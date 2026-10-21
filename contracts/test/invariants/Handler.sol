@@ -24,14 +24,16 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     bytes32 public immutable hotkey;
     uint256 public immutable fee;
 
-    address[3] internal actors;
+    address[3] public actors;
 
     // ---- ghost totals ----
 
-    /// csTAO actors actually received from `claimShares`.
+    /// csTAO actors actually received from `claimShares`, in total and per epoch.
     uint256 public claimedShares;
-    /// TAO actors actually received from `claimAssets`.
+    mapping(uint64 => uint256) public claimedSharesOf;
+    /// TAO actors actually received from `claimAssets`, in total and per epoch.
     uint256 public claimedAssets;
+    mapping(uint64 => uint256) public claimedAssetsOf;
     /// Sum of `assetsPaid` over the epochs settled by `settle`.
     uint256 public paidAssets;
     /// Sum of `sharesMinted` over the epochs settled by `settle`.
@@ -40,6 +42,16 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public lastSeenPrice;
     /// Root rewards (rao) accrued and claimed since the last settlement.
     uint256 public accruedSinceSettle;
+    /// Calls that reverted although their precondition guarantees success: a settle with an epoch
+    /// pending, a close with none in flight, or a claim of a non-zero entitlement.
+    uint256 public unexpectedReverts;
+
+    // ---- reachability counters (successful calls) ----
+
+    uint256 public settledEpochs;
+    uint256 public shareClaims;
+    uint256 public assetClaims;
+    uint256 public rewardClaims;
 
     constructor(
         CascadeVault vault_,
@@ -109,34 +121,51 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     }
 
     function claimShares(uint256 actorSeed, uint256 epochId) external {
-        (address actor, uint64 id) = _claimTarget(actorSeed, epochId, vault.depositOf);
+        (address actor, uint64 id, bool entitled) = _claimTarget(actorSeed, epochId, vault.claimableShares);
         uint256 before = vault.balanceOf(actor);
         vm.prank(actor);
         try vault.claimShares(id) {
-            claimedShares += vault.balanceOf(actor) - before;
-        } catch {}
+            uint256 received = vault.balanceOf(actor) - before;
+            claimedShares += received;
+            claimedSharesOf[id] += received;
+            shareClaims++;
+        } catch {
+            if (entitled) unexpectedReverts++;
+        }
     }
 
     function claimAssets(uint256 actorSeed, uint256 epochId) external {
-        (address actor, uint64 id) = _claimTarget(actorSeed, epochId, vault.redeemOf);
+        (address actor, uint64 id, bool entitled) = _claimTarget(actorSeed, epochId, vault.claimableAssets);
         uint256 before = tao.balanceOf(actor);
         vm.prank(actor);
         try vault.claimAssets(id) {
-            claimedAssets += tao.balanceOf(actor) - before;
-        } catch {}
+            uint256 received = tao.balanceOf(actor) - before;
+            claimedAssets += received;
+            claimedAssetsOf[id] += received;
+            assetClaims++;
+        } catch {
+            if (entitled) unexpectedReverts++;
+        }
     }
 
     // ---- keeper actions ----
 
-    /// @dev Warps past the epoch duration (1 day) first, so only an epoch in flight can stop the
-    /// close. An empty epoch just rolls.
+    /// @dev Warps past the epoch duration (1 day) first, so only an epoch in flight (or a pause) can
+    /// stop the close. An empty epoch just rolls.
     function closeEpoch() external {
         vm.warp(block.timestamp + 1 days + 1);
-        try vault.closeEpoch{value: fee}() {} catch {}
+        bool canClose = vault.inFlightEpoch() == 0 && !vault.paused();
+        try vault.closeEpoch{value: fee}() {}
+        catch {
+            if (canClose) unexpectedReverts++;
+        }
     }
 
+    /// @dev The engine is never paused and the handler pays exactly the fee, so a settle with an
+    /// epoch pending must succeed.
     function settle() external {
         uint64 id = vault.inFlightEpoch();
+        bool pending = engine.hasPending();
         try engine.settleEpoch{value: fee}() {
             uint256 price = vault.lastPrice();
             if (price > lastSeenPrice) lastSeenPrice = price;
@@ -144,7 +173,10 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             mintedShares += epoch.sharesMinted;
             paidAssets += epoch.assetsPaid;
             accruedSinceSettle = 0;
-        } catch {}
+            settledEpochs++;
+        } catch {
+            if (pending) unexpectedReverts++;
+        }
     }
 
     /// @dev Root rewards capped at a 10% APR of the root stake since the last settlement (half the
@@ -158,6 +190,7 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         staking.accrueRootReward(coldkey, hotkey, rao);
         try engine.claimRewards() {
             accruedSinceSettle += rao;
+            rewardClaims++;
         } catch {}
     }
 
@@ -197,23 +230,23 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         return vault.redeemOf(vault.currentEpochId(), actor);
     }
 
-    /// @dev The first settled epoch (from the seeded one on, wrapping) and actor (from the seeded one
-    /// on) with a non-zero `entryOf`. With none, the seeded pair, so the claim's revert paths still run.
+    /// @dev The first epoch (from the seeded one on, wrapping) and actor (from the seeded one on) with
+    /// a non-zero `claimableOf`, which is zero unless the epoch is settled. With none, the seeded pair
+    /// and `entitled == false`, so the claim's revert paths still run.
     function _claimTarget(
         uint256 actorSeed,
         uint256 epochSeed,
-        function(uint64, address) external view returns (uint256) entryOf
-    ) internal view returns (address, uint64) {
+        function(uint64, address) external view returns (uint256) claimableOf
+    ) internal view returns (address, uint64, bool entitled) {
         uint64 last = vault.currentEpochId();
         uint64 start = uint64(bound(epochSeed, 1, last));
         for (uint64 i; i < last; i++) {
             uint64 id = (start - 1 + i) % last + 1;
-            if (vault.epochs(id).status != CascadeVault.EpochStatus.Settled) continue;
             for (uint256 j; j < actors.length; j++) {
                 address actor = _actor(actorSeed % actors.length + j);
-                if (entryOf(id, actor) != 0) return (actor, id);
+                if (claimableOf(id, actor) != 0) return (actor, id, true);
             }
         }
-        return (_actor(actorSeed), start);
+        return (_actor(actorSeed), start, false);
     }
 }

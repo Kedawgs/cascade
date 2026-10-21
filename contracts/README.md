@@ -7,7 +7,7 @@ flow are in [`docs/architecture.md`](../docs/architecture.md). Contract behaviou
 ## Contracts
 
 - `CascadeVault` (Base): the csTAO token. Batches deposits and redemptions per epoch, bridges them to the engine, and settles each epoch from the engine's result.
-- `StakeEngine` (Bittensor EVM): owns the root stake. Prices each epoch from its own stake, pays redemptions back through the bridge, stakes the rest, and claims root rewards.
+- `StakeEngine` (Bittensor EVM): owns the root stake. Prices each epoch from its root stake plus its liquid balance (`totalAssets()`, which excludes unclaimed rewards), pays redemptions back through the bridge, stakes the rest, and claims root rewards.
 - `CascadeMath` / `CascadeMessages`: the share math both sides compute with, and the `EpochRequest` / `EpochResult` bridge messages.
 
 ## Build and test
@@ -45,8 +45,9 @@ in `foundry.toml`.
 
 1. The keeper should call `claimRewards()` before `settleEpoch()`. Settlement does not claim
    rewards itself, so this is what prices an epoch's rewards into that epoch.
-2. The bridge adapter the owner sets is fully trusted. It receives every payout, and the amounts it
-   reports are not re-verified on-chain.
+2. The bridge adapter the owner sets is fully trusted, and it receives every payout. The vault
+   checks the reported payout against its own recomputation from `assetsBefore`. It does not
+   verify that the reported amount actually arrived. That is what is trusted.
 3. The vault assumes a standard 18-decimal token, with no fee-on-transfer and no rebasing.
 4. There is no lower bound on `epochDuration`. A very short duration lets closers front-run
    cancels, so set it behind the timelock with care.

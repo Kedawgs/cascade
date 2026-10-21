@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ISTAKING_ADDRESS} from "../../src/interfaces/IStaking.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
@@ -102,5 +103,53 @@ contract CascadeInvariantTest is Test {
         if (inFlight != 0) {
             assertEq(uint8(vault.epochs(inFlight).status), uint8(CascadeVault.EpochStatus.InFlight));
         }
+    }
+
+    /// @dev Claims against a settled epoch never pay out more than it settled with, so a claim cannot
+    /// be repeated or over-paid.
+    function invariant_claimsNeverExceedEpochPayout() public view {
+        uint64 current = vault.currentEpochId();
+        for (uint64 id = 1; id <= current; id++) {
+            CascadeVault.Epoch memory epoch = vault.epochs(id);
+            if (epoch.status != CascadeVault.EpochStatus.Settled) continue;
+            assertLe(handler.claimedAssetsOf(id), epoch.assetsPaid);
+            assertLe(handler.claimedSharesOf(id), epoch.sharesMinted);
+        }
+    }
+
+    /// @dev The vault holds enough TAO for the open deposits plus every outstanding asset claim, and
+    /// enough csTAO for the open and in-flight escrow plus every outstanding share claim.
+    function invariant_vaultIsSolventForClaims() public view {
+        uint64 current = vault.currentEpochId();
+        uint64 inFlight = vault.inFlightEpoch();
+        uint256 owedAssets = vault.epochs(current).totalDeposits;
+        uint256 owedShares = vault.epochs(current).totalRedeemShares;
+        if (inFlight != 0) owedShares += vault.epochs(inFlight).totalRedeemShares;
+        for (uint64 id = 1; id <= current; id++) {
+            if (vault.epochs(id).status != CascadeVault.EpochStatus.Settled) continue;
+            for (uint256 i; i < 3; i++) {
+                address actor = handler.actors(i);
+                owedAssets += vault.claimableAssets(id, actor);
+                owedShares += vault.claimableShares(id, actor);
+            }
+        }
+        assertGe(tao.balanceOf(address(vault)), owedAssets);
+        assertGe(vault.balanceOf(address(vault)), owedShares);
+    }
+
+    /// @dev Liveness: a settle with an epoch pending, a close with none in flight, and a claim of a
+    /// non-zero entitlement never revert.
+    function invariant_noUnexpectedReverts() public view {
+        assertEq(handler.unexpectedReverts(), 0);
+    }
+
+    /// @dev Shows in the `-vv` output that sequences reach settlements and claims. Forge prints the
+    /// logs of the final run only, so the numbers vary with the fuzz seed.
+    function afterInvariant() public view {
+        console2.log("epochs settled", handler.settledEpochs());
+        console2.log("share claims", handler.shareClaims());
+        console2.log("asset claims", handler.assetClaims());
+        console2.log("reward claims", handler.rewardClaims());
+        console2.log("current epoch id", vault.currentEpochId());
     }
 }

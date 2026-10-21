@@ -93,4 +93,8 @@ withdrawals don't need an unstake at all.
    (assumed rao, 1 TAO = 1e9). Verify on testnet.
 3. Root unstake "too early" waiting periods for a contract coldkey.
 4. Bridged-TAO token decimals on Base (adapter scales to 18).
-5. Legal: jurisdictions, fee, US users.
+5. Minimum-unstake rule: the engine never asks root for a partial unstake below 0.002 TAO
+   (subtensor's `DefaultMinStake`, which it rejects as `AmountTooLow`). Confirm the exact
+   rule, and the behaviour of `claim_root` with nothing to claim, against the real precompile
+   on testnet.
+6. Legal: jurisdictions, fee, US users.

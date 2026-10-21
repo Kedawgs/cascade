@@ -14,7 +14,7 @@
 
 - Solidity `0.8.24`, `evm_version = "cancun"`, OpenZeppelin `v5.4.0` (already in `contracts/lib`). Config in `contracts/foundry.toml` — do not change compiler settings.
 - No upgradeable proxies, no `delegatecall`, no arbitrary external calls. The engine sends TAO only via `bridge.send` and the settle-fee refund; the vault moves assets only via `requestDeposit`/`cancelDeposit`/`closeEpoch`/`claimAssets`.
-- Admin: `Ownable2Step` owner; guardian may only `pause()`; owner may `pause()`/`unpause()`.
+- Admin: `Ownable2Step` owner; guardian may only `pause()`; owner may `pause()`/`unpause()`; `renounceOwnership()` overridden to revert `RenounceDisabled()` in both contracts.
 - Every routine function (close, settle, stake idle, claim rewards, claims) is permissionless.
 - Custom errors only (no revert strings); an event for every state change named in the spec.
 - All share math via `CascadeMath` (`contracts/src/libraries/CascadeMath.sol`, already implemented and tested — never change its formulas).

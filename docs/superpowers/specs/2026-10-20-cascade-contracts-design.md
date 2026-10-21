@@ -20,6 +20,8 @@ v1 a lost bridge message freezes new epochs, which is the safe failure).
 - No upgradeable proxies. No `delegatecall`. No arbitrary external calls.
 - Admin = `Ownable2Step` owner (a timelock controlled by a Safe in production).
   Guardian = may call `pause()` only. Owner may `pause()` and `unpause()`.
+  `renounceOwnership()` is overridden to revert `RenounceDisabled()` in both contracts: a
+  guardian pause must always be reversible by someone.
 - Every routine function (close epoch, settle epoch, stake idle, claim rewards, claims) is
   permissionless.
 - Custom errors, not revert strings. Events for every state change listed below.
@@ -86,6 +88,7 @@ Receivers only check `msg.sender == bridge`.
 Constants: `NETUID_ROOT = 0`, `RAO = 1e9`, `MIN_STAKE_RAO = 2_000_000` (0.002 TAO).
 
 Constructor `(bytes32 coldkey, bytes32 hotkey, ICascadeBridge bridge, address owner, address guardian)`.
+Reverts `ZeroColdkey` / `ZeroHotkey` / `ZeroAddress` (bridge or guardian) on zero inputs.
 Calls `setRejectStakingHotkeyGrowth(true)`.
 
 State: `coldkey` (immutable), `hotkey`, `bridge`, `guardian`, `lastSettledEpoch` (uint64),
@@ -103,8 +106,13 @@ one pending request `{epochId, depositAssets, redeemShares, totalSupply}` plus `
   1. `assetsBefore = totalAssets() - msg.value - pending.depositAssets`
   2. `redeemAssets = CascadeMath.assetsForRedeem(redeemShares, assetsBefore, totalSupply)`
   3. If `address(this).balance - msg.value < redeemAssets`, unstake
-     `ceil((redeemAssets - available) / 1e9)` rao from root. A precompile revert (e.g. root
-     "too early") bubbles up: the whole settle reverts and can be retried later.
+     `min(max(ceil((redeemAssets - available) / 1e9), MIN_STAKE_RAO), rootStakeRao())` rao
+     from root. The floor exists because subtensor rejects a partial unstake smaller than
+     `DefaultMinStake` (`AmountTooLow`) unless it removes the whole position; without it a
+     sub-0.002-TAO shortfall would make every settle revert and freeze the vault. Any excess
+     unstaked this way is below `MIN_STAKE_RAO`, so step 8 leaves it idle rather than
+     re-staking it. A precompile revert (e.g. root "too early") bubbles up: the whole settle
+     reverts and can be retried later.
   4. `fee = bridge.quoteFee(resultMessage, redeemAssets)`; `msg.value < fee` → `InsufficientFee`.
   5. Clear the pending request and set `lastSettledEpoch = epochId` before external sends.
   6. `bridge.send{value: redeemAssets + fee}(encodeResult(epochId, assetsBefore), redeemAssets)`.
@@ -208,8 +216,9 @@ Global: `inFlightEpoch` (0 = none), `lastTotalAssets`, `lastPrice`, `lastPriceTi
   hotkey, uint256 rao)` (becomes claimable), `donateStake(bytes32 hotkey, bytes32 coldkey,
   uint256 rao)`, `setUnstakeBlocked(bool)`, `rejectsGrowth(bytes32 coldkey) view`. Reverts with
   custom errors on: unknown hotkey (`UnknownHotkey`), amount below `MIN_STAKE_RAO` on `addStake`
-  (`BelowMinStake`), insufficient balance (`InsufficientBalance`), insufficient stake
-  (`InsufficientStake`), unstake blocked (`TooEarly`).
+  (`BelowMinStake`), a partial `removeStake` below `MIN_STAKE_RAO` that does not remove the whole
+  position (`BelowMinStake`, mirroring subtensor's `AmountTooLow`), insufficient balance
+  (`InsufficientBalance`), insufficient stake (`InsufficientStake`), unstake blocked (`TooEarly`).
 - `StubBridge` — records the last `send` (`lastMessage`, `lastAmount`, `lastValue`,
   `sendCount`), returns a settable `fee` from `quoteFee`, reverts `FeeTooLow` if
   `msg.value < fee` (ERC-20 side) or `msg.value < amount + fee` (native side), and on the ERC-20

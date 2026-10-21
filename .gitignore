@@ -1,0 +1,18 @@
+# deps / builds
+node_modules/
+.next/
+out/
+dist/
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/31337/
+
+# env
+.env
+.env.*
+!.env.example
+
+# local tooling
+.superpowers/
+*.log
+.DS_Store

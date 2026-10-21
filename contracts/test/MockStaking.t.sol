@@ -92,7 +92,25 @@ contract MockStakingTest is Test {
 
     function test_removeStakeInsufficientStakeReverts() public {
         vm.expectRevert(MockStaking.InsufficientStake.selector);
-        staker.remove(hotkey, 1, 0);
+        staker.remove(hotkey, 3e9, 0);
+    }
+
+    function test_removeStakePartialBelowMinimumReverts() public {
+        staker.add(hotkey, 3_000_000, 0);
+        vm.expectRevert(MockStaking.BelowMinStake.selector);
+        staker.remove(hotkey, 1_000_000, 0);
+    }
+
+    function test_removeStakeFullPositionBelowMinimumAllowed() public {
+        staker.add(hotkey, 3_000_000, 0);
+        vm.expectRevert(MockStaking.BelowMinStake.selector);
+        staker.remove(hotkey, 1_000_000, 0);
+
+        // Leave a 1_000_000-rao position, then remove all of it: allowed although below the minimum.
+        staker.remove(hotkey, 2_000_000, 0);
+        staker.remove(hotkey, 1_000_000, 0);
+        assertEq(staking.getStake(hotkey, _coldkey(), 0), 0);
+        assertEq(address(staker).balance, 10 ether);
     }
 
     function test_removeStakeBlockedRevertsTooEarly() public {

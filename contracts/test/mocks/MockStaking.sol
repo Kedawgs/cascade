@@ -67,7 +67,10 @@ contract MockStaking is IStaking {
         if (msg.value != 0) revert UnexpectedValue();
         if (unstakeBlocked) revert TooEarly();
         bytes32 coldkey = mirror(msg.sender);
-        if (stakeRao[hotkey][coldkey][netuid] < amount) revert InsufficientStake();
+        uint256 staked = stakeRao[hotkey][coldkey][netuid];
+        // Subtensor rejects a partial unstake below its minimum stake (AmountTooLow).
+        if (amount < MIN_STAKE_RAO && amount != staked) revert BelowMinStake();
+        if (staked < amount) revert InsufficientStake();
         stakeRao[hotkey][coldkey][netuid] -= amount;
         vm.deal(msg.sender, msg.sender.balance + amount * 1e9);
     }

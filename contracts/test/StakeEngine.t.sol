@@ -66,6 +66,14 @@ contract StakeEngineTest is Test {
         new StakeEngine(coldkey, HOTKEY, bridge, address(this), address(0));
     }
 
+    function test_constructorRejectsZeroKeys() public {
+        vm.expectRevert(StakeEngine.ZeroColdkey.selector);
+        new StakeEngine(bytes32(0), HOTKEY, bridge, address(this), GUARDIAN);
+
+        vm.expectRevert(StakeEngine.ZeroHotkey.selector);
+        new StakeEngine(coldkey, bytes32(0), bridge, address(this), GUARDIAN);
+    }
+
     // ---- onBridgeMessage ----
 
     function test_onBridgeMessage_onlyBridge() public {
@@ -217,6 +225,49 @@ contract StakeEngineTest is Test {
         assertEq(engine.rootStakeRao(), 6e9);
         assertEq(bridge.lastAmount(), 5e18);
         assertEq(address(engine).balance, 1);
+    }
+
+    function test_settleEpoch_tinyShortfallUnstakesMinimum() public {
+        _stakeTen();
+        _deliver(2, 5e18 - 1e9, 5e24, 10e24);
+        // Payout 5e18, liquid 5e18 - 1e9: a 1-rao shortfall, raised to the 2_000_000-rao minimum.
+        vm.expectEmit(address(engine));
+        emit StakeEngine.Unstaked(2_000_000);
+        vm.expectEmit(address(engine));
+        emit StakeEngine.EpochSettled(2, 10e18, 5e18);
+        engine.settleEpoch();
+
+        assertEq(engine.rootStakeRao(), 10e9 - 2_000_000);
+        assertEq(bridge.lastAmount(), 5e18);
+        // The 1_999_999-rao excess is below the minimum stake, so it stays idle.
+        assertEq(address(engine).balance, 1_999_999 * 1e9);
+    }
+
+    function test_settleEpoch_shortfallCappedAtRootStake() public {
+        vm.deal(address(engine), 3_000_000 * 1e9);
+        engine.stakeIdle();
+        assertEq(engine.rootStakeRao(), 3_000_000);
+
+        // Epoch 1: assets 3e15, supply 3e21 (3e21 + 1e6 == 1e6 * (3e15 + 1)), so the payout is
+        // redeemShares / 1e6 = 2e15: a 2_000_000-rao unstake that leaves a 1_000_000-rao position.
+        _deliver(1, 0, 2e21, 3e21);
+        engine.settleEpoch();
+        assertEq(engine.rootStakeRao(), 1_000_000);
+        assertEq(address(engine).balance, 0);
+
+        // Epoch 2: assets 1e15, supply 1e21 (1e21 + 1e6 == 1e6 * (1e15 + 1)), payout 1e15 / 1e6 = 1e9.
+        // The 1-rao shortfall is raised to the 2_000_000-rao minimum, then capped at the
+        // 1_000_000-rao position: removing the whole position is allowed below the minimum.
+        _deliver(2, 0, 1e15, 1e21);
+        vm.expectEmit(address(engine));
+        emit StakeEngine.Unstaked(1_000_000);
+        vm.expectEmit(address(engine));
+        emit StakeEngine.EpochSettled(2, 1e15, 1e9);
+        engine.settleEpoch();
+
+        assertEq(engine.rootStakeRao(), 0);
+        assertEq(bridge.lastAmount(), 1e9);
+        assertEq(address(engine).balance, 999_999 * 1e9);
     }
 
     function test_settleEpoch_unstakeBlockedRevertsAndKeepsPending() public {
@@ -377,6 +428,12 @@ contract StakeEngineTest is Test {
 
         engine.unpause();
         assertFalse(engine.paused());
+    }
+
+    function test_renounceOwnershipDisabled() public {
+        vm.expectRevert(StakeEngine.RenounceDisabled.selector);
+        engine.renounceOwnership();
+        assertEq(engine.owner(), address(this));
     }
 
     function test_receive_rejectsDirectTransfer() public {

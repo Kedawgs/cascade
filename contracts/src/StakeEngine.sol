@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IStaking, ISTAKING_ADDRESS} from "./interfaces/IStaking.sol";
 import {ICascadeBridge, ICascadeReceiver} from "./interfaces/ICascadeBridge.sol";
 import {CascadeMessages} from "./libraries/CascadeMessages.sol";
@@ -51,6 +52,8 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
     error ZeroAddress();
     error DirectTransferNotAllowed();
     error ZeroHotkey();
+    error ZeroColdkey();
+    error RenounceDisabled();
 
     event EpochReceived(uint64 indexed epochId, uint256 depositAssets, uint256 redeemShares, uint256 totalSupply);
     event EpochSettled(uint64 indexed epochId, uint256 assetsBefore, uint256 redeemAssets);
@@ -64,6 +67,8 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
     constructor(bytes32 coldkey_, bytes32 hotkey_, ICascadeBridge bridge_, address owner_, address guardian_)
         Ownable(owner_)
     {
+        if (coldkey_ == bytes32(0)) revert ZeroColdkey();
+        if (hotkey_ == bytes32(0)) revert ZeroHotkey();
         coldkey = coldkey_;
         hotkey = hotkey_;
         emit HotkeySet(bytes32(0), hotkey_);
@@ -117,10 +122,13 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
         uint256 assetsBefore = totalAssets() - msg.value - p.depositAssets;
         uint256 redeemAssets = CascadeMath.assetsForRedeem(p.redeemShares, assetsBefore, p.totalSupply);
 
-        // 3. Cover any shortfall from root stake, rounding up to whole rao. Precompile reverts bubble up.
+        // 3. Cover any shortfall from root stake, rounding up to whole rao. Subtensor rejects a partial
+        // unstake below its minimum stake, so unstake at least MIN_STAKE_RAO but never more than the
+        // whole position; the sub-minimum excess stays idle at step 8. Precompile reverts bubble up.
         uint256 available = address(this).balance - msg.value;
         if (available < redeemAssets) {
-            uint256 rao = (redeemAssets - available + RAO - 1) / RAO;
+            uint256 rao = Math.max((redeemAssets - available + RAO - 1) / RAO, MIN_STAKE_RAO);
+            rao = Math.min(rao, rootStakeRao());
             STAKING.removeStake(hotkey, rao, NETUID_ROOT);
             emit Unstaked(rao);
         }
@@ -190,6 +198,11 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Disabled: without an owner a guardian pause could never be lifted.
+    function renounceOwnership() public pure override {
+        revert RenounceDisabled();
     }
 
     receive() external payable {

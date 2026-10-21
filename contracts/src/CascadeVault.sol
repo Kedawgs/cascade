@@ -9,14 +9,19 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ICascadeBridge, ICascadeReceiver} from "./interfaces/ICascadeBridge.sol";
+import {CascadeMath} from "./libraries/CascadeMath.sol";
 import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 
 /// @title CascadeVault
-/// @notice Base-side vault of Cascade and the csTAO share token. Collects bridged-TAO deposits per
-/// epoch and, when an epoch closes, bridges them to the StakeEngine with an epoch request.
-/// @dev Assets leave this contract only through `cancelDeposit` refunds and the bridge pull in
-/// `closeEpoch`. Ether leaves only as the bridge fee and its refund to the `closeEpoch` caller.
+/// @notice Base-side vault of Cascade and the csTAO share token. Collects bridged-TAO deposits and
+/// escrowed redemptions per epoch, bridges them to the StakeEngine with an epoch request when the
+/// epoch closes, and settles the epoch from the engine's result.
+/// @dev Assets leave this contract only through `cancelDeposit` refunds, the bridge pull in
+/// `closeEpoch`, and `claimAssets`. Ether leaves only as the bridge fee and its refund to the
+/// `closeEpoch` caller. The vault never trusts a share or payout figure from the bridge: it
+/// recomputes both from the single reported `assetsBefore` and bounds that number.
 contract CascadeVault is ERC20, ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -141,6 +146,24 @@ contract CascadeVault is ERC20, ICascadeReceiver, Ownable2Step, Pausable, Reentr
         return lastTotalAssets + _epochs[currentEpochId].totalDeposits + inFlightDeposits;
     }
 
+    /// @notice csTAO `user` can claim for their deposit in `epochId`; 0 unless the epoch is settled.
+    function claimableShares(uint64 epochId, address user) public view returns (uint256) {
+        Epoch storage epoch = _epochs[epochId];
+        uint256 deposited = depositOf[epochId][user];
+        // A non-zero entry implies a non-zero `totalDeposits`.
+        if (epoch.status != EpochStatus.Settled || deposited == 0) return 0;
+        return Math.mulDiv(deposited, epoch.sharesMinted, epoch.totalDeposits);
+    }
+
+    /// @notice Assets `user` can claim for their redemption in `epochId`; 0 unless the epoch is settled.
+    function claimableAssets(uint64 epochId, address user) public view returns (uint256) {
+        Epoch storage epoch = _epochs[epochId];
+        uint256 redeemed = redeemOf[epochId][user];
+        // A non-zero entry implies a non-zero `totalRedeemShares`.
+        if (epoch.status != EpochStatus.Settled || redeemed == 0) return 0;
+        return Math.mulDiv(redeemed, epoch.assetsPaid, epoch.totalRedeemShares);
+    }
+
     // ---- user actions ----
 
     /// @notice Pulls `assets` from the caller and credits them to `receiver` in the open epoch.
@@ -165,6 +188,55 @@ contract CascadeVault is ERC20, ICascadeReceiver, Ownable2Step, Pausable, Reentr
         depositOf[id][msg.sender] -= assets;
         _epochs[id].totalDeposits -= assets;
         emit DepositCancelled(id, msg.sender, assets);
+
+        asset.safeTransfer(msg.sender, assets);
+    }
+
+    /// @notice Escrows `shares` of the caller in the vault for redemption when the open epoch settles.
+    function requestRedeem(uint256 shares) external whenNotPaused {
+        if (shares == 0) revert ZeroAmount();
+
+        uint64 id = currentEpochId;
+        redeemOf[id][msg.sender] += shares;
+        _epochs[id].totalRedeemShares += shares;
+        emit RedeemRequested(id, msg.sender, shares);
+
+        _transfer(msg.sender, address(this), shares);
+    }
+
+    /// @notice Returns part or all of the caller's escrowed shares from the open epoch. Works while paused.
+    function cancelRedeem(uint256 shares) external {
+        uint64 id = currentEpochId;
+        if (shares > redeemOf[id][msg.sender]) revert InsufficientRequest();
+
+        redeemOf[id][msg.sender] -= shares;
+        _epochs[id].totalRedeemShares -= shares;
+        emit RedeemCancelled(id, msg.sender, shares);
+
+        _transfer(address(this), msg.sender, shares);
+    }
+
+    /// @notice Sends the caller the csTAO minted for their deposit in a settled epoch. Works while paused.
+    function claimShares(uint64 epochId) external nonReentrant {
+        if (_epochs[epochId].status != EpochStatus.Settled) revert NotSettled();
+        uint256 shares = claimableShares(epochId, msg.sender);
+        if (shares == 0) revert NothingToClaim();
+
+        depositOf[epochId][msg.sender] = 0;
+        emit SharesClaimed(epochId, msg.sender, shares);
+
+        _transfer(address(this), msg.sender, shares);
+    }
+
+    /// @notice Sends the caller the assets paid out for their redemption in a settled epoch.
+    /// Works while paused.
+    function claimAssets(uint64 epochId) external nonReentrant {
+        if (_epochs[epochId].status != EpochStatus.Settled) revert NotSettled();
+        uint256 assets = claimableAssets(epochId, msg.sender);
+        if (assets == 0) revert NothingToClaim();
+
+        redeemOf[epochId][msg.sender] = 0;
+        emit AssetsClaimed(epochId, msg.sender, assets);
 
         asset.safeTransfer(msg.sender, assets);
     }
@@ -205,20 +277,47 @@ contract CascadeVault is ERC20, ICascadeReceiver, Ownable2Step, Pausable, Reentr
 
         asset.forceApprove(address(bridge), deposits);
         bridge.send{value: fee}(message, deposits);
+        asset.forceApprove(address(bridge), 0);
         _refund(msg.value - fee);
         emit EpochClosed(id, deposits, redeemShares, supply);
     }
 
     // ---- bridge ----
 
-    /// @dev Access checks only; no epoch result is accepted yet.
-    function onBridgeMessage(bytes calldata, uint256) external payable {
+    /// @notice Receives the engine's result for the in-flight epoch; `amount` is the redemption
+    /// payout, transferred to the vault before the call. Works while paused.
+    /// @dev Shares and payout are recomputed from `assetsBefore`. A result outside the bounds never
+    /// reverts: it is stored, the epoch is flagged and the vault pauses for the owner to review.
+    function onBridgeMessage(bytes calldata message, uint256 amount) external payable {
         if (msg.sender != address(bridge)) revert NotBridge();
         if (msg.value != 0) revert ValueMismatch();
-        revert UnexpectedEpoch();
+        (uint64 epochId, uint256 assetsBefore) = CascadeMessages.decodeResult(message);
+        Epoch storage epoch = _epochs[epochId];
+        if (epochId == 0 || epochId != inFlightEpoch || epoch.status != EpochStatus.InFlight) {
+            revert UnexpectedEpoch();
+        }
+
+        if (_amountInBounds(epoch, assetsBefore, amount) && _priceInBounds(epoch, assetsBefore)) {
+            _applySettlement(epochId, assetsBefore, amount);
+        } else {
+            epoch.assetsBefore = assetsBefore;
+            epoch.assetsPaid = amount;
+            epoch.status = EpochStatus.Flagged;
+            if (!paused()) _pause();
+            emit EpochFlagged(epochId, assetsBefore, amount);
+        }
     }
 
     // ---- admin ----
+
+    /// @notice Applies the stored result of the flagged in-flight epoch after review. The vault
+    /// stays paused until the owner unpauses.
+    function acceptFlaggedEpoch() external onlyOwner {
+        uint64 id = inFlightEpoch;
+        Epoch storage epoch = _epochs[id];
+        if (epoch.status != EpochStatus.Flagged) revert NotFlagged();
+        _applySettlement(id, epoch.assetsBefore, epoch.assetsPaid);
+    }
 
     function setCaps(uint256 tvlCap_, uint256 minDeposit_) external onlyOwner {
         _setCaps(tvlCap_, minDeposit_);
@@ -255,6 +354,51 @@ contract CascadeVault is ERC20, ICascadeReceiver, Ownable2Step, Pausable, Reentr
     }
 
     // ---- internal ----
+
+    /// @dev Mints the epoch's deposit shares to the vault (held for `claimShares`), burns its
+    /// escrowed redemption shares, and records the new total assets and price.
+    function _applySettlement(uint64 epochId, uint256 assetsBefore, uint256 amount) private {
+        Epoch storage epoch = _epochs[epochId];
+        uint256 deposits = epoch.totalDeposits;
+        uint256 minted = CascadeMath.sharesForDeposit(deposits, assetsBefore, epoch.supplyAtClose);
+
+        epoch.assetsBefore = assetsBefore;
+        epoch.sharesMinted = minted;
+        epoch.assetsPaid = amount;
+        epoch.status = EpochStatus.Settled;
+        inFlightEpoch = 0;
+
+        _mint(address(this), minted);
+        _burn(address(this), epoch.totalRedeemShares);
+
+        uint256 totalAssets = assetsBefore + deposits - amount;
+        lastTotalAssets = totalAssets;
+        lastPrice = CascadeMath.price(totalAssets, totalSupply());
+        lastPriceTime = uint64(block.timestamp);
+        emit EpochSettled(epochId, assetsBefore, minted, amount);
+    }
+
+    /// @dev The payout may fall short of the recomputed redemption value by at most 1e9 wei (one rao)
+    /// and never exceed it.
+    function _amountInBounds(Epoch storage epoch, uint256 assetsBefore, uint256 amount) private view returns (bool) {
+        uint256 expectedPay = CascadeMath.assetsForRedeem(epoch.totalRedeemShares, assetsBefore, epoch.supplyAtClose);
+        return amount <= expectedPay && amount + 1e9 >= expectedPay;
+    }
+
+    /// @dev The reported price may drop by at most `maxDropBps` and rise by at most `maxAprBps`
+    /// annualised since the last price, plus a 1e-9 relative tolerance. Unchecked with no supply
+    /// (depositors own everything) or before the first price.
+    function _priceInBounds(Epoch storage epoch, uint256 assetsBefore) private view returns (bool) {
+        uint256 supply = epoch.supplyAtClose;
+        if (supply == 0 || lastPriceTime == 0) return true;
+
+        uint256 p = CascadeMath.price(assetsBefore, supply);
+        uint256 last = lastPrice;
+        uint256 minPrice = last - last * maxDropBps / 10000;
+        uint256 elapsed = block.timestamp - lastPriceTime;
+        uint256 maxPrice = last + Math.mulDiv(last, uint256(maxAprBps) * elapsed, 10000 * 365 days) + last / 1e9 + 1;
+        return p >= minPrice && p <= maxPrice;
+    }
 
     /// @dev Returns unused fee payment to the caller.
     function _refund(uint256 amount) private {

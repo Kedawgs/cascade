@@ -1,7 +1,7 @@
 # Cascade contracts v2 — vault on Bittensor, front door on Base — design spec
 
-Revision 4 (2026-10-21), after the v2 research (`reports/Cascade v2 Bittensor vault rails.md`)
-and three builder checks.
+Revision 5 (2026-10-21), after the v2 research (`reports/Cascade v2 Bittensor vault rails.md`)
+and four builder checks (the last found nothing Critical; the per-task code reviews take over).
 Supersedes the v1 contract design (`2026-10-20-cascade-contracts-design.md`) for the vault half.
 Product context: `docs/architecture.md` (to be updated to match this spec once approved).
 
@@ -46,7 +46,8 @@ The research established, and this revision builds in, that:
 - Non-goals (this build): production bridge adapters (a separate spec once ForeverMoney's
   contract interface is known — see "Adapters"), the keeper bot (a separate deliverable),
   deployment scripts, fees to users (one exception: a small anti-spam charge on redeem *requests*
-  on Base, paid to whoever closes the batch, never to the team), USDC conversion (the app swaps
+  on Base; it pays the batch's bridge fee and any excess goes to whoever forwards the batch,
+  usually Cascade's own keeper, and the app may pre-pay it for its users), USDC conversion (the app swaps
   USDC↔TAO on Base around deposit/claim), a wrapped or transferable csTAO (possible later),
   subnet staking, a user-registered recovery address on Bittensor (v2.1).
 - Anti-goals: any path where the team's keys can move user funds; any contract that must trust a
@@ -206,13 +207,18 @@ The initial bridge is enabled immediately (no delay at construction) and is the 
   staked; always in the set). `rootStakeRao() view` = Σ `STAKING.getStake(h, coldkey, 0)` over the
   set. A hotkey stays in the set while it has stake or meaningful unclaimed rewards, because
   rewards claimed later land on the hotkey that earned them.
-- `setStakeHotkey(bytes32 h)` (owner): adds `h` to the set if absent (`TooManyHotkeys`,
-  `ZeroHotkey`), makes it the stake hotkey; emits `StakeHotkeySet`.
+- `addHotkey(bytes32 h)` (owner): adds `h` to the set without changing the stake hotkey
+  (`TooManyHotkeys`, `ZeroHotkey`, `HotkeyKnown`); emits `HotkeyAdded`. Used to re-add a
+  forfeited hotkey so its rewards can be claimed without routing new stake to it.
+- `setStakeHotkey(bytes32 h)` (owner): adds `h` to the set if absent (same rules), makes it the
+  stake hotkey; emits `StakeHotkeySet`.
 - `moveStake(bytes32 from, uint256 rao)` (owner): `STAKING.moveStake(from, stakeHotkey, 0, 0, rao)`
   (root→root, fee-free); measures both stakes before/after; emits `StakeMoved(from, to, rao, moved)`.
-- `removeHotkey(bytes32 h, bool forfeit)` (owner): `h != stakeHotkey` (`HotkeyInUse`); moves any
-  remaining stake to `stakeHotkey` first (so a stranger parking 0.002 TAO on it cannot block
-  removal); then, unless `forfeit`, requires
+- `removeHotkey(bytes32 h, bool forfeit)` (owner): `h != stakeHotkey` (`HotkeyInUse`); clears any
+  remaining stake first (so a stranger parking dust on it cannot block removal): if the leftover
+  is below `minStakeRao()` call `removeStakeFull(h, 0)` (a move below the minimum would be
+  refused; the TAO becomes idle balance that `stakeIdle` restakes later), otherwise
+  `moveStake(h, stakeHotkey, 0, 0, leftover)`; measure either way; then, unless `forfeit`, requires
   `STAKING.getUnclaimedRootTaoByHotkey(coldkey, h) <= hotkeyDustRao` (owner-set, default
   `1_000_000` rao, `HotkeyHasRewards`; a 1.7M-gas read is fine in an admin call). `forfeit` exists
   because a stranger's dust stake keeps earning a few rao per epoch and the chain can refuse that
@@ -223,7 +229,8 @@ The initial bridge is enabled immediately (no delay at construction) and is the 
   (`7 days`); `whenNotPaused`, `nonReentrant`. **Not called from any delivery or payout path** (a
   precompile failure there would burn the delivery's gas, and a future root hold would re-arm on
   every stake — which is also why it is not permissionless: anyone could otherwise restart such a
-  hold for cents). Stakes `idle = balance - pendingPayouts - ED_RESERVE` on `stakeHotkey` if
+  hold for cents). Stakes `idle = balance - pendingPayouts - ED_RESERVE` (floored at 0 — the
+  liquid balance is normally below what queued batches are owed) on `stakeHotkey` if
   `idle / RAO >= minStakeRao()`; measures the stake delta; sets `lastStakeAt`; emits
   `Staked(hotkey, rao, measuredDelta)`. `ED_RESERVE = 1e12` wei (1,000 rao) is never spent and
   never counted, so the chain's 500-rao existential deposit can never make a payout fail.
@@ -371,9 +378,12 @@ passed the per-peer burn allowance at delivery.
    about one normal message fee) pay nothing, emit `PayoutDust(key, user, assets)` per entry, and
    complete the chunk so the batch can finish; an individual `net_i == 0` is likewise
    `PayoutDust`. Dust stays in the vault and raises the price.
-3. **Liquidity.** `available = balance - ED_RESERVE - (pendingPayouts - batch.remaining)`; if
-   `available < net + fee` call `_unstake(net + fee - available)` (a precompile revert bubbles
-   up; retry).
+3. **Liquidity.** `available = balance - ED_RESERVE - (pendingPayouts - batch.remaining)`,
+   **floored at 0** (with several batches queued against a fully staked vault — the normal
+   state — the raw difference is negative, and an unfloored subtraction would freeze every
+   payout); if `available < net + fee` call `_unstake(net + fee - available)` (a precompile
+   revert bubbles up; retry). Each chunk unstakes only what it needs; other batches'
+   reservations stay staked until their turn.
 4. **Effects first.** `cursor += taken`, `chunk += 1`, `remaining -= sum`, `pendingPayouts -=
    sum`. If `cursor == count` delete the batch (keep `processed[key]`).
 5. **Send.** `primaryBridge.send{value: net + fee}(sourceChain, frontDoor, encodePayouts(key, chunk-1, netEntries), net)`
@@ -410,8 +420,9 @@ suite treats it as such.
   contract deployed with `CREATE` on Bittensor, for example). Front-door depositors are opted in
   by construction: their shares exist only because that address acted on Base.
 - `redeemDirect(uint256 shares)` — `whenNotPaused`, `nonReentrant`; `ZeroAmount`; `out =
-  assetsForRedeem(shares, totalAssets(), totalSupply())` rounded down to rao; burn; unstake any
-  shortfall with `_unstake` (respecting `pendingPayouts` and `ED_RESERVE`); send `out` to
+  assetsForRedeem(shares, totalAssets(), totalSupply())` rounded down to rao; burn; `available
+  = balance - ED_RESERVE - pendingPayouts` floored at 0; if `available < out` unstake the
+  shortfall with `_unstake`; send `out` to
   `msg.sender` with `call` (`TransferFailed`); emits `RedeemedDirect`. **No outflow cap**: a
   direct redeem is authorised by the share owner's own signature on this chain, so it is not a
   drain vector, and sharing a window with front doors would let anyone starve the bridged queue
@@ -427,8 +438,8 @@ suite treats it as such.
 Owner: front-door and bridge registries (`proposeFrontDoor` / `activateFrontDoor` /
 `removeFrontDoor`, `proposeBridge` / `activateBridge` / `disableBridge`, `cancelProposal`),
 `setPrimaryBridge` (must be an enabled bridge; disabling the primary halts payouts until a new
-primary is set — payouts wait, nothing is lost), `setGuardian`, `setKeeper`, `setStakeHotkey`,
-`moveStake`, `removeHotkey`, `cancelPayoutBatch`, `setMinDirectDeposit`, `setMaxTotalAssets`,
+primary is set — payouts wait, nothing is lost), `setGuardian`, `setKeeper`, `addHotkey`,
+`setStakeHotkey`, `moveStake`, `removeHotkey`, `cancelPayoutBatch`, `setMinDirectDeposit`, `setMaxTotalAssets`,
 `setOutflowLimits(maxDailyOutflowBps <= 10000, minDailyOutflow)`, `setMessageLimits(maxEntryValue,
 maxMessageValue, minChunk)` (`maxEntryValue <= maxMessageValue`, `1 <= minChunk <= MAX_ENTRIES`),
 `setFeeLimits(maxFeeBps <= 10000, maxFeeAbs)`, `setPayoutDelay` (`<= 7 days`),
@@ -522,7 +533,8 @@ fill the list for free), `mapping(address => uint256) claimable`, `uint256 total
 `uint256 depositCap` (owner-set soft TVL limit for this chain — in the beta it follows Base TAO
 liquidity, about $450k total depth, not the contract's own limits), `uint256 netForwarded`
 (forwarded deposits minus payouts received, floored at 0),
-`mapping(bytes32 batchKey => mapping(uint32 chunk => bool)) delivered`.
+`mapping(bytes32 batchKey => mapping(uint32 chunk => bool)) delivered`,
+`mapping(address => uint256) feeCredit` (pre-paid redeem-request fees, see below), `primaryBridge`.
 Operator limits: `maxDeposits` and `maxRedeems` entries per batch (owner-set `setBatchLimits`,
 each `1..MAX_ENTRIES`, default `50`), `maxBatchValue` (owner-set, default `4_000e18`, below the
 lane's 5,000-TAO message cap), `redeemRequestFee` (owner-set, in ETH, default `1e14` wei ≈ $0.30).
@@ -530,13 +542,17 @@ lane's 5,000-TAO message cap), `redeemRequestFee` (owner-set, in ETH, default `1
 **Junk redeem requests.** `requestRedeem` needs no shares (the front door cannot see balances on
 Bittensor), so without a cost per slot anyone with 50 throwaway contracts could fill every
 batch's redeem list for cents and block honest exits — and smart-wallet users have no other exit.
-The answer has three parts: (1) the first redeem request per user per batch pays
-`redeemRequestFee` in ETH into the batch's `feePot`; (2) a batch whose redeem list is full may be
-closed at once by anyone, and `closeBatch` spends the pot on the bridge fee first and pays any
-remainder to the closer, so a junk-filled batch pays for its own forwarding and the griefer loses
-more than the keeper; (3) because Base has no public mempool, an honest user who finds the list
-full can close the batch and place their request in the next one in the same transaction (the app
-offers this; a smart wallet batches the two calls), so blocking is impossible, only a one-fee
+The answer has three parts: (1) the first redeem request per user per batch costs
+`redeemRequestFee` in ETH, paid into the batch's `feePot` either as `msg.value` or from the
+user's `feeCredit` — anyone may pre-pay credit for any user with `creditRedeemFee(address user)
+payable`, which is how the app sponsors users whose passkey wallets hold no ETH (a gas paymaster
+cannot supply `msg.value`), and nobody can spend another user's credit; (2) a batch whose redeem
+list is full may be closed at once by anyone, and closing spends the pot on the bridge fee first
+and pays any remainder to the closer, so a junk-filled batch pays for its own forwarding and the
+griefer loses more than the keeper; (3) `requestRedeem` itself closes the open batch when the
+redeem list is full and the caller has no entry (same rules as `closeBatch`: pot first,
+`InsufficientFee` if short, remainder to the caller), then places the request in the new batch —
+one call that works for every wallet in every state, so blocking is impossible, only a one-fee
 tax under attack. A refundable bond would not work (the front door never learns which requests
 were empty); reporting empties back from the vault would cost an extra message per batch.
 
@@ -544,7 +560,8 @@ were empty); reporting empties back from the vault would cost an extra message p
 - `depositFor(address user, uint256 amount)` — `whenNotPaused`, `nonReentrant`; `user == 0` →
   `ZeroAddress`; `amount % RAO != 0` → `NotRaoAligned`; `amount < minDeposit` → `BelowMinDeposit`;
   `netForwarded + open.totalDeposits + amount > depositCap` → `CapExceeded`;
-  `open.totalDeposits + amount > maxBatchValue` → `BatchValueFull` (close the batch first);
+  `open.totalDeposits + amount > maxBatchValue` → `BatchValueFull` (the deposit waits for the
+  next batch; a batch within `minDeposit` of full may be closed early by anyone);
   deposit list full and `user` has no entry → `BatchFull`; pulls `amount` from `msg.sender`;
   adds to `user`'s entry; emits `DepositRequested(batchId, user, amount, msg.sender)`.
   `depositFor` exists for one-signature "zap" contracts (approve + swap + deposit); it can only
@@ -553,21 +570,28 @@ were empty); reporting empties back from the vault would cost an extra message p
   `NotRaoAligned` (so a cancel can never leave a misaligned total); reduces the caller's own
   entry (`InsufficientRequest`), freeing the slot at zero; returns tokens to the caller; emits
   `DepositCancelled`.
-- `requestRedeem(uint256 shares) payable` — `whenNotPaused`; `ZeroAmount`; if the caller has no
-  entry in the open batch: redeem list full → `BatchFull`, `msg.value != redeemRequestFee` →
-  `WrongFee`, `feePot += msg.value`; otherwise `msg.value` must be 0; adds to the caller's entry
-  (the vault clips to what the user holds, to `maxEntryValue` and to the peer's daily
-  allowance); emits `RedeemRequested`. `cancelRedeem(uint256 shares)` mirrors `cancelDeposit`
-  (no alignment rule: shares; the fee is not refunded; the slot is freed at zero).
+- `creditRedeemFee(address user) payable` — anyone; `feeCredit[user] += msg.value`; emits
+  `FeeCredited`. Credit is only ever spent on that user's own requests; it is not withdrawable.
+- `requestRedeem(uint256 shares) payable` — `whenNotPaused`, `nonReentrant`; `ZeroAmount`. If
+  the caller already has an entry in the open batch: `msg.value` must be 0, add to the entry.
+  Otherwise: if the redeem list is full, close the batch first (exactly as `closeBatch` does,
+  with `msg.value` excluded from the budget — the pot pays, `InsufficientFee` if it cannot, any
+  remainder to the caller), then take the fee: `msg.value == redeemRequestFee` → `feePot +=
+  msg.value`; else `msg.value == 0` and `feeCredit[caller] >= redeemRequestFee` → move it to
+  `feePot`; else `WrongFee`. Adds to the caller's entry (the vault clips to what the user holds,
+  to `maxEntryValue` and to the peer's daily allowance); emits `RedeemRequested`.
+  `cancelRedeem(uint256 shares)` mirrors `cancelDeposit` (no alignment rule: shares; the fee is
+  not refunded; the slot is freed at zero).
 - `closeBatch() payable` — permissionless, `whenNotPaused`, `nonReentrant`. Allowed when
   `block.timestamp >= start + batchInterval` OR either list is at its limit OR
-  `totalDeposits == maxBatchValue`; empty batch → restart the timer, refund `msg.value`, emit
-  `BatchRolled`. Otherwise: effects first (open the next batch, `netForwarded +=
-  totalDeposits`), `fee = bridge.quoteFee(vaultChain, vault, msg_, totalDeposits)`; `budget =
-  feePot + msg.value`; `budget < fee` → `InsufficientFee`; `asset.forceApprove(bridge,
-  totalDeposits)`, `bridge.send{value: fee}(...)`, `forceApprove(bridge, 0)`; pay `budget - fee`
-  to `msg.sender` (the caller's own excess plus any pot remainder); emit `BatchClosed(id,
-  totalDeposits, deposits.length, redeems.length, fee, potUsed)`. No in-flight lock. Default
+  `maxBatchValue - totalDeposits < minDeposit` (full by value); empty batch → restart the timer,
+  refund `msg.value`, emit `BatchRolled`. Otherwise: effects first (open the next batch,
+  `netForwarded += totalDeposits`), `fee = primaryBridge.quoteFee(vaultChain, vault, msg_,
+  totalDeposits)`; `budget = feePot + msg.value`; `budget < fee` → `InsufficientFee`;
+  `asset.forceApprove(primaryBridge, totalDeposits)`, `primaryBridge.send{value: fee}(...)`,
+  `forceApprove(primaryBridge, 0)`; pay `budget - fee` to `msg.sender` (the caller's own excess
+  plus any pot remainder); emit `BatchClosed(id, totalDeposits, deposits.length, redeems.length,
+  fee, potUsed)`. No in-flight lock. Default
   `batchInterval` for the beta: `12 hours` (bridged TAO earns nothing while it waits, and a batch
   costs dollars, not tens of dollars).
 - `onBridgeMessage(sourceChain, sender, message, amount)` — only an enabled bridge;
@@ -581,11 +605,14 @@ were empty); reporting empties back from the vault would cost an extra message p
   emits `Claimed`.
 - Invariant: `asset.balanceOf(this) >= open.totalDeposits + totalClaimable` (`>=`, because
   donations and tokens that land ahead of their data message are allowed); ETH held `==` the open
-  batch's `feePot`.
+  batch's `feePot + Σ feeCredit`.
 - Admin: `setCaps(minDeposit, depositCap)`, `setBatchLimits(maxDeposits, maxRedeems)`,
   `setMaxBatchValue`, `setBatchInterval`, `setRedeemRequestFee`, bridge set with the same
-  propose/activate/cancel/disable pattern as the vault (guardian may cancel and disable),
-  `setGuardian`, `pause`/`unpause`.
+  propose/activate/cancel/disable pattern as the vault (guardian may cancel and disable) plus
+  `setPrimaryBridge` (owner; must be enabled) — batches are sent through `primaryBridge`,
+  incoming `PAYOUTS` are accepted from any enabled bridge, and disabling the primary stops
+  closes (deposits can still be cancelled) until a new primary is set; `setGuardian`,
+  `pause`/`unpause`.
 
 ## Keepers and fees
 
@@ -659,19 +686,22 @@ true dust tail completes the batch; exact `net + fee` sent and the adapter keeps
 across several hotkeys; full-exit and sweep paths; retry after a precompile revert; batch deleted
 when done); `cancelPayoutBatch` (re-mints exactly; after partial chunks; owner only; works paused
 and with the front door removed; price after cancel ≥ price at that batch's delivery);
-`stakeIdle` (threshold, `ED_RESERVE`, keeper vs fallback, paused); rewards (keeper vs per-hotkey
-fallback; `InsufficientGas` before the call; gas-burning failure leaves state untouched; zero
-delta succeeds; vesting curve; sandwich attempt yields nothing); hotkey set (add/move/remove
-rules incl. dust threshold, `forfeit`, leftover stake; `rootStakeRao` sums); direct
+two redeem batches queued against a fully staked vault both pay out, in either order;
+`stakeIdle` (threshold, `ED_RESERVE`, floored idle, keeper vs fallback, paused); rewards (keeper
+vs per-hotkey fallback; `InsufficientGas` before the call; gas-burning failure leaves state
+untouched; zero delta succeeds; vesting curve; sandwich attempt yields nothing); hotkey set
+(`addHotkey`, set/move/remove rules incl. dust threshold, `forfeit`, leftover stake below and
+above the minimum; `rootStakeRao` sums); direct
 deposit/redeem (caps, `directOnly` set on every deposit and cleared by opt-in, a front-door
 deposit then a direct deposit then a front-door redeem is skipped, pricing excludes own
 `msg.value`); registries (delay, activate, cancel/disable/remove by guardian, primary must be
 enabled); pause scope; `receive()` guard.
 Unit, front door: deposit/depositFor/cancel (alignment, slot freed at zero)/redeem (fee on first
-entry only, `WrongFee`)/cancel/close (interval, list limits, `maxBatchValue`, pot spent first,
-remainder to the closer), roll, payout credit per `(batchKey, chunk)`, duplicate chunk,
-`TokensNotReceived`, claim, caps, peer checks; a junk-filled batch is closable by a user who then
-requests in the next batch in the same transaction.
+entry only, paid by value or by credit, `WrongFee`, credit not spendable by others)/cancel/close
+(interval, list limits, full by value within `minDeposit`, pot spent first, remainder to the
+closer, through `primaryBridge` only), roll, payout credit per `(batchKey, chunk)` from any
+enabled bridge, duplicate chunk, `TokensNotReceived`, claim, caps, peer checks; in a junk-filled
+batch a single `requestRedeem` from a plain wallet closes it and lands in the next batch.
 Gas: 100 + 100 delivery under `6_500_000`; 50 + 50 under `3_500_000`; vault bytecode under
 `24_576` bytes (`forge build --sizes`).
 End to end: one vault, one front door, through `MockBridge`: deposit → batch → shares → claim
@@ -695,7 +725,8 @@ exceed delivered payouts; no unexpected reverts; reachability logged.
 3. Same-address rule kept and made sound by non-transferable shares plus `directOnly` on every
    direct deposit; app guards legacy `CREATE` contract wallets; recovery address → v2.1.
 4. Batch griefing: merged per-user entries, slots freed at zero, separate deposit/redeem limits,
-   close-when-full, `minChunk`, close-and-request path in the app.
+   close-when-full (including full by value), `minChunk`, `requestRedeem` closes a full batch
+   itself, pre-paid fee credits so sponsored wallets can request.
 5. Caps: `netForwarded` nets off payouts; vault-wide `maxTotalAssets` for direct deposits;
    `depositCap` on Base follows DEX liquidity.
 6. Direct access kept, uncapped, with the honest note about who can use it.
@@ -728,9 +759,10 @@ exceed delivered payouts; no unexpected reverts; reachability logged.
    end to end (batch, delay, bridge). Accept?
 3. **Non-transferable shares** in v2 (csTAO cannot be sent between wallets; this is what makes the
    same-address model safe). Accept?
-4. **Anti-spam fee on withdrawal requests:** about $0.30 in ETH per request on Base, paid to
-   whoever forwards the batch (never to the team). Without it, anyone could block all withdrawals
-   for cents. Accept?
+4. **Anti-spam fee on withdrawal requests:** about $0.30 in ETH per request on Base. It pays the
+   batch's bridge fee; any excess goes to whoever forwards the batch, usually Cascade's own
+   keeper. The app can pre-pay it for users whose wallets hold no ETH. Without it, anyone could
+   block all withdrawals for cents. Accept?
 5. **Reward vesting** over 7 days (share price rises smoothly instead of jumping at each weekly
    claim). Accept?
 6. **Launch scope:** Base only, beta `depositCap` sized to Base TAO liquidity (about $250k);

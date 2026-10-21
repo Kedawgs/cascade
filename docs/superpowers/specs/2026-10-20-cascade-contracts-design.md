@@ -119,8 +119,10 @@ one pending request `{epochId, depositAssets, redeemShares, totalSupply}` plus `
   `claimRootWithHotkey(hotkey)` (claimed rewards land as root stake). Emits
   `RewardsClaimed(raoGained)` where raoGained is the root stake increase.
 - `unclaimedRewards() view` = `getUnclaimedRootTaoByHotkey(coldkey, hotkey)`.
-- `setHotkey(bytes32)` — owner. Moves the full root stake with `moveStake(old, new, 0, 0, rao)`
-  when non-zero. Emits `HotkeySet(old, new)`.
+- `setHotkey(bytes32)` — owner. Zero → `ZeroHotkey`. First claims any unclaimed root rewards
+  on the old hotkey (`claimRootWithHotkey(old)` when `getUnclaimedRootTaoByHotkey(coldkey, old)
+  > 0`, emitting `RewardsClaimed`) so nothing is stranded, then moves the full root stake with
+  `moveStake(old, new, 0, 0, rao)` when non-zero. Emits `HotkeySet(old, new)`.
 - `setBridge(address)`, `setGuardian(address)` — owner, emit `BridgeSet`, `GuardianSet`.
   Zero address → `ZeroAddress`.
 - `pause()` — owner or guardian (`NotGuardian` otherwise). `unpause()` — owner.

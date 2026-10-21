@@ -50,6 +50,7 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
     error NotGuardian();
     error ZeroAddress();
     error DirectTransferNotAllowed();
+    error ZeroHotkey();
 
     event EpochReceived(uint64 indexed epochId, uint256 depositAssets, uint256 redeemShares, uint256 totalSupply);
     event EpochSettled(uint64 indexed epochId, uint256 assetsBefore, uint256 redeemAssets);
@@ -157,17 +158,18 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
 
     /// @notice Claims root rewards; they land as root stake.
     function claimRewards() external whenNotPaused nonReentrant {
-        uint256 stakeBefore = rootStakeRao();
-        STAKING.claimRootWithHotkey(hotkey);
-        emit RewardsClaimed(rootStakeRao() - stakeBefore);
+        _claimRewards();
     }
 
     // ---- admin ----
 
-    /// @notice Points the root stake at a new validator, moving all of it.
+    /// @notice Points the root stake at a new validator. Claims the old hotkey's unclaimed root
+    /// rewards first so none are stranded, then moves the full root stake.
     function setHotkey(bytes32 newHotkey) external onlyOwner {
+        if (newHotkey == bytes32(0)) revert ZeroHotkey();
         bytes32 oldHotkey = hotkey;
-        uint256 rao = STAKING.getStake(oldHotkey, coldkey, NETUID_ROOT);
+        if (STAKING.getUnclaimedRootTaoByHotkey(coldkey, oldHotkey) > 0) _claimRewards();
+        uint256 rao = rootStakeRao();
         hotkey = newHotkey;
         if (rao != 0) STAKING.moveStake(oldHotkey, newHotkey, NETUID_ROOT, NETUID_ROOT, rao);
         emit HotkeySet(oldHotkey, newHotkey);
@@ -202,6 +204,13 @@ contract StakeEngine is ICascadeReceiver, Ownable2Step, Pausable, ReentrancyGuar
         if (rao < MIN_STAKE_RAO) return;
         STAKING.addStake(hotkey, rao, NETUID_ROOT);
         emit Staked(rao);
+    }
+
+    /// @dev Claims root rewards for the current hotkey; they land as root stake.
+    function _claimRewards() internal {
+        uint256 stakeBefore = rootStakeRao();
+        STAKING.claimRootWithHotkey(hotkey);
+        emit RewardsClaimed(rootStakeRao() - stakeBefore);
     }
 
     function _setBridge(address newBridge) private {

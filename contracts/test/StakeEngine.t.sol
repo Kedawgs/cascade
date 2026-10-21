@@ -204,6 +204,21 @@ contract StakeEngineTest is Test {
         assertEq(bridge.lastAmount(), 10e18);
     }
 
+    function test_settleEpoch_shortfallRoundsUnstakeUp() public {
+        _stakeTen();
+        _deliver(2, 1e18 + 1, 5e24, 10e24);
+        // Payout 5e18, liquid 1e18 + 1, shortfall 4e18 - 1 wei: 3999999999.999999999 rao rounds up to 4e9.
+        vm.expectEmit(address(engine));
+        emit StakeEngine.Unstaked(4e9);
+        vm.expectEmit(address(engine));
+        emit StakeEngine.EpochSettled(2, 10e18, 5e18);
+        engine.settleEpoch();
+
+        assertEq(engine.rootStakeRao(), 6e9);
+        assertEq(bridge.lastAmount(), 5e18);
+        assertEq(address(engine).balance, 1);
+    }
+
     function test_settleEpoch_unstakeBlockedRevertsAndKeepsPending() public {
         _stakeTen();
         _deliver(2, 4e18, 5e24, 10e24);
@@ -320,6 +335,26 @@ contract StakeEngineTest is Test {
         vm.prank(BAD);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, BAD));
         engine.setHotkey(HOTKEY2);
+    }
+
+    function test_setHotkey_claimsOldHotkeyRewardsBeforeMoving() public {
+        _stakeTen();
+        staking.accrueRootReward(coldkey, HOTKEY, 5e8);
+
+        vm.expectEmit(address(engine));
+        emit StakeEngine.RewardsClaimed(5e8);
+        vm.expectEmit(address(engine));
+        emit StakeEngine.HotkeySet(HOTKEY, HOTKEY2);
+        engine.setHotkey(HOTKEY2);
+
+        assertEq(staking.getStake(HOTKEY2, coldkey, 0), 10e9 + 5e8);
+        assertEq(staking.getStake(HOTKEY, coldkey, 0), 0);
+        assertEq(staking.getUnclaimedRootTaoByHotkey(coldkey, HOTKEY), 0);
+    }
+
+    function test_setHotkey_zeroReverts() public {
+        vm.expectRevert(StakeEngine.ZeroHotkey.selector);
+        engine.setHotkey(bytes32(0));
     }
 
     function test_setBridge_zeroReverts() public {

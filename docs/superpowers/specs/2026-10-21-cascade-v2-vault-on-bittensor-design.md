@@ -1,6 +1,7 @@
 # Cascade contracts v2 — vault on Bittensor, front door on Base — design spec
 
-Revision 2 (2026-10-21), after the v2 research (`reports/Cascade v2 Bittensor vault rails.md`).
+Revision 3 (2026-10-21), after the v2 research (`reports/Cascade v2 Bittensor vault rails.md`)
+and two builder checks.
 Supersedes the v1 contract design (`2026-10-20-cascade-contracts-design.md`) for the vault half.
 Product context: `docs/architecture.md` (to be updated to match this spec once approved).
 
@@ -18,14 +19,13 @@ and forwards them with each user's address. Nothing is estimated, nothing is fla
 independent (no in-flight lock), and the "all your TAO is staked" proof is one read from the
 chain where shares and stake both live.
 
-Revision 2 changes nothing in that intent. It corrects the places where revision 1 assumed an
-ordinary EVM chain and a generic bridge. The research established that:
+The research established, and this revision builds in, that:
 
 - Chainlink CCIP is the only rail that moves TAO between Base and Bittensor EVM, and what it
   delivers on Bittensor is ForeverMoney's ERC-20 claim token, not native TAO. Only ForeverMoney's
   contracts convert it. **The conversion lives in a replaceable adapter, outside the vault.**
 - Claiming root rewards needs a ~53M-gas allowance and can be refused by the chain. **Claims are
-  a separate keeper call, never part of pricing or delivery.**
+  a separate keeper call, never part of pricing or delivery, and vest into the price.**
 - A CCIP delivery on Bittensor gets about 7.2M gas, one message carries at most 5,000 TAO, and
   storage is the cost that matters. **Batches are smaller and payout lists are stored as hashes.**
 - TAO balances are kept in rao (1e9 wei); sub-minimum stake remainders are swept; the coldkey
@@ -33,6 +33,9 @@ ordinary EVM chain and a generic bridge. The research established that:
   measured.**
 - Only Base and Robinhood Chain have a bridgeable TAO token. **Ethereum, BNB and Polygon front
   doors are dropped; those users bridge USDC to Base in the app.**
+- A front door speaks for its users: a rogue one could burn their shares. **Redeems are capped
+  per front door at delivery, payouts wait a delay, and a batch can be cancelled with the shares
+  given back.** That is the core of exit safety in this revision.
 
 ## Goals / non-goals / anti-goals
 
@@ -42,27 +45,40 @@ ordinary EVM chain and a generic bridge. The research established that:
   replaced without touching the vault.
 - Non-goals (this build): production bridge adapters (a separate spec once ForeverMoney's
   contract interface is known — see "Adapters"), deployment scripts, fees to users, USDC
-  conversion (the app swaps USDC↔TAO on Base around deposit/claim), a wrapped csTAO on Base,
-  subnet staking, a user-registered recovery address on Bittensor (v2.1).
+  conversion (the app swaps USDC↔TAO on Base around deposit/claim), a wrapped or transferable
+  csTAO (possible later), subnet staking, a user-registered recovery address on Bittensor (v2.1).
 - Anti-goals: any path where the team's keys can move user funds; any contract that must trust a
   reported balance; any single lost message that blocks other users; any routine action that
-  needs more gas than a bridge delivery can buy.
+  needs more gas than a bridge delivery can buy; any way for a peer to take more than a bounded,
+  delayed, reversible amount.
 
 ## Global rules
 
-- Solidity `0.8.24`, EVM `cancun`, OpenZeppelin `v5.4.0`. No proxies, no `delegatecall`, no
-  arbitrary external calls. Custom errors; an event per state change. `renounceOwnership`
-  reverts `RenounceDisabled()`. The vault must stay under the 24,576-byte code limit (ForeverMoney's
-  comparable contract is 19,129 bytes); the plan includes a `forge build --sizes` check.
-- Admin = `Ownable2Step` owner (timelock + Safe in production). Guardian may only `pause()` and
-  `cancelProposal()`. Owner may `pause()`/`unpause()`. Routine actions are permissionless.
+- Solidity `0.8.24`, EVM `cancun`, OpenZeppelin `v5.4.0`. No proxies, no `delegatecall` (which
+  also rules out external libraries), no arbitrary external calls. Custom errors; an event per
+  state change. `renounceOwnership` reverts `RenounceDisabled()`.
+- **Code size.** The vault must stay under 24,576 bytes. The plan checks `forge build --sizes`
+  as soon as the vault compiles. Agreed fallback if it does not fit: csTAO becomes a separate
+  minimal ERC-20 contract (`CascadeShares`) that only the vault can mint and burn, deployed from
+  the vault's constructor; the vault keeps the accounting and the stake on the same chain, which
+  is the property that matters. Second fallback: lower the optimizer `runs`.
+- Roles. Owner = `Ownable2Step` (timelock + Safe in production; the timelock delay is an
+  operations parameter, 48 hours in the beta). Guardian (a fast, low-trust key) may only stop
+  flows: `pause`, `cancelProposal`, `disableBridge`, `removeFrontDoor`. Keeper (owner-set role)
+  may time `claimRewards` and `stakeIdle`; anyone may call them after a fallback delay. Everything
+  else routine is permissionless.
 - Share math via `CascadeMath` (unchanged): `sharesForDeposit`, `assetsForRedeem`, `price`,
   virtual offset `1e6`, all rounded down. Shares have 24 decimals.
+- **csTAO is non-transferable in v2.** `transfer`, `transferFrom`, `approve` revert
+  `NonTransferable()`. Shares can only be minted by a batch or `depositDirect` and burned by a
+  batch or `redeemDirect`. This is what makes "the address that deposited controls the shares"
+  true on both chains (see "Addresses and wallets"); a transferable wrapper can come later.
 - Units: TAO amounts in contracts are 18-decimal wei; the precompile takes rao (`RAO = 1e9` wei).
-  **Every amount that crosses into the vault must be a whole number of rao** (`amount % RAO == 0`,
-  else `NotRaoAligned`), because the chain truncates transfers to rao. Every amount the vault
-  pays out is rounded down to rao. Front doors hold bridged TAO as an 18-decimal ERC-20
-  (`UnsupportedDecimals` otherwise) and enforce rao alignment at deposit.
+  The chain truncates every transfer to rao, so the front door only accepts whole-rao amounts
+  (`NotRaoAligned`) in `depositFor` **and** `cancelDeposit`, the vault rounds every incoming
+  amount down to rao before pricing it (defence in depth: a misaligned entry can never strand a
+  batch), and every amount the vault pays out is rounded down to rao. Front doors hold bridged
+  TAO as an 18-decimal ERC-20 (`UnsupportedDecimals` otherwise).
 - Users are identified by their EVM address, which is the same on every EVM chain. A front door
   forwards `msg.sender` (or the named user of `depositFor`, deposits only); the vault never takes
   a user address from anyone but a registered front door.
@@ -72,10 +88,10 @@ ordinary EVM chain and a generic bridge. The research established that:
   precompile v2), `ADDRESS_MAPPING = 0x000000000000000000000000000000000000080c`. Tests
   `vm.etch` mocks at those addresses (as v1 does).
 - **Measure, never assume.** Around every precompile call that moves value the vault records the
-  balance and stake before and after and emits what actually happened. Precompile dispatch
-  failures surface as low-level errors with no return data and consume all forwarded gas, so the
-  vault never wraps a precompile write in `try/catch`; it lets the revert bubble up and the caller
-  retries.
+  balance and stake before and after and emits what actually happened; a measured delta may be
+  zero or negative and never reverts on its own. Precompile dispatch failures surface as
+  low-level errors with no return data and consume all forwarded gas, so the vault never wraps a
+  precompile *write* in `try/catch`; it lets the revert bubble up and the caller retries.
 
 ## Bridge interface v2 (chain-aware) — unchanged
 
@@ -105,6 +121,11 @@ CCIP and the vault, and a **Base adapter** between CCIP and the front door. They
 designed to be replaced, because every outside change (ForeverMoney's token, Chainlink's lane,
 a Bittensor runtime upgrade) lands there. Their obligations:
 
+- **Immutable.** An adapter has no admin and no upgrade path; its router, peer addresses and
+  gateway are constructor constants. Any change is a new adapter that goes through the vault's
+  7-day registry. Otherwise an adapter's own admin would bypass the delay, and because any enabled
+  adapter may present any registered `(sourceChain, sender)`, the weakest adapter would set the
+  security level for every front door.
 - Inbound (Base → vault): receive ForeverMoney's token plus the `BATCH` data, convert the token to
   native TAO, then call `vault.onBridgeMessage{value: amount}(...)` with `amount == Σ deposits`.
   Preferred: conversion through a ForeverMoney function in the same transaction (atomic). Fallback
@@ -116,15 +137,16 @@ a Bittensor runtime upgrade) lands there. Their obligations:
   convert through ForeverMoney's gateway, and deliver token plus data to the front door. If the
   gateway cannot carry data, the adapter sends the data as a separate CCIP message; the front
   door's `TokensNotReceived` check makes that safe (the data message fails until the tokens are
-  there, then anyone re-executes it).
+  there, then anyone re-executes it). Note for the adapter spec: in that fallback the token check
+  is pooled across chunks, so a chunk whose tokens the rail loses makes the *last* chunk's data
+  fail, not its own.
 - Limits the adapter must enforce before sending, because the lane will otherwise fail the
   message: ≤ 5,000 TAO per message (ForeverMoney pool rate limit, 0.6 TAO/s refill, shared with
   every ForeverMoney user), ≤ 32,000 bytes of data, and a delivery gas budget ≤ ~7.2M on Bittensor
-  / ~13M on Base. The contracts below keep every message under those limits by construction, so
-  an adapter only has to pass them through.
-- Adapter admin is ForeverMoney-facing and outside the vault's trust model. The README must say
-  plainly that ForeverMoney's 2-of-3 Safe (token pools, rate limits), Chainlink's lane
-  configuration and Bittensor's sudo key can each stop or change the rails with no delay.
+  / ~13M on Base. The contracts below keep every message under those limits by construction.
+- The README must say plainly that ForeverMoney's 2-of-3 Safe (token pools, rate limits),
+  Chainlink's lane configuration and Bittensor's sudo key can each stop or change the rails with
+  no delay.
 
 **Blocking dependency:** the inbound conversion needs a function on ForeverMoney's Bittensor
 contracts that a third-party contract may call. Their source is not verified on the explorer and
@@ -135,6 +157,7 @@ and do not wait for that answer; the adapter spec does.
 
 ```solidity
 struct Entry { address user; uint256 amount; }   // amount = TAO wei for deposits/payouts, shares for redeems
+struct Payout { address user; uint256 shares; uint256 assets; }   // what a batch committed to
 ```
 
 | Kind | Value | Payload | Bridged amount |
@@ -146,12 +169,14 @@ Wrong kind → `WrongMessageKind`. Entry arrays are bounded by `MAX_ENTRIES = 10
 message (decoding more reverts `TooManyEntries`). The front door's operator limits (default 50 per
 list) sit below that; `MAX_ENTRIES` is the hard ceiling the vault relies on for gas.
 
-A payout batch may be sent in several chunks (see `processPayouts`); `(batchId, chunk)` is the
-replay key on the front door.
+A payout batch may be sent in several chunks; `(batchId, chunk)` is the replay key on the front
+door. `Payout` is never bridged; it is what the vault's running hash commits to and what the
+keeper resubmits from events.
 
 ## CascadeVault (Bittensor EVM) — stake + shares
 
-ERC-20 `Cascade Staked TAO` / `csTAO`, 24 decimals. Absorbs the v1 `StakeEngine` logic.
+ERC-20 `Cascade Staked TAO` / `csTAO`, 24 decimals, non-transferable. Absorbs the v1
+`StakeEngine` logic.
 
 Constructor `(bytes32 expectedColdkey, bytes32 hotkey, ICascadeBridge bridge, address owner, address guardian, uint256 minDirectDeposit)`:
 derives `coldkey = ADDRESS_MAPPING.addressMapping(address(this))` and reverts `ColdkeyMismatch`
@@ -159,25 +184,30 @@ if it differs from `expectedColdkey` (ForeverMoney's hand-typed coldkey caused a
 the parameter stays as a cross-check only); `ZeroHotkey`; zero-address checks; calls
 `STAKING.setRejectStakingHotkeyGrowth(true)` (stops strangers adding new hotkeys to the vault's
 stake list; stake sent onto the vault's own hotkeys still lands, which only raises the price).
+The initial bridge is enabled immediately (no delay at construction) and is the primary.
 
 ### Stake and hotkeys
 
 - `bytes32[] hotkeys` (bounded by `MAX_HOTKEYS = 4`), `bytes32 stakeHotkey` (where idle TAO is
   staked; always in the set). `rootStakeRao() view` = Σ `STAKING.getStake(h, coldkey, 0)` over the
-  set. A hotkey stays in the set until its stake is zero because rewards claimed later land on the
-  hotkey that earned them.
+  set. A hotkey stays in the set while it has stake or unclaimed rewards, because rewards claimed
+  later land on the hotkey that earned them.
 - `setStakeHotkey(bytes32 h)` (owner): adds `h` to the set if absent (`TooManyHotkeys`,
   `ZeroHotkey`), makes it the stake hotkey; emits `StakeHotkeySet`.
 - `moveStake(bytes32 from, uint256 rao)` (owner): `STAKING.moveStake(from, stakeHotkey, 0, 0, rao)`
   (root→root, fee-free); measures both stakes before/after; emits `StakeMoved(from, to, rao, moved)`.
-- `removeHotkey(bytes32 h)` (owner): `h != stakeHotkey` (`HotkeyInUse`), `getStake(h) == 0`
-  (`HotkeyNotEmpty`); emits `HotkeyRemoved`.
-- `stakeIdle()` — permissionless, `whenNotPaused`, `nonReentrant`. **Not called from any delivery
-  or payout path** (a precompile failure there would burn the delivery's gas, and a future root
-  hold would re-arm on every stake). Stakes `idle = balance - pendingPayouts - ED_RESERVE` on
-  `stakeHotkey` if `idle / RAO >= minStakeRao()`; measures the stake delta; emits
-  `Staked(hotkey, rao)`. `ED_RESERVE = 1e12` wei (1,000 rao) is never spent and never counted,
-  so the chain's 500-rao existential deposit can never make a payout fail.
+- `removeHotkey(bytes32 h)` (owner): `h != stakeHotkey` (`HotkeyInUse`);
+  `STAKING.getUnclaimedRootTaoByHotkey(coldkey, h) == 0` (`HotkeyHasRewards`; a 1.7M-gas read is
+  fine in an admin call); moves any remaining stake to `stakeHotkey` first (so a stranger parking
+  0.002 TAO on it cannot block removal); then removes it; emits `HotkeyRemoved`.
+- `stakeIdle()` — keeper, or anyone once `block.timestamp >= lastStakeAt + KEEPER_FALLBACK`
+  (`7 days`); `whenNotPaused`, `nonReentrant`. **Not called from any delivery or payout path** (a
+  precompile failure there would burn the delivery's gas, and a future root hold would re-arm on
+  every stake — which is also why it is not permissionless: anyone could otherwise restart such a
+  hold for cents). Stakes `idle = balance - pendingPayouts - ED_RESERVE` on `stakeHotkey` if
+  `idle / RAO >= minStakeRao()`; measures the stake delta; sets `lastStakeAt`; emits
+  `Staked(hotkey, rao, measuredDelta)`. `ED_RESERVE = 1e12` wei (1,000 rao) is never spent and
+  never counted, so the chain's 500-rao existential deposit can never make a payout fail.
 - Floors are read live with a capped gas and a fallback: `minStakeRao()` =
   `STAKING.getDefaultMinStake{gas: 100_000}()` else `fallbackMinStakeRao` (owner-set, default
   `2_000_000`); `minRemainRao()` = `STAKING.getNominatorMinRequiredStake{gas: 100_000}()` else
@@ -189,14 +219,15 @@ stake list; stake sent onto the vault's own hotkeys still lands, which only rais
   `STAKING.removeStakeFull(h, 0)` (the chain would otherwise sweep the remainder anyway, and an
   over-request silently exits the whole position), else `STAKING.removeStake(h, want, 0)`.
   Measure `received = balance_after - balance_before`; emit `Unstaked(h, want, received)`;
-  `remaining -= received`; stop when `remaining == 0`. A precompile revert (e.g. root "too early",
-  basket migration) bubbles up; the caller retries later; nothing else is blocked. `receive()`
-  accepts value only while `_unstaking` is set (reverts `DirectTransferNotAllowed` otherwise).
-  Credits bypass `receive()` on today's runtime; the flag protects against a runtime that routes
-  them through it.
+  `remaining -= min(remaining, received)`; stop when `remaining == 0`. A precompile revert (e.g.
+  root "too early", basket migration) bubbles up; the caller retries later; nothing else is
+  blocked. `receive()` accepts value only while `_unstaking` is set (reverts
+  `DirectTransferNotAllowed` otherwise). Credits bypass `receive()` on today's runtime; the flag
+  protects against a runtime that routes them through it.
 - Unexpected stake decreases (a chain sweep) or increases (a donation onto a hotkey) are never
   treated as errors: `totalAssets` reads both stake and balance, so a sweep moves value from one
-  term to the other and a donation raises the price.
+  term to the other and a donation raises the price. A brand-new stake position reads back one
+  rao short on the live chain; the mock models it and the price invariant tolerates one rao.
 
 ### Rewards: separate, keeper-timed, vested
 
@@ -206,69 +237,82 @@ anything), costs real money (about τ0.057 for a full basket), sells basket hold
 slippage bound, and can be refused by the chain (`RootClaimTooHeavy`) for reasons outside the
 vault's control. Therefore:
 
-- `claimRewards(bytes32 hotkey)` — `nonReentrant`; `hotkey` must be in the set. Callable by
-  `claimer` (owner-set role, event `ClaimerSet`) at any time, and by anyone once
-  `block.timestamp >= lastClaimAt + CLAIM_FALLBACK_DELAY` (`7 days`), so a dead keeper can never
-  strand rewards. Requires `gasleft() >= claimGasRequired` (owner-set, default `55_000_000`,
-  event `ClaimGasSet`) else `InsufficientGas` — this is what stops a mis-sized call from burning
-  its gas in the precompile. Calls `STAKING.claimRootWithHotkey(hotkey)` with no `try/catch`;
-  measures `delta = stake_after - stake_before`; sets `lastClaimAt`; starts vesting `delta`;
-  emits `RewardsClaimed(hotkey, delta)`. The claimer role only times claims; it can never move
-  funds.
-- **Vesting.** A claim adds `delta` to `vestingAmount` (plus whatever was still unvested) and
-  restarts `vestingStart`; `unvestedRewards() view = vestingAmount * remaining / REWARD_VESTING`
-  with `REWARD_VESTING = 7 days`, linear. `totalAssets()` excludes the unvested part, so the
-  share price rises smoothly over the week instead of jumping at the claim. Without this, a
+- `claimRewards(bytes32 hotkey)` — `nonReentrant`; `hotkey` must be in the set. Callable by the
+  keeper at any time, and by anyone once `block.timestamp >= lastClaimAt[hotkey] + KEEPER_FALLBACK`
+  (per hotkey, so claiming one does not close the fallback for another). Requires `gasleft() >=
+  claimGasRequired` (owner-set, default `55_000_000`, event `ClaimGasSet`) else `InsufficientGas`
+  — this is what stops a mis-sized call from burning its gas in the precompile. Calls
+  `STAKING.claimRootWithHotkey(hotkey)` with no `try/catch`; measures `delta = stake_after -
+  stake_before` (zero or negative → `delta = 0`, still a success); sets `lastClaimAt[hotkey]`;
+  starts vesting `delta`; emits `RewardsClaimed(hotkey, delta)`. The keeper role only times
+  claims; it can never move funds. (Timing does shift a little value between leavers and stayers,
+  see vesting; the README says so.)
+- **Vesting.** A claim adds `delta` to the still-unvested remainder and restarts
+  `vestingStart`; `unvestedRewards() view = vestingAmount * timeRemaining / REWARD_VESTING` with
+  `REWARD_VESTING = 7 days`, linear. `totalAssets()` excludes the unvested part, so the share
+  price rises smoothly over the week instead of jumping at the claim. Without this, a
   Bittensor-native user could `depositDirect` just before a keeper's claim and `redeemDirect`
   just after, taking a week of everyone's rewards (the claim is a visible transaction and the
   chain ignores priority fees, so the sandwich is cheap). Vesting also removes the v1 "catch-up
   claim distorts one batch's price" problem without putting the claim in the pricing path.
 - Unclaimed rewards are never priced in (reading them costs 1.7M gas and the claim can fail).
   With weekly claims at most about a week of yield (~0.1%) is outside the price at any time.
-- `setHotkey` no longer claims first (it cannot, inside normal gas). Moving stake off a hotkey
-  leaves that hotkey's unclaimed rewards owed to it; they are claimed later with
-  `claimRewards(oldHotkey)` and vest like any other claim. That is why the hotkey set exists.
+- Moving stake off a hotkey leaves that hotkey's unclaimed rewards owed to it; they are claimed
+  later with `claimRewards(oldHotkey)` and vest like any other claim. That is why the hotkey set
+  exists.
 
 ### Assets and pricing
 
 - `grossAssets() view = rootStakeRao() * RAO + balance - ED_RESERVE` (floored at 0).
 - `totalAssets() view = grossAssets() - pendingPayouts - unvestedRewards()` (floored at 0).
-- One price per batch: `onBridgeMessage` fixes `A = totalAssets() - msg.value` and
-  `S = totalSupply()` once and uses them for every entry, rounded in the vault's favour.
+- One price per batch: `onBridgeMessage` fixes `A = totalAssets() - credited` (where `credited`
+  is `msg.value` rounded down to rao, and the subtraction floors at 0) and `S = totalSupply()`
+  once and uses them for every entry, rounded in the vault's favour. `depositDirect` does the
+  same with its own `msg.value`.
 
 ### State
 
-`guardian`, `claimer`, `pendingPayouts` (TAO owed to batches not yet fully sent),
-`mapping(bytes32 key => PayoutBatch)` with `key = keccak256(sourceChain, sender, batchId)`,
-`PayoutBatch { uint64 sourceChain; address frontDoor; uint64 batchId; uint32 cursor; uint32 count; uint32 chunk; uint256 remaining; bytes32 payoutsHash; }`
+`guardian`, `keeper`, `pendingPayouts` (TAO owed to batches not yet fully sent),
+`mapping(bytes32 key => bool) processed` (every delivered batch, payouts or not — the replay
+record), `mapping(bytes32 key => PayoutBatch)` with `key = keccak256(sourceChain, sender, batchId)`,
+`PayoutBatch { uint64 sourceChain; address frontDoor; uint64 batchId; uint64 queuedAt; uint32 cursor; uint32 count; uint32 chunk; uint256 remaining; bytes32 payoutsHash; }`
 (the entries themselves are **not stored** — storing 100 entries costs two fresh slots each and
 would push a full delivery past the lane's gas ceiling; the keeper resubmits the list from the
-`Redeemed` events), front-door and bridge registries (see "Exit safety"), `primaryBridge`,
-outflow window (`windowStart`, `outflowInWindow`), `maxDailyOutflowBps` (default `2000`),
-`maxEntryValue` (default `2_000e18`), `maxMessageValue` (default `4_000e18`), `maxTotalAssets`,
-`minDirectDeposit`, hotkey set, vesting fields, `lastClaimAt`, `claimGasRequired`, floor
-fallbacks.
+`Redeemed` events), per-front-door burn windows `mapping(bytes32 peer => Window { uint64 start; uint256 burned; })`
+with `peer = keccak256(sourceChain, sender)`, `mapping(address => bool) directOnly`, front-door
+and bridge registries (see "Exit safety"), `primaryBridge`, `maxDailyOutflowBps` (default `2000`),
+`minDailyOutflow` (default `100e18`), `maxEntryValue` (default `2_000e18`), `maxMessageValue`
+(default `4_000e18`), `minChunk` (default `10`), `payoutDelay` (default `24 hours`),
+`maxTotalAssets`, `minDirectDeposit`, hotkey set, vesting fields, `lastClaimAt[hotkey]`,
+`lastStakeAt`, `claimGasRequired`, floor fallbacks.
 
 ### `onBridgeMessage(sourceChain, sender, message, amount) payable`
 
 Only an enabled bridge (`NotBridge`); `(sourceChain, sender)` must be an active front door
-(`UnknownPeer`); `msg.value != amount` → `ValueMismatch`; `amount % RAO != 0` → `NotRaoAligned`;
-decodes `BATCH`; `amount != Σ deposits.amount` or any `d.amount % RAO != 0` → `AmountMismatch` /
-`NotRaoAligned`; replayed key → `DuplicateBatch`. Works while paused (money in flight is never
-stuck). Does **no staking and no claiming**. With `A`, `S` fixed:
+(`UnknownPeer`); `msg.value != amount` → `ValueMismatch`; decodes `BATCH`; `amount != Σ
+deposits.amount` → `AmountMismatch`; `processed[key]` → `DuplicateBatch`. **Reverts while paused**
+(`EnforcedPause`): the rail marks the delivery failed and anyone re-executes it after unpause, so
+money in flight is held, not lost, and a pause really stops a rogue peer. Does **no staking and
+no claiming**. Sets `processed[key]`. With `A`, `S` fixed:
 
-1. For each deposit: `_mint(user, sharesForDeposit(d.amount, A, S))`; emit
-   `Deposited(sourceChain, batchId, user, d.amount, shares)`. Zero shares (dust) → still fine.
-2. For each redeem: `s = min(r.amount, balanceOf(user))`; if `s == 0` emit
-   `RedeemSkipped(...)` and continue. Clip to the per-entry payout bound: `sMax =
-   maxEntryValue * (S + 1e6) / (A + 1)` (rounded down; `CascadeMath.sharesForDeposit` is exactly
-   this formula); `s = min(s, sMax)`; `out = assetsForRedeem(s, A, S)` rounded down to rao
-   (`out -= out % RAO`); if `out == 0` emit `RedeemSkipped` and continue (nothing burned);
-   `_burn(user, s)`; accumulate `total += out`, `hash = keccak256(hash, user, out)` (running
-   hash over `(user, out)` pairs in order); emit `Redeemed(sourceChain, batchId, user, s, out)`.
-   A user whose request was clipped keeps the rest of their shares and may request again.
-3. If `total > 0`: `pendingPayouts += total`; store
-   `PayoutBatch{sourceChain, sender, batchId, cursor 0, count n, chunk 0, remaining total, payoutsHash hash}`;
+1. For each deposit: `a = d.amount - d.amount % RAO`; `user == 0` → emit
+   `DepositSkipped(key, user, a)` and continue (the TAO stays; price rises); else
+   `_mint(user, sharesForDeposit(a, A, S))`; emit `Deposited(key, user, a, shares)`. Zero shares
+   (dust) → still fine. No per-entry condition ever reverts the batch.
+2. **Burn allowance for this peer.** Reset the peer's window if `block.timestamp >= start + 24
+   hours`. `allowance = max(grossAssets() * maxDailyOutflowBps / 10000, minDailyOutflow) -
+   burned` (floored at 0; `grossAssets()` here includes the deposits just credited).
+3. For each redeem: `s = min(r.amount, balanceOf(user))`; if `s == 0` or `directOnly[user]` →
+   emit `RedeemSkipped(key, user, r.amount)` and continue. Clip to the per-entry bound and to
+   the remaining allowance: `cap = min(maxEntryValue, allowance)`; `sMax = cap * (S + 1e6) /
+   (A + 1)` (rounded down; this is `CascadeMath.sharesForDeposit(cap, A, S)`); `s = min(s,
+   sMax)`; `out = assetsForRedeem(s, A, S)` rounded down to rao; if `out == 0` → emit
+   `RedeemDeferred(key, user, r.amount)` and continue (nothing burned; the user keeps the shares
+   and may request again); `_burn(user, s)`; `allowance -= out`; `burned += out`; `total += out`;
+   `hash = keccak256(hash, user, s, out)` (running hash over `Payout` triples in order); emit
+   `Redeemed(key, user, s, out)`. A clipped user keeps the rest of their shares.
+4. If `total > 0`: `pendingPayouts += total`; store
+   `PayoutBatch{sourceChain, sender, batchId, queuedAt = now, cursor 0, count n, chunk 0, remaining total, payoutsHash hash}`;
    emit `PayoutBatchQueued(key, sourceChain, batchId, n, total)`.
 
 Gas: a full `MAX_ENTRIES` + `MAX_ENTRIES` delivery must fit under the lane budget. The plan
@@ -276,46 +320,69 @@ includes a test that measures a 100 + 100 delivery (fresh users, cold storage) a
 under `6_500_000` gas, and a 50 + 50 delivery under `3_500_000`; the operator limits default to
 50 + 50 and may be raised to 100 only if the fork measurement confirms the number.
 
-### `processPayouts(bytes32 key, Entry[] calldata payouts, uint32 maxEntries)`
+### `processPayouts(bytes32 key, Payout[] calldata payouts, uint32 maxEntries)`
 
 Permissionless, `whenNotPaused`, `nonReentrant`. `payouts` must be the batch's full ordered list:
 its running hash must equal `payoutsHash` and its length `count` (`PayoutsMismatch`); `cursor <
-count` (`NotPending`).
+count` (`NotPending`); `block.timestamp >= queuedAt + payoutDelay` (`PayoutDelayed`) — the delay
+is the window in which a guardian pause and an owner cancel can undo a rogue batch before any
+TAO leaves. There is no outflow window here: everything queued already passed the per-peer burn
+allowance at delivery.
 
-1. **Window.** If `block.timestamp >= windowStart + 24 hours` reset the window. `allowance =
-   grossAssets() * maxDailyOutflowBps / 10000 - outflowInWindow` (floored at 0). The denominator
-   is **gross** assets (stake plus balance, before subtracting pending payouts) so a large
-   redemption batch cannot shrink its own allowance to zero; revision 1 measured against
-   `totalAssets()` and a 300-TAO batch in a 1,000-TAO vault could never clear.
-2. **Select a chunk.** Starting at `cursor`, take entries in order while `sum + out_i <=
-   allowance`, `sum + out_i <= maxMessageValue` and `taken < maxEntries`; stop at the first entry
-   that does not fit (order is preserved so the hash stays checkable). If no entry fits, emit
-   `OutflowLimited(key, allowance)` and return without changes (never a revert that loses state).
-3. **Fee.** `msg_ = encodePayouts(batchId, chunk, chunkEntries)`; `fee = primaryBridge.quoteFee(sourceChain, frontDoor, msg_, sum)`;
-   `fee >= sum` → `FeeExceedsPayout` (retry later). Deduct pro-rata in TAO: `net_i = out_i -
-   out_i * fee / sum`, rounded against the user and down to rao; an entry that cannot cover its
-   share is paid 0 and emitted as `PayoutDust`. `net = Σ net_i`.
-4. **Liquidity.** `available = balance - ED_RESERVE - (pendingPayouts - batch.remaining)`; if
-   `available < sum` call `_unstake(sum - available)` (a precompile revert bubbles up; retry).
-5. **Effects first.** `cursor += taken`, `chunk += 1`, `remaining -= sum`, `pendingPayouts -=
-   sum`, `outflowInWindow += sum`.
-6. **Send.** `primaryBridge.send{value: sum}(sourceChain, frontDoor, encodePayouts(batchId, chunk-1, netEntries), net)`
-   (the bridge takes `fee` from the value and forwards `net`). Emit `PayoutChunkSent(key, chunk-1, taken, sum, net, fee)`.
+1. **Select a chunk.** Starting at `cursor`, take entries in order while `sum + assets_i <=
+   maxMessageValue` and `taken < maxEntries`; stop at the first entry that does not fit. An entry
+   alone always fits (`maxEntryValue <= maxMessageValue` is enforced by the setters, and lowering
+   `maxMessageValue` below a queued entry requires cancelling that batch first). `maxEntries <
+   minChunk` is treated as `minChunk` unless fewer entries remain, so a caller cannot make every
+   user pay a whole message fee by sending one-entry chunks.
+2. **Fee.** `msg_ = encodePayouts(batchId, chunk, chunkEntries)`; `fee = primaryBridge.quoteFee(sourceChain, frontDoor, msg_, sum)`.
+   Deduct pro-rata in TAO: `net_i = assets_i - assets_i * fee / sum`, rounded against the user
+   and down to rao; `net = Σ net_i`. If `fee >= sum` (a tail entry too small to cover the fee):
+   pay nothing, emit `PayoutDust(key, user, assets)` for each entry in the chunk, and complete the
+   chunk anyway so the batch can finish (the dust stays in the vault and raises the price). An
+   entry whose `net_i` is 0 is likewise emitted as `PayoutDust`.
+3. **Liquidity.** `available = balance - ED_RESERVE - (pendingPayouts - batch.remaining)`; if
+   `available < net + fee` call `_unstake(net + fee - available)` (a precompile revert bubbles
+   up; retry).
+4. **Effects first.** `cursor += taken`, `chunk += 1`, `remaining -= sum`, `pendingPayouts -=
+   sum`. If `cursor == count` delete the batch (keep `processed[key]`).
+5. **Send.** `primaryBridge.send{value: net + fee}(sourceChain, frontDoor, encodePayouts(batchId, chunk-1, netEntries), net)`
+   — exactly `net + fee`, never `sum`; the rounding difference `sum - net - fee` stays in the
+   vault. Emit `PayoutChunkSent(key, chunk-1, taken, sum, net, fee)`. Skip the send entirely when
+   `net == 0`.
 
-No `stakeIdle()` here either; the keeper calls it separately.
+No `stakeIdle()` here; the keeper calls it separately.
+
+### `cancelPayoutBatch(bytes32 key, Payout[] calldata payouts)`
+
+Owner only (timelocked), works while paused, `nonReentrant`. Verifies the list against
+`payoutsHash` and `count`. For every entry from `cursor` to the end: `_mint(user, shares)`
+(exact, because the batch's price was fixed), emit `RedeemReversed(key, user, shares, assets)`.
+`pendingPayouts -= remaining`; delete the batch. The peer's `burned` is not restored. This is
+how a batch from a rogue or dead front door is undone: the users get their shares back instead
+of their TAO being paid to an address that should not have it, or sitting in `pendingPayouts`
+forever. Chunks already sent stay sent.
 
 ### Direct access (Bittensor-native users; escape hatch for EOAs)
 
 - `depositDirect() payable` — `whenNotPaused`, `nonReentrant`; `msg.value % RAO != 0` →
-  `NotRaoAligned`; `msg.value < minDirectDeposit` → `BelowMinDeposit`; `totalAssets() + msg.value
-  > maxTotalAssets` → `CapExceeded`; mints at the current price to `msg.sender`; emits
-  `DepositedDirect`. No staking inline.
+  `NotRaoAligned`; `msg.value < minDirectDeposit` → `BelowMinDeposit`; with `A = totalAssets() -
+  msg.value`: `A + msg.value > maxTotalAssets` → `CapExceeded`; if `balanceOf(msg.sender) == 0`
+  set `directOnly[msg.sender] = true`; mints `sharesForDeposit(msg.value, A, S)` to
+  `msg.sender`; emits `DepositedDirect`. No staking inline.
+- `allowFrontDoorRedeems()` — clears `directOnly[msg.sender]`; emits `FrontDoorRedeemsAllowed`.
+  A Bittensor-native depositor must opt in before a front door may redeem for their address,
+  because the same address on Base may belong to someone else (a contract deployed with `CREATE`
+  on Bittensor, for example). Front-door depositors are opted in by construction: their shares
+  exist only because that address acted on Base.
 - `redeemDirect(uint256 shares)` — `whenNotPaused`, `nonReentrant`; `ZeroAmount`; `out =
-  assetsForRedeem(shares, totalAssets(), totalSupply())` rounded down to rao; `out >
-  maxEntryValue` → `AboveMaxEntry` (redeem less); window as above, `out > allowance` →
-  `OutflowLimitReached` (nothing burned, so a revert is correct here); burn; unstake any shortfall
-  with `_unstake` (respecting `pendingPayouts` and `ED_RESERVE`); `outflowInWindow += out`; send
-  `out` to `msg.sender` with `call` (`TransferFailed`); emits `RedeemedDirect`.
+  assetsForRedeem(shares, totalAssets(), totalSupply())` rounded down to rao; burn; unstake any
+  shortfall with `_unstake` (respecting `pendingPayouts` and `ED_RESERVE`); send `out` to
+  `msg.sender` with `call` (`TransferFailed`); emits `RedeemedDirect`. **No outflow cap**: a
+  direct redeem is authorised by the share owner's own signature on this chain, so it is not a
+  drain vector, and sharing a window with front doors would let anyone starve the bridged queue
+  for free by looping `depositDirect`/`redeemDirect`. Root unstaking is 1:1 and fee-free, so a
+  large direct exit cannot hurt remaining holders.
 - Who can really use it: Bittensor-native users and EOAs that hold TAO for gas on chain 964. No
   Coinbase Smart Wallet factory, faucet or gas sponsorship was found on chain 964, so smart-wallet
   users on Base rely on the front door for exits. The README says so; a user-registered
@@ -323,69 +390,90 @@ No `stakeIdle()` here either; the keeper calls it separately.
 
 ### Admin
 
-Front-door and bridge registries (`propose*` / `activate*` after `REGISTRY_DELAY` / `remove*`
-or `disable*` immediately / `cancelProposal` by owner or guardian), `setPrimaryBridge`,
-`setGuardian`, `setClaimer`, `setStakeHotkey`, `moveStake`, `removeHotkey`,
-`setMinDirectDeposit`, `setMaxTotalAssets`, `setMaxDailyOutflowBps` (`<= 10000`),
-`setMaxEntryValue` / `setMaxMessageValue` (`maxEntryValue <= maxMessageValue`),
-`setClaimGasRequired`, `setFloorFallbacks(minStakeRao, minRemainRao)` (`1 <= a <= b <= 1e9`),
-`pause`/`unpause`. Value leaves the vault only via `primaryBridge.send` in `processPayouts` and
-`redeemDirect` to `msg.sender`.
+Owner: front-door and bridge registries (`proposeFrontDoor` / `activateFrontDoor` /
+`removeFrontDoor`, `proposeBridge` / `activateBridge` / `disableBridge`, `cancelProposal`),
+`setPrimaryBridge` (must be an enabled bridge; disabling the primary halts payouts until a new
+primary is set — payouts wait, nothing is lost), `setGuardian`, `setKeeper`, `setStakeHotkey`,
+`moveStake`, `removeHotkey`, `cancelPayoutBatch`, `setMinDirectDeposit`, `setMaxTotalAssets`,
+`setOutflowLimits(maxDailyOutflowBps <= 10000, minDailyOutflow)`, `setMessageLimits(maxEntryValue,
+maxMessageValue, minChunk)` (`maxEntryValue <= maxMessageValue`, `1 <= minChunk <= MAX_ENTRIES`),
+`setPayoutDelay` (`<= 7 days`), `setClaimGasRequired`, `setFloorFallbacks(minStakeRao,
+minRemainRao)` (`1 <= a <= b <= 1e9`), `pause`/`unpause`.
+Guardian: `pause`, `cancelProposal`, `disableBridge`, `removeFrontDoor`.
+Value leaves the vault only via `primaryBridge.send` in `processPayouts` and `redeemDirect` to
+`msg.sender`.
 
 ### Exit safety: what a compromised registry, bridge or front door can do
 
-The payout for a redeem batch goes back to **the front door that sent the batch**. Anyone who can
-get an address registered as a front door, or who controls the primary bridge adapter, could
-submit one `BATCH` redeeming every holder and collect the payout. The owner's timelock is not
-enough on its own (anti-goal: "no path where the team's keys can move user funds"). The vault
-bounds this itself:
+A front door speaks for its users: a `BATCH` from it burns the named users' shares and the TAO is
+owed to **that front door**. So anyone who gets an address registered as a front door, or who
+controls an enabled adapter, could submit redeem-only batches naming every holder. The owner's
+timelock is not enough on its own (anti-goal: "no path where the team's keys can move user
+funds"). The vault bounds this in four layers:
 
-- **Registry changes are slow, visible and vetoable.** `proposeFrontDoor(chain, addr)` /
-  `proposeBridge(addr)` emit an event and start `REGISTRY_DELAY = 7 days`; `activateFrontDoor` /
-  `activateBridge` only succeed after it. `cancelProposal(...)` by the owner **or the guardian**
-  stops a pending proposal at once (cancelling can only stop a flow, so it fits a guardian whose
-  only other power is pause). Removal (`removeFrontDoor`, `disableBridge`) is immediate.
-  Registries are sets, so an old and a new peer can both be live during a migration and nothing
-  in transit is rejected with `UnknownPeer`.
-- **Outflow is rate-limited per entry, not per batch.** `maxDailyOutflowBps` (default 20% of
-  gross assets per rolling 24 h) is enforced in `processPayouts` (which pays what fits and defers
-  the rest) and `redeemDirect`. A drain therefore needs several days, and even a corrected cap
-  lets at most 1 − 0.8⁷ ≈ 79% leave within the 7-day delay; the guardian veto is what closes the
-  rest, which is why it exists.
-- **A forged `BATCH` without the registry.** Deposits need real native value. Redeems can only
-  burn shares the named user holds and route the payout to the registered front door of the
-  batch's source chain — an unwanted exit for that user (griefing), not theft, while the registry
-  is honest.
-- **Pause scope.** Guardian/owner pause blocks `deposit`, `depositFor`, `requestRedeem`,
-  `closeBatch`, `processPayouts`, `stakeIdle`, `depositDirect`, `redeemDirect`; it never blocks
-  `cancelDeposit`, `cancelRedeem`, `claim`, `claimRewards`, or incoming `onBridgeMessage`.
+1. **Registry changes are slow, visible and vetoable.** `proposeFrontDoor(chain, addr)` /
+   `proposeBridge(addr)` emit an event and start `REGISTRY_DELAY = 7 days`; `activate*` only
+   succeeds after it. `cancelProposal` (owner or guardian) stops a pending proposal at once.
+   `removeFrontDoor` / `disableBridge` (owner or guardian) take effect at once; they can only stop
+   flows, which is the same argument that gives the guardian its cancel power. Registries are
+   sets, so an old and a new peer can both be live during a migration. Adapters are immutable, so
+   nothing behind the registry can change without going through it.
+2. **Burns are capped per peer at delivery.** Each front door may burn at most
+   `max(20% of gross assets, minDailyOutflow)` per fixed 24-hour window; redeems beyond that are
+   deferred (the user keeps the shares). A rogue peer therefore takes at most one day's allowance
+   per window, and only its own allowance — direct redeems and other front doors have none to
+   share.
+3. **Payouts wait.** Nothing burned can leave for `payoutDelay` (default 24 hours). Within that
+   window the guardian pauses (which also holds incoming batches) and removes the peer, and the
+   owner cancels the batch, which gives every affected user their shares back. If the guardian
+   acts within the delay, a rogue peer steals nothing. If nobody acts, the loss is bounded by
+   layer 2: at most one day's allowance per compromised peer per day.
+4. **Pause holds everything that moves value.** Guardian/owner pause blocks `onBridgeMessage`
+   (re-executed later), `processPayouts`, `stakeIdle`, `depositDirect`, `redeemDirect`, and on the
+   front door `deposit`, `depositFor`, `requestRedeem`, `closeBatch`. It never blocks
+   `cancelDeposit`, `cancelRedeem`, `claim`, `claimRewards`, `cancelPayoutBatch`, or the front
+   door's incoming `PAYOUTS` (tokens already there; crediting is harmless).
+
+Other properties:
+
+- **A forged `BATCH` needs a registered peer.** Deposits need real native value. Redeems can only
+  burn shares the named user holds, within the peer's allowance, and only for users who are not
+  `directOnly`.
 - Donations cannot freeze anything: no bounds, no flags; unexpected TAO only raises the price.
-- Honest statement for the README: *the team cannot move user funds instantly; any change that
-  could is announced on-chain seven days ahead and the guardian can veto it; a compromised bridge
-  or peer can take at most the daily outflow limit before it is paused or removed. Outside the
-  contract, ForeverMoney's signers, Chainlink's lane configuration and Bittensor's sudo key can
-  stop or change the rails with no delay.*
+- Honest statement for the README: *the team cannot move user funds instantly; any new front door
+  or bridge is announced on-chain seven days ahead and the guardian can veto it; a compromised
+  front door or bridge can burn at most about 20% of the vault per day in redemptions, nothing it
+  burned can be paid out for 24 hours, and within that time the batch can be cancelled and the
+  shares returned. Outside the contract, ForeverMoney's signers, Chainlink's lane configuration
+  and Bittensor's sudo key can stop or change the rails with no delay.*
 
 ### Lost messages
 
 Tokens and data travel together in one adapter delivery. If delivery reverts (gas, a transient
-precompile error) the adapter's manual re-execution path is the retry; the vault and front doors
-are written so that re-delivery is safe (`DuplicateBatch` / `DuplicatePayouts` only after
-success). If the rail itself loses a message, the funds in it are the rail's loss; v2 has no
-in-contract recovery and no in-flight lock, so other users are unaffected.
+precompile error, the vault paused) the adapter's manual re-execution path is the retry; the
+vault and front doors are written so that re-delivery is safe (`DuplicateBatch` /
+`DuplicatePayouts` only after success). The pre-mainnet checklist must confirm that manual
+re-execution never expires on these lanes. If the rail itself loses a message, the funds in it
+are the rail's loss; v2 has no in-contract recovery and no in-flight lock, so other users are
+unaffected.
 
 ### Addresses and wallets
 
-Shares are credited to the depositor's address as seen on Base. This is safe for EOAs,
-EIP-7702 accounts and CREATE2 smart wallets whose factory exists on Bittensor EVM; it is NOT safe
-for legacy nonce-based (`CREATE`) contract wallets. The contracts keep the same-address rule; the
-app must refuse legacy contract wallets and tell smart-wallet users that their exit is the front
-door. Documented in the README.
+Shares are credited to the depositor's address as seen on Base. Because csTAO is non-transferable,
+every share balance was created either by a front door (the address acted on Base) or by
+`depositDirect` (the address acted on Bittensor, and is `directOnly` until it opts in). That
+closes both directions of the same-address problem: a Base party cannot redeem a Bittensor
+depositor's shares, and a Bittensor party cannot receive shares it did not deposit for. What
+remains: legacy nonce-based (`CREATE`) contract wallets on Base, where a different party could
+hold the same address on Bittensor and `redeemDirect` — the app must refuse those; and smart
+wallets whose factory is absent on chain 964, whose only exit is the front door. Both in the
+README.
 
 ## CascadeFrontDoor (Base; one deployment per supported chain)
 
 Constructor `(IERC20Metadata asset, ICascadeBridge bridge, uint64 vaultChain, address vault, address owner, address guardian, uint64 batchInterval, uint256 minDeposit, uint256 depositCap)`.
-`asset` is immutable and must have 18 decimals.
+`asset`, `vaultChain` and `vault` are immutable (a new vault means new front doors; a mutable
+vault peer would reject in-flight payouts with `UnknownPeer`). `asset` must have 18 decimals.
 
 State: open batch `{ uint64 id; uint64 start; Entry[] deposits; Entry[] redeems; uint256 totalDeposits; }`
 with **one merged entry per user per list** (`depositIndex[batchId][user]`, `redeemIndex[...]`),
@@ -408,11 +496,13 @@ keeper one bridge fee per filled batch.
   adds to `user`'s entry; emits `DepositRequested(batchId, user, amount, msg.sender)`.
   `depositFor` exists for one-signature "zap" contracts (approve + swap + deposit); it can only
   give shares to the named user, so it does not weaken the same-address rule.
-- `cancelDeposit(uint256 amount)` — open batch only, works while paused; reduces the caller's own
+- `cancelDeposit(uint256 amount)` — open batch only, works while paused; `amount % RAO != 0` →
+  `NotRaoAligned` (so a cancel can never leave a misaligned total); reduces the caller's own
   entry (`InsufficientRequest`); returns tokens to the caller; emits `DepositCancelled`.
 - `requestRedeem(uint256 shares)` — `whenNotPaused`; `ZeroAmount`; redeem list full and no entry →
-  `BatchFull`; adds to the caller's entry (the vault clips to what the user holds and to
-  `maxEntryValue`); emits `RedeemRequested`. `cancelRedeem(uint256 shares)` mirrors `cancelDeposit`.
+  `BatchFull`; adds to the caller's entry (the vault clips to what the user holds, to
+  `maxEntryValue` and to the peer's daily allowance); emits `RedeemRequested`.
+  `cancelRedeem(uint256 shares)` mirrors `cancelDeposit` (no alignment rule: shares).
 - `closeBatch() payable` — permissionless, `whenNotPaused`, `nonReentrant`. Allowed when
   `block.timestamp >= start + batchInterval` OR either list is at its limit OR
   `totalDeposits == maxBatchValue`; empty batch → restart the timer, refund, emit `BatchRolled`.
@@ -431,17 +521,23 @@ keeper one bridge fee per filled batch.
   `PayoutReceived(batchId, chunk, user, amount)`. Works while paused.
 - `claim()` — `nonReentrant`, works while paused; `NothingToClaim`; zero first, then transfer;
   emits `Claimed`.
-- Invariant: `asset.balanceOf(this) == open.totalDeposits + totalClaimable`.
+- Invariant: `asset.balanceOf(this) >= open.totalDeposits + totalClaimable` (`>=`, because
+  donations and tokens that land ahead of their data message are allowed).
 - Admin: `setCaps(minDeposit, depositCap)`, `setBatchLimits(maxDeposits, maxRedeems)`,
   `setMaxBatchValue`, `setBatchInterval`, bridge set with the same propose/activate/cancel/disable
-  pattern as the vault, `setVault(chain, address)` (two-step with `REGISTRY_DELAY`, cancellable),
-  `setGuardian`, `pause`/`unpause`.
+  pattern as the vault (guardian may cancel and disable), `setGuardian`, `pause`/`unpause`.
 
 ## Keepers and fees
 
-Anyone may call `closeBatch`, `processPayouts`, `stakeIdle`, and (after the fallback delay)
-`claimRewards`. The keeper is "the most reliable caller", never a privileged one, except that the
-`claimer` role may time claims early.
+Routine calls and who makes them:
+
+| Call | Who | Fallback |
+|---|---|---|
+| `closeBatch` (Base) | anyone; keeper in practice | — |
+| `processPayouts` (Bittensor) | anyone; keeper in practice | — |
+| `stakeIdle` | keeper | anyone after 7 days idle |
+| `claimRewards(hotkey)` | keeper | anyone after 7 days since that hotkey's last claim |
+| CCIP re-execution | anyone | — |
 
 - **Deposit leg (Base → Bittensor):** bridge fee in ETH, paid by the caller of `closeBatch`,
   excess refunded; an operator cost (about $1.5–11 per batch depending on size and gas bought).
@@ -453,11 +549,12 @@ Anyone may call `closeBatch`, `processPayouts`, `stakeIdle`, and (after the fall
   running on both chains against an archive/paid RPC (the public lite RPC drops state after
   ~300 blocks and rate-limits). Its jobs: close batches (after checking the pool's rate-limit
   allowance and sizing delivery gas to the entry count), re-execute failed deliveries, run
-  `processPayouts` with the list rebuilt from `Redeemed` events, `stakeIdle` on a schedule,
-  `claimRewards` weekly after an off-chain `eth_call` pre-check (expected delta, no
+  `processPayouts` after the delay with the list rebuilt from `Redeemed` events, `stakeIdle` on a
+  schedule, `claimRewards` weekly after an off-chain `eth_call` pre-check (expected delta, no
   `RootClaimTooHeavy`), check `getPrecompileStatus` for the staking precompile, and run the
   contract's precompile calls against each Bittensor pre-release on testnet 945.
-- A stolen keeper key can only delay things; every routine function is permissionless.
+- A stolen keeper key can time claims and stakes badly and nothing else; every money-moving
+  function is permissionless or owner-only.
 
 ## Test doubles
 
@@ -465,10 +562,11 @@ Anyone may call `closeBatch`, `processPayouts`, `stakeIdle`, and (after the fall
   `getNominatorMinRequiredStake()` (settable, defaults `2_000_000` / `20_000_000`);
   `removeStake` clips an over-request to a full exit, enforces `AmountTooLow` on partial unstakes
   below the min, and sweeps a remainder below the nominator min to the balance;
-  `removeStakeFull`; `moveStake` root→root; `claimRootWithHotkey` requires `gasleft() >=
-  claimGasRequired` (settable, default `53_200_000`) and models a dispatch failure by consuming
-  all gas (`invalid()`); `setClaimTooHeavy(bool)` makes claims fail the same way;
-  `setUnclaimed(hotkey, rao)` so a claim adds stake; `setRejectStakingHotkeyGrowth`;
+  `removeStakeFull`; `moveStake` root→root; a fresh position reads one rao short (`setOneRaoShort(bool)`,
+  default on); `claimRootWithHotkey` requires `gasleft() >= claimGasRequired` (settable, default
+  `53_200_000`) and models a dispatch failure by consuming all gas (`invalid()`);
+  `setClaimTooHeavy(bool)` makes claims fail the same way; `setUnclaimed(hotkey, rao)` so a claim
+  adds stake and `getUnclaimedRootTaoByHotkey` reads it; `setRejectStakingHotkeyGrowth`;
   `mirror(a) = keccak256("evm:" ++ a)` shared with `MockAddressMapping` (etched at `0x…080c`),
   so the vault's derived coldkey matches what the mock credits.
 - `MockTAO` (unchanged).
@@ -476,51 +574,66 @@ Anyone may call `closeBatch`, `processPayouts`, `stakeIdle`, and (after the fall
   receiver on `destChain` with `(sourceChain, sender)`; native delivery to the vault, ERC-20 to
   the front door; FIFO; `setAutoDeliver`, `deliverNext`, `pendingCount`; `failNext()`;
   enforces `maxMessageValue` (default `5_000e18`, `RateLimited`) and delivers with an explicit
-  gas cap `deliveryGas` (default `7_000_000`) so a gas regression shows up as a failed delivery.
+  gas cap `deliveryGas` (default `7_000_000`) so a gas regression shows up as a failed delivery;
+  a failed delivery stays queued for re-delivery (`retryNext`).
 - `StubBridge` v2 for unit tests (records the last send).
 
 ## Tests the plan must include (minimum)
 
-Unit, vault: constructor derives and cross-checks the coldkey; batch handling (one batch price;
-redeems clipped to balance and to `maxEntryValue`; rao rounding; skipped redeems; running hash;
-duplicate batch; wrong peer; value/amount mismatch; `NotRaoAligned`; `pendingPayouts`
-accounting; no staking inside delivery); `processPayouts` (hash check; chunking by window, message
-cap and `maxEntries`; `OutflowLimited` with no state change; fee pro-rata and dust; unstake
-across several hotkeys; full-exit and sweep paths; retry after a precompile revert); `stakeIdle`
-(threshold, `ED_RESERVE`, paused); rewards (claimer vs fallback timing; `InsufficientGas`
-before the call; gas-burning failure leaves state untouched; vesting curve; sandwich attempt
-yields nothing); hotkey set (add/move/remove rules; `rootStakeRao` sums); direct deposit/redeem
-(caps, window, `AboveMaxEntry`); registries (delay, activate, cancel by guardian, remove);
-pause rules; `receive()` guard.
-Unit, front door: deposit/depositFor/cancel/redeem/cancel/close (interval, list limits,
-`maxBatchValue`), roll, payout credit per chunk, duplicate chunk, `TokensNotReceived`, claim, caps,
-peer checks, rao alignment.
+Unit, vault: constructor derives and cross-checks the coldkey; non-transferable shares; batch
+handling (one batch price; deposits rounded to rao; zero-address deposit skipped; redeems clipped
+to balance, `maxEntryValue` and the peer allowance; `directOnly` skipped; deferred redeems keep
+shares; running hash; `processed` replay for deposit-only batches; wrong peer; value/amount
+mismatch; `pendingPayouts` accounting; no staking inside delivery; reverts while paused and
+re-delivers after); `processPayouts` (hash check; delay; chunking by message cap, `maxEntries`
+and `minChunk`; fee pro-rata, dust and the tail entry; exact `net + fee` sent; unstake across
+several hotkeys; full-exit and sweep paths; retry after a precompile revert; batch deleted when
+done); `cancelPayoutBatch` (re-mints exactly; after partial chunks; owner only; works paused);
+`stakeIdle` (threshold, `ED_RESERVE`, keeper vs fallback, paused); rewards (keeper vs per-hotkey
+fallback; `InsufficientGas` before the call; gas-burning failure leaves state untouched; zero
+delta succeeds; vesting curve; sandwich attempt yields nothing); hotkey set (add/move/remove rules
+incl. unclaimed rewards and leftover stake; `rootStakeRao` sums); direct deposit/redeem (caps,
+`directOnly` set and cleared, pricing excludes own `msg.value`); registries (delay, activate,
+cancel/disable/remove by guardian, primary must be enabled); pause scope; `receive()` guard.
+Unit, front door: deposit/depositFor/cancel (alignment)/redeem/cancel/close (interval, list
+limits, `maxBatchValue`), roll, payout credit per chunk, duplicate chunk, `TokensNotReceived`,
+claim, caps, peer checks.
 Gas: 100 + 100 delivery under `6_500_000`; 50 + 50 under `3_500_000`; vault bytecode under
 `24_576` bytes (`forge build --sizes`).
 End to end: one vault, one front door, through `MockBridge`: deposit → batch → shares → claim
-rewards → vest → redeem → chunked payouts → claim on Base; a second front door on another chain id.
-Invariants: csTAO price never decreases (with vesting); `grossAssets` conservation;
-`pendingPayouts == Σ remaining of open payout batches`; outflow in any 24 h ≤ cap of gross assets
-at window start; front-door balance identity; claims never exceed delivered payouts; no
+rewards → vest → redeem → delay → chunked payouts → claim on Base; a second front door on
+another chain id with its own allowance; a rogue front door scenario (burn capped, pause, cancel,
+shares restored).
+Invariants: csTAO price never decreases beyond one rao of tolerance; `grossAssets` conservation;
+`pendingPayouts == Σ remaining of open payout batches`; per-peer burned in any fixed window ≤ its
+allowance; front-door balance identity (`>=`); claims never exceed delivered payouts; no
 unexpected reverts; reachability logged.
 
 ## Decisions taken by the author (not the user's)
 
-1. Fees: deposit-leg bridge fee is an operator cost; payout-leg fee is deducted pro-rata in TAO.
-2. Lost messages: no in-contract recovery (adapter manual re-execution); registries are sets.
-3. Same-address rule kept; app guards legacy `CREATE` contract wallets; recovery address → v2.1.
-4. Batch griefing: merged per-user entries, separate deposit/redeem limits, close-when-full;
-   a redeem bond is deferred to v2.1.
+1. Fees: deposit-leg bridge fee is an operator cost; payout-leg fee is deducted pro-rata in TAO;
+   rounding dust stays in the vault.
+2. Lost messages: no in-contract recovery (adapter manual re-execution); registries are sets;
+   adapters are immutable; the front door's vault peer is immutable.
+3. Same-address rule kept and made sound by non-transferable shares plus `directOnly`; app guards
+   legacy `CREATE` contract wallets; recovery address → v2.1.
+4. Batch griefing: merged per-user entries, separate deposit/redeem limits, close-when-full,
+   `minChunk`; a redeem bond is deferred to v2.1.
 5. Caps: `netForwarded` nets off payouts; vault-wide `maxTotalAssets` for direct deposits;
    `depositCap` on Base follows DEX liquidity.
-6. Direct access kept, with the honest note about who can use it.
+6. Direct access kept, uncapped, with the honest note about who can use it.
 7. Adapters are a separate spec; the vault's native-value interface is the contract they honour.
-8. Rewards: keeper-timed `claimer` role with a 7-day permissionless fallback, `gasleft()` guard,
-   7-day linear vesting of each claim.
-9. Payout lists stored as a running hash; chunked, per-entry outflow limiting against gross assets.
-10. Operator defaults: 50 + 50 entries, 4,000 TAO per batch, 2,000 TAO per payout entry, 12-hour
-    batch interval, 20%/day outflow, 7-day registry delay with guardian veto.
-11. Floors read live with owner-set fallbacks; `ED_RESERVE` of 1,000 rao.
+8. Rewards: keeper role with 7-day permissionless fallback per hotkey, `gasleft()` guard, 7-day
+   linear vesting; `stakeIdle` under the same role for the root-hold reason.
+9. Payout lists stored as a running hash over `(user, shares, assets)`; chunked; cancellable
+   with exact re-mint.
+10. Exit safety moved to delivery time: per-peer burn allowance `max(20% of gross,
+    minDailyOutflow)` per fixed 24-hour window, `payoutDelay` 24 hours, guardian stop powers.
+11. Operator defaults: 50 + 50 entries, 4,000 TAO per batch, 2,000 TAO per payout entry,
+    `minChunk` 10, 12-hour batch interval, 100 TAO `minDailyOutflow`, 7-day registry delay,
+    48-hour owner timelock.
+12. Floors read live with owner-set fallbacks; `ED_RESERVE` of 1,000 rao; code-size fallback
+    agreed in advance.
 
 ## Open questions for the user
 
@@ -528,11 +641,15 @@ unexpected reverts; reachability logged.
    third-party contract can call to turn their token into native TAO. Reaching out to them is an
    outward-facing step the user takes (a draft message can be provided). The contracts build does
    not wait for the answer; the adapter spec does.
-2. **Exit safety:** 7-day registry delay with guardian veto, 20% of gross assets per day paid per
-   entry. Accept these defaults?
-3. **Reward vesting** over 7 days (share price rises smoothly instead of jumping at each weekly
+2. **Exit safety:** 7-day registry delay with guardian veto; each front door may burn at most
+   20% of the vault per day in redemptions; payouts wait 24 hours before leaving; a rogue batch
+   can be cancelled with the shares returned. The visible cost to honest users is that a
+   withdrawal takes about two days end to end (batch, delay, bridge). Accept?
+3. **Non-transferable shares** in v2 (csTAO cannot be sent between wallets; this is what makes the
+   same-address model safe). Accept?
+4. **Reward vesting** over 7 days (share price rises smoothly instead of jumping at each weekly
    claim). Accept?
-4. **Launch scope:** Base only, beta `depositCap` sized to Base TAO liquidity (about $250k);
+5. **Launch scope:** Base only, beta `depositCap` sized to Base TAO liquidity (about $250k);
    Robinhood Chain as a possible second front door later; Ethereum/BNB/Polygon users bridge USDC
    to Base in the app. Accept?
 
@@ -542,10 +659,10 @@ unexpected reverts; reachability logged.
 |---|---|
 | Cheap flag-and-freeze griefing via a substrate donation (Important 1) | No bounds/flags; a donation only raises the price |
 | Catch-up reward claims flag honest epochs; last redeemers lose unclaimed rewards (Important 2) | Separate keeper-timed claim with vesting; nothing is flagged; rewards claimed later still land on the earning hotkey |
-| `setBridge` during an in-flight epoch bricks it (Important 3) | adapter set + primary; no in-flight lock |
+| `setBridge` during an in-flight epoch bricks it (Important 3) | adapter set + primary; no in-flight lock; immutable adapters |
 | `MIN_STAKE_RAO` constant mirrors a tunable chain parameter (Important 4) | floors read live from the precompile with owner-set fallbacks |
 | Vault trusts that bridged tokens arrived (minor) | front door `TokensNotReceived`; vault `msg.value == amount` |
-| Pre-mainnet checklist (12 items) | copy into `docs/architecture.md`; add: fork measurement of delivery gas, `try/catch` behaviour of a view read on the live runtime, ForeverMoney conversion interface, CCIP 2.0 lane migration status |
+| Pre-mainnet checklist (12 items) | copy into `docs/architecture.md`; add: fork measurement of delivery gas, `try/catch` behaviour of a view read on the live runtime, ForeverMoney conversion interface, CCIP 2.0 lane migration status, CCIP manual re-execution never expiring |
 
 ## Migration from v1
 

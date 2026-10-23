@@ -1,6 +1,6 @@
 # Cascade contracts v2 — vault on Bittensor, front door on Base — design spec
 
-## As built (revision 6, 2026-10-22; rulings 13-20 from the final review, 2026-10-23)
+## As built (revision 6, 2026-10-22; rulings 13-20 from the final review and 21-25 from the external review's fix wave, 2026-10-23)
 
 The contracts on branch `contracts-v2` follow revision 5 below, except for these build rulings.
 Where they differ, the code and this list win. Contract-level detail is in `contracts/README.md`.
@@ -14,9 +14,10 @@ Where they differ, the code and this list win. Contract-level detail is in `cont
    but does not restart the vesting schedule.
 4. **Insolvency guard.** `onBridgeMessage` and `depositDirect` revert `VaultInsolvent()` when
    `A * 2_000_000 < S`, i.e. the share price is below half the launch price (1e-6 wei per share
-   unit, which is 1 TAO per csTAO). Since ruling 18 it applies only to batches with deposits.
-   Recovery is out of band (a substrate-side transfer to the vault's mirror address), then the
-   failed delivery is re-executed.
+   unit, which is 1 TAO per csTAO). Since ruling 18 it applies only to batches with deposits, and
+   since ruling 21 a delivery bounces those deposits instead of reverting; only `depositDirect`
+   still reverts. Recovery is out of band (a substrate-side transfer to the vault's mirror
+   address).
 5. `processPayouts` rounds the quoted bridge fee up to a whole rao before the ceiling check and the
    pro-rata deduction, so the value sent is always whole rao (the chain floors EVM transfers).
 6. `moveStake` measures only the destination (`moved`); `StakeMoved` has one measured field.
@@ -47,11 +48,36 @@ Where they differ, the code and this list win. Contract-level detail is in `cont
 17. **Hotkey reveal.** `addHotkey` is callable by the owner, guardian or keeper (`NotAuthorized`);
     `setStakeHotkey`, `moveStake` and `removeHotkey` stay owner-only.
 18. **Insolvency guard exempts exits.** `VaultInsolvent` applies only to batches with deposits (and
-    to `depositDirect`); redeem-only batches deliver.
+    to `depositDirect`); redeem-only batches deliver. Superseded for deliveries by ruling 21.
 19. **Whole-position claims.** `claimRewards` vests the change in `rootStakeRao() * RAO + balance`
     across the claim; `RewardsClaimed` stays in rao.
 20. **Chunk tail fold.** A tail of fewer than `minChunk` entries is taken into the chunk when the
     whole still fits within `maxMessageValue` and `MAX_ENTRIES`.
+21. **Insolvent deliveries bounce deposits.** `onBridgeMessage` no longer reverts `VaultInsolvent`.
+    With `insolvent = A * 2_000_000 < S`, a deposit entry with a non-zero user and `a > 0` is not
+    minted: it is queued as `Payout{user, shares: 0, assets: a}` in the same running hash, `count`,
+    `remaining` and `pendingPayouts` as the redeems (deposits first, then redeems), and emits
+    `DepositBounced(key, user, assets)`. Redeems in the batch burn as usual; only burns count
+    against the burn window. The TAO returns through `processPayouts` like any payout (fee pro
+    rata). `cancelPayoutBatch` re-mints 0 shares for a bounce, so a cancel leaves its TAO in the
+    vault: such a batch is processed, never cancelled. `depositDirect` keeps its revert.
+22. **Keeper-only chunk size.** In `processPayouts` the limit is
+    `min(max(maxEntries, minChunk), MAX_ENTRIES)` for the keeper and `MAX_ENTRIES` for anyone else,
+    so a stranger always sends the largest chunk that fits `maxMessageValue`.
+23. **Fee credit combines with value.** A first redeem request takes
+    `fromCredit = min(feeCredit[user], fee)` and requires `msg.value == fee - fromCredit`; the pot
+    gains `msg.value + fromCredit`; `FeeCreditSpent(user, fromCredit)` only when `fromCredit > 0`.
+24. **Seeded keeper fallbacks.** The constructor sets `lastStakeAt` and the constructor hotkey's
+    `lastClaimAt` to the deploy time; `_addHotkey` (`addHotkey`, `setStakeHotkey`) sets
+    `lastClaimAt[h]` to now when it is 0. A re-added hotkey keeps its last claim time.
+25. **One stake read per delivery.** `onBridgeMessage` reads `grossAssets()` once, derives
+    `A = _sub0(_sub0(gross, pendingPayouts + unvestedRewards()), credited)` (the same value as
+    before) and passes `grossBefore = _sub0(gross, msg.value)` to `_burnRedeems`.
+
+Open precondition (not built): before a second front door on another chain is activated, the vault
+needs per-peer share-origin tracking; otherwise whoever controls the same address on that chain
+could redeem shares deposited through Base. Maintenance item: the vault's front-door registry
+duplicates `CascadeBase`'s bridge registry.
 
 Naming: the guardian's `cancelProposal` below is two functions in the code,
 `cancelBridgeProposal` (both contracts) and `cancelFrontDoorProposal` (vault).

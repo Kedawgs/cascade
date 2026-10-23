@@ -89,7 +89,7 @@ forge build --sizes                           # the vault must stay under 24,576
 forge fmt --check
 ```
 
-- **Suite:** 262 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
+- **Suite:** 274 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
   `foundry.toml`). The invariants also held at 3,000 × 64.
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
   payout-batch cancel may leave it below that batch's delivery price by at most one rao of rounding
@@ -106,12 +106,13 @@ forge fmt --check
   chain-aware, enforces the fee rule and a 5,000-TAO message cap, delivers with a 7,000,000 gas cap,
   and keeps failed deliveries queued for retry. Also `MockAddressMapping`, `StubBridge` and
   `MockTAO`.
-- **Gas:** a 100 + 100 batch delivery costs 4,524,971 gas (test bound 6,500,000); 50 + 50 costs
-  2,381,687 (bound 3,500,000), both with one hotkey in the set. The lane gives about 7.2M. Operator
-  limits default to 50 + 50; raise them to 100 only after a fork measurement.
-- **Sizes:** `CascadeVault` is 23,348 B of runtime code at `optimizer_runs = 200` (limit 24,576;
-  1,228 B of headroom, so any post-audit change must watch `forge build --sizes`).
-  `CascadeFrontDoor` is 13,663 B.
+- **Gas:** a 100 + 100 batch delivery costs 4,540,281 gas (test bound 6,500,000); 50 + 50 costs
+  2,389,100 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
+  (one `getStake` per hotkey in the set). The lane gives about 7.2M. Operator limits default to
+  50 + 50; raise them to 100 only after a fork measurement.
+- **Sizes:** `CascadeVault` is 23,777 B of runtime code at `optimizer_runs = 200` (limit 24,576;
+  799 B of headroom, so any post-audit change must watch `forge build --sizes`).
+  `CascadeFrontDoor` is 13,658 B.
 
 ## Money flow
 
@@ -124,9 +125,11 @@ forge fmt --check
    batch. `cancelDeposit` returns tokens while the batch is still open.
 2. To exit, a user calls `requestRedeem(shares)`. The front door cannot see balances on Bittensor,
    so the vault clips each request later. The first request per user per batch costs
-   `redeemRequestFee` in ETH (the spec's default, 1e14 wei, is about $0.30). It is paid with the
-   call or from credit that anyone can pre-pay with `creditRedeemFee`; this is how the app sponsors
-   passkey wallets that hold no ETH. `cancelRedeem` reduces a request; the fee is not refunded.
+   `redeemRequestFee` in ETH (the spec's default, 1e14 wei, is about $0.30). It is paid from the
+   user's credit first, which anyone can pre-pay with `creditRedeemFee` (this is how the app
+   sponsors passkey wallets that hold no ETH), and the call must carry exactly the rest: nothing
+   when the credit covers the fee, the whole fee when there is no credit. `cancelRedeem` reduces a
+   request; the fee is not refunded.
 3. Anyone calls `closeBatch` once the batch interval has passed (12 hours in the beta), either list
    is full, or the batch is full by value. The batch's fee pot pays the bridge fee first, the caller
    tops up any gap, and the caller keeps any remainder. An empty batch just restarts its timer. When
@@ -138,24 +141,28 @@ forge fmt --check
    each deposit, then burns shares for each redeem request, clipped to what the user holds, to
    2,000 TAO per entry, and to the front door's daily allowance. Whatever is clipped is not burned:
    the user keeps those shares and can request again. Each burn's payout is reserved and queued.
-   The vault stores only a running hash of the queue; the keeper resubmits the list from the
-   `Redeemed` events. No single entry can make a batch revert. Delivery never stakes and never
-   claims rewards.
+   If the vault is insolvent (share price below half the launch price), deposits are not minted:
+   each is bounced, queued ahead of the batch's redeems as a payout of its TAO with 0 shares
+   (`DepositBounced`), and comes back to the user on Base like any payout. The vault stores only a
+   running hash of the queue; the keeper resubmits the list from the `DepositBounced` and
+   `Redeemed` events, in log order. No single entry can make a batch revert. Delivery never stakes
+   and never claims rewards.
 5. Later, the keeper calls `stakeIdle` to stake the liquid TAO that is not reserved for payouts.
 
 ### Payout leg (Bittensor to Base)
 
 1. Once `payoutDelay` (24 hours) has passed, anyone calls `processPayouts` with the batch's full
-   list. The caller chooses the chunk size, but a request below 10 entries (`minChunk`) is raised to
-   10, and a tail of fewer than 10 entries that would be left behind is folded into the chunk when
-   the whole still fits, so a short tail does not pay a message fee alone. A chunk stays within
-   4,000 TAO, except that it always takes at least one entry. The vault quotes the bridge fee and
-   refuses (`FeeTooHigh`) if the fee is above the larger of 1% of the chunk and 0.02 TAO; the batch
-   then waits for fees to fall. Each user pays a pro-rata share of the fee in TAO, rounded against
-   the user and down to whole rao. An entry left with nothing is recorded as dust (`PayoutDust`) and
-   its value stays in the vault. The vault unstakes only what the chunk needs, plus the owner's
-   `unstakeMarginRao` (0 by default; root unstaking is 1:1 and fee-free today), and sends the chunk
-   through the primary bridge. A batch whose front door has been removed is refused
+   list. Only the keeper chooses the chunk size, and a keeper request below 10 entries (`minChunk`)
+   is raised to 10; anyone else's call sends the largest chunk that fits (up to 100 entries,
+   `MAX_ENTRIES`). A tail of fewer than 10 entries that would be left behind is folded into the
+   chunk when the whole still fits, so a short tail does not pay a message fee alone. A chunk stays
+   within 4,000 TAO, except that it always takes at least one entry. The vault quotes the bridge
+   fee and refuses (`FeeTooHigh`) if the fee is above the larger of 1% of the chunk and 0.02 TAO;
+   the batch then waits for fees to fall. Each user pays a pro-rata share of the fee in TAO,
+   rounded against the user and down to whole rao. An entry left with nothing is recorded as dust
+   (`PayoutDust`) and its value stays in the vault. The vault unstakes only what the chunk needs,
+   plus the owner's `unstakeMarginRao` (0 by default; root unstaking is 1:1 and fee-free today), and
+   sends the chunk through the primary bridge. A batch whose front door has been removed is refused
    (`FrontDoorInactive`).
 2. The adapters deliver ForeverMoney's TAO plus the payout list to the front door, which credits
    each user. Incoming payouts are accepted even while the front door is paused.
@@ -184,9 +191,9 @@ Routine calls and who makes them:
 | Call | Who | Fallback |
 |---|---|---|
 | `closeBatch` (Base) | anyone; the keeper in practice | — |
-| `processPayouts` (Bittensor) | anyone; the keeper in practice | — |
-| `stakeIdle` | keeper | anyone, once 7 days have passed since the last stake |
-| `claimRewards(hotkey)` | keeper | anyone, once 7 days have passed since that hotkey's last claim |
+| `processPayouts` (Bittensor) | anyone; the keeper in practice, and only the keeper chooses the chunk size | — |
+| `stakeIdle` | keeper | anyone, once 7 days have passed since the last stake (or the deploy) |
+| `claimRewards(hotkey)` | keeper | anyone, once 7 days have passed since that hotkey's last claim (or since it was first added) |
 | CCIP re-execution | anyone | — |
 
 - **Deposit-leg fee:** the CCIP fee in ETH, paid from the batch's redeem-request pot first and then
@@ -202,8 +209,10 @@ Routine calls and who makes them:
   still unclaimed or vesting. With weekly claims the unclaimed part is at most about a week of yield
   (about 0.1%).
 - `setKeeper(address(0))` is allowed and leaves only the 7-day fallback.
-- Both fallbacks count from timestamps that start at 0, so until the first `stakeIdle` (or a
-  hotkey's first claim) anyone can make that call.
+- Both fallbacks start counting at once, so only the keeper can act in the first 7 days: the stake
+  fallback from deploy, and each hotkey's claim fallback from deploy (the constructor hotkey) or
+  from when the hotkey is first added (`addHotkey`, `setStakeHotkey`). A removed and re-added
+  hotkey keeps its last claim time.
 
 Other roles:
 
@@ -216,7 +225,8 @@ Other roles:
   which only widens the stake the price reads. It stays in office for 8 days after the owner
   proposes its replacement, longer than the 7-day registry delay, so it can still veto anything
   proposed alongside.
-- **Keeper:** times `stakeIdle` and `claimRewards` (above) and can `addHotkey`.
+- **Keeper:** times `stakeIdle` and `claimRewards` (above), chooses the payout chunk size, and can
+  `addHotkey`.
 - **Everyone else:** deposits, redeem requests, cancels, closes, payouts, claims and direct access.
 
 The keeper bot is a separate deliverable. Hosted keeper services are gone (Chainlink Automation,
@@ -296,10 +306,11 @@ Soft spots:
   nobody acts.
 - **A cancel does not restore the burn window,** so honest requests through that front door may be
   deferred until its window resets.
-- **Chunking can be gamed within the fee ceiling.** `processPayouts` is permissionless, so anyone
-  can send a batch in `minChunk`-sized chunks ahead of the keeper, and a tail that would push a
-  chunk over `maxMessageValue` still goes alone. Each extra message costs its users at most the fee
-  ceiling.
+- **Chunk size is the keeper's call.** `processPayouts` is permissionless, but only the keeper's
+  `maxEntries` counts: anyone else sends the largest chunk that fits, so a stranger cannot split a
+  batch into many fee-paying messages. A stolen keeper key could still send `minChunk`-sized
+  chunks, and a tail that would push a chunk over `maxMessageValue` still goes alone. Each extra
+  message costs its users at most the fee ceiling.
 - **Vesting follows the keeper's cadence.** Each claim re-spreads what is still unvested plus the
   new reward over 7 days, so frequent tiny claims stretch vesting out. Claim on a steady weekly
   cadence.
@@ -331,10 +342,23 @@ Soft spots:
   if the guardian key is NOT granted the timelock's canceller role. Without that role the guardian
   cannot veto timelocked parameter changes (the outflow percentage, `payoutDelay`, the fee ceiling,
   `setStakeHotkey` / `moveStake`), which wait only for the timelock.
-- **An insolvent vault refuses deposits, not exits.** If the share price falls below half the launch
-  price, every front-door batch with deposits reverts `VaultInsolvent` until the vault is
-  recapitalised out of band (see [Operator notes](#operator-notes)). Redeem-only batches still
-  deliver and direct redeems keep working, at the lowered price.
+- **An insolvent vault bounces deposits, not exits.** If the share price falls below half the
+  launch price, a front-door batch still delivers: its deposits are not minted but bounced, queued
+  ahead of the batch's redeems as payouts of their TAO with 0 shares (`DepositBounced`), and its
+  redeems burn at the lowered price. A bounced deposit comes back to the user on Base after the
+  24-hour payout delay, less its share of the bridge fee and the rao floor, so a griefer's deposit
+  cannot hold up a batch's exits. `depositDirect` reverts `VaultInsolvent` until the vault is
+  recapitalised out of band (see [Operator notes](#operator-notes)); direct redeems keep working.
+- **Process a batch with bounced deposits; never cancel it.** `cancelPayoutBatch` re-mints each
+  unsent entry's shares, and a bounced deposit has none, so a cancel releases its TAO into the
+  vault's assets (to the holders) instead of returning it to the depositor.
+- **A second front door needs share-origin tracking first.** Shares are not tied to the front door
+  that minted them: any registered front door can redeem for an address. With a second front door
+  on another chain, whoever controls the same address on that chain could redeem shares deposited
+  through Base and claim the payout there, and a contract wallet's address can belong to someone
+  else on another chain (see [Who can use direct access](#who-can-use-direct-access)). Before a
+  second front door (on another chain) is activated, the vault needs per-peer share-origin
+  tracking, which is not built. This is a precondition, not a parameter.
 - **A position below the minimum stake waits.** The unstake walk skips any hotkey whose stake is
   below the minimum stake: the chain may refuse to touch it, and that revert would block every exit.
   An exit that needs that dust (under the minimum stake per hotkey: 0.002 TAO today, up to 1 TAO if
@@ -360,7 +384,7 @@ Keys:
 |---|---|---|
 | Owner | Everything in [Roles](#roles) under "Owner", including replacing the guardian (8 days after proposing it) and picking the validators. | Cannot move user funds directly. The only route would be registering a rogue front door or bridge, which waits 7 days in public, and the sitting guardian can veto it: replacing the guardian takes 8 days, longer than the registry delay, and the guardian stays in office until then. A compromised owner cannot bypass the sitting guardian's veto within the registry delay; with the guardian vetoing, a rogue registration needs at least 15 days of public notice plus the timelock's delay. Parameter changes wait only for the timelock. |
 | Guardian | Stop only: pause, remove a front door, disable a bridge, cancel a pending proposal. It can also add a hotkey, which only widens what the price reads. | A stolen guardian key can freeze, not take. The owner proposes a replacement at once and accepts it after 8 days; the guardian cannot cancel that. Until then it can re-pause, remove front doors, disable bridges and cancel the owner's re-registration proposals, so front-door deposits, redeems and payouts can stay frozen for about 15 days plus the owner's timelock (8-day replacement, then a 7-day registry re-proposal), and direct deposits and redeems for 8 days plus the timelock. The bound holds only if the guardian key does NOT hold the timelock's canceller role. It could fill the hotkey set (at most 4); the owner removes extras. |
-| Keeper | Time `claimRewards` and `stakeIdle`; add a hotkey. | A stolen key can time claims and stakes badly (frequent tiny claims stretch vesting), and on a runtime with a post-stake hold on unstaking it can re-arm that hold with `stakeIdle` to delay exits; it cannot move funds. Anyone may act after 7 days (and before the first stake or claim, since those timestamps start at 0), and the owner can replace or clear the keeper. |
+| Keeper | Time `claimRewards` and `stakeIdle`; add a hotkey; choose payout chunk sizes. | A stolen key can time claims and stakes badly (frequent tiny claims stretch vesting), and on a runtime with a post-stake hold on unstaking it can re-arm that hold with `stakeIdle` to delay exits, and it alone chooses payout chunk sizes (each extra chunk costs its users at most the fee ceiling); it cannot move funds. Anyone may act after 7 days (counted from deploy, or from when a hotkey was first added, until the first stake or claim), and the owner can replace or clear the keeper. |
 | Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey and initial bridge. The initial bridge is enabled at once, with no delay. | Check every constructor argument before anyone deposits. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
 
 Contracts:
@@ -396,6 +420,12 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
   shares. Anyone can deposit for any address (`depositFor` on Base), so an address can hold shares
   it did not pay for, but shares can never be taken from anyone: only the address itself can redeem
   them, directly on Bittensor or by its own redeem request on Base.
+- **The same address on a second front door's chain may be a different party.** Any registered
+  front door may redeem for any address, so a second front door on another chain would let whoever
+  controls that address there redeem shares deposited through Base: the contract-wallet cases
+  above, now between two front-door chains. Per-peer share-origin tracking is required before a
+  second front door (on another chain) is activated (see the soft spots under
+  [Exit safety](#exit-safety)).
 
 ## Operator notes
 
@@ -424,9 +454,10 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
    so does a `requestRedeem` that self-closes a full batch. A keeper, router or wallet contract that
    cannot receive ETH cannot close a batch whose pot exceeds the fee; give it a payable `receive`.
 7. **Insolvency recovery is out of band.** If the share price falls below half the launch price,
-   batches with deposits and `depositDirect` revert `VaultInsolvent` (redeem-only batches still
-   deliver). Recover with a substrate-side transfer to the vault's mirror address, then re-execute
-   the failed deliveries.
+   front-door deposits bounce back to their users (process those batches with `processPayouts`;
+   never cancel them, or the bounced TAO stays in the vault) and `depositDirect` reverts
+   `VaultInsolvent`; redeems keep working. Recover with a substrate-side transfer to the vault's
+   mirror address; deposits mint again from the next delivery.
 8. **Pause on any unexplained drop in `totalAssets`.** The insolvency guard trips only below half
    the launch price. A smaller unexplained drop (a misread stake, for example) still lets batches
    and direct deposits through at the lowered price until someone pauses.
@@ -487,15 +518,16 @@ Defaults at deploy:
 
 ## Static analysis
 
-Slither 0.11.5 over `src/` (`contracts/slither.config.json` filters out `lib/` and `test/`): 65
+Slither 0.11.5 over `src/` (`contracts/slither.config.json` filters out `lib/` and `test/`): 69
 results, no new defects. Re-run from `contracts/` with `slither .`.
 
 | Severity | Finding | Verdict |
 |---|---|---|
-| High | `arbitrary-send-eth` in `processPayouts` | By design: the destination is the owner-registered primary bridge (7-day registry). |
+| High | `arbitrary-send-eth` in `processPayouts` (no longer reported) | Slither now reads the `msg.sender == keeper` chunk-size check in `_takeChunk` as access control, but `processPayouts` is still permissionless. By design: the destination is the owner-registered primary bridge (7-day registry). |
 | High | `weak-prng` ×3 | False positive: `x % RAO` aligns amounts to whole rao; nothing is random. |
-| High | `reentrancy-eth` in `requestRedeem` | The self-close path. Every function that moves ETH or tokens is `nonReentrant`; the only function reachable mid-call is `creditRedeemFee`, which only adds credit. |
-| Medium | `incorrect-equality` ×6 | Intentional zero checks. |
+| High | `reentrancy-eth` in `requestRedeem` | The self-close path. Every function that moves ETH or tokens is `nonReentrant`; the only function reachable mid-call is `creditRedeemFee`, which only adds credit (credit added there may pay the same request's fee, which is taken after the close). |
+| Medium | `incorrect-equality` ×7 | Intentional zero checks (including the unset-timestamp check that seeds a new hotkey's claim fallback). |
+| Medium | `uninitialized-local` ×2 | Intentional zero starts: the delivery's payout queue `b` in `onBridgeMessage` and the burn total in `_burnRedeems`. |
 | Medium | `reentrancy-no-eth` ×4 | Calls into the staking precompile, which is runtime code, not EVM code, and cannot re-enter. |
 | Low / Info | `calls-loop` | Bounded by `MAX_HOTKEYS = 4` (the set's stake reads, including those around a reward claim, and the unstake walk). |
 | Low / Info | `timestamp` | The 7-day, 8-day and 24-hour windows tolerate clock drift. |
@@ -558,14 +590,20 @@ Rails and ForeverMoney:
 Measurements and policy:
 
 17. Fork-measure delivery gas before raising batch limits above 50 + 50.
-18. Watch `forge build --sizes` after any post-audit change (1,228 B of headroom in the vault at
+18. Watch `forge build --sizes` after any post-audit change (799 B of headroom in the vault at
     `optimizer_runs = 200`).
 19. Decide the `setClaimGasRequired` bounds policy: 0 disables the guard and too high blocks claims.
     It is owner discipline, behind the timelock.
+20. Maintenance: the vault's front-door registry (`proposeFrontDoor`, `activateFrontDoor`,
+    `cancelFrontDoorProposal`, `removeFrontDoor`) duplicates the bridge registry in `CascadeBase`
+    (propose, activate after `REGISTRY_DELAY`, cancel, disable). A fix to one must be mirrored in
+    the other; consider one shared, keyed registry in a later version.
 
 Outside this build:
 
-20. Production adapters (a separate spec, once ForeverMoney answers), the keeper bot, and
+21. Per-peer share-origin tracking, before a second front door on another chain is activated (see
+    the soft spots under [Exit safety](#exit-safety)).
+22. Production adapters (a separate spec, once ForeverMoney answers), the keeper bot, and
     deployment scripts.
-21. An independent audit of the contracts and the adapters.
-22. Legal: jurisdictions, fees, US users.
+23. An independent audit of the contracts and the adapters.
+24. Legal: jurisdictions, fees, US users.

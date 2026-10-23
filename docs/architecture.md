@@ -78,7 +78,8 @@ moves because of staking rewards:
 - no USD price oracle is needed anywhere in the contracts;
 - the price should only go up, as the invariant suite checks (except that cancelling a payout
   batch can bring it back to that batch's own price, within rounding dust). Below half the launch
-  price, the vault refuses new batches and direct deposits until it is recapitalised.
+  price, the vault refuses deposits (batches carrying deposits, and direct deposits) until it is
+  recapitalised; exits keep working.
 
 ## How pricing works
 
@@ -90,28 +91,33 @@ moves because of staking rewards:
   in the vault's favour. A direct deposit is priced the same way, without its own value.
 - **Rewards are claimed separately and vest.** Claiming needs about 53M gas and can be refused by
   the chain, so it is never part of pricing or delivery. The keeper claims (weekly, in practice);
-  each claim's measured gain vests linearly over 7 days. That stops someone depositing just before a
-  claim and redeeming just after to take a week of everyone's rewards. Unclaimed rewards are never
-  priced in: with weekly claims, at most about a week of yield (about 0.1%) is outside the price.
+  each claim's measured gain (the whole position's increase, wherever the chain credits it) vests
+  linearly over 7 days. That stops someone depositing just before a claim and redeeming just after
+  to take a week of everyone's rewards. Unclaimed rewards are never priced in: with weekly claims,
+  at most about a week of yield (about 0.1%) is outside the price.
 - **Measure, never assume.** Around every precompile call that moves value, the vault measures the
   balance or stake before and after. An unstake that delivers less than the exit needs makes the
-  exit revert instead of paying from reserves.
+  exit revert instead of paying from reserves; if the chain ever charged a fee on unstaking, an
+  owner-set margin added to every unstake request would cover it.
 
 ## Exit safety, in short
 
 A front door speaks for its users, so a rogue front door or adapter could try to burn every holder's
 shares. Four layers bound that:
 
-1. New front doors and bridges wait 7 days in public, and the guardian can veto them.
-2. Each front door may burn at most `max(20% of gross assets, 100 TAO)` per fixed 24-hour window.
+1. New front doors and bridges wait 7 days in public, and the guardian can veto them. Replacing the
+   guardian takes 8 days, so it stays in office through any proposal made alongside.
+2. Each front door may burn at most `max(20% of gross assets before the batch's deposits, 100 TAO)`
+   per fixed 24-hour window.
 3. Nothing burned leaves for 24 hours; the guardian can hold a front door's payouts at once, and the
    owner can cancel the batch and give the shares back.
 4. Pause stops deposits, redemptions, payouts and staking, not cancels, claims or incoming payouts.
 
 The rails sit outside this: ForeverMoney's 2-of-3 Safe, Chainlink's lane configuration and
-Bittensor's sudo key can each stop or change them with no delay. The README has the full honest
-statement, the soft spots (one: the owner can replace the guardian behind only the timelock, so
-the guardian must hold the timelock's canceller role), and what each outside party can do.
+Bittensor's sudo key can each stop or change them with no delay, and a validator's hotkey swap
+reprices the vault until the hotkey is re-added (the owner, guardian or keeper can do that at
+once). The README has the full honest statement, the soft spots, and what each outside party can
+do.
 
 ## Before mainnet
 

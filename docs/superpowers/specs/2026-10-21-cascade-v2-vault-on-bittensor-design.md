@@ -1,6 +1,6 @@
 # Cascade contracts v2 — vault on Bittensor, front door on Base — design spec
 
-## As built (revision 6, 2026-10-22)
+## As built (revision 6, 2026-10-22; rulings 13-20 from the final review, 2026-10-23)
 
 The contracts on branch `contracts-v2` follow revision 5 below, except for these build rulings.
 Where they differ, the code and this list win. Contract-level detail is in `contracts/README.md`.
@@ -14,9 +14,9 @@ Where they differ, the code and this list win. Contract-level detail is in `cont
    but does not restart the vesting schedule.
 4. **Insolvency guard.** `onBridgeMessage` and `depositDirect` revert `VaultInsolvent()` when
    `A * 2_000_000 < S`, i.e. the share price is below half the launch price (1e-6 wei per share
-   unit, which is 1 TAO per csTAO). This applies to every batch, redeem-only ones included. Recovery
-   is out of band (a substrate-side transfer to the vault's mirror address), then the failed delivery
-   is re-executed.
+   unit, which is 1 TAO per csTAO). Since ruling 18 it applies only to batches with deposits.
+   Recovery is out of band (a substrate-side transfer to the vault's mirror address), then the
+   failed delivery is re-executed.
 5. `processPayouts` rounds the quoted bridge fee up to a whole rao before the ceiling check and the
    pro-rata deduction, so the value sent is always whole rao (the chain floors EVM transfers).
 6. `moveStake` measures only the destination (`moved`); `StakeMoved` has one measured field.
@@ -36,6 +36,22 @@ Where they differ, the code and this list win. Contract-level detail is in `cont
 12. Test doubles: MockStaking's one-rao-short read applies to any credit into an empty position
     (`addStake` and the `moveStake` destination); `removeStakeFull` honours `setUnstakeBlocked`;
     MockBridge checks `destChain` (`UnknownDestination`).
+13. **Unstake margin.** Owner-set `unstakeMarginRao` (default 0) is added to every unstake request;
+    `UnstakeShort` stays strict and any excess sits idle for `stakeIdle`.
+14. **Floors.** `minStakeRao()` / `minRemainRao()` return max(live read, fallback); the unstake walk
+    skips a hotkey whose stake is below `minStakeRao()`.
+15. **Allowance base.** A front door's daily allowance is computed on the gross before the
+    delivery's deposits (`grossAssets() - msg.value`).
+16. **Guardian replacement.** No `setGuardian`: owner-only `proposeGuardian`, `acceptGuardian` after
+    `GUARDIAN_DELAY = 8 days`, and `cancelGuardianProposal` (the guardian cannot cancel).
+17. **Hotkey reveal.** `addHotkey` is callable by the owner, guardian or keeper (`NotAuthorized`);
+    `setStakeHotkey`, `moveStake` and `removeHotkey` stay owner-only.
+18. **Insolvency guard exempts exits.** `VaultInsolvent` applies only to batches with deposits (and
+    to `depositDirect`); redeem-only batches deliver.
+19. **Whole-position claims.** `claimRewards` vests the change in `rootStakeRao() * RAO + balance`
+    across the claim; `RewardsClaimed` stays in rao.
+20. **Chunk tail fold.** A tail of fewer than `minChunk` entries is taken into the chunk when the
+    whole still fits within `maxMessageValue` and `MAX_ENTRIES`.
 
 Naming: the guardian's `cancelProposal` below is two functions in the code,
 `cancelBridgeProposal` (both contracts) and `cancelFrontDoorProposal` (vault).

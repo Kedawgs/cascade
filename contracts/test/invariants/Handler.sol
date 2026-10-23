@@ -19,7 +19,8 @@ import {MockTAO} from "../mocks/MockTAO.sol";
 /// Each actor holds 10_000 bridged TAO on Base, and 10_000 native TAO plus 10 ether of fee money as one
 /// native balance (both chains share one EVM here). Every action wraps its call in try/catch and
 /// updates the ghosts only when it succeeds. The handler is the vault's keeper, pays every close's
-/// bridge fee, and acts as the owner (by prank) to cancel queued payouts. No donations.
+/// bridge fee, and acts as the owner (by prank) to cancel queued payouts. No donations; rarely, a
+/// simulated loss takes TAO out of the vault (see simulateLoss), which can make it insolvent.
 contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 internal constant RAO = 1e9;
     uint256 internal constant ED = 1e12;
@@ -30,6 +31,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// The most entries one processPayouts call asks for (it asks for 1 to CHUNK_ENTRIES); with the
     /// vault's minChunk at 1, a 2- or 3-entry batch can go out in several chunks.
     uint32 internal constant CHUNK_ENTRIES = 3;
+    /// simulateLoss acts on at most this many calls per run.
+    uint256 internal constant MAX_LOSSES = 2;
 
     CascadeVault public immutable vault;
     CascadeFrontDoor public immutable fd;
@@ -55,6 +58,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostPayoutsReceived;
     /// Bridged TAO actors received from `claim`.
     uint256 public ghostClaimed;
+    /// Native TAO taken out of the vault by simulateLoss.
+    uint256 public ghostLoss;
     /// Highest price seen; a cancel resets it to the post-cancel price, at most the cancelled batch's
     /// delivery price.
     uint256 public priceFloor;
@@ -92,9 +97,13 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// RedeemDeferred and RedeemSkipped events seen in deliveries.
     uint256 public redeemDeferred;
     uint256 public redeemSkipped;
-    /// DepositBounced events seen in deliveries (expected 0: the price never falls, so the vault never
-    /// becomes insolvent here).
+    /// DepositBounced events seen in deliveries (reached only after a simulated loss).
     uint256 public depositBounces;
+    /// Bounced entries sent in payout chunks, and bounced entries a cancel released into the vault.
+    uint256 public bouncesPaid;
+    uint256 public bouncesCancelled;
+    /// simulateLoss calls that took TAO out of the vault.
+    uint256 public losses;
     /// High-water mark of queuedKeys.length.
     uint256 public maxQueueDepth;
     /// Exits refused UnstakeShort because the only stake sat below the minimum stake, which the
@@ -253,10 +262,13 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         // forge-lint: disable-next-line(block-timestamp)
         bool ready = block.timestamp >= uint256(vault.getPayoutBatch(key).queuedAt) + vault.payoutDelay()
             && vault.frontDoorActive(peer) && vault.bridgeEnabled(vault.primaryBridge());
+        uint256 cursor = vault.getPayoutBatch(key).cursor;
         vm.recordLogs();
         try vault.processPayouts(key, list, maxEntries) {
             _recordPayout(key, vm.getRecordedLogs());
-            if (vault.getPayoutBatch(key).count == 0) _dropKey(key);
+            CascadeVault.PayoutBatch memory b = vault.getPayoutBatch(key);
+            bouncesPaid += _bounces(list, cursor, b.count == 0 ? list.length : b.cursor);
+            if (b.count == 0) _dropKey(key);
             else ++partialChunks;
             _raiseFloor();
         } catch (bytes memory reason) {
@@ -305,7 +317,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         uint256 maxRao = Math.min(MAX_DEPOSIT, _sub0(actor.balance, FEE_MONEY)) / RAO;
         if (maxRao < 1e15 / RAO) return;
         amount = bound(amount, 1e15 / RAO, maxRao) * RAO;
-        bool ready = vault.totalAssets() + amount <= vault.maxTotalAssets();
+        // within the cap, and not below half the launch price (VaultInsolvent, reachable after a loss)
+        uint256 assets = vault.totalAssets();
+        bool ready = assets + amount <= vault.maxTotalAssets() && assets * 2_000_000 >= vault.totalSupply();
         vm.prank(actor);
         try vault.depositDirect{value: amount}() {
             ghostIn += amount;
@@ -357,12 +371,34 @@ contract Handler is CommonBase, StdCheats, StdUtils {
                 ++cancelDustViolations;
             }
             priceFloor = Math.min(f, vault.price());
+            bouncesCancelled += _bounces(list, b.cursor, list.length);
             _dropKey(key);
             ++cancels;
             if (b.cursor != 0) ++cancelsAfterPartial;
         } catch {
             ++unexpectedReverts;
         }
+    }
+
+    // ---- losses ----
+
+    /// @dev Rarely (seed % 7 == 0, on at most MAX_LOSSES calls a run) takes TAO out of the vault, as a
+    /// lost or misread position would: between half and all of the liquid balance that is neither the
+    /// existential reserve nor reserved for queued payouts (so every queued payout stays fundable and
+    /// a payout's UnstakeShort stays unexpected), floored to rao. A large one makes the vault insolvent,
+    /// so later deliveries bounce their deposits. A loss legitimately lowers the price, so the floor
+    /// restarts from the post-loss price.
+    function simulateLoss(uint256 seed) external {
+        if (seed % 7 != 0 || losses >= MAX_LOSSES) return;
+        uint256 balance = address(vault).balance;
+        uint256 free = _sub0(_sub0(balance, ED), vault.pendingPayouts());
+        uint256 x = bound(seed / 7, free / 2, free);
+        x -= x % RAO;
+        if (x == 0) return;
+        vm.deal(address(vault), balance - x);
+        ghostLoss += x;
+        ++losses;
+        priceFloor = vault.price();
     }
 
     // ---- time ----
@@ -538,6 +574,17 @@ contract Handler is CommonBase, StdCheats, StdUtils {
 
     function _claimable(address a) internal view returns (uint256) {
         return fd.claimable(a);
+    }
+
+    /// The bounced deposits (0 shares) among list[from:to].
+    function _bounces(CascadeMessages.Payout[] memory list, uint256 from, uint256 to)
+        internal
+        pure
+        returns (uint256 n)
+    {
+        for (uint256 i = from; i < to; ++i) {
+            if (list[i].shares == 0) ++n;
+        }
     }
 
     function _sub0(uint256 a, uint256 b) internal pure returns (uint256) {

@@ -17,7 +17,8 @@ import {Handler} from "./Handler.sol";
 
 /// @dev Random sequences of front-door deposits, redeem requests and cancels, batch closes (delivered at
 /// once by MockBridge), payouts, claims, direct deposits and redeems, staking, root rewards, payout
-/// cancels and time jumps, over the EndToEnd fixture: the vault on BITTENSOR, one front door on BASE,
+/// cancels, rare simulated losses (which can make the vault insolvent, so deliveries bounce deposits)
+/// and time jumps, over the EndToEnd fixture: the vault on BITTENSOR, one front door on BASE,
 /// exact stake reads, bridge fee 1e15, redeem-request fee 1e14. Only the handler's actions are fuzzed.
 /// The vault's deposit cap and the front door's are raised so that neither is ever why a call fails.
 contract CascadeInvariantTest is Test {
@@ -74,7 +75,7 @@ contract CascadeInvariantTest is Test {
         // pays every close's bridge fee
         vm.deal(address(handler), 100 ether);
 
-        bytes4[] memory selectors = new bytes4[](13);
+        bytes4[] memory selectors = new bytes4[](14);
         selectors[0] = Handler.deposit.selector;
         selectors[1] = Handler.requestRedeem.selector;
         selectors[2] = Handler.cancelDeposit.selector;
@@ -88,13 +89,15 @@ contract CascadeInvariantTest is Test {
         selectors[10] = Handler.accrueAndClaim.selector;
         selectors[11] = Handler.warp.selector;
         selectors[12] = Handler.cancelQueued.selector;
+        selectors[13] = Handler.simulateLoss.selector;
         targetContract(address(handler));
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
     /// @dev The price never falls below the highest price seen, one rao of tolerance in the assets for
     /// rounding. A payout cancel resets the floor to the post-cancel price, after the handler checks that
-    /// price against the batch's delivery price (invariant_cancelDustBounded).
+    /// price against the batch's delivery price (invariant_cancelDustBounded); a simulated loss resets it
+    /// to the post-loss price.
     function invariant_priceNeverFallsExceptAcrossCancel() public view {
         assertGe(CascadeMath.price(vault.totalAssets() + 1e9, vault.totalSupply()), handler.priceFloor());
     }
@@ -106,10 +109,12 @@ contract CascadeInvariantTest is Test {
     }
 
     /// @dev Exact stake reads and no donations: the vault holds every wei delivered or deposited, less
-    /// every wei sent out, plus every claimed reward.
+    /// every wei sent out, plus every claimed reward, less every simulated loss.
     function invariant_grossAssetsConserved() public view {
-        // ghostIn - ghostOut + ghostRewards, ordered so rewards paid out never underflow
-        assertEq(vault.grossAssets(), handler.ghostIn() + handler.ghostRewards() - handler.ghostOut());
+        // ghostIn - ghostOut + ghostRewards - ghostLoss, ordered so nothing underflows
+        assertEq(
+            vault.grossAssets(), handler.ghostIn() + handler.ghostRewards() - handler.ghostOut() - handler.ghostLoss()
+        );
     }
 
     /// @dev Every reserved wei belongs to a batch still in the queue.
@@ -164,7 +169,10 @@ contract CascadeInvariantTest is Test {
         emit log_named_uint("cancelsAfterPartial", handler.cancelsAfterPartial());
         emit log_named_uint("redeemDeferred", handler.redeemDeferred());
         emit log_named_uint("redeemSkipped", handler.redeemSkipped());
+        emit log_named_uint("losses", handler.losses());
         emit log_named_uint("depositBounces", handler.depositBounces());
+        emit log_named_uint("bouncesPaid", handler.bouncesPaid());
+        emit log_named_uint("bouncesCancelled", handler.bouncesCancelled());
         emit log_named_uint("maxQueueDepth", handler.maxQueueDepth());
         emit log_named_uint("dustBlocked", handler.dustBlocked());
     }
@@ -219,6 +227,59 @@ contract CascadeInvariantTest is Test {
         invariant_priceNeverFallsExceptAcrossCancel();
         invariant_grossAssetsConserved();
         invariant_pendingPayoutsMatchQueue();
+        invariant_noUnexpectedReverts();
+    }
+
+    /// @dev A simulated loss makes the vault insolvent: a direct deposit is refused (expected), a batch's
+    /// deposits bounce ahead of its redeem, one bounce is paid back to Base and claimed, and the owner
+    /// cancels the rest of the batch (a bounce among it), all with every invariant holding.
+    function test_lossBouncesDepositsThenPayoutAndCancel() public {
+        // alice deposits 10 TAO at the front door: 1e25 shares, left liquid
+        handler.deposit(0, 10_000_000_000);
+        handler.closeBatch();
+        assertEq(vault.balanceOf(handler.actors(0)), 1e25);
+
+        // seed 42e18: 42e18 % 7 == 0 and 6e18 lies in [free / 2, free] = [5e18, 10e18], so 6e18 is lost.
+        // totalAssets 4e18 against 1e25 shares is below half the launch price.
+        handler.simulateLoss(42e18);
+        assertEq(handler.losses(), 1);
+        assertEq(handler.ghostLoss(), 6e18);
+        assertLt(vault.totalAssets() * 2_000_000, vault.totalSupply());
+        // refused VaultInsolvent, which the handler expects
+        handler.depositDirect(1, 1_000_000_000);
+        assertEq(handler.directDeposits(), 0);
+
+        // bob and carol deposit, alice asks to redeem half: both deposits bounce ahead of her redeem
+        handler.deposit(1, 1_000_000_000);
+        handler.deposit(2, 2_000_000_000);
+        handler.requestRedeem(0, 5e24);
+        handler.closeBatch();
+        assertEq(handler.depositBounces(), 2);
+        assertEq(handler.queuedCount(), 1);
+        bytes32 key = handler.queuedKeys(0);
+        assertEq(vault.getPayoutBatch(key).count, 3);
+        assertEq(vault.balanceOf(handler.actors(1)), 0);
+        assertEq(vault.balanceOf(handler.actors(2)), 0);
+
+        // the keeper's first chunk (1 entry, minChunk 1) pays bob's bounce back; bob claims it on Base
+        handler.processPayouts(0);
+        assertEq(handler.bouncesPaid(), 1);
+        assertEq(handler.partialChunks(), 1);
+        handler.claim(1);
+        assertEq(handler.claims(), 1);
+
+        // the owner cancels the rest: carol's bounce stays in the vault, alice's shares come back
+        handler.cancelQueued(0);
+        assertEq(handler.bouncesCancelled(), 1);
+        assertEq(handler.cancelsAfterPartial(), 1);
+        assertEq(vault.balanceOf(handler.actors(0)), 1e25);
+
+        invariant_priceNeverFallsExceptAcrossCancel();
+        invariant_cancelDustBounded();
+        invariant_grossAssetsConserved();
+        invariant_pendingPayoutsMatchQueue();
+        invariant_frontDoorIdentities();
+        invariant_claimsNeverExceedPayouts();
         invariant_noUnexpectedReverts();
     }
 

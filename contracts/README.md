@@ -89,7 +89,7 @@ forge build --sizes                           # the vault must stay under 24,576
 forge fmt --check
 ```
 
-- **Suite:** 275 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
+- **Suite:** 276 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
   `foundry.toml`). The invariants also held at 3,000 × 64.
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
   payout-batch cancel may leave it below that batch's delivery price by at most one rao of rounding
@@ -98,6 +98,11 @@ forge fmt --check
   deposits); the front door's token and ETH balances match its books; users never claim more than
   was paid out; no unexpected reverts. The one expected exit failure is counted, not hidden: an
   `UnstakeShort` while the vault's only stake sits below the minimum stake (see the soft spots).
+  The handler also simulates rare losses (at most two a run, from liquid TAO not reserved for
+  payouts) that can make the vault insolvent. The price floor restarts from each post-loss price
+  and gross-asset conservation subtracts the losses, so bounced deposits are delivered, paid out and
+  cancelled under fuzzing. A 32-seed sweep reached a loss, a bounce, a paid bounce and a cancelled
+  bounce on every seed.
 - **Test doubles** (`test/mocks`): `MockStaking` is etched at the precompile address and models the
   floor reads, over-request clipping, sweeps, a fresh position reading one rao short, claims that
   burn all gas when refused, an optional per-removal chain fee (`removeFeeRao`) and claims paid out

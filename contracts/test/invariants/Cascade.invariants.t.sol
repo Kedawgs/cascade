@@ -165,6 +165,7 @@ contract CascadeInvariantTest is Test {
         emit log_named_uint("redeemDeferred", handler.redeemDeferred());
         emit log_named_uint("redeemSkipped", handler.redeemSkipped());
         emit log_named_uint("maxQueueDepth", handler.maxQueueDepth());
+        emit log_named_uint("dustBlocked", handler.dustBlocked());
     }
 
     // ---- regression ----
@@ -218,5 +219,34 @@ contract CascadeInvariantTest is Test {
         invariant_grossAssetsConserved();
         invariant_pendingPayoutsMatchQueue();
         invariant_noUnexpectedReverts();
+    }
+
+    /// @dev A position below the minimum stake is skipped by the unstake walk: alice's full exit empties
+    /// HK1, a 0.001-TAO reward lands on it, and bob's full exit (which needs that reward) is refused
+    /// UnstakeShort, counted as dust-blocked rather than unexpected. Once stakeIdle tops HK1 up, bob exits.
+    function test_subMinimumStakeBlocksExitUntilToppedUp() public {
+        handler.depositDirect(0, 10_000_000_000);
+        handler.stakeIdle();
+        handler.redeemDirect(0, type(uint256).max);
+        assertEq(staking.getStake(HK1, vault.coldkey(), 0), 0);
+        handler.depositDirect(1, 10_000_000_000);
+        handler.accrueAndClaim(1_000_000);
+        assertEq(staking.getStake(HK1, vault.coldkey(), 0), 1_000_000);
+        handler.warp(3 days);
+        handler.warp(3 days);
+        handler.warp(3 days);
+
+        handler.redeemDirect(1, type(uint256).max);
+        assertEq(handler.dustBlocked(), 1);
+        assertEq(handler.directRedeems(), 1);
+        invariant_noUnexpectedReverts();
+
+        // bob's 10 TAO staked onto the dust position, then he exits in full
+        handler.stakeIdle();
+        handler.redeemDirect(1, type(uint256).max);
+        assertEq(handler.directRedeems(), 2);
+        assertEq(vault.totalSupply(), 0);
+        invariant_noUnexpectedReverts();
+        invariant_grossAssetsConserved();
     }
 }

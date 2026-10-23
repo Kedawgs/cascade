@@ -96,6 +96,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint256 public claimGasRequired = 55_000_000;
     uint256 public fallbackMinStakeRao = 2_000_000;
     uint256 public fallbackMinRemainRao = 20_000_000;
+    /// Added to every unstake request, in rao, to cover a chain fee or short delivery on root unstakes.
+    uint256 public unstakeMarginRao;
 
     // ---- errors ----
 
@@ -286,19 +288,21 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         return hotkeys.length;
     }
 
-    /// The chain's minimum stake operation, in rao; the owner-set fallback if the read fails.
+    /// The chain's minimum stake operation, in rao: the larger of the live read and the owner-set
+    /// fallback, or the fallback alone if the read fails.
     function minStakeRao() public view returns (uint256) {
         try STAKING.getDefaultMinStake{gas: 100_000}() returns (uint256 v) {
-            return v;
+            return Math.max(v, fallbackMinStakeRao);
         } catch {
             return fallbackMinStakeRao;
         }
     }
 
-    /// The chain's minimum nominator position, in rao; the owner-set fallback if the read fails.
+    /// The chain's minimum nominator position, in rao: the larger of the live read and the owner-set
+    /// fallback, or the fallback alone if the read fails.
     function minRemainRao() public view returns (uint256) {
         try STAKING.getNominatorMinRequiredStake{gas: 100_000}() returns (uint256 v) {
-            return v;
+            return Math.max(v, fallbackMinRemainRao);
         } catch {
             return fallbackMinRemainRao;
         }
@@ -631,6 +635,11 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         emit LimitSet("hotkeyDustRao", rao, 0);
     }
 
+    function setUnstakeMarginRao(uint256 rao) external onlyOwner {
+        unstakeMarginRao = rao;
+        emit LimitSet("unstakeMarginRao", rao, 0);
+    }
+
     function setFloorFallbacks(uint256 minStake, uint256 minRemain) external onlyOwner {
         if (minStake == 0 || minStake > minRemain || minRemain > 1e9) revert InvalidParameter();
         fallbackMinStakeRao = minStake;
@@ -806,14 +815,17 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Unstakes at least `shortfallWei` (when the stake allows), walking the stake hotkey first and
-    /// then the set in order. Rounds each request up to the chain's floors and exits a position fully
-    /// when the chain would sweep its remainder anyway. A precompile revert bubbles up; retry later.
-    /// Returns the part of the shortfall the measured receipts did not cover (0 when covered); a short
-    /// receipt never reverts here, the caller decides.
+    /// then the set in order. Skips a position below the minimum stake (the chain may refuse to touch
+    /// it, and that revert would block every exit). Rounds each request up to the minimum stake, adds
+    /// `unstakeMarginRao`, and exits a position fully when the chain would sweep its remainder anyway.
+    /// A precompile revert bubbles up; retry later. Returns the part of the shortfall the measured
+    /// receipts did not cover (0 when covered); a short receipt never reverts here, the caller decides.
+    /// Any excess received stays idle for stakeIdle.
     function _unstake(uint256 shortfallWei) internal returns (uint256 unmet) {
         unmet = shortfallWei;
         uint256 minStake = minStakeRao();
         uint256 minRemain = minRemainRao();
+        uint256 margin = unstakeMarginRao;
         bytes32 first = stakeHotkey;
         uint256 n = hotkeys.length;
         _unstaking = true;
@@ -822,8 +834,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
             bytes32 h = i == 0 ? first : hotkeys[i - 1];
             if (i != 0 && h == first) continue;
             uint256 s = _stakeOf(h);
-            if (s == 0) continue;
-            uint256 want = Math.max(Math.ceilDiv(unmet, RAO), minStake);
+            // also skips an empty position (minStake >= fallbackMinStakeRao >= 1)
+            if (s < minStake) continue;
+            uint256 want = Math.max(Math.ceilDiv(unmet, RAO), minStake) + margin;
             uint256 received = _removeStake(h, want, want >= s || s - want < minRemain);
             unmet -= Math.min(unmet, received);
         }

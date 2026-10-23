@@ -483,6 +483,39 @@ contract VaultPayoutsTest is VaultTestBase {
         assertDeleted(K);
     }
 
+    function test_processPayouts_unstakeMarginCoversRemoveFee() public {
+        // the chain keeps 50_000 rao of every removal
+        staking.setRemoveFeeRao(50_000);
+
+        // available 0: want 100_000_000_000 arrives as 99_999_950_000 rao, short of net + fee = 100e18
+        vm.expectRevert(CascadeVault.UnstakeShort.selector);
+        process(K, listK(), 10);
+        assertBatch(K, 0, 0, 100e18);
+        assertEq(stakeOf(HK1), 1_000_000_000_000);
+        // the mock credits with vm.deal, which the revert does not undo
+        vm.deal(address(vault), ED);
+
+        vm.prank(owner);
+        vault.setUnstakeMarginRao(50_000);
+
+        // want = 100_000_000_000 + 50_000; the fee leaves exactly 100e18, and alice's entry is sent in full
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStake, (HK1, 100_000_050_000, 0)));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Unstaked(HK1, 100_000_050_000, 100e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutChunkSent(K, 0, 1, 100e18, 99_999e15, 1e15);
+        process(K, listK(), 10);
+
+        assertEq(bridge.lastValue(), 100e18);
+        assertEq(bridge.lastAmount(), 99_999e15);
+        assertEq(bridge.lastMessage(), CascadeMessages.encodePayouts(K, 0, entries1(alice, 99_999e15)));
+        assertDeleted(K);
+        assertEq(vault.pendingPayouts(), 0);
+        // 1_000_000_000_000 - 100_000_050_000
+        assertEq(stakeOf(HK1), 899_999_950_000);
+        assertEq(address(vault).balance, ED);
+    }
+
     function test_processPayouts_twoBatchesFullyStakedBThenA() public {
         (bytes32 a, bytes32 b) = queueTwoFullyStaked();
         uint256 sends = bridge.sendCount();

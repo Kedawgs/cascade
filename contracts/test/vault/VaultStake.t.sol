@@ -125,6 +125,20 @@ contract VaultStakeTest is VaultTestBase {
         assertEq(vault.minRemainRao(), 25_000_000);
     }
 
+    function test_floorsAreTheLargerOfLiveAndFallback() public {
+        // live 2_000_000 / 20_000_000; fallbacks raised above them
+        vm.prank(owner);
+        vault.setFloorFallbacks(3_000_000, 30_000_000);
+        assertEq(vault.minStakeRao(), 3_000_000);
+        assertEq(vault.minRemainRao(), 30_000_000);
+
+        // live raised above the fallbacks
+        staking.setMinStake(4_000_000);
+        staking.setNominatorMin(40_000_000);
+        assertEq(vault.minStakeRao(), 4_000_000);
+        assertEq(vault.minRemainRao(), 40_000_000);
+    }
+
     function test_floorsFallBackWhenReadReverts() public {
         // live reads differ from the fallbacks, so the fallback is visible
         staking.setMinStake(2_500_000);
@@ -550,6 +564,109 @@ contract VaultStakeTest is VaultTestBase {
         assertEq(stakeOf(HK2), 0);
         assertEq(alice.balance, 5e18);
         assertEq(address(vault).balance, ED);
+    }
+
+    function test_redeemDirectSkipsSubMinimumHotkey() public {
+        staking.setOneRaoShort(false);
+        depositDirect(alice, 10e18);
+        keeperStakes();
+        // HK2 becomes the stake hotkey holding 1_500_000 rao, below the 2_000_000 minimum (the mock does
+        // not enforce the minimum on moves; on chain dust arrives by rewards or a transfer)
+        vm.startPrank(owner);
+        vault.setStakeHotkey(HK2);
+        vault.moveStake(HK1, 1_500_000);
+        vm.stopPrank();
+        assertEq(stakeOf(HK2), 1_500_000);
+        assertEq(stakeOf(HK1), 9_998_500_000);
+
+        // out = 5e24 * (10e18 + 1) / (1e25 + 1e6) = 5e18. HK2 is below the minimum and is not touched;
+        // HK1: want 5_000_000_000 leaves 4_998_500_000 >= 20_000_000, a partial removeStake
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStakeFull, (HK2, 0)), 0);
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeWithSelector(IStaking.removeStake.selector, HK2), 0);
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStake, (HK1, 5_000_000_000, 0)));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Unstaked(HK1, 5_000_000_000, 5e18);
+        redeem(alice, 5e24);
+
+        assertEq(stakeOf(HK2), 1_500_000);
+        assertEq(stakeOf(HK1), 4_998_500_000);
+        assertEq(alice.balance, 5e18);
+        assertEq(address(vault).balance, ED);
+    }
+
+    function test_redeemDirectRequestsRaisedFallbackMinStake() public {
+        staking.setOneRaoShort(false);
+        // 1e26 shares, 100_000_000_000 rao staked
+        depositDirect(alice, 100e18);
+        keeperStakes();
+        // the owner raises the floors above the live 2_000_000 / 20_000_000
+        vm.prank(owner);
+        vault.setFloorFallbacks(5_000_000, 50_000_000);
+
+        // out = 1e18 * (100e18 + 1) / (1e26 + 1e6) = 1e12; want = max(1_000, 5_000_000) = 5_000_000 leaves
+        // 99_995_000_000 >= 50_000_000, a partial removeStake
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStake, (HK1, 5_000_000, 0)));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Unstaked(HK1, 5_000_000, 5e15);
+        redeem(alice, 1e18);
+
+        assertEq(alice.balance, 1e12);
+        assertEq(stakeOf(HK1), 99_995_000_000);
+        // 1e12 + 5e15 - 1e12 stays liquid
+        assertEq(address(vault).balance, 5e15);
+    }
+
+    function test_redeemDirectUnstakeMarginCoversRemoveFee() public {
+        staking.setOneRaoShort(false);
+        // 1e26 shares, 100_000_000_000 rao staked
+        depositDirect(alice, 100e18);
+        keeperStakes();
+        // the chain keeps 50_000 rao of every removal
+        staking.setRemoveFeeRao(50_000);
+
+        // out = 1e25 * (100e18 + 1) / (1e26 + 1e6) = 10e18; want 10_000_000_000 arrives as 9_999_950_000 rao
+        vm.prank(alice);
+        vm.expectRevert(CascadeVault.UnstakeShort.selector);
+        vault.redeemDirect(1e25);
+        assertEq(vault.balanceOf(alice), 1e26);
+        assertEq(stakeOf(HK1), 100_000_000_000);
+        // the mock credits with vm.deal, which the revert does not undo
+        vm.deal(address(vault), ED);
+
+        vm.expectEmit(address(vault));
+        emit CascadeVault.LimitSet("unstakeMarginRao", 50_000, 0);
+        vm.prank(owner);
+        vault.setUnstakeMarginRao(50_000);
+        assertEq(vault.unstakeMarginRao(), 50_000);
+
+        // want = 10_000_000_000 + 50_000 = 10_000_050_000; the fee leaves exactly 10e18
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStake, (HK1, 10_000_050_000, 0)));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Unstaked(HK1, 10_000_050_000, 10e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemedDirect(alice, 1e25, 10e18);
+        redeem(alice, 1e25);
+        assertEq(alice.balance, 10e18);
+        // 100_000_000_000 - 10_000_050_000
+        assertEq(stakeOf(HK1), 89_999_950_000);
+        assertEq(address(vault).balance, ED);
+
+        // with no fee the margin's excess stays idle for stakeIdle. A = 89_999_950_000 * 1e9, S = 9e25:
+        // out = 1e24 * (89_999_950_000e9 + 1) / (9e25 + 1e6) = 999_999_444_444_444_444 → 999_999_444_000_000_000;
+        // want = ceil(out / 1e9) + 50_000 = 1_000_049_444
+        staking.setRemoveFeeRao(0);
+        redeem(alice, 1e24);
+        assertEq(alice.balance, 10e18 + 999_999_444_000_000_000);
+        // 1_000_049_444 * 1e9 - 999_999_444_000_000_000 = 50_000 rao idle
+        assertEq(address(vault).balance, ED + 50_000e9);
+    }
+
+    function test_setUnstakeMarginRaoOwnerOnly() public {
+        assertEq(vault.unstakeMarginRao(), 0);
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        vault.setUnstakeMarginRao(1);
+        assertEq(vault.unstakeMarginRao(), 0);
     }
 
     function test_redeemDirectBelowOneRaoReverts() public {

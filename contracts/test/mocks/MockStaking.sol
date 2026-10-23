@@ -29,6 +29,10 @@ contract MockStaking is IStaking {
     bool public exactStakeReads;
     bool public claimTooHeavy;
     bool public unstakeBlocked;
+    /// @dev A chain fee, in rao, deducted from what each removeStake / removeStakeFull credits.
+    uint256 public removeFeeRao;
+    /// @dev true pays a claim out as the caller's native balance instead of stake on the hotkey.
+    bool public claimToBalance;
 
     mapping(bytes32 hotkey => bool) public knownHotkey;
     mapping(bytes32 hotkey => mapping(bytes32 coldkey => mapping(uint256 netuid => uint256))) private _stake;
@@ -63,6 +67,14 @@ contract MockStaking is IStaking {
 
     function setUnstakeBlocked(bool v) external {
         unstakeBlocked = v;
+    }
+
+    function setRemoveFeeRao(uint256 rao) external {
+        removeFeeRao = rao;
+    }
+
+    function setClaimToBalance(bool v) external {
+        claimToBalance = v;
     }
 
     /// @dev Sets (does not add to) the unclaimed root amount, in rao.
@@ -103,7 +115,7 @@ contract MockStaking is IStaking {
             remainder = 0;
         }
         _stake[hotkey][cold][netuid] = remainder;
-        _payOut(removed);
+        _payOut(_afterFee(removed));
     }
 
     function removeStakeFull(bytes32 hotkey, uint256 netuid) external payable {
@@ -111,7 +123,7 @@ contract MockStaking is IStaking {
         bytes32 cold = mirror(msg.sender);
         uint256 staked = _stake[hotkey][cold][netuid];
         _stake[hotkey][cold][netuid] = 0;
-        _payOut(staked);
+        _payOut(_afterFee(staked));
     }
 
     function moveStake(
@@ -142,7 +154,8 @@ contract MockStaking is IStaking {
         bytes32 cold = mirror(msg.sender);
         uint256 amount = _unclaimed[cold][hotkey];
         _unclaimed[cold][hotkey] = 0;
-        _stake[hotkey][cold][0] += amount;
+        if (claimToBalance) _payOut(amount);
+        else _stake[hotkey][cold][0] += amount;
     }
 
     /// @return taoValue 18-decimal (rao * 1e9)
@@ -180,6 +193,10 @@ contract MockStaking is IStaking {
     function _credit(bytes32 hotkey, bytes32 coldkey, uint256 netuid, uint256 rao) private {
         uint256 current = _stake[hotkey][coldkey][netuid];
         _stake[hotkey][coldkey][netuid] = current + ((current == 0 && !exactStakeReads && rao != 0) ? rao - 1 : rao);
+    }
+
+    function _afterFee(uint256 rao) private view returns (uint256) {
+        return rao > removeFeeRao ? rao - removeFeeRao : 0;
     }
 
     function _payOut(uint256 rao) private {

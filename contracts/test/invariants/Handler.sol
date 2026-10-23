@@ -94,6 +94,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public redeemSkipped;
     /// High-water mark of queuedKeys.length.
     uint256 public maxQueueDepth;
+    /// Exits refused UnstakeShort because the only stake sat below the minimum stake, which the
+    /// vault's unstake walk skips.
+    uint256 public dustBlocked;
 
     constructor(
         CascadeVault vault_,
@@ -253,8 +256,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             if (vault.getPayoutBatch(key).count == 0) _dropKey(key);
             else ++partialChunks;
             _raiseFloor();
-        } catch {
-            if (ready) ++unexpectedReverts;
+        } catch (bytes memory reason) {
+            if (ready && !_dustBlocked(reason)) ++unexpectedReverts;
         }
     }
 
@@ -325,8 +328,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             ghostOut += actor.balance - before;
             ++directRedeems;
             _raiseFloor();
-        } catch {
-            if (out >= RAO) ++unexpectedReverts;
+        } catch (bytes memory reason) {
+            if (out >= RAO && !_dustBlocked(reason)) ++unexpectedReverts;
         }
     }
 
@@ -429,6 +432,18 @@ contract Handler is CommonBase, StdCheats, StdUtils {
                 ++payoutChunks;
             }
         }
+    }
+
+    /// An UnstakeShort while the vault's stake is non-zero but below the minimum stake: the unstake walk
+    /// skips such a position, so an exit that needs it waits for stakeIdle (or the owner) to clear it.
+    /// Counted in dustBlocked.
+    function _dustBlocked(bytes memory reason) internal returns (bool) {
+        uint256 s = staking.getStake(hotkey, vault.coldkey(), 0);
+        // truncating to the selector is the point of the cast
+        // forge-lint: disable-next-line(unsafe-typecast)
+        if (s == 0 || s >= MIN_STAKE_RAO || bytes4(reason) != CascadeVault.UnstakeShort.selector) return false;
+        ++dustBlocked;
+        return true;
     }
 
     /// Swap-and-pop.

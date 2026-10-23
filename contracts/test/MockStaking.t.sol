@@ -106,6 +106,35 @@ contract MockStakingTest is Test {
         assertEq(staking.getStake(HK1, _me(), 0), 0);
     }
 
+    function test_removeFeeDeductedFromBothRemovals() public {
+        staking.setOneRaoShort(false);
+        staking.addStake(HK1, 100_000_000, 0);
+        staking.setRemoveFeeRao(50_000);
+        uint256 before = address(this).balance;
+
+        // 30_000_000 removed, 30_000_000 - 50_000 credited
+        staking.removeStake(HK1, 30_000_000, 0);
+        assertEq(staking.getStake(HK1, _me(), 0), 70_000_000);
+        assertEq(address(this).balance, before + 29_950_000 * RAO);
+
+        // 70_000_000 removed, 70_000_000 - 50_000 credited
+        staking.removeStakeFull(HK1, 0);
+        assertEq(staking.getStake(HK1, _me(), 0), 0);
+        assertEq(address(this).balance, before + (29_950_000 + 69_950_000) * RAO);
+    }
+
+    function test_claimToBalancePaysOutInsteadOfStaking() public {
+        staking.setOneRaoShort(false);
+        staking.setClaimToBalance(true);
+        staking.setUnclaimed(_me(), HK1, 1e6);
+        uint256 before = address(this).balance;
+        (bool ok,) = address(staking).call{gas: 60_000_000}(abi.encodeCall(IStaking.claimRootWithHotkey, (HK1)));
+        assertTrue(ok);
+        assertEq(staking.getStake(HK1, _me(), 0), 0);
+        assertEq(address(this).balance, before + 1e6 * RAO);
+        assertEq(staking.getUnclaimedRootTaoByHotkey(_me(), HK1), 0);
+    }
+
     function test_claimBurnsAllGasBelowRequirement() public {
         staking.setOneRaoShort(false);
         staking.setUnclaimed(_me(), HK1, 1e6);

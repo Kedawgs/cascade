@@ -65,6 +65,30 @@ contract VaultRewardsTest is VaultTestBase {
         assertEq(vault.totalAssets(), 11e18);
     }
 
+    function test_claimMeasuresWholePosition() public {
+        // the chain pays this claim out as liquid balance instead of stake on HK1: it is still measured
+        // and vested, so the price does not jump
+        staking.setClaimToBalance(true);
+        staking.setUnclaimed(vault.coldkey(), HK1, 1_000_000_000);
+        uint256 t0 = block.timestamp;
+
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RewardsClaimed(HK1, 1e9);
+        claimAs(keeper, HK1);
+
+        assertEq(stakeOf(HK1), 10_000_000_000);
+        assertEq(address(vault).balance, ED + 1e18);
+        assertEq(vault.vestingAmount(), 1e18);
+        assertEq(vault.vestingStart(), t0);
+        // (10_000_000_000 * 1e9 + ED + 1e18) - ED
+        assertEq(vault.grossAssets(), 11e18);
+        // 11e18 - 1e18 unvested
+        assertEq(vault.totalAssets(), 10e18);
+
+        vm.warp(t0 + 7 days);
+        assertEq(vault.totalAssets(), 11e18);
+    }
+
     function test_claimStrangerBeforeFallbackReverts() public {
         // setUp's registry delay already put block.timestamp past 0 + 7 days, so the keeper claims
         // first to start HK1's window.

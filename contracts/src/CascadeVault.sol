@@ -146,7 +146,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     event Staked(bytes32 indexed hotkey, uint256 rao, uint256 measured);
     /// `receivedWei` is the vault's measured balance increase.
     event Unstaked(bytes32 indexed hotkey, uint256 wantRao, uint256 receivedWei);
-    /// `deltaRao` is the hotkey's measured stake increase from the claim.
+    /// `deltaRao` is the vault's measured position increase from the claim (stake across the set plus
+    /// liquid balance), in rao, floored.
     event RewardsClaimed(bytes32 indexed hotkey, uint256 deltaRao);
     event FrontDoorProposed(uint64 indexed chain, address indexed addr, uint64 readyAt);
     event FrontDoorActivated(uint64 indexed chain, address indexed addr);
@@ -267,7 +268,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     function grossAssets() public view returns (uint256) {
-        return _sub0(rootStakeRao() * RAO + address(this).balance, ED_RESERVE);
+        return _sub0(_positionWei(), ED_RESERVE);
     }
 
     function unvestedRewards() public view returns (uint256) {
@@ -384,7 +385,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     // ---- rewards ----
 
-    /// Claims `hotkey`'s root rewards into stake and vests the measured increase over REWARD_VESTING,
+    /// Claims `hotkey`'s root rewards and vests the measured increase of the whole position (stake
+    /// across the set plus liquid balance, wherever the chain credits the claim) over REWARD_VESTING,
     /// on top of what is still unvested. An empty claim leaves the schedule as it is. Keeper only, or
     /// anyone once KEEPER_FALLBACK has passed since this hotkey's last claim. Works while paused. The
     /// chain can refuse a claim by burning the forwarded gas; the revert bubbles up and nothing changes.
@@ -392,18 +394,19 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         if (!isHotkey[hotkey]) revert UnknownHotkey();
         // forge-lint: disable-next-line(block-timestamp)
         if (msg.sender != keeper && block.timestamp < lastClaimAt[hotkey] + KEEPER_FALLBACK) revert NotKeeper();
-        if (gasleft() < claimGasRequired) revert InsufficientGas();
 
-        uint256 before = _stakeOf(hotkey);
+        uint256 before = _positionWei();
+        // checked after the measurement, right before the call it protects
+        if (gasleft() < claimGasRequired) revert InsufficientGas();
         STAKING.claimRootWithHotkey(hotkey);
-        uint256 delta = _sub0(_stakeOf(hotkey), before);
+        uint256 delta = _sub0(_positionWei(), before);
         lastClaimAt[hotkey] = uint64(block.timestamp);
         // restarting on 0 would re-spread the unvested remainder over a fresh REWARD_VESTING
         if (delta != 0) {
-            vestingAmount = unvestedRewards() + delta * RAO;
+            vestingAmount = unvestedRewards() + delta;
             vestingStart = uint64(block.timestamp);
         }
-        emit RewardsClaimed(hotkey, delta);
+        emit RewardsClaimed(hotkey, delta / RAO);
     }
 
     // ---- direct access ----
@@ -664,6 +667,11 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     /// a - b, floored at 0.
     function _sub0(uint256 a, uint256 b) internal pure returns (uint256) {
         return a > b ? a - b : 0;
+    }
+
+    /// Root stake across the set plus the liquid balance, in wei, before any reserve.
+    function _positionWei() internal view returns (uint256) {
+        return rootStakeRao() * RAO + address(this).balance;
     }
 
     /// The vault's root stake on `h`, in rao.

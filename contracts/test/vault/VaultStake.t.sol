@@ -161,7 +161,7 @@ contract VaultStakeTest is VaultTestBase {
 
     function test_addHotkeyRules() public {
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(CascadeVault.NotAuthorized.selector);
         vault.addHotkey(HK2);
 
         vm.startPrank(owner);
@@ -185,6 +185,46 @@ contract VaultStakeTest is VaultTestBase {
         assertEq(vault.hotkeyCount(), 4);
         assertFalse(vault.isHotkey(HK5));
         assertEq(vault.stakeHotkey(), HK1);
+    }
+
+    function test_addHotkeyByKeeperOrGuardian() public {
+        // a validator's hotkey swap is fixed by re-adding the new hotkey fast: the keeper or guardian may
+        vm.expectEmit(address(vault));
+        emit CascadeVault.HotkeyAdded(HK2);
+        vm.prank(keeper);
+        vault.addHotkey(HK2);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.HotkeyAdded(HK3);
+        vm.prank(guardian);
+        vault.addHotkey(HK3);
+        vm.prank(keeper);
+        vault.addHotkey(HK4);
+        assertEq(vault.hotkeyCount(), 4);
+        assertTrue(vault.isHotkey(HK2));
+        assertTrue(vault.isHotkey(HK3));
+        // adding never routes new stake
+        assertEq(vault.stakeHotkey(), HK1);
+
+        // the set cap still applies
+        vm.prank(guardian);
+        vm.expectRevert(CascadeVault.TooManyHotkeys.selector);
+        vault.addHotkey(HK5);
+        vm.prank(keeper);
+        vm.expectRevert(CascadeVault.HotkeyKnown.selector);
+        vault.addHotkey(HK2);
+
+        // the other hotkey calls stay owner-only
+        vm.startPrank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, keeper));
+        vault.setStakeHotkey(HK2);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, keeper));
+        vault.removeHotkey(HK2, false);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, keeper));
+        vault.moveStake(HK2, 1);
+        vm.stopPrank();
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        vault.removeHotkey(HK2, false);
     }
 
     function test_setStakeHotkeyAddsAndSwitches() public {

@@ -117,6 +117,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     error HotkeyInUse();
     error HotkeyHasRewards();
     error NotKeeper();
+    error NotAuthorized();
     error NothingToStake();
     error ZeroAmount();
     error TransferFailed();
@@ -310,8 +311,11 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     // ---- stake and hotkeys ----
 
-    /// Adds `h` to the set without routing new stake to it (e.g. to claim a forfeited hotkey's rewards).
-    function addHotkey(bytes32 h) external onlyOwner {
+    /// Adds `h` to the set without routing new stake to it (e.g. to claim a forfeited hotkey's rewards,
+    /// or to bring stake a validator's hotkey swap moved back into the price). Owner, guardian or keeper:
+    /// adding only widens what the price reads, and the set stays capped at MAX_HOTKEYS.
+    function addHotkey(bytes32 h) external {
+        if (msg.sender != owner() && msg.sender != guardian && msg.sender != keeper) revert NotAuthorized();
         _addHotkey(h);
     }
 

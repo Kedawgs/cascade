@@ -4,9 +4,33 @@ pragma solidity 0.8.24;
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeBase} from "../../src/CascadeBase.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
+import {ICascadeBridge} from "../../src/interfaces/ICascadeBridge.sol";
 import {ISTAKING_ADDRESS, IStaking} from "../../src/interfaces/IStaking.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {VaultTestBase} from "../VaultTestBase.sol";
+
+/// A rogue adapter with flash capital: delivers a forged batch whose deposit is its own borrowed TAO,
+/// then redeems its fresh shares directly in the same transaction.
+contract FlashAdapter is ICascadeBridge {
+    CascadeVault immutable vault;
+
+    constructor(CascadeVault v) {
+        vault = v;
+    }
+
+    function send(uint64, address, bytes calldata, uint256) external payable {}
+
+    function quoteFee(uint64, address, bytes calldata, uint256) external pure returns (uint256) {
+        return 0;
+    }
+
+    function attack(uint64 chain, address door, bytes calldata message, uint256 amount) external {
+        vault.onBridgeMessage{value: amount}(chain, door, message, amount);
+        vault.redeemDirect(vault.balanceOf(address(this)));
+    }
+
+    receive() external payable {}
+}
 
 contract VaultDeliveryTest is VaultTestBase {
     address stranger = makeAddr("stranger");
@@ -308,6 +332,50 @@ contract VaultDeliveryTest is VaultTestBase {
         assertEq(vault.pendingPayouts(), 400e18);
     }
 
+    function test_delivery_allowanceOnPreDeliveryGrossDefeatsFlashDeposit() public {
+        staking.setOneRaoShort(false);
+        // alice holds 1e27 shares worth 1_000e18, all staked on HK1
+        depositVia(alice, 1_000e18);
+        vm.prank(keeper);
+        vault.stakeIdle();
+
+        FlashAdapter adapter = new FlashAdapter(vault);
+        vm.startPrank(owner);
+        vault.proposeBridge(address(adapter));
+        vm.warp(block.timestamp + 7 days);
+        vault.activateBridge(address(adapter));
+        vm.stopPrank();
+
+        // A forged batch deposits 4_000e18 of flash capital to the adapter and redeems alice in full.
+        // The allowance is on the gross before the deposit: max(1_000e18 * 20%, 100e18) = 200e18 (on the
+        // post-delivery gross of 5_000e18 it would be 1_000e18, the whole of alice).
+        // A = 1_000e18, S = 1e27: the adapter gets 4_000e18 * (1e27 + 1e6) / (1_000e18 + 1) = 4e27 shares;
+        // alice's sMax = 200e18 * (1e27 + 1e6) / (1_000e18 + 1) = 2e26 → 200e18
+        uint256 flash = 4_000e18;
+        vm.deal(address(adapter), flash);
+        bytes memory message =
+            CascadeMessages.encodeBatch(77, entries1(address(adapter), flash), entries1(alice, type(uint256).max));
+        bytes32 key = vault.batchKey(BASE, frontDoor, message);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Deposited(key, address(adapter), flash, 4e27);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 2e26, 200e18);
+        // the adapter's same-transaction redeemDirect: assets 5_000e18 - 200e18 pending, S = 4.8e27:
+        // 4e27 * (4_800e18 + 1) / (4.8e27 + 1e6) = 4_000e18, no more than it deposited
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemedDirect(address(adapter), 4e27, flash);
+        adapter.attack(BASE, frontDoor, message, flash);
+
+        assertEq(vault.balanceOf(alice), 8e26);
+        assertEq(vault.pendingPayouts(), 200e18);
+        (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertLe(burned, 200e18);
+        assertEq(vault.balanceOf(address(adapter)), 0);
+        assertLe(address(adapter).balance, flash);
+        // alice's remaining 8e26 shares are still worth 800e18
+        assertEq(vault.totalAssets(), 800e18);
+    }
+
     function test_delivery_minDailyOutflowFloor() public {
         depositVia(alice, 10e18);
 
@@ -441,7 +509,8 @@ contract VaultDeliveryTest is VaultTestBase {
             r[i] = CascadeMessages.Entry(addr(0x2000 + i), 1e24);
         }
         // A = 1_100e18 - 100e18 = 1_000e18, S = 1e27: deposit 1e18 * (1e27 + 1e6) / (1_000e18 + 1) = 1e24;
-        // redeem 1e24 * (1_000e18 + 1) / (1e27 + 1e6) = 1e18; allowance 220e18 covers 100e18
+        // redeem 1e24 * (1_000e18 + 1) / (1e27 + 1e6) = 1e18; the allowance, 20% of the 1_000e18 gross
+        // before this delivery's deposits = 200e18, covers 100e18
         bytes32 key = deliver(BASE, frontDoor, 2, d, r);
 
         assertTrue(vault.processed(key));
@@ -536,6 +605,25 @@ contract VaultDeliveryTest is VaultTestBase {
         vm.expectRevert(CascadeVault.VaultInsolvent.selector);
         depositDirect(bob, 1e18);
         assertEq(vault.totalSupply(), 1e25);
+    }
+
+    function test_delivery_redeemOnlyBatchDeliversInInsolventVault() public {
+        depositVia(alice, 10e18);
+        // 60% of the assets lost: 4e18 left against a supply of 1e25, below half the launch price
+        vm.deal(address(vault), ED + 4e18);
+
+        // a redeem-only batch still delivers, at the lowered price: A = 4e18, S = 1e25,
+        // 5e24 * (4e18 + 1) / (1e25 + 1e6) = 2e18; allowance max(4e18 * 20%, 100e18) = 100e18
+        bytes32 key = nextRedeemKey(alice, 5e24);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 5e24, 2e18);
+        redeemVia(alice, 5e24);
+        assertEq(vault.balanceOf(alice), 5e24);
+        assertEq(vault.pendingPayouts(), 2e18);
+
+        // a batch with deposits is still refused
+        vm.expectRevert(CascadeVault.VaultInsolvent.selector);
+        deliver(BASE, frontDoor, ++nextBatchId, entries1(bob, 1e18), entries1(alice, 1e24));
     }
 
     function test_delivery_sixtyPercentAssetsStillDeposits() public {

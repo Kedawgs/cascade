@@ -382,6 +382,7 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// unexpected revert: the vault is never paused and its peer is always active here.
     function _recordDelivery(Vm.Log[] memory logs) internal {
         bool burned;
+        uint256 delivered;
         for (uint256 i; i < logs.length; ++i) {
             Vm.Log memory log = logs[i];
             if (log.emitter == address(bridge) && log.topics[0] == MockBridge.DeliveryFailed.selector) {
@@ -390,6 +391,7 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             if (_isVaultLog(log, CascadeVault.BatchDelivered.selector)) {
                 (, uint256 amount) = abi.decode(log.data, (uint64, uint256));
                 ghostIn += amount;
+                delivered = amount;
                 ++deliveries;
             } else if (_isVaultLog(log, CascadeVault.Redeemed.selector)) {
                 (uint256 shares, uint256 assets) = abi.decode(log.data, (uint256, uint256));
@@ -410,10 +412,12 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             }
         }
         // The window is written only by a delivery that burns; checked then, against the gross the
-        // vault measured its allowance on (unchanged since, inside the same close).
+        // vault measured its allowance on: the gross before this delivery's deposits (nothing else has
+        // changed it since, inside the same close).
         if (burned) {
             (, uint256 windowBurned) = vault.burnWindows(peer);
-            if (windowBurned > Math.max(vault.grossAssets() * 2000 / 10_000, 100e18)) ++burnViolations;
+            uint256 grossBefore = _sub0(vault.grossAssets(), delivered);
+            if (windowBurned > Math.max(grossBefore * 2000 / 10_000, 100e18)) ++burnViolations;
         }
     }
 

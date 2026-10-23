@@ -454,9 +454,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     /// Delivers a front door's BATCH with its deposits' TAO. Prices every entry at one price fixed
     /// before the batch (A = assets without this delivery, S = supply), mints for deposits, then burns
-    /// for redeems within the front door's daily allowance and queues their payouts. No per-entry
-    /// condition reverts the batch. Reverts while paused so the rail holds the money. No staking or
-    /// claiming here.
+    /// for redeems within the front door's daily allowance (measured on the gross before this delivery's
+    /// deposits) and queues their payouts. No per-entry condition reverts the batch. Reverts while
+    /// paused so the rail holds the money. No staking or claiming here.
     function onBridgeMessage(uint64 sourceChain, address sender, bytes calldata message, uint256 amount)
         external
         payable
@@ -485,8 +485,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         uint256 A = _sub0(totalAssets(), msg.value - msg.value % RAO);
         uint256 S = totalSupply();
         // Below half the launch price (1e-6 TAO per share) assets were lost; minting there would hand
-        // these deposits much of the vault. S == 0 never trips it.
-        if (A * 2_000_000 < S) revert VaultInsolvent();
+        // these deposits much of the vault. S == 0 never trips it. A redeem-only batch still delivers,
+        // so exits keep working in a broken vault.
+        if (deposits.length != 0 && A * 2_000_000 < S) revert VaultInsolvent();
 
         _creditDeposits(key, deposits, A, S);
         PayoutBatch memory b = _burnRedeems(key, peer, redeems, A, S);
@@ -689,7 +690,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
-    /// bound and the front door's remaining daily allowance. Returns the queue's count, total (as
+    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of the gross before
+    /// this delivery's deposits, minDailyOutflow) per 24-hour window. Returns the queue's count, total (as
     /// `remaining`) and running hash; the caller fills in the rest.
     function _burnRedeems(bytes32 key, bytes32 peer, CascadeMessages.Entry[] memory redeems, uint256 A, uint256 S)
         internal
@@ -699,8 +701,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         Window memory w = burnWindows[peer];
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp >= w.start + 24 hours) w = Window(uint64(block.timestamp), 0);
-        // gross includes the deposits just credited
-        uint256 allowance = _sub0(Math.max(grossAssets() * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
+        // on the gross before this delivery's deposits (msg.value), so they cannot raise the allowance
+        uint256 grossBefore = _sub0(grossAssets(), msg.value);
+        uint256 allowance = _sub0(Math.max(grossBefore * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
         uint256 maxEntry = maxEntryValue;
         for (uint256 i; i < redeems.length; ++i) {
             address user = redeems[i].user;

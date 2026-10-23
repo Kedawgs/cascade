@@ -44,7 +44,7 @@ contract GasTest is VaultTestBase {
         g -= gasleft();
 
         // A = 1_000e18 + value - value, S = 1e27: deposit 1e18 → 1e24 shares; redeem 1e24 → 1e18,
-        // all within the allowance 20% of gross (1_000e18 + value) >= 200e18
+        // all within the allowance, 20% of the gross before the deposits (1_000e18) = 200e18 >= value
         CascadeVault.PayoutBatch memory b = vault.getPayoutBatch(vault.batchKey(BASE, frontDoor, message));
         assertEq(b.count, n);
         assertEq(b.remaining, value);

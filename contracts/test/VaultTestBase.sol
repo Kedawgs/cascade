@@ -36,6 +36,8 @@ abstract contract VaultTestBase is Test {
     StubBridge bridge;
     CascadeVault vault;
     uint64 nextBatchId;
+    /// When `vault` was deployed: the seed of its keeper-fallback timestamps.
+    uint256 deployedAt;
 
     function setUp() public virtual {
         vm.etch(ISTAKING_ADDRESS, address(new MockStaking()).code);
@@ -49,14 +51,20 @@ abstract contract VaultTestBase is Test {
         bridge = new StubBridge(IERC20(address(0)));
         bridge.setFee(1e15);
 
-        bytes32 expectedColdkey = mirror(vm.computeCreateAddress(address(this), vm.getNonce(address(this))));
-        vault = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15);
+        deployedAt = block.timestamp;
+        vault = freshVault();
         // The operator funds the existential reserve before use (Task 13 documents it).
         vm.deal(address(vault), ED);
-
-        vm.prank(owner);
-        vault.setKeeper(keeper);
         registerFrontDoor(BASE, frontDoor);
+    }
+
+    /// A vault deployed now at its predicted address on the shared mocks and stub bridge, staking to
+    /// HK1, with the keeper set (no reserve funded, no front door).
+    function freshVault() internal returns (CascadeVault v) {
+        bytes32 expectedColdkey = mirror(vm.computeCreateAddress(address(this), vm.getNonce(address(this))));
+        v = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15);
+        vm.prank(owner);
+        v.setKeeper(keeper);
     }
 
     function registerFrontDoor(uint64 chain, address addr) internal {

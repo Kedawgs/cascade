@@ -90,8 +90,8 @@ contract VaultRewardsTest is VaultTestBase {
     }
 
     function test_claimStrangerBeforeFallbackReverts() public {
-        // setUp's registry delay already put block.timestamp past 0 + 7 days, so the keeper claims
-        // first to start HK1's window.
+        // setUp's registry delay already put block.timestamp 7 days past the deploy seed, so the keeper
+        // claims first to start HK1's window.
         claimAs(keeper, HK1);
         uint256 t0 = block.timestamp;
         staking.setUnclaimed(vault.coldkey(), HK1, 1_000_000_000);
@@ -114,24 +114,83 @@ contract VaultRewardsTest is VaultTestBase {
     }
 
     function test_claimFallbackIsPerHotkey() public {
-        // Past 0 + 7 days, so a hotkey that was never claimed is open to anyone.
+        // HK2 is added (and seeded) at 8 days; HK1 is claimed by the keeper 7 days later
         vm.warp(8 days);
+        vm.prank(owner);
+        vault.addHotkey(HK2);
+        staking.setUnclaimed(vault.coldkey(), HK2, 500_000_000);
+        vm.warp(15 days);
         claimAs(keeper, HK1);
-        assertEq(vault.lastClaimAt(HK1), 8 days);
+        assertEq(vault.lastClaimAt(HK1), 15 days);
 
         vm.prank(stranger);
         vm.expectRevert(CascadeVault.NotKeeper.selector);
         vault.claimRewards{gas: 60_000_000}(HK1);
 
-        vm.prank(owner);
-        vault.addHotkey(HK2);
-        staking.setUnclaimed(vault.coldkey(), HK2, 500_000_000);
-
+        // HK2's own window, from its seed, has passed
         vm.expectEmit(address(vault));
         emit CascadeVault.RewardsClaimed(HK2, 500_000_000);
         claimAs(stranger, HK2);
         assertEq(stakeOf(HK2), 500_000_000);
-        assertEq(vault.lastClaimAt(HK2), 8 days);
+        assertEq(vault.lastClaimAt(HK2), 15 days);
+    }
+
+    function test_claimFallbackSeededAtDeploy() public {
+        uint256 t0 = block.timestamp;
+        CascadeVault v = freshVault();
+
+        // the constructor hotkey's window starts at deploy
+        vm.prank(stranger);
+        vm.expectRevert(CascadeVault.NotKeeper.selector);
+        v.claimRewards{gas: 60_000_000}(HK1);
+        vm.warp(t0 + 7 days - 1);
+        vm.prank(stranger);
+        vm.expectRevert(CascadeVault.NotKeeper.selector);
+        v.claimRewards{gas: 60_000_000}(HK1);
+        assertEq(v.lastClaimAt(HK1), t0);
+
+        vm.warp(t0 + 7 days);
+        vm.expectEmit(address(v));
+        emit CascadeVault.RewardsClaimed(HK1, 0);
+        vm.prank(stranger);
+        v.claimRewards{gas: 60_000_000}(HK1);
+        assertEq(v.lastClaimAt(HK1), t0 + 7 days);
+    }
+
+    function test_claimFallbackSeededWhenHotkeyAdded() public {
+        uint256 t0 = block.timestamp;
+        vm.prank(keeper);
+        vault.addHotkey(HK2);
+        staking.setUnclaimed(vault.coldkey(), HK2, 500_000_000);
+
+        // added 1 day ago: still the keeper's
+        vm.warp(t0 + 1 days);
+        vm.prank(stranger);
+        vm.expectRevert(CascadeVault.NotKeeper.selector);
+        vault.claimRewards{gas: 60_000_000}(HK2);
+        assertEq(vault.lastClaimAt(HK2), t0);
+
+        // setStakeHotkey adds a new hotkey through the same path
+        vm.prank(owner);
+        vault.setStakeHotkey(HK3);
+        assertEq(vault.lastClaimAt(HK3), t0 + 1 days);
+        vm.prank(stranger);
+        vm.expectRevert(CascadeVault.NotKeeper.selector);
+        vault.claimRewards{gas: 60_000_000}(HK3);
+
+        vm.warp(t0 + 7 days);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RewardsClaimed(HK2, 500_000_000);
+        claimAs(stranger, HK2);
+        assertEq(vault.lastClaimAt(HK2), t0 + 7 days);
+
+        // only an unset timestamp is seeded: a removed and re-added hotkey keeps its last claim
+        vm.prank(owner);
+        vault.removeHotkey(HK2, false);
+        vm.warp(t0 + 20 days);
+        vm.prank(owner);
+        vault.addHotkey(HK2);
+        assertEq(vault.lastClaimAt(HK2), t0 + 7 days);
     }
 
     function test_claimInsufficientGasRevertsBeforeCall() public {
@@ -143,7 +202,7 @@ contract VaultRewardsTest is VaultTestBase {
 
         assertEq(unclaimedOf(HK1), 1e18);
         assertEq(stakeOf(HK1), 10_000_000_000);
-        assertEq(vault.lastClaimAt(HK1), 0);
+        assertEq(vault.lastClaimAt(HK1), deployedAt);
     }
 
     function test_claimGasBurningFailureLeavesStateUntouched() public {
@@ -156,7 +215,7 @@ contract VaultRewardsTest is VaultTestBase {
         assertFalse(ok);
         assertEq(unclaimedOf(HK1), 1e18);
         assertEq(stakeOf(HK1), 10_000_000_000);
-        assertEq(vault.lastClaimAt(HK1), 0);
+        assertEq(vault.lastClaimAt(HK1), deployedAt);
         assertEq(vault.vestingAmount(), 0);
         assertEq(vault.vestingStart(), 0);
     }

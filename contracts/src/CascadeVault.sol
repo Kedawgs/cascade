@@ -198,6 +198,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         hotkeys.push(hotkey);
         isHotkey[hotkey] = true;
         stakeHotkey = hotkey;
+        // the keeper fallbacks count from deploy, not from 0
+        lastStakeAt = uint64(block.timestamp);
+        lastClaimAt[hotkey] = uint64(block.timestamp);
         emit StakeHotkeySet(hotkey);
         minDirectDeposit = minDirectDeposit_;
         STAKING.setRejectStakingHotkeyGrowth(true);
@@ -372,7 +375,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Stakes the liquid balance not reserved for queued payouts or the existential deposit. Keeper
-    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake.
+    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake (or the deploy).
     function stakeIdle() external whenNotPaused nonReentrant {
         // forge-lint: disable-next-line(block-timestamp)
         if (msg.sender != keeper && block.timestamp < lastStakeAt + KEEPER_FALLBACK) revert NotKeeper();
@@ -392,8 +395,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     /// Claims `hotkey`'s root rewards and vests the measured increase of the whole position (stake
     /// across the set plus liquid balance, wherever the chain credits the claim) over REWARD_VESTING,
     /// on top of what is still unvested. An empty claim leaves the schedule as it is. Keeper only, or
-    /// anyone once KEEPER_FALLBACK has passed since this hotkey's last claim. Works while paused. The
-    /// chain can refuse a claim by burning the forwarded gas; the revert bubbles up and nothing changes.
+    /// anyone once KEEPER_FALLBACK has passed since this hotkey's last claim (or since it was first
+    /// added). Works while paused. The chain can refuse a claim by burning the forwarded gas; the
+    /// revert bubbles up and nothing changes.
     function claimRewards(bytes32 hotkey) external nonReentrant {
         if (!isHotkey[hotkey]) revert UnknownHotkey();
         // forge-lint: disable-next-line(block-timestamp)
@@ -863,12 +867,14 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         }
     }
 
+    /// A hotkey never seen before starts its claim fallback now; a re-added one keeps its last claim.
     function _addHotkey(bytes32 h) internal {
         if (h == bytes32(0)) revert ZeroHotkey();
         if (isHotkey[h]) revert HotkeyKnown();
         if (hotkeys.length >= MAX_HOTKEYS) revert TooManyHotkeys();
         hotkeys.push(h);
         isHotkey[h] = true;
+        if (lastClaimAt[h] == 0) lastClaimAt[h] = uint64(block.timestamp);
         emit HotkeyAdded(h);
     }
 

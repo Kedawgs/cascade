@@ -54,9 +54,31 @@ contract VaultStakeTest is VaultTestBase {
         assertEq(vault.lastStakeAt(), block.timestamp);
     }
 
+    function test_stakeIdleFallbackSeededAtDeploy() public {
+        uint256 t0 = block.timestamp;
+        CascadeVault v = freshVault();
+        // idle TAO a stranger could otherwise stake at once
+        vm.deal(address(v), ED + 10e18);
+
+        vm.prank(stranger);
+        vm.expectRevert(CascadeVault.NotKeeper.selector);
+        v.stakeIdle();
+        vm.warp(t0 + 7 days - 1);
+        vm.prank(stranger);
+        vm.expectRevert(CascadeVault.NotKeeper.selector);
+        v.stakeIdle();
+        assertEq(v.lastStakeAt(), t0);
+
+        vm.warp(t0 + 7 days);
+        vm.prank(stranger);
+        v.stakeIdle();
+        assertEq(v.lastStakeAt(), t0 + 7 days);
+        assertEq(address(v).balance, ED);
+    }
+
     function test_stakeIdleStrangerBeforeFallbackReverts() public {
-        // setUp's registry delay already put block.timestamp past 0 + 7 days, so the keeper stakes
-        // first to start the window.
+        // setUp's registry delay already put block.timestamp 7 days past the deploy seed, so the
+        // keeper stakes first to start the window.
         depositDirect(alice, 10e18);
         keeperStakes();
         uint256 t0 = block.timestamp;

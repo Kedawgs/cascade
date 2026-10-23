@@ -341,6 +341,10 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         assertEq(fd.totalFeeCredit(), 1e14);
         assertEq(address(fd).balance, 1e14);
 
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.FeeCreditSpent(alice, 1e14);
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.RedeemRequested(1, alice, 1e24);
         vm.prank(alice);
         fd.requestRedeem(1e24);
         assertEq(openPot(), 1e14);
@@ -598,6 +602,24 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         vm.prank(carol);
         fd.closeBatch{value: 1e15}();
         assertEq(bridge.lastAmount(), 3_999_500_000_000_000_000_000);
+        assertEq(openId(), 2);
+    }
+
+    function test_closeBatchEarlyWhenFilledExactlyWithZeroMinimum() public {
+        vm.prank(owner);
+        fd.setCaps(0, 10_000e18);
+        tao.mint(alice, 3_000e18);
+        dep(alice, 3_999e18);
+        // 1e18 of room left: not full
+        assertFalse(fd.canClose());
+        dep(alice, 1e18);
+        // exactly maxBatchValue 4_000e18: full before the interval
+        assertEq(openTotal(), 4_000e18);
+        assertTrue(fd.canClose());
+
+        vm.prank(carol);
+        fd.closeBatch{value: 1e15}();
+        assertEq(bridge.lastAmount(), 4_000e18);
         assertEq(openId(), 2);
     }
 

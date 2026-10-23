@@ -4,7 +4,7 @@ pragma solidity 0.8.24;
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {CascadeBase} from "./CascadeBase.sol";
-import {ICascadeBridge} from "./interfaces/ICascadeBridge.sol";
+import {ICascadeBridge, ICascadeReceiver} from "./interfaces/ICascadeBridge.sol";
 import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 
 /// @notice Cascade front door on Base: holds bridged TAO, collects deposits and redeem requests
@@ -13,8 +13,10 @@ import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 /// @dev Redeem requests need no shares (the front door cannot see Bittensor), so the first request
 /// per user per batch pays `redeemRequestFee` in ETH into the batch's fee pot, the pot pays the
 /// batch's bridge fee first, and a request that meets a full redeem list closes the batch itself.
-/// ETH held always equals the open batch's `feePot` plus `totalFeeCredit`.
-contract CascadeFrontDoor is CascadeBase {
+/// ETH held always equals the open batch's `feePot` plus `totalFeeCredit`. Payouts from the vault
+/// arrive in chunks and are credited for users to claim; the asset held is always at least the open
+/// batch's `totalDeposits` plus `totalClaimable`.
+contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     using SafeERC20 for IERC20Metadata;
 
     // ---- constants and immutables ----
@@ -42,7 +44,7 @@ contract CascadeFrontDoor is CascadeBase {
     mapping(uint64 => mapping(address => uint256)) internal depositSlot;
     mapping(uint64 => mapping(address => uint256)) internal redeemSlot;
 
-    // payouts in, claims out (Task 10)
+    // payouts in, claims out
     mapping(address => uint256) public claimable;
     uint256 public totalClaimable;
     /// Forwarded deposits minus payouts received, floored at 0.
@@ -78,12 +80,19 @@ contract CascadeFrontDoor is CascadeBase {
     error TransferFailed();
     error InvalidParameter();
     error DirectTransferNotAllowed();
+    error UnknownPeer();
+    error ValueMismatch();
+    error AmountMismatch();
+    error TokensNotReceived();
+    error DuplicatePayouts();
+    error NothingToClaim();
 
     // ---- events ----
 
     event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer);
     event DepositCancelled(uint64 indexed batchId, address indexed user, uint256 amount);
     event FeeCredited(address indexed user, uint256 amount, address payer);
+    event FeeCreditSpent(address indexed user, uint256 amount);
     event RedeemRequested(uint64 indexed batchId, address indexed user, uint256 shares);
     event RedeemCancelled(uint64 indexed batchId, address indexed user, uint256 shares);
     /// `potUsed` is the part of `fee` paid from the batch's fee pot; the closer paid the rest.
@@ -93,6 +102,8 @@ contract CascadeFrontDoor is CascadeBase {
     /// An empty batch reached its close: the timer restarted and the id stayed.
     event BatchRolled(uint64 indexed id);
     event LimitSet(bytes32 indexed name, uint256 a, uint256 b);
+    event PayoutReceived(bytes32 indexed batchKey, uint32 chunk, address indexed user, uint256 amount);
+    event Claimed(address indexed user, uint256 amount);
 
     // ---- constructor ----
 
@@ -154,12 +165,13 @@ contract CascadeFrontDoor is CascadeBase {
         return slot == 0 ? 0 : open.redeems[slot - 1].amount;
     }
 
-    /// Due by time, either list at its limit, or full by value (no room for another minimum
-    /// deposit; written without subtraction so a lowered maxBatchValue cannot underflow it).
+    /// Due by time, either list at its limit, or full by value: at or over maxBatchValue (which may
+    /// have been lowered below the total), or with no room left for another minimum deposit.
     function canClose() public view returns (bool) {
         // forge-lint: disable-next-line(block-timestamp)
         return block.timestamp >= uint256(open.start) + batchInterval || open.deposits.length >= maxDeposits
-            || open.redeems.length >= maxRedeems || open.totalDeposits + minDeposit > maxBatchValue;
+            || open.redeems.length >= maxRedeems || open.totalDeposits >= maxBatchValue
+            || maxBatchValue - open.totalDeposits < minDeposit;
     }
 
     // ---- deposits ----
@@ -231,6 +243,7 @@ contract CascadeFrontDoor is CascadeBase {
                 feeCredit[msg.sender] -= fee;
                 totalFeeCredit -= fee;
                 open.feePot += fee;
+                emit FeeCreditSpent(msg.sender, fee);
             } else {
                 revert WrongFee();
             }
@@ -261,6 +274,53 @@ contract CascadeFrontDoor is CascadeBase {
             return;
         }
         _closeBatch(open.feePot + msg.value);
+    }
+
+    // ---- payouts in ----
+
+    /// Credits one PAYOUTS chunk from the vault, whose tokens the adapter transferred before the
+    /// call. Each `(batchKey, chunk)` is credited once; an empty chunk is accepted and marked
+    /// delivered. Works while paused: the tokens are already here.
+    function onBridgeMessage(uint64 sourceChain, address sender, bytes calldata message, uint256 amount)
+        external
+        payable
+        nonReentrant
+    {
+        _requireBridge();
+        if (sourceChain != vaultChain || sender != vault) revert UnknownPeer();
+        if (msg.value != 0) revert ValueMismatch();
+        (bytes32 batchKey, uint32 chunk, CascadeMessages.Entry[] memory payouts) =
+            CascadeMessages.decodePayouts(message);
+        uint256 sum;
+        for (uint256 i; i < payouts.length; ++i) {
+            sum += payouts[i].amount;
+        }
+        if (sum != amount) revert AmountMismatch();
+        // the open batch's deposits and earlier credits are not this chunk's tokens
+        if (asset.balanceOf(address(this)) < open.totalDeposits + totalClaimable + amount) {
+            revert TokensNotReceived();
+        }
+        if (delivered[batchKey][chunk]) revert DuplicatePayouts();
+
+        delivered[batchKey][chunk] = true;
+        for (uint256 i; i < payouts.length; ++i) {
+            CascadeMessages.Entry memory p = payouts[i];
+            claimable[p.user] += p.amount;
+            emit PayoutReceived(batchKey, chunk, p.user, p.amount);
+        }
+        totalClaimable += amount;
+        uint256 forwarded = netForwarded;
+        netForwarded = forwarded > amount ? forwarded - amount : 0;
+    }
+
+    /// Sends the caller everything credited to them; works while paused.
+    function claim() external nonReentrant {
+        uint256 amount = claimable[msg.sender];
+        if (amount == 0) revert NothingToClaim();
+        claimable[msg.sender] = 0;
+        totalClaimable -= amount;
+        asset.safeTransfer(msg.sender, amount);
+        emit Claimed(msg.sender, amount);
     }
 
     // ---- admin ----

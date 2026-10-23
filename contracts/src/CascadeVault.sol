@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeBase} from "./CascadeBase.sol";
 import {ICascadeBridge} from "./interfaces/ICascadeBridge.sol";
 import {ISTAKING_ADDRESS, IStaking} from "./interfaces/IStaking.sol";
@@ -83,15 +84,34 @@ contract CascadeVault is ERC20, CascadeBase {
     error CapExceeded();
     error InvalidParameter();
     error DirectTransferNotAllowed();
+    error HotkeyKnown();
+    error TooManyHotkeys();
+    error UnknownHotkey();
+    error HotkeyInUse();
+    error HotkeyHasRewards();
+    error NotKeeper();
+    error NothingToStake();
+    error ZeroAmount();
+    error TransferFailed();
 
     // ---- events ----
 
     event StakeHotkeySet(bytes32 indexed hotkey);
+    event HotkeyAdded(bytes32 indexed hotkey);
+    /// `unclaimed` is the hotkey's unclaimed root reward at removal, 18-decimal.
+    event HotkeyRemoved(bytes32 indexed hotkey, uint256 unclaimed, bool forfeit);
+    /// `moved` is the destination's measured stake increase, in rao.
+    event StakeMoved(bytes32 indexed from, bytes32 indexed to, uint256 rao, uint256 moved);
+    /// `measured` is the stake hotkey's measured stake increase, in rao.
+    event Staked(bytes32 indexed hotkey, uint256 rao, uint256 measured);
+    /// `receivedWei` is the vault's measured balance increase.
+    event Unstaked(bytes32 indexed hotkey, uint256 wantRao, uint256 receivedWei);
     event FrontDoorProposed(uint64 indexed chain, address indexed addr, uint64 readyAt);
     event FrontDoorActivated(uint64 indexed chain, address indexed addr);
     event FrontDoorProposalCancelled(uint64 indexed chain, address indexed addr);
     event FrontDoorRemoved(uint64 indexed chain, address indexed addr);
     event DepositedDirect(address indexed user, uint256 assets, uint256 shares);
+    event RedeemedDirect(address indexed user, uint256 shares, uint256 assets);
     event FrontDoorRedeemsAllowed(address indexed user);
     event KeeperSet(address keeper);
     event ClaimGasSet(uint256 claimGasRequired);
@@ -205,6 +225,98 @@ contract CascadeVault is ERC20, CascadeBase {
         return CascadeMath.price(totalAssets(), totalSupply());
     }
 
+    function hotkeyCount() external view returns (uint256) {
+        return hotkeys.length;
+    }
+
+    /// The chain's minimum stake operation, in rao; the owner-set fallback if the read fails.
+    function minStakeRao() public view returns (uint256) {
+        try STAKING.getDefaultMinStake{gas: 100_000}() returns (uint256 v) {
+            return v;
+        } catch {
+            return fallbackMinStakeRao;
+        }
+    }
+
+    /// The chain's minimum nominator position, in rao; the owner-set fallback if the read fails.
+    function minRemainRao() public view returns (uint256) {
+        try STAKING.getNominatorMinRequiredStake{gas: 100_000}() returns (uint256 v) {
+            return v;
+        } catch {
+            return fallbackMinRemainRao;
+        }
+    }
+
+    // ---- stake and hotkeys ----
+
+    /// Adds `h` to the set without routing new stake to it (e.g. to claim a forfeited hotkey's rewards).
+    function addHotkey(bytes32 h) external onlyOwner {
+        _addHotkey(h);
+    }
+
+    function setStakeHotkey(bytes32 h) external onlyOwner {
+        if (!isHotkey[h]) _addHotkey(h);
+        stakeHotkey = h;
+        emit StakeHotkeySet(h);
+    }
+
+    /// Moves root stake from `from` onto the stake hotkey (root to root, fee-free).
+    function moveStake(bytes32 from, uint256 rao) external onlyOwner {
+        if (!isHotkey[from]) revert UnknownHotkey();
+        if (from == stakeHotkey) revert HotkeyInUse();
+        _moveStake(from, rao);
+    }
+
+    /// Clears any stake left on `h` first, so dust parked on it cannot block removal. Unless
+    /// `forfeit`, refuses while `h` has unclaimed rewards above the dust allowance; forfeited
+    /// rewards stay owed on chain and can be claimed after re-adding `h`.
+    function removeHotkey(bytes32 h, bool forfeit) external onlyOwner {
+        if (!isHotkey[h]) revert UnknownHotkey();
+        if (h == stakeHotkey) revert HotkeyInUse();
+
+        uint256 leftover = _stakeOf(h);
+        if (leftover != 0) {
+            if (leftover < minStakeRao()) {
+                // A move below the minimum would be refused; the TAO becomes idle balance.
+                _unstaking = true;
+                _removeStake(h, leftover, true);
+                _unstaking = false;
+            } else {
+                _moveStake(h, leftover);
+            }
+        }
+
+        uint256 unclaimed = STAKING.getUnclaimedRootTaoByHotkey(coldkey, h);
+        if (!forfeit && unclaimed > hotkeyDustRao * RAO) revert HotkeyHasRewards();
+
+        uint256 last = hotkeys.length - 1;
+        for (uint256 i; i <= last; ++i) {
+            if (hotkeys[i] == h) {
+                hotkeys[i] = hotkeys[last];
+                break;
+            }
+        }
+        hotkeys.pop();
+        isHotkey[h] = false;
+        emit HotkeyRemoved(h, unclaimed, forfeit);
+    }
+
+    /// Stakes the liquid balance not reserved for queued payouts or the existential deposit. Keeper
+    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake.
+    function stakeIdle() external whenNotPaused nonReentrant {
+        // forge-lint: disable-next-line(block-timestamp)
+        if (msg.sender != keeper && block.timestamp < lastStakeAt + KEEPER_FALLBACK) revert NotKeeper();
+        uint256 rao = _available() / RAO;
+        if (rao < minStakeRao()) revert NothingToStake();
+
+        bytes32 h = stakeHotkey;
+        uint256 before = _stakeOf(h);
+        STAKING.addStake(h, rao, NETUID_ROOT);
+        uint256 measured = _sub0(_stakeOf(h), before);
+        lastStakeAt = uint64(block.timestamp);
+        emit Staked(h, rao, measured);
+    }
+
     // ---- direct access ----
 
     function depositDirect() external payable whenNotPaused nonReentrant {
@@ -223,6 +335,20 @@ contract CascadeVault is ERC20, CascadeBase {
     function allowFrontDoorRedeems() external {
         directOnly[msg.sender] = false;
         emit FrontDoorRedeemsAllowed(msg.sender);
+    }
+
+    /// Burns `shares` and pays their value to the caller, unstaking any shortfall. No outflow cap:
+    /// the share owner signs on this chain, and root unstaking is 1:1 and fee-free.
+    function redeemDirect(uint256 shares) external whenNotPaused nonReentrant {
+        if (shares == 0) revert ZeroAmount();
+        uint256 out = CascadeMath.assetsForRedeem(shares, totalAssets(), totalSupply());
+        out -= out % RAO;
+        _burn(msg.sender, shares);
+        uint256 available = _available();
+        if (available < out) _unstake(out - available);
+        (bool ok,) = msg.sender.call{value: out}("");
+        if (!ok) revert TransferFailed();
+        emit RedeemedDirect(msg.sender, shares, out);
     }
 
     // ---- admin: parameters ----
@@ -303,5 +429,64 @@ contract CascadeVault is ERC20, CascadeBase {
     /// a - b, floored at 0.
     function _sub0(uint256 a, uint256 b) internal pure returns (uint256) {
         return a > b ? a - b : 0;
+    }
+
+    /// The vault's root stake on `h`, in rao.
+    function _stakeOf(bytes32 h) internal view returns (uint256) {
+        return STAKING.getStake(h, coldkey, NETUID_ROOT);
+    }
+
+    /// Liquid balance above the existential reserve and queued payouts, floored at 0, in wei.
+    function _available() internal view returns (uint256) {
+        return _sub0(_sub0(address(this).balance, ED_RESERVE), pendingPayouts);
+    }
+
+    function _addHotkey(bytes32 h) internal {
+        if (h == bytes32(0)) revert ZeroHotkey();
+        if (isHotkey[h]) revert HotkeyKnown();
+        if (hotkeys.length >= MAX_HOTKEYS) revert TooManyHotkeys();
+        hotkeys.push(h);
+        isHotkey[h] = true;
+        emit HotkeyAdded(h);
+    }
+
+    function _moveStake(bytes32 from, uint256 rao) internal {
+        bytes32 to = stakeHotkey;
+        uint256 before = _stakeOf(to);
+        STAKING.moveStake(from, to, NETUID_ROOT, NETUID_ROOT, rao);
+        emit StakeMoved(from, to, rao, _sub0(_stakeOf(to), before));
+    }
+
+    /// Unstakes at least `shortfallWei` (when the stake allows), walking the stake hotkey first and
+    /// then the set in order. Rounds each request up to the chain's floors and exits a position fully
+    /// when the chain would sweep its remainder anyway. A precompile revert bubbles up; retry later.
+    function _unstake(uint256 shortfallWei) internal {
+        uint256 remaining = shortfallWei;
+        uint256 minStake = minStakeRao();
+        uint256 minRemain = minRemainRao();
+        bytes32 first = stakeHotkey;
+        uint256 n = hotkeys.length;
+        _unstaking = true;
+        // i == 0 is the stake hotkey; i >= 1 is hotkeys[i - 1], skipping the stake hotkey.
+        for (uint256 i; i <= n && remaining != 0; ++i) {
+            bytes32 h = i == 0 ? first : hotkeys[i - 1];
+            if (i != 0 && h == first) continue;
+            uint256 s = _stakeOf(h);
+            if (s == 0) continue;
+            uint256 want = Math.max(Math.ceilDiv(remaining, RAO), minStake);
+            uint256 received = _removeStake(h, want, want >= s || s - want < minRemain);
+            remaining -= Math.min(remaining, received);
+        }
+        _unstaking = false;
+    }
+
+    /// Removes `want` rao from `h` (or the whole position when `full`) and returns the measured
+    /// balance increase. The caller sets `_unstaking`.
+    function _removeStake(bytes32 h, uint256 want, bool full) internal returns (uint256 received) {
+        uint256 before = address(this).balance;
+        if (full) STAKING.removeStakeFull(h, NETUID_ROOT);
+        else STAKING.removeStake(h, want, NETUID_ROOT);
+        received = _sub0(address(this).balance, before);
+        emit Unstaked(h, want, received);
     }
 }

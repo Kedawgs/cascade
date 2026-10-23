@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {Vm} from "forge-std/Vm.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeBase} from "../../src/CascadeBase.sol";
@@ -353,6 +354,85 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         assertEq(fd.redeemOf(alice), 1e24);
         assertEq(alice.balance, 1 ether);
         assertEq(address(fd).balance, 1e14);
+    }
+
+    function test_requestRedeemCombinesCreditAndValue() public {
+        vm.prank(bob);
+        fd.creditRedeemFee{value: 0.5e14}(alice);
+
+        // half from credit, half as value
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.FeeCreditSpent(alice, 0.5e14);
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.RedeemRequested(1, alice, 1e24);
+        vm.prank(alice);
+        fd.requestRedeem{value: 0.5e14}(1e24);
+        assertEq(openPot(), 1e14);
+        assertEq(fd.feeCredit(alice), 0);
+        assertEq(fd.totalFeeCredit(), 0);
+        assertEq(alice.balance, 1 ether - 0.5e14);
+        assertEq(address(fd).balance, 1e14);
+        assertEthIdentity();
+
+        // without credit the whole fee is value, and no credit is spent
+        vm.recordLogs();
+        requestWithFee(carol, 1e24);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != CascadeFrontDoor.FeeCreditSpent.selector);
+        }
+        assertEq(openPot(), 2e14);
+        assertEthIdentity();
+    }
+
+    function test_requestRedeemCreditCoversPartOfRaisedFee() public {
+        vm.prank(bob);
+        fd.creditRedeemFee{value: 1e14}(alice);
+        vm.prank(owner);
+        fd.setRedeemRequestFee(2e14);
+
+        // credit 1e14 + value 1e14 = the raised fee
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.FeeCreditSpent(alice, 1e14);
+        vm.prank(alice);
+        fd.requestRedeem{value: 1e14}(1e24);
+        assertEq(openPot(), 2e14);
+        assertEq(fd.feeCredit(alice), 0);
+        assertEq(fd.totalFeeCredit(), 0);
+        assertEq(address(fd).balance, 2e14);
+        assertEthIdentity();
+    }
+
+    function test_requestRedeemValueMustBeFeeLessCredit() public {
+        vm.prank(bob);
+        fd.creditRedeemFee{value: 1e14}(alice);
+
+        // credit covers the fee, so any value is wrong
+        vm.prank(alice);
+        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
+        fd.requestRedeem{value: 1e14}(1e24);
+        vm.prank(alice);
+        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
+        fd.requestRedeem{value: 1}(1e24);
+
+        // part credit: value must be exactly the rest
+        vm.prank(bob);
+        fd.creditRedeemFee{value: 0.5e14}(carol);
+        vm.prank(carol);
+        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
+        fd.requestRedeem{value: 0.5e14 - 1}(1e24);
+        vm.prank(carol);
+        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
+        fd.requestRedeem{value: 1e14}(1e24);
+        vm.prank(carol);
+        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
+        fd.requestRedeem(1e24);
+
+        assertEq(fd.feeCredit(alice), 1e14);
+        assertEq(fd.feeCredit(carol), 0.5e14);
+        assertEq(fd.totalFeeCredit(), 1.5e14);
+        assertEq(openPot(), 0);
+        assertEthIdentity();
     }
 
     function test_creditNotSpendableByOthers() public {

@@ -1,34 +1,28 @@
-# Message to ForeverMoney (draft, 2026-10-22)
+# Message to ForeverMoney (draft, revised 2026-10-23)
 
-Send via their X account (@forevermoney_ai) or the contact on docs.forevermoney.ai. Keep it short; the
-questions are what matter.
+Most of the original questions are now answered from their public source and on-chain simulation
+(see `docs/forevermoney-probe.md`): `AlphaVault.withdrawLiquid` and `depositLiquid` are permissionless
+and 1:1 for TAO, and the Base pool has no sender allowlist. What is left is a courtesy heads-up and
+three operational questions. Send via @forevermoney_ai or the contact on docs.forevermoney.ai.
 
 ---
 
 Subject: Integrating ForeverMoney TAO into a staking vault on Bittensor EVM
 
-Hi — I'm building cascade.fi, a simple product that lets people on Base get root-staking exposure to
-TAO without a Bittensor wallet. The plan is a batching contract on Base that sends your TAO token over
-CCIP to a vault contract on Bittensor EVM, which stakes native TAO and tracks shares. Your bridge is
-the only rail that reaches Bittensor, so I'd like to build on it properly rather than reverse-engineer
-it. Four questions:
+Hi — I'm building cascade.fi, a product that gives people on Base root-staking exposure to TAO without
+a Bittensor wallet. Your TAO token over CCIP is the rail. From your public bridge-contracts repo I've
+confirmed that a contract can call `AlphaVault.withdrawLiquid` and `depositLiquid` directly, so the
+plan is: our Base contract sends your token plus our batch data to our own receiver on 964 through
+the CCIP router; the receiver unwraps via `withdrawLiquid` and stakes natively; payouts go back
+through `depositLiquid` and the router. We don't touch your gateways. Three questions:
 
-1. **Contract-level redeem.** Can a third-party contract on Bittensor EVM convert your CCIP TAO token
-   (0xC5b6…0256) into native TAO in a single call, and is that call permissionless? If so, which
-   contract and function (your gateway at 0xd5Fa…eD69?), and what does it need (approval, min
-   amount, any fee)?
+1. Any objection to that direct integration, or anything about `AlphaVault` you'd want an integrator
+   to know (planned migrations, pause policy, the `whenNotMigrating` gate on deposits)?
+2. Will you verify `AlphaVault` and the TAO `AlphaToken` on the Taostats explorer? We've matched the
+   deployed bytecode to the audit commit ourselves, but verified source is better for everyone's
+   auditors.
+3. How would an integrator hear ahead of time about pauses, migrations, or CCIP pool-limit changes?
 
-2. **Data with tokens.** Does your Base gateway let an integrator attach a data payload to the CCIP
-   message, so our vault learns who deposited? If not, is it fine for our contract to call the CCIP
-   router directly with your token (the Base pool appears to have no sender allowlist)?
-
-3. **Source.** Is the audited source at the Hackerbane review commit
-   (e80a4432fc0d58f1e7ab94180137aace7f4286d2) available, and will the gateway / AlphaVault contracts be
-   verified on the explorer? I'd rather integrate against verified code.
-
-4. **Operations.** How would a protocol integrator hear about pauses, upgrades or rate-limit changes
-   ahead of time? And are Ethereum or BNB pools for TAO on the roadmap?
-
-Happy to share the design doc and the vault's audit when it's done. Thanks.
+Happy to share our design doc and audit when it's done. Thanks.
 
 — Daniel, cascade.fi

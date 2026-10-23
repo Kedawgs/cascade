@@ -1,100 +1,119 @@
-# Cascade architecture (v1 draft)
+# Cascade architecture (v2)
 
-Cascade lets someone get staked-TAO exposure without a Bittensor wallet and without
-knowing what alpha tokens are. They deposit from a normal wallet, see one balance,
-and can check at any time that their TAO really is staked.
+Cascade lets someone get staked-TAO exposure without a Bittensor wallet and without knowing what
+alpha tokens are. They deposit from a normal wallet, see one balance, and can check at any time
+that their TAO really is staked.
 
-Background research: `reports/Cascade subnet index vault.md`.
+Design: `docs/superpowers/specs/2026-10-21-cascade-v2-vault-on-bittensor-design.md`. Contract
+details, operator notes and the pre-mainnet checklist: `contracts/README.md`. Research:
+`reports/Cascade v2 Bittensor vault rails.md` (rails and chain behaviour) and
+`reports/Cascade subnet index vault.md` (background).
 
-## Product decisions so far
+## Product decisions
 
-- **Plain root staking only.** Deposits are staked as TAO on Bittensor's root
-  (netuid 0). No subnet picking, no alpha swaps. Since Root Reborn (Aug 2026) root
-  rewards accrue from validator baskets and are claimed back as root stake.
-- **Transparency is the product.** Home screen shows the balance plus a live
-  on-chain check that it is all staked; each deposit has a step-by-step trail with
-  a receipt per step.
-- **Security first.** Small immutable contracts, no upgrade proxies, caps, a
-  guardian that can only pause, admin behind a timelock.
-- **Runs on its own.** Every routine action (close epoch, settle, stake, claim
-  rewards) is a permissionless function. The team's bot is just the most reliable
-  caller.
-- **Multichain in the app, single route in the contracts.** Contracts only know
-  one route: Base <-> Bittensor. Deposits from Ethereum / BNB / Polygon hop to Base
-  first through an established bridge aggregator inside the app.
+- **Plain root staking only.** Deposits are staked as TAO on Bittensor's root (netuid 0). No
+  subnet picking, no alpha swaps. Since Root Reborn (Aug 2026) root rewards accrue from validator
+  baskets and are claimed back as root stake.
+- **Transparency is the product.** The home screen shows the balance plus a live on-chain check that
+  it is all staked; each deposit has a step-by-step trail with a receipt per step. Shares and stake
+  now live in one contract, so the check is one read on one chain.
+- **Security first.** Small immutable contracts, no upgrade proxies, caps, a guardian that can only
+  stop flows, and admin behind a timelock (48 hours in the beta). The team cannot move user funds
+  instantly: a new front door or bridge is announced on-chain 7 days ahead.
+- **Runs on its own.** Closing batches, sending payouts and re-executing bridge messages are
+  permissionless. Staking idle TAO and claiming rewards are timed by a keeper; if it has not acted
+  for 7 days, anyone may. The team's bot is just the most reliable caller.
+- **Base only, in the contracts.** ForeverMoney's bridged TAO, the only TAO that CCIP carries to
+  Bittensor EVM, exists only on Base and Robinhood Chain. The first front door is on Base; Robinhood
+  Chain is a possible second. Users on Ethereum, BNB or Polygon bridge USDC to Base inside the app.
+- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base, not to the
+  contracts' limits.
+- **csTAO cannot be transferred in v2.** That is what makes "the address that deposited controls the
+  shares" true on both chains.
+- **A small anti-spam fee on withdrawal requests** (about $0.30 in ETH; the app can pre-pay it).
+  Without it, anyone could fill every batch with junk requests for cents.
+- **Rewards vest over 7 days,** so the share price rises smoothly instead of jumping at each claim.
+- **A withdrawal takes about two days** end to end: batch interval, a 24-hour safety delay, bridge.
 
 ## Money flow
 
 ```
  user wallet (any chain)
-   |  app routes USDC -> TAO on Base (aggregator / Aerodrome), user signs
+   |  app routes USDC -> ForeverMoney's TAO on Base (DEX swap), user signs
    v
- CascadeVault (Base)            holds TAO waiting to cross, issues csTAO shares
-   |  closeEpoch(): one batched bridge transfer + message
+ CascadeFrontDoor (Base)        collects deposits and redeem requests into one batch
+   |  closeBatch(): tokens + BATCH message naming each user
    v
- bridge adapter (CCIP planned; MockBridge for local dev)
+ Base adapter -> CCIP -> Bittensor adapter    (ForeverMoney's token -> native TAO)
    v
- StakeEngine (Bittensor EVM)    owns the root stake via the staking precompile 0x...0805
-   |  settleEpoch(): prices the epoch from its own on-chain stake,
-   |  sends redemption TAO + a price message back
+ CascadeVault (Bittensor EVM)   holds the root stake AND the csTAO balances
+   |  delivery: one price per batch; mint for deposits, burn for redeems, queue payouts
+   |  after 24 h: processPayouts(): TAO + PAYOUTS message, in chunks
    v
- CascadeVault (Base)            mints shares for depositors, pays redeemers
+ Bittensor adapter -> CCIP -> Base adapter    (native TAO -> ForeverMoney's token)
+   v
+ CascadeFrontDoor (Base)        credits each user; user claims; app swaps to USDC
 ```
+
+v1 kept the share balances on Base and only the stake on Bittensor. The Base vault could not see
+the stake, so it had to trust a number reported across the bridge, with price bounds, flagging, an
+owner review step and a one-batch-in-flight rule; a lost message froze every later batch. v2 moves
+the accounting next to the stake. Nothing is estimated, nothing is flagged, batches are independent,
+and a lost message affects only its own batch.
+
+The front door is thin: it batches, forwards each user's address, and pays out what the vault sends.
+Bittensor-native users (and EOAs with TAO for gas on chain 964) can also deposit and redeem directly
+on the vault, which is the exit if a front door disappears. Smart-wallet users on Base rely on the
+front door; a user-registered recovery address is planned for v2.1.
+
+The bridge is wrapped in replaceable, immutable adapters. CCIP delivers ForeverMoney's ERC-20 claim
+token, not native TAO, and only ForeverMoney's contracts convert it, so the adapter is where that
+dependency, and every other outside change, lands.
 
 ### Why the vault is denominated in TAO, not USDC
 
-The vault's asset is bridged TAO on Base. USDC is converted to TAO in the user's own
-transaction before it reaches the vault. That means the share price only ever moves
-because of staking rewards, so:
+The vault's asset is TAO. USDC is converted to ForeverMoney's TAO in the user's own transaction on
+Base before it reaches the front door, and back after the payout is claimed. So the share price only
+moves because of staking rewards:
 
-- no USD price oracle is needed anywhere in the contracts,
-- the share price should only go up, which gives a simple, strong safety check:
-  any settlement that lowers the price, or raises it faster than a capped yearly
-  rate, is flagged and pauses the vault instead of being applied.
+- no USD price oracle is needed anywhere in the contracts;
+- the price should only go up, which the invariant suite checks (the one exception: cancelling a
+  payout batch can lower it slightly, never below that batch's own price). If it ever fell below
+  half the launch price, the vault would refuse new batches and direct deposits until recapitalised.
 
-### Pricing comes from the engine, checked by the vault
+## How pricing works
 
-The engine is the only place that can see the real stake, so it reports the
-pre-deposit asset value (`assetsBefore`) for each epoch. Both sides compute shares and
-redemption amounts with the same library (`CascadeMath`), so the vault does not trust
-any share or payout number from the bridge, only `assetsBefore`, and that one number
-is bounded by the price-growth check.
+- **Assets are read, not reported.** `totalAssets` is the root stake across the vault's hotkeys plus
+  its liquid balance, minus a small reserve for the chain's existential deposit, minus payouts already
+  owed to queued batches, minus rewards still vesting.
+- **One price per batch.** When a batch arrives, the vault fixes assets (without the TAO that batch
+  brought) and share supply once, and prices every deposit and redeem in it at that price, rounded
+  in the vault's favour. A direct deposit is priced the same way, without its own value.
+- **Rewards are claimed separately and vest.** Claiming needs about 53M gas and can be refused by
+  the chain, so it is never part of pricing or delivery. The keeper claims (weekly, in practice);
+  each claim's measured gain vests linearly over 7 days. That stops someone depositing just before a
+  claim and redeeming just after to take a week of everyone's rewards. Unclaimed rewards are never
+  priced in: with weekly claims, at most about a week of yield (about 0.1%) is outside the price.
+- **Measure, never assume.** Around every precompile call that moves value, the vault measures the
+  balance or stake before and after. An unstake that delivers less than asked makes the exit revert
+  instead of paying from reserves.
 
-Deposits and redemptions in the same epoch are netted on the engine, so most
-withdrawals don't need an unstake at all.
+## Exit safety, in short
 
-### Epoch lifecycle
+A front door speaks for its users, so a rogue front door or adapter could try to burn every holder's
+shares. Four layers bound that:
 
-1. Users `requestDeposit` (TAO) or `requestRedeem` (shares, escrowed) during an epoch.
-   Requests can be cancelled until the epoch closes.
-2. After `epochDuration`, anyone calls `closeEpoch()` on Base. Pending deposits are
-   bridged with an `EpochRequest` message. Only one epoch can be in flight.
-3. On Bittensor the bridge delivers the message; the engine only records it.
-4. Anyone calls `settleEpoch()` on the engine: it computes `assetsBefore`, unstakes any
-   shortfall, sends redemption TAO back with an `EpochResult`, and stakes the rest.
-5. The vault checks the price bounds, mints shares, burns escrowed shares, and users
-   `claimShares` / `claimAssets` for that epoch.
+1. New front doors and bridges wait 7 days in public, and the guardian can veto them.
+2. Each front door may burn at most `max(20% of gross assets, 100 TAO)` per fixed 24-hour window.
+3. Nothing burned leaves for 24 hours; the guardian can hold a front door's payouts at once, and the
+   owner can cancel the batch and give the shares back.
+4. Pause holds everything that moves value, but never blocks cancels, claims or incoming payouts.
 
-## Trust and controls
+The rails sit outside this: ForeverMoney's 2-of-3 Safe, Chainlink's lane configuration and
+Bittensor's sudo key can each stop or change them with no delay. The README has the full honest
+statement, the soft spots, and what each outside party can do.
 
-| Piece | Who can do what |
-|---|---|
-| Vault / engine owner | A timelock (72h+ in production) controlled by a Safe. Can change caps, bridge, validator hotkey, guardian; can accept a flagged epoch after review. |
-| Guardian | Can pause. Cannot move funds. |
-| Bridge adapter | Only it can call `onBridgeMessage`. Must verify source chain + peer contract. |
-| Keepers | Nobody special. All routine functions are permissionless. |
-| Engine funds | Can only be staked, unstaked, or sent through the bridge to the vault. No arbitrary calls, no `transferStake`. |
+## Before mainnet
 
-## Open questions to settle before mainnet
-
-1. Can CCIP (ForeverMoney's TAO pool) deliver TAO plus a message to and from a contract
-   on Bittensor EVM, and what are the rate limits? Decides the production adapter.
-2. Units for root stake via `getStake(hotkey, coldkey, 0)` and `removeStake(..., 0)`
-   (assumed rao, 1 TAO = 1e9). Verify on testnet.
-3. Root unstake "too early" waiting periods for a contract coldkey.
-4. Bridged-TAO token decimals on Base (adapter scales to 18).
-5. Minimum-unstake rule: the engine never asks root for a partial unstake below 0.002 TAO
-   (subtensor's `DefaultMinStake`, which it rejects as `AmountTooLow`). Confirm the exact
-   rule, and the behaviour of `claim_root` with nothing to claim, against the real precompile
-   on testnet.
-6. Legal: jurisdictions, fee, US users.
+See the pre-mainnet checklist in `contracts/README.md`. First: ForeverMoney's conversion interface
+(the adapter spec waits on it) and a fork measurement of delivery gas. An audit is still required.

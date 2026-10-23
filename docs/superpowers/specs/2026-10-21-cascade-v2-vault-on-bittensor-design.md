@@ -1,5 +1,47 @@
 # Cascade contracts v2 — vault on Bittensor, front door on Base — design spec
 
+## As built (revision 6, 2026-10-22)
+
+The contracts on branch `contracts-v2` follow revision 5 below, except for these build rulings.
+Where they differ, the code and this list win. Contract-level detail is in `contracts/README.md`.
+
+1. **Short unstakes revert.** `_unstake` returns the unmet remainder; `redeemDirect` and
+   `processPayouts` revert `UnstakeShort()` if it is non-zero (no slack). A precompile that
+   under-delivers makes exits fail loudly instead of paying from `ED_RESERVE` or `pendingPayouts`.
+2. `redeemDirect` reverts `ZeroAmount` when the payout, floored to rao, is 0 (no burning shares for
+   nothing).
+3. A reward claim with a measured delta of 0 updates `lastClaimAt` and emits `RewardsClaimed(h, 0)`
+   but does not restart the vesting schedule.
+4. **Insolvency guard.** `onBridgeMessage` and `depositDirect` revert `VaultInsolvent()` when
+   `A * 2_000_000 < S`, i.e. the share price is below half the launch price (1e-6 wei per share
+   unit, which is 1 TAO per csTAO). This applies to every batch, redeem-only ones included. Recovery
+   is out of band (a substrate-side transfer to the vault's mirror address), then the failed delivery
+   is re-executed.
+5. `processPayouts` rounds the quoted bridge fee up to a whole rao before the ceiling check and the
+   pro-rata deduction, so the value sent is always whole rao (the chain floors EVM transfers).
+6. `moveStake` measures only the destination (`moved`); `StakeMoved` has one measured field.
+7. Front door `canClose()` full-by-value term: `totalDeposits >= maxBatchValue ||
+   maxBatchValue - totalDeposits < minDeposit`.
+8. The front door emits `FeeCreditSpent(user, amount)` when a redeem request is paid from credit.
+9. **Front-door replay record** is `delivered[bridge][keccak256(message)]` (per delivering adapter,
+   by message hash), not `delivered[batchKey][chunk]`. A rogue adapter can only occupy its own slots;
+   an early exact copy must be backed by tokens (so it can only spend surplus or donations) and
+   leaves the honest adapter its own slot. Every delivery emits
+   `PayoutsDelivered(batchKey, chunk, amount, bridge)`, including an empty one.
+10. Vault `LimitSet(bytes32 name, uint256 a, uint256 b)` uses the state-variable name as the label;
+    `setMessageLimits` emits two events. `maxTotalAssets` defaults to `1_000e18`. Front-door batch
+    ids start at 1. `setKeeper(address(0))` is allowed (fallback-only mode).
+11. The vault's `onBridgeMessage` checks `NotBridge` before the pause, with explicit
+    `_requireBridge(); _requireNotPaused();` calls.
+12. Test doubles: MockStaking's one-rao-short read applies to any credit into an empty position
+    (`addStake` and the `moveStake` destination); `removeStakeFull` honours `setUnstakeBlocked`;
+    MockBridge checks `destChain` (`UnknownDestination`).
+
+Naming: the guardian's `cancelProposal` below is two functions in the code,
+`cancelBridgeProposal` (both contracts) and `cancelFrontDoorProposal` (vault).
+
+---
+
 Revision 5 (2026-10-21), after the v2 research (`reports/Cascade v2 Bittensor vault rails.md`)
 and four builder checks (the last found nothing Critical; the per-task code reviews take over).
 Supersedes the v1 contract design (`2026-10-20-cascade-contracts-design.md`) for the vault half.

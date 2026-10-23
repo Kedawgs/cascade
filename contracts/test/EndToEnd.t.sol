@@ -199,6 +199,7 @@ contract EndToEndTest is Test {
         assertEq(vault.rootStakeRao(), 10_000_000_000);
         staking.setUnclaimed(vault.coldkey(), HK1, 1_000_000_000);
         vm.prank(keeper);
+        // claimRewards needs claimGasRequired (55M) left before the claim
         vault.claimRewards{gas: 60_000_000}(HK1);
         vm.warp(block.timestamp + 7 days);
         // 11_000_000_000 rao * 1e9 + ED - ED, nothing pending, nothing unvested
@@ -360,7 +361,7 @@ contract EndToEndTest is Test {
         assertEq(vault.balanceOf(alice), 1e27);
         assertEq(vault.pendingPayouts(), 0);
 
-        // alice's honest redeem through fd, on fd's own window: A = 1_000e18, S = 1e27, allowance 200e18:
+        // alice's honest redeem through fd: A = 1_000e18, S = 1e27, allowance 200e18:
         // 1e26 * (1_000e18 + 1) / (1e27 + 1e6) = 100e18
         requestVia(fd, alice, 1e26);
         bytes32 k2 = keyOf(BASE, address(fd), 2, noEntries(), entries1(alice, 1e26));
@@ -418,6 +419,49 @@ contract EndToEndTest is Test {
         assertEq(bridge.failedCount(), 0);
         // funded once: the retry did not create the value again
         assertEq(address(bridge).balance, FEE);
+    }
+
+    function test_failedPayoutDeliveryIsRetried() public {
+        // A = 0, S = 0: 10e18 * 1e6 = 1e25, left liquid
+        depositVia(fd, alice, 10e18);
+        close(fd);
+        // A = 10e18, S = 1e25: 5e24 * (10e18 + 1) / (1e25 + 1e6) = 5e18
+        requestVia(fd, alice, 5e24);
+        bytes32 key = keyOf(BASE, address(fd), 2, noEntries(), entries1(alice, 5e24));
+        vm.recordLogs();
+        close(fd);
+        CascadeMessages.Payout[] memory list = redeemedList(vm.getRecordedLogs(), key);
+        assertPayout(list, alice, 5e24, 5e18);
+
+        // the vault sends the chunk; the rail fails its delivery to Base (deliveries 0 and 1 were the batches)
+        vm.warp(block.timestamp + 24 hours);
+        bridge.failNext();
+        vm.recordLogs();
+        vault.processPayouts(key, list, 50);
+        (uint256 n, uint256 index, bytes memory reason) = failures(vm.getRecordedLogs());
+        assertEq(n, 1);
+        assertEq(index, 2);
+        assertEq(reason.length, 0);
+        assertEq(bridge.failedCount(), 1);
+        // Bittensor: the payout left (net + fee = 5e18)
+        assertEq(vault.pendingPayouts(), 0);
+        assertEq(address(vault).balance, ED + 5e18);
+        // Base: nothing arrived
+        assertEq(tao.balanceOf(address(fd)), 0);
+        assertEq(fd.claimable(alice), 0);
+        assertEq(fd.netForwarded(), 10e18);
+
+        // the retry mints once and credits alice: 5e18 - 1e15 fee
+        assertTrue(bridge.retryNext());
+        assertEq(bridge.failedCount(), 0);
+        assertEq(tao.balanceOf(address(fd)), 4_999e15);
+        assertEq(fd.claimable(alice), 4_999e15);
+        // 10e18 - 4_999e15
+        assertEq(fd.netForwarded(), 5_001e15);
+        vm.prank(alice);
+        fd.claim();
+        assertEq(tao.balanceOf(alice), 1_000e18 - 10e18 + 4_999e15);
+        assertEq(tao.balanceOf(address(fd)), 0);
     }
 
     function test_deliveryGasCapCatchesRegression() public {

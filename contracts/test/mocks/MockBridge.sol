@@ -28,6 +28,7 @@ contract MockBridge is ICascadeBridge {
     }
 
     error UnknownSender();
+    error UnknownDestination();
     error InsufficientFee();
     error RateLimited();
     error NothingQueued();
@@ -94,11 +95,13 @@ contract MockBridge is ICascadeBridge {
         return fee;
     }
 
-    /// The source chain is the sender's connected chain. Native: msg.value covers amount + fee.
-    /// ERC-20: msg.value covers the fee and `amount` tokens are pulled from the sender.
+    /// The source chain is the sender's connected chain; the recipient must be connected on
+    /// `destChain`. Native: msg.value covers amount + fee. ERC-20: msg.value covers the fee and
+    /// `amount` tokens are pulled from the sender.
     function send(uint64 destChain, address recipient, bytes calldata message, uint256 amount) external payable {
         uint64 sourceChain = chainOf[msg.sender];
         if (sourceChain == 0) revert UnknownSender();
+        if (destChain == 0 || chainOf[recipient] != destChain) revert UnknownDestination();
         bool native = nativeOf[sourceChain];
         if (msg.value < (native ? amount + fee : fee)) revert InsufficientFee();
         if (amount > maxMessageValue) revert RateLimited();

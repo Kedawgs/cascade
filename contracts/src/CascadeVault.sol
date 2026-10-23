@@ -94,6 +94,7 @@ contract CascadeVault is ERC20, CascadeBase {
     error ZeroAmount();
     error TransferFailed();
     error UnstakeShort();
+    error InsufficientGas();
 
     // ---- events ----
 
@@ -107,6 +108,8 @@ contract CascadeVault is ERC20, CascadeBase {
     event Staked(bytes32 indexed hotkey, uint256 rao, uint256 measured);
     /// `receivedWei` is the vault's measured balance increase.
     event Unstaked(bytes32 indexed hotkey, uint256 wantRao, uint256 receivedWei);
+    /// `deltaRao` is the hotkey's measured stake increase from the claim.
+    event RewardsClaimed(bytes32 indexed hotkey, uint256 deltaRao);
     event FrontDoorProposed(uint64 indexed chain, address indexed addr, uint64 readyAt);
     event FrontDoorActivated(uint64 indexed chain, address indexed addr);
     event FrontDoorProposalCancelled(uint64 indexed chain, address indexed addr);
@@ -316,6 +319,27 @@ contract CascadeVault is ERC20, CascadeBase {
         uint256 measured = _sub0(_stakeOf(h), before);
         lastStakeAt = uint64(block.timestamp);
         emit Staked(h, rao, measured);
+    }
+
+    // ---- rewards ----
+
+    /// Claims `hotkey`'s root rewards into stake and vests the measured increase over REWARD_VESTING,
+    /// on top of what is still unvested. Keeper only, or anyone once KEEPER_FALLBACK has passed since
+    /// this hotkey's last claim. Works while paused. The chain can refuse a claim by burning the
+    /// forwarded gas; the revert bubbles up and nothing changes.
+    function claimRewards(bytes32 hotkey) external nonReentrant {
+        if (!isHotkey[hotkey]) revert UnknownHotkey();
+        // forge-lint: disable-next-line(block-timestamp)
+        if (msg.sender != keeper && block.timestamp < lastClaimAt[hotkey] + KEEPER_FALLBACK) revert NotKeeper();
+        if (gasleft() < claimGasRequired) revert InsufficientGas();
+
+        uint256 before = _stakeOf(hotkey);
+        STAKING.claimRootWithHotkey(hotkey);
+        uint256 delta = _sub0(_stakeOf(hotkey), before);
+        lastClaimAt[hotkey] = uint64(block.timestamp);
+        vestingAmount = unvestedRewards() + delta * RAO;
+        vestingStart = uint64(block.timestamp);
+        emit RewardsClaimed(hotkey, delta);
     }
 
     // ---- direct access ----

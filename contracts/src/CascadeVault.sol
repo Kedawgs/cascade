@@ -521,9 +521,10 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     /// Sends the next chunk of batch `key` to its front door through the primary bridge, once
     /// payoutDelay has passed. `payouts` is the batch's full ordered list, rebuilt from its
-    /// DepositBounced and Redeemed events in log order. Permissionless. Each entry pays its share of the
-    /// bridge fee and is floored to rao; an entry left with nothing (every entry when the chunk is worth
-    /// no more than the fee) is PayoutDust and stays in the vault. No staking here.
+    /// DepositBounced and Redeemed events in log order. Permissionless; only the keeper's `maxEntries`
+    /// counts, anyone else sends the largest chunk that fits. Each entry pays its share of the bridge
+    /// fee and is floored to rao; an entry left with nothing (every entry when the chunk is worth no
+    /// more than the fee) is PayoutDust and stays in the vault. No staking here.
     function processPayouts(bytes32 key, CascadeMessages.Payout[] calldata payouts, uint32 maxEntries)
         external
         whenNotPaused
@@ -800,17 +801,21 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Payout step 1: from `start`, the next entry always (even above maxMessageValue), then entries in
-    /// order while fewer than max(maxEntries, minChunk), capped at MAX_ENTRIES, are taken and the sum
-    /// stays within maxMessageValue. A tail of fewer than minChunk entries that would be left behind is
-    /// taken too when the whole chunk still fits within maxMessageValue and MAX_ENTRIES, so a tail never
-    /// pays a message fee alone. Returns them at their gross value, with their sum.
+    /// order while fewer than the limit are taken and the sum stays within maxMessageValue. The limit
+    /// is max(maxEntries, minChunk), capped at MAX_ENTRIES, for the keeper, and MAX_ENTRIES for anyone
+    /// else (a stranger cannot split a batch into small chunks that each pay a fee). A tail of fewer
+    /// than minChunk entries that would be left behind is taken too when the whole chunk still fits
+    /// within maxMessageValue and MAX_ENTRIES, so a tail never pays a message fee alone. Returns them at
+    /// their gross value, with their sum.
     function _takeChunk(CascadeMessages.Payout[] calldata payouts, uint256 start, uint256 maxEntries)
         internal
         view
         returns (CascadeMessages.Entry[] memory entries, uint256 sum)
     {
         uint256 n = payouts.length;
-        uint256 limit = Math.min(Math.max(maxEntries, minChunk), CascadeMessages.MAX_ENTRIES);
+        uint256 limit = msg.sender == keeper
+            ? Math.min(Math.max(maxEntries, minChunk), CascadeMessages.MAX_ENTRIES)
+            : CascadeMessages.MAX_ENTRIES;
         uint256 end = Math.min(start + limit, n);
         uint256 cap = maxMessageValue;
         uint256 i = start;

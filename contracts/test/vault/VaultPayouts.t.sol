@@ -411,15 +411,53 @@ contract VaultPayoutsTest is VaultTestBase {
         vm.prank(owner);
         vault.setMessageLimits(120e18, 120e18, 2);
 
-        // maxEntries 1 is raised to minChunk 2
+        // the keeper's maxEntries 1 is raised to minChunk 2
         vm.expectEmit(address(vault));
         emit CascadeVault.PayoutChunkSent(key, 0, 2, 120e18, 119_999e15, 1e15);
+        vm.prank(keeper);
         process(key, list, 1);
         assertBatch(key, 2, 1, 60e18);
 
         // only one entry is left
         vm.expectEmit(address(vault));
         emit CascadeVault.PayoutChunkSent(key, 1, 1, 60e18, 59_999e15, 1e15);
+        vm.prank(keeper);
+        process(key, list, 1);
+        assertDeleted(key);
+    }
+
+    function test_processPayouts_strangerSendsLargestChunk() public {
+        (bytes32 key, CascadeMessages.Payout[] memory list) = queueThree();
+        vm.prank(owner);
+        vault.setMessageLimits(2_000e18, 4_000e18, 1);
+
+        // a stranger's maxEntries 0 (minChunk 1 would have allowed a chunk of 1) is ignored: all three
+        // entries fit within 4_000e18, so they go in one chunk. Each pays ceil(60e18 * 1e15 / 180e18) =
+        // 333_333_333_333_334 and floors to 59_999_666_666_000_000_000; net = 3 of those
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutChunkSent(key, 0, 3, 180e18, 179_998_999_998_000_000_000, 1e15);
+        vm.prank(makeAddr("stranger"));
+        process(key, list, 0);
+        assertDeleted(key);
+        assertEq(bridge.sendCount(), 2);
+    }
+
+    function test_processPayouts_keeperChoosesChunkSize() public {
+        (bytes32 key, CascadeMessages.Payout[] memory list) = queueThree();
+        vm.prank(owner);
+        vault.setMessageLimits(2_000e18, 4_000e18, 1);
+
+        // the keeper asks for 1 entry (minChunk 1) and gets 1
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutChunkSent(key, 0, 1, 60e18, 59_999e15, 1e15);
+        vm.prank(keeper);
+        process(key, list, 1);
+        assertBatch(key, 1, 1, 120e18);
+
+        // a stranger asking for 1 gets the rest: ceil(60e18 * 1e15 / 120e18) = 5e14 each
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutChunkSent(key, 1, 2, 120e18, 119_999e15, 1e15);
+        vm.prank(makeAddr("stranger"));
         process(key, list, 1);
         assertDeleted(key);
     }
@@ -427,11 +465,12 @@ contract VaultPayoutsTest is VaultTestBase {
     function test_processPayouts_shortTailFoldedIntoChunk() public {
         (bytes32 key, CascadeMessages.Payout[] memory list) = queueEleven();
 
-        // maxEntries 10 (= minChunk) would leave one entry, fewer than minChunk; it fits within 4_000e18
-        // and MAX_ENTRIES, so all 11 go in one chunk. Each pays ceil(1e18 * 1e15 / 11e18) =
-        // 90_909_090_909_091 and floors to 999_909_090_000_000_000; net = 11 of those
+        // the keeper's maxEntries 10 (= minChunk) would leave one entry, fewer than minChunk; it fits
+        // within 4_000e18 and MAX_ENTRIES, so all 11 go in one chunk. Each pays
+        // ceil(1e18 * 1e15 / 11e18) = 90_909_090_909_091 and floors to 999_909_090_000_000_000; net = 11 of those
         vm.expectEmit(address(vault));
         emit CascadeVault.PayoutChunkSent(key, 0, 11, 11e18, 10_998_999_990_000_000_000, 1e15);
+        vm.prank(keeper);
         process(key, list, 10);
 
         assertDeleted(key);
@@ -449,6 +488,7 @@ contract VaultPayoutsTest is VaultTestBase {
         // Each pays ceil(1e18 * 1e15 / 10e18) = 1e14
         vm.expectEmit(address(vault));
         emit CascadeVault.PayoutChunkSent(key, 0, 10, 10e18, 9_999e15, 1e15);
+        vm.prank(keeper);
         process(key, list, 10);
         assertBatch(key, 10, 1, 1e18);
 

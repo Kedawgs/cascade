@@ -295,7 +295,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         if (msg.value != 0) revert ValueMismatch();
         (bytes32 batchKey, uint32 chunk, CascadeMessages.Entry[] memory payouts) =
             CascadeMessages.decodePayouts(message);
-        uint256 sum;
+        uint256 sum = 0;
         for (uint256 i; i < payouts.length; ++i) {
             sum += payouts[i].amount;
         }

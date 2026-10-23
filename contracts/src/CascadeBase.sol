@@ -31,7 +31,7 @@ abstract contract CascadeBase is Ownable2Step, Pausable, ReentrancyGuard {
     error PrimaryBridgeDisabled();
     error RenounceDisabled();
 
-    event GuardianSet(address guardian);
+    event GuardianSet(address indexed guardian);
     event GuardianProposed(address indexed guardian, uint64 readyAt);
     event GuardianProposalCancelled(address indexed guardian);
     event BridgeProposed(address indexed bridge, uint64 readyAt);
@@ -95,6 +95,7 @@ abstract contract CascadeBase is Ownable2Step, Pausable, ReentrancyGuard {
     function activateBridge(address bridge) external onlyOwner {
         uint64 proposedAt = bridgeProposedAt[bridge];
         if (proposedAt == 0) revert NoProposal();
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp < uint256(proposedAt) + REGISTRY_DELAY) revert NotReady();
         delete bridgeProposedAt[bridge];
         bridgeEnabled[bridge] = true;

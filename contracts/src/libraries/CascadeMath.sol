@@ -3,10 +3,9 @@ pragma solidity 0.8.24;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @notice Share pricing shared by the vault (Base) and the engine (Bittensor) so both sides
-/// compute identical numbers from the same inputs. Uses the OpenZeppelin ERC-4626 virtual
-/// offset defence against donation / inflation attacks. All results round down, in favour
-/// of the vault.
+/// @notice Share pricing for the vault on Bittensor EVM (front doors never price). Uses the
+/// OpenZeppelin ERC-4626 virtual offset defence against donation / inflation attacks: 1e6
+/// virtual shares and 1 wei of virtual assets. All results round down, in favour of the vault.
 library CascadeMath {
     /// Shares carry 6 more decimals than the asset.
     uint256 internal constant VIRTUAL_SHARES = 1e6;

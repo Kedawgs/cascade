@@ -156,7 +156,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     event DepositedDirect(address indexed user, uint256 assets, uint256 shares);
     event RedeemedDirect(address indexed user, uint256 shares, uint256 assets);
     event FrontDoorRedeemsAllowed(address indexed user);
-    event KeeperSet(address keeper);
+    event KeeperSet(address indexed keeper);
     event ClaimGasSet(uint256 claimGasRequired);
     event LimitSet(bytes32 indexed name, uint256 a, uint256 b);
     event BatchDelivered(
@@ -237,6 +237,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         bytes32 id = peerId(chain, addr);
         uint64 proposedAt = frontDoorProposedAt[id];
         if (proposedAt == 0) revert NoProposal();
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp < uint256(proposedAt) + REGISTRY_DELAY) revert NotReady();
         delete frontDoorProposedAt[id];
         frontDoorActive[id] = true;
@@ -478,7 +479,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         (uint64 batchId, CascadeMessages.Entry[] memory deposits, CascadeMessages.Entry[] memory redeems) =
             CascadeMessages.decodeBatch(message);
         {
-            uint256 sum;
+            uint256 sum = 0;
             for (uint256 i; i < deposits.length; ++i) {
                 sum += deposits[i].amount;
             }
@@ -758,7 +759,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         b = payoutBatches[key];
         if (b.cursor >= b.count) revert NotPending();
         if (payouts.length != b.count) revert PayoutsMismatch();
-        bytes32 h;
+        bytes32 h = bytes32(0);
         for (uint256 i; i < payouts.length; ++i) {
             h = keccak256(abi.encode(h, payouts[i].user, payouts[i].shares, payouts[i].assets));
         }

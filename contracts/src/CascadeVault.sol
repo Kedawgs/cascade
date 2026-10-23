@@ -366,9 +366,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     // ---- rewards ----
 
     /// Claims `hotkey`'s root rewards into stake and vests the measured increase over REWARD_VESTING,
-    /// on top of what is still unvested. Keeper only, or anyone once KEEPER_FALLBACK has passed since
-    /// this hotkey's last claim. Works while paused. The chain can refuse a claim by burning the
-    /// forwarded gas; the revert bubbles up and nothing changes.
+    /// on top of what is still unvested. An empty claim leaves the schedule as it is. Keeper only, or
+    /// anyone once KEEPER_FALLBACK has passed since this hotkey's last claim. Works while paused. The
+    /// chain can refuse a claim by burning the forwarded gas; the revert bubbles up and nothing changes.
     function claimRewards(bytes32 hotkey) external nonReentrant {
         if (!isHotkey[hotkey]) revert UnknownHotkey();
         // forge-lint: disable-next-line(block-timestamp)
@@ -379,8 +379,11 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         STAKING.claimRootWithHotkey(hotkey);
         uint256 delta = _sub0(_stakeOf(hotkey), before);
         lastClaimAt[hotkey] = uint64(block.timestamp);
-        vestingAmount = unvestedRewards() + delta * RAO;
-        vestingStart = uint64(block.timestamp);
+        // restarting on 0 would re-spread the unvested remainder over a fresh REWARD_VESTING
+        if (delta != 0) {
+            vestingAmount = unvestedRewards() + delta * RAO;
+            vestingStart = uint64(block.timestamp);
+        }
         emit RewardsClaimed(hotkey, delta);
     }
 
@@ -392,8 +395,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         if (assets < minDirectDeposit) revert BelowMinDeposit();
         uint256 assetsBefore = _sub0(totalAssets(), assets);
         uint256 supply = totalSupply();
-        // A floored to 0 against live shares would hand this deposit the whole vault.
-        if (assetsBefore == 0 && supply != 0) revert VaultInsolvent();
+        // Below half the launch price (1e-6 TAO per share) assets were lost; minting there would hand
+        // this deposit much of the vault. A supply of 0 never trips it.
+        if (assetsBefore * 2_000_000 < supply) revert VaultInsolvent();
         if (assetsBefore + assets > maxTotalAssets) revert CapExceeded();
         // Set on every direct deposit: a front door may redeem for this address only after an opt-in.
         directOnly[msg.sender] = true;
@@ -465,8 +469,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
         uint256 A = _sub0(totalAssets(), msg.value - msg.value % RAO);
         uint256 S = totalSupply();
-        // A floored to 0 against live shares would hand these deposits the whole vault.
-        if (A == 0 && S != 0) revert VaultInsolvent();
+        // Below half the launch price (1e-6 TAO per share) assets were lost; minting there would hand
+        // these deposits much of the vault. S == 0 never trips it.
+        if (A * 2_000_000 < S) revert VaultInsolvent();
 
         _creditDeposits(key, deposits, A, S);
         PayoutBatch memory b = _burnRedeems(key, peer, redeems, A, S);

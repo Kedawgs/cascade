@@ -524,4 +524,33 @@ contract VaultDeliveryTest is VaultTestBase {
         vm.expectRevert(CascadeVault.VaultInsolvent.selector);
         depositDirect(bob, 1e18);
     }
+
+    function test_delivery_belowHalfLaunchPriceReverts() public {
+        depositVia(alice, 10e18);
+        // 60% of the assets lost: 4e18 left against a supply of 1e25
+        vm.deal(address(vault), ED + 4e18);
+
+        // A = (4e18 + 1e18) - 1e18 = 4e18; 4e18 * 2_000_000 = 8e24 < 1e25
+        vm.expectRevert(CascadeVault.VaultInsolvent.selector);
+        deliver(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
+        vm.expectRevert(CascadeVault.VaultInsolvent.selector);
+        depositDirect(bob, 1e18);
+        assertEq(vault.totalSupply(), 1e25);
+    }
+
+    function test_delivery_sixtyPercentAssetsStillDeposits() public {
+        depositVia(alice, 10e18);
+        // 40% of the assets lost: 6e18 left against a supply of 1e25
+        vm.deal(address(vault), ED + 6e18);
+
+        // A = 6e18; 6e18 * 2_000_000 = 1.2e25 >= 1e25, so the guard holds:
+        // 1e18 * (1e25 + 1e6) / (6e18 + 1) = 1_666_666_666_666_666_666_555_555 (floor)
+        deliver(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
+        assertEq(vault.balanceOf(bob), 1_666_666_666_666_666_666_555_555);
+
+        // A = 7e18, S = 1e25 + 1_666_666_666_666_666_666_555_555:
+        // 1e18 * (11_666_666_666_666_666_666_555_555 + 1e6) / (7e18 + 1) = 1_666_666_666_666_666_666_555_555 (floor)
+        depositDirect(carol, 1e18);
+        assertEq(vault.balanceOf(carol), 1_666_666_666_666_666_666_555_555);
+    }
 }

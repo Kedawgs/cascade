@@ -138,15 +138,23 @@ contract VaultRewardsTest is VaultTestBase {
     }
 
     function test_claimZeroDeltaSucceeds() public {
+        // a 1 TAO claim at t0 starts a schedule that a later empty claim must not restart
+        claimOneTao();
+        uint256 t0 = block.timestamp;
+        vm.warp(t0 + 3.5 days);
+        // 11e18 - 1e18 * 3.5 days / 7 days
+        assertEq(vault.totalAssets(), 10.5e18);
+
         vm.expectEmit(address(vault));
         emit CascadeVault.RewardsClaimed(HK1, 0);
         claimAs(keeper, HK1);
 
-        assertEq(vault.lastClaimAt(HK1), block.timestamp);
-        assertEq(vault.vestingAmount(), 0);
-        assertEq(vault.vestingStart(), block.timestamp);
-        assertEq(stakeOf(HK1), 10_000_000_000);
-        assertEq(vault.totalAssets(), 10e18);
+        assertEq(vault.lastClaimAt(HK1), t0 + 3.5 days);
+        assertEq(vault.vestingAmount(), 1e18);
+        assertEq(vault.vestingStart(), t0);
+        assertEq(stakeOf(HK1), 11_000_000_000);
+        // still half vested; restarting would have re-spread 0.5e18 over 7 days (11e18 - 0.5e18)
+        assertEq(vault.totalAssets(), 10.5e18);
     }
 
     function test_claimUnknownHotkeyReverts() public {

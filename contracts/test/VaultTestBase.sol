@@ -35,6 +35,7 @@ abstract contract VaultTestBase is Test {
     MockStaking staking = MockStaking(ISTAKING_ADDRESS);
     StubBridge bridge;
     CascadeVault vault;
+    uint64 nextBatchId;
 
     function setUp() public virtual {
         vm.etch(ISTAKING_ADDRESS, address(new MockStaking()).code);
@@ -70,6 +71,29 @@ abstract contract VaultTestBase is Test {
         vm.deal(user, user.balance + amount);
         vm.prank(user);
         vault.depositDirect{value: amount}();
+    }
+
+    /// Delivers a BATCH from (chain, sender) through the stub bridge with value == amount == Σ deposits.
+    function deliver(
+        uint64 chain,
+        address sender,
+        uint64 batchId,
+        CascadeMessages.Entry[] memory deposits,
+        CascadeMessages.Entry[] memory redeems
+    ) internal returns (bytes32 key) {
+        bytes memory message = CascadeMessages.encodeBatch(batchId, deposits, redeems);
+        uint256 sum;
+        for (uint256 i; i < deposits.length; ++i) {
+            sum += deposits[i].amount;
+        }
+        vm.deal(address(bridge), address(bridge).balance + sum);
+        vm.prank(address(bridge));
+        vault.onBridgeMessage{value: sum}(chain, sender, message, sum);
+        return vault.batchKey(chain, sender, message);
+    }
+
+    function depositVia(address user, uint256 amount) internal returns (bytes32) {
+        return deliver(BASE, frontDoor, ++nextBatchId, entries1(user, amount), noEntries());
     }
 
     function entries1(address user, uint256 amount) internal pure returns (CascadeMessages.Entry[] memory e) {

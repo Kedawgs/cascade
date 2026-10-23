@@ -4,7 +4,7 @@ pragma solidity 0.8.24;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeBase} from "./CascadeBase.sol";
-import {ICascadeBridge} from "./interfaces/ICascadeBridge.sol";
+import {ICascadeBridge, ICascadeReceiver} from "./interfaces/ICascadeBridge.sol";
 import {ISTAKING_ADDRESS, IStaking} from "./interfaces/IStaking.sol";
 import {ADDRESS_MAPPING_ADDRESS, IAddressMapping} from "./interfaces/IAddressMapping.sol";
 import {CascadeMath} from "./libraries/CascadeMath.sol";
@@ -15,7 +15,7 @@ import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 /// registered bridge; Bittensor-native users can deposit directly.
 /// @dev csTAO has 24 decimals and is non-transferable. Prices read the stake live through the
 /// staking precompile; TAO is in wei here and in rao (1e9 wei) at the precompile.
-contract CascadeVault is ERC20, CascadeBase {
+contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     // ---- constants ----
 
     uint256 public constant RAO = 1e9;
@@ -56,6 +56,31 @@ contract CascadeVault is ERC20, CascadeBase {
     mapping(bytes32 => uint64) public frontDoorProposedAt;
     mapping(address => bool) public directOnly;
 
+    // batch delivery and the payout queue (entries are not stored: the keeper resubmits them from
+    // the Redeemed events and the vault checks them against payoutsHash)
+    struct PayoutBatch {
+        uint64 sourceChain;
+        address frontDoor;
+        uint64 batchId;
+        uint64 queuedAt;
+        uint32 cursor;
+        uint32 count;
+        uint32 chunk;
+        uint256 remaining;
+        bytes32 payoutsHash;
+    }
+
+    struct Window {
+        uint64 start;
+        uint256 burned;
+    }
+
+    /// Every delivered batch, payouts or not: the replay record.
+    mapping(bytes32 => bool) public processed;
+    mapping(bytes32 => PayoutBatch) public payoutBatches;
+    /// Value burned per front door (keyed by peerId) in its current 24-hour window.
+    mapping(bytes32 => Window) public burnWindows;
+
     // parameters (spec defaults; maxTotalAssets is a plan decision)
     uint32 public minChunk = 10;
     uint64 public payoutDelay = 24 hours;
@@ -95,6 +120,11 @@ contract CascadeVault is ERC20, CascadeBase {
     error TransferFailed();
     error UnstakeShort();
     error InsufficientGas();
+    error VaultInsolvent();
+    error UnknownPeer();
+    error ValueMismatch();
+    error AmountMismatch();
+    error DuplicateBatch();
 
     // ---- events ----
 
@@ -120,6 +150,18 @@ contract CascadeVault is ERC20, CascadeBase {
     event KeeperSet(address keeper);
     event ClaimGasSet(uint256 claimGasRequired);
     event LimitSet(bytes32 indexed name, uint256 a, uint256 b);
+    event BatchDelivered(
+        bytes32 indexed key, uint64 indexed sourceChain, address indexed frontDoor, uint64 batchId, uint256 amount
+    );
+    event DepositSkipped(bytes32 indexed key, address user, uint256 assets);
+    event Deposited(bytes32 indexed key, address indexed user, uint256 assets, uint256 shares);
+    event RedeemSkipped(bytes32 indexed key, address indexed user, uint256 requested);
+    event RedeemDeferred(bytes32 indexed key, address indexed user, uint256 requested);
+    event Redeemed(bytes32 indexed key, address indexed user, uint256 shares, uint256 assets);
+    /// `price` is the batch price, CascadeMath.price(A, S).
+    event PayoutBatchQueued(
+        bytes32 indexed key, uint64 indexed sourceChain, uint64 batchId, uint32 count, uint256 total, uint256 price
+    );
 
     // ---- constructor ----
 
@@ -349,10 +391,13 @@ contract CascadeVault is ERC20, CascadeBase {
         if (assets % RAO != 0) revert NotRaoAligned();
         if (assets < minDirectDeposit) revert BelowMinDeposit();
         uint256 assetsBefore = _sub0(totalAssets(), assets);
+        uint256 supply = totalSupply();
+        // A floored to 0 against live shares would hand this deposit the whole vault.
+        if (assetsBefore == 0 && supply != 0) revert VaultInsolvent();
         if (assetsBefore + assets > maxTotalAssets) revert CapExceeded();
         // Set on every direct deposit: a front door may redeem for this address only after an opt-in.
         directOnly[msg.sender] = true;
-        uint256 shares = CascadeMath.sharesForDeposit(assets, assetsBefore, totalSupply());
+        uint256 shares = CascadeMath.sharesForDeposit(assets, assetsBefore, supply);
         _mint(msg.sender, shares);
         emit DepositedDirect(msg.sender, assets, shares);
     }
@@ -376,6 +421,64 @@ contract CascadeVault is ERC20, CascadeBase {
         (bool ok,) = msg.sender.call{value: out}("");
         if (!ok) revert TransferFailed();
         emit RedeemedDirect(msg.sender, shares, out);
+    }
+
+    // ---- bridge delivery ----
+
+    function batchKey(uint64 sourceChain, address sender, bytes calldata message) public pure returns (bytes32) {
+        return keccak256(abi.encode(sourceChain, sender, keccak256(message)));
+    }
+
+    function getPayoutBatch(bytes32 key) external view returns (PayoutBatch memory) {
+        return payoutBatches[key];
+    }
+
+    /// Delivers a front door's BATCH with its deposits' TAO. Prices every entry at one price fixed
+    /// before the batch (A = assets without this delivery, S = supply), mints for deposits, then burns
+    /// for redeems within the front door's daily allowance and queues their payouts. No per-entry
+    /// condition reverts the batch. Reverts while paused so the rail holds the money. No staking or
+    /// claiming here.
+    function onBridgeMessage(uint64 sourceChain, address sender, bytes calldata message, uint256 amount)
+        external
+        payable
+        nonReentrant
+    {
+        // whenNotPaused, checked after the bridge
+        _requireBridge();
+        _requireNotPaused();
+        bytes32 peer = peerId(sourceChain, sender);
+        if (!frontDoorActive[peer]) revert UnknownPeer();
+        if (msg.value != amount) revert ValueMismatch();
+        (uint64 batchId, CascadeMessages.Entry[] memory deposits, CascadeMessages.Entry[] memory redeems) =
+            CascadeMessages.decodeBatch(message);
+        {
+            uint256 sum;
+            for (uint256 i; i < deposits.length; ++i) {
+                sum += deposits[i].amount;
+            }
+            if (sum != amount) revert AmountMismatch();
+        }
+        bytes32 key = batchKey(sourceChain, sender, message);
+        if (processed[key]) revert DuplicateBatch();
+        processed[key] = true;
+        emit BatchDelivered(key, sourceChain, sender, batchId, amount);
+
+        uint256 A = _sub0(totalAssets(), msg.value - msg.value % RAO);
+        uint256 S = totalSupply();
+        // A floored to 0 against live shares would hand these deposits the whole vault.
+        if (A == 0 && S != 0) revert VaultInsolvent();
+
+        _creditDeposits(key, deposits, A, S);
+        PayoutBatch memory b = _burnRedeems(key, peer, redeems, A, S);
+        if (b.remaining != 0) {
+            b.sourceChain = sourceChain;
+            b.frontDoor = sender;
+            b.batchId = batchId;
+            b.queuedAt = uint64(block.timestamp);
+            payoutBatches[key] = b;
+            pendingPayouts += b.remaining;
+            emit PayoutBatchQueued(key, sourceChain, batchId, b.count, b.remaining, CascadeMath.price(A, S));
+        }
     }
 
     // ---- admin: parameters ----
@@ -466,6 +569,67 @@ contract CascadeVault is ERC20, CascadeBase {
     /// Liquid balance above the existential reserve and queued payouts, floored at 0, in wei.
     function _available() internal view returns (uint256) {
         return _sub0(_sub0(address(this).balance, ED_RESERVE), pendingPayouts);
+    }
+
+    /// Delivery step 1: mints each deposit, floored to rao, at (A, S). A zero user is skipped and its
+    /// TAO stays in the vault.
+    function _creditDeposits(bytes32 key, CascadeMessages.Entry[] memory deposits, uint256 A, uint256 S) internal {
+        for (uint256 i; i < deposits.length; ++i) {
+            address user = deposits[i].user;
+            uint256 a = deposits[i].amount;
+            a -= a % RAO;
+            if (user == address(0)) {
+                emit DepositSkipped(key, user, a);
+                continue;
+            }
+            uint256 shares = CascadeMath.sharesForDeposit(a, A, S);
+            _mint(user, shares);
+            emit Deposited(key, user, a, shares);
+        }
+    }
+
+    /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
+    /// bound and the front door's remaining daily allowance. Returns the queue's count, total (as
+    /// `remaining`) and running hash; the caller fills in the rest.
+    function _burnRedeems(bytes32 key, bytes32 peer, CascadeMessages.Entry[] memory redeems, uint256 A, uint256 S)
+        internal
+        returns (PayoutBatch memory b)
+    {
+        if (redeems.length == 0) return b;
+        Window memory w = burnWindows[peer];
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp >= w.start + 24 hours) w = Window(uint64(block.timestamp), 0);
+        // gross includes the deposits just credited
+        uint256 allowance = _sub0(Math.max(grossAssets() * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
+        uint256 maxEntry = maxEntryValue;
+        for (uint256 i; i < redeems.length; ++i) {
+            address user = redeems[i].user;
+            uint256 requested = redeems[i].amount;
+            uint256 s = Math.min(requested, balanceOf(user));
+            if (s == 0 || directOnly[user]) {
+                emit RedeemSkipped(key, user, requested);
+                continue;
+            }
+            s = Math.min(s, CascadeMath.sharesForDeposit(Math.min(maxEntry, allowance), A, S));
+            uint256 out = CascadeMath.assetsForRedeem(s, A, S);
+            out -= out % RAO;
+            if (out == 0) {
+                // nothing burned; the holder keeps the shares and may request again
+                emit RedeemDeferred(key, user, requested);
+                continue;
+            }
+            _burn(user, s);
+            // out <= cap <= allowance, since s <= sharesForDeposit(cap, A, S)
+            allowance -= out;
+            b.remaining += out;
+            ++b.count;
+            b.payoutsHash = keccak256(abi.encode(b.payoutsHash, user, s, out));
+            emit Redeemed(key, user, s, out);
+        }
+        if (b.remaining != 0) {
+            w.burned += b.remaining;
+            burnWindows[peer] = w;
+        }
     }
 
     function _addHotkey(bytes32 h) internal {

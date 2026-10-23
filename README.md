@@ -21,6 +21,8 @@ withdrawals and forwards them over Chainlink CCIP. See `docs/architecture.md` fo
 
 - `main` is the reviewed state. Work happens on a short-lived branch per piece (`adapters`,
   `web-wiring`, `keeper`), with a test-first build and an independent review before it lands.
+- Clone with `git clone --recurse-submodules` (the contract dependencies are git submodules under
+  `contracts/lib`; on an existing clone run `git submodule update --init`).
 - Contracts: `cd contracts && forge test` (262 tests, 9 invariants), `forge build --sizes`
   (the vault must stay under 24,576 bytes), `forge fmt --check`, `slither .`.
 - Web: `cd web && pnpm install && pnpm dev`.

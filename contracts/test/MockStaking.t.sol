@@ -91,6 +91,21 @@ contract MockStakingTest is Test {
         assertEq(address(this).balance, before + 30_000_000 * RAO);
     }
 
+    function test_unstakeBlockedRevertsBothRemovals() public {
+        staking.setOneRaoShort(false);
+        staking.addStake(HK1, 30_000_000, 0);
+        staking.setUnstakeBlocked(true);
+        vm.expectRevert(MockStaking.TooEarly.selector);
+        staking.removeStake(HK1, 5_000_000, 0);
+        vm.expectRevert(MockStaking.TooEarly.selector);
+        staking.removeStakeFull(HK1, 0);
+        assertEq(staking.getStake(HK1, _me(), 0), 30_000_000);
+
+        staking.setUnstakeBlocked(false);
+        staking.removeStakeFull(HK1, 0);
+        assertEq(staking.getStake(HK1, _me(), 0), 0);
+    }
+
     function test_claimBurnsAllGasBelowRequirement() public {
         staking.setOneRaoShort(false);
         staking.setUnclaimed(_me(), HK1, 1e6);

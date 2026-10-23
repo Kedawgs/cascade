@@ -107,6 +107,7 @@ contract MockStaking is IStaking {
     }
 
     function removeStakeFull(bytes32 hotkey, uint256 netuid) external payable {
+        if (unstakeBlocked) revert TooEarly();
         bytes32 cold = mirror(msg.sender);
         uint256 staked = _stake[hotkey][cold][netuid];
         _stake[hotkey][cold][netuid] = 0;

@@ -93,6 +93,7 @@ contract CascadeVault is ERC20, CascadeBase {
     error NothingToStake();
     error ZeroAmount();
     error TransferFailed();
+    error UnstakeShort();
 
     // ---- events ----
 
@@ -340,12 +341,14 @@ contract CascadeVault is ERC20, CascadeBase {
     /// Burns `shares` and pays their value to the caller, unstaking any shortfall. No outflow cap:
     /// the share owner signs on this chain, and root unstaking is 1:1 and fee-free.
     function redeemDirect(uint256 shares) external whenNotPaused nonReentrant {
-        if (shares == 0) revert ZeroAmount();
         uint256 out = CascadeMath.assetsForRedeem(shares, totalAssets(), totalSupply());
         out -= out % RAO;
+        // Also covers shares == 0.
+        if (out == 0) revert ZeroAmount();
         _burn(msg.sender, shares);
         uint256 available = _available();
-        if (available < out) _unstake(out - available);
+        // An under-delivering unstake must never be paid from ED_RESERVE or queued payouts.
+        if (available < out && _unstake(out - available) != 0) revert UnstakeShort();
         (bool ok,) = msg.sender.call{value: out}("");
         if (!ok) revert TransferFailed();
         emit RedeemedDirect(msg.sender, shares, out);
@@ -460,22 +463,24 @@ contract CascadeVault is ERC20, CascadeBase {
     /// Unstakes at least `shortfallWei` (when the stake allows), walking the stake hotkey first and
     /// then the set in order. Rounds each request up to the chain's floors and exits a position fully
     /// when the chain would sweep its remainder anyway. A precompile revert bubbles up; retry later.
-    function _unstake(uint256 shortfallWei) internal {
-        uint256 remaining = shortfallWei;
+    /// Returns the part of the shortfall the measured receipts did not cover (0 when covered); a short
+    /// receipt never reverts here, the caller decides.
+    function _unstake(uint256 shortfallWei) internal returns (uint256 unmet) {
+        unmet = shortfallWei;
         uint256 minStake = minStakeRao();
         uint256 minRemain = minRemainRao();
         bytes32 first = stakeHotkey;
         uint256 n = hotkeys.length;
         _unstaking = true;
         // i == 0 is the stake hotkey; i >= 1 is hotkeys[i - 1], skipping the stake hotkey.
-        for (uint256 i; i <= n && remaining != 0; ++i) {
+        for (uint256 i; i <= n && unmet != 0; ++i) {
             bytes32 h = i == 0 ? first : hotkeys[i - 1];
             if (i != 0 && h == first) continue;
             uint256 s = _stakeOf(h);
             if (s == 0) continue;
-            uint256 want = Math.max(Math.ceilDiv(remaining, RAO), minStake);
+            uint256 want = Math.max(Math.ceilDiv(unmet, RAO), minStake);
             uint256 received = _removeStake(h, want, want >= s || s - want < minRemain);
-            remaining -= Math.min(remaining, received);
+            unmet -= Math.min(unmet, received);
         }
         _unstaking = false;
     }

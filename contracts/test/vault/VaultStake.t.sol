@@ -452,7 +452,7 @@ contract VaultStakeTest is VaultTestBase {
     }
 
     function test_redeemDirectRetriesAfterPrecompileRevert() public {
-        // a partial unstake (the mock blocks removeStake, not removeStakeFull)
+        // a partial unstake (removeStake); test_redeemDirectRetriesAfterFullExitRevert covers removeStakeFull
         staking.setOneRaoShort(false);
         depositDirect(alice, 100e18);
         keeperStakes();
@@ -473,6 +473,105 @@ contract VaultStakeTest is VaultTestBase {
         assertEq(alice.balance, 10e18);
         assertEq(vault.balanceOf(alice), 9e25);
         assertEq(stakeOf(HK1), 90_000_000_000);
+    }
+
+    function test_redeemDirectRetriesAfterFullExitRevert() public {
+        staking.setOneRaoShort(false);
+        depositDirect(alice, 10e18);
+        keeperStakes();
+        staking.setUnstakeBlocked(true);
+
+        // out = 10e18 needs the whole 10_000_000_000 rao position: removeStakeFull, blocked
+        vm.prank(alice);
+        vm.expectRevert(MockStaking.TooEarly.selector);
+        vault.redeemDirect(1e25);
+
+        assertEq(vault.balanceOf(alice), 1e25);
+        assertEq(vault.totalSupply(), 1e25);
+        assertEq(stakeOf(HK1), 10_000_000_000);
+        assertEq(alice.balance, 0);
+
+        staking.setUnstakeBlocked(false);
+        redeem(alice, 1e25);
+        assertEq(alice.balance, 10e18);
+        assertEq(vault.balanceOf(alice), 0);
+        assertEq(stakeOf(HK1), 0);
+    }
+
+    function test_redeemDirectRevertsWhenUnstakeDeliversShort() public {
+        staking.setOneRaoShort(false);
+        // 1e26 shares, 100_000_000_000 rao staked
+        depositDirect(alice, 100e18);
+        keeperStakes();
+        // the partial removeStake returns without crediting anything
+        vm.mockCall(ISTAKING_ADDRESS, abi.encodeWithSelector(IStaking.removeStake.selector), "");
+
+        // out = 1e18 * (100e18 + 1) / (1e26 + 1e6) = 1e18 / 1e6 = 1e12; available 0; want = max(1_000,
+        // 2_000_000) = 2_000_000 (partial) arrives as 0, so all 1e12 is unmet. Without the check the send
+        // would come out of ED_RESERVE.
+        vm.prank(alice);
+        vm.expectRevert(CascadeVault.UnstakeShort.selector);
+        vault.redeemDirect(1e18);
+
+        assertEq(vault.balanceOf(alice), 1e26);
+        assertEq(vault.totalSupply(), 1e26);
+        assertEq(stakeOf(HK1), 100_000_000_000);
+        assertEq(alice.balance, 0);
+        assertEq(address(vault).balance, ED);
+
+        // a delivering unstake goes through: 1e12 + 2_000_000 * 1e9 - 1e12 stays liquid
+        vm.clearMockedCalls();
+        redeem(alice, 1e18);
+        assertEq(alice.balance, 1e12);
+        assertEq(stakeOf(HK1), 99_998_000_000);
+        assertEq(address(vault).balance, 2e15);
+    }
+
+    function test_redeemDirectSkipsEmptyStakeHotkey() public {
+        staking.setOneRaoShort(false);
+        depositDirect(alice, 10e18);
+        keeperStakes();
+        vm.startPrank(owner);
+        vault.addHotkey(HK2);
+        vault.setStakeHotkey(HK2);
+        vm.stopPrank();
+        assertEq(stakeOf(HK2), 0);
+
+        // out = 5e24 / 1e6 = 5e18. HK2 (stake hotkey) holds nothing and is skipped; HK1: want
+        // 5_000_000_000 leaves 5_000_000_000 >= 20_000_000, a partial removeStake
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStakeFull, (HK2, 0)), 0);
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeWithSelector(IStaking.removeStake.selector, HK2), 0);
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeCall(IStaking.removeStake, (HK1, 5_000_000_000, 0)));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Unstaked(HK1, 5_000_000_000, 5e18);
+        redeem(alice, 5e24);
+
+        assertEq(stakeOf(HK1), 5_000_000_000);
+        assertEq(stakeOf(HK2), 0);
+        assertEq(alice.balance, 5e18);
+        assertEq(address(vault).balance, ED);
+    }
+
+    function test_redeemDirectBelowOneRaoReverts() public {
+        depositDirect(alice, 10e18);
+
+        // 1 * (10e18 + 1) / (1e25 + 1e6) = 0
+        vm.prank(alice);
+        vm.expectRevert(CascadeVault.ZeroAmount.selector);
+        vault.redeemDirect(1);
+        // (1e15 - 1) / 1e6 = 999_999_999 wei, floored to whole rao = 0
+        vm.prank(alice);
+        vm.expectRevert(CascadeVault.ZeroAmount.selector);
+        vault.redeemDirect(1e15 - 1);
+
+        assertEq(vault.balanceOf(alice), 1e25);
+        assertEq(vault.totalSupply(), 1e25);
+        assertEq(address(vault).balance, ED + 10e18);
+
+        // 1e15 / 1e6 = 1e9 wei, exactly one rao
+        redeem(alice, 1e15);
+        assertEq(alice.balance, 1e9);
+        assertEq(vault.balanceOf(alice), 1e25 - 1e15);
     }
 
     function test_redeemDirectZeroReverts() public {

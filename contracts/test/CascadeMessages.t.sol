@@ -5,20 +5,36 @@ import {Test} from "forge-std/Test.sol";
 import {CascadeMessages} from "../src/libraries/CascadeMessages.sol";
 
 contract MessagesHarness {
-    function encodeRequest(uint64 epochId, uint256 redeemShares, uint256 totalSupply) external pure returns (bytes memory) {
-        return CascadeMessages.encodeRequest(epochId, redeemShares, totalSupply);
+    function encodeBatch(
+        uint64 batchId,
+        CascadeMessages.Entry[] memory deposits,
+        CascadeMessages.Entry[] memory redeems
+    ) external pure returns (bytes memory) {
+        return CascadeMessages.encodeBatch(batchId, deposits, redeems);
     }
 
-    function decodeRequest(bytes memory message) external pure returns (uint64, uint256, uint256) {
-        return CascadeMessages.decodeRequest(message);
+    function decodeBatch(bytes memory message)
+        external
+        pure
+        returns (uint64 batchId, CascadeMessages.Entry[] memory deposits, CascadeMessages.Entry[] memory redeems)
+    {
+        return CascadeMessages.decodeBatch(message);
     }
 
-    function encodeResult(uint64 epochId, uint256 assetsBefore) external pure returns (bytes memory) {
-        return CascadeMessages.encodeResult(epochId, assetsBefore);
+    function encodePayouts(bytes32 batchKey, uint32 chunk, CascadeMessages.Entry[] memory payouts)
+        external
+        pure
+        returns (bytes memory)
+    {
+        return CascadeMessages.encodePayouts(batchKey, chunk, payouts);
     }
 
-    function decodeResult(bytes memory message) external pure returns (uint64, uint256) {
-        return CascadeMessages.decodeResult(message);
+    function decodePayouts(bytes memory message)
+        external
+        pure
+        returns (bytes32 batchKey, uint32 chunk, CascadeMessages.Entry[] memory payouts)
+    {
+        return CascadeMessages.decodePayouts(message);
     }
 
     function kind(bytes memory message) external pure returns (uint8) {
@@ -27,46 +43,85 @@ contract MessagesHarness {
 }
 
 contract CascadeMessagesTest is Test {
-    MessagesHarness internal harness = new MessagesHarness();
+    MessagesHarness internal h;
+    address internal a = address(0xA11CE);
+    address internal b = address(0xB0B);
 
-    function test_requestRoundTrip() public view {
-        (uint64 epochId, uint256 redeemShares, uint256 totalSupply) =
-            harness.decodeRequest(harness.encodeRequest(7, 40e24, 100e24));
-        assertEq(epochId, 7);
-        assertEq(redeemShares, 40e24);
-        assertEq(totalSupply, 100e24);
+    function setUp() public {
+        h = new MessagesHarness();
     }
 
-    function test_resultRoundTrip() public view {
-        (uint64 epochId, uint256 assetsBefore) = harness.decodeResult(harness.encodeResult(7, 123e18));
-        assertEq(epochId, 7);
-        assertEq(assetsBefore, 123e18);
+    function _list(address user, uint256 amount, uint256 n) internal pure returns (CascadeMessages.Entry[] memory l) {
+        l = new CascadeMessages.Entry[](n);
+        for (uint256 i; i < n; ++i) {
+            l[i] = CascadeMessages.Entry(user, amount);
+        }
     }
 
-    function test_kindOfRequestIsOne() public view {
-        assertEq(harness.kind(harness.encodeRequest(1, 0, 0)), 1);
+    function test_batchRoundTrip() public view {
+        CascadeMessages.Entry[] memory d = _list(a, 10e18, 1);
+        CascadeMessages.Entry[] memory r = _list(b, 5e24, 1);
+        (uint64 id, CascadeMessages.Entry[] memory d2, CascadeMessages.Entry[] memory r2) =
+            h.decodeBatch(h.encodeBatch(7, d, r));
+        assertEq(id, 7);
+        assertEq(d2.length, 1);
+        assertEq(d2[0].user, a);
+        assertEq(d2[0].amount, 10e18);
+        assertEq(r2.length, 1);
+        assertEq(r2[0].user, b);
+        assertEq(r2[0].amount, 5e24);
     }
 
-    function test_kindOfResultIsTwo() public view {
-        assertEq(harness.kind(harness.encodeResult(1, 0)), 2);
+    function test_payoutsRoundTrip() public view {
+        CascadeMessages.Entry[] memory p = _list(a, 1e18, 1);
+        (bytes32 key, uint32 chunk, CascadeMessages.Entry[] memory p2) =
+            h.decodePayouts(h.encodePayouts(keccak256("k"), 3, p));
+        assertEq(key, keccak256("k"));
+        assertEq(chunk, 3);
+        assertEq(p2.length, 1);
+        assertEq(p2[0].user, a);
+        assertEq(p2[0].amount, 1e18);
     }
 
-    function test_decodeRequestRejectsResult() public {
-        bytes memory result = harness.encodeResult(1, 0);
+    function test_kinds() public view {
+        assertEq(h.kind(h.encodeBatch(1, _list(a, 1, 1), _list(b, 1, 1))), 1);
+        assertEq(h.kind(h.encodePayouts(keccak256("k"), 0, _list(a, 1, 1))), 2);
+    }
+
+    function test_decodeBatchRejectsPayouts() public {
+        bytes memory m = h.encodePayouts(keccak256("k"), 0, _list(a, 1, 1));
         vm.expectRevert(abi.encodeWithSelector(CascadeMessages.WrongMessageKind.selector, 1, 2));
-        harness.decodeRequest(result);
+        h.decodeBatch(m);
     }
 
-    function test_decodeResultRejectsRequest() public {
-        bytes memory request = harness.encodeRequest(1, 0, 0);
+    function test_decodePayoutsRejectsBatch() public {
+        bytes memory m = h.encodeBatch(1, _list(a, 1, 1), _list(b, 1, 1));
         vm.expectRevert(abi.encodeWithSelector(CascadeMessages.WrongMessageKind.selector, 2, 1));
-        harness.decodeResult(request);
+        h.decodePayouts(m);
     }
 
-    function test_requestEncodingIsAbiEncode() public view {
-        assertEq(
-            harness.encodeRequest(7, 40e24, 100e24),
-            abi.encode(uint8(1), uint64(7), uint256(40e24), uint256(100e24))
-        );
+    function test_batchEncodingIsAbiEncode() public view {
+        CascadeMessages.Entry[] memory d = _list(a, 10e18, 2);
+        CascadeMessages.Entry[] memory r = _list(b, 3, 1);
+        assertEq(h.encodeBatch(7, d, r), abi.encode(uint8(1), uint64(7), d, r));
+    }
+
+    function test_decodeBatchRejects101Deposits() public {
+        bytes memory m = h.encodeBatch(1, _list(a, 1, 101), _list(b, 1, 0));
+        vm.expectRevert(CascadeMessages.TooManyEntries.selector);
+        h.decodeBatch(m);
+    }
+
+    function test_decodeBatchAccepts100Each() public view {
+        bytes memory m = h.encodeBatch(1, _list(a, 1, 100), _list(b, 2, 100));
+        (, CascadeMessages.Entry[] memory d, CascadeMessages.Entry[] memory r) = h.decodeBatch(m);
+        assertEq(d.length, 100);
+        assertEq(r.length, 100);
+    }
+
+    function test_decodePayoutsRejects101() public {
+        bytes memory m = h.encodePayouts(keccak256("k"), 0, _list(a, 1, 101));
+        vm.expectRevert(CascadeMessages.TooManyEntries.selector);
+        h.decodePayouts(m);
     }
 }

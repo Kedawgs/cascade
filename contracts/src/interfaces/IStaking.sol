@@ -31,4 +31,13 @@ interface IStaking {
     function getUnclaimedRootTaoByHotkey(bytes32 coldkey, bytes32 hotkey) external view returns (uint256 taoValue);
 
     function setRejectStakingHotkeyGrowth(bool enabled) external;
+
+    /// @dev Removes the caller's entire stake on (hotkey, netuid), credited to caller balance.
+    function removeStakeFull(bytes32 hotkey, uint256 netuid) external payable;
+
+    /// @return minimum stake in rao for a default stake operation
+    function getDefaultMinStake() external view returns (uint256);
+
+    /// @return minimum nominator stake in rao
+    function getNominatorMinRequiredStake() external view returns (uint256);
 }

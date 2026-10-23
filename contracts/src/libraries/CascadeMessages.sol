@@ -1,40 +1,64 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// @notice Encoding and decoding of the two cross-chain epoch messages.
+/// @notice Encoding and decoding of the two cross-chain messages: the deposit/redeem BATCH
+/// (Base to vault) and the PAYOUTS chunks (vault to Base).
 /// @dev Every message is `abi.encode(uint8 kind, fields...)`.
 library CascadeMessages {
-    uint8 internal constant EPOCH_REQUEST = 1;
-    uint8 internal constant EPOCH_RESULT = 2;
+    struct Entry {
+        address user;
+        uint256 amount;
+    }
+
+    struct Payout {
+        address user;
+        uint256 shares;
+        uint256 assets;
+    }
+
+    uint8 internal constant BATCH = 1;
+    uint8 internal constant PAYOUTS = 2;
+    uint256 internal constant MAX_ENTRIES = 100;
 
     error WrongMessageKind(uint8 expected, uint8 actual);
+    error TooManyEntries();
 
-    function encodeRequest(uint64 epochId, uint256 redeemShares, uint256 totalSupply)
+    function encodeBatch(uint64 batchId, Entry[] memory deposits, Entry[] memory redeems)
         internal
         pure
         returns (bytes memory)
     {
-        return abi.encode(EPOCH_REQUEST, epochId, redeemShares, totalSupply);
+        return abi.encode(BATCH, batchId, deposits, redeems);
     }
 
-    function decodeRequest(bytes memory message)
+    function decodeBatch(bytes memory message)
         internal
         pure
-        returns (uint64 epochId, uint256 redeemShares, uint256 totalSupply)
+        returns (uint64 batchId, Entry[] memory deposits, Entry[] memory redeems)
     {
         uint8 actual = kind(message);
-        if (actual != EPOCH_REQUEST) revert WrongMessageKind(EPOCH_REQUEST, actual);
-        (, epochId, redeemShares, totalSupply) = abi.decode(message, (uint8, uint64, uint256, uint256));
+        if (actual != BATCH) revert WrongMessageKind(BATCH, actual);
+        (, batchId, deposits, redeems) = abi.decode(message, (uint8, uint64, Entry[], Entry[]));
+        if (deposits.length > MAX_ENTRIES || redeems.length > MAX_ENTRIES) revert TooManyEntries();
     }
 
-    function encodeResult(uint64 epochId, uint256 assetsBefore) internal pure returns (bytes memory) {
-        return abi.encode(EPOCH_RESULT, epochId, assetsBefore);
+    function encodePayouts(bytes32 batchKey, uint32 chunk, Entry[] memory payouts)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(PAYOUTS, batchKey, chunk, payouts);
     }
 
-    function decodeResult(bytes memory message) internal pure returns (uint64 epochId, uint256 assetsBefore) {
+    function decodePayouts(bytes memory message)
+        internal
+        pure
+        returns (bytes32 batchKey, uint32 chunk, Entry[] memory payouts)
+    {
         uint8 actual = kind(message);
-        if (actual != EPOCH_RESULT) revert WrongMessageKind(EPOCH_RESULT, actual);
-        (, epochId, assetsBefore) = abi.decode(message, (uint8, uint64, uint256));
+        if (actual != PAYOUTS) revert WrongMessageKind(PAYOUTS, actual);
+        (, batchKey, chunk, payouts) = abi.decode(message, (uint8, bytes32, uint32, Entry[]));
+        if (payouts.length > MAX_ENTRIES) revert TooManyEntries();
     }
 
     function kind(bytes memory message) internal pure returns (uint8) {

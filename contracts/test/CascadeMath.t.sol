@@ -37,9 +37,7 @@ contract CascadeMathTest is Test {
     function testFuzz_roundTripNeverProfits(uint128 assets, uint128 totalAssets, uint128 totalSupply) public pure {
         vm.assume(assets > 0);
         uint256 shares = CascadeMath.sharesForDeposit(assets, totalAssets, totalSupply);
-        uint256 back = CascadeMath.assetsForRedeem(
-            shares, uint256(totalAssets) + assets, uint256(totalSupply) + shares
-        );
+        uint256 back = CascadeMath.assetsForRedeem(shares, uint256(totalAssets) + assets, uint256(totalSupply) + shares);
         assertLe(back, assets);
     }
 

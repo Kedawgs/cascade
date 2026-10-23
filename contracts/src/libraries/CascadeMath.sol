@@ -20,11 +20,7 @@ library CascadeMath {
         return Math.mulDiv(assets, totalSupply + VIRTUAL_SHARES, totalAssets + VIRTUAL_ASSETS);
     }
 
-    function assetsForRedeem(uint256 shares, uint256 totalAssets, uint256 totalSupply)
-        internal
-        pure
-        returns (uint256)
-    {
+    function assetsForRedeem(uint256 shares, uint256 totalAssets, uint256 totalSupply) internal pure returns (uint256) {
         return Math.mulDiv(shares, totalAssets + VIRTUAL_ASSETS, totalSupply + VIRTUAL_SHARES);
     }
 

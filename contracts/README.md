@@ -89,12 +89,13 @@ forge build --sizes                           # the vault must stay under 24,576
 forge fmt --check
 ```
 
-- **Suite:** 242 tests (unit, end-to-end, and 8 invariants at 128 runs × 64 depth, set in
-  `foundry.toml`). The invariants also held at 3,000 × 64 and 500 × 256.
-- **Invariants:** the price never falls, except across a payout-batch cancel, and then not below
-  that batch's price (within 100 rao of rounding dust); gross assets are conserved; reserved payouts
-  match the queue; no front door burns more than its allowance in a window; the front door's token
-  and ETH balances match its books; users never claim more than was paid out; no unexpected reverts.
+- **Suite:** 243 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
+  `foundry.toml`). The invariants also held at 3,000 × 64.
+- **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
+  payout-batch cancel may leave it below that batch's delivery price by at most one rao of rounding
+  dust per re-minted entry; gross assets are conserved; reserved payouts match the queue; no front
+  door burns more than its allowance in a window; the front door's token and ETH balances match its
+  books; users never claim more than was paid out; no unexpected reverts.
 - **Test doubles** (`test/mocks`): `MockStaking` is etched at the precompile address and models the
   floor reads, over-request clipping, sweeps, a fresh position reading one rao short, and claims that
   burn all gas when refused. `MockBridge` is chain-aware, enforces the fee rule and a 5,000-TAO
@@ -191,6 +192,8 @@ Routine calls and who makes them:
   linearly over 7 days, so someone who leaves forgoes rewards that are still unclaimed or vesting.
   With weekly claims the unclaimed part is at most about a week of yield (about 0.1%).
 - `setKeeper(address(0))` is allowed and leaves only the 7-day fallback.
+- Both fallbacks count from timestamps that start at 0, so until the first `stakeIdle` (or a
+  hotkey's first claim) anyone can make that call.
 
 Other roles:
 
@@ -241,9 +244,10 @@ The four layers:
 3. **Payouts wait, and stop the moment a front door is removed.** Nothing burned can leave for 24
    hours, `processPayouts` refuses a removed front door's batches, and the owner can then
    `cancelPayoutBatch`, which re-mints every unsent user's shares at the batch's price.
-4. **Pause holds everything that moves value** (deliveries, payouts, staking, direct deposits and
-   redeems; on Base, deposits, redeem requests and closes) but never blocks cancels, claims on Base,
-   reward claims, payout-batch cancels or incoming payouts on Base.
+4. **Pause holds the money flows:** deliveries, payouts, staking, and direct deposits and redeems
+   on Bittensor; deposits, redeem requests and closes on Base. It never blocks cancels, claims on
+   Base, reward claims, payout-batch cancels or incoming payouts on Base, and the owner's stake
+   management (`moveStake`, `removeHotkey`) and `creditRedeemFee` also run while paused.
 
 Soft spots:
 
@@ -256,14 +260,23 @@ Soft spots:
 - **A rogue adapter gets every door's allowance.** Any enabled adapter can present any registered
   front door: two during a migration, more if Robinhood Chain is added. A cap across all front
   doors is deliberately not added, because one door's honest exits would then block another's users.
-- **The backstop needs people.** The hard bound is the 24-hour delay plus the guardian removing the
-  front door (or disabling the adapter) in time, and the owner cancelling the batch. If nobody acts
-  within the delay, the loss is bounded only by the allowance.
+- **The backstop needs people.** Beyond the allowance, protection depends on the guardian removing
+  the front door (or disabling the adapter) within the 24-hour delay, and on the owner then
+  cancelling the batch. Otherwise the loss is bounded by the allowance each window, for as long as
+  nobody acts.
 - **A cancel does not restore the burn window,** so honest requests through that front door may be
   deferred until its window resets.
-- **The limits are owner parameters.** The outflow percentage and floor, the payout delay (up to 7
-  days) and the fee ceiling change without the 7-day registry delay, behind only the owner's
-  timelock (an operational setting, 48 hours in the beta).
+- **The limits are owner parameters.** The outflow percentage (up to 100%) and its floor (no upper
+  bound), the payout delay (0 to 7 days) and the fee ceiling (up to 100%, with an absolute part
+  that has no upper bound) change without the 7-day registry delay, behind only the owner's
+  timelock (an operational setting, 48 hours in the beta). Set to their extremes, they remove the
+  bounds in layers 2 and 3.
+- **The guardian's veto is not independent of the owner.** `setGuardian` is a plain owner call
+  behind only the timelock, so one malicious timelock batch can replace the guardian and propose a
+  rogue front door. What remains is the public notice, the timelock delay plus the 7-day registry
+  delay, during which users can exit (front-door exits within the daily allowance, direct redeems
+  without a cap). The operational answer is that the guardian holds the timelock's canceller role
+  (see [Operator notes](#operator-notes)).
 - **An insolvent vault stops front-door batches.** If the share price falls below half the launch
   price, every front-door batch, redeems included, reverts `VaultInsolvent` until the vault is
   recapitalised out of band (see [Operator notes](#operator-notes)). Direct redeems keep working.
@@ -275,16 +288,16 @@ Outside parties. No delay applies to any of them.
 | Party | What it can do | What bounds it |
 |---|---|---|
 | ForeverMoney's 2-of-3 Safe | Pause the token pools, change rate limits, or remove ForeverMoney's TAO from CCIP. | Exposure is TAO in an open batch, in flight, or credited and unclaimed on Base. Staked TAO is native on Bittensor and unaffected. |
-| Chainlink CCIP lane configuration and rate limits | Stall batches in either direction. The lanes are mid-migration to CCIP 2.0, and the Risk Management Network check is switched off on the current lanes. | A failed delivery is retried by manual re-execution, which anyone can run. A message the rail loses loses only that batch's funds: there is no in-contract recovery and no in-flight lock, so other batches are unaffected. |
+| Chainlink CCIP (lane configuration, rate limits and message verification) | Stall batches in either direction. A compromised CCIP network could also deliver forged `BATCH` or `PAYOUTS` messages that an honest adapter accepts. The Risk Management Network check, an extra independent verification, is disabled on these lanes, and the lanes are mid-migration to CCIP 2.0. | Forged messages get the same bounds as a rogue adapter (see the contracts table below), and funds in flight are exposed. A failed delivery is retried by manual re-execution, which anyone can run. A message the rail loses loses only that batch's funds: there is no in-contract recovery and no in-flight lock, so other batches are unaffected. One caveat: in the separate-data-message fallback the token check is pooled across chunks, so a chunk whose tokens are lost makes the *last* chunk's data fail, not its own. |
 | Bittensor's sudo key | Ship runtime upgrades (about weekly) that change precompile behaviour, or disable a precompile. | Value-moving precompile calls are measured, so an under-delivering unstake reverts (`UnstakeShort`) instead of paying from reserves or other users' payouts. The price itself trusts the stake read, so a changed read would misprice; the keeper is to run each pre-release on testnet 945 first. |
 
 Keys:
 
 | Key | What it can do | What bounds it |
 |---|---|---|
-| Owner | Everything in [Roles](#roles) under "Owner". | Cannot move user funds directly. The only route would be registering a rogue front door or bridge, which waits 7 days in public and which the guardian can veto. Parameter changes wait only for the timelock. |
+| Owner | Everything in [Roles](#roles) under "Owner", including replacing the guardian with `setGuardian`. | Cannot move user funds directly. The only route would be registering a rogue front door or bridge, which waits 7 days in public. The guardian's veto is not independent: one malicious timelock batch can replace the guardian and propose a rogue front door. What remains is the public notice (the timelock delay plus the 7-day registry delay), during which users can exit, and the guardian's canceller role on the timelock. Parameter changes wait only for the timelock. |
 | Guardian | Stop only: pause, remove a front door, disable a bridge, cancel a pending proposal. | A stolen guardian key can freeze, not take. Unpausing needs the owner, and a removed front door or disabled bridge comes back only through the 7-day registry. |
-| Keeper | Time `claimRewards` and `stakeIdle`. | A stolen key can shift a little reward timing and nothing else. Anyone may act after 7 days, and the owner can replace or clear the keeper. |
+| Keeper | Time `claimRewards` and `stakeIdle`. | A stolen key can time claims and stakes badly; it cannot move funds. Anyone may act after 7 days (and before the first stake or claim, since those timestamps start at 0), and the owner can replace or clear the keeper. |
 | Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey and initial bridge. The initial bridge is enabled at once, with no delay. | Check every constructor argument before anyone deposits. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
 
 Contracts:
@@ -292,7 +305,7 @@ Contracts:
 | If compromised | What it can do | What bounds it |
 |---|---|---|
 | A front door | Burn the shares of users it names, up to `max(20% of gross assets including its own deposits, 100 TAO)` per fixed 24-hour window, with the TAO owed to itself. | The 24-hour payout delay, an instant guardian hold, and an owner cancel that re-mints the shares. Users marked `directOnly` are skipped. |
-| An adapter | Present any registered front door, so it gets every door's allowance (same bounds). It holds whatever passes through it in flight. On Base it can only credit payouts backed by tokens already in the front door, and can block only its own deliveries. | The same bounds, plus the 7-day bridge registry and the guardian's `disableBridge`. |
+| An adapter | Present any registered front door, so it gets every door's allowance (same bounds). It holds whatever passes through it in flight. On Base it can credit only tokens the front door holds beyond its books: donations, or payout tokens that landed ahead of their data in the separate-data-message fallback. It can credit that surplus to anyone with a made-up `PAYOUTS` message, and the pending chunk whose tokens it spent then fails `TokensNotReceived`. Its replay slots are its own, so it cannot pre-mark another adapter's deliveries. | The same bounds, plus the 7-day bridge registry and the guardian's `disableBridge`. |
 
 App side (outside this build): the swap router and onramp APIs, npm dependencies, and the keeper's
 RPC provider.
@@ -323,7 +336,7 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
    existential deposit can never make a payout fail. Funding it up front means the first users'
    deposits do not have to fill it.
 2. **Size the redeem-request fee to the bridge fee.** Keep `redeemRequestFee × maxRedeems` at or
-   above the live Base-to-Bittensor bridge fee (defaults: 1e14 wei × 50 = 0.005 ETH). Otherwise a
+   above the live Base-to-Bittensor bridge fee (beta values: 1e14 wei × 50 = 0.005 ETH). Otherwise a
    junk-filled batch cannot self-close: the `requestRedeem` that would close it reverts
    `InsufficientFee`, and the keeper must close it with `closeBatch` and ETH attached.
 3. **Set the beta cap, in TAO.** Set the vault's `maxTotalAssets` (default 1,000 TAO; it caps direct
@@ -342,16 +355,22 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
 7. **Insolvency recovery is out of band.** If the share price falls below half the launch price,
    `onBridgeMessage` and `depositDirect` revert `VaultInsolvent`. Recover with a substrate-side
    transfer to the vault's mirror address, then re-execute the failed deliveries.
-8. **`batchInterval` has no lower bound.** A very short interval lets anyone close a batch before a
+8. **Pause on any unexplained drop in `totalAssets`.** The insolvency guard trips only below half
+   the launch price. A smaller unexplained drop (a misread stake, for example) still lets batches
+   and direct deposits through at the lowered price until someone pauses.
+9. **`batchInterval` has no lower bound.** A very short interval lets anyone close a batch before a
    user's cancel lands. Set it behind the timelock with care.
-9. **The primary bridge is a single point of liveness.** Disabling a contract's primary bridge stops
-   its outgoing messages (closes on Base, payouts on Bittensor) until the owner sets another enabled
-   bridge as primary, and a new adapter takes 7 days to register. Keep a standby adapter registered.
-10. **Hotkeys.** `setStakeHotkey` routes new stake to a new validator and `moveStake` moves existing
+10. **The primary bridge is a single point of liveness.** Disabling a contract's primary bridge stops
+    its outgoing messages (closes on Base, payouts on Bittensor) until the owner sets another enabled
+    bridge as primary, and a new adapter takes 7 days to register. Keep a standby adapter registered.
+11. **Hotkeys.** `setStakeHotkey` routes new stake to a new validator and `moveStake` moves existing
     stake onto it. Keep an old hotkey in the set (at most 4) until its rewards are claimed, because
     rewards land on the hotkey that earned them. `removeHotkey` refuses while unclaimed rewards
     exceed `hotkeyDustRao`, unless told to forfeit them.
-11. **Outside parties.** ForeverMoney's 2-of-3 Safe, Chainlink's lane configuration and Bittensor's
+12. **The guardian holds the timelock's canceller role.** The owner can replace the guardian behind
+    only the timelock, so the guardian key must be able to cancel a pending timelock batch (for
+    example `setGuardian` plus `proposeFrontDoor`) before it executes.
+13. **Outside parties.** ForeverMoney's 2-of-3 Safe, Chainlink's lane configuration and Bittensor's
     sudo key can each stop or change the rails with no delay. See [Trust and supply chain](#trust-and-supply-chain).
 
 Defaults at deploy:
@@ -363,7 +382,7 @@ Defaults at deploy:
 | `batchInterval`, `minDeposit`, `depositCap`, `redeemRequestFee` | constructor arguments (beta: 12 hours; fee 1e14 wei) | front door |
 | `maxDailyOutflowBps` / `minDailyOutflow` | 20% / 100 TAO per 24-hour window per front door | vault |
 | `maxEntryValue` / `maxMessageValue` / `minChunk` | 2,000 TAO / 4,000 TAO / 10 entries | vault |
-| `payoutDelay` | 24 hours (at most 7 days) | vault |
+| `payoutDelay` | 24 hours (owner-settable, 0 to 7 days) | vault |
 | `maxFeeBps` / `maxFeeAbs` | 1% / 0.02 TAO | vault |
 | `maxTotalAssets` | 1,000 TAO | vault |
 | `minDirectDeposit` | constructor argument | vault |
@@ -390,6 +409,7 @@ Re-run from `contracts/` with `slither . --filter-paths "lib/|test/"`.
 | Low / Info | `timestamp` | The 7-day and 24-hour windows tolerate clock drift. |
 | Low / Info | `assembly` | A memory-safe length shrink in `_deductFee`. |
 | Low / Info | `low-level-calls` | Intended value sends. |
+| Low / Info | `missing-zero-check` on `setKeeper` | By design: `address(0)` leaves only the 7-day fallback. |
 | Low / Info | naming; two unindexed event address parameters | Hygiene. |
 
 ## Pre-mainnet checklist

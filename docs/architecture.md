@@ -26,8 +26,7 @@ details, operator notes and the pre-mainnet checklist: `contracts/README.md`. Re
 - **Base only, in the contracts.** ForeverMoney's bridged TAO, the only TAO that CCIP carries to
   Bittensor EVM, exists only on Base and Robinhood Chain. The first front door is on Base; Robinhood
   Chain is a possible second. Users on Ethereum, BNB or Polygon bridge USDC to Base inside the app.
-- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base, not to the
-  contracts' limits.
+- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base.
 - **csTAO cannot be transferred in v2.** That is what makes "the address that deposited controls the
   shares" true on both chains.
 - **A small anti-spam fee on withdrawal requests** (about $0.30 in ETH; the app can pre-pay it).
@@ -77,15 +76,15 @@ Base before it reaches the front door, and back after the payout is claimed. So 
 moves because of staking rewards:
 
 - no USD price oracle is needed anywhere in the contracts;
-- the price should only go up, which the invariant suite checks (the one exception: cancelling a
-  payout batch can lower it slightly, never below that batch's own price). If it ever fell below
-  half the launch price, the vault would refuse new batches and direct deposits until recapitalised.
+- the price should only go up, as the invariant suite checks (except that cancelling a payout
+  batch can bring it back to that batch's own price, within rounding dust). Below half the launch
+  price, the vault refuses new batches and direct deposits until it is recapitalised.
 
 ## How pricing works
 
-- **Assets are read, not reported.** `totalAssets` is the root stake across the vault's hotkeys plus
-  its liquid balance, minus a small reserve for the chain's existential deposit, minus payouts already
-  owed to queued batches, minus rewards still vesting.
+- **Assets are read, not reported.** `totalAssets` is the root stake across the vault's hotkeys
+  plus its liquid balance, minus a small reserve for the chain's existential deposit, minus payouts
+  already owed to queued batches, minus rewards still vesting.
 - **One price per batch.** When a batch arrives, the vault fixes assets (without the TAO that batch
   brought) and share supply once, and prices every deposit and redeem in it at that price, rounded
   in the vault's favour. A direct deposit is priced the same way, without its own value.
@@ -95,8 +94,8 @@ moves because of staking rewards:
   claim and redeeming just after to take a week of everyone's rewards. Unclaimed rewards are never
   priced in: with weekly claims, at most about a week of yield (about 0.1%) is outside the price.
 - **Measure, never assume.** Around every precompile call that moves value, the vault measures the
-  balance or stake before and after. An unstake that delivers less than asked makes the exit revert
-  instead of paying from reserves.
+  balance or stake before and after. An unstake that delivers less than the exit needs makes the
+  exit revert instead of paying from reserves.
 
 ## Exit safety, in short
 
@@ -107,11 +106,12 @@ shares. Four layers bound that:
 2. Each front door may burn at most `max(20% of gross assets, 100 TAO)` per fixed 24-hour window.
 3. Nothing burned leaves for 24 hours; the guardian can hold a front door's payouts at once, and the
    owner can cancel the batch and give the shares back.
-4. Pause holds everything that moves value, but never blocks cancels, claims or incoming payouts.
+4. Pause stops deposits, redemptions, payouts and staking, not cancels, claims or incoming payouts.
 
 The rails sit outside this: ForeverMoney's 2-of-3 Safe, Chainlink's lane configuration and
 Bittensor's sudo key can each stop or change them with no delay. The README has the full honest
-statement, the soft spots, and what each outside party can do.
+statement, the soft spots (one: the owner can replace the guardian behind only the timelock, so
+the guardian must hold the timelock's canceller role), and what each outside party can do.
 
 ## Before mainnet
 

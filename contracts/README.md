@@ -271,13 +271,15 @@ The four layers:
 
 Soft spots:
 
-- **The allowance base can still be raised within one transaction.** The allowance is computed on
-  the gross before the delivery's own deposits, so a batch cannot inflate its own window with flash
-  capital. Two same-transaction paths remain. A `depositDirect` just before the delivery is bounded
-  by `maxTotalAssets` (and that bound grows when the beta cap is lifted). A rogue adapter can also
-  deliver a forged deposit-only batch just before the redeem batch, bounded only by the TAO it can
-  borrow: measured, 4,000 TAO of flash capital that way still burns a 1,000-TAO holder in full, and
-  the adapter takes its 4,000 back with `redeemDirect` in the same transaction.
+- **The allowance base counts any capital already in the vault.** The allowance is computed on the
+  gross before the delivery's own deposits, which only stops a batch's OWN deposits from counting.
+  Any capital in the vault before the redeem batch raises the base: a rogue front door's earlier
+  deposit batch, a forged deposit batch delivered in an earlier block (or earlier in the same
+  transaction by a rogue adapter: measured, 4,000 TAO of flash capital that way still burns a
+  1,000-TAO holder in full, and the adapter takes its 4,000 back with `redeemDirect` in the same
+  transaction), or a `depositDirect` up to `maxTotalAssets` (which grows when the beta cap is
+  lifted). The backstop is unchanged: the 24-hour payout delay, the guardian's hold and the owner's
+  cancel. Flagged for the auditor.
 - **First come, first served.** A front door's allowance goes to redeems in delivery order, so one
   large holder can take a door's whole window. Deferred users must request again and pay the
   redeem-request fee again.
@@ -319,8 +321,16 @@ Soft spots:
   alongside its replacement and can veto it: a compromised owner cannot bypass that veto within the
   registry delay. After 8 days it can install its own guardian and propose again, so a rogue front
   door or bridge needs at least 15 days of public notice plus the timelock's delay, during which
-  users can exit. A stolen guardian key, in turn, can freeze flows for at most 8 days plus the
-  owner's timelock, and cannot cancel its own replacement.
+  users can exit.
+- **A stolen guardian key can freeze for about 15 days.** Besides pausing, it can `removeFrontDoor`
+  and `disableBridge`, and while still in office it can cancel the owner's re-registration
+  proposals (`cancelFrontDoorProposal`, `cancelBridgeProposal`). Front-door deposits, redeems and
+  payouts can therefore stay frozen for about 15 days plus the owner's timelock (8 days to replace
+  the guardian, then a 7-day registry re-proposal); direct deposits and redeems, which only a pause
+  stops, for 8 days plus the timelock. It cannot cancel its own replacement. This bound holds only
+  if the guardian key is NOT granted the timelock's canceller role. Without that role the guardian
+  cannot veto timelocked parameter changes (the outflow percentage, `payoutDelay`, the fee ceiling,
+  `setStakeHotkey` / `moveStake`), which wait only for the timelock.
 - **An insolvent vault refuses deposits, not exits.** If the share price falls below half the launch
   price, every front-door batch with deposits reverts `VaultInsolvent` until the vault is
   recapitalised out of band (see [Operator notes](#operator-notes)). Redeem-only batches still
@@ -328,8 +338,10 @@ Soft spots:
 - **A position below the minimum stake waits.** The unstake walk skips any hotkey whose stake is
   below the minimum stake: the chain may refuse to touch it, and that revert would block every exit.
   An exit that needs that dust (under the minimum stake per hotkey: 0.002 TAO today, up to 1 TAO if
-  the owner raises the fallback) reverts `UnstakeShort` until `stakeIdle` tops the position up or
-  the owner sweeps it with `removeHotkey`.
+  the owner raises the fallback) reverts `UnstakeShort` until the position is cleared. `stakeIdle`
+  tops up only the stake hotkey, and only once at least the minimum stake is idle; otherwise the
+  owner sweeps the position with `removeHotkey`, which exits it fully (for the stake hotkey, after
+  `setStakeHotkey` elsewhere first).
 
 ## Trust and supply chain
 
@@ -340,14 +352,14 @@ Outside parties. No delay applies to any of them.
 | ForeverMoney's 2-of-3 Safe | Pause the token pools, change rate limits, or remove ForeverMoney's TAO from CCIP. | Exposure is TAO in an open batch, in flight, or credited and unclaimed on Base. Staked TAO is native on Bittensor and unaffected. |
 | Chainlink CCIP (lane configuration, rate limits and message verification) | Stall batches in either direction. A compromised CCIP network could also deliver forged `BATCH` or `PAYOUTS` messages that an honest adapter accepts. The Risk Management Network check, an extra independent verification, is disabled on these lanes, and the lanes are mid-migration to CCIP 2.0. | Forged messages get the same bounds as a rogue adapter (see the contracts table below), and funds in flight are exposed. A failed delivery is retried by manual re-execution, which anyone can run. A message the rail loses loses only that batch's funds: there is no in-contract recovery and no in-flight lock, so other batches are unaffected. One caveat: in the separate-data-message fallback the token check is pooled across chunks, so a chunk whose tokens are lost makes the *last* chunk's data fail, not its own. |
 | Bittensor's sudo key | Ship runtime upgrades (about weekly) that change precompile behaviour, or disable a precompile. | Value-moving precompile calls are measured, so an under-delivering unstake reverts (`UnstakeShort`) instead of paying from reserves or other users' payouts. That is a freeze, not a protection, if the chain ever charges a fee or under-delivers on root unstake: every exit that needs an unstake reverts until the owner raises `unstakeMarginRao` (added to every unstake request; any excess stays idle for `stakeIdle`; the fee then falls on all holders, not the leaver). The price itself trusts the stake read, so a changed read would misprice; the keeper is to run each pre-release on testnet 945 first, and the [checklist](#pre-mainnet-checklist) lists the behaviours to confirm. |
-| Validators (the hotkey owners) | The owner picks them, and they keep their validator take from the rewards. A validator's hotkey swap moves the vault's root stake to a new hotkey outside the set the vault reads, so the price drops until that hotkey is added back. | The keeper watches for hotkey swaps and stake drops, the guardian pauses, and the owner, guardian or keeper re-adds the hotkey (`addHotkey`; no timelock for the guardian or keeper). Front-door batches delivered in that window are mispriced (deposits get too many shares, redeems too little). |
+| Validators (the hotkey owners) | The owner picks them, and they keep their validator take from the rewards. A validator's hotkey swap moves the vault's root stake to a new hotkey outside the set the vault reads, so the price drops until that hotkey is added back. | The keeper watches for hotkey swaps and stake drops, the guardian pauses, and the owner, guardian or keeper re-adds the hotkey (`addHotkey`; no timelock for the guardian or keeper). Front-door batches delivered in that window are mispriced (deposits get too many shares, redeems too little), and so are direct deposits and redeems: a colluding validator could swap and then `depositDirect` at the lowered price, bounded by the `maxTotalAssets` headroom the drop opens (the insolvency guard trips only below 50%). Keep one hotkey slot free (the set holds at most 4) so a swapped hotkey can be re-added without the timelock. |
 
 Keys:
 
 | Key | What it can do | What bounds it |
 |---|---|---|
 | Owner | Everything in [Roles](#roles) under "Owner", including replacing the guardian (8 days after proposing it) and picking the validators. | Cannot move user funds directly. The only route would be registering a rogue front door or bridge, which waits 7 days in public, and the sitting guardian can veto it: replacing the guardian takes 8 days, longer than the registry delay, and the guardian stays in office until then. A compromised owner cannot bypass the sitting guardian's veto within the registry delay; with the guardian vetoing, a rogue registration needs at least 15 days of public notice plus the timelock's delay. Parameter changes wait only for the timelock. |
-| Guardian | Stop only: pause, remove a front door, disable a bridge, cancel a pending proposal. It can also add a hotkey, which only widens what the price reads. | A stolen guardian key can freeze, not take, and for at most 8 days plus the owner's timelock: the owner proposes a replacement at once, accepts it after 8 days, and the guardian cannot cancel that. Unpausing needs the owner, and a removed front door or disabled bridge comes back only through the 7-day registry. It could fill the hotkey set (at most 4); the owner removes extras. |
+| Guardian | Stop only: pause, remove a front door, disable a bridge, cancel a pending proposal. It can also add a hotkey, which only widens what the price reads. | A stolen guardian key can freeze, not take. The owner proposes a replacement at once and accepts it after 8 days; the guardian cannot cancel that. Until then it can re-pause, remove front doors, disable bridges and cancel the owner's re-registration proposals, so front-door deposits, redeems and payouts can stay frozen for about 15 days plus the owner's timelock (8-day replacement, then a 7-day registry re-proposal), and direct deposits and redeems for 8 days plus the timelock. The bound holds only if the guardian key does NOT hold the timelock's canceller role. It could fill the hotkey set (at most 4); the owner removes extras. |
 | Keeper | Time `claimRewards` and `stakeIdle`; add a hotkey. | A stolen key can time claims and stakes badly (frequent tiny claims stretch vesting), and on a runtime with a post-stake hold on unstaking it can re-arm that hold with `stakeIdle` to delay exits; it cannot move funds. Anyone may act after 7 days (and before the first stake or claim, since those timestamps start at 0), and the owner can replace or clear the keeper. |
 | Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey and initial bridge. The initial bridge is enabled at once, with no delay. | Check every constructor argument before anyone deposits. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
 
@@ -428,12 +440,20 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
     rewards land on the hotkey that earned them. `removeHotkey` refuses while unclaimed rewards
     exceed `hotkeyDustRao`, unless told to forfeit them. The owner, guardian or keeper can
     `addHotkey`: after a validator's hotkey swap, add the new hotkey at once so its stake counts in
-    the price again (pause first if batches are arriving). The unstake walk skips a position below
-    the minimum stake; `removeHotkey` exits such dust fully.
+    the price again (pause first if batches are arriving). Keep one slot free so a swapped hotkey
+    can be re-added without the timelock. The unstake walk skips a position below the minimum
+    stake: `stakeIdle` tops up only the stake hotkey, and only when at least the minimum stake is
+    idle; `removeHotkey` exits such dust fully (on the stake hotkey, `setStakeHotkey` elsewhere
+    first).
 12. **Replacing the guardian takes 8 days.** `proposeGuardian`, then `acceptGuardian` once
-    `GUARDIAN_DELAY` has passed; only the owner can `cancelGuardianProposal`. A stolen guardian key
-    can freeze for at most 8 days plus the owner's timelock. A compromised owner cannot bypass the
-    sitting guardian's veto within the registry delay.
+    `GUARDIAN_DELAY` has passed; only the owner can `cancelGuardianProposal`. Do NOT grant the
+    guardian key the timelock's canceller role, or the bound below fails. A stolen guardian key can
+    keep front-door flows frozen for about 15 days plus the owner's timelock (it can cancel
+    re-registration proposals until it is replaced), and direct deposits and redeems for 8 days
+    plus the timelock. Without the canceller role the guardian cannot veto timelocked parameter
+    changes (the outflow percentage, `payoutDelay`, the fee ceiling, `setStakeHotkey` /
+    `moveStake`), which wait only for the timelock. A compromised owner cannot bypass the sitting
+    guardian's veto within the registry delay.
 13. **Unstake margin and floors.** If root unstakes start delivering short (a chain fee), every exit
     that needs an unstake reverts `UnstakeShort`. Set `unstakeMarginRao` to at least the shortfall
     per removal; any excess stays idle for `stakeIdle`. `setFloorFallbacks` can raise the floors but
@@ -508,7 +528,10 @@ Confirm on Bittensor testnet 945 or a fork of chain 964:
    forwarded gas, and a capped `try/catch` view read (the live floors from `getDefaultMinStake` and
    `getNominatorMinRequiredStake`, 100,000 gas each) falls back to the owner-set values as modelled.
    A read that succeeds with malformed return data is NOT caught by the `try/catch`: the decode
-   reverts in the vault and fails every call that reads the floors.
+   reverts in the vault and fails every call that reads the floors. Nor is an out-of-range
+   (implausibly large) but successful read: every position would read as below the minimum stake,
+   so the unstake walk skips them all and exits freeze until the owner moves stake and removes
+   hotkeys (each removal exits its position fully).
 7. `setRejectStakingHotkeyGrowth` semantics, and that it has no clearing setter; a root-to-root
    `moveStake` is fee-free.
 8. A validator's hotkey swap moves a contract coldkey's root stake (the keeper's swap monitoring and

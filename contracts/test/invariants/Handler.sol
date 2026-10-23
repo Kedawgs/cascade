@@ -92,6 +92,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// RedeemDeferred and RedeemSkipped events seen in deliveries.
     uint256 public redeemDeferred;
     uint256 public redeemSkipped;
+    /// DepositBounced events seen in deliveries (expected 0: the price never falls, so the vault never
+    /// becomes insolvent here).
+    uint256 public depositBounces;
     /// High-water mark of queuedKeys.length.
     uint256 public maxQueueDepth;
     /// Exits refused UnstakeShort because the only stake sat below the minimum stake, which the
@@ -215,7 +218,7 @@ contract Handler is CommonBase, StdCheats, StdUtils {
 
     /// @dev Warps 12 hours, so the open batch is due, and pays the bridge fee on top of the pot. The
     /// bridge delivers inside the close: the delivery's events give its amount, its payout list (from
-    /// the Redeemed events) and its delivery price.
+    /// the DepositBounced and Redeemed events) and its delivery price.
     function closeBatch() external {
         vm.warp(block.timestamp + 12 hours);
         (,,,, uint256 nDeposits, uint256 nRedeems) = fd.openBatch();
@@ -393,6 +396,13 @@ contract Handler is CommonBase, StdCheats, StdUtils {
                 ghostIn += amount;
                 delivered = amount;
                 ++deliveries;
+            } else if (_isVaultLog(log, CascadeVault.DepositBounced.selector)) {
+                // a bounced deposit is queued ahead of the redeems, with 0 shares
+                // casting to 'uint160' is safe because the topic is an indexed address
+                // forge-lint: disable-next-line(unsafe-typecast)
+                address user = address(uint160(uint256(log.topics[2])));
+                lists[log.topics[1]].push(CascadeMessages.Payout(user, 0, abi.decode(log.data, (uint256))));
+                ++depositBounces;
             } else if (_isVaultLog(log, CascadeVault.Redeemed.selector)) {
                 (uint256 shares, uint256 assets) = abi.decode(log.data, (uint256, uint256));
                 // casting to 'uint160' is safe because the topic is an indexed address

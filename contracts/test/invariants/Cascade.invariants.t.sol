@@ -164,6 +164,7 @@ contract CascadeInvariantTest is Test {
         emit log_named_uint("cancelsAfterPartial", handler.cancelsAfterPartial());
         emit log_named_uint("redeemDeferred", handler.redeemDeferred());
         emit log_named_uint("redeemSkipped", handler.redeemSkipped());
+        emit log_named_uint("depositBounces", handler.depositBounces());
         emit log_named_uint("maxQueueDepth", handler.maxQueueDepth());
         emit log_named_uint("dustBlocked", handler.dustBlocked());
     }

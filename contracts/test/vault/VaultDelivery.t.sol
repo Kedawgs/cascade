@@ -570,20 +570,39 @@ contract VaultDeliveryTest is VaultTestBase {
 
     // ---- insolvency guard ----
 
-    function test_delivery_insolventVaultReverts() public {
+    function test_delivery_insolventVaultBouncesDeposit() public {
         depositVia(alice, 10e18);
         // lost assets: gross 0 against a supply of 1e25
         vm.deal(address(vault), 0);
 
-        // totalAssets = 1e18 - 1e12 during the call; A = max(1e18 - 1e12 - 1e18, 0) = 0, S = 1e25
-        vm.expectRevert(CascadeVault.VaultInsolvent.selector);
+        // totalAssets = 1e18 - 1e12 during the call; A = max(1e18 - 1e12 - 1e18, 0) = 0, S = 1e25: bob's
+        // deposit is not minted but queued back; price = (0 + 1) * 1e18 / (1e25 + 1e6) = 0
+        bytes32 key = keyOf(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
+        vm.expectEmit(address(vault));
+        emit CascadeVault.DepositBounced(key, bob, 1e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutBatchQueued(key, BASE, 2, 1, 1e18, 0);
         deliver(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
 
-        // once the state is repaired the same delivery goes through:
-        // A = 10e18, S = 1e25: 1e18 * (1e25 + 1e6) / (10e18 + 1) = 1e24
-        vm.deal(address(vault), ED + 10e18);
-        deliver(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
+        assertTrue(vault.processed(key));
+        assertEq(vault.balanceOf(bob), 0);
+        assertEq(vault.totalSupply(), 1e25);
+        assertEq(vault.pendingPayouts(), 1e18);
+        CascadeVault.PayoutBatch memory b = vault.getPayoutBatch(key);
+        assertEq(b.count, 1);
+        assertEq(b.remaining, 1e18);
+        assertEq(b.payoutsHash, keccak256(abi.encode(bytes32(0), bob, uint256(0), uint256(1e18))));
+        // a bounce is not a burn: the front door's window is untouched
+        (uint64 start, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(start, 0);
+        assertEq(burned, 0);
+
+        // once the state is repaired (alice's 10e18 back, bob's 1e18 still reserved) deposits mint again:
+        // A = (12e18 - 1e18 pending) - 1e18 = 10e18, S = 1e25: 1e18 * (1e25 + 1e6) / (10e18 + 1) = 1e24
+        vm.deal(address(vault), ED + 11e18);
+        deliver(BASE, frontDoor, 3, entries1(bob, 1e18), noEntries());
         assertEq(vault.balanceOf(bob), 1e24);
+        assertEq(vault.pendingPayouts(), 1e18);
     }
 
     function test_depositDirect_insolventVaultReverts() public {
@@ -594,17 +613,24 @@ contract VaultDeliveryTest is VaultTestBase {
         depositDirect(bob, 1e18);
     }
 
-    function test_delivery_belowHalfLaunchPriceReverts() public {
+    function test_delivery_belowHalfLaunchPriceBouncesDeposits() public {
         depositVia(alice, 10e18);
         // 60% of the assets lost: 4e18 left against a supply of 1e25
         vm.deal(address(vault), ED + 4e18);
 
-        // A = (4e18 + 1e18) - 1e18 = 4e18; 4e18 * 2_000_000 = 8e24 < 1e25
-        vm.expectRevert(CascadeVault.VaultInsolvent.selector);
+        // A = (4e18 + 1e18) - 1e18 = 4e18; 4e18 * 2_000_000 = 8e24 < 1e25: the batch delivers, bob's
+        // deposit bounces; a direct deposit is still refused
+        bytes32 key = keyOf(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
+        vm.expectEmit(address(vault));
+        emit CascadeVault.DepositBounced(key, bob, 1e18);
         deliver(BASE, frontDoor, 2, entries1(bob, 1e18), noEntries());
+        assertEq(vault.balanceOf(bob), 0);
+        assertEq(vault.pendingPayouts(), 1e18);
         vm.expectRevert(CascadeVault.VaultInsolvent.selector);
         depositDirect(bob, 1e18);
         assertEq(vault.totalSupply(), 1e25);
+        // the bounced 1e18 is reserved, so the price is where the loss left it
+        assertEq(vault.totalAssets(), 4e18);
     }
 
     function test_delivery_redeemOnlyBatchDeliversInInsolventVault() public {
@@ -620,10 +646,93 @@ contract VaultDeliveryTest is VaultTestBase {
         redeemVia(alice, 5e24);
         assertEq(vault.balanceOf(alice), 5e24);
         assertEq(vault.pendingPayouts(), 2e18);
+    }
 
-        // a batch with deposits is still refused
-        vm.expectRevert(CascadeVault.VaultInsolvent.selector);
-        deliver(BASE, frontDoor, ++nextBatchId, entries1(bob, 1e18), entries1(alice, 1e24));
+    /// A griefer's minimum deposit sits in the same batch as alice's exit: the deposit bounces and the
+    /// exit still burns. The queue lists deposits first, then redeems, and pays out like any batch.
+    function test_delivery_insolventVaultBouncesDepositsAndStillRedeems() public {
+        depositVia(alice, 10e18);
+        // 60% of the assets lost: 4e18 left against a supply of 1e25
+        vm.deal(address(vault), ED + 4e18);
+        uint256 t0 = block.timestamp;
+
+        // A = 4e18, S = 1e25 (insolvent): bob bounces; alice 5e24 * (4e18 + 1) / (1e25 + 1e6) = 2e18;
+        // price = (4e18 + 1) * 1e18 / (1e25 + 1e6) = 4e11
+        CascadeMessages.Entry[] memory d = entries1(bob, 1e18);
+        CascadeMessages.Entry[] memory r = entries1(alice, 5e24);
+        bytes32 key = keyOf(BASE, frontDoor, 2, d, r);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.DepositBounced(key, bob, 1e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 5e24, 2e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutBatchQueued(key, BASE, 2, 2, 3e18, 4e11);
+        deliver(BASE, frontDoor, 2, d, r);
+
+        assertEq(vault.balanceOf(bob), 0);
+        assertEq(vault.balanceOf(alice), 5e24);
+        assertEq(vault.totalSupply(), 5e24);
+        CascadeVault.PayoutBatch memory b = vault.getPayoutBatch(key);
+        assertEq(b.count, 2);
+        assertEq(b.remaining, 3e18);
+        bytes32 h1 = keccak256(abi.encode(bytes32(0), bob, uint256(0), uint256(1e18)));
+        assertEq(b.payoutsHash, keccak256(abi.encode(h1, alice, uint256(5e24), uint256(2e18))));
+        assertEq(vault.pendingPayouts(), 1e18 + 2e18);
+        // only alice's burn counts against the window
+        (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(burned, 2e18);
+
+        // the list in delivery order: deposits first, then redeems
+        CascadeMessages.Payout[] memory list = new CascadeMessages.Payout[](2);
+        list[0] = CascadeMessages.Payout(bob, 0, 1e18);
+        list[1] = CascadeMessages.Payout(alice, 5e24, 2e18);
+        CascadeMessages.Payout[] memory swapped = new CascadeMessages.Payout[](2);
+        swapped[0] = list[1];
+        swapped[1] = list[0];
+        vm.warp(t0 + 24 hours);
+        vm.expectRevert(CascadeVault.PayoutsMismatch.selector);
+        vault.processPayouts(key, swapped, 10);
+
+        // sum 3e18, fee 1e15 pro rata: bob ceil(1e18 * 1e15 / 3e18) = 333_333_333_333_334 →
+        // 999_666_666_666_666_666 floors to 999_666_666_000_000_000; alice ceil(2e18 * 1e15 / 3e18) =
+        // 666_666_666_666_667 → 1_999_333_333_333_333_333 floors to 1_999_333_333_000_000_000.
+        // The liquid 5e18 covers net + fee, so nothing is unstaked.
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutChunkSent(key, 0, 2, 3e18, 2_998_999_999_000_000_000, 1e15);
+        vault.processPayouts(key, list, 10);
+
+        CascadeMessages.Entry[] memory sent = entries2(bob, 999_666_666_000_000_000, alice, 1_999_333_333_000_000_000);
+        assertEq(bridge.lastMessage(), CascadeMessages.encodePayouts(key, 0, sent));
+        assertEq(bridge.lastAmount(), 2_998_999_999_000_000_000);
+        assertEq(bridge.lastValue(), 2_998_999_999_000_000_000 + 1e15);
+        assertEq(bridge.lastRecipient(), frontDoor);
+        assertEq(vault.pendingPayouts(), 0);
+        assertEq(vault.getPayoutBatch(key).count, 0);
+        assertEq(address(vault).balance, ED + 5e18 - 2_999_999_999_000_000_000);
+    }
+
+    /// A cancel re-mints each unsent entry's shares; a bounced deposit has none, so its TAO is released
+    /// into the vault's assets instead of going back. The owner must process such a batch, not cancel it.
+    function test_cancelPayoutBatch_bouncedDepositStaysInVault() public {
+        depositVia(alice, 10e18);
+        vm.deal(address(vault), ED + 4e18);
+        bytes32 key = deliver(BASE, frontDoor, 2, entries1(bob, 1e18), entries1(alice, 5e24));
+        CascadeMessages.Payout[] memory list = new CascadeMessages.Payout[](2);
+        list[0] = CascadeMessages.Payout(bob, 0, 1e18);
+        list[1] = CascadeMessages.Payout(alice, 5e24, 2e18);
+
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemReversed(key, bob, 0, 1e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemReversed(key, alice, 5e24, 2e18);
+        vm.prank(owner);
+        vault.cancelPayoutBatch(key, list);
+
+        assertEq(vault.balanceOf(bob), 0);
+        assertEq(vault.balanceOf(alice), 1e25);
+        assertEq(vault.pendingPayouts(), 0);
+        // gross 5e18, nothing reserved: bob's 1e18 now backs alice's shares
+        assertEq(vault.totalAssets(), 5e18);
     }
 
     function test_delivery_sixtyPercentAssetsStillDeposits() public {

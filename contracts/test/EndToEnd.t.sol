@@ -163,6 +163,36 @@ contract EndToEndTest is Test {
         }
     }
 
+    /// The keeper's full view: batch `key`'s ordered payout list, rebuilt from the vault's DepositBounced
+    /// (0 shares) and Redeemed events in log order (bounced deposits first, then redeems).
+    function queuedList(Vm.Log[] memory logs, bytes32 key)
+        internal
+        view
+        returns (CascadeMessages.Payout[] memory list)
+    {
+        uint256 n;
+        for (uint256 i; i < logs.length; ++i) {
+            if (isVaultLog(logs[i], CascadeVault.DepositBounced.selector, key)) ++n;
+            else if (isVaultLog(logs[i], CascadeVault.Redeemed.selector, key)) ++n;
+        }
+        list = new CascadeMessages.Payout[](n);
+        n = 0;
+        for (uint256 i; i < logs.length; ++i) {
+            Vm.Log memory log = logs[i];
+            bool bounced = isVaultLog(log, CascadeVault.DepositBounced.selector, key);
+            if (!bounced && !isVaultLog(log, CascadeVault.Redeemed.selector, key)) continue;
+            // casting to 'uint160' is safe because the topic is an indexed address
+            // forge-lint: disable-next-line(unsafe-typecast)
+            address user = address(uint160(uint256(log.topics[2])));
+            if (bounced) {
+                list[n++] = CascadeMessages.Payout(user, 0, abi.decode(log.data, (uint256)));
+            } else {
+                (uint256 shares, uint256 assets) = abi.decode(log.data, (uint256, uint256));
+                list[n++] = CascadeMessages.Payout(user, shares, assets);
+            }
+        }
+    }
+
     /// The number of the bridge's DeliveryFailed events in `logs`, and the last one's fields.
     function failures(Vm.Log[] memory logs) internal view returns (uint256 n, uint256 index, bytes memory reason) {
         for (uint256 i; i < logs.length; ++i) {
@@ -238,6 +268,59 @@ contract EndToEndTest is Test {
         // the rao floor stayed in the vault: 11e18 - 5_499_999_999_000_000_000
         assertEq(vault.totalAssets(), 5_500_000_001_000_000_000);
         // the rail
+        assertEq(bridge.pendingCount(), 0);
+        assertEq(bridge.failedCount(), 0);
+    }
+
+    /// In an insolvent vault a deposit is not minted: its TAO rides back to Base with the batch's payouts
+    /// and the depositor claims it there (less its share of the payout fee), while the same batch's
+    /// redeem still exits.
+    function test_insolventVaultBouncesDepositBackToBase() public {
+        // A = 0, S = 0: alice's 10e18 → 1e25 shares, left liquid; then 60% of the assets are lost
+        depositVia(fd, alice, 10e18);
+        close(fd);
+        vm.deal(address(vault), ED + 4e18);
+
+        // bob deposits 1e18 and alice asks to redeem half in the same batch. A = (5e18 - 0) - 1e18 = 4e18,
+        // S = 1e25 (below half the launch price): bob bounces; alice 5e24 * (4e18 + 1) / (1e25 + 1e6) = 2e18
+        depositVia(fd, bob, 1e18);
+        requestVia(fd, alice, 5e24);
+        bytes32 key = keyOf(BASE, address(fd), 2, entries1(bob, 1e18), entries1(alice, 5e24));
+        vm.recordLogs();
+        close(fd);
+        CascadeMessages.Payout[] memory list = queuedList(vm.getRecordedLogs(), key);
+        assertEq(list.length, 2);
+        assertEq(list[0].user, bob);
+        assertEq(list[0].shares, 0);
+        assertEq(list[0].assets, 1e18);
+        assertEq(list[1].user, alice);
+        assertEq(list[1].shares, 5e24);
+        assertEq(list[1].assets, 2e18);
+        assertEq(vault.balanceOf(bob), 0);
+        assertEq(vault.balanceOf(alice), 5e24);
+        assertEq(vault.pendingPayouts(), 3e18);
+        assertEq(bridge.failedCount(), 0);
+
+        // after the delay: fee 1e15 pro rata over 3e18 (bob 999_666_666_000_000_000, alice
+        // 1_999_333_333_000_000_000, net 2_998_999_999_000_000_000), paid from the liquid balance
+        vm.warp(block.timestamp + 24 hours);
+        vm.prank(keeper);
+        vault.processPayouts(key, list, 50);
+        assertEq(fd.claimable(bob), 999_666_666_000_000_000);
+        assertEq(fd.claimable(alice), 1_999_333_333_000_000_000);
+        vm.prank(bob);
+        fd.claim();
+
+        // Base: bob is back to 1_000e18 less his share of the fee and the rao floor
+        assertEq(tao.balanceOf(bob), 1_000e18 - 1e18 + 999_666_666_000_000_000);
+        assertEq(fd.totalClaimable(), 1_999_333_333_000_000_000);
+        assertEq(tao.balanceOf(address(fd)), 1_999_333_333_000_000_000);
+        // 11e18 forwarded - 2_998_999_999_000_000_000 received
+        assertEq(fd.netForwarded(), 8_001_000_001_000_000_000);
+        // Bittensor: net + fee left; the rounding remainder 1e9 stayed
+        assertEq(vault.pendingPayouts(), 0);
+        assertEq(address(vault).balance, ED + 5e18 - 2_999_999_999_000_000_000);
+        assertEq(vault.totalSupply(), 5e24);
         assertEq(bridge.pendingCount(), 0);
         assertEq(bridge.failedCount(), 0);
     }

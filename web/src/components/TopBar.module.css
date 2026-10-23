@@ -1,0 +1,90 @@
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  margin-bottom: 20px;
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.home {
+  color: var(--ink);
+  text-decoration: none;
+  border-radius: 8px;
+}
+
+.back {
+  padding: 8px 8px 8px 0;
+  color: var(--water);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  border-radius: 8px;
+}
+
+.back:hover {
+  text-decoration: underline;
+}
+
+.title {
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.avatar {
+  display: block;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--mist);
+  border: 1px solid var(--line);
+  anchor-name: --account-avatar;
+}
+
+button.avatar {
+  cursor: pointer;
+}
+
+button.avatar:hover {
+  background: var(--water-tint);
+}
+
+/* Native popover: light dismiss and Escape come for free. */
+.menu {
+  position: fixed;
+  inset: auto;
+  top: 84px;
+  right: max(var(--gutter), calc((100vw - var(--content-width)) / 2));
+  width: min(260px, calc(100vw - 2 * var(--gutter)));
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 10px 30px rgb(16 33 43 / 0.12);
+}
+
+@supports (position-anchor: --a) {
+  .menu {
+    position-anchor: --account-avatar;
+    top: calc(anchor(bottom) + 8px);
+    right: anchor(right);
+  }
+}
+
+.menuName {
+  margin: 2px 0 12px;
+  word-break: break-all;
+}

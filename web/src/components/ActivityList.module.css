@@ -1,0 +1,49 @@
+.list li {
+  border-top: 1px solid var(--line);
+}
+
+/* Rows bleed 10px past the column so the hover tint has room, as in the mockup. */
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  margin: 0 -10px;
+  padding: 12px 10px;
+  border-radius: 12px;
+  color: var(--ink);
+  font-size: 15px;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+.row:hover {
+  background: var(--water-tint);
+}
+
+.row:focus-visible {
+  background: var(--water-tint);
+  outline-offset: 0;
+}
+
+.date {
+  display: inline-block;
+  min-width: 4.2em;
+  margin-right: 4px;
+}
+
+.done,
+.moving {
+  flex: none;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.done {
+  color: var(--proof);
+}
+
+.moving {
+  color: var(--water);
+}

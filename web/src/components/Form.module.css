@@ -1,0 +1,195 @@
+.form {
+  display: block;
+}
+
+/* Big amount, like the mockup's "$500", with a quiet underline so it reads as a field. */
+.amountField {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin: 2px 0 4px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--line);
+  font-size: 40px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  transition: border-color 0.15s ease;
+}
+
+.amountField:focus-within {
+  border-color: var(--water);
+}
+
+.amountField[data-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.amountInput {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The field's border shows focus instead. */
+.amountInput:focus-visible {
+  outline: none;
+}
+
+.amountInput::placeholder {
+  color: var(--line);
+}
+
+.unit {
+  color: var(--muted);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.max {
+  align-self: center;
+  flex: none;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--mist);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.max:hover {
+  background: var(--water-tint);
+}
+
+.under {
+  min-height: 1.45em;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 13.5px;
+}
+
+.chainSet {
+  margin-top: 18px;
+  border: 0;
+  min-width: 0;
+}
+
+.chains {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chain {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chain:hover {
+  border-color: var(--water);
+}
+
+.chain:has(.radio:checked) {
+  padding: 11px;
+  border: 2px solid var(--water);
+  background: var(--water-wash);
+  font-weight: 600;
+}
+
+.chain:has(.radio:focus-visible) {
+  outline: 2px solid var(--water);
+  outline-offset: 2px;
+}
+
+.radio {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.chainDot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.note {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--mist);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.summary {
+  margin-top: 16px;
+}
+
+.summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  font-size: 15px;
+}
+
+.summary dt {
+  color: var(--muted);
+}
+
+.summary dd {
+  text-align: right;
+}
+
+.submit {
+  margin-top: 18px;
+}
+
+.after {
+  margin-top: 10px;
+  text-align: center;
+}
+
+.rows {
+  margin-top: 6px;
+}
+
+.rows div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 15px;
+}
+
+.rows div + div {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}

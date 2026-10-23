@@ -27,6 +27,8 @@ contract CascadeInvariantTest is Test {
     uint256 constant FEE = 1e15;
     uint256 constant REQUEST_FEE = 1e14;
     uint256 constant HIGH_CAP = 1_000_000e18;
+    /// MAX_ENTRIES (100) rao: the most rounding dust one cancelled batch can come back short.
+    uint256 constant DUST_TOLERANCE = 100 * 1e9;
 
     address owner = makeAddr("owner");
     address guardian = makeAddr("guardian");
@@ -89,10 +91,13 @@ contract CascadeInvariantTest is Test {
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
-    /// @dev Only a payout cancel lowers the price, and only to its batch's delivery price; one rao of
-    /// tolerance in the assets for rounding.
+    /// @dev Only a payout cancel lowers the price, and only to its batch's delivery price, within
+    /// DUST_TOLERANCE of assets. Each burned entry leaves less than 1 rao of rounding dust in the vault
+    /// (its payout is floored to rao); a holder who exits before an owner cancel takes part of that dust,
+    /// so the re-minted shares come back short by less than `count` rao in total, and count <=
+    /// MAX_ENTRIES. A real loss would be orders of magnitude larger.
     function invariant_priceNeverFallsExceptAcrossCancel() public view {
-        assertGe(CascadeMath.price(vault.totalAssets() + 1e9, vault.totalSupply()), handler.priceFloor());
+        assertGe(CascadeMath.price(vault.totalAssets() + DUST_TOLERANCE, vault.totalSupply()), handler.priceFloor());
     }
 
     /// @dev Exact stake reads and no donations: the vault holds every wei delivered or deposited, less
@@ -149,5 +154,48 @@ contract CascadeInvariantTest is Test {
         emit log_named_uint("stakes", handler.stakes());
         emit log_named_uint("rewardClaims", handler.rewardClaims());
         emit log_named_uint("cancels", handler.cancels());
+    }
+
+    // ---- regression ----
+
+    /// @dev The sequence that took a cancel more than one rao below its batch's delivery price: alice
+    /// keeps part of her shares through a 3-entry batch, takes her part of its dust out by a direct
+    /// redeem, then the owner cancels the batch. Amounts are inside the handler's bounds, so they pass
+    /// through unchanged.
+    function test_cancelAfterExitStaysWithinDustTolerance() public {
+        // alice and carol deposit directly; 0.818140478 TAO of rewards vest
+        handler.depositDirect(0, 10_889_328_168);
+        handler.depositDirect(2, 8_834_290_024);
+        handler.accrueAndClaim(818_140_478);
+        handler.warp(3 days);
+        handler.warp(3 days);
+        handler.warp(3 days);
+        // bob deposits 19.000000012 TAO at the front door; more rewards vest
+        handler.deposit(1, 19_000_000_012);
+        handler.closeBatch();
+        handler.accrueAndClaim(879_191_032);
+        handler.warp(3 days);
+        handler.warp(3 days);
+        handler.warp(3 days);
+        // alice asks for part of her shares, bob and carol for all of theirs: one batch, 3 entries
+        handler.requestRedeem(0, 1_883_245_995_349_222_618_070_820);
+        handler.requestRedeem(1, type(uint256).max);
+        handler.requestRedeem(2, type(uint256).max);
+        handler.closeBatch();
+        assertEq(handler.queuedCount(), 1);
+        assertEq(vault.getPayoutBatch(handler.queuedKeys(0)).count, 3);
+        // alice exits with the rest; the owner cancels the batch
+        handler.redeemDirect(0, type(uint256).max);
+        assertEq(vault.balanceOf(handler.actors(0)), 0);
+        handler.cancelQueued(0);
+        assertEq(handler.cancels(), 1);
+
+        // more than one rao short of the delivery price, within the dust tolerance
+        uint256 floor_ = handler.priceFloor();
+        assertLt(CascadeMath.price(vault.totalAssets() + 1e9, vault.totalSupply()), floor_);
+        invariant_priceNeverFallsExceptAcrossCancel();
+        invariant_grossAssetsConserved();
+        invariant_pendingPayoutsMatchQueue();
+        invariant_noUnexpectedReverts();
     }
 }

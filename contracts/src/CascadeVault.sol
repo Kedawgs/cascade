@@ -767,20 +767,31 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     /// Payout step 1: from `start`, the next entry always (even above maxMessageValue), then entries in
     /// order while fewer than max(maxEntries, minChunk), capped at MAX_ENTRIES, are taken and the sum
-    /// stays within maxMessageValue. Returns them at their gross value, with their sum.
+    /// stays within maxMessageValue. A tail of fewer than minChunk entries that would be left behind is
+    /// taken too when the whole chunk still fits within maxMessageValue and MAX_ENTRIES, so a tail never
+    /// pays a message fee alone. Returns them at their gross value, with their sum.
     function _takeChunk(CascadeMessages.Payout[] calldata payouts, uint256 start, uint256 maxEntries)
         internal
         view
         returns (CascadeMessages.Entry[] memory entries, uint256 sum)
     {
+        uint256 n = payouts.length;
         uint256 limit = Math.min(Math.max(maxEntries, minChunk), CascadeMessages.MAX_ENTRIES);
-        uint256 end = Math.min(start + limit, payouts.length);
+        uint256 end = Math.min(start + limit, n);
         uint256 cap = maxMessageValue;
         uint256 i = start;
         do {
             sum += payouts[i].assets;
             ++i;
         } while (i < end && sum + payouts[i].assets <= cap);
+        // fold a short tail in
+        if (i < n && n - i < minChunk && n - start <= CascadeMessages.MAX_ENTRIES) {
+            uint256 total = sum;
+            for (uint256 j = i; j < n; ++j) {
+                total += payouts[j].assets;
+            }
+            if (total <= cap) (sum, i) = (total, n);
+        }
         entries = new CascadeMessages.Entry[](i - start);
         for (uint256 j; j < entries.length; ++j) {
             entries[j] = CascadeMessages.Entry(payouts[start + j].user, payouts[start + j].assets);

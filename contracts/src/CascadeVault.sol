@@ -499,7 +499,11 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         processed[key] = true;
         emit BatchDelivered(key, sourceChain, sender, batchId, amount);
 
-        uint256 A = _sub0(totalAssets(), msg.value - msg.value % RAO);
+        // one read of the stake for the whole delivery: A is totalAssets() without this delivery's
+        // credited value, and the allowance base is the gross before this delivery's deposits
+        // (msg.value), so they cannot raise it
+        uint256 gross = grossAssets();
+        uint256 A = _sub0(_sub0(gross, pendingPayouts + unvestedRewards()), msg.value - msg.value % RAO);
         uint256 S = totalSupply();
         // Below half the launch price (1e-6 TAO per share) assets were lost; minting there would hand
         // these deposits much of the vault, so they bounce instead. S == 0 never trips it. Redeems still
@@ -509,7 +513,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         // one queue for both steps: bounced deposits first, then redeems
         PayoutBatch memory b;
         _creditDeposits(key, deposits, A, S, insolvent, b);
-        _burnRedeems(key, peer, redeems, A, S, b);
+        _burnRedeems(key, peer, redeems, A, S, _sub0(gross, msg.value), b);
         if (b.remaining != 0) {
             b.sourceChain = sourceChain;
             b.frontDoor = sender;
@@ -729,23 +733,23 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
-    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of the gross before
-    /// this delivery's deposits, minDailyOutflow) per 24-hour window, and queues it in `b` after any
-    /// bounced deposits. Only burns count against the window. The caller fills in the rest of `b`.
+    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `grossBefore`,
+    /// the gross before this delivery's deposits, minDailyOutflow) per 24-hour window, and queues it in
+    /// `b` after any bounced deposits. Only burns count against the window. The caller fills in the
+    /// rest of `b`.
     function _burnRedeems(
         bytes32 key,
         bytes32 peer,
         CascadeMessages.Entry[] memory redeems,
         uint256 A,
         uint256 S,
+        uint256 grossBefore,
         PayoutBatch memory b
     ) internal {
         if (redeems.length == 0) return;
         Window memory w = burnWindows[peer];
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp >= w.start + 24 hours) w = Window(uint64(block.timestamp), 0);
-        // on the gross before this delivery's deposits (msg.value), so they cannot raise the allowance
-        uint256 grossBefore = _sub0(grossAssets(), msg.value);
         uint256 allowance = _sub0(Math.max(grossBefore * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
         uint256 maxEntry = maxEntryValue;
         // this delivery's burns, without its bounced deposits

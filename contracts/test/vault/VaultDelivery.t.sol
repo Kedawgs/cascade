@@ -473,6 +473,18 @@ contract VaultDeliveryTest is VaultTestBase {
         assertEq(address(vault).balance, 15e18 + ED);
     }
 
+    function test_delivery_readsStakeOncePerHotkey() public {
+        depositVia(alice, 10e18);
+        vm.startPrank(owner);
+        vault.addHotkey(HK2);
+        vault.addHotkey(HK3);
+        vm.stopPrank();
+
+        // the price (A) and the allowance base (grossBefore) come from one read of the 3-hotkey set
+        vm.expectCall(ISTAKING_ADDRESS, abi.encodeWithSelector(IStaking.getStake.selector), 3);
+        deliver(BASE, frontDoor, 2, entries1(bob, 1e18), entries1(alice, 5e24));
+    }
+
     function test_delivery_revertsWhilePausedAndDeliversAfterUnpause() public {
         vm.prank(guardian);
         vault.pause();

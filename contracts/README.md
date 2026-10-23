@@ -271,11 +271,13 @@ The four layers:
 
 Soft spots:
 
-- **Same-transaction direct deposits can still raise the allowance.** The allowance is computed on
+- **The allowance base can still be raised within one transaction.** The allowance is computed on
   the gross before the delivery's own deposits, so a batch cannot inflate its own window with flash
-  capital. The remaining inflation path is a `depositDirect` in the same transaction just before the
-  delivery (by a rogue adapter, say), which `maxTotalAssets` bounds; that bound grows when the beta
-  cap is lifted.
+  capital. Two same-transaction paths remain. A `depositDirect` just before the delivery is bounded
+  by `maxTotalAssets` (and that bound grows when the beta cap is lifted). A rogue adapter can also
+  deliver a forged deposit-only batch just before the redeem batch, bounded only by the TAO it can
+  borrow: measured, 4,000 TAO of flash capital that way still burns a 1,000-TAO holder in full, and
+  the adapter takes its 4,000 back with `redeemDirect` in the same transaction.
 - **First come, first served.** A front door's allowance goes to redeems in delivery order, so one
   large holder can take a door's whole window. Deferred users must request again and pay the
   redeem-request fee again.
@@ -353,7 +355,7 @@ Contracts:
 | If compromised | What it can do | What bounds it |
 |---|---|---|
 | A front door | Burn the shares of users it names, up to `max(20% of gross assets before its batch's deposits, 100 TAO)` per fixed 24-hour window, with the TAO owed to itself. | The 24-hour payout delay, an instant guardian hold, and an owner cancel that re-mints the shares. Users marked `directOnly` are skipped. |
-| An adapter | Present any registered front door, so it gets every door's allowance (same bounds). It holds whatever passes through it in flight. On Base it can credit only tokens the front door holds beyond its books: donations, or payout tokens that landed ahead of their data in the separate-data-message fallback. It can credit that surplus to anyone with a made-up `PAYOUTS` message, and the pending chunk whose tokens it spent then fails `TokensNotReceived`. Its replay slots are its own, so it cannot pre-mark another adapter's deliveries. Whichever adapter is primary sets the fee quote: it can quote up to the fee ceiling and keep the excess. | The same bounds, plus the 7-day bridge registry and the guardian's `disableBridge`. A non-primary adapter's forged redeems are paid out through the primary adapter to the registered front door, which credits the named users on Base: forced exits, not theft. Theft needs a rogue front door or the primary adapter. Disabling a non-primary adapter does not hold batches it already delivered; hold those by removing the front door, then cancel them. |
+| An adapter | Present any registered front door, so it gets every door's allowance (same bounds). It holds whatever passes through it in flight. On Base it can credit only tokens the front door holds beyond its books: donations, or payout tokens that landed ahead of their data in the separate-data-message fallback. It can credit that surplus to anyone with a made-up `PAYOUTS` message, and the pending chunk whose tokens it spent then fails `TokensNotReceived`. Its replay slots are its own, so it cannot pre-mark another adapter's deliveries. Whichever adapter is primary sets the fee quote: it can quote up to the fee ceiling and keep the excess. With borrowed TAO it can raise a door's allowance base within one transaction by delivering a forged deposit-only batch first (see the soft spots). | The same bounds, plus the 7-day bridge registry and the guardian's `disableBridge`. A non-primary adapter's forged redeems are paid out through the primary adapter to the registered front door, which credits the named users on Base: forced exits, not theft. Theft needs a rogue front door or the primary adapter. Disabling a non-primary adapter does not hold batches it already delivered; hold those by removing the front door, then cancel them. |
 
 App side (outside this build): the swap router and onramp APIs, npm dependencies, and the keeper's
 RPC provider.

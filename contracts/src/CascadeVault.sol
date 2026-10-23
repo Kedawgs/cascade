@@ -522,6 +522,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         uint32 taken = uint32(entries.length);
         uint256 fee =
             bridge.quoteFee(b.sourceChain, b.frontDoor, CascadeMessages.encodePayouts(key, b.chunk, entries), sum);
+        // Rounded up to whole rao: the chain floors value transfers to rao, so a sub-rao net + fee
+        // would reach the adapter short of amount + fee.
+        fee = Math.ceilDiv(fee, RAO) * RAO;
         if (fee > Math.max(sum * maxFeeBps / 10_000, maxFeeAbs)) revert FeeTooHigh();
         uint256 net = _deductFee(key, entries, fee, sum);
         if (net == 0) fee = 0;

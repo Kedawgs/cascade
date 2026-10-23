@@ -283,6 +283,22 @@ contract VaultPayoutsTest is VaultTestBase {
         assertEq(vault.pendingPayouts(), 0);
     }
 
+    function test_processPayouts_subRaoFeeRoundsUpToWholeRao() public {
+        // the quote 1e15 + 1 rounds up to 1e15 + 1e9 = 1_000_001_000_000_000; ceiling 1e18
+        bridge.setFee(1e15 + 1);
+        // net = 100e18 - ceil(100e18 * 1_000_001_000_000_000 / 100e18) = 99_998_999_999_000_000_000 (rao-aligned);
+        // sent = net + fee = 100e18. Unrounded, the send would carry 99_999_999_999_000_000_001 wei.
+        vm.expectEmit(address(vault));
+        emit CascadeVault.PayoutChunkSent(K, 0, 1, 100e18, 99_998_999_999_000_000_000, 1_000_001_000_000_000);
+        process(K, listK(), 10);
+
+        assertEq(bridge.lastValue(), 100e18);
+        assertEq(bridge.lastValue() % 1e9, 0);
+        assertEq(bridge.lastAmount(), 99_998_999_999_000_000_000);
+        assertEq(bridge.lastMessage(), CascadeMessages.encodePayouts(K, 0, entries1(alice, 99_998_999_999_000_000_000)));
+        assertDeleted(K);
+    }
+
     function test_processPayouts_dustTailCompletesBatch() public {
         process(K, listK(), 10);
         // A = 900e18, S = 9e26: 1e16 * (9e26 + 1e6) / (900e18 + 1) = 1e22, left liquid
@@ -635,6 +651,30 @@ contract VaultPayoutsTest is VaultTestBase {
 
         assertEq(vault.balanceOf(alice), 9e26);
         assertBatch(K, 0, 0, 100e18);
+    }
+
+    function test_cancelPayoutBatch_twiceRevertsNotPending() public {
+        cancel(K, listK());
+        assertEq(vault.balanceOf(alice), 1e27);
+
+        vm.prank(owner);
+        vm.expectRevert(CascadeVault.NotPending.selector);
+        vault.cancelPayoutBatch(K, listK());
+        assertEq(vault.balanceOf(alice), 1e27);
+        assertEq(vault.totalSupply(), 1e27);
+        assertEq(vault.pendingPayouts(), 0);
+    }
+
+    function test_cancelPayoutBatch_afterFullPayoutRevertsNotPending() public {
+        process(K, listK(), 10);
+        assertEq(vault.balanceOf(alice), 9e26);
+
+        vm.prank(owner);
+        vm.expectRevert(CascadeVault.NotPending.selector);
+        vault.cancelPayoutBatch(K, listK());
+        assertEq(vault.balanceOf(alice), 9e26);
+        assertEq(vault.totalSupply(), 9e26);
+        assertEq(vault.pendingPayouts(), 0);
     }
 
     function test_cancelPayoutBatch_priceStaysAtOrAboveDeliveryPrice() public {

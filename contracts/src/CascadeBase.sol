@@ -7,11 +7,16 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ICascadeBridge} from "./interfaces/ICascadeBridge.sol";
 
 /// Shared admin surface: two-step owner, guardian, pause, and a bridge registry where new bridges
-/// wait REGISTRY_DELAY before activation and the guardian can cancel or disable at once.
+/// wait REGISTRY_DELAY before activation and the guardian can cancel or disable at once. The owner
+/// replaces the guardian only after GUARDIAN_DELAY, longer than REGISTRY_DELAY, so the sitting
+/// guardian can still veto any registry proposal made alongside its replacement.
 abstract contract CascadeBase is Ownable2Step, Pausable, ReentrancyGuard {
     uint64 public constant REGISTRY_DELAY = 7 days;
+    uint64 public constant GUARDIAN_DELAY = 8 days;
 
     address public guardian;
+    address public pendingGuardian;
+    uint64 public guardianProposedAt;
     mapping(address => bool) public bridgeEnabled;
     mapping(address => uint64) public bridgeProposedAt;
     address public primaryBridge;
@@ -27,6 +32,8 @@ abstract contract CascadeBase is Ownable2Step, Pausable, ReentrancyGuard {
     error RenounceDisabled();
 
     event GuardianSet(address guardian);
+    event GuardianProposed(address indexed guardian, uint64 readyAt);
+    event GuardianProposalCancelled(address indexed guardian);
     event BridgeProposed(address indexed bridge, uint64 readyAt);
     event BridgeActivated(address indexed bridge);
     event BridgeProposalCancelled(address indexed bridge);
@@ -48,10 +55,34 @@ abstract contract CascadeBase is Ownable2Step, Pausable, ReentrancyGuard {
         emit PrimaryBridgeSet(initialBridge);
     }
 
-    function setGuardian(address newGuardian) external onlyOwner {
+    /// Starts replacing the guardian; the sitting guardian keeps its powers until acceptGuardian.
+    /// Re-proposing restarts the delay.
+    function proposeGuardian(address newGuardian) external onlyOwner {
         if (newGuardian == address(0)) revert ZeroAddress();
+        pendingGuardian = newGuardian;
+        guardianProposedAt = uint64(block.timestamp);
+        emit GuardianProposed(newGuardian, uint64(block.timestamp) + GUARDIAN_DELAY);
+    }
+
+    function acceptGuardian() external onlyOwner {
+        uint64 proposedAt = guardianProposedAt;
+        if (proposedAt == 0) revert NoProposal();
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp < uint256(proposedAt) + GUARDIAN_DELAY) revert NotReady();
+        address newGuardian = pendingGuardian;
+        delete pendingGuardian;
+        delete guardianProposedAt;
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
+    }
+
+    /// Owner only: the guardian cannot block its own replacement.
+    function cancelGuardianProposal() external onlyOwner {
+        if (guardianProposedAt == 0) revert NoProposal();
+        address proposed = pendingGuardian;
+        delete pendingGuardian;
+        delete guardianProposedAt;
+        emit GuardianProposalCancelled(proposed);
     }
 
     function proposeBridge(address bridge) external onlyOwner {

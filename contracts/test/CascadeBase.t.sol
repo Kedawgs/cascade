@@ -26,6 +26,7 @@ contract CascadeBaseTest is Test {
     address bridge = makeAddr("bridge");
     address bridge2 = makeAddr("bridge2");
     address stranger = makeAddr("stranger");
+    address guardian2 = makeAddr("guardian2");
 
     function setUp() public {
         base = new BaseHarness(owner, guardian, bridge);
@@ -146,6 +147,114 @@ contract CascadeBaseTest is Test {
         vm.prank(stranger);
         vm.expectRevert(CascadeBase.NotGuardian.selector);
         base.pause();
+    }
+
+    // ---- guardian replacement ----
+
+    function test_noImmediateGuardianSetter() public {
+        vm.prank(owner);
+        (bool ok,) = address(base).call(abi.encodeWithSignature("setGuardian(address)", guardian2));
+        assertFalse(ok);
+        assertEq(base.guardian(), guardian);
+    }
+
+    function test_guardianReplacementWaitsEightDays() public {
+        assertEq(base.GUARDIAN_DELAY(), 8 days);
+        uint64 t0 = uint64(block.timestamp);
+        vm.expectEmit(address(base));
+        emit CascadeBase.GuardianProposed(guardian2, t0 + 8 days);
+        vm.prank(owner);
+        base.proposeGuardian(guardian2);
+        assertEq(base.pendingGuardian(), guardian2);
+        assertEq(base.guardianProposedAt(), t0);
+
+        vm.warp(t0 + 8 days - 1);
+        vm.prank(owner);
+        vm.expectRevert(CascadeBase.NotReady.selector);
+        base.acceptGuardian();
+        assertEq(base.guardian(), guardian);
+        // the sitting guardian keeps its powers through the delay
+        vm.prank(guardian2);
+        vm.expectRevert(CascadeBase.NotGuardian.selector);
+        base.pause();
+        vm.prank(guardian);
+        base.pause();
+
+        vm.warp(t0 + 8 days);
+        vm.prank(guardian2);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian2));
+        base.acceptGuardian();
+
+        vm.expectEmit(address(base));
+        emit CascadeBase.GuardianSet(guardian2);
+        vm.prank(owner);
+        base.acceptGuardian();
+        assertEq(base.guardian(), guardian2);
+        assertEq(base.pendingGuardian(), address(0));
+        assertEq(base.guardianProposedAt(), 0);
+
+        // the old guardian is out, the new one is in
+        vm.prank(guardian);
+        vm.expectRevert(CascadeBase.NotGuardian.selector);
+        base.disableBridge(bridge);
+        vm.prank(guardian2);
+        base.disableBridge(bridge);
+        assertFalse(base.bridgeEnabled(bridge));
+    }
+
+    function test_proposeGuardianRules() public {
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        base.proposeGuardian(guardian2);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        base.proposeGuardian(stranger);
+
+        vm.startPrank(owner);
+        vm.expectRevert(CascadeBase.ZeroAddress.selector);
+        base.proposeGuardian(address(0));
+        vm.expectRevert(CascadeBase.NoProposal.selector);
+        base.acceptGuardian();
+        vm.expectRevert(CascadeBase.NoProposal.selector);
+        base.cancelGuardianProposal();
+
+        // re-proposing restarts the delay
+        uint64 t0 = uint64(block.timestamp);
+        base.proposeGuardian(stranger);
+        vm.warp(t0 + 4 days);
+        base.proposeGuardian(guardian2);
+        assertEq(base.pendingGuardian(), guardian2);
+        assertEq(base.guardianProposedAt(), t0 + 4 days);
+        vm.warp(t0 + 8 days);
+        vm.expectRevert(CascadeBase.NotReady.selector);
+        base.acceptGuardian();
+        vm.warp(t0 + 12 days);
+        base.acceptGuardian();
+        vm.stopPrank();
+        assertEq(base.guardian(), guardian2);
+    }
+
+    function test_guardianCannotCancelItsReplacement() public {
+        vm.prank(owner);
+        base.proposeGuardian(guardian2);
+
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        base.cancelGuardianProposal();
+        assertEq(base.pendingGuardian(), guardian2);
+
+        vm.expectEmit(address(base));
+        emit CascadeBase.GuardianProposalCancelled(guardian2);
+        vm.prank(owner);
+        base.cancelGuardianProposal();
+        assertEq(base.pendingGuardian(), address(0));
+        assertEq(base.guardianProposedAt(), 0);
+
+        vm.warp(block.timestamp + 8 days);
+        vm.prank(owner);
+        vm.expectRevert(CascadeBase.NoProposal.selector);
+        base.acceptGuardian();
+        assertEq(base.guardian(), guardian);
     }
 
     function test_renounceReverts() public {

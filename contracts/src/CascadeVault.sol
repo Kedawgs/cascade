@@ -125,6 +125,11 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     error ValueMismatch();
     error AmountMismatch();
     error DuplicateBatch();
+    error NotPending();
+    error PayoutsMismatch();
+    error PayoutDelayed();
+    error FrontDoorInactive();
+    error FeeTooHigh();
 
     // ---- events ----
 
@@ -162,6 +167,12 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     event PayoutBatchQueued(
         bytes32 indexed key, uint64 indexed sourceChain, uint64 batchId, uint32 count, uint256 total, uint256 price
     );
+    /// `gross` is the chunk's queued value; `net + fee` is the value sent (both 0 when nothing was sent).
+    event PayoutChunkSent(bytes32 indexed key, uint32 chunk, uint32 taken, uint256 gross, uint256 net, uint256 fee);
+    /// An entry left with nothing after its share of the fee; `assets` stays in the vault.
+    event PayoutDust(bytes32 indexed key, address indexed user, uint256 assets);
+    event RedeemReversed(bytes32 indexed key, address indexed user, uint256 shares, uint256 assets);
+    event PayoutBatchCancelled(bytes32 indexed key, uint256 remaining);
 
     // ---- constructor ----
 
@@ -486,6 +497,78 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         }
     }
 
+    // ---- payouts ----
+
+    /// Sends the next chunk of batch `key` to its front door through the primary bridge, once
+    /// payoutDelay has passed. `payouts` is the batch's full ordered list, rebuilt from its Redeemed
+    /// events. Permissionless. Each entry pays its share of the bridge fee and is floored to rao; an
+    /// entry left with nothing (every entry when the chunk is worth no more than the fee) is
+    /// PayoutDust and stays in the vault. No staking here.
+    function processPayouts(bytes32 key, CascadeMessages.Payout[] calldata payouts, uint32 maxEntries)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        PayoutBatch memory b = _verifyPayouts(key, payouts);
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp < uint256(b.queuedAt) + payoutDelay) revert PayoutDelayed();
+        if (!frontDoorActive[peerId(b.sourceChain, b.frontDoor)]) revert FrontDoorInactive();
+        ICascadeBridge bridge = _primary();
+
+        // 1. chunk; 2. fee, quoted on the gross message, under the ceiling
+        (CascadeMessages.Entry[] memory entries, uint256 sum) = _takeChunk(payouts, b.cursor, maxEntries);
+        // casting to 'uint32' is safe because a chunk holds at most MAX_ENTRIES entries
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint32 taken = uint32(entries.length);
+        uint256 fee =
+            bridge.quoteFee(b.sourceChain, b.frontDoor, CascadeMessages.encodePayouts(key, b.chunk, entries), sum);
+        if (fee > Math.max(sum * maxFeeBps / 10_000, maxFeeAbs)) revert FeeTooHigh();
+        uint256 net = _deductFee(key, entries, fee, sum);
+        if (net == 0) fee = 0;
+
+        // 3. liquidity beyond the reserve and the other batches' reservations, floored at 0
+        {
+            uint256 available = _sub0(_sub0(address(this).balance, ED_RESERVE), pendingPayouts - b.remaining);
+            if (available < net + fee && _unstake(net + fee - available) != 0) revert UnstakeShort();
+        }
+
+        // 4. effects
+        pendingPayouts -= sum;
+        if (b.cursor + taken == b.count) {
+            // processed[key] stays
+            delete payoutBatches[key];
+        } else {
+            PayoutBatch storage s = payoutBatches[key];
+            s.cursor = b.cursor + taken;
+            s.chunk = b.chunk + 1;
+            s.remaining = b.remaining - sum;
+        }
+
+        // 5. send exactly net + fee; the rounding difference sum - net - fee stays in the vault
+        if (net != 0) {
+            bytes memory message = CascadeMessages.encodePayouts(key, b.chunk, entries);
+            bridge.send{value: net + fee}(b.sourceChain, b.frontDoor, message, net);
+        }
+        emit PayoutChunkSent(key, b.chunk, taken, sum, net, fee);
+    }
+
+    /// Undoes the unsent rest of batch `key`: re-mints each remaining entry's shares (exact, at the
+    /// batch's fixed price) and releases its reservation. Chunks already sent stay sent; the front
+    /// door's burn window is not restored. Owner only; works while paused and after the front door
+    /// was removed.
+    function cancelPayoutBatch(bytes32 key, CascadeMessages.Payout[] calldata payouts) external onlyOwner nonReentrant {
+        PayoutBatch storage b = _verifyPayouts(key, payouts);
+        for (uint256 i = b.cursor; i < payouts.length; ++i) {
+            CascadeMessages.Payout calldata p = payouts[i];
+            _mint(p.user, p.shares);
+            emit RedeemReversed(key, p.user, p.shares, p.assets);
+        }
+        uint256 remaining = b.remaining;
+        pendingPayouts -= remaining;
+        delete payoutBatches[key];
+        emit PayoutBatchCancelled(key, remaining);
+    }
+
     // ---- admin: parameters ----
 
     /// address(0) leaves only the permissionless fallback.
@@ -634,6 +717,72 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         if (b.remaining != 0) {
             w.burned += b.remaining;
             burnWindows[peer] = w;
+        }
+    }
+
+    /// The batch under `key` once `payouts` is shown to be its full ordered list. NotPending unless
+    /// entries are left (an unknown key has none); PayoutsMismatch unless the length is `count` and the
+    /// running hash over every entry equals `payoutsHash`.
+    function _verifyPayouts(bytes32 key, CascadeMessages.Payout[] calldata payouts)
+        internal
+        view
+        returns (PayoutBatch storage b)
+    {
+        b = payoutBatches[key];
+        if (b.cursor >= b.count) revert NotPending();
+        if (payouts.length != b.count) revert PayoutsMismatch();
+        bytes32 h;
+        for (uint256 i; i < payouts.length; ++i) {
+            h = keccak256(abi.encode(h, payouts[i].user, payouts[i].shares, payouts[i].assets));
+        }
+        if (h != b.payoutsHash) revert PayoutsMismatch();
+    }
+
+    /// Payout step 1: from `start`, the next entry always (even above maxMessageValue), then entries in
+    /// order while fewer than max(maxEntries, minChunk), capped at MAX_ENTRIES, are taken and the sum
+    /// stays within maxMessageValue. Returns them at their gross value, with their sum.
+    function _takeChunk(CascadeMessages.Payout[] calldata payouts, uint256 start, uint256 maxEntries)
+        internal
+        view
+        returns (CascadeMessages.Entry[] memory entries, uint256 sum)
+    {
+        uint256 limit = Math.min(Math.max(maxEntries, minChunk), CascadeMessages.MAX_ENTRIES);
+        uint256 end = Math.min(start + limit, payouts.length);
+        uint256 cap = maxMessageValue;
+        uint256 i = start;
+        do {
+            sum += payouts[i].assets;
+            ++i;
+        } while (i < end && sum + payouts[i].assets <= cap);
+        entries = new CascadeMessages.Entry[](i - start);
+        for (uint256 j; j < entries.length; ++j) {
+            entries[j] = CascadeMessages.Entry(payouts[start + j].user, payouts[start + j].assets);
+        }
+    }
+
+    /// Payout step 2: each entry pays ceil(assets * fee / sum) and is floored to rao. An entry left with
+    /// 0 (every entry when sum <= fee, the dust tail) emits PayoutDust and is dropped. Rewrites
+    /// `entries` in place as the list to send and returns its total.
+    function _deductFee(bytes32 key, CascadeMessages.Entry[] memory entries, uint256 fee, uint256 sum)
+        internal
+        returns (uint256 net)
+    {
+        uint256 n;
+        for (uint256 i; i < entries.length; ++i) {
+            CascadeMessages.Entry memory e = entries[i];
+            uint256 a = _sub0(e.amount, Math.mulDiv(e.amount, fee, sum, Math.Rounding.Ceil));
+            a -= a % RAO;
+            if (a == 0) {
+                emit PayoutDust(key, e.user, e.amount);
+                continue;
+            }
+            e.amount = a;
+            entries[n++] = e;
+            net += a;
+        }
+        // shrink to the n entries kept
+        assembly ("memory-safe") {
+            mstore(entries, n)
         }
     }
 

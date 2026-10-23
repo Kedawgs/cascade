@@ -27,7 +27,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// Native balance an actor keeps back from direct deposits, for redeem-request fees.
     uint256 internal constant FEE_MONEY = 10 ether;
     uint256 internal constant MIN_STAKE_RAO = 2_000_000;
-    uint32 internal constant MAX_ENTRIES = 50;
+    /// The most entries one processPayouts call asks for (it asks for 1 to CHUNK_ENTRIES); with the
+    /// vault's minChunk at 1, a 2- or 3-entry batch can go out in several chunks.
+    uint32 internal constant CHUNK_ENTRIES = 3;
 
     CascadeVault public immutable vault;
     CascadeFrontDoor public immutable fd;
@@ -53,10 +55,14 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostPayoutsReceived;
     /// Bridged TAO actors received from `claim`.
     uint256 public ghostClaimed;
-    /// Highest price seen, lowered only by a cancel, to the cancelled batch's delivery price.
+    /// Highest price seen; a cancel resets it to the post-cancel price, at most the cancelled batch's
+    /// delivery price.
     uint256 public priceFloor;
     /// Deliveries that left a front door's burn window above its daily allowance.
     uint256 public burnViolations;
+    /// Cancels that left the price below min(priceFloor, delivery price) by a rao or more per
+    /// re-minted entry.
+    uint256 public cancelDustViolations;
     /// Calls (and bridge deliveries) that failed although the handler checked their precondition.
     uint256 public unexpectedReverts;
     /// Keys of the batches with payouts left, and per key the delivery price and the full payout list.
@@ -73,12 +79,21 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public closes;
     uint256 public deliveries;
     uint256 public payoutChunks;
+    /// Chunks that left entries in their batch.
+    uint256 public partialChunks;
     uint256 public claims;
     uint256 public directDeposits;
     uint256 public directRedeems;
     uint256 public stakes;
     uint256 public rewardClaims;
     uint256 public cancels;
+    /// Cancels of a batch that had already sent a chunk.
+    uint256 public cancelsAfterPartial;
+    /// RedeemDeferred and RedeemSkipped events seen in deliveries.
+    uint256 public redeemDeferred;
+    uint256 public redeemSkipped;
+    /// High-water mark of queuedKeys.length.
+    uint256 public maxQueueDepth;
 
     constructor(
         CascadeVault vault_,
@@ -117,46 +132,66 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         uint256 maxRao = Math.min(MAX_DEPOSIT, tao.balanceOf(actor)) / RAO;
         if (maxRao < 1e18 / RAO) return;
         amount = bound(amount, 1e18 / RAO, maxRao) * RAO;
+        // rao-aligned, within the actor's balance and allowance: only a cap or a full list may refuse it
+        (,, uint256 open,, uint256 nDeposits,) = fd.openBatch();
+        bool ready = amount >= fd.minDeposit() && fd.netForwarded() + open + amount <= fd.depositCap()
+            && open + amount <= fd.maxBatchValue() && (fd.depositOf(actor) != 0 || nDeposits < fd.maxDeposits());
         vm.prank(actor);
         try fd.deposit(amount) {
             ++deposits;
             _raiseFloor();
-        } catch {}
+        } catch {
+            if (ready) ++unexpectedReverts;
+        }
     }
 
-    /// @dev Pays the redeem-request fee by value on the actor's first request in the open batch.
+    /// @dev Prefers a holder without a request in the open batch, so batches carry several entries (and
+    /// pay out in several chunks); adds to an existing request once every holder has one. Pays the
+    /// redeem-request fee by value on the actor's first request in the open batch.
     function requestRedeem(uint256 actorSeed, uint256 shares) external {
-        (address actor, uint256 balance) = _actorWith(actorSeed, _shares);
+        (address actor, uint256 balance) = _actorWith(actorSeed, _sharesNotRequested);
+        if (balance == 0) (actor, balance) = _actorWith(actorSeed, _shares);
         if (balance == 0) return;
         shares = bound(shares, 1, balance);
-        uint256 fee = fd.redeemOf(actor) == 0 ? fd.redeemRequestFee() : 0;
+        bool hasEntry = fd.redeemOf(actor) != 0;
+        uint256 fee = hasEntry ? 0 : fd.redeemRequestFee();
+        (,,,,, uint256 nRedeems) = fd.openBatch();
+        bool ready = actor.balance >= fee && (hasEntry || nRedeems < fd.maxRedeems());
         vm.prank(actor);
         try fd.requestRedeem{value: fee}(shares) {
             ++redeemRequests;
             _raiseFloor();
-        } catch {}
+        } catch {
+            if (ready) ++unexpectedReverts;
+        }
     }
 
     function cancelDeposit(uint256 actorSeed, uint256 amount) external {
         (address actor, uint256 open) = _actorWith(actorSeed, _openDeposit);
         if (open == 0) return;
+        // rao-aligned and at most the entry
         amount = bound(amount, 1, open / RAO) * RAO;
         vm.prank(actor);
         try fd.cancelDeposit(amount) {
             ++depositCancels;
             _raiseFloor();
-        } catch {}
+        } catch {
+            ++unexpectedReverts;
+        }
     }
 
     function cancelRedeem(uint256 actorSeed, uint256 shares) external {
         (address actor, uint256 open) = _actorWith(actorSeed, _openRedeem);
         if (open == 0) return;
+        // at most the entry
         shares = bound(shares, 1, open);
         vm.prank(actor);
         try fd.cancelRedeem(shares) {
             ++redeemCancels;
             _raiseFloor();
-        } catch {}
+        } catch {
+            ++unexpectedReverts;
+        }
     }
 
     function claim(uint256 actorSeed) external {
@@ -196,12 +231,16 @@ contract Handler is CommonBase, StdCheats, StdUtils {
 
     // ---- vault: keeper and permissionless ----
 
-    /// @dev Warps 24 hours past the payout delay of any queued batch and sends one chunk of up to 50
-    /// entries from the stored list.
+    /// @dev Warps 24 hours past the payout delay of a queued batch (preferring one with 2 or more entries
+    /// left, which can go out in several chunks) and sends its next chunk of 1 to CHUNK_ENTRIES entries
+    /// (from the seed) from the stored list.
     function processPayouts(uint256 keySeed) external {
         uint256 n = queuedKeys.length;
         if (n == 0) return;
-        bytes32 key = queuedKeys[keySeed % n];
+        bytes32 key = _keyWith(keySeed, _entriesLeft, 2);
+        // casting to 'uint32' is safe because the value is at most CHUNK_ENTRIES
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint32 maxEntries = uint32(1 + (keySeed / n) % CHUNK_ENTRIES);
         vm.warp(block.timestamp + 24 hours);
         CascadeMessages.Payout[] memory list = lists[key];
         // test-controlled time
@@ -209,9 +248,10 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         bool ready = block.timestamp >= uint256(vault.getPayoutBatch(key).queuedAt) + vault.payoutDelay()
             && vault.frontDoorActive(peer) && vault.bridgeEnabled(vault.primaryBridge());
         vm.recordLogs();
-        try vault.processPayouts(key, list, MAX_ENTRIES) {
+        try vault.processPayouts(key, list, maxEntries) {
             _recordPayout(key, vm.getRecordedLogs());
             if (vault.getPayoutBatch(key).count == 0) _dropKey(key);
+            else ++partialChunks;
             _raiseFloor();
         } catch {
             if (ready) ++unexpectedReverts;
@@ -251,8 +291,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
 
     // ---- vault: direct users ----
 
-    /// @dev Opts the actor back in to front-door redeems after each direct deposit, so every actor can
-    /// keep using both paths.
+    /// @dev A direct deposit marks the actor direct-only; the handler opts it back in to front-door
+    /// redeems unless the amount in rao is 3 mod 4, so both paths stay in use and the vault's
+    /// direct-only skip is reached too.
     function depositDirect(uint256 actorSeed, uint256 amount) external {
         address actor = actors[actorSeed % actors.length];
         uint256 maxRao = Math.min(MAX_DEPOSIT, _sub0(actor.balance, FEE_MONEY)) / RAO;
@@ -263,8 +304,10 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         try vault.depositDirect{value: amount}() {
             ghostIn += amount;
             ++directDeposits;
-            vm.prank(actor);
-            vault.allowFrontDoorRedeems();
+            if ((amount / RAO) % 4 != 3) {
+                vm.prank(actor);
+                vault.allowFrontDoorRedeems();
+            }
             _raiseFloor();
         } catch {
             if (ready) ++unexpectedReverts;
@@ -289,17 +332,28 @@ contract Handler is CommonBase, StdCheats, StdUtils {
 
     // ---- owner ----
 
-    /// @dev Cancels a queued batch's unsent payouts; the price may fall to that batch's delivery price.
+    /// @dev Cancels a queued batch's unsent payouts. The price may fall to that batch's delivery price,
+    /// and below it by the rounding dust of the entries re-minted: each burned entry left less than 1 rao
+    /// in the vault, which a holder who exits before the cancel can take. So the post-cancel price is
+    /// checked once here, with one rao per re-minted entry, and the floor restarts from it.
     function cancelQueued(uint256 keySeed) external {
         uint256 n = queuedKeys.length;
         if (n == 0) return;
-        bytes32 key = queuedKeys[keySeed % n];
+        // prefers a batch that already sent a chunk
+        bytes32 key = _keyWith(keySeed, _chunksSent, 1);
         CascadeMessages.Payout[] memory list = lists[key];
+        CascadeVault.PayoutBatch memory b = vault.getPayoutBatch(key);
+        uint256 reMinted = b.count - b.cursor;
         vm.prank(owner);
         try vault.cancelPayoutBatch(key, list) {
-            priceFloor = Math.min(priceFloor, deliveryPrice[key]);
+            uint256 f = Math.min(priceFloor, deliveryPrice[key]);
+            if (CascadeMath.price(vault.totalAssets() + reMinted * RAO, vault.totalSupply()) < f) {
+                ++cancelDustViolations;
+            }
+            priceFloor = Math.min(f, vault.price());
             _dropKey(key);
             ++cancels;
+            if (b.cursor != 0) ++cancelsAfterPartial;
         } catch {
             ++unexpectedReverts;
         }
@@ -344,7 +398,12 @@ contract Handler is CommonBase, StdCheats, StdUtils {
                 (,,, uint256 price) = abi.decode(log.data, (uint64, uint32, uint256, uint256));
                 deliveryPrice[log.topics[1]] = price;
                 queuedKeys.push(log.topics[1]);
+                maxQueueDepth = Math.max(maxQueueDepth, queuedKeys.length);
                 burned = true;
+            } else if (_isVaultLog(log, CascadeVault.RedeemDeferred.selector)) {
+                ++redeemDeferred;
+            } else if (_isVaultLog(log, CascadeVault.RedeemSkipped.selector)) {
+                ++redeemSkipped;
             }
         }
         // The window is written only by a delivery that burns; checked then, against the gross the
@@ -408,8 +467,36 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         return (actors[seed % n], 0);
     }
 
+    /// The first queued key from `seed` on whose `measure` is at least `min`, or queuedKeys[seed].
+    /// Requires a non-empty queue.
+    function _keyWith(uint256 seed, function(bytes32) internal view returns (uint256) measure, uint256 min)
+        internal
+        view
+        returns (bytes32)
+    {
+        uint256 n = queuedKeys.length;
+        for (uint256 i; i < n; ++i) {
+            bytes32 key = queuedKeys[(seed % n + i) % n];
+            if (measure(key) >= min) return key;
+        }
+        return queuedKeys[seed % n];
+    }
+
+    function _entriesLeft(bytes32 key) internal view returns (uint256) {
+        CascadeVault.PayoutBatch memory b = vault.getPayoutBatch(key);
+        return b.count - b.cursor;
+    }
+
+    function _chunksSent(bytes32 key) internal view returns (uint256) {
+        return vault.getPayoutBatch(key).cursor;
+    }
+
     function _shares(address a) internal view returns (uint256) {
         return vault.balanceOf(a);
+    }
+
+    function _sharesNotRequested(address a) internal view returns (uint256) {
+        return fd.redeemOf(a) == 0 ? vault.balanceOf(a) : 0;
     }
 
     function _openDeposit(address a) internal view returns (uint256) {

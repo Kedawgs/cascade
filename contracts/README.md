@@ -89,7 +89,7 @@ forge build --sizes                           # the vault must stay under 24,576
 forge fmt --check
 ```
 
-- **Suite:** 274 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
+- **Suite:** 275 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
   `foundry.toml`). The invariants also held at 3,000 × 64.
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
   payout-batch cancel may leave it below that batch's delivery price by at most one rao of rounding
@@ -112,7 +112,7 @@ forge fmt --check
   50 + 50; raise them to 100 only after a fork measurement.
 - **Sizes:** `CascadeVault` is 23,777 B of runtime code at `optimizer_runs = 200` (limit 24,576;
   799 B of headroom, so any post-audit change must watch `forge build --sizes`).
-  `CascadeFrontDoor` is 13,658 B.
+  `CascadeFrontDoor` is 13,663 B.
 
 ## Money flow
 
@@ -125,11 +125,11 @@ forge fmt --check
    batch. `cancelDeposit` returns tokens while the batch is still open.
 2. To exit, a user calls `requestRedeem(shares)`. The front door cannot see balances on Bittensor,
    so the vault clips each request later. The first request per user per batch costs
-   `redeemRequestFee` in ETH (the spec's default, 1e14 wei, is about $0.30). It is paid from the
-   user's credit first, which anyone can pre-pay with `creditRedeemFee` (this is how the app
-   sponsors passkey wallets that hold no ETH), and the call must carry exactly the rest: nothing
-   when the credit covers the fee, the whole fee when there is no credit. `cancelRedeem` reduces a
-   request; the fee is not refunded.
+   `redeemRequestFee` in ETH (the spec's default, 1e14 wei, is about $0.30). It is paid cash first:
+   the call may carry up to the fee, and the user's credit covers the rest. Anyone can pre-pay
+   credit with `creditRedeemFee`; this is how the app sponsors passkey wallets that hold no ETH.
+   The app may send the full fee or `fee - credit`. The full fee in cash always works, so a gift of
+   credit cannot make a request revert. `cancelRedeem` reduces a request; the fee is not refunded.
 3. Anyone calls `closeBatch` once the batch interval has passed (12 hours in the beta), either list
    is full, or the batch is full by value. The batch's fee pot pays the bridge fee first, the caller
    tops up any gap, and the caller keeps any remainder. An empty batch just restarts its timer. When

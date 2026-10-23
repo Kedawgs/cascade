@@ -403,19 +403,24 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         assertEthIdentity();
     }
 
-    function test_requestRedeemValueMustBeFeeLessCredit() public {
+    /// Cash first: the value is used up to the fee and credit covers whatever it does not. Paying the
+    /// whole fee in cash works whatever the credit; more than the fee, or too little credit, reverts.
+    function test_requestRedeemCashFirstCreditCoversRest() public {
         vm.prank(bob);
         fd.creditRedeemFee{value: 1e14}(alice);
 
-        // credit covers the fee, so any value is wrong
+        // more than the fee is refused, credit or not
         vm.prank(alice);
         vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
-        fd.requestRedeem{value: 1e14}(1e24);
-        vm.prank(alice);
-        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
-        fd.requestRedeem{value: 1}(1e24);
+        fd.requestRedeem{value: 1e14 + 1}(1e24);
 
-        // part credit: value must be exactly the rest
+        // the full fee in cash leaves the credit untouched
+        vm.prank(alice);
+        fd.requestRedeem{value: 1e14}(1e24);
+        assertEq(fd.feeCredit(alice), 1e14);
+        assertEq(openPot(), 1e14);
+
+        // part cash, the rest from credit: 1 wei of value, 1e14 - 1 of credit
         vm.prank(bob);
         fd.creditRedeemFee{value: 0.5e14}(carol);
         vm.prank(carol);
@@ -423,15 +428,35 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         fd.requestRedeem{value: 0.5e14 - 1}(1e24);
         vm.prank(carol);
         vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
-        fd.requestRedeem{value: 1e14}(1e24);
-        vm.prank(carol);
-        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
         fd.requestRedeem(1e24);
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.FeeCreditSpent(carol, 0.5e14);
+        vm.prank(carol);
+        fd.requestRedeem{value: 0.5e14}(1e24);
+        assertEq(fd.feeCredit(carol), 0);
 
-        assertEq(fd.feeCredit(alice), 1e14);
-        assertEq(fd.feeCredit(carol), 0.5e14);
-        assertEq(fd.totalFeeCredit(), 1.5e14);
-        assertEq(openPot(), 0);
+        // bob has no credit: only the full fee in cash works
+        vm.prank(bob);
+        vm.expectRevert(CascadeFrontDoor.WrongFee.selector);
+        fd.requestRedeem{value: 1}(1e24);
+        requestWithFee(bob, 1e24);
+
+        assertEq(fd.totalFeeCredit(), 1e14);
+        assertEq(openPot(), 3e14);
+        assertEthIdentity();
+    }
+
+    /// A gift of 1 wei of credit cannot make a user's full-fee request revert.
+    function test_requestRedeemCreditGiftCannotBreakRequest() public {
+        vm.prank(bob);
+        fd.creditRedeemFee{value: 1}(alice);
+
+        vm.prank(alice);
+        fd.requestRedeem{value: 1e14}(1e24);
+        assertEq(fd.redeemOf(alice), 1e24);
+        assertEq(fd.feeCredit(alice), 1);
+        assertEq(fd.totalFeeCredit(), 1);
+        assertEq(openPot(), 1e14);
         assertEthIdentity();
     }
 

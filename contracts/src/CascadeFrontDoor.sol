@@ -3,7 +3,6 @@ pragma solidity 0.8.24;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeBase} from "./CascadeBase.sol";
 import {ICascadeBridge, ICascadeReceiver} from "./interfaces/ICascadeBridge.sol";
 import {CascadeMessages} from "./libraries/CascadeMessages.sol";
@@ -229,10 +228,11 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         emit FeeCredited(user, msg.value, msg.sender);
     }
 
-    /// Adds to the caller's redeem request. The first request per batch pays `redeemRequestFee`:
-    /// the caller's credit first, as far as it goes, and exactly the rest as msg.value. If the redeem
-    /// list is full it first closes the batch on the pot alone (any remainder to the caller) and
-    /// lands in the next one.
+    /// Adds to the caller's redeem request. The first request per batch pays `redeemRequestFee`,
+    /// cash first: msg.value (at most the fee) and the caller's credit for the rest, so the full fee
+    /// in cash always works and a gift of credit cannot make a request revert. If the redeem list is
+    /// full it first closes the batch on the pot alone (any remainder to the caller) and lands in
+    /// the next one.
     function requestRedeem(uint256 shares) external payable whenNotPaused nonReentrant {
         if (shares == 0) revert ZeroAmount();
         uint256 slot = redeemSlot[open.id][msg.sender];
@@ -242,14 +242,15 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         } else {
             if (open.redeems.length >= maxRedeems) _closeBatch(open.feePot);
             uint256 fee = redeemRequestFee;
-            uint256 fromCredit = Math.min(feeCredit[msg.sender], fee);
-            if (msg.value != fee - fromCredit) revert WrongFee();
+            if (msg.value > fee) revert WrongFee();
+            uint256 fromCredit = fee - msg.value;
+            if (feeCredit[msg.sender] < fromCredit) revert WrongFee();
             if (fromCredit != 0) {
                 feeCredit[msg.sender] -= fromCredit;
                 totalFeeCredit -= fromCredit;
                 emit FeeCreditSpent(msg.sender, fromCredit);
             }
-            open.feePot += msg.value + fromCredit;
+            open.feePot += fee;
             open.redeems.push(CascadeMessages.Entry(msg.sender, shares));
             redeemSlot[open.id][msg.sender] = open.redeems.length;
         }

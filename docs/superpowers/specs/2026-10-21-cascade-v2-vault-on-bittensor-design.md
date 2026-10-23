@@ -64,9 +64,10 @@ Where they differ, the code and this list win. Contract-level detail is in `cont
 22. **Keeper-only chunk size.** In `processPayouts` the limit is
     `min(max(maxEntries, minChunk), MAX_ENTRIES)` for the keeper and `MAX_ENTRIES` for anyone else,
     so a stranger always sends the largest chunk that fits `maxMessageValue`.
-23. **Fee credit combines with value.** A first redeem request takes
-    `fromCredit = min(feeCredit[user], fee)` and requires `msg.value == fee - fromCredit`; the pot
-    gains `msg.value + fromCredit`; `FeeCreditSpent(user, fromCredit)` only when `fromCredit > 0`.
+23. **Fee: cash first, credit for the rest.** A first redeem request reverts `WrongFee` when
+    `msg.value > fee`; `fromCredit = fee - msg.value` must be covered by `feeCredit[user]` (else
+    `WrongFee`); the pot gains `fee`; `FeeCreditSpent(user, fromCredit)` only when `fromCredit > 0`.
+    The full fee in cash always works, so a gift of credit (no minimum) cannot break a request.
 24. **Seeded keeper fallbacks.** The constructor sets `lastStakeAt` and the constructor hotkey's
     `lastClaimAt` to the deploy time; `_addHotkey` (`addHotkey`, `setStakeHotkey`) sets
     `lastClaimAt[h]` to now when it is 0. A re-added hotkey keeps its last claim time.

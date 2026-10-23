@@ -327,8 +327,9 @@ Soft spots:
   deliver and direct redeems keep working, at the lowered price.
 - **A position below the minimum stake waits.** The unstake walk skips any hotkey whose stake is
   below the minimum stake: the chain may refuse to touch it, and that revert would block every exit.
-  An exit that needs that dust (under the minimum stake, about 0.002 TAO, per hotkey) reverts
-  `UnstakeShort` until `stakeIdle` tops the position up or the owner sweeps it with `removeHotkey`.
+  An exit that needs that dust (under the minimum stake per hotkey: 0.002 TAO today, up to 1 TAO if
+  the owner raises the fallback) reverts `UnstakeShort` until `stakeIdle` tops the position up or
+  the owner sweeps it with `removeHotkey`.
 
 ## Trust and supply chain
 

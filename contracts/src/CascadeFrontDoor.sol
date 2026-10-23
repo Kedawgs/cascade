@@ -49,7 +49,9 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     uint256 public totalClaimable;
     /// Forwarded deposits minus payouts received, floored at 0.
     uint256 public netForwarded;
-    mapping(bytes32 => mapping(uint32 => bool)) public delivered;
+    /// Replay record, per delivering bridge and message hash: an adapter can only occupy its own
+    /// slots, never an honest adapter's (batch keys and chunk numbers are predictable).
+    mapping(address bridge => mapping(bytes32 messageHash => bool)) public delivered;
 
     // pre-paid redeem-request fees
     mapping(address => uint256) public feeCredit;
@@ -102,6 +104,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     /// An empty batch reached its close: the timer restarted and the id stayed.
     event BatchRolled(uint64 indexed id);
     event LimitSet(bytes32 indexed name, uint256 a, uint256 b);
+    event PayoutsDelivered(bytes32 indexed batchKey, uint32 chunk, uint256 amount, address bridge);
     event PayoutReceived(bytes32 indexed batchKey, uint32 chunk, address indexed user, uint256 amount);
     event Claimed(address indexed user, uint256 amount);
 
@@ -279,8 +282,9 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     // ---- payouts in ----
 
     /// Credits one PAYOUTS chunk from the vault, whose tokens the adapter transferred before the
-    /// call. Each `(batchKey, chunk)` is credited once; an empty chunk is accepted and marked
-    /// delivered. Works while paused: the tokens are already here.
+    /// call. Each bridge delivers a given message once; a copy from another enabled bridge must
+    /// still find its own tokens here, so it can only spend surplus. An empty chunk is accepted and
+    /// recorded. Works while paused: the tokens are already here.
     function onBridgeMessage(uint64 sourceChain, address sender, bytes calldata message, uint256 amount)
         external
         payable
@@ -300,9 +304,11 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         if (asset.balanceOf(address(this)) < open.totalDeposits + totalClaimable + amount) {
             revert TokensNotReceived();
         }
-        if (delivered[batchKey][chunk]) revert DuplicatePayouts();
+        bytes32 messageHash = keccak256(message);
+        if (delivered[msg.sender][messageHash]) revert DuplicatePayouts();
 
-        delivered[batchKey][chunk] = true;
+        delivered[msg.sender][messageHash] = true;
+        emit PayoutsDelivered(batchKey, chunk, amount, msg.sender);
         for (uint256 i; i < payouts.length; ++i) {
             CascadeMessages.Entry memory p = payouts[i];
             claimable[p.user] += p.amount;

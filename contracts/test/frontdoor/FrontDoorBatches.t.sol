@@ -630,7 +630,7 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
 
         vm.prank(owner);
         fd.setMaxBatchValue(2_000e18);
-        // 3_000e18 + 1e18 > 2_000e18: full, and no underflow
+        // 3_000e18 >= 2_000e18: full, and the room term is never evaluated, so no underflow
         assertTrue(fd.canClose());
         vm.prank(bob);
         vm.expectRevert(CascadeFrontDoor.BatchValueFull.selector);

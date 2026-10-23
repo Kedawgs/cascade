@@ -26,6 +26,21 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         fd.onBridgeMessage(BITTENSOR, vault, CascadeMessages.encodePayouts(key, chunk, payouts), sum);
     }
 
+    /// The replay-record key of a PAYOUTS message.
+    function hashOf(bytes32 key, uint32 chunk, CascadeMessages.Entry[] memory payouts) internal pure returns (bytes32) {
+        return keccak256(CascadeMessages.encodePayouts(key, chunk, payouts));
+    }
+
+    /// A second stub bridge, proposed and activated after the registry delay.
+    function enableBridge2() internal returns (StubBridge bridge2) {
+        bridge2 = new StubBridge(tao);
+        vm.prank(owner);
+        fd.proposeBridge(address(bridge2));
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(owner);
+        fd.activateBridge(address(bridge2));
+    }
+
     function sumOf(CascadeMessages.Entry[] memory payouts) internal pure returns (uint256 sum) {
         for (uint256 i; i < payouts.length; ++i) {
             sum += payouts[i].amount;
@@ -72,20 +87,25 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
     // ---- payouts in ----
 
     function test_payoutCreditsClaimable() public {
+        CascadeMessages.Entry[] memory p = entries2(alice, 3e18, bob, 2e18);
         tao.mint(address(fd), 5e18);
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.PayoutsDelivered(KEY, 0, 5e18, address(bridge));
         vm.expectEmit(address(fd));
         emit CascadeFrontDoor.PayoutReceived(KEY, 0, alice, 3e18);
         vm.expectEmit(address(fd));
         emit CascadeFrontDoor.PayoutReceived(KEY, 0, bob, 2e18);
-        deliverPayouts(KEY, 0, entries2(alice, 3e18, bob, 2e18), false);
+        deliverPayouts(KEY, 0, p, false);
 
         assertEq(fd.claimable(alice), 3e18);
         assertEq(fd.claimable(bob), 2e18);
         assertEq(fd.claimable(carol), 0);
         assertEq(fd.totalClaimable(), 5e18);
-        assertTrue(fd.delivered(KEY, 0));
-        assertFalse(fd.delivered(KEY, 1));
-        assertFalse(fd.delivered(KEY2, 0));
+        // recorded per delivering bridge and message hash
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, p)));
+        assertFalse(fd.delivered(address(bridge), hashOf(KEY, 1, p)));
+        assertFalse(fd.delivered(address(bridge), hashOf(KEY2, 0, p)));
+        assertFalse(fd.delivered(makeAddr("bridge2"), hashOf(KEY, 0, p)));
         assertEq(tao.balanceOf(address(fd)), 5e18);
         // credits only; nothing is pushed to the users
         assertEq(tao.balanceOf(alice), 1_000e18);
@@ -111,6 +131,8 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
         assertEq(fd.claimable(alice), 3e18);
         assertEq(fd.totalClaimable(), 3e18);
+        assertTrue(fd.delivered(address(bridge2), keccak256(m)));
+        assertFalse(fd.delivered(address(bridge), keccak256(m)));
         // the primary bridge is unchanged
         assertEq(fd.primaryBridge(), address(bridge));
 
@@ -128,7 +150,8 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         vm.prank(address(bridge2));
         vm.expectRevert(CascadeBase.NotBridge.selector);
         fd.onBridgeMessage(BITTENSOR, vault, m1, 1e18);
-        assertFalse(fd.delivered(KEY, 1));
+        assertFalse(fd.delivered(address(bridge2), keccak256(m1)));
+        assertFalse(fd.delivered(stranger, keccak256(m1)));
     }
 
     function test_payoutWrongPeerReverts() public {
@@ -145,7 +168,7 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         vm.expectRevert(CascadeFrontDoor.UnknownPeer.selector);
         fd.onBridgeMessage(BASE, vault, m, 3e18);
 
-        assertFalse(fd.delivered(KEY, 0));
+        assertFalse(fd.delivered(address(bridge), keccak256(m)));
         assertEq(fd.totalClaimable(), 0);
 
         // the vault itself is accepted
@@ -163,7 +186,7 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         vm.expectRevert(CascadeFrontDoor.ValueMismatch.selector);
         fd.onBridgeMessage{value: 1}(BITTENSOR, vault, m, 3e18);
 
-        assertFalse(fd.delivered(KEY, 0));
+        assertFalse(fd.delivered(address(bridge), keccak256(m)));
         assertEq(address(fd).balance, 0);
         assertEq(address(bridge).balance, 1);
     }
@@ -186,7 +209,8 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         vm.expectRevert(CascadeFrontDoor.AmountMismatch.selector);
         fd.onBridgeMessage(BITTENSOR, vault, empty, 1e18);
 
-        assertFalse(fd.delivered(KEY, 0));
+        assertFalse(fd.delivered(address(bridge), keccak256(m)));
+        assertFalse(fd.delivered(address(bridge), keccak256(empty)));
         assertEq(fd.totalClaimable(), 0);
     }
 
@@ -205,14 +229,14 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         tao.mint(address(fd), 5e18 - 1);
         vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
         deliverPayouts(KEY, 0, p, false);
-        assertFalse(fd.delivered(KEY, 0));
+        assertFalse(fd.delivered(address(bridge), hashOf(KEY, 0, p)));
 
         // the rest arrives; the same message is re-delivered and goes through
         tao.mint(address(fd), 1);
         deliverPayouts(KEY, 0, p, false);
         assertEq(fd.claimable(alice), 5e18);
         assertEq(fd.totalClaimable(), 5e18);
-        assertTrue(fd.delivered(KEY, 0));
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, p)));
 
         // existing claimable is not payout tokens either: 15e18 held, 10e18 + 5e18 + 2e18 needed
         vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
@@ -224,27 +248,46 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
     }
 
     function test_payoutDuplicateChunkReverts() public {
+        StubBridge bridge2 = enableBridge2();
         CascadeMessages.Entry[] memory p = entries1(alice, 3e18);
+        bytes memory m = CascadeMessages.encodePayouts(KEY, 0, p);
         deliverPayouts(KEY, 0, p, true);
+        assertTrue(fd.delivered(address(bridge), keccak256(m)));
 
-        // a replay of (KEY, 0), even with its tokens here again
+        // a copy from a second enabled bridge with no tokens behind it: 3e18 held, 3e18 + 3e18 needed
+        vm.prank(address(bridge2));
+        vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
+        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
+
+        // the same message from the same bridge, even with its tokens here again
         tao.mint(address(fd), 3e18);
         vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
         deliverPayouts(KEY, 0, p, false);
         assertEq(fd.claimable(alice), 3e18);
         assertEq(fd.totalClaimable(), 3e18);
 
+        // the same message from the second bridge is its own slot: accepted, as tokens now back it
+        assertFalse(fd.delivered(address(bridge2), keccak256(m)));
+        vm.prank(address(bridge2));
+        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
+        assertTrue(fd.delivered(address(bridge2), keccak256(m)));
+        assertEq(fd.claimable(alice), 6e18);
+        // and only once from that bridge too
+        tao.mint(address(fd), 3e18);
+        vm.prank(address(bridge2));
+        vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
+        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
+
         // the next chunk of the same batch (those tokens now back it)
         deliverPayouts(KEY, 1, p, false);
         // chunk 0 of another batch
         deliverPayouts(KEY2, 0, p, true);
 
-        assertEq(fd.claimable(alice), 9e18);
-        assertEq(fd.totalClaimable(), 9e18);
-        assertTrue(fd.delivered(KEY, 0));
-        assertTrue(fd.delivered(KEY, 1));
-        assertTrue(fd.delivered(KEY2, 0));
-        assertEq(tao.balanceOf(address(fd)), 9e18);
+        assertEq(fd.claimable(alice), 12e18);
+        assertEq(fd.totalClaimable(), 12e18);
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 1, p)));
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY2, 0, p)));
+        assertEq(tao.balanceOf(address(fd)), 12e18);
     }
 
     function test_payoutReducesNetForwardedFloored() public {
@@ -278,16 +321,22 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
 
         assertEq(fd.claimable(alice), 3e18);
         assertEq(fd.totalClaimable(), 3e18);
-        assertTrue(fd.delivered(KEY, 0));
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, entries1(alice, 3e18))));
     }
 
     function test_payoutEmptyListAccepted() public {
         vm.recordLogs();
         deliverPayouts(KEY, 0, noEntries(), false);
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 0);
+        // exactly one event: PayoutsDelivered(KEY, 0, 0, bridge)
+        assertEq(logs.length, 1);
+        assertEq(logs[0].emitter, address(fd));
+        assertEq(logs[0].topics.length, 2);
+        assertEq(logs[0].topics[0], CascadeFrontDoor.PayoutsDelivered.selector);
+        assertEq(logs[0].topics[1], KEY);
+        assertEq(logs[0].data, abi.encode(uint32(0), uint256(0), address(bridge)));
 
-        assertTrue(fd.delivered(KEY, 0));
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, noEntries())));
         assertEq(fd.totalClaimable(), 0);
         assertEq(fd.netForwarded(), 0);
         assertEq(tao.balanceOf(address(fd)), 0);
@@ -295,6 +344,11 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         // and is not replayable
         vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
         deliverPayouts(KEY, 0, noEntries(), false);
+
+        // an empty (KEY, 0) does not occupy the real chunk 0 of that batch
+        deliverPayouts(KEY, 0, entries1(alice, 3e18), true);
+        assertEq(fd.claimable(alice), 3e18);
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, entries1(alice, 3e18))));
     }
 
     // ---- claims out ----

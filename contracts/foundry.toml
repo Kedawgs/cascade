@@ -19,3 +19,7 @@ runs = 512
 runs = 128
 depth = 64
 fail_on_revert = false
+
+[fmt]
+# Vendored Chainlink files must stay byte-identical to the package.
+ignore = ["src/vendor/**", "test/vendor/**"]

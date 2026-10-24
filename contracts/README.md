@@ -126,7 +126,7 @@ the fee rule.
 - **Manual re-execution.** On CCIP 2.0, `OffRamp.execute(encodedMessage, ccvs, verifierResults,
   gasLimitOverride)` is permissionless: anyone can execute a message in `FAILURE` again at any time,
   with no expiry, and `gasLimitOverride` can raise (never lower) the receiver gas. This is the retry
-  path for every failure above; the tooling belongs to the keeper spec. The adapters store no
+  path for every failure above; the tooling belongs to the keeper spec. Permissionless is not the same as "anyone with the message": `execute` also needs the default committee's `verifierResults` (signatures), which only Chainlink's verifier infrastructure produces, so the operator must fetch them (CCIP explorer or verifier API) before anyone can re-execute (checklist item 27). The adapters store no
   message ids: CCIP executes a message successfully at most once, and the vault and front door
   reject a repeated delivery as a duplicate.
 - **Fee rule.** Fees are paid in the native coin (ETH on Base, TAO on Bittensor) and do not depend
@@ -141,7 +141,12 @@ the fee rule.
   `gasPerEntry` 26,450 toward Bittensor (Base adapter) and 120,000 and 29,900 toward Base
   (Bittensor adapter); the constructor's 200-entry check gives 5,830,000 and 6,100,000, under the
   cap. They are constructor arguments, so a tune is a redeploy, not a code change. A delivery that
-  still runs short fails and is re-executed with `gasLimitOverride`; nothing is lost.
+  still runs short fails and is re-executed with `gasLimitOverride`; nothing is lost. The
+  Bittensor-side figures rest on mock-precompile measurements plus a 300,000-gas allowance; the
+  1-deposit point has 5,883 gas of slack against the real-AlphaVault fork measurement. Real-precompile
+  delivery gas is unmeasured until the first live batch, which should therefore be the single-entry
+  batch of the checklist (item 28), with the re-execution path and its `verifierResults` source
+  ready.
 - **Send limits.** At most 5,000 TAO per message (`MAX_MESSAGE_VALUE`, the pools' bucket capacity;
   `MessageTooLarge`). The adapters do not read the pools' rate-limit bucket: a short bucket makes
   `ccipSend` revert, so `closeBatch` or `processPayouts` reverts and the batch waits.
@@ -150,9 +155,10 @@ the fee rule.
   adapter never spends. Bittensor EVM reports a balance net of the chain's 500-rao existential
   deposit, so an adapter that holds nothing sees every incoming conversion 500 rao short and every
   delivery reverts `ConversionShort` (re-executable once funded; the live simulation shows both
-  cases). The deployer funds 1e12 wei through `fundReserve()` before the first delivery. Sends and
-  deliveries move only exact amounts, so the reserve and any kept fee excess are all an adapter
-  holds at rest.
+  cases). The deployer funds 1e12 wei through `fundReserve()` before the first delivery. Sends move
+  only exact amounts, but a delivery requires only at least `amount` from ForeverMoney's
+  `withdrawLiquid`, so a withdraw surplus stays in the adapter; the reserve, any kept fee excess and
+  any such surplus are what an adapter holds at rest.
 
 **The staking floor.** Bittensor refuses to add stake, or pay out a partial unstake, below
 `DefaultMinStake` (2,000,000 rao = 0.002 TAO today; the root key can change it), and both
@@ -549,12 +555,12 @@ Outside parties. No delay applies to any of them.
 
 | Party | What it can do | What bounds it |
 |---|---|---|
-| ForeverMoney's guardian and admin | Pause their `AlphaVault` (guardian) or start a migration (admin), with no notice. | A pause stalls both legs: deliveries to the vault fail (`withdrawLiquid` reverts) and are re-executed once it lifts, and `processPayouts` reverts (`depositLiquid`) and is retried. A migration stalls payouts the same way. Nothing is lost, and no ForeverMoney key can take TAO that sits in the vault. |
+| ForeverMoney's guardian and admin | Pause their `AlphaVault` (guardian) or start a migration (admin), with no notice. | A pause stalls both legs: deliveries to the vault fail (`withdrawLiquid` reverts) and are re-executed once it lifts, and `processPayouts` reverts (`depositLiquid`) and is retried. A migration is different and permanent for inbound batches: `initiateMigration` closes `depositLiquid` for 7 days while `withdrawLiquid` stays open, `executeMigration` moves the whole position and `withdrawLiquid` then reverts `Insolvent` for good, and `finishMigration` pauses the vault forever. The adapter's `alphaVault` is immutable and always answers ERC-165, so every `BATCH` delivered after `executeMigration` sits in CCIP `FAILURE` forever (no token-only fallback, no rescue), and the depositors in those batches lose their TAO, which was burned on Base. The 7-day notice window is the only protection: the keeper must not close batches during it, and ForeverMoney's `MIGRATION_DELAY` (7 days) equals the bridge registry's `REGISTRY_DELAY` (7 days), so the owner must propose the replacement adapter pair (both adapters, because `remoteAdapter` is circular) the day a migration is announced (see [Operator notes](#operator-notes) 17 and checklist item 25). No ForeverMoney key can take TAO that sits in the vault. |
 | ForeverMoney's validator | Holds the stake behind bridged TAO while a batch or payout is in flight (minutes). | Nothing users see: conversion is 1:1 both ways, and the vault's own stake sits with its own validators. |
 | ForeverMoney's 2-of-3 Safe | Pause the token pools, change rate limits, or remove ForeverMoney's TAO from CCIP. | Sends revert and batches wait. Exposure is TAO in an open batch, in flight, or credited and unclaimed on Base. Staked TAO is native on Bittensor and unaffected. |
 | Chainlink CCIP (lane configuration, the default verifier committee, the Risk Management Network) | Pause a lane, change its gas or data limits, or withhold verification, which stalls batches in either direction. A compromised CCIP network could also deliver forged `BATCH` or `PAYOUTS` messages that an honest adapter accepts. The Risk Management Network check, an extra independent verification, is disabled on these lanes. Executions on both lanes go through `OffRamp 2.0.0` (read 2026-10-24). | Sends revert or deliveries wait. A lane gas limit lowered below an adapter's gas model needs a new adapter through the 7-day registry. Forged messages get the same bounds as a rogue adapter (see the contracts table below), and funds in flight are exposed. A failed delivery is retried by manual re-execution, which anyone can run, with no expiry. A message the rail loses loses only that batch's funds: there is no in-contract recovery and no in-flight lock, so other batches are unaffected. |
 | Chainlink's default executor | Executes verified messages on the destination chain, or stops doing so. | Anyone, including the keeper, can execute a verified message with `OffRamp.execute`; there is no expiry. |
-| Bittensor's sudo (root) key | Ship runtime upgrades (about weekly) that change precompile behaviour, or disable a precompile. Raise the staking floor (`DefaultMinStake`). | A raised floor holds a deposit batch below it in CCIP until the floor drops, and a payout chunk below it reverts until regrouped or cancelled (see [the staking floor](#bridge-adapters-ccip-20)); the adapters add one precompile read, `getDefaultMinStake()`. Value-moving precompile calls are measured, so an under-delivering unstake reverts (`UnstakeShort`) instead of paying from reserves or other users' payouts. That is a freeze, not a protection, if the chain ever charges a fee or under-delivers on root unstake: every exit that needs an unstake reverts until the owner raises `unstakeMarginRao` (added to every unstake request; any excess stays idle for `stakeIdle`; the fee then falls on all holders, not the leaver). The price itself trusts the stake read, so a changed read would misprice; the keeper is to run each pre-release on testnet 945 first, and the [checklist](#pre-mainnet-checklist) lists the behaviours to confirm. |
+| Bittensor's sudo (root) key | Ship runtime upgrades (about weekly) that change precompile behaviour, or disable a precompile. Raise the staking floor (`DefaultMinStake`). | A raised floor holds a deposit batch below it in CCIP until the floor drops, and a payout chunk below it reverts until regrouped or cancelled (see [the staking floor](#bridge-adapters-ccip-20)); the adapters add one precompile read, `getDefaultMinStake()`. Value-moving precompile calls are measured, so an under-delivering unstake reverts (`UnstakeShort`) instead of paying from reserves or other users' payouts. That is a freeze, not a protection, if the chain ever charges a fee or under-delivers on root unstake: every exit that needs an unstake reverts until the owner raises `unstakeMarginRao` (added to every unstake request; any excess stays idle for `stakeIdle`; the fee then falls on all holders, not the leaver). For the Bittensor adapter an under-delivering root unstake is a loss of in-flight inbound batches, not a freeze: its delivery requires the native delta from `withdrawLiquid(token, amount, amount)` to be at least `amount`, it has no margin knob and it is immutable, so one rao short strands every batch in flight (a new adapter only helps future batches; checklist item 26). The price itself trusts the stake read, so a changed read would misprice; the keeper is to run each pre-release on testnet 945 first, and the [checklist](#pre-mainnet-checklist) lists the behaviours to confirm. |
 | Validators (the hotkey owners) | The owner picks them, and they keep their validator take from the rewards. A validator's hotkey swap moves the vault's root stake to a new hotkey outside the set the vault reads, so the price drops until that hotkey is added back. | The keeper watches for hotkey swaps and stake drops, the guardian pauses, and the owner, guardian or keeper re-adds the hotkey (`addHotkey`; no timelock for the guardian or keeper). Front-door batches delivered in that window are mispriced (deposits get too many shares, redeems too little), and so are direct deposits and redeems: a colluding validator could swap and then `depositDirect` at the lowered price, bounded by the `maxTotalAssets` headroom the drop opens (the insolvency guard trips only below 50%). Keep one hotkey slot free (the set holds at most 4) so a swapped hotkey can be re-added without the timelock. |
 
 Keys:
@@ -691,12 +697,17 @@ giving the package's integrity hash.
     deposits (note 7). The web app must refuse unstake requests worth less than 0.01 TAO. Before
     `closeBatch`, the keeper reads `getDefaultMinStake()`: a deposit batch that arrives while the
     floor sits above its total waits in CCIP until the floor drops (at a 0.01 TAO minimum deposit
-    that takes a five-fold raise).
+    that takes a five-fold raise). Next to that floor pre-check, a second keeper rule: do not
+    `closeBatch` while `AlphaVault.migrationReadyAt() != 0` or `AlphaVault.isPaused()` is true
+    (a batch delivered after a completed ForeverMoney migration is stranded for good; see
+    [Trust and supply chain](#trust-and-supply-chain)).
 18. **Re-executing a failed delivery.** A delivery that reverts (ForeverMoney paused, the vault
     paused, out of gas, the floor raised, the adapter's reserve unfunded) stays `FAILURE` on the
     destination's `OffRamp 2.0.0`. Anyone can run `OffRamp.execute(encodedMessage, ccvs,
     verifierResults, gasLimitOverride)` on it again at any time, with no expiry; raise
-    `gasLimitOverride` if it ran out of gas. The keeper spec owns the tooling.
+    `gasLimitOverride` if it ran out of gas. Re-execution needs the default committee's
+    `verifierResults`, which only Chainlink's verifier infrastructure produces: fetch them from the
+    CCIP explorer or verifier API first. The keeper spec owns the tooling.
 
 Defaults at deploy:
 
@@ -825,3 +836,22 @@ Outside this build:
     failed deliveries). The adapters are built.
 23. An independent audit of the contracts and the adapters.
 24. Legal: jurisdictions, fees, US users.
+
+Added by the final whole-branch review (2026-10-24):
+
+25. ForeverMoney migration: a completed migration strands every inbound batch delivered after it,
+    and `MIGRATION_DELAY` (7 days) equals `REGISTRY_DELAY` (7 days). Have the runbook say that the
+    owner proposes the replacement adapter pair (both adapters, because `remoteAdapter` is
+    circular) the day a migration is announced, and that the keeper stops closing batches while
+    `AlphaVault.migrationReadyAt() != 0` or `AlphaVault.isPaused()`.
+26. Decide, before any deployment larger than the first test run, whether the next adapter version
+    tops up a bounded shortfall (for example at most 1 rao per delivery) from its reserve; the
+    current adapter requires exact 1:1.
+27. Confirm how to obtain `verifierResults` for a FAILURE message on these lanes before deploying.
+28. After deploying, read back on chain `adapterBase.remoteAdapter()`, `adapterBit.remoteAdapter()`,
+    both adapters' `router()`, `token()` and `remoteSelector()`, and `adapterBit.alphaVault()`, and
+    compare them with the plan: `remoteAdapter` is circular across two chains, and a wrong
+    prediction (a stray transaction, a nonce mismatch) makes every delivery `WrongSender` and
+    leaves the first batch's tokens in FAILURE forever. Call `fundReserve()` with 1e12 wei before
+    activating the bridge. Send one single-entry 0.01-TAO batch and watch it deliver before opening
+    deposits.

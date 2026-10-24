@@ -343,7 +343,7 @@ Errors: `ZeroAddress`, `SameChain`, `GasModelTooLarge`, `WrongDestination`, `Mes
 
 | Party or event | Can do | What the user sees |
 |---|---|---|
-| ForeverMoney guardian pause / admin migration | stall deposits (inbound `withdrawLiquid` reverts) or payouts (`depositLiquid` reverts) | deliveries fail and are re-executed when the pause lifts; `processPayouts` reverts and is retried; nothing is lost |
+| ForeverMoney guardian pause / admin migration | a pause stalls deposits (inbound `withdrawLiquid` reverts) or payouts (`depositLiquid` reverts); a completed migration (`executeMigration`) makes `withdrawLiquid` revert `Insolvent` permanently | a pause: deliveries fail and are re-executed when it lifts; `processPayouts` reverts and is retried; nothing is lost. A migration: every inbound batch delivered after `executeMigration` sits in CCIP `FAILURE` forever (the adapter's `alphaVault` is immutable; no token-only fallback, no rescue) and its depositors lose their TAO; the 7-day notice window is the only protection, and it equals the registry's 7-day delay, so the replacement adapter pair is proposed the day a migration is announced (corrected after the whole-branch review, 2026-10-24) |
 | ForeverMoney validator choice | where bridged TAO is staked while in flight (minutes) | none |
 | ForeverMoney 2-of-3 Safe | change pool rate limits, pause the pools | sends revert; batches wait |
 | Chainlink lane config, default verifier committee, RMN | pause the lane, change gas or data limits, withhold verification | sends revert or deliveries wait; an over-cap gas model needs a new adapter through the 7-day registry |

@@ -49,8 +49,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         fd.claim();
 
         assertEq(taoBase.balanceOf(alice), 1_000e18 - 10e18 + net);
-        assertEq(taoBase.balanceOf(address(adapterBase)), 0);
-        assertEq(taoBit.balanceOf(address(adapterBit)), 0);
+        assertAdaptersHold(ED);
         assertEq(taoBase.balanceOf(address(fd)), 0);
         // the vault's fee equals the router's, so nothing is left over on top of the reserve
         assertEq(address(adapterBit).balance, ED);
@@ -97,7 +96,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertEq(fd2.claimable(alice), 0);
         assertEq(taoBase.balanceOf(address(fd)), list1[0].assets - FEE);
         assertEq(taoBase.balanceOf(address(fd2)), list2[0].assets - FEE);
-        assertEq(taoBase.balanceOf(address(adapterBase)), 0);
+        assertAdaptersHold(ED);
     }
 
     function test_failedDeliveryIsRetried() public {
@@ -110,7 +109,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertFalse(ok);
         assertEq(inner(reason), abi.encodeWithSelector(Pausable.EnforcedPause.selector));
         // atomic: no token minted, nothing converted
-        assertEq(taoBit.balanceOf(address(adapterBit)), 0);
+        assertAdaptersHold(ED);
         assertEq(taoBit.totalSupply(), 0);
         assertEq(vault.balanceOf(alice), 0);
         assertEq(address(vault).balance, ED);
@@ -121,6 +120,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertTrue(ok);
         assertEq(vault.balanceOf(alice), 1e25);
         assertEq(address(vault).balance, ED + 10e18);
+        assertAdaptersHold(ED);
     }
 
     function test_redeliveryAfterSuccessIsRejected() public {
@@ -136,7 +136,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertEq(inner(reason), abi.encodeWithSelector(CascadeVault.DuplicateBatch.selector));
         assertEq(vault.totalSupply(), supply);
         assertEq(vault.balanceOf(alice), supply);
-        assertEq(taoBit.balanceOf(address(adapterBit)), 0);
+        assertAdaptersHold(ED);
         assertEq(address(vault).balance, ED + 10e18);
     }
 
@@ -156,7 +156,8 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertEq(bytes4(inner(reason)), CascadeVault.UnknownPeer.selector);
         assertEq(vault.totalSupply(), 0);
         assertEq(vault.balanceOf(stranger), 0);
-        assertEq(taoBit.balanceOf(address(adapterBit)), 0);
+        assertEq(taoBase.balanceOf(address(routerBase)), 1e18);
+        assertAdaptersHold(ED);
         assertEq(address(vault).balance, ED);
     }
 
@@ -174,6 +175,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertEq(id2, id);
         assertEq(start2, start);
         assertEq(routerBase.sendCount(), 0);
+        assertAdaptersHold(ED);
         assertEq(taoBase.balanceOf(address(fd)), 10e18);
         assertEq(taoBase.balanceOf(address(routerBase)), 0);
 
@@ -183,6 +185,7 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         fd.closeBatch{value: FEE}();
         (bool ok,) = relayToBittensor(0);
         assertTrue(ok);
+        assertAdaptersHold(ED);
     }
 
     function test_payoutFeeExcessStaysInAdapter() public {
@@ -200,9 +203,11 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertEq(routerBit.lastSend().value, FEE + 1);
         assertEq(address(routerBit).balance, FEE + 1);
         assertEq(address(adapterBit).balance, ED + 1e9 - 1);
+        assertAdaptersHold(ED + 1e9 - 1);
 
         (bool ok,) = relayToBase(0);
         assertTrue(ok);
         assertEq(fd.claimable(alice), net);
+        assertAdaptersHold(ED + 1e9 - 1);
     }
 }

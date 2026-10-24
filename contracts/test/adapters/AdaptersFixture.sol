@@ -269,6 +269,15 @@ abstract contract AdaptersFixture is Test {
         list = redeemedList(vm.getRecordedLogs(), key);
     }
 
+    /// Neither adapter keeps tokens, the Base adapter keeps no native value, and the Bittensor adapter
+    /// holds exactly `bitNative` (its reserve plus any fee surplus).
+    function assertAdaptersHold(uint256 bitNative) internal view {
+        assertEq(taoBase.balanceOf(address(adapterBase)), 0, "adapterBase tokens");
+        assertEq(taoBit.balanceOf(address(adapterBit)), 0, "adapterBit tokens");
+        assertEq(address(adapterBase).balance, 0, "adapterBase native");
+        assertEq(address(adapterBit).balance, bitNative, "adapterBit native");
+    }
+
     /// The keeper pays out `key` after the payout delay; the send is recorded on `routerBit`.
     function pay(bytes32 key, CascadeMessages.Payout[] memory list) internal {
         vm.warp(block.timestamp + vault.payoutDelay());

@@ -122,6 +122,8 @@ contract MockRouterTest is Test {
         (bool called, bool ok, bytes memory reason) = router.deliver(r, _incoming(3e18), 1_000_000);
         assertTrue(called);
         assertFalse(ok);
+        // casting to 'bytes4' is safe because it keeps the revert data's selector, the only part compared
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(bytes4(reason), MockRouter.DeliveryFailed.selector);
         assertEq(tao.balanceOf(r), 0);
     }

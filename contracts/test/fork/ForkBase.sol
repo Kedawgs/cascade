@@ -21,6 +21,8 @@ interface IRouterView {
     }
 
     function getOffRamps() external view returns (OffRamp[] memory);
+    function getOnRamp(uint64 destChainSelector) external view returns (address);
+    function getWrappedNative() external view returns (address);
 }
 
 interface ITypeAndVersion {
@@ -163,13 +165,24 @@ abstract contract ForkBase is Test {
         m.data = data;
     }
 
-    /// Executes `m` on the real `offRamp` with every verifier it requires stubbed. `ok` is true only when
-    /// the call returned and the message reached SUCCESS; `err` is the revert data when `execute` itself
-    /// reverted, else the `returnData` of the OffRamp's ExecutionStateChanged event (the receiver's or
-    /// pool's error on FAILURE, empty on SUCCESS). Uses (and so consumes) `vm.recordLogs`.
+    /// Executes `m` on the real `offRamp` with every verifier it requires stubbed for the call. `ok` is true
+    /// only when the call returned and the message reached SUCCESS; `err` is the revert data when `execute`
+    /// itself reverted, else the `returnData` of the OffRamp's ExecutionStateChanged event (the receiver's
+    /// or pool's error on FAILURE, empty on SUCCESS). Uses (and so consumes) `vm.recordLogs`.
     function execute(address offRamp, MessageV1Codec.MessageV1 memory m)
         internal
         returns (bytes32 id, bool ok, bytes memory err)
+    {
+        (id, ok, err,) = executeLogged(offRamp, m);
+    }
+
+    /// `execute`, also returning every log the execution emitted (none when `execute` itself reverted),
+    /// e.g. for a keeper rebuilding a payout list from the receiver's events. The verifiers' real code is
+    /// put back afterwards: a lane's default CCV also resolves the verifier for sends, so a stub left in
+    /// place would break a later send on the same fork.
+    function executeLogged(address offRamp, MessageV1Codec.MessageV1 memory m)
+        internal
+        returns (bytes32 id, bool ok, bytes memory err, Vm.Log[] memory logs)
     {
         bytes memory encoded = MessageV1Codec._encodeMessageV1(m);
         id = keccak256(encoded);
@@ -179,19 +192,26 @@ abstract contract ForkBase is Test {
         for (uint256 i; i < ccvs.length; ++i) {
             address ccv = i < required.length ? required[i] : optional[i - required.length];
             if (ccv == address(0)) continue;
-            vm.etch(ccv, type(StubVerifier).runtimeCode);
             ccvs[n++] = ccv;
         }
         // drop the address(0) slots: shrink the array to the n CCVs written
         assembly ("memory-safe") {
             mstore(ccvs, n)
         }
+        // every original is read before any etch, so a CCV listed twice still gets its real code back
+        bytes[] memory realCode = new bytes[](n);
+        for (uint256 i; i < n; ++i) {
+            realCode[i] = ccvs[i].code;
+        }
+        for (uint256 i; i < n; ++i) {
+            vm.etch(ccvs[i], type(StubVerifier).runtimeCode);
+        }
         bytes[] memory results = new bytes[](n);
 
         vm.recordLogs();
         try IOffRamp20(offRamp).execute(encoded, ccvs, results, 0) {
             ok = IOffRamp20(offRamp).getExecutionState(id) == SUCCESS;
-            Vm.Log[] memory logs = vm.getRecordedLogs();
+            logs = vm.getRecordedLogs();
             for (uint256 i; i < logs.length; ++i) {
                 if (logs[i].emitter == offRamp && logs[i].topics[0] == EXECUTION_STATE_CHANGED) {
                     (, err) = abi.decode(logs[i].data, (uint8, bytes));
@@ -199,6 +219,9 @@ abstract contract ForkBase is Test {
             }
         } catch (bytes memory reason) {
             err = reason;
+        }
+        for (uint256 i; i < n; ++i) {
+            vm.etch(ccvs[i], realCode[i]);
         }
     }
 

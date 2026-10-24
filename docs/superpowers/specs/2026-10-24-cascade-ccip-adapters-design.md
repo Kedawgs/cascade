@@ -281,8 +281,12 @@ fail delivery every time. The adapters make both failures early and explicit:
 - Base adapter: `send`/`quoteFee` revert `BelowSendMinimum(amount, minSendAmount)` when
   `0 < amount < minSendAmount`. The Base side cannot read Bittensor's floor, so `minSendAmount` is a
   deployment argument set with margin (the deployment spec sets it at 0.01 TAO, five times today's
-  floor) and the deployment rule is front door `minDeposit >= minSendAmount`, so an honest batch
-  never trips it.
+  floor) and the deployment rule is front door `minDeposit >= minSendAmount`. For that rule to
+  mean "an honest batch never trips it", every entry in a batch must stay at or above
+  `minDeposit`: the front door therefore refuses a partial `cancelDeposit` that would leave an
+  entry between zero and `minDeposit` (a full cancel is always allowed). This front-door change
+  was added on 2026-10-24 after the Task 4 review showed that a partial cancel could leave a
+  batch total below `minSendAmount` and stall `closeBatch` until the next deposit.
 
 What remains, and who owns it (recorded in `contracts/README.md`):
 - A payout batch whose last chunk is below the floor stalls until the keeper groups it with

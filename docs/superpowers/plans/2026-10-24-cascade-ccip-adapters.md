@@ -793,3 +793,74 @@ git commit -m "docs(adapters): live simulation script, README sections, trust ma
 - Spec coverage: send/quote/deliver (Tasks 2, 4, 5); payload and multi-peer (Tasks 2, 6); ERC-165 (Tasks 1, 7); gas sizing and calibration (Tasks 1, 9); floor handling both sides (Tasks 4, 5, 8); reserve and `receive()` (Task 5); vendoring with provenance (Tasks 1, 7); fork tests through the real OffRamp with the spike-and-fallback rule (Tasks 7, 8); live simulation and docs (Task 10); limits assertions (Tasks 7, 8).
 - Type consistency: `Config` struct, hook names, `MockRouter.Sent`, `deliver` return triple, `gasLimitOf`, `offRamp20`, `message`, `execute` are used with the same names in every task that consumes them.
 - Review Focus lines 1–5 are pinned in Tasks 5, 5, 4, 2, 3/6 respectively.
+
+---
+
+### Task 11: Front door — a partial cancel keeps the minimum deposit (ruling from the Task 4 review)
+
+**Why this task exists:** the Task 4 review found that `cancelDeposit` lets a user reduce an entry to any
+whole-rao remainder, so a batch total can sit between zero and the adapter's `minSendAmount`; then
+`closeBatch` reverts `BelowSendMinimum` at the quote and the batch (and every redeem request in it) waits
+for the next deposit. The spec's rule "front door `minDeposit >= minSendAmount` means an honest batch never
+trips it" only holds if every entry stays at or above `minDeposit`. Fix at the source.
+
+**Files:**
+- Modify: `contracts/src/CascadeFrontDoor.sol` (`cancelDeposit`)
+- Test: `contracts/test/frontdoor/FrontDoorBatches.t.sol`
+- Modify: `contracts/README.md` (the "Deposit leg" bullet that describes `cancelDeposit`)
+
+**Interfaces:**
+- Consumes: `cancelDeposit(uint256 amount)`, `minDeposit`, `depositOf(address)`, error `BelowMinDeposit()`.
+- Produces: `cancelDeposit` reverts `BelowMinDeposit` when the caller's remaining entry would be above zero
+  and below `minDeposit`; a cancel that leaves exactly `minDeposit`, more, or zero succeeds as before.
+
+- [ ] **Step 1: Write the failing tests** (fixture `FrontDoorTestBase`: `minDeposit` 1e18, alice holds 1,000 TAO approved)
+
+```solidity
+function test_cancelDeposit_partialBelowMinimumReverts() public {
+    vm.prank(alice); fd.deposit(2e18);
+    vm.prank(alice);
+    vm.expectRevert(CascadeFrontDoor.BelowMinDeposit.selector);
+    fd.cancelDeposit(1e18 + 1e9);                       // would leave 1e18 - 1e9
+    assertEq(fd.depositOf(alice), 2e18);
+}
+function test_cancelDeposit_partialToExactMinimumSucceeds() public {
+    vm.prank(alice); fd.deposit(2e18);
+    vm.prank(alice); fd.cancelDeposit(1e18);            // leaves exactly minDeposit
+    assertEq(fd.depositOf(alice), 1e18);
+}
+function test_cancelDeposit_fullCancelAlwaysSucceeds() public {
+    vm.prank(alice); fd.deposit(1e18);
+    vm.prank(alice); fd.cancelDeposit(1e18);            // leaves zero
+    assertEq(fd.depositOf(alice), 0);
+    (, , uint256 totalDeposits,,,) = fd.openBatch();    // adjust the destructuring to openBatch()'s real shape
+    assertEq(totalDeposits, 0);
+}
+```
+
+- [ ] **Step 2: Run them to verify the first fails**
+
+Run: `forge test --match-path test/frontdoor/FrontDoorBatches.t.sol --match-test cancelDeposit_ -vv`
+Expected: `test_cancelDeposit_partialBelowMinimumReverts` FAILS (no revert); the other two pass already.
+
+- [ ] **Step 3: Implement** in `cancelDeposit`: after `_reduce`, read the caller's remaining entry (zero when the
+  slot was freed) and `if (left != 0 && left < minDeposit) revert BelowMinDeposit();`. No other behaviour changes.
+  Note in the NatDoc that an entry left below a later-raised `minDeposit` can only be cancelled in full.
+
+- [ ] **Step 4: Run the file and the full suite**
+
+Run: `forge test --match-path test/frontdoor/FrontDoorBatches.t.sol -vv && forge test`
+Expected: all pass, including the two existing cancel tests (`test_cancelDepositPartialThenFullFreesSlot`,
+`test_cancelDepositFreesSlotForOthers`) — if one of them cancels down to a sub-minimum remainder, change its
+amounts so the remainder is zero or at least 1e18 and say so in the report.
+
+- [ ] **Step 5: README** — in `contracts/README.md`, the Deposit-leg sentence "`cancelDeposit` returns tokens while
+  the batch is still open." gains: "A partial cancel must leave at least `minDeposit`; a full cancel is always
+  allowed, so a batch never holds an entry below the minimum."
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/CascadeFrontDoor.sol test/frontdoor/FrontDoorBatches.t.sol README.md
+git commit -m "fix(front-door): a partial cancelDeposit must leave at least minDeposit"
+```

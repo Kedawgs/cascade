@@ -7,7 +7,7 @@ import {MockTAO} from "./MockTAO.sol";
 /// @notice ForeverMoney alpha vault double over MockTAO: native TAO in mints the token one to one, burning
 /// it pays native TAO out. The vault needs native funds to pay withdrawals (tests vm.deal it). `shortBy`
 /// makes it deliver that many wei less than the nominal amount, after the slippage check, as the real
-/// vault can when the chain rounds against it.
+/// vault can when the chain rounds against it; `overpay` pays that many wei more on a withdrawal.
 contract MockAlphaVault is IAlphaVault {
     error ZeroAmount();
     error NotWholeRao();
@@ -23,6 +23,7 @@ contract MockAlphaVault is IAlphaVault {
     bool public paused;
     bool public migrating;
     uint256 public shortBy;
+    uint256 public overpay;
 
     constructor(MockTAO token_) {
         token = token_;
@@ -46,6 +47,10 @@ contract MockAlphaVault is IAlphaVault {
         shortBy = v;
     }
 
+    function setOverpay(uint256 v) external {
+        overpay = v;
+    }
+
     function depositLiquid(address token_, uint256 minAlphaRao) external payable returns (uint256 minted) {
         if (token_ != address(token)) revert NotListed();
         if (paused) revert Halted();
@@ -66,7 +71,7 @@ contract MockAlphaVault is IAlphaVault {
         if (wad / 1e9 < floorRao) revert AmountTooLow();
         token.burn(msg.sender, wad);
         if (wad < minTaoOut) revert Slippage();
-        taoOut = wad - shortBy;
+        taoOut = wad - shortBy + overpay;
         (bool ok,) = msg.sender.call{value: taoOut}("");
         if (!ok) revert NativeTransferFailed();
     }

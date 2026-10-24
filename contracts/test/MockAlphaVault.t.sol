@@ -43,6 +43,15 @@ contract MockAlphaVaultTest is Test {
         assertEq(address(this).balance - before, 4e18 - 1);
     }
 
+    function test_withdrawLiquid_overpayPaysMore() public {
+        tao.mint(address(this), 10e18);
+        vault.setOverpay(5);
+        uint256 before = address(this).balance;
+        uint256 out = vault.withdrawLiquid(address(tao), 4e18, 4e18);
+        assertEq(out, 4e18 + 5);
+        assertEq(address(this).balance - before, 4e18 + 5);
+    }
+
     function test_depositLiquid_mintsOneToOne() public {
         uint256 minted = vault.depositLiquid{value: 3e18}(address(tao), 3e9);
         assertEq(minted, 3e18);

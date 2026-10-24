@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cascade mockup v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#10212B; --ink-2:#4B5B66; --ink-3:#7E8C96;
+    --line:#E3EAEE; --line-soft:#EEF3F6;
+    --paper:#FFFFFF; --mist:#F3F7F9;
+    --water:#2E8FA3; --water-tint:#E3F1F4; --water-deep:#206F80;
+    --proof:#1E8A5A; --proof-tint:#E6F4EC;
+    --amber:#9A5B00; --amber-tint:#FFF3DE;
+    --shadow:0 2px 4px rgba(16,33,43,.04), 0 24px 60px -24px rgba(16,33,43,.18);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:"Manrope",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+  a{color:inherit;text-decoration:none}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--water);outline-offset:3px}
+  .wrap{max-width:1280px;margin:0 auto;padding:0 40px}
+  .meta{background:#10212B;color:#B9C6CE;font-size:13px;padding:8px 40px}
+  .meta b{color:#fff;font-weight:700}
+
+  /* nav */
+  .nav{display:flex;align-items:center;justify-content:space-between;height:100px}
+  .brand{display:inline-flex;align-items:center;gap:10px;font-size:24px;font-weight:700;letter-spacing:-.02em}
+  .brand svg{display:block}
+  .links{display:flex;gap:40px;font-size:17px;font-weight:500;color:var(--ink-2)}
+  .links a:hover{color:var(--ink)}
+  .nav .pill{height:50px;padding:0 26px;font-size:16px}
+  .pill{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:46px;padding:0 22px;border-radius:999px;background:var(--ink);color:#fff;font-weight:600;font-size:15px;border:0;cursor:pointer;font-family:inherit}
+  .pill:hover{background:#1F3846}
+  .pill.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .pill.ghost:hover{background:var(--mist)}
+
+  /* hero */
+  .hero{position:relative;overflow:hidden}
+  .hero::before{content:"";position:absolute;inset:-20% auto -20% -10%;width:62%;background:
+      radial-gradient(42% 46% at 40% 45%, rgba(46,143,163,.22), transparent 70%),
+      radial-gradient(36% 40% at 62% 70%, rgba(163,140,230,.16), transparent 70%),
+      radial-gradient(30% 34% at 25% 75%, rgba(246,196,214,.22), transparent 70%);
+      filter:blur(10px);pointer-events:none}
+  .hero .wrap{position:relative;display:grid;grid-template-columns:1.05fr 1fr;gap:48px;align-items:center;min-height:640px;padding-top:24px;padding-bottom:48px}
+  .flow{position:relative;width:600px;height:430px;margin:0 auto;max-width:100%}
+  .flow > svg{position:absolute;left:0;top:0;width:600px;height:430px}
+  .tile{position:absolute;z-index:2;transform:translateY(-100%);background:#fff;border:1px solid var(--line);border-radius:14px;padding:12px 16px 12px;box-shadow:var(--shadow);min-width:168px}
+  .tile .k{font-size:12.5px;color:var(--ink-3);margin:0 0 2px;font-weight:600}
+  .tile .v{font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.1;margin:0;display:flex;align-items:center;gap:8px}
+  .tile .s{font-size:13px;color:var(--ink-2);margin:3px 0 0}
+  .coin{width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font-size:10px;font-weight:800;color:#fff}
+  .coin.usdc{background:#2775CA}
+  .coin.tao{background:#10212B}
+  .coin.base{background:#0052FF}
+  .cap{position:absolute;z-index:1;transform:translateX(-100%);font-size:12.5px;color:var(--ink-2);background:#fff;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-weight:600;white-space:nowrap}
+  .end{position:absolute;z-index:2;display:inline-flex;align-items:center;gap:8px;background:var(--proof-tint);color:var(--proof);border-radius:999px;padding:7px 14px;font-weight:700;font-size:14px}
+  .tick{width:18px;height:18px;border-radius:50%;background:var(--proof);display:inline-grid;place-items:center}
+  .tick.w{background:var(--water)}
+  @media (prefers-reduced-motion:reduce){.flow > svg .dot{display:none}}
+
+  .copy h1{margin:0 0 18px;font-weight:300;font-size:54px;line-height:1.05;letter-spacing:-.025em}
+  .copy h1 strong{display:block;font-weight:600;font-size:104px;line-height:.98;letter-spacing:-.045em;margin-top:6px}
+  .copy .sub{font-size:20px;color:var(--ink-2);margin:0 0 30px;max-width:40ch;font-weight:400}
+  .stats{display:flex;align-items:center;gap:28px;margin-bottom:22px}
+  .stat .v{font-size:36px;font-weight:600;letter-spacing:-.03em;line-height:1;margin:0;color:var(--water-deep)}
+  .stat .v.dark{color:var(--ink)}
+  .stat .k{font-size:13.5px;color:var(--ink-3);margin:6px 0 0}
+  .vr{width:1px;height:46px;background:var(--line)}
+  .stats .pill{height:52px;padding:0 26px;font-size:16px;margin-left:6px}
+  .chains{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink-2);flex-wrap:wrap}
+  .chain{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px 0 6px;border:1px solid var(--line);border-radius:999px;background:#fff;font-weight:600;font-size:13px;color:var(--ink)}
+  .chain .c{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;font-size:9px;font-weight:800;color:#fff}
+  .chain.soon{color:var(--ink-3);border-style:dashed;background:transparent}
+  .chain.soon .c{opacity:.55}
+  .soon-tag{font-size:10.5px;font-weight:700;color:var(--water-deep);background:var(--water-tint);border-radius:999px;padding:1px 6px;margin-left:2px}
+  .c.base{background:#0052FF}.c.eth{background:#627EEA}.c.arb{background:#213147}.c.pol{background:#8247E5}.c.bnb{background:#F0B90B;color:#1a1a1a!important}
+  .fine{font-size:12.5px;color:var(--ink-3);margin:18px 0 0}
+
+  /* sections */
+  section{padding:104px 0}
+  h2{font-size:48px;font-weight:300;letter-spacing:-.03em;line-height:1.05;margin:0 0 14px}
+  h2 b{font-weight:600}
+  .lede{font-size:19px;color:var(--ink-2);max-width:54ch;margin:0 0 56px}
+  .center{text-align:center}
+  .center .lede{margin-left:auto;margin-right:auto}
+
+  /* steps as a cascade */
+  .cascade{display:grid;grid-template-columns:repeat(3,1fr);column-gap:48px;align-items:start}
+  .step{position:relative}
+  .step .ledge{height:3px;background:var(--water);border-radius:2px}
+  .step:nth-child(2){margin-top:60px}
+  .step:nth-child(3){margin-top:120px}
+  .step:not(:first-child)::before{content:"";position:absolute;left:-48px;top:-60px;width:48px;height:3px;background:var(--water);opacity:.3}
+  .step:not(:first-child)::after{content:"";position:absolute;left:-1px;top:-60px;width:3px;height:60px;background:var(--water);opacity:.3}
+  .step .n{font-size:14px;font-weight:700;color:var(--water-deep);margin:18px 0 6px}
+  .step h3{font-size:26px;letter-spacing:-.02em;margin:0 0 8px;font-weight:600}
+  .step p{margin:0;color:var(--ink-2);font-size:16.5px;max-width:34ch}
+
+  /* stake widget section */
+  .stake-wrap{background:var(--mist);position:relative;overflow:hidden}
+  .stake-wrap::after{content:"";position:absolute;right:-10%;bottom:-40%;width:50%;height:120%;background:radial-gradient(40% 40% at 50% 50%, rgba(46,143,163,.16), transparent 70%);pointer-events:none}
+  .stake-grid{position:relative;display:grid;grid-template-columns:1fr 520px;gap:72px;align-items:center}
+  .widget{background:#fff;border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:22px 24px 24px}
+  .tabs{display:grid;grid-template-columns:1fr 1fr;background:var(--mist);border-radius:12px;padding:4px;margin-bottom:18px}
+  .tabs span{text-align:center;padding:10px 0;border-radius:9px;font-weight:700;font-size:15px;color:var(--ink-3)}
+  .tabs span.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(16,33,43,.08)}
+  .lbl{font-size:13px;font-weight:700;color:var(--ink-2);margin:0 0 8px}
+  .chainrow{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  .chainrow .chain{height:36px;padding:0 13px 0 7px;font-size:14px}
+  .chainrow .chain .c{width:22px;height:22px;font-size:10px}
+  .chainrow .chain.on{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+  .field{border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .field .k{font-size:13px;color:var(--ink-2);display:flex;justify-content:space-between}
+  .field .k b{font-weight:700;color:var(--water-deep)}
+  .field .in{display:flex;align-items:baseline;justify-content:space-between;margin-top:6px}
+  .field .in .v{font-size:36px;font-weight:600;letter-spacing:-.02em;line-height:1}
+  .field .in .u{font-weight:700;font-size:16px;display:inline-flex;align-items:center;gap:8px}
+  .sum{margin:16px 0 18px;font-size:14.5px}
+  .sum div{display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--line-soft)}
+  .sum div:first-child{border-top:0}
+  .sum span:last-child{font-weight:700}
+  .sum .y{color:var(--water-deep)}
+  .widget .pill{width:100%;height:52px;font-size:16px}
+  .widget .foot{font-size:13px;color:var(--ink-3);margin:12px 0 0;text-align:center}
+  .points{list-style:none;padding:0;margin:0;display:grid;gap:18px}
+  .points li{display:flex;gap:14px;align-items:flex-start;font-size:17px;color:var(--ink-2)}
+  .points li b{color:var(--ink);font-weight:700}
+  .points .tick{flex:none;margin-top:4px}
+
+  /* secure */
+  .secure{display:grid;grid-template-columns:repeat(4,1fr);gap:40px}
+  .sec h3{font-size:20px;margin:14px 0 6px;font-weight:700;letter-spacing:-.01em}
+  .sec p{margin:0;color:var(--ink-2);font-size:15.5px}
+  .sec .ic{width:44px;height:44px;border-radius:12px;background:var(--water-tint);display:grid;place-items:center}
+  .status{display:inline-block;font-size:12px;font-weight:700;color:var(--amber);background:var(--amber-tint);border-radius:999px;padding:2px 9px;margin-left:8px;vertical-align:2px}
+
+  footer{border-top:1px solid var(--line);padding:36px 0 56px;color:var(--ink-2);font-size:14.5px}
+  .frow{display:flex;justify-content:space-between;align-items:flex-start;gap:40px}
+  .flinks{display:flex;gap:26px}
+  .fnote{margin:10px 0 0;max-width:52ch;color:var(--ink-3);font-size:13.5px}
+
+  /* divider + app frame */
+  .divider{background:#10212B;color:#B9C6CE;font-size:13px;padding:8px 40px;margin-top:8px}
+  .divider b{color:#fff;font-weight:700}
+  .frame{max-width:1320px;margin:28px auto 80px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fff;box-shadow:var(--shadow)}
+  .chrome{height:40px;background:#EEF2F5;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line)}
+  .chrome i{width:11px;height:11px;border-radius:50%;background:#CCD5DC;display:block}
+  .chrome .url{margin-left:12px;flex:1;height:26px;background:#fff;border-radius:7px;font-size:12.5px;color:var(--ink-2);display:flex;align-items:center;padding:0 12px;border:1px solid var(--line)}
+  .app{padding:0 40px 48px}
+  .appbar{display:flex;align-items:center;justify-content:space-between;height:76px}
+  .acct{display:flex;gap:8px}
+  .apill{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 13px 0 10px;border-radius:999px;background:#fff;border:1px solid var(--line);font-size:14px;font-weight:600}
+  .avatar{width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#2E8FA3,#1E8A5A);display:inline-block}
+  .grid{display:grid;grid-template-columns:1fr 440px;gap:56px;align-items:start;margin-top:8px}
+  .bal .label{font-size:14px;color:var(--ink-2);margin:0 0 6px;font-weight:600}
+  .bal .amount{font-size:60px;font-weight:600;letter-spacing:-.035em;line-height:1;margin:0}
+  .bal .sub{display:flex;align-items:baseline;gap:14px;margin:12px 0 4px;font-size:19px}
+  .earned{color:var(--proof);font-weight:700;font-size:16px}
+  .bal .price{font-size:14.5px;color:var(--ink-3);margin:0 0 26px}
+
+  .where{border:1px solid var(--line);border-radius:18px;padding:18px 20px 16px;background:#fff}
+  .where .h{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px}
+  .where .h p{margin:0;font-weight:700;font-size:15px}
+  .where .h small{font-size:13px;color:var(--ink-3)}
+  .lane{display:grid;grid-template-columns:1fr 1fr 1fr;position:relative}
+  .lane::before{content:"";position:absolute;left:12%;right:12%;top:13px;height:2px;background:var(--line)}
+  .node{position:relative;padding-top:34px;text-align:center}
+  .node::before{content:"";position:absolute;left:50%;top:5px;width:18px;height:18px;border-radius:50%;transform:translateX(-50%);background:#fff;border:2px solid var(--line)}
+  .node.live::before{border-color:var(--water);background:var(--water);box-shadow:0 0 0 5px var(--water-tint)}
+  .node.done::before{border-color:var(--proof);background:var(--proof)}
+  .node .nv{font-size:20px;font-weight:700;letter-spacing:-.02em;margin:0}
+  .node .nk{font-size:13px;color:var(--ink-2);margin:2px 0 0}
+  .node .nk a{color:var(--water-deep);font-weight:700;border-bottom:1px solid currentColor}
+
+  .list{margin-top:34px}
+  .list h2{font-size:18px;font-weight:700;letter-spacing:-.01em;margin:0 0 4px}
+  .row{display:grid;grid-template-columns:1.2fr 1fr 1.2fr auto;gap:16px;align-items:center;padding:16px 0;border-top:1px solid var(--line)}
+  .row:last-child{border-bottom:1px solid var(--line)}
+  .row .t{font-weight:700;font-size:15.5px;margin:0}
+  .row .d{font-size:13px;color:var(--ink-3);margin:2px 0 0}
+  .row .c{font-size:15px}
+  .row .c small{display:block;font-size:13px;color:var(--ink-3)}
+  .chip{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;font-size:13px;font-weight:700}
+  .chip.ok{background:var(--proof-tint);color:var(--proof)}
+  .chip.busy{background:var(--water-tint);color:var(--water-deep)}
+  .bars{display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle}
+  .bars i{width:14px;height:4px;border-radius:2px;background:var(--line);display:block}
+  .bars i.on{background:var(--water)}
+  .chev{color:var(--ink-3);font-size:18px}
+  .sticky{position:sticky;top:24px}
+
+  @media (min-width:1800px){
+    .wrap{max-width:1440px}
+    .hero .wrap{min-height:720px}
+    .flow{transform:scale(1.18);transform-origin:center}
+    .copy h1{font-size:60px}.copy h1 strong{font-size:120px}
+    .copy .sub{font-size:22px}
+  }
+  @media (max-width:1000px){
+    .hero .wrap{grid-template-columns:1fr;min-height:0}
+    .flow{height:400px}
+    .copy h1{font-size:40px}.copy h1 strong{font-size:72px}
+    .cascade{grid-template-columns:1fr;row-gap:40px}
+    .step:nth-child(n){margin-top:0}.step::before,.step::after{display:none}
+    .stake-grid{grid-template-columns:1fr}
+    .secure{grid-template-columns:1fr 1fr}
+    .grid{grid-template-columns:1fr}
+    .links{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="meta"><b>Approved mockup (2026-10-23)</b> &nbsp; Landing page first, then the stake page. Every number is sample data.</div>
+
+<div class="wrap">
+  <nav class="nav">
+    <a class="brand" href="#">
+      <svg width="28" height="25" viewBox="0 0 18 16" aria-hidden="true"><rect x="0" y="0" width="10" height="3.2" rx="1.6" fill="#10212B"/><rect x="4" y="6.4" width="10" height="3.2" rx="1.6" fill="#2E8FA3"/><rect x="8" y="12.8" width="10" height="3.2" rx="1.6" fill="#1E8A5A"/></svg>
+      cascade
+    </a>
+    <div class="links"><a href="#stake">Stake</a><a href="#how">How it works</a><a href="#secure">Security</a><a href="#">Docs</a></div>
+    <a class="pill" href="#stake">Stake TAO</a>
+  </nav>
+</div>
+
+<!-- ============================ HERO ============================ -->
+<header class="hero">
+  <div class="wrap">
+    <div class="flow" aria-label="Where your money goes">
+      <svg viewBox="0 0 600 430" fill="none" aria-hidden="true">
+        <path id="route" d="M44 92 H214 V206 H384 V320 H556" stroke="#CFE0E6" stroke-width="3" stroke-linecap="round"/>
+        <path d="M44 92 H214 V206 H384 V320 H556" stroke="#2E8FA3" stroke-width="3" stroke-linecap="round" stroke-dasharray="6 10" opacity=".55"/>
+        <circle class="dot" r="6" fill="#2E8FA3"><animateMotion dur="7s" repeatCount="indefinite" begin="0s"><mpath href="#route"/></animateMotion></circle>
+        <circle class="dot" r="6" fill="#2E8FA3" opacity=".7"><animateMotion dur="7s" repeatCount="indefinite" begin="2.3s"><mpath href="#route"/></animateMotion></circle>
+        <circle class="dot" r="6" fill="#2E8FA3" opacity=".45"><animateMotion dur="7s" repeatCount="indefinite" begin="4.6s"><mpath href="#route"/></animateMotion></circle>
+      </svg>
+      <div class="tile" style="left:44px;top:78px">
+        <p class="k">Your wallet, on Base</p>
+        <p class="v"><span class="coin usdc">$</span>500 USDC</p>
+        <p class="s">Deposited just now</p>
+      </div>
+      <span class="cap" style="left:202px;top:134px">swapped for TAO</span>
+      <div class="tile" style="left:230px;top:192px">
+        <p class="k">Your TAO</p>
+        <p class="v"><span class="coin tao">τ</span>1.84 TAO</p>
+        <p class="s">Bought at $271.18 each</p>
+      </div>
+      <span class="cap" style="left:372px;top:248px">crosses via Chainlink CCIP</span>
+      <div class="tile" style="left:400px;top:306px">
+        <p class="k">Staked on Bittensor</p>
+        <p class="v"><span class="tick w"><svg width="10" height="10" viewBox="0 0 13 13"><path d="M2.5 6.8l2.6 2.6 5.4-6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>1.84 TAO</p>
+        <p class="s">Earning 11.4% a year in TAO</p>
+      </div>
+      <span class="end" style="left:286px;top:372px"><span class="tick"><svg width="10" height="10" viewBox="0 0 13 13"><path d="M2.5 6.8l2.6 2.6 5.4-6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Rewards land in your balance every day</span>
+    </div>
+
+    <div class="copy">
+      <h1>Get exposure to <strong>TAO staking</strong></h1>
+      <p class="sub">Simple and easy, from the wallet you already have. Deposit USDC, we swap it to TAO and stake it on Bittensor for you.</p>
+      <div class="stats">
+        <div class="stat"><p class="v">11.4%</p><p class="k">APR, paid in TAO*</p></div>
+        <div class="vr"></div>
+        <div class="stat"><p class="v dark">$3,384,210</p><p class="k">staked through Cascade**</p></div>
+        <a class="pill" href="#stake">Stake</a>
+      </div>
+      <div class="chains">
+        <span>Deposit from</span>
+        <span class="chain"><span class="c base">B</span>Base</span>
+        <span class="chain soon"><span class="c eth">Ξ</span>Ethereum<span class="soon-tag">Soon</span></span>
+        <span class="chain soon"><span class="c arb">A</span>Arbitrum<span class="soon-tag">Soon</span></span>
+        <span class="chain soon"><span class="c pol">P</span>Polygon<span class="soon-tag">Soon</span></span>
+        <span class="chain soon"><span class="c bnb">B</span>BNB<span class="soon-tag">Soon</span></span>
+      </div>
+      <p class="fine">*Average over the last 7 days. Changes with the network and is not guaranteed. **Sample figure.</p>
+    </div>
+  </div>
+</header>
+
+<!-- ============================ HOW ============================ -->
+<div class="wrap">
+  <section id="how">
+    <h2>One transaction from you. <b>We handle the rest.</b></h2>
+    <p class="lede">No Bittensor wallet, no seed phrase to write down, nothing new to learn. You can follow every step with a receipt anyone can look up.</p>
+    <div class="cascade">
+      <div class="step"><div class="ledge"></div><p class="n">Step 1</p><h3>Deposit USDC</h3><p>Straight from MetaMask, Coinbase Wallet, Rabby or any wallet on Base.</p></div>
+      <div class="step"><div class="ledge"></div><p class="n">Step 2</p><h3>We swap and stake</h3><p>Your USDC becomes TAO, crosses to Bittensor over Chainlink CCIP and is staked. Usually within the hour.</p></div>
+      <div class="step"><div class="ledge"></div><p class="n">Step 3</p><h3>Earn, and leave any time</h3><p>Staking rewards are added to your balance every day. Unstake back to USDC whenever you like.</p></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================ STAKE ============================ -->
+<div class="stake-wrap" id="stake">
+  <div class="wrap">
+    <section>
+      <div class="stake-grid">
+        <div>
+          <h2>Stake in <b>under a minute</b></h2>
+          <p class="lede" style="margin-bottom:34px">Pick the chain your USDC is on, type an amount, approve once. Base is live today and more chains are on the way.</p>
+          <ul class="points">
+            <li><span class="tick w"><svg width="10" height="10" viewBox="0 0 13 13"><path d="M2.5 6.8l2.6 2.6 5.4-6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span><b>One balance.</b> Your TAO and your rewards, in dollars and in TAO.</span></li>
+            <li><span class="tick w"><svg width="10" height="10" viewBox="0 0 13 13"><path d="M2.5 6.8l2.6 2.6 5.4-6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span><b>Always visible.</b> See exactly where your money is at every step, with a live on-chain check once it is staked.</span></li>
+            <li><span class="tick w"><svg width="10" height="10" viewBox="0 0 13 13"><path d="M2.5 6.8l2.6 2.6 5.4-6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span><b>Unstake any time.</b> Back to USDC in the same wallet, usually within a day.</span></li>
+          </ul>
+        </div>
+        <div class="widget" aria-label="Stake">
+          <div class="tabs"><span class="on">Stake</span><span>Unstake</span></div>
+          <p class="lbl">Deposit from</p>
+          <div class="chainrow">
+            <span class="chain on"><span class="c base">B</span>Base</span>
+            <span class="chain soon"><span class="c eth">Ξ</span>Ethereum<span class="soon-tag">Soon</span></span>
+            <span class="chain soon"><span class="c arb">A</span>Arbitrum<span class="soon-tag">Soon</span></span>
+            <span class="chain soon"><span class="c pol">P</span>Polygon<span class="soon-tag">Soon</span></span>
+            <span class="chain soon"><span class="c bnb">B</span>BNB<span class="soon-tag">Soon</span></span>
+          </div>
+          <div class="field">
+            <div class="k"><span>Amount</span><span>Balance 2,400.00 USDC &nbsp;<b>Max</b></span></div>
+            <div class="in"><span class="v">500</span><span class="u"><span class="coin usdc">$</span>USDC</span></div>
+          </div>
+          <div class="sum">
+            <div><span>You'll stake about</span><span>1.84 TAO</span></div>
+            <div><span>Staking yield</span><span class="y">11.4% APR</span></div>
+            <div><span>Fees</span><span>$1.90</span></div>
+            <div><span>Staked in</span><span>about 40 minutes</span></div>
+          </div>
+          <a class="pill" href="#">Stake 500 USDC</a>
+          <p class="foot">One transaction from your wallet. No Bittensor wallet needed.</p>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ============================ SECURE ============================ -->
+<div class="wrap">
+  <section id="secure">
+    <h2>Secure <b>by design</b></h2>
+    <p class="lede">Your TAO sits in an open, auditable contract. Not in our hands.</p>
+    <div class="secure">
+      <div class="sec"><div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2E8FA3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div><h3>Verifiable on-chain</h3><p>Every balance comes with a live check of your stake on Bittensor that you can open yourself.</p></div>
+      <div class="sec"><div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2E8FA3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg></div><h3>Open source</h3><p>The contracts and this app are public on GitHub, with a security policy for reporting issues.</p></div>
+      <div class="sec"><div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2E8FA3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h3>Independent audit<span class="status">Scheduled</span></h3><p>A third-party review before launch. The report will be linked here.</p></div>
+      <div class="sec"><div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2E8FA3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h16M12 4v16"/><circle cx="12" cy="12" r="9"/></svg></div><h3>Built on Chainlink CCIP</h3><p>Your TAO crosses chains over Chainlink's bridge, the same rails used by the largest DeFi protocols.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="frow">
+      <div>
+        <a class="brand" href="#" style="font-size:18px"><svg width="20" height="18" viewBox="0 0 18 16" aria-hidden="true"><rect x="0" y="0" width="10" height="3.2" rx="1.6" fill="#10212B"/><rect x="4" y="6.4" width="10" height="3.2" rx="1.6" fill="#2E8FA3"/><rect x="8" y="12.8" width="10" height="3.2" rx="1.6" fill="#1E8A5A"/></svg>cascade</a>
+        <p class="fnote">TAO staking exposure for people who would rather not run a Bittensor wallet. Yield varies with the network and is not guaranteed.</p>
+      </div>
+      <div class="flinks"><a href="#">Docs</a><a href="#">GitHub</a><a href="#">Security</a><a href="#">Status</a><a href="#">Contact</a></div>
+    </div>
+  </footer>
+</div>
+
+<!-- ============================ STAKE PAGE (signed in) ============================ -->
+<style>
+  .app2{background:#F6F9FA;padding:0 32px 64px}
+  .bar2{display:flex;align-items:center;justify-content:space-between;height:74px;max-width:1240px;margin:0 auto}
+  .bar2 .left{display:flex;align-items:center}
+  .snav{display:flex;align-items:center;gap:4px;margin-left:40px}
+  .snav a{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 14px;border-radius:999px;font-size:14px;font-weight:700;color:var(--ink-2)}
+  .snav a.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(16,33,43,.08)}
+  .snav svg{display:block}
+  .wal{display:inline-flex;align-items:center;height:40px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:0 4px 0 14px;font-size:14px;font-weight:700;gap:10px}
+  .wal .addr{display:inline-flex;align-items:center;gap:8px;background:var(--mist);border-radius:999px;padding:0 10px 0 12px;height:32px;font-weight:600}
+  .col{max-width:560px;margin:0 auto;padding-top:26px}
+  .col h1{font-size:32px;font-weight:700;letter-spacing:-.025em;margin:0 0 4px;text-align:center}
+  .col .sub2{text-align:center;color:var(--ink-2);margin:0 0 20px;font-size:15px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);overflow:hidden}
+  .summary{background:var(--mist);padding:20px 24px 22px;display:grid;grid-template-columns:1fr 1fr;row-gap:18px}
+  .summary .k{font-size:13px;color:var(--ink-2);margin:0 0 3px;font-weight:600;display:flex;align-items:center;gap:6px}
+  .summary .v{font-size:19px;font-weight:700;letter-spacing:-.02em;margin:0;display:flex;align-items:center;gap:8px}
+  .summary .v small{font-size:13px;font-weight:600;color:var(--ink-3)}
+  .summary .apr{color:var(--water-deep)}
+  .livedot{width:8px;height:8px;border-radius:50%;background:var(--proof);display:inline-block}
+  .form{padding:20px 24px 24px}
+  .amount{display:flex;align-items:center;border:1px solid var(--line);border-radius:14px;overflow:hidden;margin-top:4px}
+  .amount .tok{display:flex;align-items:center;gap:8px;padding:0 14px;height:56px;border-right:1px solid var(--line);font-weight:700;font-size:15px;white-space:nowrap}
+  .amount .inp{flex:1;padding:0 14px;font-size:22px;font-weight:600;color:var(--ink-3)}
+  .amount .max{margin-right:10px;font-size:12px;font-weight:800;color:var(--water-deep);background:var(--water-tint);border-radius:8px;padding:6px 10px}
+  .form .pill{width:100%;height:54px;font-size:16px;margin:14px 0 16px}
+  .det div{display:flex;justify-content:space-between;padding:8px 0;font-size:14.5px;color:var(--ink-2)}
+  .det div span:last-child{color:var(--ink);font-weight:700}
+  .det div span:last-child.y{color:var(--water-deep)}
+  .sec-h{display:flex;justify-content:space-between;align-items:baseline;margin:30px 0 12px}
+  .sec-h h2{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em}
+  .sec-h a{font-size:13.5px;font-weight:700;color:var(--water-deep)}
+  .where2{padding:18px 22px 16px}
+  .stats2 div{display:flex;justify-content:space-between;padding:13px 24px;border-top:1px solid var(--line-soft);font-size:14.5px;color:var(--ink-2)}
+  .stats2 div:first-child{border-top:0}
+  .stats2 span:last-child{font-weight:700;color:var(--ink)}
+  .stats2 span.y{color:var(--water-deep)}
+  .faq details{background:#fff;border:1px solid var(--line);border-radius:16px;margin-bottom:10px;box-shadow:var(--shadow)}
+  .faq summary{list-style:none;cursor:pointer;padding:18px 22px;font-weight:700;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+  .faq summary::-webkit-details-marker{display:none}
+  .faq summary::after{content:"";width:9px;height:9px;border-right:2px solid var(--ink-3);border-bottom:2px solid var(--ink-3);transform:rotate(45deg);margin-right:4px;transition:transform .15s}
+  .faq details[open] summary::after{transform:rotate(-135deg)}
+  .faq .a{padding:0 22px 18px;color:var(--ink-2);font-size:14.5px;margin:0}
+  .foot2{font-size:12.5px;color:var(--ink-3);margin:26px 0 0}
+  .lane{margin-top:4px}
+</style>
+
+<div class="divider"><b>Stake page</b> &nbsp; What a signed-in person sees. One centred column, like Lido's stake app.</div>
+
+<div class="frame" id="stakepage">
+  <div class="chrome"><i></i><i></i><i></i><div class="url">app.cascade.fi/stake</div></div>
+  <div class="app2">
+    <div class="bar2">
+      <div class="left">
+        <a class="brand" href="#"><svg width="22" height="20" viewBox="0 0 18 16" aria-hidden="true"><rect x="0" y="0" width="10" height="3.2" rx="1.6" fill="#10212B"/><rect x="4" y="6.4" width="10" height="3.2" rx="1.6" fill="#2E8FA3"/><rect x="8" y="12.8" width="10" height="3.2" rx="1.6" fill="#1E8A5A"/></svg>cascade</a>
+        <nav class="snav">
+          <a class="on" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Stake</a>
+          <a href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>Unstake</a>
+          <a href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-6 4 3 7-9"/></svg>Rewards</a>
+          <a href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M5 12h14M5 17h9"/></svg>Activity</a>
+        </nav>
+      </div>
+      <div class="acct">
+        <span class="apill"><span class="c base" style="width:16px;height:16px;border-radius:50%;display:inline-block"></span>Base</span>
+        <span class="wal">2,400 USDC <span class="addr">0x7A3f…9F2c <span class="avatar"></span></span></span>
+      </div>
+    </div>
+
+    <div class="col">
+      <h1>Stake TAO</h1>
+      <p class="sub2">Deposit USDC and earn TAO staking rewards</p>
+
+      <div class="card">
+        <div class="summary">
+          <div><p class="k">Available to stake <span class="livedot"></span></p><p class="v">2,400.00 USDC</p></div>
+          <div><p class="k">Network</p><p class="v"><span class="c base" style="width:18px;height:18px;border-radius:50%;display:inline-block"></span>Base</p></div>
+          <div><p class="k">Staked</p><p class="v">3.86 TAO <small>$1,046.76</small></p></div>
+          <div><p class="k">Cascade APR*</p><p class="v apr">11.4%</p></div>
+        </div>
+        <div class="form">
+          <p class="lbl">Deposit from</p>
+          <div class="chainrow">
+            <span class="chain on"><span class="c base">B</span>Base</span>
+            <span class="chain soon"><span class="c eth">Ξ</span>Ethereum<span class="soon-tag">Soon</span></span>
+            <span class="chain soon"><span class="c arb">A</span>Arbitrum<span class="soon-tag">Soon</span></span>
+            <span class="chain soon"><span class="c pol">P</span>Polygon<span class="soon-tag">Soon</span></span>
+            <span class="chain soon"><span class="c bnb">B</span>BNB<span class="soon-tag">Soon</span></span>
+          </div>
+          <p class="lbl">Amount</p>
+          <div class="amount">
+            <span class="tok"><span class="coin usdc">$</span>USDC</span>
+            <span class="inp">USDC amount</span>
+            <span class="max">MAX</span>
+          </div>
+          <a class="pill" href="#">Stake</a>
+          <div class="det">
+            <div><span>You will receive</span><span>about 1.84 TAO</span></div>
+            <div><span>TAO price</span><span>$271.18</span></div>
+            <div><span>Staking yield</span><span class="y">11.4% APR</span></div>
+            <div><span>Fees</span><span>$1.90</span></div>
+            <div><span>Staked in</span><span>about 40 minutes</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sec-h"><h2>Where your money is right now</h2><a href="#">Checked on-chain 14 seconds ago</a></div>
+      <div class="card where2">
+        <div class="lane">
+          <div class="node"><p class="nv">2,400 USDC</p><p class="nk">in your wallet on Base</p></div>
+          <div class="node live"><p class="nv">2.03 TAO</p><p class="nk">crossing to Bittensor, step 3 of 4</p></div>
+          <div class="node done"><p class="nv">3.86 TAO</p><p class="nk">staked on Bittensor. <a href="#">See it</a></p></div>
+        </div>
+      </div>
+
+      <div class="sec-h"><h2>Cascade statistics</h2><a href="#">View on Bittensor</a></div>
+      <div class="card stats2">
+        <div><span>Annual percentage rate*</span><span class="y">11.4%</span></div>
+        <div><span>Total staked through Cascade</span><span>12,480 TAO</span></div>
+        <div><span>Stakers</span><span>1,204</span></div>
+        <div><span>TAO price</span><span>$271.18</span></div>
+      </div>
+
+      <div class="sec-h"><h2>FAQ</h2></div>
+      <div class="faq">
+        <details open><summary>What is Cascade?</summary><p class="a">Cascade stakes TAO on Bittensor for you. You deposit USDC from a normal wallet on Base. Cascade swaps it to TAO, moves it to Bittensor and stakes it. Your balance shows your TAO and the rewards it earns.</p></details>
+        <details><summary>Do I need a Bittensor wallet?</summary><p class="a">No. Everything happens from the wallet you already use on Base, such as MetaMask, Coinbase Wallet or Rabby.</p></details>
+        <details><summary>Where is my TAO staked?</summary><p class="a">On Bittensor's root network with a vetted validator. Your balance comes with a live on-chain check you can open at any time.</p></details>
+        <details><summary>What are the fees?</summary><p class="a">Every fee is shown before you confirm. A deposit carries the swap and bridge cost. Unstaking carries a small request fee that covers the trip back to Base.</p></details>
+        <details><summary>How do I unstake?</summary><p class="a">Open the Unstake tab, enter an amount of TAO, and your USDC arrives in the same wallet on Base, usually within a day.</p></details>
+        <details><summary>Is there a lock-up?</summary><p class="a">No. Unstaking takes a little time because the TAO has to be unstaked on Bittensor and sent back across to Base, but you can start it whenever you like.</p></details>
+      </div>
+
+      <p class="foot2">*APR is an estimate based on recent rewards. It is not guaranteed and changes with network conditions. Numbers on this mockup are samples.</p>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

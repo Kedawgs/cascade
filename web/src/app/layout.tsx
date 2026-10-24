@@ -1,20 +1,20 @@
 import type { Metadata, Viewport } from "next";
-import { Schibsted_Grotesk } from "next/font/google";
+import { Manrope } from "next/font/google";
 import { DemoBanner } from "@/components/DemoBanner";
 import { Providers } from "@/components/Providers";
 import "./globals.css";
 
-const schibsted = Schibsted_Grotesk({
+const manrope = Manrope({
   variable: "--font-sans",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+  weight: ["300", "400", "500", "600", "700"],
   display: "swap",
 });
 
 export const metadata: Metadata = {
   title: { default: "Cascade", template: "%s · Cascade" },
   description:
-    "Deposit USDC from the wallet you already have and hold TAO staked on Bittensor, with proof that it stays staked.",
+    "Get exposure to TAO staking from the wallet you already have. Deposit USDC and Cascade swaps it to TAO and stakes it on Bittensor for you.",
 };
 
 export const viewport: Viewport = {
@@ -25,7 +25,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={schibsted.variable}>
+    <html lang="en" className={manrope.variable}>
       <body>
         <Providers>
           <DemoBanner />

@@ -1,24 +1,33 @@
-/* Design tokens from the approved mockups. */
+/* Design tokens from the approved 2026-10-23 mockup
+   (docs/superpowers/specs/assets/2026-10-23-web-redesign-mockup.html). */
 :root {
   --ink: #10212b;
+  --ink-2: #4b5b66;
+  --ink-3: #7e8c96;
   --water: #2e8fa3;
-  --mist: #eef4f6;
-  --paper: #ffffff;
-  --proof: #1e8a5a;
-  --muted: #5e707b;
-  --line: #d6e2e7;
-
-  /* Tints used in the mockups for selected and tapped states. */
+  --water-deep: #206f80;
   --water-tint: #e3f1f4;
+  --mist: #f3f7f9;
+  --paper: #ffffff;
+  --line: #e3eaee;
+  --line-soft: #eef3f6;
+  --proof: #1e8a5a;
+  --proof-tint: #e6f4ec;
+  --amber: #9a5b00;
+  --amber-tint: #fff3de;
+  --danger: #b4232a;
+  --shadow: 0 2px 4px rgba(16, 33, 43, 0.04), 0 24px 60px -24px rgba(16, 33, 43, 0.18);
+  --r-card: 20px;
+  --r-input: 14px;
+  --r-pill: 999px;
+
+  /* Aliases kept for components that predate the redesign. */
+  --muted: var(--ink-2);
   --water-wash: #f3fafb;
   --ink-hover: #1f3846;
   --mist-hover: #e1ebee;
-  --danger: #b4232a;
-
-  --radius-box: 16px;
-  --radius-btn: 14px;
-  --content-width: 420px;
-  --gutter: 16px;
+  --radius-box: var(--r-card);
+  --radius-btn: var(--r-input);
 
   color-scheme: light;
 }
@@ -44,8 +53,8 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 15px;
-  line-height: 1.4;
+  font-size: 16px;
+  line-height: 1.5;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -71,18 +80,40 @@ ul {
   outline-offset: 2px;
 }
 
-/* Single, centered column. */
+/* Layout containers. The landing page uses .wrap, the app uses .col. */
 .page {
   width: 100%;
-  max-width: calc(var(--content-width) + 2 * var(--gutter));
+}
+
+.wrap {
+  width: 100%;
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 20px var(--gutter) 48px;
+  padding: 0 40px;
+}
+
+@media (max-width: 700px) {
+  .wrap {
+    padding: 0 20px;
+  }
+}
+
+@media (min-width: 1800px) {
+  .wrap {
+    max-width: 1440px;
+  }
+}
+
+.col {
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
 }
 
 /* Text */
 .small {
   font-size: 13.5px;
-  color: var(--muted);
+  color: var(--ink-2);
   line-height: 1.45;
 }
 
@@ -94,7 +125,7 @@ ul {
 
 .link {
   display: inline-block;
-  color: var(--water);
+  color: var(--water-deep);
   font-size: 14px;
   font-weight: 600;
   text-decoration: none;
@@ -112,11 +143,57 @@ ul {
 
 .box {
   background: var(--mist);
-  border-radius: var(--radius-box);
+  border-radius: var(--r-card);
   padding: 16px;
 }
 
-/* Buttons */
+/* Pill buttons and links (the primary action style of the redesign). */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 0 22px;
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  background: var(--ink);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.pill:hover:not(:disabled) {
+  background: var(--ink-hover);
+}
+
+.pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pill-ghost {
+  background: #fff;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.pill-ghost:hover:not(:disabled) {
+  background: var(--mist);
+}
+
+.pill-block {
+  display: flex;
+  width: 100%;
+}
+
+/* Older button classes, still used by screens that Task 9 replaces. */
 .btn {
   display: inline-flex;
   align-items: center;

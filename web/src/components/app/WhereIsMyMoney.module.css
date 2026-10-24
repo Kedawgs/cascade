@@ -1,0 +1,117 @@
+.section {
+  margin-top: 30px;
+}
+
+.head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.head h2 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.checked {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--water-deep);
+  white-space: nowrap;
+}
+
+.card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  padding: 18px 22px 16px;
+}
+
+.lane {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  margin-top: 4px;
+}
+
+.lane::before {
+  content: "";
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: 13px;
+  height: 2px;
+  background: var(--line);
+}
+
+.node {
+  position: relative;
+  padding-top: 34px;
+  text-align: center;
+}
+
+.node::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 5px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  background: var(--paper);
+  border: 2px solid var(--line);
+}
+
+.muted .amount {
+  color: var(--ink-2);
+}
+
+.live::before {
+  border-color: var(--water);
+  background: var(--water);
+  box-shadow: 0 0 0 5px var(--water-tint);
+}
+
+.done::before {
+  border-color: var(--proof);
+  background: var(--proof);
+}
+
+.amount {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.label {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.link {
+  color: var(--water-deep);
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+}
+
+@media (max-width: 480px) {
+  .amount {
+    font-size: 16px;
+  }
+
+  .label {
+    font-size: 12px;
+  }
+
+  .lane::before {
+    left: 16%;
+    right: 16%;
+  }
+}

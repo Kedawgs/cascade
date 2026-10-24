@@ -1,5 +1,5 @@
 .banner {
-  padding: 7px var(--gutter);
+  padding: 7px 20px;
   background: var(--mist);
   border-bottom: 1px solid var(--line);
   color: var(--muted);

@@ -103,6 +103,8 @@ contract CcipAdapterBaseTest is Test {
     function entries(uint256 n) internal pure returns (CascadeMessages.Entry[] memory e) {
         e = new CascadeMessages.Entry[](n);
         for (uint256 i; i < n; i++) {
+            // small test index, far below 2^160
+            // forge-lint: disable-next-line(unsafe-typecast)
             e[i] = CascadeMessages.Entry(address(uint160(i + 1)), 1e9);
         }
     }

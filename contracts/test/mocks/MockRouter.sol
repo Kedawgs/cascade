@@ -61,6 +61,10 @@ contract MockRouter is IRouterClient {
         maxGas = maxGas_;
     }
 
+    function setMaxDataBytes(uint256 maxDataBytes_) external {
+        maxDataBytes = maxDataBytes_;
+    }
+
     function isChainSupported(uint64) external pure returns (bool) {
         return true;
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useProtocolStats } from "@/lib/cascade/hooks";
+import { useProof, useProtocolStats } from "@/lib/cascade/hooks";
 import { statRows } from "@/lib/stats";
 import { ReceiptLink } from "../ReceiptLink";
 import { SampleTag } from "../SampleTag";
@@ -51,4 +51,14 @@ export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
       <p className={styles.footnote}>{APR_FOOTNOTE}</p>
     </section>
   );
+}
+
+function StatsWithProof({ account }: { account: string }) {
+  const proof = useProof(account);
+  return <StatsCard explorerUrl={proof.data?.explorerUrl} />;
+}
+
+/** The statistics card with the "View on Bittensor" link when an account has a proof. */
+export function StatsCardForAccount({ account }: { account: string | null }) {
+  return account ? <StatsWithProof account={account} /> : <StatsCard />;
 }

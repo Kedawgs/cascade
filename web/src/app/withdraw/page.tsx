@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
-import { WithdrawScreen } from "@/components/WithdrawScreen";
+import { Redirect } from "@/components/app/Redirect";
 
-export const metadata: Metadata = { title: "Withdraw" };
+export const metadata: Metadata = { title: "Unstake" };
 
+/** The old withdraw page lives on as a redirect to the Unstake tab. */
 export default function WithdrawPage() {
-  return <WithdrawScreen />;
+  return <Redirect to="/unstake" />;
 }

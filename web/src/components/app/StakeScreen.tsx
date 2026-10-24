@@ -1,19 +1,13 @@
 "use client";
 
 import { useCascadeAccount } from "@/lib/account";
-import { useProof } from "@/lib/cascade/hooks";
 import { Loading } from "../RequireAccount";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import { Faq } from "./Faq";
 import { StakeCard } from "./StakeCard";
-import { StatsCard } from "./StatsCard";
+import { StatsCardForAccount } from "./StatsCard";
 import { WhereIsMyMoney } from "./WhereIsMyMoney";
-
-function StatsWithProof({ account }: { account: string }) {
-  const proof = useProof(account);
-  return <StatsCard explorerUrl={proof.data?.explorerUrl} />;
-}
 
 /** `/stake`: never redirects; without an account the form shows its connect state. */
 export function StakeScreen() {
@@ -30,7 +24,7 @@ export function StakeScreen() {
         <>
           <StakeCard account={account} />
           {account && <WhereIsMyMoney account={account} />}
-          {account ? <StatsWithProof account={account} /> : <StatsCard />}
+          <StatsCardForAccount account={account} />
           <Faq />
         </>
       )}

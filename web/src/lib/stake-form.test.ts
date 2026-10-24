@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { stakeButtonLabel, validateStakeAmount } from "./stake-form";
+import {
+  stakeButtonLabel,
+  unstakeButtonLabel,
+  validateStakeAmount,
+  validateUnstakeAmount,
+} from "./stake-form";
 import { parseAmount, sanitizeAmountInput } from "./format";
 
 const limits = { minUsd: 10, maxUsd: 50_000 };
@@ -47,5 +52,26 @@ describe("stakeButtonLabel", () => {
     expect(stakeButtonLabel({ account: "0xa", amount: 500, error: null, pending: true })).toBe(
       "Starting your stake…",
     );
+  });
+});
+
+describe("unstake helpers", () => {
+  it("labels the button", () => {
+    expect(unstakeButtonLabel({ account: null, amount: 1, error: null, pending: false })).toBe(
+      "Connect wallet",
+    );
+    expect(unstakeButtonLabel({ account: "0xa", amount: 1.5, error: null, pending: false })).toBe(
+      "Unstake 1.50 TAO",
+    );
+    expect(unstakeButtonLabel({ account: "0xa", amount: null, error: null, pending: false })).toBe(
+      "Unstake",
+    );
+  });
+
+  it("validates against the staked balance", () => {
+    expect(validateUnstakeAmount(4, 3.66)).toBe("You have 3.66 TAO staked.");
+    expect(validateUnstakeAmount(0, 3.66)).toBe("Enter how much TAO to unstake.");
+    expect(validateUnstakeAmount(1, 3.66)).toBeNull();
+    expect(validateUnstakeAmount(null, 3.66)).toBeNull();
   });
 });

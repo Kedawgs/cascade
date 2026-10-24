@@ -229,3 +229,14 @@
   color: var(--ink-3);
   text-align: center;
 }
+
+/* Empty state used when there is nothing to unstake yet. */
+.empty {
+  padding: 8px 0 4px;
+  text-align: center;
+}
+
+.emptyTitle {
+  font-size: 17px;
+  font-weight: 700;
+}

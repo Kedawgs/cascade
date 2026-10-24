@@ -35,6 +35,9 @@ contract CascadeMathTest is Test {
 
     /// A deposit followed by an immediate redeem of the minted shares never returns more than was put in.
     function testFuzz_roundTripNeverProfits(uint128 assets, uint128 totalAssets, uint128 totalSupply) public pure {
+        assets = uint128(bound(assets, 0, 1e36));
+        totalAssets = uint128(bound(totalAssets, 0, 1e36));
+        totalSupply = uint128(bound(totalSupply, 0, 1e36));
         vm.assume(assets > 0);
         uint256 shares = CascadeMath.sharesForDeposit(assets, totalAssets, totalSupply);
         uint256 back = CascadeMath.assetsForRedeem(shares, uint256(totalAssets) + assets, uint256(totalSupply) + shares);
@@ -43,6 +46,9 @@ contract CascadeMathTest is Test {
 
     /// Minting at the current price never lowers the price for existing holders.
     function testFuzz_depositNeverLowersPrice(uint128 assets, uint128 totalAssets, uint128 totalSupply) public pure {
+        assets = uint128(bound(assets, 0, 1e36));
+        totalAssets = uint128(bound(totalAssets, 0, 1e36));
+        totalSupply = uint128(bound(totalSupply, 0, 1e36));
         uint256 before = CascadeMath.price(totalAssets, totalSupply);
         uint256 shares = CascadeMath.sharesForDeposit(assets, totalAssets, totalSupply);
         uint256 afterPrice = CascadeMath.price(uint256(totalAssets) + assets, uint256(totalSupply) + shares);
@@ -51,6 +57,9 @@ contract CascadeMathTest is Test {
 
     /// Paying out a redemption never lowers the price for the holders who stay.
     function testFuzz_redeemNeverLowersPrice(uint128 shares, uint128 totalAssets, uint128 totalSupply) public pure {
+        shares = uint128(bound(shares, 0, 1e36));
+        totalAssets = uint128(bound(totalAssets, 0, 1e36));
+        totalSupply = uint128(bound(totalSupply, 0, 1e36));
         vm.assume(shares <= totalSupply);
         uint256 before = CascadeMath.price(totalAssets, totalSupply);
         uint256 out = CascadeMath.assetsForRedeem(shares, totalAssets, totalSupply);

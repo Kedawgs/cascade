@@ -5,7 +5,8 @@ import { injected } from "wagmi/connectors/injected";
 
 export const wagmiConfig = createConfig({
   chains: [base, mainnet, arbitrum, polygon, bsc],
-  connectors: [baseAccount({ appName: "Cascade" }), injected()],
+  // telemetry: false keeps the Base Account SDK from loading Coinbase analytics on every page.
+  connectors: [baseAccount({ appName: "Cascade", preference: { telemetry: false } }), injected()],
   transports: {
     [base.id]: http(),
     [mainnet.id]: http(),

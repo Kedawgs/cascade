@@ -97,3 +97,14 @@ describe("amount input", () => {
     expect(parseAmount("12.5")).toBe(12.5);
   });
 });
+
+describe("comma decimals", () => {
+  it("treats a lone comma as the decimal point unless it is a thousands separator", () => {
+    expect(sanitizeAmountInput("1,5", 4)).toBe("1.5");
+    expect(sanitizeAmountInput("100,50", 2)).toBe("100.50");
+    expect(sanitizeAmountInput("3,6600", 4)).toBe("3.6600");
+    expect(sanitizeAmountInput("$1,000", 2)).toBe("1000");
+    expect(sanitizeAmountInput("1,000.50", 2)).toBe("1000.50");
+    expect(sanitizeAmountInput("1,000,000", 2)).toBe("1000000");
+  });
+});

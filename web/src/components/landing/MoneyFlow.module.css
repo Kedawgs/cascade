@@ -143,7 +143,7 @@
   padding: 7px 14px;
   border-radius: var(--r-pill);
   background: var(--proof-tint);
-  color: var(--proof);
+  color: var(--proof-text);
   font-size: 14px;
   font-weight: 700;
   white-space: nowrap;

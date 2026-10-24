@@ -5,6 +5,7 @@ import { useNow } from "@/lib/client-state";
 import { formatRelative } from "@/lib/format";
 import { deriveLane } from "@/lib/lane";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
+import { LoadError } from "../LoadError";
 import { ReceiptLink } from "../ReceiptLink";
 import styles from "./WhereIsMyMoney.module.css";
 
@@ -20,7 +21,21 @@ export function WhereIsMyMoney({ account }: { account: string }) {
     usdcBalance: balance.status === "success" ? (balance.data ?? null) : null,
     deposits: deposits.data ?? [],
     proof: proof.data ?? null,
+    proofError: proof.isError,
   });
+
+  if (deposits.isError) {
+    return (
+      <section aria-labelledby="where-heading" className={styles.section}>
+        <div className={styles.head}>
+          <h2 id="where-heading">Where your money is right now</h2>
+        </div>
+        <div className={styles.card}>
+          <LoadError what="where your money is" onRetry={() => void deposits.refetch()} />
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section aria-labelledby="where-heading" className={styles.section}>

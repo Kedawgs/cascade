@@ -276,9 +276,9 @@ function toWithdrawalRecord(w: StoredWithdrawal, now: number): WithdrawalRecord 
 
   const steps = [
     step("requested", 0, {
-      done: { title: `Asked to withdraw ${tao} TAO` },
+      done: { title: `Asked to unstake ${tao} TAO` },
       active: { title: `Sending your request for ${tao} TAO` },
-      pending: { title: `Ask to withdraw ${tao} TAO` },
+      pending: { title: `Ask to unstake ${tao} TAO` },
     }),
     step("unstaked", 1, {
       done: { title: "Unstaked in the daily batch" },
@@ -420,12 +420,14 @@ export function createMockCascadeData(options: MockOptions = {}): CascadeData {
       if (countDone(d.stepTimes, t) < 4 || d.rewardsTao <= 0) continue;
       const stakedAt = d.stepTimes[3];
       const count = Math.max(1, Math.floor((t - stakedAt) / DAY_MS));
-      const per = round(d.rewardsTao / count, 4);
+      // Cumulative rounding: day i gets round(R*(i+1)/n) - round(R*i/n), so no day is
+      // negative and the days always add up to R exactly.
       for (let i = 0; i < count; i++) {
-        const last = i === count - 1;
+        const upTo = round((d.rewardsTao * (i + 1)) / count, 4);
+        const before = round((d.rewardsTao * i) / count, 4);
         records.push({
           date: new Date(Math.min(stakedAt + (i + 1) * DAY_MS, t)),
-          taoAccrued: last ? round(d.rewardsTao - per * (count - 1), 4) : per,
+          taoAccrued: round(upTo - before, 4),
         });
       }
     }
@@ -524,10 +526,10 @@ export function createMockCascadeData(options: MockOptions = {}): CascadeData {
     async startDeposit(account, amountUsd, chain) {
       if (!isSourceChain(chain)) throw new Error("Pick the chain your USDC is on.");
       if (!Number.isFinite(amountUsd) || amountUsd < DEPOSIT_LIMITS.minUsd) {
-        throw new RangeError(`The smallest deposit is ${formatUsd(DEPOSIT_LIMITS.minUsd)}.`);
+        throw new RangeError(`The smallest stake is ${formatUsd(DEPOSIT_LIMITS.minUsd)}.`);
       }
       if (amountUsd > DEPOSIT_LIMITS.maxUsd) {
-        throw new RangeError(`The most you can deposit right now is ${formatUsd(DEPOSIT_LIMITS.maxUsd)}.`);
+        throw new RangeError(`The most you can stake right now is ${formatUsd(DEPOSIT_LIMITS.maxUsd)}.`);
       }
       const quote = quoteDeposit(round(amountUsd, 2), chain);
       const t = now();
@@ -556,10 +558,10 @@ export function createMockCascadeData(options: MockOptions = {}): CascadeData {
 
     async startWithdrawal(account, taoAmount) {
       const quote = quoteWithdrawal(taoAmount);
-      if (!(quote.taoAmount > 0)) throw new RangeError("Enter how much TAO to withdraw.");
+      if (!(quote.taoAmount > 0)) throw new RangeError("Enter how much TAO to unstake.");
       const { taoBalance } = position(account);
       if (quote.taoAmount > taoBalance + 1e-9) {
-        throw new RangeError(`You can withdraw up to ${formatTao(taoBalance)} TAO.`);
+        throw new RangeError(`You can unstake up to ${formatTao(taoBalance)} TAO.`);
       }
       const t = now();
       const record: StoredWithdrawal = {

@@ -139,7 +139,7 @@ describe("deposit progress", () => {
   });
 
   it("rejects amounts outside the limits", async () => {
-    await expect(ctx.data.startDeposit(ACCOUNT, 5, "base")).rejects.toThrow("smallest deposit");
+    await expect(ctx.data.startDeposit(ACCOUNT, 5, "base")).rejects.toThrow("smallest stake");
     await expect(ctx.data.startDeposit(ACCOUNT, 60_000, "base")).rejects.toThrow("most you can");
   });
 });
@@ -247,5 +247,19 @@ describe("protocol stats, rewards and balances", () => {
     const rewards = await data.listRewards(ACCOUNT);
     expect(rewards).toHaveLength(19);
     expect(rewards.at(-1)?.runningTotalTao).toBe(0.0213);
+  });
+});
+
+describe("reward list over time", () => {
+  it("never shows a negative day and always adds up, whatever the date", async () => {
+    for (let day = 0; day < 400; day++) {
+      const t = new Date(2026, 9, 2, 12, 0).getTime() + day * 86_400_000;
+      const data = createMockCascadeData({ now: () => t, store: memoryStore() });
+      const rewards = await data.listRewards(ACCOUNT);
+      expect(rewards.every((r) => r.taoAccrued >= 0), `day ${day}`).toBe(true);
+      const total = rewards.reduce((s, r) => s + r.taoAccrued, 0);
+      expect(Math.round(total * 1e4) / 1e4, `day ${day}`).toBe(0.0213);
+      expect(rewards.at(-1)?.runningTotalTao, `day ${day}`).toBe(0.0213);
+    }
   });
 });

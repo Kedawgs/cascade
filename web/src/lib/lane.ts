@@ -14,6 +14,8 @@ export interface LaneInput {
   usdcBalance: number | null;
   deposits: DepositRecord[];
   proof: StakeProof | null;
+  /** True when the proof query failed, so the lane says so instead of "checking" forever. */
+  proofError?: boolean;
 }
 
 /** Plain words for what a deposit in progress is doing right now. */
@@ -54,7 +56,9 @@ export function deriveLane(input: LaneInput): [LaneNode, LaneNode, LaneNode] {
   }
 
   let staked: LaneNode;
-  if (!input.proof) {
+  if (input.proofError) {
+    staked = { amount: "–", label: "check unavailable", state: "muted" };
+  } else if (!input.proof) {
     staked = { amount: "–", label: "checking", state: "muted" };
   } else if (input.proof.stakedTao > 0) {
     staked = {

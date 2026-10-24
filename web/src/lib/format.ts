@@ -105,7 +105,15 @@ export function shortAddress(addr: string): string {
 
 /** Keeps what a person types into an amount box to digits and one decimal point. */
 export function sanitizeAmountInput(raw: string, maxDecimals: number): string {
-  const cleaned = raw.replace(/,/g, "").replace(/[^\d.]/g, "");
+  // A lone comma is a decimal point ("1,5", "100,50") unless it sits before exactly three
+  // digits with no dot anywhere ("1,000"), which is a thousands separator.
+  let text = raw;
+  if (!text.includes(".")) {
+    const parts = text.split(",");
+    const after = parts[1]?.replace(/\D/g, "") ?? "";
+    if (parts.length === 2 && after.length !== 3) text = text.replace(",", ".");
+  }
+  const cleaned = text.replace(/,/g, "").replace(/[^\d.]/g, "");
   const [whole = "", ...rest] = cleaned.split(".");
   const trimmedWhole = whole.replace(/^0+(?=\d)/, "");
   if (rest.length === 0) return trimmedWhole;

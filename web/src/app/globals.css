@@ -3,7 +3,7 @@
 :root {
   --ink: #10212b;
   --ink-2: #4b5b66;
-  --ink-3: #7e8c96;
+  --ink-3: #5b6a75;
   --water: #2e8fa3;
   --water-deep: #206f80;
   --water-tint: #e3f1f4;
@@ -12,6 +12,7 @@
   --line: #e3eaee;
   --line-soft: #eef3f6;
   --proof: #1e8a5a;
+  --proof-text: #176b46;
   --proof-tint: #e6f4ec;
   --amber: #9a5b00;
   --amber-tint: #fff3de;

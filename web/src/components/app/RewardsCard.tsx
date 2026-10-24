@@ -1,9 +1,10 @@
 "use client";
 
 import { usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
-import { formatDay, formatTao, formatUsd } from "@/lib/format";
+import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
 import { formatApr } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
+import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
 import { SampleTag } from "../SampleTag";
 import app from "./App.module.css";
@@ -35,6 +36,17 @@ function Apr() {
 function RewardsForAccount({ account }: { account: string }) {
   const position = usePosition(account);
   const rewards = useRewards(account);
+  if (position.isError || rewards.isError) {
+    return (
+      <LoadError
+        what="your rewards"
+        onRetry={() => {
+          void position.refetch();
+          void rewards.refetch();
+        }}
+      />
+    );
+  }
   if (!position.data || !rewards.data) return <Loading />;
 
   const earned = position.data.rewardsEarnedTao;
@@ -59,7 +71,7 @@ function RewardsForAccount({ account }: { account: string }) {
             <li key={r.date.toISOString()} className={styles.row}>
               <span className={styles.day}>{formatDay(r.date)}</span>
               <span className={styles.amount}>
-                +{formatTao(r.taoAccrued, 4)} TAO
+                {formatSignedTao(r.taoAccrued)} TAO
                 <small>{formatTao(r.runningTotalTao, 4)} TAO so far</small>
               </span>
             </li>

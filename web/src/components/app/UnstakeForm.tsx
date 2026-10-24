@@ -7,6 +7,7 @@ import { usePosition, useStartWithdrawal, useWithdrawalQuote } from "@/lib/casca
 import { formatTao, formatUsd, formatUsdc, parseAmount } from "@/lib/format";
 import { unstakeButtonLabel, validateUnstakeAmount } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
+import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
 import { AmountField } from "./AmountField";
 import styles from "./StakeForm.module.css";
@@ -19,6 +20,9 @@ export function UnstakeForm({ account }: { account: string | null }) {
 
 function UnstakeWithBalance({ account }: { account: string }) {
   const position = usePosition(account);
+  if (position.isError) {
+    return <LoadError what="your balance" onRetry={() => void position.refetch()} />;
+  }
   if (!position.data) return <Loading />;
   if (position.data.taoBalance <= 0) {
     return (

@@ -69,3 +69,13 @@ describe("deriveLane", () => {
     });
   });
 });
+
+describe("deriveLane when a query failed", () => {
+  it("says the check is unavailable instead of checking forever", () => {
+    expect(deriveLane({ usdcBalance: 1, deposits: [], proof: null, proofError: true })[2]).toEqual({
+      amount: "–",
+      label: "check unavailable",
+      state: "muted",
+    });
+  });
+});

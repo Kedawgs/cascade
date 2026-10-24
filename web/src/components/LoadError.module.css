@@ -1,0 +1,10 @@
+.box {
+  padding: 20px 24px;
+  text-align: center;
+}
+
+.text {
+  margin-bottom: 12px;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}

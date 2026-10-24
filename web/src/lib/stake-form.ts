@@ -11,13 +11,23 @@ export type StakeState = {
 export function validateStakeAmount(
   amount: number | null,
   limits: { minUsd: number; maxUsd: number },
+  /** The wallet's USDC balance when known; null skips the check. */
+  balance: number | null = null,
 ): string | null {
   if (amount === null) return null;
   if (amount < limits.minUsd) return `The smallest stake is ${formatUsdShort(limits.minUsd)}.`;
   if (amount > limits.maxUsd) {
     return `The most you can stake right now is ${formatUsdShort(limits.maxUsd)}.`;
   }
+  if (balance !== null && amount > balance + 1e-9) {
+    return `You have ${formatUsdc(balance)} USDC on Base.`;
+  }
   return null;
+}
+
+/** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds. */
+export function maxStakeInput(balance: number): string {
+  return (Math.floor(balance * 100) / 100).toFixed(2);
 }
 
 export function stakeButtonLabel(s: StakeState): string {

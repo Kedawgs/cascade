@@ -22,7 +22,7 @@
 
 .amount {
   font-weight: 700;
-  color: var(--proof);
+  color: var(--proof-text);
   text-align: right;
 }
 

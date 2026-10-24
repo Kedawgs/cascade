@@ -6,7 +6,7 @@ import { useCascadeData } from "@/lib/cascade/context";
 import { useDepositQuote, useProtocolStats, useStartDeposit } from "@/lib/cascade/hooks";
 import type { SourceChain } from "@/lib/cascade/types";
 import { formatTao, formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
-import { stakeButtonLabel, validateStakeAmount } from "@/lib/stake-form";
+import { maxStakeInput, stakeButtonLabel, validateStakeAmount } from "@/lib/stake-form";
 import { formatApr } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
 import { SampleTag } from "../SampleTag";
@@ -37,7 +37,7 @@ export function StakeForm({
   const noteId = useId();
 
   const amount = parseAmount(raw);
-  const error = validateStakeAmount(amount, limits);
+  const error = validateStakeAmount(amount, limits, account ? maxUsdc : null);
   const valid = amount !== null && amount > 0 && error === null;
   const quoteQuery = useDepositQuote(valid ? amount : null, chain);
   const quote = valid ? quoteQuery.data : undefined;
@@ -68,7 +68,7 @@ export function StakeForm({
         onChange={setRaw}
         unit="USDC"
         decimals={2}
-        onMax={account ? () => setRaw(maxUsdc === null ? "" : maxUsdc.toFixed(2)) : undefined}
+        onMax={account ? () => setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc)) : undefined}
         maxDisabled={maxUsdc === null}
         invalid={error !== null}
         describedBy={noteId}

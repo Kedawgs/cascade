@@ -15,8 +15,11 @@ function StakedSummary({ account }: { account: string }) {
   return (
     <div>
       <p className={styles.k}>Staked</p>
-      <p className={styles.v}>
-        {position.data ? (
+      <p
+        className={styles.v}
+        title={position.isError ? "We couldn't load your balance just now." : undefined}
+      >
+        {position.data && !position.isError ? (
           <>
             {formatTao(position.data.taoBalance, 2)} TAO{" "}
             <small>{formatUsd(position.data.usdValue)}</small>

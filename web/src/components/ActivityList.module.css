@@ -55,7 +55,7 @@
 
 .ok {
   background: var(--proof-tint);
-  color: var(--proof);
+  color: var(--proof-text);
 }
 
 .busy {

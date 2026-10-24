@@ -9,6 +9,7 @@ import { parseActivityParams } from "@/lib/activity-params";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { DepositList, WithdrawalList } from "../ActivityList";
 import { ConnectWallet } from "../ConnectWallet";
+import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
 import { Trail } from "../Trail";
 import app from "./App.module.css";
@@ -23,7 +24,7 @@ function BackLink() {
   );
 }
 
-function NotFound({ what }: { what: "deposit" | "withdrawal" }) {
+function NotFound({ what }: { what: "deposit" | "unstake" }) {
   return (
     <div className={`${app.card} ${styles.panel}`}>
       <p className={styles.panelTitle}>We couldn&apos;t find this {what}.</p>
@@ -34,8 +35,9 @@ function NotFound({ what }: { what: "deposit" | "withdrawal" }) {
 }
 
 function DepositDetail({ account, id }: { account: string; id: string }) {
-  const { data: deposit, isPending } = useDeposit(account, id);
+  const { data: deposit, isPending, isError, refetch } = useDeposit(account, id);
   const { data: position } = usePosition(account);
+  if (isError) return <LoadError what="this deposit" onRetry={() => void refetch()} />;
   if (isPending) return <Loading />;
   if (!deposit) return <NotFound what="deposit" />;
 
@@ -73,9 +75,10 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
 }
 
 function WithdrawalDetail({ account, id }: { account: string; id: string }) {
-  const { data: withdrawal, isPending } = useWithdrawal(account, id);
+  const { data: withdrawal, isPending, isError, refetch } = useWithdrawal(account, id);
+  if (isError) return <LoadError what="this unstake" onRetry={() => void refetch()} />;
   if (isPending) return <Loading />;
-  if (!withdrawal) return <NotFound what="withdrawal" />;
+  if (!withdrawal) return <NotFound what="unstake" />;
 
   const paid = withdrawal.status === "paid";
   const tao = formatTao(withdrawal.taoAmount, 2);
@@ -105,6 +108,17 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
 function Lists({ account }: { account: string }) {
   const deposits = useDeposits(account);
   const withdrawals = useWithdrawals(account);
+  if (deposits.isError || withdrawals.isError) {
+    return (
+      <LoadError
+        what="your activity"
+        onRetry={() => {
+          void deposits.refetch();
+          void withdrawals.refetch();
+        }}
+      />
+    );
+  }
   if (!deposits.data || !withdrawals.data) return <Loading />;
   return (
     <>

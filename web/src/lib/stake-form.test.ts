@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  maxStakeInput,
   stakeButtonLabel,
   unstakeButtonLabel,
   validateStakeAmount,
@@ -73,5 +74,20 @@ describe("unstake helpers", () => {
     expect(validateUnstakeAmount(0, 3.66)).toBe("Enter how much TAO to unstake.");
     expect(validateUnstakeAmount(1, 3.66)).toBeNull();
     expect(validateUnstakeAmount(null, 3.66)).toBeNull();
+  });
+});
+
+describe("balance checks", () => {
+  it("refuses more than the wallet holds", () => {
+    expect(validateStakeAmount(10_000, limits, 2400)).toBe("You have 2,400 USDC on Base.");
+    expect(validateStakeAmount(2400, limits, 2400)).toBeNull();
+    expect(validateStakeAmount(500, limits, null)).toBeNull();
+    expect(validateStakeAmount(5, limits, 2400)).toBe("The smallest stake is $10.");
+  });
+
+  it("floors MAX to whole cents so it never exceeds the balance", () => {
+    expect(maxStakeInput(2.999999)).toBe("2.99");
+    expect(maxStakeInput(12.345678)).toBe("12.34");
+    expect(maxStakeInput(2400)).toBe("2400.00");
   });
 });

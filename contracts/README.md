@@ -431,8 +431,8 @@ enabled adapter, could submit redeem-only batches naming every holder. The vault
 
 The honest statement, from the spec:
 
-> The team cannot move user funds instantly; any new front door or bridge is announced on-chain
-> seven days ahead and the guardian can veto it; a compromised front door can burn at most about 20%
+> The team cannot move user funds instantly; any front door or bridge added after deployment is
+> announced on-chain seven days ahead and the guardian can veto it; a compromised front door can burn at most about 20%
 > of the vault per day in redemptions (per registered front door, and never less than 100 TAO a
 > day), nothing it burned can be paid out for 24 hours, the guardian can hold those payouts at once,
 > and the owner can then cancel the batch and return the shares. Outside the contract, ForeverMoney's
@@ -446,8 +446,8 @@ below).
 The four layers:
 
 1. **Registry changes are slow, visible and vetoable.** A new front door or bridge can be activated
-   only 7 days after it is proposed on-chain (only the ones named at deployment are active at once); the guardian or owner can cancel a proposal, remove a
-   front door or disable a bridge at once. The guardian itself can be replaced only 8 days after the
+   only 7 days after it is proposed on-chain (the ones named at deployment are active at once); the
+   guardian or owner can cancel a proposal, remove a front door or disable a bridge at once. The guardian itself can be replaced only 8 days after the
    owner proposes it, so it outlasts any registry proposal made alongside.
 2. **Burns are capped per front door at delivery.** Each front door may burn at most
    `max(20% of gross assets before the batch's deposits, 100 TAO)` per fixed 24-hour window;
@@ -570,7 +570,7 @@ Keys:
 | Owner | Everything in [Roles](#roles) under "Owner", including replacing the guardian (8 days after proposing it) and picking the validators. | Cannot move user funds directly. The only route would be registering a rogue front door or bridge, which waits 7 days in public, and the sitting guardian can veto it: replacing the guardian takes 8 days, longer than the registry delay, and the guardian stays in office until then. A compromised owner cannot bypass the sitting guardian's veto within the registry delay; with the guardian vetoing, a rogue registration needs at least 15 days of public notice plus the timelock's delay. Parameter changes wait only for the timelock. |
 | Guardian | Stop only: pause, remove a front door, disable a bridge, cancel a pending proposal. It can also add a hotkey, which only widens what the price reads. | A stolen guardian key can freeze, not take. The owner proposes a replacement at once and accepts it after 8 days; the guardian cannot cancel that. Until then it can re-pause, remove front doors, disable bridges and cancel the owner's re-registration proposals, so front-door deposits, redeems and payouts can stay frozen for about 15 days plus the owner's timelock (8-day replacement, then a 7-day registry re-proposal), and direct deposits and redeems for 8 days plus the timelock. The bound holds only if the guardian key does NOT hold the timelock's canceller role. It could fill the hotkey set (at most 4); the owner removes extras. |
 | Keeper | Time `claimRewards` and `stakeIdle`; add a hotkey; choose payout chunk sizes. | A stolen key can time claims and stakes badly (frequent tiny claims stretch vesting), and on a runtime with a post-stake hold on unstaking it can re-arm that hold with `stakeIdle` to delay exits, and it alone chooses payout chunk sizes (each extra chunk costs its users at most the fee ceiling); it cannot move funds. Anyone may act after 7 days (counted from deploy, or from when a hotkey was first added, until the first stake or claim), and the owner can replace or clear the keeper. |
-| Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey, initial bridge and, optionally, the vault's initial front door (a chain id and address; a zero address names none). Both are active at once, with no delay, because nobody has deposited yet; every later front door or bridge waits 7 days. | Check every constructor argument before anyone deposits, including `frontDoorActive(peerId(chain, frontDoor))` for the initial front door. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
+| Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey, initial bridge and, optionally, the vault's initial front door (a chain id and address; a zero address names none). The initial bridge and front door are active at once, with no delay, because nobody has deposited yet; every later front door or bridge waits 7 days. | Check every constructor argument before anyone deposits (checklist item 28), including that the initial front door has code and points back at this vault: `frontDoorActive(peerId(chain, frontDoor))` proves only the registration. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
 
 Contracts:
 
@@ -853,6 +853,13 @@ Added by the final whole-branch review (2026-10-24):
     both adapters' `router()`, `token()` and `remoteSelector()`, and `adapterBit.alphaVault()`, and
     compare them with the plan: `remoteAdapter` is circular across two chains, and a wrong
     prediction (a stray transaction, a nonce mismatch) makes every delivery `WrongSender` and
-    leaves the first batch's tokens in FAILURE forever. Call `fundReserve()` with 1e12 wei before
+    leaves the first batch's tokens in FAILURE forever. Deploy the Base side first, so the vault
+    names an initial front door that already has code (the Base contracts then hold the predicted
+    Bittensor addresses, and nothing on Bittensor trusts an empty slot). Then read back on Base the
+    front door's `vault()`, `vaultChain()` and `primaryBridge()` and its code hash, and on Bittensor
+    `vault.frontDoorActive(vault.peerId(chain, frontDoor))` with `chain` equal to
+    `adapterBit.remoteChainId()` (the chain id the adapter reports, not the CCIP selector), and
+    that the vault's deploy transaction emitted exactly one `FrontDoorActivated`. Call
+    `fundReserve()` with 1e12 wei before
     activating the bridge. Send one single-entry 0.01-TAO batch and watch it deliver before opening
     deposits.

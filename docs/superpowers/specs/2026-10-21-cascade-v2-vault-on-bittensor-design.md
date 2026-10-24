@@ -286,6 +286,11 @@ the parameter stays as a cross-check only); `ZeroHotkey`; zero-address checks; c
 stake list; stake sent onto the vault's own hotkeys still lands, which only raises the price).
 The initial bridge is enabled immediately (no delay at construction) and is the primary.
 
+> **Correction (2026-10-24):** the constructor also takes `(uint64 initialFrontDoorChain, address
+> initialFrontDoor)` and activates that front door at once, like the initial bridge (zero address =
+> none); without it every fresh deployment waited `REGISTRY_DELAY` before its first deposit. Only
+> front doors and bridges added after deployment wait 7 days.
+
 ### Stake and hotkeys
 
 - `bytes32[] hotkeys` (bounded by `MAX_HOTKEYS = 4`), `bytes32 stakeHotkey` (where idle TAO is
@@ -575,8 +580,8 @@ Other properties:
   burn shares the named user holds, within the peer's allowance, and only for users who are not
   `directOnly`. A forged batch cannot block an honest one (message-hash keys).
 - Donations cannot freeze anything: no bounds, no flags; unexpected TAO only raises the price.
-- Honest statement for the README: *the team cannot move user funds instantly; any new front door
-  or bridge is announced on-chain seven days ahead and the guardian can veto it; a compromised
+- Honest statement for the README: *the team cannot move user funds instantly; any front door or
+  bridge added after deployment is announced on-chain seven days ahead and the guardian can veto it; a compromised
   front door can burn at most about 20% of the vault per day in redemptions (per registered front
   door, and never less than 100 TAO a day), nothing it burned can be paid out for 24 hours, the
   guardian can hold those payouts at once, and the owner can then cancel the batch and return the

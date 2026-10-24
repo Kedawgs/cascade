@@ -95,12 +95,18 @@ contract VaultCoreTest is VaultTestBase {
         assertFalse(vault.frontDoorActive(vault.peerId(BASE, bob)));
 
         // and bringing it back waits the full registry delay
+        uint256 t0 = block.timestamp;
         vm.prank(owner);
         vault.proposeFrontDoor(BASE, bob);
-        vm.warp(block.timestamp + 7 days - 1);
+        vm.warp(t0 + 7 days - 1);
         vm.prank(owner);
         vm.expectRevert(CascadeBase.NotReady.selector);
         vault.activateFrontDoor(BASE, bob);
+
+        vm.warp(t0 + 7 days);
+        vm.prank(owner);
+        vault.activateFrontDoor(BASE, bob);
+        assertTrue(vault.frontDoorActive(vault.peerId(BASE, bob)));
     }
 
     // ---- token ----

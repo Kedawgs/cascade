@@ -240,7 +240,7 @@ contract CcipBittensorAdapterTest is Test {
     function test_receive_rejectsStrangers() public {
         (bool ok, bytes memory ret) = address(adapter).call{value: 1}("");
         assertFalse(ok);
-        assertEq(bytes4(ret), CcipAdapterBase.UnexpectedValue.selector);
+        assertEq(ret, abi.encodeWithSelector(CcipAdapterBase.UnexpectedValue.selector));
     }
 
     function test_fundReserve_isNeverSpent() public {

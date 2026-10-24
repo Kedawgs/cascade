@@ -1,6 +1,6 @@
 # Cascade web redesign: landing page and stake app
 
-Date: 2026-10-23. Status: approved in conversation (mockup), awaiting builder check.
+Date: 2026-10-23. Status: mockup approved in conversation; builder check done and its questions settled below; awaiting the owner's read of this document.
 Visual reference: `docs/superpowers/specs/assets/2026-10-23-web-redesign-mockup.html` (open it in a browser; it is the approved mockup, landing page on top and the stake page below).
 
 ## Intent
@@ -101,24 +101,39 @@ Footnote. "*APR is an estimate based on recent rewards. It is not guaranteed and
 - Rewards: a card with "Earned so far" in TAO and dollars, current APR, and a simple list of recent reward accruals from the data layer. Keep it to one card; no charts in this round.
 - Activity: the existing deposits and withdrawals lists restyled as rows (amount and chain, TAO at price, status chip with the four-bar progress), each opening the existing trail screen with receipts.
 
-Visitors with no wallet and no demo see the landing page at `/`; "See the demo" starts the existing demo account and lands on `/stake`.
+Routes and gating: `/` is always the landing page, for everyone, like lido.fi; its "Stake TAO" button goes to `/stake`. The app routes (`/stake`, `/unstake`, `/rewards`, `/activity`) never redirect away. With no wallet and no demo they render in a connect state: the summary shows dashes, the form's button reads "Connect wallet", statistics and FAQ show as usual. "See the demo" starts the existing demo account and lands on `/stake`. The old `/deposit` and `/withdraw` routes redirect to `/stake` and `/unstake`.
 
 ## Data layer additions
 
-`CascadeData` gains `getProtocolStats(): Promise<ProtocolStats>` with `aprPercent`, `totalStakedTao`, `stakers`, `taoPriceUsd` (each optional); the mock returns the mockup's sample figures. The wallet USDC balance comes from wagmi when a wallet is connected and from the mock in demo mode. The money-flow visual and the stake widget share one sample quote from `quoteDeposit`. Nothing else in the contract changes.
+`CascadeData` gains:
+
+- `source: "mock" | "live"` so the UI knows whether figures are samples.
+- `getProtocolStats(): Promise<ProtocolStats>` with `aprPercent`, `totalStakedTao`, `stakers`, `taoPriceUsd` (each optional); the mock returns the mockup's sample figures.
+- `listRewards(account): Promise<RewardRecord[]>`: one record per day with the TAO accrued and the running total. The mock models a daily accrual at the sample APR from each staked deposit's date. (In the contracts, claimed rewards vest over seven days, so a balance grows a little every day; "Rewards land in your balance every day" is the honest plain-language version of that.)
+- `WithdrawalQuote.etaMinutes` for the "Paid out in about N hours" row.
+- `SourceChain` gains `arbitrum`; `chains.ts` carries a `status: "live" | "soon"` per chain, and every chip row reads that one list. Base is the only live chain at launch.
+
+The wallet USDC balance comes from wagmi when a wallet is connected and from the mock in demo mode. The money-flow visual and the stake widget share one sample quote from `quoteDeposit`. `startDeposit` and `startWithdrawal` stay mocked until the `web-wiring` piece, even with a real wallet connected.
 
 ## Copy rules
 
 - Sentence case everywhere; no all-caps labels except the MAX button.
 - The action is "Stake" and "Unstake" throughout: tab names, buttons, confirmations.
-- Describe states, not mechanisms: "Your TAO", "Staked on Bittensor", "crossing to Bittensor". Chainlink CCIP is named once per page as a trust signal.
+- Describe states, not mechanisms: "Your TAO", "Staked on Bittensor", "crossing to Bittensor". Chainlink CCIP is named where the money crosses chains (the flow caption, step 2) and in the Security section, and nowhere else.
 - Errors say what happened and what to do next, in the interface's voice. Empty states invite the first action.
 - Yield is always "APR" with the footnote; never "guaranteed", never "up to".
+
+## Decisions after the builder check (my calls)
+
+- Public demo before wiring. This build may be deployed publicly on mock data as a demo. Whenever `source` is `"mock"`, the existing demo banner shows on every page and each protocol-wide figure (hero APR and total staked, the statistics card) carries a small "sample" tag. Per-account figures in demo mode are already covered by the banner. The money-flow tiles are illustrative and need no tag.
+- "Where your money is right now" with several deposits in progress: the middle node sums `pendingTao` over all in-progress deposits. With one deposit in progress its sub-line is that deposit's step ("crossing to Bittensor, step 3 of 4"); with more than one it reads "N deposits on their way"; with none the node is muted and reads "nothing in transit". The staked node reads from `StakeProof`; the wallet node from the USDC balance. Derivation is a pure function with unit tests.
+- Links. GitHub goes to https://github.com/Kedawgs/cascade; Security to the repo's `SECURITY.md`; Docs to the repo's `docs/` folder for now. Status and Contact are left out until a status page and a contact channel exist; nothing on the site may link to a dead page.
+- Static export with no server. Receipt detail screens move to query-string routes under the Activity tab (for example `/activity?deposit=<id>`), which work on any static host without a fallback rule. The old `/deposits/[id]` and `/withdrawals/[id]` URLs are not kept; nothing public links to them yet. Host choice is a deploy-time decision; any static host works.
 
 ## Left to the builder
 
 - Component breakdown and file layout within `web/src`.
-- How the four tabs map to routes and how the receipt detail pages (`/deposits/[id]`, `/withdrawals/[id]`) are served under static export.
+- Component breakdown for the four tabs and the receipt detail screen under the Activity tab.
 - Exact breakpoints, the phone version of the hero path and the nav.
 - Accordion, chip row and tab implementations (native elements preferred: `details`, buttons with `aria-pressed`).
 - Loading, empty and error states for every data-backed element, following the current app's pattern.

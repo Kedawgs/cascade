@@ -10,7 +10,7 @@ withdrawals and forwards them over Chainlink CCIP. See `docs/architecture.md` fo
 | Path | What it is |
 |---|---|
 | `contracts/` | Foundry project: `CascadeVault`, `CascadeFrontDoor`, `CascadeBase`, tests, invariants |
-| `web/` | Next.js demo app; every number comes from the mock service in `src/lib/cascade` |
+| `web/` | Next.js site: landing page plus the Stake, Unstake, Rewards and Activity tabs. Every number comes from the data layer in `src/lib/cascade` (the mock adapter today); builds to a static export. See `web/README.md` |
 | `docs/architecture.md` | How the two contracts move money, in plain language |
 | `docs/superpowers/specs/` | Design specs; the v2 spec's top section records every ruling made while building |
 | `docs/superpowers/plans/` | The task plans the builds followed |
@@ -25,13 +25,14 @@ withdrawals and forwards them over Chainlink CCIP. See `docs/architecture.md` fo
   `contracts/lib`; on an existing clone run `git submodule update --init`).
 - Contracts: `cd contracts && forge test` (262 tests, 9 invariants), `forge build --sizes`
   (the vault must stay under 24,576 bytes), `forge fmt --check`, `slither .`.
-- Web: `cd web && pnpm install && pnpm dev`.
+- Web: `cd web && pnpm install && pnpm dev`; `pnpm build` writes the static site to `web/out/`.
 - Tags: `v2.0-contracts-reviewed` is the current contracts milestone; `contracts-v1-superseded`
   marks the earlier design, kept for reference.
 
 ## Status
 
-Contracts are built and reviewed but not audited and not deployed. Next: the CCIP + ForeverMoney
+Contracts are built and reviewed but not audited and not deployed. The web app has its real
+design (landing page and stake app) but still runs on mock data. Next: the CCIP + ForeverMoney
 adapters (design in `docs/forevermoney-probe.md`), then the keeper bot, then wiring the web app to
 testnet. Nothing here should hold real money before a professional audit and the checklist in
 `contracts/README.md` is done.

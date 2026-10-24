@@ -14,8 +14,9 @@ details, operator notes and the pre-mainnet checklist: `contracts/README.md`. Re
 - **Plain root staking only.** Deposits are staked as TAO on Bittensor's root (netuid 0). No
   subnet picking, no alpha swaps. Since Root Reborn (Aug 2026) root rewards accrue from validator
   baskets and are claimed back as root stake.
-- **Transparency is the product.** The home screen shows the balance plus a live on-chain check that
-  it is all staked; each deposit has a step-by-step trail with a receipt per step. Shares and stake
+- **Transparency is the product.** The stake page shows the balance, a live on-chain check that it
+  is all staked, and a three-stop lane for where the money is right now (wallet, in transit, staked);
+  each deposit has a step-by-step trail with a receipt per step under the Activity tab. Shares and stake
   now live in one contract, so the check is one read on one chain.
 - **Security first.** Small immutable contracts, no upgrade proxies, caps, a guardian that can only
   stop flows, and admin behind a timelock (48 hours in the beta). The team cannot move user funds

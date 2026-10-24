@@ -207,11 +207,16 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     }
 
     /// Reduces the caller's own deposit in the open batch and returns the tokens; works while paused.
+    /// A partial cancel must leave at least `minDeposit` (a full cancel is always allowed), so an entry
+    /// left below a later-raised `minDeposit` can only be cancelled in full.
     function cancelDeposit(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         if (amount % RAO != 0) revert NotRaoAligned();
         uint64 id = open.id;
         _reduce(open.deposits, depositSlot[id], amount);
+        uint256 slot = depositSlot[id][msg.sender];
+        uint256 left = slot == 0 ? 0 : open.deposits[slot - 1].amount;
+        if (left != 0 && left < minDeposit) revert BelowMinDeposit();
         open.totalDeposits -= amount;
         asset.safeTransfer(msg.sender, amount);
         emit DepositCancelled(id, msg.sender, amount);

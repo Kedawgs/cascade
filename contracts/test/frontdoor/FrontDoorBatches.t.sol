@@ -260,6 +260,32 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         assertEq(tao.balanceOf(alice), 1_000e18);
     }
 
+    function test_cancelDeposit_partialBelowMinimumReverts() public {
+        vm.prank(alice);
+        fd.deposit(2e18);
+        vm.prank(alice);
+        vm.expectRevert(CascadeFrontDoor.BelowMinDeposit.selector);
+        fd.cancelDeposit(1e18 + 1e9); // would leave 1e18 - 1e9
+        assertEq(fd.depositOf(alice), 2e18);
+    }
+
+    function test_cancelDeposit_partialToExactMinimumSucceeds() public {
+        vm.prank(alice);
+        fd.deposit(2e18);
+        vm.prank(alice);
+        fd.cancelDeposit(1e18); // leaves exactly minDeposit
+        assertEq(fd.depositOf(alice), 1e18);
+    }
+
+    function test_cancelDeposit_fullCancelAlwaysSucceeds() public {
+        vm.prank(alice);
+        fd.deposit(1e18);
+        vm.prank(alice);
+        fd.cancelDeposit(1e18); // leaves zero
+        assertEq(fd.depositOf(alice), 0);
+        assertEq(openTotal(), 0);
+    }
+
     function test_cancelDepositFreesSlotForOthers() public {
         vm.prank(owner);
         fd.setBatchLimits(1, 1);

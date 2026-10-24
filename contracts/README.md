@@ -127,7 +127,7 @@ forge fmt --check
    one-signature "zap" contract calls `depositFor`, which can only credit the named user. Amounts
    must be whole rao (1 rao = 1e-9 TAO), at least `minDeposit`, inside the front door's
    `depositCap`, and inside the batch's 4,000-TAO value limit. Each user has one merged entry per
-   batch. `cancelDeposit` returns tokens while the batch is still open.
+   batch. `cancelDeposit` returns tokens while the batch is still open. A partial cancel must leave at least `minDeposit`; a full cancel is always allowed, so a batch never holds an entry below the minimum.
 2. To exit, a user calls `requestRedeem(shares)`. The front door cannot see balances on Bittensor,
    so the vault clips each request later. The first request per user per batch costs
    `redeemRequestFee` in ETH (the spec's default, 1e14 wei, is about $0.30). It is paid cash first:

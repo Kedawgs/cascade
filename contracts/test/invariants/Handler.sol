@@ -186,6 +186,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         if (open == 0) return;
         // rao-aligned and at most the entry
         amount = bound(amount, 1, open / RAO) * RAO;
+        // a partial cancel must leave at least minDeposit, so a smaller remainder cancels in full
+        uint256 left = open - amount;
+        if (left != 0 && left < fd.minDeposit()) amount = open;
         vm.prank(actor);
         try fd.cancelDeposit(amount) {
             ++depositCancels;

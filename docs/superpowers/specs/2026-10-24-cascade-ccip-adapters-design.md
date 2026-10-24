@@ -123,7 +123,8 @@ supply 13,247 TAO on 2026-10-24):
   to the caller by `call`. Reverts when halted, when `wad % 1e9 != 0`, or when `taoOut < minTaoOut`.
 - `depositLiquid(address token, uint256 minAlphaRao) payable`: stakes `msg.value` (a whole number
   of rao) and mints bridged TAO 1:1 to the caller. Reverts when halted or migrating.
-- Their guardian pause and admin migration can stall either leg with no notice; their 2-of-3 Safe
+- Their guardian pause stalls either leg with no notice, and a completed admin migration permanently
+  strands inbound batches delivered after it (see the trust map); their 2-of-3 Safe
   controls the pools and rate limits. No ForeverMoney key can take TAO that sits in Cascade's vault.
 
 Bittensor staking floor (research, `bittensor_evm_home_chain.md`, live 2026-10-21): adding stake

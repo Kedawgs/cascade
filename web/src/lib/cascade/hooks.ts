@@ -9,7 +9,10 @@ const LIVE_MS = 1_000;
 const IDLE_MS = 30_000;
 
 export const cascadeKeys = {
+  stats: () => ["cascade", "stats"] as const,
   account: (account: string) => ["cascade", account] as const,
+  usdc: (account: string) => ["cascade", account, "usdc"] as const,
+  rewards: (account: string) => ["cascade", account, "rewards"] as const,
   position: (account: string) => ["cascade", account, "position"] as const,
   proof: (account: string) => ["cascade", account, "proof"] as const,
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
@@ -19,6 +22,34 @@ export const cascadeKeys = {
   depositQuote: (amount: number, chain: SourceChain) => ["quote", "deposit", amount, chain] as const,
   withdrawalQuote: (tao: number) => ["quote", "withdrawal", tao] as const,
 };
+
+export function useProtocolStats() {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.stats(),
+    queryFn: () => data.getProtocolStats(),
+    refetchInterval: IDLE_MS,
+  });
+}
+
+/** The demo account's USDC. Connected wallets read their balance from the chain instead. */
+export function useMockUsdcBalance(account: string, enabled = true) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.usdc(account),
+    queryFn: () => data.getUsdcBalance(account),
+    refetchInterval: IDLE_MS,
+    enabled,
+  });
+}
+
+export function useRewards(account: string) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.rewards(account),
+    queryFn: () => data.listRewards(account),
+  });
+}
 
 export function usePosition(account: string, live = false) {
   const data = useCascadeData();

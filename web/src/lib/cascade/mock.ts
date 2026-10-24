@@ -24,6 +24,8 @@ import type {
   DepositRecord,
   DepositStepKey,
   Position,
+  ProtocolStats,
+  RewardRecord,
   SourceChain,
   StakeProof,
   StepStatus,
@@ -39,16 +41,27 @@ export const SWAP_FEE_RATE = 0.003;
 export const ROUTE_FEE_USD: Record<SourceChain, number> = {
   base: 0,
   ethereum: 2.5,
-  bnb: 0.4,
+  arbitrum: 0.3,
   polygon: 0.2,
+  bnb: 0.4,
 };
 export const ETA_MINUTES: Record<SourceChain, number> = {
   base: 10,
   ethereum: 15,
-  bnb: 13,
+  arbitrum: 13,
   polygon: 13,
+  bnb: 13,
 };
 export const DEPOSIT_LIMITS = { minUsd: 10, maxUsd: 50_000 } as const;
+/** Protocol-wide sample figures shown with a "sample" tag while the data is mock. */
+export const MOCK_APR_PERCENT = 11.4;
+export const MOCK_TOTAL_STAKED_TAO = 12_480;
+export const MOCK_STAKERS = 1_204;
+/** USDC every demo account can stake. */
+export const MOCK_USDC_BALANCE = 2_400;
+/** Withdrawals go out in the daily batch, so about a day. */
+export const WITHDRAWAL_ETA_MINUTES = 1_440;
+const DAY_MS = 24 * 60 * 60_000;
 /** How often a demo deposit or withdrawal moves to its next step. */
 export const DEMO_STEP_MS = 4_000;
 export const MOCK_VALIDATOR_HOTKEY = "5HEo565WAy4Dbq3Sv271SAi7syBSofyfhhwRNjFNSM2g7tQb";
@@ -395,6 +408,35 @@ export function createMockCascadeData(options: MockOptions = {}): CascadeData {
     };
   }
 
+  /**
+   * One record per day since each staked deposit's staking time, spreading the
+   * deposit's rewards evenly (remainder on the last day) so the list always adds
+   * up to the balance shown. Deposits still in progress contribute nothing.
+   */
+  function rewards(account: string): RewardRecord[] {
+    const t = now();
+    const records: { date: Date; taoAccrued: number }[] = [];
+    for (const d of depositsFor(account)) {
+      if (countDone(d.stepTimes, t) < 4 || d.rewardsTao <= 0) continue;
+      const stakedAt = d.stepTimes[3];
+      const count = Math.max(1, Math.floor((t - stakedAt) / DAY_MS));
+      const per = round(d.rewardsTao / count, 4);
+      for (let i = 0; i < count; i++) {
+        const last = i === count - 1;
+        records.push({
+          date: new Date(Math.min(stakedAt + (i + 1) * DAY_MS, t)),
+          taoAccrued: last ? round(d.rewardsTao - per * (count - 1), 4) : per,
+        });
+      }
+    }
+    records.sort((a, b) => a.date.getTime() - b.date.getTime());
+    let running = 0;
+    return records.map((r) => {
+      running = round(running + r.taoAccrued, 4);
+      return { ...r, runningTotalTao: running };
+    });
+  }
+
   function quoteDeposit(amountUsd: number, chain: SourceChain): DepositQuote {
     const amount = Number.isFinite(amountUsd) ? Math.max(0, amountUsd) : 0;
     const feesUsd = amount > 0 ? round(amount * SWAP_FEE_RATE + ROUTE_FEE_USD[chain], 2) : 0;
@@ -412,14 +454,38 @@ export function createMockCascadeData(options: MockOptions = {}): CascadeData {
     const tao = Number.isFinite(taoAmount) ? Math.max(0, round(taoAmount, 4)) : 0;
     const gross = tao * price;
     const feesUsd = round(gross * SWAP_FEE_RATE, 2);
-    return { taoAmount: tao, usdcAmount: round(gross - feesUsd, 2), feesUsd, taoPriceUsd: price };
+    return {
+      taoAmount: tao,
+      usdcAmount: round(gross - feesUsd, 2),
+      feesUsd,
+      taoPriceUsd: price,
+      etaMinutes: WITHDRAWAL_ETA_MINUTES,
+    };
   }
 
   const byNewest = (a: { createdAt: Date }, b: { createdAt: Date }) =>
     b.createdAt.getTime() - a.createdAt.getTime();
 
   return {
+    source: "mock",
     limits: { ...DEPOSIT_LIMITS },
+
+    async getProtocolStats(): Promise<ProtocolStats> {
+      return {
+        aprPercent: MOCK_APR_PERCENT,
+        totalStakedTao: MOCK_TOTAL_STAKED_TAO,
+        stakers: MOCK_STAKERS,
+        taoPriceUsd: price,
+      };
+    },
+
+    async getUsdcBalance() {
+      return MOCK_USDC_BALANCE;
+    },
+
+    async listRewards(account) {
+      return rewards(account);
+    },
 
     async getPosition(account) {
       return position(account);

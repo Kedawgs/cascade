@@ -6,7 +6,7 @@
  * trail receipts) only has to implement `CascadeData`; see `./index.ts`.
  */
 
-export type SourceChain = "base" | "ethereum" | "bnb" | "polygon";
+export type SourceChain = "base" | "ethereum" | "arbitrum" | "polygon" | "bnb";
 
 export interface Position {
   /** Staked TAO the account owns right now, rewards included. */
@@ -29,6 +29,21 @@ export interface StakeProof {
   checkedAt: Date;
   validatorHotkey: string;
   explorerUrl: string;
+}
+
+/** Protocol-wide figures for the landing page and the statistics card. Missing values are hidden. */
+export interface ProtocolStats {
+  aprPercent?: number;
+  totalStakedTao?: number;
+  stakers?: number;
+  taoPriceUsd?: number;
+}
+
+/** One day's staking rewards for an account. */
+export interface RewardRecord {
+  date: Date;
+  taoAccrued: number;
+  runningTotalTao: number;
 }
 
 export type StepStatus = "done" | "active" | "pending";
@@ -87,6 +102,8 @@ export interface WithdrawalQuote {
   usdcAmount: number;
   feesUsd: number;
   taoPriceUsd: number;
+  /** How long until the USDC is paid out on Base. */
+  etaMinutes: number;
 }
 
 export interface DepositLimits {
@@ -95,9 +112,15 @@ export interface DepositLimits {
 }
 
 export interface CascadeData {
+  /** Whether the figures are demo samples or read from the chain. */
+  readonly source: "mock" | "live";
   limits: DepositLimits;
+  getProtocolStats(): Promise<ProtocolStats>;
   getPosition(account: string): Promise<Position>;
   getProof(account: string): Promise<StakeProof>;
+  /** USDC the account could stake right now (demo accounts get a sample balance). */
+  getUsdcBalance(account: string): Promise<number>;
+  listRewards(account: string): Promise<RewardRecord[]>;
   listDeposits(account: string): Promise<DepositRecord[]>;
   getDeposit(account: string, id: string): Promise<DepositRecord | null>;
   quoteDeposit(amountUsd: number, chain: SourceChain): Promise<DepositQuote>;

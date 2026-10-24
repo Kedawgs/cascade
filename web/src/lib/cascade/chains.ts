@@ -3,18 +3,26 @@ import type { SourceChain } from "./types";
 export interface SourceChainInfo {
   id: SourceChain;
   label: string;
-  /** Dot color used in the chain picker (from the approved mockup). */
+  /** Brand colour for the chip dot. */
   color: string;
   /** EVM chain id, matches the wagmi config. */
   chainId: number;
+  /** Only live chains can be picked; the rest show as "Soon". */
+  status: "live" | "soon";
 }
 
+/** In display order. Base is the only live chain at launch. */
 export const SOURCE_CHAINS: readonly SourceChainInfo[] = [
-  { id: "base", label: "Base", color: "#2563EB", chainId: 8453 },
-  { id: "ethereum", label: "Ethereum", color: "#6B7280", chainId: 1 },
-  { id: "bnb", label: "BNB Chain", color: "#D4A017", chainId: 56 },
-  { id: "polygon", label: "Polygon", color: "#7C3AED", chainId: 137 },
+  { id: "base", label: "Base", color: "#0052FF", chainId: 8453, status: "live" },
+  { id: "ethereum", label: "Ethereum", color: "#627EEA", chainId: 1, status: "soon" },
+  { id: "arbitrum", label: "Arbitrum", color: "#213147", chainId: 42161, status: "soon" },
+  { id: "polygon", label: "Polygon", color: "#8247E5", chainId: 137, status: "soon" },
+  { id: "bnb", label: "BNB Chain", color: "#F0B90B", chainId: 56, status: "soon" },
 ];
+
+export function liveChains(): SourceChainInfo[] {
+  return SOURCE_CHAINS.filter((c) => c.status === "live");
+}
 
 export function chainInfo(id: SourceChain): SourceChainInfo {
   const info = SOURCE_CHAINS.find((c) => c.id === id);

@@ -201,3 +201,51 @@ describe("persistence", () => {
     expect(started.sourceChain).toBe("base");
   });
 });
+
+describe("protocol stats, rewards and balances", () => {
+  it("reports itself as the mock", () => {
+    const { data } = setup();
+    expect(data.source).toBe("mock");
+  });
+
+  it("returns the sample protocol statistics", async () => {
+    const { data } = setup();
+    expect(await data.getProtocolStats()).toEqual({
+      aprPercent: 11.4,
+      totalStakedTao: 12480,
+      stakers: 1204,
+      taoPriceUsd: 286,
+    });
+  });
+
+  it("gives every account 2,400 USDC to stake", async () => {
+    const { data } = setup();
+    expect(await data.getUsdcBalance(ACCOUNT)).toBe(2400);
+  });
+
+  it("quotes withdrawals as paid out in about a day", async () => {
+    const { data } = setup();
+    expect((await data.quoteWithdrawal(1)).etaMinutes).toBe(1440);
+  });
+
+  it("spreads each staked deposit's rewards over the days since it staked", async () => {
+    const { data } = setup(); // clock is Oct 20 12:00; seed staked Oct 1 09:19
+    const rewards = await data.listRewards(ACCOUNT);
+    expect(rewards).toHaveLength(19);
+    expect(rewards[0].date.getDate()).toBe(2); // the day after it staked on Oct 1
+    expect(rewards.at(-1)?.date.getDate()).toBe(20);
+    expect(rewards.at(-1)?.runningTotalTao).toBe(0.0213);
+    expect(rewards.every((r) => r.taoAccrued > 0)).toBe(true);
+    const total = rewards.reduce((s, r) => s + r.taoAccrued, 0);
+    expect(Math.round(total * 1e4) / 1e4).toBe(0.0213);
+  });
+
+  it("ignores deposits that are still in progress", async () => {
+    const { data, advance } = setup();
+    await data.startDeposit(ACCOUNT, 100, "base");
+    advance(DEMO_STEP_MS); // first step only; not staked
+    const rewards = await data.listRewards(ACCOUNT);
+    expect(rewards).toHaveLength(19);
+    expect(rewards.at(-1)?.runningTotalTao).toBe(0.0213);
+  });
+});

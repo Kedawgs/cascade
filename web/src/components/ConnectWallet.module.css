@@ -1,0 +1,53 @@
+.block {
+  display: block;
+  width: 100%;
+}
+
+.inline {
+  position: relative;
+  display: inline-block;
+}
+
+.button {
+  min-height: 52px;
+  font-size: 16px;
+}
+
+.inline .button {
+  min-height: 46px;
+  font-size: 15px;
+}
+
+.panel {
+  margin-top: 10px;
+}
+
+/* In the nav the chooser drops down under the button. */
+.inline .panel {
+  position: absolute;
+  right: 0;
+  z-index: 10;
+  width: 260px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-input);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.options {
+  display: grid;
+  gap: 8px;
+}
+
+.hint {
+  margin-top: 8px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 13.5px;
+}

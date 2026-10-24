@@ -2,7 +2,7 @@
 
 import { useId, useState } from "react";
 import { useConnect, useConnectors, type Connector } from "wagmi";
-import styles from "./Landing.module.css";
+import styles from "./ConnectWallet.module.css";
 
 function connectorLabel(c: Connector): string {
   if (c.id === "baseAccount") return "Base Account";
@@ -31,7 +31,14 @@ function friendlyError(error: Error): string {
   return "We couldn't connect to that wallet. Try again or pick another one.";
 }
 
-export function ConnectWallet() {
+/** A "Connect wallet" button that opens the list of wallets to pick from. */
+export function ConnectWallet({
+  variant = "pill",
+  label = "Connect wallet",
+}: {
+  variant?: "pill" | "pill-block";
+  label?: string;
+}) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   const connectors = useConnectors();
@@ -39,26 +46,27 @@ export function ConnectWallet() {
   const options = open ? pickConnectors(connectors) : [];
   const pendingUid =
     isPending && variables && "uid" in variables.connector ? variables.connector.uid : null;
+  const block = variant === "pill-block";
 
   return (
-    <div>
+    <div className={block ? styles.block : styles.inline}>
       <button
         type="button"
-        className="btn btn-primary btn-block"
+        className={`pill ${block ? "pill-block" : ""} ${styles.button}`}
         aria-expanded={open}
         aria-controls={listId}
         onClick={() => setOpen((v) => !v)}
       >
-        Connect wallet
+        {label}
       </button>
-      <div id={listId} hidden={!open}>
+      <div id={listId} hidden={!open} className={styles.panel}>
         {open && (
           <ul className={styles.options} aria-label="Choose a wallet">
             {options.map((c) => (
               <li key={c.uid}>
                 <button
                   type="button"
-                  className={`btn btn-ghost btn-block ${styles.option}`}
+                  className="pill pill-ghost pill-block"
                   disabled={isPending}
                   onClick={() => connect({ connector: c })}
                 >
@@ -69,9 +77,7 @@ export function ConnectWallet() {
           </ul>
         )}
         {open && !options.some((c) => c.type === "injected") && (
-          <p className={`small ${styles.hint}`}>
-            No browser wallet found. Base Account works in any browser.
-          </p>
+          <p className={styles.hint}>No browser wallet found. Base Account works in any browser.</p>
         )}
       </div>
       {error && (

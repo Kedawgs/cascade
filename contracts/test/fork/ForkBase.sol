@@ -86,9 +86,15 @@ abstract contract ForkBase is Test {
         _;
     }
 
-    /// Forks the chain at `envKey`'s RPC (or `defaultRpc`) at its latest block, only when `FORK` is set.
+    /// Forks the chain at `envKey`'s RPC (or `defaultRpc`), only when `FORK` is set: at block `FORK_BLOCK` when
+    /// that is set, so Foundry's RPC cache can serve repeat runs, else at the latest block. `FORK_BLOCK` applies
+    /// to every fork in the run, so pin one chain at a time (`--match-path`).
     function forkFrom(string memory envKey, string memory defaultRpc) internal {
-        if (vm.envOr("FORK", false)) vm.createSelectFork(vm.envOr(envKey, defaultRpc));
+        if (!vm.envOr("FORK", false)) return;
+        string memory url = vm.envOr(envKey, defaultRpc);
+        uint256 pinned = vm.envOr("FORK_BLOCK", uint256(0));
+        if (pinned == 0) vm.createSelectFork(url);
+        else vm.createSelectFork(url, pinned);
     }
 
     /// The `OffRamp 2.0.0` that `router` accepts for messages from `sourceSelector`, found by version

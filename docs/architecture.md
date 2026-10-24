@@ -66,9 +66,18 @@ Bittensor-native users (and EOAs with TAO for gas on chain 964) can also deposit
 on the vault, which is the exit if a front door disappears. Smart-wallet users on Base rely on the
 front door; a user-registered recovery address is planned for v2.1.
 
-The bridge is wrapped in replaceable, immutable adapters. CCIP delivers ForeverMoney's ERC-20 claim
-token, not native TAO, and only ForeverMoney's contracts convert it, so the adapter is where that
-dependency, and every other outside change, lands.
+The bridge is wrapped in two replaceable, immutable adapters, one beside each contract:
+`CcipBaseAdapter` next to the front door on Base and `CcipBittensorAdapter` next to the vault. The
+vault and the front door only call `send` and receive `onBridgeMessage`; everything that touches
+the rail happens in the adapters. CCIP carries ForeverMoney's ERC-20 TAO, not native TAO, so the
+Bittensor adapter converts in the same transaction as each crossing: `withdrawLiquid` on
+ForeverMoney's `AlphaVault` turns arriving tokens into native TAO before the vault sees them, and
+`depositLiquid` turns a payout's native TAO into tokens before it leaves. Tokens and the batch or
+payout list travel in one CCIP message, so a delivery that fails leaves both on the rail, where
+anyone can re-execute it later. The adapters have no owner; replacing one is a new deployment
+through the 7-day bridge registry. That is where a change on the rail (ForeverMoney's token,
+Chainlink's lane) lands, not in the vault or the front door. Details: the "Bridge adapters" section
+of `contracts/README.md`.
 
 ### Why the vault is denominated in TAO, not USDC
 
@@ -122,5 +131,6 @@ do.
 
 ## Before mainnet
 
-See the pre-mainnet checklist in `contracts/README.md`. First: ForeverMoney's conversion interface
-(the adapter spec waits on it) and a fork measurement of delivery gas. An audit is still required.
+See the pre-mainnet checklist in `contracts/README.md`. The adapters are built and fork-tested;
+next is the deployment runbook. Just before deploying, re-run the live simulation of the inbound
+conversion with the real constructor arguments. An audit is still required.

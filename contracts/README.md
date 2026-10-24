@@ -8,9 +8,11 @@ shares whose price rises as staking rewards come in.
 - Authoritative design: [`docs/superpowers/specs/2026-10-21-cascade-v2-vault-on-bittensor-design.md`](../docs/superpowers/specs/2026-10-21-cascade-v2-vault-on-bittensor-design.md)
   (revision 5, with the as-built rulings of revision 6 at the top).
 - Rail facts (CCIP, ForeverMoney, limits): [`reports/Cascade v2 Bittensor vault rails.md`](../reports/Cascade%20v2%20Bittensor%20vault%20rails.md).
+- Bridge adapters: [`docs/superpowers/specs/2026-10-24-cascade-ccip-adapters-design.md`](../docs/superpowers/specs/2026-10-24-cascade-ccip-adapters-design.md)
+  and [`docs/forevermoney-probe.md`](../docs/forevermoney-probe.md).
 
-Not in this build: the production bridge adapters, the keeper bot, deployment scripts, and the
-app's USDC swaps. See the [pre-mainnet checklist](#pre-mainnet-checklist).
+Not in this build: the keeper bot, deployment scripts, and the app's USDC swaps. See the
+[pre-mainnet checklist](#pre-mainnet-checklist).
 
 ## Contracts
 
@@ -19,6 +21,8 @@ app's USDC swaps. See the [pre-mainnet checklist](#pre-mainnet-checklist).
 | `CascadeVault` | Bittensor EVM (chain 964) | Holds the root stake and the csTAO balances. Prices every batch from the stake it reads directly. Queues payouts and sends them in chunks. Lets Bittensor-native users deposit and redeem directly. |
 | `CascadeFrontDoor` | Base | Collects deposits of ForeverMoney's bridged TAO and redeem requests into batches, forwards each batch to the vault with each user's address, receives payouts and lets users claim them. It never prices anything. |
 | `CascadeBase` | both | Shared admin: two-step owner, guardian, pause, and the bridge registry (a new bridge waits 7 days). The guardian is replaced only 8 days after the owner proposes it. `renounceOwnership` is disabled. |
+| `CcipBaseAdapter` | Base | The front door's bridge: sends ForeverMoney's TAO plus a `BATCH` over Chainlink CCIP, and delivers incoming tokens plus `PAYOUTS` to the front door. See [Bridge adapters](#bridge-adapters-ccip-20). |
+| `CcipBittensorAdapter` | Bittensor EVM | The vault's bridge: converts between native TAO and ForeverMoney's TAO through their `AlphaVault` in the same transaction as each send and delivery. |
 
 csTAO ("Cascade Staked TAO") has 24 decimals and cannot be transferred: `transfer`, `transferFrom`
 and `approve` revert. At launch 1 csTAO is worth 1 TAO.
@@ -34,6 +38,11 @@ Libraries and interfaces:
   `onBridgeMessage` in).
 - `IStaking` (the staking precompile at `0x…0805`) and `IAddressMapping` (`0x…080c`, used once in
   the vault's constructor to derive its own coldkey).
+- `IAlphaVault`: ForeverMoney's `depositLiquid` and `withdrawLiquid`, which the Bittensor adapter
+  calls, plus four views the tests read.
+- `src/vendor/ccip`: three files from Chainlink's `@chainlink/contracts-ccip@2.0.0` (the message
+  structs, the Router interface and the receiver interface), copied byte-for-byte; `VENDOR.md`
+  records the package, its integrity hash and the one changed import path.
 
 There are no proxies, no `delegatecall` and no arbitrary external calls. Value leaves the vault in
 only two ways: a payout chunk sent through the primary bridge, and a direct redeem paid to the share
@@ -46,11 +55,11 @@ and the vault, and a Base adapter between CCIP and the front door. They are the 
 replaced, because every outside change (ForeverMoney's token, Chainlink's lane, a Bittensor runtime
 upgrade) lands there. An adapter must:
 
-- **Be immutable.** No admin and no upgrade path. Its router, peer addresses and gateway are
-  constructor constants. Any change is a new adapter that goes through the 7-day registry.
-  Otherwise the adapter's own admin would bypass the delay, and because any enabled adapter may
-  present any registered front door, the weakest adapter would set the security level for every
-  front door.
+- **Be immutable.** No admin and no upgrade path. Its router, remote adapter and ForeverMoney
+  contract are constructor constants. Any change is a new adapter that goes through the 7-day
+  registry. Otherwise the adapter's own admin would bypass the delay, and because any enabled
+  adapter may present any registered front door, the weakest adapter would set the security level
+  for every front door.
 - **Report the true source.** The receivers trust the `(sourceChain, sender)` pair the adapter
   passes in. The adapter verifies it against CCIP before calling `onBridgeMessage`.
 - **Keep the fee-budget rule.** Accept any `send` whose budget covers the real fee, keep the excess,
@@ -74,10 +83,108 @@ upgrade) lands there. An adapter must:
   contracts' defaults are set to stay under these: 4,000 TAO per batch and per payout chunk, 50 + 50
   entries per batch, and at most 100 entries in any list.
 
-Blocking dependency: the inbound conversion needs a function on ForeverMoney's Bittensor contracts
-that a third-party contract may call. Their source is not verified on the explorer, and their docs
-describe only app and SDK use. These contracts are built and tested against `MockBridge`; the
-adapter spec waits for ForeverMoney's answer.
+The adapters in this build take the preferred path in both directions: ForeverMoney's `AlphaVault`
+converts in the same transaction (`withdrawLiquid` inbound, `depositLiquid` outbound; permissionless
+and exactly 1:1, per `docs/forevermoney-probe.md`), and each CCIP message carries the tokens and the
+data together. The fallbacks above are not built. How they meet each rule:
+[Bridge adapters (CCIP 2.0)](#bridge-adapters-ccip-20).
+
+### Bridge adapters (CCIP 2.0)
+
+Two immutable adapters sit between Chainlink CCIP and the vault and front door, which see only
+`ICascadeBridge` / `ICascadeReceiver` and run unchanged from the `MockBridge` build. Both lanes run
+the CCIP 2.0.0 execution model (`OnRamp 2.0.0`, `OffRamp 2.0.0`, `Router 1.2.0`).
+
+| Adapter | Sends | Delivers |
+|---|---|---|
+| `CcipBaseAdapter` (Base) | pulls exactly `amount` of ForeverMoney's TAO from the caller (the front door), approves the Router, sends tokens plus `BATCH`, resets the approval | transfers the tokens to the recipient, then calls its `onBridgeMessage` with no value |
+| `CcipBittensorAdapter` (Bittensor EVM) | turns `amount` of the caller's (the vault's) native TAO into ForeverMoney's TAO with `AlphaVault.depositLiquid` (the token balance must grow by exactly `amount`), then sends tokens plus `PAYOUTS` | turns the tokens back with `AlphaVault.withdrawLiquid(token, amount, amount)` (the native balance must grow by at least `amount`, else `ConversionShort`), then calls `onBridgeMessage{value: amount}` |
+
+Both inherit `CcipAdapterBase`: the Router and sender checks, ERC-165, the payload, gas sizing and
+the fee rule.
+
+- **Immutables only.** `router`, `token` (ForeverMoney's TAO on that chain), `localChainId`,
+  `remoteChainId`, `remoteSelector`, `remoteAdapter` (the only CCIP sender a delivery accepts), and
+  the gas model `gasBase` and `gasPerEntry`; plus `minSendAmount` on Base and `alphaVault` on
+  Bittensor. No owner, pause, upgrade or rescue function, and no stored balance anyone can
+  withdraw. A change is a new adapter through the 7-day bridge registry. The constructor rejects
+  zero addresses, equal chain ids, and a gas model whose largest message does not fit the cap.
+- **A pipe, not a peer.** The CCIP data is `abi.encode(recipient, sender, message)`: who called
+  `send` and who should receive. A delivery checks that the message came from the Router, from
+  `remoteSelector` and from `remoteAdapter` (exactly 32 bytes), and carries at most one token, ours.
+  Whether that sender and recipient are registered peers is the vault's and the front door's
+  decision, as with `MockBridge`. This is what lets one adapter pair serve an old and a new front
+  door during a migration (the vault pays every front door through its one primary bridge).
+  Anyone may call `send`; a caller that names a recipient that rejects the delivery strands only
+  its own tokens.
+- **Tokens and data in one transaction.** The OffRamp releases or mints the tokens and calls
+  `ccipReceive` in one call, so any revert (a ForeverMoney pause, a paused vault, out of gas, a
+  raised staking floor) undoes the token transfer too and marks the message `FAILURE`. CCIP calls a
+  receiver only if it answers ERC-165 for `IAny2EVMMessageReceiver`, otherwise it delivers the
+  tokens alone; the adapters answer it, and answer false for the V2 interface so the lane's default
+  verifiers and "wait for finality" apply.
+- **Manual re-execution.** On CCIP 2.0, `OffRamp.execute(encodedMessage, ccvs, verifierResults,
+  gasLimitOverride)` is permissionless: anyone can execute a message in `FAILURE` again at any time,
+  with no expiry, and `gasLimitOverride` can raise (never lower) the receiver gas. This is the retry
+  path for every failure above; the tooling belongs to the keeper spec. The adapters store no
+  message ids: CCIP executes a message successfully at most once, and the vault and front door
+  reject a repeated delivery as a duplicate.
+- **Fee rule.** Fees are paid in the native coin (ETH on Base, TAO on Bittensor) and do not depend
+  on the amount. `quoteFee` prices exactly the message `send` builds (same payload length, same gas
+  limit, a token entry only when `amount > 0`), so the quote is the fee paid. `send` needs
+  `msg.value >= fee` on Base and `msg.value >= amount + fee` on Bittensor (`InsufficientFee`), pays
+  the Router exactly the fee, keeps any excess and never sends value back.
+- **Gas sizing.** The delivery gas limit is `min(gasBase + entries × gasPerEntry, 7,000,000)`
+  (`GAS_CAP`), with `entries` read from the message's length (both message kinds have a fixed size
+  per entry); a message of neither shape gets the cap. The deployment values, calibrated in
+  `test/adapters/AdapterGas.t.sol` with at least 15% headroom, are `gasBase` 540,000 and
+  `gasPerEntry` 26,450 toward Bittensor (Base adapter) and 120,000 and 29,900 toward Base
+  (Bittensor adapter); the constructor's 200-entry check gives 5,830,000 and 6,100,000, under the
+  cap. They are constructor arguments, so a tune is a redeploy, not a code change. A delivery that
+  still runs short fails and is re-executed with `gasLimitOverride`; nothing is lost.
+- **Send limits.** At most 5,000 TAO per message (`MAX_MESSAGE_VALUE`, the pools' bucket capacity;
+  `MessageTooLarge`). The adapters do not read the pools' rate-limit bucket: a short bucket makes
+  `ccipSend` revert, so `closeBatch` or `processPayouts` reverts and the batch waits.
+- **The reserve.** The Bittensor adapter's `receive()` accepts TAO only from the `AlphaVault` (the
+  `withdrawLiquid` proceeds), so TAO sent to it by mistake bounces. `fundReserve()` adds TAO the
+  adapter never spends. Bittensor EVM reports a balance net of the chain's 500-rao existential
+  deposit, so an adapter that holds nothing sees every incoming conversion 500 rao short and every
+  delivery reverts `ConversionShort` (re-executable once funded; the live simulation shows both
+  cases). The deployer funds 1e12 wei through `fundReserve()` before the first delivery. Sends and
+  deliveries move only exact amounts, so the reserve and any kept fee excess are all an adapter
+  holds at rest.
+
+**The staking floor.** Bittensor refuses to add stake, or pay out a partial unstake, below
+`DefaultMinStake` (2,000,000 rao = 0.002 TAO today; the root key can change it), and both
+conversions stake or unstake on ForeverMoney's validator. The adapters make the failure early and
+explicit:
+
+- Bittensor adapter: `send` and `quoteFee` revert `BelowConversionFloor(amount, floor)` when
+  `0 < amount < floor`, with the floor read live from the staking precompile
+  (`getDefaultMinStake()`); a delivery makes the same check before `withdrawLiquid`.
+- Base adapter: it cannot read Bittensor, so `send` and `quoteFee` revert
+  `BelowSendMinimum(amount, minSendAmount)` below an immutable minimum, 0.01 TAO at deployment
+  (five times today's floor). The front door keeps every entry at or above `minDeposit` (a partial
+  `cancelDeposit` may not leave less), so with `minDeposit >= minSendAmount` an honest batch never
+  trips it.
+
+What remains, and who owns it:
+
+| Stall | What happens | Owner |
+|---|---|---|
+| A payout chunk whose net is below the live floor | `processPayouts` reverts `BelowConversionFloor` every time | The keeper groups it with neighbouring entries (`maxEntries`); if every remaining entry is tiny, the owner cancels the batch (`cancelPayoutBatch` re-mints the shares; nobody loses funds). The web app must refuse unstake requests worth less than 0.01 TAO (web-wiring spec). |
+| A deposit batch in flight when the root key raises the floor above its total | the delivery fails and waits in CCIP until the floor comes back down, then is re-executed | The keeper reads `getDefaultMinStake()` before `closeBatch` (keeper spec). At a 0.01 TAO minimum this needs a five-fold raise. |
+| `minDeposit` set below `minSendAmount` with `setCaps` | a batch whose total is below `minSendAmount` reverts `BelowSendMinimum` at `closeBatch` and stays open until more deposits arrive | The operator keeps `minDeposit >= minSendAmount` ([Operator notes](#operator-notes)). |
+
+**Tests.** Unit and end-to-end tests (`test/adapters`) run the adapters over `MockRouter` and
+`MockAlphaVault`, including a vault-to-front-door round trip with the two adapters in place of
+`MockBridge`. The fork tests (`test/fork`, run on demand) drive deliveries through the deployed
+`OffRamp 2.0.0` on forks of both mainnets with only its verifiers stubbed, so the real Router, the
+real token pools (BurnMint on Base, LockRelease on Bittensor) and the real ERC-165 gate run; on
+Bittensor, ForeverMoney's real `AlphaVault` code runs over `MockStaking`, because the forked EVM
+has no staking precompile. They also assert the lane limits and the `OffRamp 2.0.0` addresses.
+`script/simulate_inbound.sh` runs one delivery against the live Bittensor node, the only run
+through the real staking precompile (see [Build and test](#build-and-test)).
 
 ## Build and test
 
@@ -87,10 +194,14 @@ forge test                                    # unit, end-to-end and invariant t
 forge test --match-path "test/invariants/*"   # invariant suite only
 forge build --sizes                           # the vault must stay under 24,576 bytes
 forge fmt --check
+forge lint
 ```
 
-- **Suite:** 276 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
-  `foundry.toml`). The invariants also held at 3,000 × 64.
+- **Suite:** 349 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
+  `foundry.toml`), plus 12 fork tests that report as skipped unless `FORK` is set (below). The
+  invariants also held at 3,000 × 64.
+- **Stale artifacts:** running `forge lint` right after an edit can leave test artifacts without
+  bytecode, and `forge test` then reports "No tests found". `forge clean && forge build` fixes it.
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
   payout-batch cancel may leave it below that batch's delivery price by at most one rao of rounding
   dust per re-minted entry; gross assets are conserved; reserved payouts match the queue; no front
@@ -109,7 +220,10 @@ forge fmt --check
   as balance (`claimToBalance`). It credits with `vm.deal`, which a reverted call does not undo, so
   a test that expects a revert after a removal resets the vault's balance. `MockBridge` is
   chain-aware, enforces the fee rule and a 5,000-TAO message cap, delivers with a 7,000,000 gas cap,
-  and keeps failed deliveries queued for retry. Also `MockAddressMapping`, `StubBridge` and
+  and keeps failed deliveries queued for retry. For the adapters, `MockRouter` records each
+  `ccipSend`, quotes a settable fee and delivers the way the 2.0 OffRamp does (code-size and
+  ERC-165 gate, tokens, then `ccipReceive` as the Router), and `MockAlphaVault` converts 1:1 both
+  ways with a settable pause, floor and short payment. Also `MockAddressMapping`, `StubBridge` and
   `MockTAO`.
 - **Gas:** a 100 + 100 batch delivery costs 4,540,281 gas (test bound 6,500,000); 50 + 50 costs
   2,389,100 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
@@ -119,6 +233,58 @@ forge fmt --check
   799 B of headroom, so any post-audit change must watch `forge build --sizes`).
   `CascadeFrontDoor` is 13,663 B.
 
+### Fork tests and the live simulation
+
+The fork tests (`test/fork`, 6 on Base and 6 on Bittensor) fork both mainnets and are skipped
+unless `FORK` is set. `FORK=1 forge test` runs the whole suite including all 12.
+
+```shell
+FORK=1 forge test --match-path "test/fork/*.t.sol"           # all 12 fork tests
+FORK=1 forge test --match-path test/fork/BaseFork.t.sol      # Base only
+FORK=1 forge test --match-path test/fork/BittensorFork.t.sol # Bittensor only (rate limit below)
+bash script/simulate_inbound.sh                              # live eth_call, Bittensor node
+```
+
+| Variable | Default | Effect |
+|---|---|---|
+| `FORK` | unset | Runs the fork tests; without it they report as skipped. |
+| `BASE_RPC` | `https://mainnet.base.org` | Base RPC. |
+| `BITTENSOR_RPC` | `https://lite.chain.opentensor.ai` | Bittensor EVM RPC. The lite node keeps only about 300 blocks of state. |
+| `FORK_BLOCK` | latest block | Forks at this block, so Foundry's on-disk RPC cache serves repeat runs. It applies to every fork in the run, so pin one chain at a time with `--match-path`. |
+
+- **Base** runs fine on the public RPC (green at block 53034779, and pinned there again with
+  `FORK_BLOCK=53034779`).
+- **Bittensor rate limit.** Both public Bittensor RPCs (`lite.chain.opentensor.ai` and
+  `archive.chain.opentensor.ai`) allow about 128 requests a minute, and a cold run of the
+  Bittensor fork tests needs more, so it fails with HTTP 429. Run a local anvil as a cache of the
+  archive node at a fixed block and point the tests at it (green at block 9354721):
+
+  ```shell
+  anvil --fork-url https://archive.chain.opentensor.ai --fork-block-number <N> --port 8547 \
+    --retries 12 --fork-retry-backoff 20000 --timeout 60000
+  BITTENSOR_RPC=http://127.0.0.1:8547 FORK=1 forge test --match-path test/fork/BittensorFork.t.sol -vv
+  ```
+
+- **What the forks cannot run.** The forked Bittensor EVM has no staking precompile, so the fork
+  tests etch `MockStaking` at its address and ForeverMoney's real `AlphaVault` code runs over a
+  mock unstake.
+
+`script/simulate_inbound.sh` covers that gap. It deploys the Bittensor adapter (real constructor
+arguments) and `test/fork/Sink.sol` on a throwaway local anvil to get their runtime code, then
+runs one `ccipReceive` as a plain `eth_call` on the live Bittensor node with state overrides: the
+two runtime codes at unused addresses, 1 TAO of ForeverMoney's token in the adapter's balance slot
+(found by matching the pool's balance), and a small stand-in at the Router's address that funds the
+adapter's 1e12-wei reserve through `fundReserve()` and then forwards the `ccipReceive`, so the
+adapter still sees the Router as caller. ForeverMoney's real `withdrawLiquid` burns the tokens,
+unstakes through the real precompile and pays the adapter, which forwards the TAO to the sink; the
+sink reverts unless it receives exactly the amount. Success prints `SIMULATION OK`; a revert is
+named (the adapter's, the sink's or ForeverMoney's error). Nothing is broadcast. It makes about 12
+requests to the node. Options: `BITTENSOR_RPC`, `REMOTE_ADAPTER` (the Base adapter's address),
+`AMOUNT` (wei), `GAS_BASE` and `GAS_PER_ENTRY` (the Bittensor adapter's gas model), `RESERVE`
+(0 shows the unfunded adapter's `ConversionShort`) and `FUNDER`. Run on 2026-10-24 against the lite
+node: 1 TAO and exactly 0.002 TAO (the floor) delivered; `RESERVE=0` reverted `ConversionShort`;
+20,000 TAO, more than ForeverMoney's position, reverted their `Insolvent()`.
+
 ## Money flow
 
 ### Deposit leg (Base to Bittensor)
@@ -127,7 +293,9 @@ forge fmt --check
    one-signature "zap" contract calls `depositFor`, which can only credit the named user. Amounts
    must be whole rao (1 rao = 1e-9 TAO), at least `minDeposit`, inside the front door's
    `depositCap`, and inside the batch's 4,000-TAO value limit. Each user has one merged entry per
-   batch. `cancelDeposit` returns tokens while the batch is still open. A partial cancel must leave at least `minDeposit`; a full cancel is always allowed, so a batch never holds an entry below the minimum.
+   batch. `cancelDeposit` returns tokens while the batch is still open. A partial cancel must leave
+   at least `minDeposit`; a full cancel is always allowed, so every entry is at least the
+   `minDeposit` in force when it last changed.
 2. To exit, a user calls `requestRedeem(shares)`. The front door cannot see balances on Bittensor,
    so the vault clips each request later. The first request per user per batch costs
    `redeemRequestFee` in ETH (the spec's default, 1e14 wei, is about $0.30). It is paid cash first:
@@ -238,13 +406,14 @@ The keeper bot is a separate deliverable. Hosted keeper services are gone (Chain
 Gelato Web3 Functions and OpenZeppelin Defender all shut down in 2026), so it is a self-hosted bot
 on both chains with its keys in OpenZeppelin Relayer or a cloud KMS. It needs an archive or paid
 RPC: the public lite RPC drops state after about 300 blocks, and payout lists are rebuilt from
-events. Its jobs: close batches after checking the pools' rate-limit allowance and sizing delivery
-gas to the entry count; re-execute failed deliveries; run `processPayouts` after the delay; run
-`stakeIdle` on a schedule; run `claimRewards` weekly after an `eth_call` pre-check (expected delta,
-no `RootClaimTooHeavy`); watch the validators for hotkey swaps and drops in the vault's stake
-(re-add the hotkey with `addHotkey` and alert the guardian); watch `getPrecompileStatus` for the
-staking precompile; and run the contracts' precompile calls against each Bittensor pre-release on
-testnet 945.
+events. Its jobs: close batches after checking the pools' rate-limit allowance and the live
+staking floor (`getDefaultMinStake()`; the adapters size delivery gas to the entry count
+themselves); re-execute failed deliveries (`OffRamp.execute`, with `gasLimitOverride` when a
+delivery ran out of gas); run `processPayouts` after the delay; run `stakeIdle` on a schedule;
+run `claimRewards` weekly after an `eth_call` pre-check (expected delta, no `RootClaimTooHeavy`);
+watch the validators for hotkey swaps and drops in the vault's stake (re-add the hotkey with
+`addHotkey` and alert the guardian); watch `getPrecompileStatus` for the staking precompile; and
+run the contracts' precompile calls against each Bittensor pre-release on testnet 945.
 
 ## Exit safety
 
@@ -378,9 +547,12 @@ Outside parties. No delay applies to any of them.
 
 | Party | What it can do | What bounds it |
 |---|---|---|
-| ForeverMoney's 2-of-3 Safe | Pause the token pools, change rate limits, or remove ForeverMoney's TAO from CCIP. | Exposure is TAO in an open batch, in flight, or credited and unclaimed on Base. Staked TAO is native on Bittensor and unaffected. |
-| Chainlink CCIP (lane configuration, rate limits and message verification) | Stall batches in either direction. A compromised CCIP network could also deliver forged `BATCH` or `PAYOUTS` messages that an honest adapter accepts. The Risk Management Network check, an extra independent verification, is disabled on these lanes, and the lanes are mid-migration to CCIP 2.0. | Forged messages get the same bounds as a rogue adapter (see the contracts table below), and funds in flight are exposed. A failed delivery is retried by manual re-execution, which anyone can run. A message the rail loses loses only that batch's funds: there is no in-contract recovery and no in-flight lock, so other batches are unaffected. One caveat: in the separate-data-message fallback the token check is pooled across chunks, so a chunk whose tokens are lost makes the *last* chunk's data fail, not its own. |
-| Bittensor's sudo key | Ship runtime upgrades (about weekly) that change precompile behaviour, or disable a precompile. | Value-moving precompile calls are measured, so an under-delivering unstake reverts (`UnstakeShort`) instead of paying from reserves or other users' payouts. That is a freeze, not a protection, if the chain ever charges a fee or under-delivers on root unstake: every exit that needs an unstake reverts until the owner raises `unstakeMarginRao` (added to every unstake request; any excess stays idle for `stakeIdle`; the fee then falls on all holders, not the leaver). The price itself trusts the stake read, so a changed read would misprice; the keeper is to run each pre-release on testnet 945 first, and the [checklist](#pre-mainnet-checklist) lists the behaviours to confirm. |
+| ForeverMoney's guardian and admin | Pause their `AlphaVault` (guardian) or start a migration (admin), with no notice. | A pause stalls both legs: deliveries to the vault fail (`withdrawLiquid` reverts) and are re-executed once it lifts, and `processPayouts` reverts (`depositLiquid`) and is retried. A migration stalls payouts the same way. Nothing is lost, and no ForeverMoney key can take TAO that sits in the vault. |
+| ForeverMoney's validator | Holds the stake behind bridged TAO while a batch or payout is in flight (minutes). | Nothing users see: conversion is 1:1 both ways, and the vault's own stake sits with its own validators. |
+| ForeverMoney's 2-of-3 Safe | Pause the token pools, change rate limits, or remove ForeverMoney's TAO from CCIP. | Sends revert and batches wait. Exposure is TAO in an open batch, in flight, or credited and unclaimed on Base. Staked TAO is native on Bittensor and unaffected. |
+| Chainlink CCIP (lane configuration, the default verifier committee, the Risk Management Network) | Pause a lane, change its gas or data limits, or withhold verification, which stalls batches in either direction. A compromised CCIP network could also deliver forged `BATCH` or `PAYOUTS` messages that an honest adapter accepts. The Risk Management Network check, an extra independent verification, is disabled on these lanes. Executions on both lanes go through `OffRamp 2.0.0` (read 2026-10-24). | Sends revert or deliveries wait. A lane gas limit lowered below an adapter's gas model needs a new adapter through the 7-day registry. Forged messages get the same bounds as a rogue adapter (see the contracts table below), and funds in flight are exposed. A failed delivery is retried by manual re-execution, which anyone can run, with no expiry. A message the rail loses loses only that batch's funds: there is no in-contract recovery and no in-flight lock, so other batches are unaffected. |
+| Chainlink's default executor | Executes verified messages on the destination chain, or stops doing so. | Anyone, including the keeper, can execute a verified message with `OffRamp.execute`; there is no expiry. |
+| Bittensor's sudo (root) key | Ship runtime upgrades (about weekly) that change precompile behaviour, or disable a precompile. Raise the staking floor (`DefaultMinStake`). | A raised floor holds a deposit batch below it in CCIP until the floor drops, and a payout chunk below it reverts until regrouped or cancelled (see [the staking floor](#bridge-adapters-ccip-20)); the adapters add one precompile read, `getDefaultMinStake()`. Value-moving precompile calls are measured, so an under-delivering unstake reverts (`UnstakeShort`) instead of paying from reserves or other users' payouts. That is a freeze, not a protection, if the chain ever charges a fee or under-delivers on root unstake: every exit that needs an unstake reverts until the owner raises `unstakeMarginRao` (added to every unstake request; any excess stays idle for `stakeIdle`; the fee then falls on all holders, not the leaver). The price itself trusts the stake read, so a changed read would misprice; the keeper is to run each pre-release on testnet 945 first, and the [checklist](#pre-mainnet-checklist) lists the behaviours to confirm. |
 | Validators (the hotkey owners) | The owner picks them, and they keep their validator take from the rewards. A validator's hotkey swap moves the vault's root stake to a new hotkey outside the set the vault reads, so the price drops until that hotkey is added back. | The keeper watches for hotkey swaps and stake drops, the guardian pauses, and the owner, guardian or keeper re-adds the hotkey (`addHotkey`; no timelock for the guardian or keeper). Front-door batches delivered in that window are mispriced (deposits get too many shares, redeems too little), and so are direct deposits and redeems: a colluding validator could swap and then `depositDirect` at the lowered price, bounded by the `maxTotalAssets` headroom the drop opens (the insolvency guard trips only below 50%). Keep one hotkey slot free (the set holds at most 4) so a swapped hotkey can be re-added without the timelock. |
 
 Keys:
@@ -403,7 +575,10 @@ App side (outside this build): the swap router and onramp APIs, npm dependencies
 RPC provider.
 
 Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned by tag in
-`foundry.lock`; solc 0.8.24 with EVM target cancun (what Bittensor EVM's docs recommend).
+`foundry.lock`; solc 0.8.24 with EVM target cancun (what Bittensor EVM's docs recommend). Chainlink
+code is vendored, not a dependency: three files of `@chainlink/contracts-ccip@2.0.0` in
+`src/vendor/ccip` and its message codec in `test/vendor/ccip` (tests only), each with a `VENDOR.md`
+giving the package's integrity hash.
 
 ## Who can use direct access
 
@@ -434,11 +609,14 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
 
 ## Operator notes
 
-1. **Fund the reserve first.** Before first use, send the vault's address at least `ED_RESERVE`
+1. **Fund the reserves first.** Before first use, send the vault's address at least `ED_RESERVE`
    (1e12 wei = 1,000 rao) as a substrate-side transfer to its mirror (SS58) address; `receive()`
    rejects plain EVM sends. The reserve is never spent or counted, so the chain's 500-rao
    existential deposit can never make a payout fail. Funding it up front means the first users'
-   deposits do not have to fill it.
+   deposits do not have to fill it. Also call the Bittensor adapter's `fundReserve()` with 1e12 wei
+   before its first delivery. Bittensor EVM reports balances net of the existential deposit, so an
+   adapter that holds nothing sees each conversion 500 rao short and every delivery reverts
+   `ConversionShort` until the reserve is there (nothing is lost; re-execute them afterwards).
 2. **Size the redeem-request fee to the bridge fee.** Keep `redeemRequestFee × maxRedeems` at or
    above the live Base-to-Bittensor bridge fee (beta values: 1e14 wei × 50 = 0.005 ETH). Otherwise a
    junk-filled batch cannot self-close: the `requestRedeem` that would close it reverts
@@ -452,8 +630,8 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
    and for the stake reads of every hotkey in the set before and after the claim, and pre-check each
    claim with `eth_call`.
 5. **Batch limits.** Keep 50 deposits + 50 redeems per batch until a fork measurement confirms that
-   100 + 100 fits the lane's delivery gas (with as many hotkeys in the set as you use). Size each
-   batch's delivery gas to its entry count (unused gas is not refunded), and check the pools'
+   100 + 100 fits the lane's delivery gas (with as many hotkeys in the set as you use). The adapters
+   size each delivery's gas to its entry count (unused gas is not refunded); check the pools'
    rate-limit allowance before closing. Keep `maxMessageValue` at or below the lane's 5,000 TAO.
 6. **ETH receivers.** `closeBatch` pays the rest of the budget to the caller with a plain call, and
    so does a `requestRedeem` that self-closes a full batch. A keeper, router or wallet contract that
@@ -499,6 +677,24 @@ Build dependencies: OpenZeppelin Contracts v5.4.0 and forge-std v1.17.0, pinned 
     then remove it.
 15. **Outside parties.** ForeverMoney's 2-of-3 Safe, Chainlink's lane configuration and Bittensor's
     sudo key can each stop or change the rails with no delay. See [Trust and supply chain](#trust-and-supply-chain).
+16. **Deposit minimums.** A partial `cancelDeposit` must leave at least `minDeposit` (a full cancel
+    always works), so no entry sits below the minimum in force when it last changed. Keep the front
+    door's `minDeposit` at or above the Base adapter's `minSendAmount` (0.01 TAO). `setCaps` can set
+    it lower, and a batch whose total then falls below `minSendAmount` reverts `BelowSendMinimum`
+    at `closeBatch` and stays open until more deposits arrive.
+17. **Staking-floor stalls.** A payout chunk whose net is below the live floor (0.002 TAO today)
+    makes `processPayouts` revert `BelowConversionFloor` until the keeper groups it with
+    neighbouring entries (`maxEntries`). If every remaining entry is tiny, the owner cancels the
+    batch (`cancelPayoutBatch` re-mints the shares; nobody loses funds), unless it holds bounced
+    deposits (note 7). The web app must refuse unstake requests worth less than 0.01 TAO. Before
+    `closeBatch`, the keeper reads `getDefaultMinStake()`: a deposit batch that arrives while the
+    floor sits above its total waits in CCIP until the floor drops (at a 0.01 TAO minimum deposit
+    that takes a five-fold raise).
+18. **Re-executing a failed delivery.** A delivery that reverts (ForeverMoney paused, the vault
+    paused, out of gas, the floor raised, the adapter's reserve unfunded) stays `FAILURE` on the
+    destination's `OffRamp 2.0.0`. Anyone can run `OffRamp.execute(encodedMessage, ccvs,
+    verifierResults, gasLimitOverride)` on it again at any time, with no expiry; raise
+    `gasLimitOverride` if it ran out of gas. The keeper spec owns the tooling.
 
 Defaults at deploy:
 
@@ -522,8 +718,8 @@ Defaults at deploy:
 | `ED_RESERVE` | 1e12 wei (constant) | vault |
 | `gasBase` / `gasPerEntry` toward Bittensor | 540,000 / 26,450 (constructor arguments, Base adapter; calibrated in `test/adapters/AdapterGas.t.sol`) | Base adapter |
 | `gasBase` / `gasPerEntry` toward Base | 120,000 / 29,900 (constructor arguments, Bittensor adapter) | Bittensor adapter |
-| `minSendAmount` | 0.01 TAO | Base adapter |
-| adapter reserve | 1e12 wei, funded by the deployer | Bittensor adapter |
+| `minSendAmount` | 0.01 TAO (1e16 wei; constructor argument; keep `minDeposit` at or above it) | Base adapter |
+| adapter reserve | 1e12 wei, funded by the deployer through `fundReserve()` before the first delivery | Bittensor adapter |
 | `GAS_CAP` | 7,000,000 (constant) | both adapters |
 | `MAX_MESSAGE_VALUE` | 5,000 TAO (constant) | both adapters |
 
@@ -561,8 +757,9 @@ Confirm on Bittensor testnet 945 or a fork of chain 964:
    `getUnclaimedRootTaoByHotkey` is 18-decimal; Bittensor EVM floors value transfers to rao (the
    payout-fee rounding assumes it); `removeStakeFull` on an empty position reverts rather than
    silently paying 0.
-3. Floors: the minimum-stake boundary is inclusive on both remove and add, and a full exit of a
-   position below the minimum stake succeeds (`removeHotkey` relies on it).
+3. Floors: the minimum-stake boundary is inclusive on both remove and add (for a partial unstake
+   of exactly the floor, the live simulation in item 11 showed it), and a full exit of a position
+   below the minimum stake succeeds (`removeHotkey` relies on it).
 4. Identity: `addressMapping(vault)` equals the coldkey the staking precompile credits (stake dust
    and read it back).
 5. Root unstake "too early" windows for a contract coldkey, and pauses during basket migrations (a
@@ -585,16 +782,24 @@ Confirm on Bittensor testnet 945 or a fork of chain 964:
 
 Rails and ForeverMoney:
 
-11. ForeverMoney's conversion interface: a function on their Bittensor contracts that a third-party
-   contract may call to turn their token into native TAO (this blocks the adapter spec), and whether
-   their Base gateway can forward a data payload.
-12. The adapters deliver tokens and data together on both lanes (the front door's
-   `TokensNotReceived` check assumes tokens arrive with or before their data), and a batch with no
-   deposits (`amount` 0) crosses the lane.
-13. CCIP manual re-execution never expires on these lanes.
+11. ForeverMoney's conversion: answered on 2026-10-23 (`withdrawLiquid` and `depositLiquid` on
+    their `AlphaVault`, permissionless and exactly 1:1; `docs/forevermoney-probe.md`). Just before
+    deploying, run `bash script/simulate_inbound.sh` against the live node with the deployment's
+    constructor arguments (`REMOTE_ADAPTER`, `GAS_BASE`, `GAS_PER_ENTRY`) and record its output in
+    the runbook: it is the only run of their real unstake through the real staking precompile. On
+    2026-10-24 it delivered 1 TAO, and exactly 0.002 TAO (so a partial unstake at the floor
+    succeeds).
+12. The adapters deliver tokens and data together (fork-tested through the real `OffRamp 2.0.0` on
+    both lanes; the front door's `TokensNotReceived` check assumes tokens arrive with or before
+    their data). Still open: a batch with no deposits (`amount` 0) sent through a real Router (the
+    fork tests deliver one through Bittensor's OffRamp but send none).
+13. CCIP manual re-execution never expires on these lanes (none in the 2.0.0 source; the fork tests
+    re-execute a failed message through the real OffRamp).
 14. The CCIP fee does not depend on the token amount on these lanes (the vault quotes on gross
     amounts and sends the net).
-15. CCIP 2.0 lane migration status.
+15. Executions land on `OffRamp 2.0.0` on both lanes (read 2026-10-24). Before deploying, confirm
+    the `OffRamp 2.0.0` addresses still match `test/fork/ForkBase.sol` (`BASE_OFFRAMP`,
+    `BIT_OFFRAMP`); the fork tests' `offRamp20` check fails if they changed.
 16. ForeverMoney's TAO on Base has no transfer fee and does not rebase (the front door checks only
     its 18 decimals).
 
@@ -614,7 +819,7 @@ Outside this build:
 
 21. Per-peer share-origin tracking, before a second front door on another chain is activated (see
     the soft spots under [Exit safety](#exit-safety)).
-22. Production adapters (a separate spec, once ForeverMoney answers), the keeper bot, and
-    deployment scripts.
+22. The deployment scripts and runbook, and the keeper bot (including the tooling that re-executes
+    failed deliveries). The adapters are built.
 23. An independent audit of the contracts and the adapters.
 24. Legal: jurisdictions, fees, US users.

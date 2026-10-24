@@ -2,48 +2,116 @@
   border-top: 1px solid var(--line);
 }
 
-/* Rows bleed 10px past the column so the hover tint has room, as in the mockup. */
+.list li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
 .row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1.2fr auto;
+  gap: 16px;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 48px;
-  margin: 0 -10px;
-  padding: 12px 10px;
-  border-radius: 12px;
+  padding: 16px 0;
   color: var(--ink);
-  font-size: 15px;
   text-decoration: none;
-  transition: background-color 0.15s ease;
 }
 
-.row:hover {
-  background: var(--water-tint);
+.row:hover .t {
+  text-decoration: underline;
 }
 
-.row:focus-visible {
-  background: var(--water-tint);
-  outline-offset: 0;
+.t {
+  display: block;
+  font-size: 15.5px;
+  font-weight: 700;
 }
 
-.date {
-  display: inline-block;
-  min-width: 4.2em;
-  margin-right: 4px;
+.d {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--ink-3);
 }
 
-.done,
-.moving {
-  flex: none;
-  font-size: 13.5px;
-  font-weight: 600;
+.c {
+  font-size: 15px;
 }
 
-.done {
+.c small {
+  display: block;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ok {
+  background: var(--proof-tint);
   color: var(--proof);
 }
 
-.moving {
-  color: var(--water);
+.busy {
+  background: var(--water-tint);
+  color: var(--water-deep);
+}
+
+.bars {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.bars i {
+  display: block;
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.bars .on {
+  background: var(--water);
+}
+
+.sub {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.chev {
+  color: var(--ink-3);
+  font-size: 18px;
+}
+
+.empty {
+  padding: 16px 0;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}
+
+@media (max-width: 560px) {
+  .row {
+    grid-template-columns: 1fr auto;
+    row-gap: 6px;
+  }
+
+  .c {
+    grid-column: 1;
+  }
+
+  .chev {
+    grid-row: 1 / span 3;
+    grid-column: 2;
+  }
 }

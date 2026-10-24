@@ -1,7 +1,7 @@
 "use client";
 
 import { useCascadeAccount } from "@/lib/account";
-import { Loading } from "../RequireAccount";
+import { Loading } from "../Loading";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import { Faq } from "./Faq";

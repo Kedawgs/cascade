@@ -7,7 +7,7 @@ import { usePosition, useStartWithdrawal, useWithdrawalQuote } from "@/lib/casca
 import { formatTao, formatUsd, formatUsdc, parseAmount } from "@/lib/format";
 import { unstakeButtonLabel, validateUnstakeAmount } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
-import { Loading } from "../RequireAccount";
+import { Loading } from "../Loading";
 import { AmountField } from "./AmountField";
 import styles from "./StakeForm.module.css";
 

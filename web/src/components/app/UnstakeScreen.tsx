@@ -3,7 +3,7 @@
 import { useCascadeAccount } from "@/lib/account";
 import { usePosition } from "@/lib/cascade/hooks";
 import { formatTao, formatUsd } from "@/lib/format";
-import { Loading } from "../RequireAccount";
+import { Loading } from "../Loading";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import { Faq } from "./Faq";

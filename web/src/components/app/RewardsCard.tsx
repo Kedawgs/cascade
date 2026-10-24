@@ -4,7 +4,7 @@ import { usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
 import { formatDay, formatTao, formatUsd } from "@/lib/format";
 import { formatApr } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
-import { Loading } from "../RequireAccount";
+import { Loading } from "../Loading";
 import { SampleTag } from "../SampleTag";
 import app from "./App.module.css";
 import card from "./StakeCard.module.css";

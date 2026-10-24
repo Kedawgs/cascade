@@ -1,16 +1,14 @@
 import Link from "next/link";
-import { BackTopBar } from "@/components/TopBar";
 
 export default function NotFound() {
   return (
-    <>
-      <BackTopBar title="Not found" />
+    <div className="col" style={{ padding: "64px 20px" }}>
       <p className="strong">There&apos;s nothing at this address.</p>
       <p className="small">
-        <Link href="/" className="link">
-          Go to your balance
+        <Link href="/stake" className="link">
+          Go to the stake page
         </Link>
       </p>
-    </>
+    </div>
   );
 }

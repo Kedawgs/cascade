@@ -1,0 +1,77 @@
+.section {
+  margin-top: 8px;
+}
+
+.section + .section {
+  margin-top: 30px;
+}
+
+.heading {
+  margin-bottom: 4px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.back {
+  display: inline-block;
+  margin-bottom: 12px;
+  color: var(--water-deep);
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.back:hover {
+  text-decoration: underline;
+}
+
+.panel {
+  padding: 22px 24px 24px;
+}
+
+.kicker {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.panelTitle {
+  margin: 2px 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.panelText {
+  margin-bottom: 14px;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}
+
+.rows {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 0;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}
+
+.rows dd {
+  font-weight: 700;
+  color: var(--ink);
+  text-align: right;
+}
+
+@media (max-width: 480px) {
+  .panel {
+    padding: 18px;
+  }
+}

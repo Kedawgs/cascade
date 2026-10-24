@@ -338,7 +338,7 @@ contract CcipAdapterBaseTest is Test {
     function test_ccipReceive_deliversDecodedPayload() public {
         Client.Any2EVMMessage memory m = goodMessage(7e18);
         vm.expectEmit(true, true, true, true, address(h));
-        emit CcipAdapterBase.Delivered(keccak256("incoming"), 2135107236357186872, frontDoor, recipient, 7e18);
+        emit CcipAdapterBase.Delivered(keccak256("incoming"), 964, frontDoor, recipient, 7e18);
         vm.prank(address(fakeRouter));
         h.ccipReceive(m);
 

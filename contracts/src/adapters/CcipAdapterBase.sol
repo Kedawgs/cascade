@@ -105,12 +105,16 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
         else if (kind == CascadeMessages.PAYOUTS) header = 5;
         else return GAS_CAP;
         if (words < header || (words - header) % 2 != 0) return GAS_CAP;
+        // (words - header) is even here, so the division is exact.
+        // forge-lint: disable-next-line(divide-before-multiply)
         uint256 gas = gasBase + ((words - header) / 2) * gasPerEntry;
         return gas > GAS_CAP ? GAS_CAP : gas;
     }
 
     /// @notice CCIP GenericExtraArgsV3 with only a gas limit: tag, uint32 gas, no finality, no extras.
     function extraArgs(uint256 gasLimit) public pure returns (bytes memory) {
+        // gasLimit never exceeds GAS_CAP (7_000_000), which fits in uint32.
+        // forge-lint: disable-next-line(unsafe-typecast)
         return abi.encodePacked(EXTRA_ARGS_V3_TAG, uint32(gasLimit), bytes4(0), bytes7(0));
     }
 
@@ -195,7 +199,7 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
         }
         (address recipient, address sender, bytes memory payload) = decodePayload(message.data);
         _deliver(recipient, sender, payload, amount);
-        emit Delivered(message.messageId, message.sourceChainSelector, sender, recipient, amount);
+        emit Delivered(message.messageId, remoteChainId, sender, recipient, amount);
     }
 
     // ---- hooks ----

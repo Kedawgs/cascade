@@ -3,17 +3,21 @@ pragma solidity 0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ICascadeBridge} from "../interfaces/ICascadeBridge.sol";
 import {CascadeMessages} from "../libraries/CascadeMessages.sol";
+import {Client} from "../vendor/ccip/Client.sol";
 import {IAny2EVMMessageReceiver} from "../vendor/ccip/IAny2EVMMessageReceiver.sol";
 import {IRouterClient} from "../vendor/ccip/IRouterClient.sol";
 
 /// @notice Shared base of the two Chainlink CCIP adapters (Base and Bittensor EVM). It holds the
-/// fixed configuration, the gas model and the payload encoding; the sending and receiving paths
-/// live in the concrete adapters.
+/// fixed configuration, the gas model, the payload encoding and the sending and receiving paths;
+/// the concrete adapters supply the four hooks (amount check, fee budget, token collection, delivery).
 /// @dev The gas limit for the destination call is a linear function of the number of batch or
 /// payout entries, capped at `GAS_CAP`. A message that does not parse quotes the cap.
 abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IERC165 {
+    using SafeERC20 for IERC20;
+
     struct Config {
         address router;
         address token;
@@ -126,4 +130,85 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
     function supportsInterface(bytes4 id) public pure virtual returns (bool) {
         return id == type(IAny2EVMMessageReceiver).interfaceId || id == type(IERC165).interfaceId;
     }
+
+    // ---- sending ----
+
+    /// @inheritdoc ICascadeBridge
+    function send(uint64 destChain, address recipient, bytes calldata message, uint256 amount) external payable {
+        _checkSend(destChain, recipient, amount);
+        Client.EVM2AnyMessage memory m = buildMessage(recipient, msg.sender, message, amount);
+        uint256 fee = router.getFee(remoteSelector, m);
+        if (_budget(amount) < fee) revert InsufficientFee();
+        if (amount > 0) _collect(amount);
+        bytes32 id = router.ccipSend{value: fee}(remoteSelector, m);
+        if (amount > 0) token.forceApprove(address(router), 0);
+        emit Sent(id, destChain, msg.sender, recipient, amount, fee, gasFor(message));
+    }
+
+    /// @inheritdoc ICascadeBridge
+    function quoteFee(uint64 destChain, address recipient, bytes calldata message, uint256 amount)
+        external
+        view
+        returns (uint256)
+    {
+        _checkSend(destChain, recipient, amount);
+        return router.getFee(remoteSelector, buildMessage(recipient, msg.sender, message, amount));
+    }
+
+    /// @notice The exact CCIP message `send` hands to the router.
+    function buildMessage(address recipient, address sender, bytes calldata message, uint256 amount)
+        public
+        view
+        returns (Client.EVM2AnyMessage memory m)
+    {
+        m.receiver = abi.encode(remoteAdapter);
+        m.data = encodePayload(recipient, sender, message);
+        if (amount > 0) {
+            m.tokenAmounts = new Client.EVMTokenAmount[](1);
+            m.tokenAmounts[0] = Client.EVMTokenAmount(address(token), amount);
+        }
+        m.feeToken = address(0);
+        m.extraArgs = extraArgs(gasFor(message));
+    }
+
+    function _checkSend(uint64 destChain, address recipient, uint256 amount) internal view {
+        if (destChain != remoteChainId) revert WrongDestination();
+        if (recipient == address(0)) revert ZeroAddress();
+        if (amount > MAX_MESSAGE_VALUE) revert MessageTooLarge();
+        _checkAmount(amount);
+    }
+
+    // ---- receiving ----
+
+    /// @inheritdoc IAny2EVMMessageReceiver
+    function ccipReceive(Client.Any2EVMMessage calldata message) external {
+        if (msg.sender != address(router)) revert NotRouter();
+        if (message.sourceChainSelector != remoteSelector) revert WrongSource();
+        if (message.sender.length != 32 || abi.decode(message.sender, (address)) != remoteAdapter) {
+            revert WrongSender();
+        }
+        uint256 amount;
+        if (message.destTokenAmounts.length > 1) revert TooManyTokens();
+        if (message.destTokenAmounts.length == 1) {
+            if (message.destTokenAmounts[0].token != address(token)) revert WrongToken();
+            amount = message.destTokenAmounts[0].amount;
+        }
+        (address recipient, address sender, bytes memory payload) = decodePayload(message.data);
+        _deliver(recipient, sender, payload, amount);
+        emit Delivered(message.messageId, message.sourceChainSelector, sender, recipient, amount);
+    }
+
+    // ---- hooks ----
+
+    /// @dev Side-specific minimum amount check.
+    function _checkAmount(uint256 amount) internal view virtual;
+
+    /// @dev The part of msg.value available to pay the CCIP fee.
+    function _budget(uint256 amount) internal view virtual returns (uint256);
+
+    /// @dev Obtain `amount` tokens and approve the router for them.
+    function _collect(uint256 amount) internal virtual;
+
+    /// @dev Hand a verified incoming message to its recipient.
+    function _deliver(address recipient, address sender, bytes memory message, uint256 amount) internal virtual;
 }

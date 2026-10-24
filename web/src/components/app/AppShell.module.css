@@ -1,0 +1,203 @@
+.app {
+  min-height: 100dvh;
+  background: var(--mist);
+  padding: 0 20px 64px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 1240px;
+  min-height: 74px;
+  margin: 0 auto;
+}
+
+.left,
+.right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.home {
+  display: inline-flex;
+  margin-right: 32px;
+  text-decoration: none;
+  border-radius: 8px;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: var(--r-pill);
+  color: var(--ink-2);
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab.on {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(16, 33, 43, 0.08);
+}
+
+.net {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 13px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--paper);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.netDot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #0052ff;
+}
+
+.wallet {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 4px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--paper);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  anchor-name: --wallet-pill;
+}
+
+.wallet:hover {
+  border-color: var(--ink-3);
+}
+
+.walletBalance {
+  white-space: nowrap;
+}
+
+.walletAddr {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 4px 0 12px;
+  border-radius: var(--r-pill);
+  background: var(--mist);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.walletGhost {
+  display: inline-block;
+  width: 180px;
+  height: 40px;
+  border-radius: var(--r-pill);
+  background: var(--line-soft);
+}
+
+.avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--water), var(--proof));
+}
+
+/* Native popover: light dismiss and Escape come for free. */
+.menu {
+  position: fixed;
+  inset: auto;
+  top: 84px;
+  right: max(20px, calc((100vw - 1240px) / 2));
+  width: min(280px, calc(100vw - 40px));
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-input);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+@supports (position-anchor: --a) {
+  .menu {
+    position-anchor: --wallet-pill;
+    top: calc(anchor(bottom) + 8px);
+    right: anchor(right);
+  }
+}
+
+.menuLabel {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.menuName {
+  margin: 2px 0 12px;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.col {
+  padding-top: 26px;
+}
+
+@media (max-width: 900px) {
+  .bar {
+    flex-wrap: wrap;
+    padding: 12px 0;
+  }
+
+  .home {
+    margin-right: 12px;
+  }
+
+  .tabs {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .left {
+    flex: 1;
+    flex-wrap: wrap;
+  }
+
+  .walletBalance {
+    display: none;
+  }
+
+  .wallet {
+    padding-left: 4px;
+  }
+}

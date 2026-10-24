@@ -1,9 +1,10 @@
 "use client";
 
-import { useDeposits, useMockUsdcBalance, useProof } from "@/lib/cascade/hooks";
+import { useDeposits, useProof } from "@/lib/cascade/hooks";
 import { useNow } from "@/lib/client-state";
 import { formatRelative } from "@/lib/format";
 import { deriveLane } from "@/lib/lane";
+import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { ReceiptLink } from "../ReceiptLink";
 import styles from "./WhereIsMyMoney.module.css";
 
@@ -12,11 +13,11 @@ export function WhereIsMyMoney({ account }: { account: string }) {
   const deposits = useDeposits(account);
   const live = deposits.data?.some((d) => d.status === "in_progress") ?? false;
   const proof = useProof(account, live);
-  const usdc = useMockUsdcBalance(account);
+  const balance = useUsdcBalance();
   const now = useNow();
 
   const lane = deriveLane({
-    usdcBalance: usdc.data ?? null,
+    usdcBalance: balance.status === "success" ? (balance.data ?? null) : null,
     deposits: deposits.data ?? [],
     proof: proof.data ?? null,
   });

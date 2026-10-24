@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
-import { DepositScreen } from "@/components/DepositScreen";
+import { Redirect } from "@/components/app/Redirect";
 
-export const metadata: Metadata = { title: "Deposit" };
+export const metadata: Metadata = { title: "Stake" };
 
+/** The old deposit page lives on as a redirect to the Stake tab. */
 export default function DepositPage() {
-  return <DepositScreen />;
+  return <Redirect to="/stake" />;
 }

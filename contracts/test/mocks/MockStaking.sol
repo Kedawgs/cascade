@@ -38,6 +38,7 @@ contract MockStaking is IStaking {
     mapping(bytes32 hotkey => mapping(bytes32 coldkey => mapping(uint256 netuid => uint256))) private _stake;
     mapping(bytes32 coldkey => mapping(bytes32 hotkey => uint256)) private _unclaimed;
     mapping(bytes32 coldkey => bool) private _rejectsGrowth;
+    mapping(address who => bytes32) public coldkeyAlias;
 
     // ---- test configuration ----
 
@@ -55,6 +56,12 @@ contract MockStaking is IStaking {
 
     function setClaimGasRequired(uint256 v) external {
         claimGasOverride = v;
+    }
+
+    /// @dev Routes this account's calls to `coldkey` instead of its mirror, so real contract bytecode can
+    /// act as a ForeverMoney-style coldkey.
+    function setColdkeyAlias(address who, bytes32 coldkey) external {
+        coldkeyAlias[who] = coldkey;
     }
 
     function setOneRaoShort(bool on) external {
@@ -99,12 +106,12 @@ contract MockStaking is IStaking {
         uint256 cost = amount * RAO_TO_WEI;
         if (msg.sender.balance < cost) revert InsufficientBalance();
         vm.deal(msg.sender, msg.sender.balance - cost);
-        _credit(hotkey, mirror(msg.sender), netuid, amount);
+        _credit(hotkey, _cold(msg.sender), netuid, amount);
     }
 
     function removeStake(bytes32 hotkey, uint256 amount, uint256 netuid) external payable {
         if (unstakeBlocked) revert TooEarly();
-        bytes32 cold = mirror(msg.sender);
+        bytes32 cold = _cold(msg.sender);
         uint256 staked = _stake[hotkey][cold][netuid];
         if (amount > staked) amount = staked;
         if (amount < _minStake() && amount != staked) revert AmountTooLow();
@@ -120,7 +127,7 @@ contract MockStaking is IStaking {
 
     function removeStakeFull(bytes32 hotkey, uint256 netuid) external payable {
         if (unstakeBlocked) revert TooEarly();
-        bytes32 cold = mirror(msg.sender);
+        bytes32 cold = _cold(msg.sender);
         uint256 staked = _stake[hotkey][cold][netuid];
         _stake[hotkey][cold][netuid] = 0;
         _payOut(_afterFee(staked));
@@ -134,10 +141,15 @@ contract MockStaking is IStaking {
         uint256 amount
     ) external payable {
         if (!knownHotkey[destHotkey]) revert UnknownHotkey();
-        bytes32 cold = mirror(msg.sender);
+        bytes32 cold = _cold(msg.sender);
         if (amount > _stake[originHotkey][cold][originNetuid]) revert InsufficientStake();
         _stake[originHotkey][cold][originNetuid] -= amount;
         _credit(destHotkey, cold, destNetuid, amount);
+    }
+
+    function _cold(address who) private view returns (bytes32 c) {
+        c = coldkeyAlias[who];
+        if (c == bytes32(0)) c = mirror(who);
     }
 
     function getStake(bytes32 hotkey, bytes32 coldkey, uint256 netuid) external view returns (uint256) {
@@ -151,7 +163,7 @@ contract MockStaking is IStaking {
                 invalid()
             }
         }
-        bytes32 cold = mirror(msg.sender);
+        bytes32 cold = _cold(msg.sender);
         uint256 amount = _unclaimed[cold][hotkey];
         _unclaimed[cold][hotkey] = 0;
         if (claimToBalance) _payOut(amount);
@@ -164,7 +176,7 @@ contract MockStaking is IStaking {
     }
 
     function setRejectStakingHotkeyGrowth(bool enabled) external {
-        _rejectsGrowth[mirror(msg.sender)] = enabled;
+        _rejectsGrowth[_cold(msg.sender)] = enabled;
     }
 
     function getDefaultMinStake() external view returns (uint256) {

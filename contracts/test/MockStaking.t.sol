@@ -196,4 +196,13 @@ contract MockStakingTest is Test {
         assertEq(bridge.lastValue(), 1e15);
         assertEq(bridge.sendCount(), 1);
     }
+
+    function test_coldkeyAliasRoutesStake() public {
+        staking.setOneRaoShort(false);
+        bytes32 alias_ = keccak256("alias");
+        staking.setColdkeyAlias(address(this), alias_);
+        staking.addStake(HK1, 5 * RAO, 0);
+        assertEq(staking.getStake(HK1, alias_, 0), 5 * RAO);
+        assertEq(staking.getStake(HK1, _me(), 0), 0);
+    }
 }

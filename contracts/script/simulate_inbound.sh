@@ -21,6 +21,10 @@
 # adapter, which therefore still sees msg.sender == Router. The eth_call is sent from FUNDER with
 # value RESERVE.
 #
+# The node silently ignores balance overrides, so before the delivery the script checks, with the same
+# overrides, that the code overrides took effect: the adapter must answer `alphaVault()` and the sink
+# `reverting()`. Otherwise the stand-in's calls would hit empty accounts, succeed, and fake an OK.
+#
 # Run from contracts/:   bash script/simulate_inbound.sh
 # Env (all optional):
 #   BITTENSOR_RPC   Bittensor EVM RPC (default https://lite.chain.opentensor.ai)
@@ -33,8 +37,8 @@
 #   FUNDER          any address holding at least RESERVE, used as the eth_call's sender (default: the
 #                   Router's wrapped-native contract, which holds the CCIP fees paid in TAO)
 #
-# Needs forge, cast and anvil on PATH. About 12 requests to BITTENSOR_RPC (the public endpoints
-# allow about 128 a minute).
+# Needs forge, cast and anvil on PATH. About 14 requests to BITTENSOR_RPC, two of them the override
+# checks (the public endpoints allow about 128 a minute).
 set -euo pipefail
 
 BITTENSOR_RPC="${BITTENSOR_RPC:-https://lite.chain.opentensor.ai}"
@@ -185,13 +189,22 @@ echo "message: id $MESSAGE_ID, source $BASE_SELECTOR, sender abi.encode($REMOTE_
 echo "payload: abi.encode(sink $SINK, front door $FRONT_DOOR, BATCH(1, [($ALICE, $AMOUNT)], []))"
 # --override-state-diff patches one slot and keeps the token's other storage (its total supply, which the
 # burn needs); --override-state would replace the token's whole storage.
+OVERRIDES=(--override-code "$BIT_ROUTER:$STAND_IN,$ADAPTER:$CODE,$SINK:$SINK_CODE"
+  --override-state-diff "$BIT_TAO:$SLOT:$AMOUNT" --block "$BLOCK" --rpc-url "$BITTENSOR_RPC")
+# Pre-flight, with the same overrides: an empty account returns no data, so cast fails and the check fails.
+lower() { tr 'A-F' 'a-f'; }
+GOT_VAULT="$(cast call "$ADAPTER" "alphaVault()(address)" "${OVERRIDES[@]}" 2>&1 || true)"
+echo "pre-flight: adapter.alphaVault() at $ADAPTER = $GOT_VAULT"
+[ "$(printf '%s' "$GOT_VAULT" | lower)" = "$(printf '%s' "$ALPHA_VAULT" | lower)" ] ||
+  fail "the node did not apply the adapter's code override (alphaVault() did not return $ALPHA_VAULT)"
+GOT_REVERTING="$(cast call "$SINK" "reverting()(bool)" "${OVERRIDES[@]}" 2>&1 || true)"
+echo "pre-flight: sink.reverting() at $SINK = $GOT_REVERTING"
+[ "$GOT_REVERTING" = "false" ] || fail "the node did not apply the sink's code override (reverting() did not return false)"
 set +e
 OUT="$(cast call --from "$FUNDER" --value "$RESERVE" "$BIT_ROUTER" \
   "ccipReceive((bytes32,uint64,bytes,bytes,(address,uint256)[]))" \
   "($MESSAGE_ID,$BASE_SELECTOR,$SENDER,$PAYLOAD,[($BIT_TAO,$AMOUNT)])" \
-  --override-code "$BIT_ROUTER:$STAND_IN,$ADAPTER:$CODE,$SINK:$SINK_CODE" \
-  --override-state-diff "$BIT_TAO:$SLOT:$AMOUNT" \
-  --block "$BLOCK" --rpc-url "$BITTENSOR_RPC" 2>&1)"
+  "${OVERRIDES[@]}" 2>&1)"
 STATUS=$?
 set -e
 echo "result: $OUT"

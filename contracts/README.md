@@ -277,9 +277,11 @@ two runtime codes at unused addresses, 1 TAO of ForeverMoney's token in the adap
 adapter's 1e12-wei reserve through `fundReserve()` and then forwards the `ccipReceive`, so the
 adapter still sees the Router as caller. ForeverMoney's real `withdrawLiquid` burns the tokens,
 unstakes through the real precompile and pays the adapter, which forwards the TAO to the sink; the
-sink reverts unless it receives exactly the amount. Success prints `SIMULATION OK`; a revert is
-named (the adapter's, the sink's or ForeverMoney's error). Nothing is broadcast. It makes about 12
-requests to the node. Options: `BITTENSOR_RPC`, `REMOTE_ADAPTER` (the Base adapter's address),
+sink reverts unless it receives exactly the amount. Before the delivery it checks, with the same
+overrides, that the adapter answers `alphaVault()` and the sink `reverting()`, because the node
+silently ignores some overrides and calls to an empty account succeed. Success prints
+`SIMULATION OK`; a revert is named (the adapter's, the sink's or ForeverMoney's error). Nothing is
+broadcast. It makes about 14 requests to the node. Options: `BITTENSOR_RPC`, `REMOTE_ADAPTER` (the Base adapter's address),
 `AMOUNT` (wei), `GAS_BASE` and `GAS_PER_ENTRY` (the Bittensor adapter's gas model), `RESERVE`
 (0 shows the unfunded adapter's `ConversionShort`) and `FUNDER`. Run on 2026-10-24 against the lite
 node: 1 TAO and exactly 0.002 TAO (the floor) delivered; `RESERVE=0` reverted `ConversionShort`;

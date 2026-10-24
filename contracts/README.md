@@ -520,6 +520,12 @@ Defaults at deploy:
 | `REGISTRY_DELAY`, `KEEPER_FALLBACK`, `REWARD_VESTING` | 7 days each (constants) | both / vault |
 | `GUARDIAN_DELAY` | 8 days (constant) | both |
 | `ED_RESERVE` | 1e12 wei (constant) | vault |
+| `gasBase` / `gasPerEntry` toward Bittensor | 540,000 / 26,450 (constructor arguments, Base adapter; calibrated in `test/adapters/AdapterGas.t.sol`) | Base adapter |
+| `gasBase` / `gasPerEntry` toward Base | 120,000 / 29,900 (constructor arguments, Bittensor adapter) | Bittensor adapter |
+| `minSendAmount` | 0.01 TAO | Base adapter |
+| adapter reserve | 1e12 wei, funded by the deployer | Bittensor adapter |
+| `GAS_CAP` | 7,000,000 (constant) | both adapters |
+| `MAX_MESSAGE_VALUE` | 5,000 TAO (constant) | both adapters |
 
 ## Static analysis
 

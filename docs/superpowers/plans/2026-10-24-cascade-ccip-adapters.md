@@ -864,3 +864,44 @@ amounts so the remainder is zero or at least 1e18 and say so in the report.
 git add src/CascadeFrontDoor.sol test/frontdoor/FrontDoorBatches.t.sol README.md
 git commit -m "fix(front-door): a partial cancelDeposit must leave at least minDeposit"
 ```
+
+---
+
+### Task 12: Bound the CascadeMath fuzz tests to the on-chain domain (ruling from a suite failure found during Task 9)
+
+**Why this task exists:** after a `forge clean`, a fresh fuzz seed found `testFuzz_depositNeverLowersPrice` and
+`testFuzz_roundTripNeverProfits` in `contracts/test/CascadeMath.t.sol` failing with panic 0x11 on
+`args=[2^128-3, 0, 2^128-2]`: `Math.mulDiv(assets, totalSupply + 1e6, 1)` exceeds 2^256 and OpenZeppelin 5.x
+panics. The inputs are raw `uint128` with no bound; on chain the vault caps assets at 1,000 TAO (1e21 wei) and
+shares at 1e27, and TAO's whole supply is about 2.1e25 wei, so the product can never approach 2^256. The
+properties hold in-domain; the tests must say what the domain is. No change to `CascadeMath`'s code.
+
+**Files:**
+- Modify: `contracts/test/CascadeMath.t.sol` (the three fuzz tests)
+- Modify: `contracts/src/libraries/CascadeMath.sol` (NatSpec only: one sentence stating the input domain)
+
+**Interfaces:**
+- Consumes: forge-std `bound(uint256, uint256, uint256)`.
+- Produces: fuzz inputs bounded to `[0, 1e36]` for `assets`/`shares`/`totalAssets`/`totalSupply` in all three
+  fuzz tests (1e36 × (1e36 + 1e6) < 2^256, and 1e36 is a thousand billion times the real domain); the existing
+  `vm.assume` guards stay, applied after bounding.
+
+- [ ] **Step 1: Reproduce** — `forge test --match-path test/CascadeMath.t.sol -vv`
+Expected: the two tests FAIL on the cached counterexample (panic 0x11). If the cache was cleared and they pass,
+add a temporary concrete test `test_overflowCounterexample` with those exact args, watch it fail, and delete it
+in Step 3.
+
+- [ ] **Step 2: Bound the inputs** — in each fuzz test, first line(s): `assets = uint128(bound(assets, 0, 1e36))`
+(likewise `shares`, `totalAssets`, `totalSupply`), then the existing `vm.assume`s. Add to `CascadeMath.sol`'s
+library NatSpec: "Callers keep `totalAssets`, `totalSupply` and the amounts below 1e36 (the vault caps assets at
+`maxTotalAssets`); `Math.mulDiv` panics on products that exceed 2^256 instead of returning a wrong value."
+
+- [ ] **Step 3: Run** — `forge test --match-path test/CascadeMath.t.sol -vv` then `forge test`
+Expected: all pass (the cached counterexample now runs bounded); full suite green with the fork tests skipped.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add test/CascadeMath.t.sol src/libraries/CascadeMath.sol
+git commit -m "test(math): bound CascadeMath fuzz inputs to the on-chain domain"
+```

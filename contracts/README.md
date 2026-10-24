@@ -446,7 +446,7 @@ below).
 The four layers:
 
 1. **Registry changes are slow, visible and vetoable.** A new front door or bridge can be activated
-   only 7 days after it is proposed on-chain; the guardian or owner can cancel a proposal, remove a
+   only 7 days after it is proposed on-chain (only the ones named at deployment are active at once); the guardian or owner can cancel a proposal, remove a
    front door or disable a bridge at once. The guardian itself can be replaced only 8 days after the
    owner proposes it, so it outlasts any registry proposal made alongside.
 2. **Burns are capped per front door at delivery.** Each front door may burn at most
@@ -570,7 +570,7 @@ Keys:
 | Owner | Everything in [Roles](#roles) under "Owner", including replacing the guardian (8 days after proposing it) and picking the validators. | Cannot move user funds directly. The only route would be registering a rogue front door or bridge, which waits 7 days in public, and the sitting guardian can veto it: replacing the guardian takes 8 days, longer than the registry delay, and the guardian stays in office until then. A compromised owner cannot bypass the sitting guardian's veto within the registry delay; with the guardian vetoing, a rogue registration needs at least 15 days of public notice plus the timelock's delay. Parameter changes wait only for the timelock. |
 | Guardian | Stop only: pause, remove a front door, disable a bridge, cancel a pending proposal. It can also add a hotkey, which only widens what the price reads. | A stolen guardian key can freeze, not take. The owner proposes a replacement at once and accepts it after 8 days; the guardian cannot cancel that. Until then it can re-pause, remove front doors, disable bridges and cancel the owner's re-registration proposals, so front-door deposits, redeems and payouts can stay frozen for about 15 days plus the owner's timelock (8-day replacement, then a 7-day registry re-proposal), and direct deposits and redeems for 8 days plus the timelock. The bound holds only if the guardian key does NOT hold the timelock's canceller role. It could fill the hotkey set (at most 4); the owner removes extras. |
 | Keeper | Time `claimRewards` and `stakeIdle`; add a hotkey; choose payout chunk sizes. | A stolen key can time claims and stakes badly (frequent tiny claims stretch vesting), and on a runtime with a post-stake hold on unstaking it can re-arm that hold with `stakeIdle` to delay exits, and it alone chooses payout chunk sizes (each extra chunk costs its users at most the fee ceiling); it cannot move funds. Anyone may act after 7 days (counted from deploy, or from when a hotkey was first added, until the first stake or claim), and the owner can replace or clear the keeper. |
-| Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey and initial bridge. The initial bridge is enabled at once, with no delay. | Check every constructor argument before anyone deposits. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
+| Deployer | One-shot: sets the owner, guardian, hotkey, expected coldkey, initial bridge and, optionally, the vault's initial front door (a chain id and address; a zero address names none). Both are active at once, with no delay, because nobody has deposited yet; every later front door or bridge waits 7 days. | Check every constructor argument before anyone deposits, including `frontDoorActive(peerId(chain, frontDoor))` for the initial front door. The vault derives its own coldkey and reverts `ColdkeyMismatch` if the expected one differs. |
 
 Contracts:
 
@@ -825,8 +825,9 @@ Measurements and policy:
     It is owner discipline, behind the timelock.
 20. Maintenance: the vault's front-door registry (`proposeFrontDoor`, `activateFrontDoor`,
     `cancelFrontDoorProposal`, `removeFrontDoor`) duplicates the bridge registry in `CascadeBase`
-    (propose, activate after `REGISTRY_DELAY`, cancel, disable). A fix to one must be mirrored in
-    the other; consider one shared, keyed registry in a later version.
+    (propose, activate after `REGISTRY_DELAY`, cancel, disable), and the vault's constructor
+    activates the initial front door the way `CascadeBase`'s activates the initial bridge. A fix to
+    one must be mirrored in the other; consider one shared, keyed registry in a later version.
 
 Outside this build:
 

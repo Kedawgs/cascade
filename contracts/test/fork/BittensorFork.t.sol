@@ -93,7 +93,10 @@ contract BittensorForkTest is ForkBase {
             }),
             IAlphaVault(ALPHA_VAULT)
         );
-        vault = new CascadeVault(mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, 1e15);
+        // the Base front door is named at deploy, as the deployment does, so it is active with no delay
+        vault = new CascadeVault(
+            mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, 1e15, BASE, fdAddr
+        );
         assertEq(address(adapterBit), pAdapterBit, "adapter address");
         assertEq(address(vault), pVault, "vault address");
 
@@ -103,11 +106,6 @@ contract BittensorForkTest is ForkBase {
         adapterBit.fundReserve{value: RESERVE}();
         vm.prank(owner);
         vault.setKeeper(keeper);
-        vm.prank(owner);
-        vault.proposeFrontDoor(BASE, fdAddr);
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(owner);
-        vault.activateFrontDoor(BASE, fdAddr);
     }
 
     // ---- lane limits ----

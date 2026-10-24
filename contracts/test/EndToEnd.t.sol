@@ -51,7 +51,7 @@ contract EndToEndTest is Test {
         bridge.setFee(FEE);
 
         bytes32 expectedColdkey = mirror(vm.computeCreateAddress(address(this), vm.getNonce(address(this))));
-        vault = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15);
+        vault = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15, 0, address(0));
         // The operator funds the existential reserve before use.
         vm.deal(address(vault), ED);
         vm.prank(owner);

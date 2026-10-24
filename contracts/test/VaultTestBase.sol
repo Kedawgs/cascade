@@ -62,7 +62,7 @@ abstract contract VaultTestBase is Test {
     /// HK1, with the keeper set (no reserve funded, no front door).
     function freshVault() internal returns (CascadeVault v) {
         bytes32 expectedColdkey = mirror(vm.computeCreateAddress(address(this), vm.getNonce(address(this))));
-        v = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15);
+        v = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15, 0, address(0));
         vm.prank(owner);
         v.setKeeper(keeper);
     }

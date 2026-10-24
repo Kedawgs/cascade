@@ -189,7 +189,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         ICascadeBridge bridge,
         address owner_,
         address guardian_,
-        uint256 minDirectDeposit_
+        uint256 minDirectDeposit_,
+        uint64 initialFrontDoorChain,
+        address initialFrontDoor
     ) ERC20("Cascade Staked TAO", "csTAO") CascadeBase(owner_, guardian_, address(bridge)) {
         bytes32 derived = ADDRESS_MAPPING.addressMapping(address(this));
         if (derived != expectedColdkey) revert ColdkeyMismatch(expectedColdkey, derived);
@@ -203,6 +205,12 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         lastClaimAt[hotkey] = uint64(block.timestamp);
         emit StakeHotkeySet(hotkey);
         minDirectDeposit = minDirectDeposit_;
+        // Like the initial bridge, the initial front door is active at once: nobody has deposited yet,
+        // so the deployer's choice needs no delay. Later front doors wait REGISTRY_DELAY. Zero = none.
+        if (initialFrontDoor != address(0)) {
+            frontDoorActive[peerId(initialFrontDoorChain, initialFrontDoor)] = true;
+            emit FrontDoorActivated(initialFrontDoorChain, initialFrontDoor);
+        }
         STAKING.setRejectStakingHotkeyGrowth(true);
     }
 

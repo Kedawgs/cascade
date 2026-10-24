@@ -99,7 +99,10 @@ abstract contract AdaptersFixture is Test {
             }),
             IAlphaVault(address(av))
         );
-        vault = new CascadeVault(mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, 1e15);
+        // the front door is named at deploy, as the deployment does, so it is active with no delay
+        vault = new CascadeVault(
+            mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, 1e15, BASE, pFd
+        );
         fd = newFrontDoor();
         assertEq(address(adapterBase), pAdapterBase);
         assertEq(address(adapterBit), pAdapterBit);
@@ -112,7 +115,6 @@ abstract contract AdaptersFixture is Test {
         adapterBit.fundReserve{value: ED}();
         vm.prank(owner);
         vault.setKeeper(keeper);
-        registerFrontDoor(BASE, address(fd));
 
         address[2] memory users = [alice, bob];
         for (uint256 i; i < users.length; ++i) {

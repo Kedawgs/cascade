@@ -20,7 +20,7 @@ details, operator notes and the pre-mainnet checklist: `contracts/README.md`. Re
   now live in one contract, so the check is one read on one chain.
 - **Security first.** Small immutable contracts, no upgrade proxies, caps, a guardian that can only
   stop flows, and admin behind a timelock (48 hours in the beta). The team cannot move user funds
-  instantly: a new front door or bridge is announced on-chain 7 days ahead.
+  instantly: a front door or bridge added after deployment is announced on-chain 7 days ahead.
 - **Runs on its own.** Closing batches, sending payouts and re-executing bridge messages are
   permissionless. Staking idle TAO and claiming rewards are timed by a keeper; if it has not acted
   for 7 days, anyone may. The team's bot is just the most reliable caller.
@@ -115,8 +115,9 @@ moves because of staking rewards:
 A front door speaks for its users, so a rogue front door or adapter could try to burn every holder's
 shares. Four layers bound that:
 
-1. New front doors and bridges wait 7 days in public, and the guardian can veto them. Replacing the
-   guardian takes 8 days, so it stays in office through any proposal made alongside.
+1. Front doors and bridges added after deployment wait 7 days in public, and the guardian can veto
+   them. Replacing the guardian takes 8 days, so it stays in office through any proposal made
+   alongside.
 2. Each front door may burn at most `max(20% of gross assets before the batch's deposits, 100 TAO)`
    per fixed 24-hour window.
 3. Nothing burned leaves for 24 hours; the guardian can hold a front door's payouts at once, and the

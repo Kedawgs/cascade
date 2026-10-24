@@ -51,7 +51,7 @@ contract CascadeInvariantTest is Test {
         bridge.setFee(FEE);
 
         bytes32 expectedColdkey = mirror(vm.computeCreateAddress(address(this), vm.getNonce(address(this))));
-        vault = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15);
+        vault = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15, 0, address(0));
         vm.deal(address(vault), ED);
 
         fd = new CascadeFrontDoor(

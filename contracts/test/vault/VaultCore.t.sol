@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {Vm} from "forge-std/Vm.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeBase} from "../../src/CascadeBase.sol";
@@ -25,13 +26,13 @@ contract VaultCoreTest is VaultTestBase {
         bytes32 derived = mirror(nextAddress());
         bytes32 wrong = bytes32(uint256(0xbad));
         vm.expectRevert(abi.encodeWithSelector(CascadeVault.ColdkeyMismatch.selector, wrong, derived));
-        new CascadeVault(wrong, HK1, bridge, owner, guardian, 1e15);
+        new CascadeVault(wrong, HK1, bridge, owner, guardian, 1e15, 0, address(0));
     }
 
     function test_constructorRejectsZeroHotkey() public {
         bytes32 expected = mirror(nextAddress());
         vm.expectRevert(CascadeVault.ZeroHotkey.selector);
-        new CascadeVault(expected, bytes32(0), bridge, owner, guardian, 1e15);
+        new CascadeVault(expected, bytes32(0), bridge, owner, guardian, 1e15, 0, address(0));
     }
 
     function test_constructorSetsRejectGrowth() public view {
@@ -49,7 +50,57 @@ contract VaultCoreTest is VaultTestBase {
         address predicted = nextAddress();
         vm.expectEmit(predicted);
         emit CascadeVault.StakeHotkeySet(HK2);
-        new CascadeVault(mirror(predicted), HK2, bridge, owner, guardian, 1e15);
+        new CascadeVault(mirror(predicted), HK2, bridge, owner, guardian, 1e15, 0, address(0));
+    }
+
+    function test_constructorActivatesInitialFrontDoor() public {
+        address predicted = nextAddress();
+        vm.expectEmit(predicted);
+        emit CascadeVault.FrontDoorActivated(BASE, bob);
+        CascadeVault fresh = new CascadeVault(mirror(predicted), HK1, bridge, owner, guardian, 1e15, BASE, bob);
+
+        bytes32 id = fresh.peerId(BASE, bob);
+        assertTrue(fresh.frontDoorActive(id));
+        assertEq(fresh.frontDoorProposedAt(id), 0);
+        // only that pair: the same address on another chain is a different peer
+        assertFalse(fresh.frontDoorActive(fresh.peerId(BITTENSOR, bob)));
+
+        vm.prank(owner);
+        vm.expectRevert(CascadeVault.PeerKnown.selector);
+        fresh.proposeFrontDoor(BASE, bob);
+    }
+
+    function test_constructorWithoutInitialFrontDoorActivatesNone() public {
+        vm.recordLogs();
+        CascadeVault fresh =
+            new CascadeVault(mirror(nextAddress()), HK1, bridge, owner, guardian, 1e15, BASE, address(0));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics.length == 0 || logs[i].topics[0] != CascadeVault.FrontDoorActivated.selector);
+        }
+        assertFalse(fresh.frontDoorActive(fresh.peerId(BASE, address(0))));
+    }
+
+    function test_initialFrontDoorDeliversAtOnceAndReturnsOnlyAfterTheDelay() public {
+        vault = new CascadeVault(mirror(nextAddress()), HK1, bridge, owner, guardian, 1e15, BASE, bob);
+        vm.deal(address(vault), ED);
+
+        // no warp: a batch from the initial front door lands in the deploy block
+        deliver(BASE, bob, 1, entries1(alice, 10e18), noEntries());
+        assertEq(vault.balanceOf(alice), 1e25);
+
+        // the guardian removes it at once, like any front door
+        vm.prank(guardian);
+        vault.removeFrontDoor(BASE, bob);
+        assertFalse(vault.frontDoorActive(vault.peerId(BASE, bob)));
+
+        // and bringing it back waits the full registry delay
+        vm.prank(owner);
+        vault.proposeFrontDoor(BASE, bob);
+        vm.warp(block.timestamp + 7 days - 1);
+        vm.prank(owner);
+        vm.expectRevert(CascadeBase.NotReady.selector);
+        vault.activateFrontDoor(BASE, bob);
     }
 
     // ---- token ----
@@ -314,7 +365,7 @@ contract VaultCoreTest is VaultTestBase {
 
     function test_grossAssetsFloorsAtZeroOnEmptyVault() public {
         address predicted = nextAddress();
-        CascadeVault fresh = new CascadeVault(mirror(predicted), HK1, bridge, owner, guardian, 1e15);
+        CascadeVault fresh = new CascadeVault(mirror(predicted), HK1, bridge, owner, guardian, 1e15, 0, address(0));
         assertEq(address(fresh).balance, 0);
         // 0 * 1e9 + 0 - 1e12 floors to 0
         assertEq(fresh.grossAssets(), 0);

@@ -67,7 +67,14 @@ contract CcipBittensorAdapterTest is Test {
             IAlphaVault(address(av))
         );
         vault = new CascadeVault(
-            mirror(predictedVault), bytes32(uint256(1)), ICascadeBridge(address(adapter)), owner, guardian, 1e15
+            mirror(predictedVault),
+            bytes32(uint256(1)),
+            ICascadeBridge(address(adapter)),
+            owner,
+            guardian,
+            1e15,
+            0,
+            address(0)
         );
         assertEq(address(adapter), predictedAdapter);
         assertEq(address(vault), predictedVault);

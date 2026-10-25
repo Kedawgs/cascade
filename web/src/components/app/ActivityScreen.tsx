@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
-import { useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
+import { useBalances, useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { parseActivityParams } from "@/lib/activity-params";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
@@ -43,6 +43,7 @@ function Actions({ children }: { children: ReactNode }) {
 function DepositDetail({ account, id }: { account: string; id: string }) {
   const { data: deposit, isPending, isError, refetch } = useDeposit(account, id);
   const { data: position } = usePosition(account);
+  const wallet = useBalances(account);
   const flows = useFlows(account);
   const router = useRouter();
   if (isError) return <LoadError what="this deposit" onRetry={() => void refetch()} />;
@@ -50,6 +51,8 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
   if (!deposit) return <NotFound what="deposit" />;
 
   const staked = deposit.status === "staked";
+  const walletTao = wallet.data?.tao ?? 0n;
+  const walletTaoBack = deposit.status === "cancelled" ? (walletTao < deposit.taoWei ? walletTao : deposit.taoWei) : 0n;
   const amount = deposit.amountUsd !== undefined ? formatUsdShort(deposit.amountUsd) : `${formatTao(deposit.taoAmount, 4)} TAO`;
   return (
     <>
@@ -76,11 +79,26 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
             </div>
           )}
         </dl>
-        {(deposit.status === "needs_you" || deposit.cancellableWei !== undefined) && (
+        {(deposit.status === "needs_you" || deposit.retryable || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
           <Actions>
             {deposit.status === "needs_you" && (
               <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
+              </button>
+            )}
+            {deposit.status === "failed" && deposit.retryable && !deposit.nothingSent && (
+              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
+                {flows.busy === "stake" ? "Confirm in your wallet…" : "Try the deposit again"}
+              </button>
+            )}
+            {deposit.status === "failed" && deposit.nothingSent && (
+              <Link href="/stake" className="pill pill-block">
+                Stake again at today&apos;s price
+              </Link>
+            )}
+            {walletTaoBack > 0n && (
+              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.sellWalletTao(walletTaoBack).catch(() => undefined)}>
+                {flows.busy === "swap" ? "Confirm in your wallet…" : "Swap your TAO back to USDC"}
               </button>
             )}
             {deposit.nothingSent && (
@@ -102,7 +120,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
                 disabled={flows.busy !== null}
                 onClick={() => void flows.cancel("deposit", id, deposit.cancellableWei as bigint).catch(() => undefined)}
               >
-                Take it back before the batch closes
+                Cancel this deposit before its batch closes
               </button>
             )}
           </Actions>

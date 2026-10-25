@@ -69,6 +69,25 @@ describe("deposit trail", () => {
     expect(depositRecord(op, base).amountUsd).toBe(20);
   });
 
+  it("explains a failed step with the saved reason, and offers to try again or remove it when nothing was sent", () => {
+    const failed = { ...op, state: "failed" as const, hashes: {}, error: "The price moved past your 0.5% limit, so the swap was undone." };
+    const r = depositRecord(failed, { ...base, swapMined: false, depositMined: false });
+    expect(r.steps[0].status).toBe("failed");
+    expect(r.steps[0].detail).toBe("The price moved past your 0.5% limit, so the swap was undone.");
+    expect(r.retryable).toBe(true);
+    expect(r.nothingSent).toBe(true);
+  });
+
+  it("after a swap that worked but a deposit that failed, says the TAO is in the wallet", () => {
+    const failed = { ...op, state: "failed" as const, hashes: { swap: H(1) }, error: "The deposit didn't go through." };
+    const r = depositRecord(failed, { ...base, swapMined: true, depositMined: false });
+    expect(r.steps[1].status).toBe("failed");
+    expect(r.steps[1].detail).toMatch(/didn't go through/);
+    expect(r.steps[1].detail).toMatch(/in your wallet/);
+    expect(r.retryable).toBe(true);
+    expect(r.nothingSent).toBeUndefined();
+  });
+
   it("says the batch can close now once its time has passed", () => {
     const r = depositRecord(op, { ...base, now: new Date("2026-10-25T10:20:00Z") });
     expect(r.steps[2].detail).toMatch(/can close now/i);

@@ -123,20 +123,25 @@ function walletStep(mined: boolean, op: { state: string }, started: boolean): St
 }
 
 export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
+  const swapStatus = walletStep(f.swapMined, op, true);
   const swap: TrailStep<DepositStepKey> = {
     key: "swap",
     title: "Swap USDC for TAO",
-    status: walletStep(f.swapMined, op, true),
+    status: swapStatus,
     ...(op.hashes.swap && f.swapMined ? { txUrl: explorer.baseTx(op.hashes.swap) } : {}),
-    ...(!f.swapMined && op.callsId ? { detail: "Sent from your wallet as one batch" } : {}),
+    ...(!f.swapMined && op.callsId && swapStatus === "active" ? { detail: "Sent from your wallet as one batch" } : {}),
+    ...(swapStatus === "failed" || swapStatus === "action" ? { detail: op.error ?? "Waiting for you to confirm in your wallet" } : {}),
   };
+  const depositStatus = f.swapMined ? walletStep(f.depositMined, op, true) : "pending";
+  // the swap went through but the deposit did not: the TAO is sitting in the wallet
+  const taoInWallet = " Your TAO is in your wallet: deposit it or swap it back to USDC from the Stake page.";
   const deposit: TrailStep<DepositStepKey> = {
     key: "deposit",
     title: "Deposit into Cascade",
-    status: f.swapMined ? walletStep(f.depositMined, op, true) : "pending",
+    status: depositStatus,
     ...(op.hashes.deposit && f.depositMined ? { txUrl: explorer.baseTx(op.hashes.deposit) } : {}),
-    ...(f.depositMined && op.batchId !== undefined ? { detail: `In batch ${op.batchId}` } : {}),
-    ...(!f.depositMined && op.state === "needs-you" ? { detail: "Waiting for you to confirm in your wallet" } : {}),
+    ...(depositStatus === "action" ? { detail: op.error ?? "Waiting for you to confirm in your wallet" } : {}),
+    ...(depositStatus === "failed" ? { detail: `${op.error ?? "The deposit didn't go through."}${taoInWallet}` } : {}),
   };
 
   let bridge: TrailStep<DepositStepKey> = { key: "bridge", title: "Cross to Bittensor", status: "pending" };
@@ -158,7 +163,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
       };
     }
   } else if (op.cancelled && f.cancelMined) {
-    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Taken back before the batch closed: the TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
+    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Cancelled. Your TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.depositMined) {
     bridge = {
       ...bridge,
@@ -193,7 +198,9 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),
-    ...(op.state === "needs-you" &&
+    // stopped before the deposit landed: it can be tried again
+    ...((op.state === "failed" || op.state === "needs-you") && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
+    ...((op.state === "needs-you" || op.state === "failed") &&
     !op.callsId &&
     !Object.values(op.hashes).some(Boolean) &&
     (!f.interrupted || f.now.getTime() - op.createdAt >= STALE_MS)

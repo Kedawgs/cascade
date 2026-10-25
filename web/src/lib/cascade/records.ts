@@ -34,6 +34,8 @@ export interface DepositRecord {
   cancellableWei?: bigint;
   /** Stopped before any transaction was sent, so it can simply be removed. */
   nothingSent?: true;
+  /** Stopped (failed or waiting for the user) before the deposit landed: it can be tried again. */
+  retryable?: true;
 }
 
 export interface WithdrawalRecord {

@@ -38,20 +38,38 @@ describe("deriveLane", () => {
   it("shows one deposit's phrase and step, and the account's own stake", () => {
     const [w, t, s] = deriveLane({ usdcBalance: 2400, deposits: [dep("a", 0.0788, 2)], position: position(0.05), explorerUrl: VAULT });
     expect(w).toEqual({ amount: "2,400 USDC", label: "in your wallet on Base", state: "muted" });
-    expect(t).toEqual({ amount: "0.08 TAO", label: "crossing to Bittensor, step 3 of 4", state: "live" });
-    expect(s).toEqual({ amount: "0.05 TAO", label: "yours, staked on Bittensor", state: "done", href: VAULT });
+    expect(t).toEqual({ amount: "0.0788 TAO", label: "crossing to Bittensor, step 3 of 4", state: "live" });
+    expect(s).toEqual({ amount: "0.0500 TAO", label: "yours, staked on Bittensor", state: "done", href: VAULT });
   });
 
   it("uses a step's own short summary when it has one", () => {
-    const d = dep("a", 0.0117, 3);
-    d.steps[3] = { ...d.steps[3], summary: "waiting for the 0.02 TAO minimum" };
+    const d = dep("a", 0.0783, 2);
+    d.steps[2] = { ...d.steps[2], summary: "on the bridge" };
     const [, t] = deriveLane({ usdcBalance: 0, deposits: [d], position: position(0) });
-    expect(t.label).toBe("waiting for the 0.02 TAO minimum, step 4 of 4");
+    expect(t.label).toBe("on the bridge, step 3 of 4");
   });
 
   it("adds up several deposits in transit", () => {
-    const [, t] = deriveLane({ usdcBalance: 0, deposits: [dep("a", 1, 1), dep("b", 2.5, 3), dep("c", 9, 4)], position: position(0) });
+    const [, t] = deriveLane({ usdcBalance: 0, deposits: [dep("a", 1, 1), dep("b", 2.5, 2), dep("c", 9, 4)], position: position(0) });
     expect(t).toEqual({ amount: "3.50 TAO", label: "2 deposits on their way", state: "live" });
+  });
+
+  it("counts a deposit already in the vault once, under the account, not as on its way too", () => {
+    const [, t] = deriveLane({ usdcBalance: 0, deposits: [dep("three", 0.0117, 3), dep("twenty", 0.0783, 2)], position: position(0.0117) });
+    expect(t).toEqual({ amount: "0.0783 TAO", label: "crossing to Bittensor, step 3 of 4", state: "live" });
+  });
+
+  it("leaves out a deposit that never got past the swap: that money is still USDC in the wallet", () => {
+    const stopped = { ...dep("x", 0.0783, 0), status: "needs_you" as const };
+    const [, t] = deriveLane({ usdcBalance: 50, deposits: [stopped], position: position(0) });
+    expect(t.label).toBe("nothing in transit");
+  });
+
+  it("says TAO waiting for the staking minimum is in the vault, not staked", () => {
+    const [, , s] = deriveLane({ usdcBalance: 0, deposits: [], position: position(0.0117), waitingForMinimum: true, explorerUrl: VAULT });
+    expect(s.amount).toBe("0.0117 TAO");
+    expect(s.label).toBe("yours, in the vault on Bittensor, staked once it reaches 0.02 TAO");
+    expect(s.state).toBe("live");
   });
 
   it("mutes empty nodes and keeps the lane shape", () => {

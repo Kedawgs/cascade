@@ -19,7 +19,19 @@ export interface LaneInput {
   positionError?: boolean;
   /** Where the vault's stake can be seen on Bittensor. */
   explorerUrl?: string;
+  /** The vault holds TAO it can't stake yet (below Bittensor's 0.02-TAO minimum). */
+  waitingForMinimum?: boolean;
 }
+
+/** Small amounts keep four decimals, so a test-sized 0.0117 doesn't read as 0.01. */
+const tao = (n: number) => `${formatTao(n, n < 1 ? 4 : 2)} TAO`;
+
+/** On its way: swapped out of USDC (so no longer in the wallet) and not yet in the vault (where the
+ * position counts it). Failed and cancelled ones are not moving. */
+const onItsWay = (d: DepositRecord) =>
+  (d.status === "in_progress" || d.status === "needs_you") &&
+  d.steps.find((s) => s.key === "swap")?.status === "done" &&
+  d.steps.find((s) => s.key === "bridge")?.status !== "done";
 
 /** Plain words for what a deposit in progress is doing right now. */
 export const TRANSIT_PHRASE: Record<DepositStepKey, string> = {
@@ -36,7 +48,7 @@ export function deriveLane(input: LaneInput): [LaneNode, LaneNode, LaneNode] {
       ? { amount: "–", label: "balance unavailable", state: "muted" }
       : { amount: `${formatUsdc(input.usdcBalance)} USDC`, label: "in your wallet on Base", state: "muted" };
 
-  const moving = input.deposits.filter((d) => d.status === "in_progress" || d.status === "needs_you");
+  const moving = input.deposits.filter(onItsWay);
   const movingTao = moving.reduce((sum, d) => sum + d.taoAmount, 0);
   let transit: LaneNode;
   if (moving.length === 0) {
@@ -45,9 +57,9 @@ export function deriveLane(input: LaneInput): [LaneNode, LaneNode, LaneNode] {
     const steps = moving[0].steps;
     const activeIndex = Math.max(0, steps.findIndex((s) => s.status === "active" || s.status === "action"));
     const phrase = steps[activeIndex]?.summary ?? TRANSIT_PHRASE[steps[activeIndex]?.key ?? "swap"];
-    transit = { amount: `${formatTao(movingTao, 2)} TAO`, label: `${phrase}, step ${activeIndex + 1} of 4`, state: "live" };
+    transit = { amount: tao(movingTao), label: `${phrase}, step ${activeIndex + 1} of 4`, state: "live" };
   } else {
-    transit = { amount: `${formatTao(movingTao, 2)} TAO`, label: `${moving.length} deposits on their way`, state: "live" };
+    transit = { amount: tao(movingTao), label: `${moving.length} deposits on their way`, state: "live" };
   }
 
   let staked: LaneNode;
@@ -55,9 +67,11 @@ export function deriveLane(input: LaneInput): [LaneNode, LaneNode, LaneNode] {
     staked = { amount: "–", label: "check unavailable", state: "muted" };
   } else if (!input.position) {
     staked = { amount: "–", label: "checking", state: "muted" };
+  } else if (input.position.taoBalance > 0 && input.waitingForMinimum) {
+    staked = { amount: tao(input.position.taoBalance), label: "yours, in the vault on Bittensor, staked once it reaches 0.02 TAO", state: "live" };
   } else if (input.position.taoBalance > 0) {
     staked = {
-      amount: `${formatTao(input.position.taoBalance, 2)} TAO`,
+      amount: tao(input.position.taoBalance),
       label: "yours, staked on Bittensor",
       state: "done",
       ...(input.explorerUrl ? { href: input.explorerUrl } : {}),

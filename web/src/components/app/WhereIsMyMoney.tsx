@@ -24,6 +24,7 @@ export function WhereIsMyMoney({ account }: { account: string }) {
     position: position.data ?? null,
     positionError: position.isError,
     explorerUrl: proof.data?.explorerUrl,
+    waitingForMinimum: proof.data?.waitingForMinimum,
   });
 
   if (deposits.isError) {

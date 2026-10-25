@@ -12,7 +12,7 @@ const POINTS = [
     lead: "Always visible.",
     body: "See exactly where your money is at every step, with a live on-chain check once it is staked.",
   },
-  { lead: "Unstake any time.", body: "Back to USDC in the same wallet, usually within a day." },
+  { lead: "Unstake any time.", body: "Back to USDC in the same wallet. The form shows how long it takes." },
 ];
 
 function Tick() {
@@ -35,10 +35,10 @@ export function StakeSection() {
       <div className={`wrap ${styles.stakeGrid}`}>
         <div>
           <h2 id="stake-heading" className={styles.h2}>
-            Stake in <b>under a minute</b>
+            Stake in <b>a few clicks</b>
           </h2>
           <p className={styles.lede}>
-            Pick the chain your USDC is on, type an amount, approve once. Base is live today and more
+            Pick the chain your USDC is on, type an amount and confirm in your wallet. Base is live today and more
             chains are on the way.
           </p>
           <ul className={styles.points}>

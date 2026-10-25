@@ -15,11 +15,11 @@ const ITEMS: { q: string; a: string }[] = [
   },
   {
     q: "What are the fees?",
-    a: "Every fee is shown before you confirm. A deposit carries the swap and bridge cost. Unstaking carries a small request fee that covers the trip back to Base.",
+    a: "Every fee is shown before you confirm. A deposit pays Uniswap's swap fees and Base network fees. Unstaking pays a small request fee in ETH, the bridge fee for the trip back (taken from the TAO) and the swap fees back to USDC.",
   },
   {
     q: "How do I unstake?",
-    a: "Open the Unstake tab, enter an amount of TAO, and your USDC arrives in the same wallet on Base, usually within a day.",
+    a: "Open the Unstake tab and enter an amount of TAO. Your TAO comes back to Base after a short safety delay, and you claim it as USDC in the same wallet. The form shows how long it takes.",
   },
   {
     q: "Is there a lock-up?",

@@ -36,7 +36,7 @@ export function MoneyFlow({ quote, aprPercent }: { quote?: DepositQuote; aprPerc
     <div className={styles.wrap}>
       <p className="sr-only">
         A deposit of {usdc} in your wallet on Base is swapped for {tao}, crosses to Bittensor over
-        Chainlink CCIP and is staked. Rewards land in your balance every day.
+        Chainlink CCIP and is staked. Rewards grow your balance.
       </p>
       <div className={styles.flow} aria-hidden="true">
         <svg className={styles.route} viewBox="0 0 600 430" fill="none">
@@ -88,7 +88,7 @@ export function MoneyFlow({ quote, aprPercent }: { quote?: DepositQuote; aprPerc
 
         <span className={styles.end} style={{ left: 286, top: 372 }}>
           <Check green />
-          Rewards land in your balance every day
+          Rewards grow your balance
         </span>
       </div>
     </div>

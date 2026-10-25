@@ -9,7 +9,15 @@ import type { Position } from "@/lib/cascade/types";
 import { checkUnstake, toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdcCents } from "@/lib/format";
-import { maxUnstakeInputIn, unstakeButtonLabel, unstakeEquivalent, unstakeRequestWei, type UnstakeUnit } from "@/lib/stake-form";
+import {
+  maxUnstakeInputIn,
+  switchUnstakeUnit,
+  unstakeAvailableText,
+  unstakeButtonLabel,
+  unstakeEquivalent,
+  unstakeRequestWei,
+  type UnstakeUnit,
+} from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
@@ -48,14 +56,17 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const balances = useBalances(account);
   const [raw, setRaw] = useState("");
   const [all, setAll] = useState(false);
-  const [unit, setUnit] = useState<UnstakeUnit>("TAO");
+  // people come with USDC and want USDC back, so amounts start in USDC; the token chip switches to TAO
+  const [unit, setUnit] = useState<UnstakeUnit>("USDC");
+  // the exact TAO carried over by a unit switch, until the user edits the amount
+  const [pinned, setPinned] = useState<bigint | null>(null);
   const [opId, setOpId] = useState<string | null>(null);
   const inputId = useId();
   const noteId = useId();
 
   const available = position?.availableTaoWei ?? 0n;
   const price = position?.taoPriceUsd ?? 0;
-  const request = all ? available : unstakeRequestWei(raw, unit, price);
+  const request = all ? available : (pinned ?? unstakeRequestWei(raw, unit, price));
   const check = position && request !== null ? checkUnstake(request, available) : null;
   const shares =
     position && check?.ok
@@ -68,18 +79,27 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const pending = flows.busy === "unstake";
   const error = check && !check.ok ? check.reason : quoteQuery.isError && shares !== null ? "This amount can't be sent back right now" : null;
   const lowEth = quote !== undefined && balances.data !== undefined && balances.data.eth < quote.fee + GAS_WEI;
-  const label = unstakeButtonLabel({ account, amount: request === null ? null : toDisplay(request, 18), error, pending });
+  const typedUsd = unit === "USDC" ? Number(raw) : NaN;
+  const label = unstakeButtonLabel({
+    account,
+    amount: request === null ? null : toDisplay(request, 18),
+    ...(Number.isFinite(typedUsd) && typedUsd > 0 ? { usd: typedUsd } : {}),
+    error,
+    pending,
+  });
 
   function fillAll() {
     setRaw(maxUnstakeInputIn(available, unit, price));
+    setPinned(null);
     setAll(true);
   }
 
-  /** Switches the unit, carrying the amount over (converted). */
+  /** Switches the unit, showing the same amount in the other unit (MAX stays MAX). */
   function switchUnit() {
-    const next: UnstakeUnit = unit === "TAO" ? "USDC" : "TAO";
-    setUnit(next);
-    setRaw(request === null ? "" : maxUnstakeInputIn(request, next, price));
+    const next = switchUnstakeUnit(request, unit, price);
+    setUnit(next.unit);
+    setRaw(next.raw);
+    setPinned(all ? null : next.pinned);
   }
 
   function onSubmit(e: FormEvent) {
@@ -103,24 +123,22 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
         onChange={(v) => {
           setRaw(v);
           setAll(false);
+          setPinned(null);
         }}
         unit={unit}
         decimals={unit === "TAO" ? 6 : 2}
         onMax={account && position ? fillAll : undefined}
         invalid={error !== null}
         describedBy={noteId}
+        onToggleUnit={position && (unit === "USDC" || price > 0) ? switchUnit : undefined}
+        toggleLabel={unit === "TAO" ? "Type a USDC amount instead" : "Type a TAO amount instead"}
       />
       <p id={noteId} className={error ? styles.error : styles.note}>
         {error ??
           (position
-            ? `${request !== null && price > 0 ? `${unstakeEquivalent(request, unit, price)}. ` : ""}You can unstake ${formatTao(toDisplay(available, 18), 4)} TAO (${formatUsd(toDisplay(available, 18) * price)}). Unstakes start at 0.005 TAO.`
+            ? `${request !== null && price > 0 ? `${unstakeEquivalent(request, unit, price)}. ` : ""}You can unstake ${unstakeAvailableText(available, price)}. Unstakes start at 0.005 TAO.`
             : "Connect a wallet to see what you can unstake.")}
       </p>
-      {position && price > 0 && (
-        <button type="button" className={styles.switch} onClick={switchUnit}>
-          {unit === "TAO" ? "Type a USDC amount instead" : "Type a TAO amount instead"}
-        </button>
-      )}
       {check && !check.ok && check.offerAll && (
         <button type="button" className="pill pill-ghost pill-block" onClick={fillAll}>
           Unstake all {formatTao(toDisplay(available, 18), 4)} TAO instead

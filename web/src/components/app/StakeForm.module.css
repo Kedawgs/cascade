@@ -241,17 +241,20 @@
   font-weight: 700;
 }
 
-.switch {
-  display: block;
-  margin: 2px 0 0 auto;
-  padding: 2px 0;
+/* the token as a unit switch: same chip, clickable, with a swap mark */
+.tokSwitch {
   border: 0;
-  background: none;
-  color: var(--water);
   font: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  text-decoration: underline;
-  text-underline-offset: 3px;
   cursor: pointer;
+}
+
+.tokSwitch:hover .swap,
+.tokSwitch:focus-visible .swap {
+  color: var(--water-deep);
+}
+
+.swap {
+  margin-left: 2px;
+  color: var(--water);
+  font-size: 13px;
 }

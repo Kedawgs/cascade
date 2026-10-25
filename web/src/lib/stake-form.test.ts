@@ -4,6 +4,8 @@ import {
   maxUnstakeInput,
   maxUnstakeInputIn,
   stakeButtonLabel,
+  switchUnstakeUnit,
+  unstakeAvailableText,
   unstakeButtonLabel,
   unstakeEquivalent,
   unstakeRequestWei,
@@ -72,10 +74,26 @@ describe("unstake helpers", () => {
     );
   });
 
-  it("names the exact amount typed, not a rounded one", () => {
+  it("names the amount typed to six decimals, never rounding up", () => {
     const ok = { account: "0xa", error: null, pending: false };
     expect(unstakeButtonLabel({ ...ok, amount: 0.005 })).toBe("Unstake 0.005 TAO");
-    expect(unstakeButtonLabel({ ...ok, amount: 0.090086006 })).toBe("Unstake 0.0901 TAO");
+    expect(unstakeButtonLabel({ ...ok, amount: 0.12345 })).toBe("Unstake 0.12345 TAO");
+    expect(unstakeButtonLabel({ ...ok, amount: 0.090086006 })).toBe("Unstake 0.090086 TAO");
+  });
+
+  it("names a USDC-typed unstake in dollars", () => {
+    expect(unstakeButtonLabel({ account: "0xa", amount: 0.039619, usd: 10, error: null, pending: false })).toBe("Unstake $10.00");
+  });
+
+  it("keeps the exact TAO when switching units, so switching never changes what is sent", () => {
+    expect(switchUnstakeUnit(5_000_000_000_000_000n, "TAO", 252.4)).toEqual({ unit: "USDC", raw: "1.26", pinned: 5_000_000_000_000_000n });
+    expect(switchUnstakeUnit(5_000_000_000_000_000n, "USDC", 252.4)).toEqual({ unit: "TAO", raw: "0.005", pinned: 5_000_000_000_000_000n });
+    expect(switchUnstakeUnit(null, "TAO", 252.4)).toEqual({ unit: "USDC", raw: "", pinned: null });
+  });
+
+  it("states what can be unstaked the way MAX fills it, floored, so typing it back always works", () => {
+    expect(unstakeAvailableText(90_086_006_000_000_000n, 252.4)).toBe("0.090086 TAO ($22.73)");
+    expect(unstakeAvailableText(90_086_006_000_000_000n, 0)).toBe("0.090086 TAO");
   });
 
   it("turns a USDC amount into TAO at the current price, floored to whole rao", () => {

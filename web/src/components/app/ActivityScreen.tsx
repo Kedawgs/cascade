@@ -174,14 +174,9 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
         {(withdrawal.status === "ready" || withdrawal.cancellableShares !== undefined) && (
           <Actions>
             {withdrawal.status === "ready" && (
-              <>
-                <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, false).catch(() => undefined)}>
-                  {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
-                </button>
-                <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
-                  Keep it as TAO
-                </button>
-              </>
+              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, false).catch(() => undefined)}>
+                {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
+              </button>
             )}
             {withdrawal.cancellableShares !== undefined && (
               <button

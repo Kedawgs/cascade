@@ -5,13 +5,18 @@ import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 /** What the unstake amount is typed in: TAO, or its value in USDC. */
 export type UnstakeUnit = "TAO" | "USDC";
 
-/** TAO on buttons: at least 2 decimals, up to 4, so 0.005 stays 0.005. */
-const taoLabel = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+/** TAO on buttons: at least 2 decimals, up to 6 (the most the field takes), so 0.005 stays 0.005. */
+const taoLabel = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+
+/** Floors to `decimals` places; the tiny nudge keeps 0.29 * 1e6 from flooring to 289999. */
+const floorTo = (n: number, decimals: number) => Math.floor(n * 10 ** decimals + 1e-7) / 10 ** decimals;
 
 /** What the stake and unstake buttons need to know to name themselves. */
 export type StakeState = {
   account: string | null;
   amount: number | null;
+  /** An unstake typed as a USDC value: the button names the dollars. */
+  usd?: number;
   error: string | null;
   pending: boolean;
 };
@@ -55,7 +60,7 @@ export function unstakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";
   if (s.amount !== null && s.amount > 0 && s.error === null) {
-    return `Unstake ${taoLabel.format(s.amount)} TAO`;
+    return s.usd !== undefined ? `Unstake ${formatUsd(s.usd)}` : `Unstake ${taoLabel.format(floorTo(s.amount, 6))} TAO`;
   }
   return "Unstake";
 }
@@ -88,5 +93,22 @@ export function unstakeEquivalent(taoWei: bigint, typedIn: UnstakeUnit, priceUsd
 /** What MAX types in the unit shown: exact TAO (six decimals), or its USDC value floored to cents. */
 export function maxUnstakeInputIn(taoWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
   if (unit === "TAO") return maxUnstakeInput(taoWei);
-  return (Math.floor(toDisplay(taoWei, 18) * priceUsd * 100) / 100).toFixed(2);
+  return floorTo(toDisplay(taoWei, 18) * priceUsd, 2).toFixed(2);
+}
+
+/** Switching the unit shows the same request in the other unit and pins its exact TAO, so a
+ * round trip through cents never changes what is sent. */
+export function switchUnstakeUnit(
+  request: bigint | null,
+  unit: UnstakeUnit,
+  priceUsd: number,
+): { unit: UnstakeUnit; raw: string; pinned: bigint | null } {
+  const next: UnstakeUnit = unit === "TAO" ? "USDC" : "TAO";
+  return { unit: next, raw: request === null ? "" : maxUnstakeInputIn(request, next, priceUsd), pinned: request };
+}
+
+/** What can be unstaked, floored the way MAX fills it: "0.090086 TAO ($22.73)". */
+export function unstakeAvailableText(taoWei: bigint, priceUsd: number): string {
+  const tao = `${maxUnstakeInput(taoWei)} TAO`;
+  return priceUsd > 0 ? `${tao} (${formatUsd(floorTo(toDisplay(taoWei, 18) * priceUsd, 2))})` : tao;
 }

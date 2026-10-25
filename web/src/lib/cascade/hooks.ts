@@ -3,8 +3,9 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useCascadeData } from "./context";
 
-/** Chain reads: every 5 s while something is moving, every 30 s otherwise. */
-const LIVE_MS = 5_000;
+/** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
+ * public nodes rate-limit), every 30 s otherwise. */
+const LIVE_MS = 10_000;
 const IDLE_MS = 30_000;
 
 /** Query keys hold bigints as strings (react-query hashes keys with JSON). */

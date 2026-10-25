@@ -40,6 +40,7 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
     paths: paths({}),
     log: () => undefined,
     receiptTimeoutMs: 10,
+    pollMs: 1,
   };
   const fakeSend = async (step: PlannedStep): Promise<Sent> => {
     // saved after every step: the previous step is already on disk when this one is sent
@@ -144,6 +145,17 @@ describe("deploy", () => {
     await deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps);
     expect(w.sent).toEqual(ALL.slice(4));
     expect(w.sentNonces).toEqual([3, 4, 5, 6]);
+  });
+
+  it("a create that landed but reads empty for a moment is recovered, not voided", async () => {
+    const w = world({ base: 1, bittensor: 0 });
+    saveRecord(w.recordPath, recordWith([]));
+    let reads = 0;
+    const real = w.deps.effectPresent;
+    w.deps.effectPresent = async (c, p, step) => (step.id === "baseAdapter" ? reads++ > 0 : real(c, p, step));
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps);
+    expect(rec.done.baseAdapter).toEqual({ recovered: true });
+    expect(w.sent).toEqual(ALL.slice(1));
   });
 
   it("a dropped pending transaction is cleared and its step sent again", async () => {

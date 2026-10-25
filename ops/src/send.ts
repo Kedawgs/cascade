@@ -287,7 +287,11 @@ export async function sendCreate(ctx: Ctx, req: CreateRequest, predicted: Addres
   if (!got || got.toLowerCase() !== predicted.toLowerCase()) {
     throw new Error(`${chainLabel(req.chain)}: expected the contract at ${predicted}, but it landed at ${got}`);
   }
-  if ((await codeAt(ctx.rpc, req.chain, predicted)) === "0x") throw new Error(`${chainLabel(req.chain)}: no code at ${predicted}`);
+  // a load-balanced RPC can answer from a node a block behind the receipt: give it a moment
+  for (let i = 0; (await codeAt(ctx.rpc, req.chain, predicted)) === "0x"; i++) {
+    if (i >= 10) throw new Error(`${chainLabel(req.chain)}: no code at ${predicted} after the receipt (transaction ${hash})`);
+    await sleep(ctx.pollMs ?? 3_000);
+  }
   return { ...sent, address: predicted };
 }
 

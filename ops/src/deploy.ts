@@ -65,6 +65,18 @@ export const readColdkey = async (ctx: Ctx, vault: Address): Promise<Hex> =>
 
 const realDeps: DeployDeps = { sendCreate, sendCall, effectPresent, readColdkey };
 
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The wallet moved past a create's nonce but its code read empty: a load-balanced RPC can lag a
+ * block behind, so look again for a few seconds before calling the plan void. */
+async function landedAfterAll(ctx: Ctx, plan: Plan, step: PlannedStep, deps: DeployDeps): Promise<boolean> {
+  for (let i = 0; i < 5; i++) {
+    if (await deps.effectPresent(ctx, plan, step)) return true;
+    await pause(ctx.pollMs ?? 3_000);
+  }
+  return false;
+}
+
 type Receipt = { status: Hex; blockNumber: Hex; gasUsed: Hex; effectiveGasPrice: Hex } | null;
 
 const latestNonce = async (ctx: Ctx, chain: "base" | "bittensor") =>
@@ -165,6 +177,12 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean },
       );
     }
     // creates must land at their predicted addresses; a configuration call can go at any nonce
+    if (step.kind === "create" && current > step.nonce && (await landedAfterAll(ctx, rec.plan, step, deps))) {
+      rec.done[step.id] = { recovered: true };
+      saveRecord(path, rec);
+      ctx.log(`${chainLabel(step.chain)}: ${step.label} — already done on-chain, recorded`);
+      continue;
+    }
     if (step.kind === "create" && current !== step.nonce) {
       throw new Error(
         `${chainLabel(step.chain)}: the plan no longer matches the wallet (nonce ${current}, expected ${step.nonce}); run deploy --new-plan to start over from the current nonces`,

@@ -12,13 +12,14 @@ import type { CallRequest, CreateRequest } from "../src/types.ts";
 const HASH = `0x${"ab".repeat(32)}` as Hex;
 const SENTINEL = "NEVER-PRINT-ME";
 
-function fixture(over: { chainId?: number; nonce?: number; latestNonce?: number; estimate?: "fail" | "custom" | bigint; receipt?: "none" | "reverted" | "throws"; created?: Address; signer?: Address; castFails?: boolean; castErrors?: string } = {}) {
+function fixture(over: { chainId?: number; nonce?: number; latestNonce?: number; estimate?: "fail" | "custom" | bigint; receipt?: "none" | "reverted" | "throws"; created?: Address; signer?: Address; castFails?: boolean; castErrors?: string; codeAfter?: number } = {}) {
   const calls: { method: string; params: unknown[] }[] = [];
   const runs: { file: string; args: string[] }[] = [];
   const logs: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), "ops-send-"));
   const passwordFile = join(dir, "pw");
   let broadcast = false;
+  let codeReads = 0;
   writeFileSync(passwordFile, SENTINEL);
   const rpc: Rpc = {
     async request(chain, method, params) {
@@ -51,7 +52,8 @@ function fixture(over: { chainId?: number; nonce?: number; latestNonce?: number;
             logs: [{ address: WALLET, topics: [HASH], data: "0x" }],
           };
         case "eth_getCode":
-          return "0x6080";
+          // a load-balanced RPC can answer from a node a block behind
+          return codeReads++ < (over.codeAfter ?? 0) ? "0x" : "0x6080";
       }
       throw new Error(`unexpected ${method}`);
     },
@@ -189,6 +191,16 @@ describe("send", () => {
   it("a create landing at another address fails", async () => {
     const f = fixture({ created: WALLET });
     await expect(sendCreate(f.ctx, create, plan.addresses.bitAdapter)).rejects.toThrow(/expected .* at/i);
+  });
+
+  it("a create whose code shows up a moment later succeeds", async () => {
+    const f = fixture({ created: plan.addresses.bitAdapter, codeAfter: 2 });
+    await expect(sendCreate(f.ctx, create, plan.addresses.bitAdapter)).resolves.toMatchObject({ address: plan.addresses.bitAdapter });
+  });
+
+  it("a create with still no code after the wait fails", async () => {
+    const f = fixture({ created: plan.addresses.bitAdapter, codeAfter: 1_000 });
+    await expect(sendCreate(f.ctx, create, plan.addresses.bitAdapter)).rejects.toThrow(/no code/);
   });
 
   it("a reverted receipt fails", async () => {

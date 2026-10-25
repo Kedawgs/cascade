@@ -8,6 +8,9 @@ import { toDisplay } from "./units";
 export interface DepositFacts {
   swapMined: boolean;
   depositMined: boolean;
+  /** The cancel (taking it back out of the open batch) went through. */
+  cancelMined?: boolean;
+  now: Date;
   openBatchId: bigint;
   /** When the open batch can close. */
   closesAt: Date;
@@ -17,22 +20,42 @@ export interface DepositFacts {
   staked?: { at: Date; txHash: Hex };
   /** In the vault but not staked yet, because one position must reach the 0.02-TAO nominator minimum. */
   waitingForMinimum: boolean;
+  /** When the deposit was made (its receipt's block), and where the batch can be watched on the bridge. */
+  depositedAt?: Date;
+  watchUrl?: string;
 }
 
 export interface WithdrawalFacts {
   requestMined: boolean;
+  cancelMined?: boolean;
+  now: Date;
   openBatchId: bigint;
   closesAt: Date;
   stillOpen: boolean;
   delivered?: { at: Date; txHash: Hex; outcome: "redeemed" | "skipped" | "deferred"; taoWei?: bigint };
   payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date };
   claimable: bigint;
-  claimed?: { hash: Hex; at: Date };
+  /** The claim's receipts: TAO claimed, the USDC the swap paid (if it ran), and whether it was kept as TAO
+   * or the swap failed after the claim (the TAO then sits in the wallet). */
+  claimed?: { hash: Hex; at: Date; taoClaimed: bigint; usdcOut?: bigint; keptTao: boolean; swapFailed: boolean };
   payoutDelay: number;
 }
 
 const hhmm = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 const BRIDGE_TIME = "usually 20–30 minutes";
+
+/** On the bridge: how long so far, and what it is waiting for. */
+function onTheBridge(f: { now: Date; depositedAt?: Date }): string {
+  const mins = f.depositedAt ? Math.max(0, Math.round((f.now.getTime() - f.depositedAt.getTime()) / 60_000)) : undefined;
+  const so_far = mins !== undefined ? ` (deposited ${mins} minute${mins === 1 ? "" : "s"} ago)` : "";
+  return `On the bridge to Bittensor${so_far}. Chainlink waits for Base to finalize the batch (about 15–25 minutes), then delivers it on Bittensor`;
+}
+
+/** Before the batch closes: its time, or that it can close now once that time has passed. */
+const waitForClose = (f: { closesAt: Date; now: Date }) =>
+  f.closesAt.getTime() <= f.now.getTime()
+    ? "The batch can close now; it crosses as soon as it is sent"
+    : `Waits for the batch to close at ${hhmm(f.closesAt)}`;
 
 function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "failed" | "needs_you" | "done" | "in_progress" {
   if (steps.some((s) => s.status === "failed")) return "failed";
@@ -83,13 +106,14 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
             : "The vault skipped this deposit; the TAO stays in the vault",
       };
     }
+  } else if (op.cancelled && f.cancelMined) {
+    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Taken back before the batch closed: the TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.depositMined) {
     bridge = {
       ...bridge,
       status: "active",
-      detail: f.stillOpen
-        ? `Waits for the batch to close at ${hhmm(f.closesAt)}, then the bridge (${BRIDGE_TIME})`
-        : `On the bridge to Bittensor, ${BRIDGE_TIME}`,
+      detail: f.stillOpen ? `${waitForClose(f)}, then the bridge (${BRIDGE_TIME})` : onTheBridge(f),
+      ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
   }
 
@@ -102,19 +126,21 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   }
 
   const steps = [swap, deposit, bridge, stake];
+  const cancelled = op.cancelled !== undefined && f.cancelMined === true && !f.delivered;
   const state = overall(steps, "staked");
   return {
     id: op.id,
     createdAt: new Date(op.createdAt),
     sourceChain: "base",
-    status: state === "done" ? "staked" : (state as DepositRecord["status"]),
+    status: cancelled ? "cancelled" : state === "done" ? "staked" : (state as DepositRecord["status"]),
     steps,
     taoWei: op.targetTao,
     taoAmount: toDisplay(op.targetTao, 18),
-    amountUsd: toDisplay(op.usdcIn, 6),
+    // a deposit of TAO already in the wallet spent no USDC
+    ...(op.usdcIn > 0n ? { amountUsd: toDisplay(op.usdcIn, 6) } : {}),
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
-    ...(f.stillOpen && f.depositMined && !f.delivered ? { cancellableWei: op.targetTao } : {}),
+    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),
   };
 }
 
@@ -156,11 +182,19 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     } else {
       unstake = { ...unstake, ...link, status: "action", detail: "Today's withdrawal limit was reached; you kept your shares. Ask again tomorrow" };
     }
+  } else if (op.cancelled && f.cancelMined) {
+    unstake = {
+      ...unstake,
+      status: "failed",
+      at: new Date(op.cancelled.at),
+      txUrl: explorer.baseTx(op.cancelled.hash),
+      detail: "Cancelled before the batch closed. Your shares stay staked; the request fee isn't refunded",
+    };
   } else if (f.requestMined) {
     unstake = {
       ...unstake,
       status: "active",
-      detail: f.stillOpen ? `Waits for the batch to close at ${hhmm(f.closesAt)}, then the bridge` : `On the bridge to Bittensor, ${BRIDGE_TIME}`,
+      detail: f.stillOpen ? `${waitForClose(f)}, then the bridge` : `On the bridge to Bittensor, ${BRIDGE_TIME}`,
     };
   }
 
@@ -179,12 +213,23 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   }
 
   let claim: TrailStep<WithdrawalStepKey> = { key: "claim", title: "Claim as USDC", status: "pending" };
-  if (f.claimed) claim = { ...claim, status: "done", at: f.claimed.at, txUrl: explorer.baseTx(f.claimed.hash) };
-  else if (f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your TAO is back on Base. Claim it as USDC" };
+  const c = f.claimed;
+  if (c && c.swapFailed) {
+    claim = {
+      ...claim,
+      status: "action",
+      at: c.at,
+      txUrl: explorer.baseTx(c.hash),
+      detail: "Claimed, but the swap back to USDC didn't go through: the TAO is in your wallet. Swap it from the Stake page",
+    };
+  } else if (c) {
+    claim = { ...claim, title: c.keptTao ? "Claimed, kept as TAO" : "Claim as USDC", status: "done", at: c.at, txUrl: explorer.baseTx(c.hash) };
+  } else if (f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your TAO is back on Base. Claim it as USDC" };
 
   const steps = [request, unstake, ret, claim];
   let status: WithdrawalRecord["status"];
-  if (f.claimed) status = "paid";
+  if (op.cancelled && f.cancelMined && !d) status = "cancelled";
+  else if (c && !c.swapFailed) status = "paid";
   else if (steps.some((s) => s.status === "failed")) status = "failed";
   else if (f.claimable > 0n) status = "ready";
   else if (steps.some((s) => s.status === "action")) status = "needs_you";
@@ -199,6 +244,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     taoAmount: toDisplay(d?.taoWei ?? op.taoEstimate, 18),
     usdcAmount: toDisplay(op.usdcEstimate, 6),
     claimable: f.claimable,
-    ...(f.stillOpen && f.requestMined && !d ? { cancellableShares: op.shares } : {}),
+    ...(c && !c.swapFailed ? { received: c.keptTao ? { keptTao: toDisplay(c.taoClaimed, 18) } : { usdc: toDisplay(c.usdcOut ?? 0n, 6) } } : {}),
+    ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" ? { cancellableShares: op.shares } : {}),
   };
 }

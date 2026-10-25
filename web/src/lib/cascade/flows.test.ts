@@ -2,7 +2,19 @@ import { getAddress, type Hex, maxUint256 } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import type { Deployment } from "./config";
 import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
-import { claimCalls, type FlowCall, runFlow, stakeCalls, unstakeCall, type WalletPort } from "./flows";
+import {
+  claimCalls,
+  createFlowGuard,
+  depositTaoCalls,
+  type FlowCall,
+  FlowBusyError,
+  runFlow,
+  sellTaoCalls,
+  stakeCalls,
+  stillToSend,
+  unstakeCall,
+  type WalletPort,
+} from "./flows";
 import type { Balances, DepositQuote } from "./types";
 
 const D: Deployment = {
@@ -68,21 +80,28 @@ function port(over: Partial<WalletPort> = {}) {
   };
 }
 
-function tracker(initial: Record<string, Hex> = {}) {
+function tracker(initial: Record<string, Hex> = {}, start: { mode?: "batch" | "sequential"; callsId?: string } = {}) {
   const hashes: Record<string, Hex | undefined> = { ...initial };
   const states: string[] = [];
-  let callsId: string | undefined;
+  let callsId: string | undefined = start.callsId;
+  let mode = start.mode;
   return {
     hashes,
     states,
     get callsId() {
       return callsId;
     },
+    get mode() {
+      return mode;
+    },
     store: {
       hashes: () => hashes,
       setHash: (k: string, h: Hex) => void (hashes[k] = h),
       setState: (s: string) => void states.push(s),
       setCallsId: (id: string) => void (callsId = id),
+      callsId: () => callsId,
+      mode: () => mode,
+      setMode: (m: "batch" | "sequential") => void (mode = m),
     },
   };
 }
@@ -135,5 +154,82 @@ describe("runFlow", () => {
     expect(t.callsId).toBe("batch-1");
     expect(t.hashes.deposit).toBe(H(90));
     expect(t.states.at(-1)).toBe("sent");
+  });
+});
+
+describe("flow control", () => {
+  it("refuses a second flow while one is running, before anything is read or sent", async () => {
+    const guard = createFlowGuard(() => undefined);
+    let release: () => void = () => undefined;
+    const first = guard.run("stake", () => new Promise<void>((r) => (release = r)));
+    const second = vi.fn(async () => undefined);
+    await expect(guard.run("stake", second)).rejects.toBeInstanceOf(FlowBusyError);
+    expect(second).not.toHaveBeenCalled();
+    release();
+    await first;
+    await expect(guard.run("stake", async () => "again")).resolves.toBe("again");
+  });
+
+  it("a receipt it cannot read marks the step as waiting for the user, keeping the hash", async () => {
+    const p = port({ wait: vi.fn(async () => Promise.reject(new Error("request limit reached"))) });
+    const t = tracker();
+    await expect(runFlow(p, t.store as never, calls)).rejects.toThrow(/continue to check/i);
+    expect(t.states.at(-1)).toBe("needs-you");
+    expect(t.hashes.approveUsdc).toBeDefined();
+  });
+
+  it("resuming after a lost receipt waits on the same hash and sends nothing twice", async () => {
+    const p = port();
+    const t = tracker({ approveUsdc: H(50) });
+    await runFlow(p, t.store as never, calls);
+    expect(p.wait).toHaveBeenCalledWith(H(50));
+    expect(vi.mocked(p.send).mock.calls.map((c) => c[0].key)).toEqual(["swap", "approveTao", "deposit"]);
+  });
+
+  it("a wallet that turns down the batch (no smart account) falls back to one step at a time", async () => {
+    const declined = Object.assign(new Error("the user rejected the upgrade"), { code: 5750 });
+    const p = port({ canBatch: vi.fn(async () => true), sendBatch: vi.fn(async () => Promise.reject(declined)) });
+    const t = tracker();
+    await expect(runFlow(p, t.store as never, calls)).rejects.toThrow(/one at a time/i);
+    expect(t.mode).toBe("sequential");
+    expect(t.states.at(-1)).toBe("needs-you");
+    const again = port({ canBatch: vi.fn(async () => true) });
+    await runFlow(again, t.store as never, calls);
+    expect(again.sendBatch).not.toHaveBeenCalled();
+    expect(again.send).toHaveBeenCalledTimes(4);
+  });
+
+  it("a batch whose status could not be read is checked again, not sent again", async () => {
+    const p = port({ canBatch: vi.fn(async () => true), waitBatch: vi.fn(async () => Promise.reject(new Error("timeout"))) });
+    const t = tracker();
+    await expect(runFlow(p, t.store as never, calls)).rejects.toThrow(/continue to check/i);
+    expect(t.callsId).toBe("batch-1");
+    const again = port({ canBatch: vi.fn(async () => true) });
+    await runFlow(again, t.store as never, calls);
+    expect(again.sendBatch).not.toHaveBeenCalled();
+    expect(again.waitBatch).toHaveBeenCalledWith("batch-1");
+    expect(t.states.at(-1)).toBe("sent");
+  });
+
+  it("does not resend a swap or deposit the chain shows already happened", () => {
+    const op = { hashes: {}, targetTao: quote.targetTao };
+    expect(stillToSend(calls, op, { walletTao: 0n, depositOf: quote.targetTao })).toEqual([]);
+    expect(stillToSend(calls, op, { walletTao: quote.targetTao, depositOf: 0n }).map((c) => c.key)).toEqual(["approveTao", "deposit"]);
+    expect(stillToSend(calls, op, { walletTao: 0n, depositOf: 0n })).toHaveLength(4);
+  });
+});
+
+describe("TAO already in the wallet", () => {
+  it("deposits it with an exact approval, in whole rao", () => {
+    const c = depositTaoCalls(12_345_678_912_345_678n, none, D);
+    expect(c.map((x) => x.key)).toEqual(["approveTao", "deposit"]);
+    expect(c[1].args).toEqual([12_345_678_000_000_000n]);
+    expect(c[0].args).toEqual([D.frontDoor, 12_345_678_000_000_000n]);
+  });
+
+  it("swaps it back to USDC with a minimum", () => {
+    const c = sellTaoCalls(10n ** 16n, 2_400_000n, none, ME);
+    expect(c.map((x) => x.key)).toEqual(["approveTao", "swap"]);
+    expect(c[1]).toMatchObject({ functionName: "exactInput", args: [{ amountIn: 10n ** 16n, amountOutMinimum: 2_400_000n, recipient: ME }] });
   });
 });

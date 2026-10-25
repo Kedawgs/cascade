@@ -82,5 +82,7 @@ export const explorer = {
   baseTx: (hash: string) => `https://basescan.org/tx/${hash}`,
   bittensorTx: (hash: string) => `https://evm.taostats.io/tx/${hash}`,
   ccip: (messageId: string) => `https://ccip.chain.link/msg/${messageId}`,
+  /** Every bridge message an address sent, on Chainlink's explorer. */
+  ccipAddress: (address: string) => `https://ccip.chain.link/address/${address}`,
   account: (ss58: string) => `https://taostats.io/account/${ss58}`,
 };

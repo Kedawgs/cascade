@@ -87,7 +87,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
                 type="button"
                 className="pill pill-ghost pill-block"
                 disabled={flows.busy !== null}
-                onClick={() => void flows.cancel("deposit", deposit.cancellableWei as bigint).catch(() => undefined)}
+                onClick={() => void flows.cancel("deposit", id, deposit.cancellableWei as bigint).catch(() => undefined)}
               >
                 Take it back before the batch closes
               </button>
@@ -106,7 +106,11 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
 
 function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   const { data: withdrawal, isPending, isError, refetch } = useWithdrawal(account, id);
+  const all = useWithdrawals(account);
   const flows = useFlows(account);
+  // one claim pays everything back on Base, so it settles every unstake that is ready
+  const ready = (all.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
+  const claimIds = ready.includes(id) ? ready : [...ready, id];
   if (isError) return <LoadError what="this unstake" onRetry={() => void refetch()} />;
   if (isPending) return <Loading />;
   if (!withdrawal) return <NotFound what="unstake" />;
@@ -121,14 +125,24 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
         <h2 className={styles.panelTitle}>{paid ? `Where your ${tao} TAO went` : `Where your ${tao} TAO is going`}</h2>
         <Trail steps={withdrawal.steps} label="Unstake steps" />
         <dl className={styles.rows}>
-          {withdrawal.usdcAmount !== undefined && (
+          {paid && withdrawal.received ? (
             <div>
-              <dt>{paid ? "You received" : "You will receive"}</dt>
+              <dt>You received</dt>
               <dd>
-                {paid ? "" : "about "}
-                {formatUsdc(withdrawal.usdcAmount)} USDC on Base
+                {withdrawal.received.usdc !== undefined
+                  ? `${formatUsdc(withdrawal.received.usdc)} USDC on Base`
+                  : `${formatTao(withdrawal.received.keptTao ?? 0, 4)} TAO on Base`}
               </dd>
             </div>
+          ) : (
+            !paid &&
+            withdrawal.status !== "cancelled" &&
+            withdrawal.usdcAmount !== undefined && (
+              <div>
+                <dt>You will receive</dt>
+                <dd>about {formatUsdc(withdrawal.usdcAmount)} USDC on Base</dd>
+              </div>
+            )
           )}
           {withdrawal.claimable > 0n && (
             <div>
@@ -137,14 +151,21 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
             </div>
           )}
         </dl>
+        {withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
+          <Actions>
+            <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>
+              {flows.busy === "claim" ? "Confirm in your wallet…" : "Swap it to USDC"}
+            </button>
+          </Actions>
+        )}
         {(withdrawal.status === "ready" || withdrawal.cancellableShares !== undefined) && (
           <Actions>
             {withdrawal.status === "ready" && (
               <>
-                <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(false).catch(() => undefined)}>
+                <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, false).catch(() => undefined)}>
                   {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
                 </button>
-                <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(true).catch(() => undefined)}>
+                <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
                   Keep it as TAO
                 </button>
               </>
@@ -154,9 +175,9 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
                 type="button"
                 className="pill pill-ghost pill-block"
                 disabled={flows.busy !== null}
-                onClick={() => void flows.cancel("withdrawal", withdrawal.cancellableShares as bigint).catch(() => undefined)}
+                onClick={() => void flows.cancel("withdrawal", id, withdrawal.cancellableShares as bigint).catch(() => undefined)}
               >
-                Cancel before the batch closes
+                Cancel before the batch closes (the request fee isn&apos;t refunded)
               </button>
             )}
           </Actions>

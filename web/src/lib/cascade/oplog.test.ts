@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createOpLog, type DepositOp } from "./oplog";
+import { createOpLog, type DepositOp, effectiveState } from "./oplog";
 
 const FD = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750" as const;
 const ME = "0x000000000000000000000000000000000000A11c" as const;
@@ -60,5 +60,18 @@ describe("operation log", () => {
     const log = createOpLog(broken, FD);
     log.put(deposit("a", ME, 1));
     expect(log.get(ME, "a")?.id).toBe("a");
+  });
+});
+
+describe("effectiveState", () => {
+  it("treats a flow left running by a closed or reloaded tab as waiting for the user", () => {
+    const log = createOpLog(memoryStorage(), FD);
+    const op = deposit("a", ME, 1);
+    log.put(op);
+    expect(effectiveState(op, log)).toBe("needs-you");
+    log.markActive("a");
+    expect(effectiveState(op, log)).toBe("running");
+    log.markInactive("a");
+    expect(effectiveState({ ...op, state: "sent" }, log)).toBe("sent");
   });
 });

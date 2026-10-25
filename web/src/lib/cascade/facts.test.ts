@@ -1,9 +1,9 @@
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
-import { ADAPTER, FRONT_DOOR, VAULT } from "./abi";
+import { ADAPTER, ERC20, FRONT_DOOR, VAULT } from "./abi";
 import type { Deployment } from "./config";
 import { depositFacts, newScan, scanVault, withdrawalFacts } from "./facts";
-import type { DepositOp, WithdrawalOp } from "./oplog";
+import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
 
 const D: Deployment = {
@@ -221,5 +221,41 @@ describe("facts", () => {
     expect(f.batchId).toBe(3n);
     expect(f.facts.delivered).toMatchObject({ outcome: "redeemed", taoWei: 10n ** 16n });
     expect(f.facts.payout).toMatchObject({ messageId: H(6), state: 1 });
+  });
+
+  it("reads what a claim paid from its receipts, for the unstakes it names", async () => {
+    const claimedLog = log(
+      D.frontDoor,
+      encodeEventTopics({ abi: FRONT_DOOR, eventName: "Claimed", args: { user: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256"), [99n * 10n ** 14n]),
+      60n,
+      H(21),
+    );
+    const usdcIn = log(
+      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      encodeEventTopics({ abi: ERC20, eventName: "Transfer", args: { from: "0xd0b53D9277642d899DF5C87A3966A349A798F224", to: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256"), [2_450_000n]),
+      61n,
+      H(22),
+    );
+    const c = chains({ baseReceipts: { [H(21)]: { status: "success", logs: [claimedLog] }, [H(22)]: { status: "success", logs: [usdcIn] } } });
+    const op: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 1n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, state: "sent" };
+    const claim: ClaimOp = {
+      id: "k",
+      kind: "claim",
+      account: ME,
+      createdAt: 10,
+      amount: 99n * 10n ** 14n,
+      keepTao: false,
+      minUsdc: 1n,
+      hashes: { claim: H(21), swap: H(22) },
+      withdrawalIds: ["w"],
+      state: "sent",
+    };
+    const other: ClaimOp = { ...claim, id: "k2", withdrawalIds: ["someone-else"] };
+    const f = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [other, claim] });
+    expect(f.facts.claimed).toMatchObject({ hash: H(21), taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, keptTao: false, swapFailed: false });
+    const none = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [other] });
+    expect(none.facts.claimed).toBeUndefined();
   });
 });

@@ -26,6 +26,7 @@ function Chip({ status }: { status: DepositRecord["status"] | WithdrawalRecord["
   if (status === "ready") return <span className={`${styles.chip} ${styles.warn}`}>Ready to claim</span>;
   if (status === "needs_you") return <span className={`${styles.chip} ${styles.warn}`}>Needs you</span>;
   if (status === "failed") return <span className={`${styles.chip} ${styles.bad}`}>Problem</span>;
+  if (status === "cancelled") return <span className={`${styles.chip} ${styles.warn}`}>Cancelled</span>;
   return <span className={`${styles.chip} ${styles.busy}`}>On its way</span>;
 }
 
@@ -54,7 +55,7 @@ export function DepositList({ deposits }: { deposits: DepositRecord[] }) {
               </span>
               <span>
                 <Chip status={d.status} />
-                {d.status !== "staked" && (
+                {d.status !== "staked" && d.status !== "cancelled" && (
                   <>
                     <Bars done={done} />
                     <span className={styles.sub}>{current ? TRANSIT_PHRASE[current.key] : "starting"}</span>
@@ -98,7 +99,7 @@ export function WithdrawalList({ withdrawals }: { withdrawals: WithdrawalRecord[
               </span>
               <span>
                 <Chip status={w.status} />
-                {w.status !== "paid" && <Bars done={done} />}
+                {w.status !== "paid" && w.status !== "cancelled" && <Bars done={done} />}
               </span>
               <span className={styles.chev} aria-hidden="true">
                 ›

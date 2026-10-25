@@ -26,6 +26,8 @@ export interface DepositOp extends OpBase {
   /** EIP-5792 batch id when the wallet sent everything at once. */
   callsId?: string;
   batchId?: bigint;
+  /** Taken back out of the open batch. */
+  cancelled?: { hash: Hex; at: number };
 }
 
 export interface WithdrawalOp extends OpBase {
@@ -36,6 +38,7 @@ export interface WithdrawalOp extends OpBase {
   fee: bigint;
   hash?: Hex;
   batchId?: bigint;
+  cancelled?: { hash: Hex; at: number };
 }
 
 export interface ClaimOp extends OpBase {
@@ -45,6 +48,8 @@ export interface ClaimOp extends OpBase {
   minUsdc: bigint;
   hashes: Partial<Record<ClaimCall, Hex>>;
   callsId?: string;
+  /** The unstakes this claim pays out (everything that was back on Base when it was made). */
+  withdrawalIds?: string[];
 }
 
 export type Operation = DepositOp | WithdrawalOp | ClaimOp;
@@ -80,7 +85,13 @@ export function createOpLog(storage: Storage, frontDoor: Address) {
     }
   }
 
+  /** Flows running in this tab right now: a "running" record not in here was left by a reload. */
+  const active = new Set<string>();
+
   return {
+    markActive: (id: string) => void active.add(id),
+    markInactive: (id: string) => void active.delete(id),
+    isActive: (id: string) => active.has(id),
     list: (account: Address) => [...read(account)].sort((a, b) => b.createdAt - a.createdAt),
     get: (account: Address, id: string) => read(account).find((o) => o.id === id) ?? null,
     put(op: Operation) {
@@ -96,6 +107,11 @@ export function createOpLog(storage: Storage, frontDoor: Address) {
 }
 
 export type OpLog = ReturnType<typeof createOpLog>;
+
+/** A record still marked "running" whose flow is not running in this tab was interrupted (a reload,
+ * a closed tab): the user can continue it. */
+export const effectiveState = (op: Operation, log: Pick<OpLog, "isActive">): OpState =>
+  op.state === "running" && !log.isActive(op.id) ? "needs-you" : op.state;
 
 /** A short random id for a new operation. */
 export const newOpId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);

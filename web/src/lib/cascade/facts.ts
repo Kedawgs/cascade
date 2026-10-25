@@ -1,7 +1,7 @@
 import { type Address, type Hex, parseEventLogs } from "viem";
-import { ADAPTER, FRONT_DOOR, OFFRAMP_ABI, VAULT } from "./abi";
+import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, VAULT } from "./abi";
 import type { Clients } from "./chain";
-import { type Deployment, OFFRAMP } from "./config";
+import { type Deployment, explorer, OFFRAMP, TOKENS } from "./config";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
 import type { DepositFacts, WithdrawalFacts } from "./trail";
@@ -117,8 +117,13 @@ export async function depositFacts(
   const dep = await baseReceipt(c, op.hashes.deposit);
   const batchId = op.batchId ?? batchIdFrom(dep, "DepositRequested", op.account);
   const facts: DepositFacts = {
-    swapMined: mined(swap),
+    // a deposit of TAO already in the wallet has no swap
+    swapMined: op.usdcIn === 0n ? mined(dep) || !!op.hashes.deposit : mined(swap),
     depositMined: mined(dep),
+    cancelMined: op.cancelled ? mined(await baseReceipt(c, op.cancelled.hash)) : undefined,
+    now: new Date(),
+    depositedAt: new Date(op.createdAt),
+    watchUrl: explorer.ccipAddress(d.baseAdapter),
     openBatchId: ctx.fd.openBatchId,
     closesAt: closesAt(ctx.fd),
     stillOpen: batchId === undefined || batchId === ctx.fd.openBatchId,
@@ -159,6 +164,8 @@ export async function withdrawalFacts(
   const batchId = op.batchId ?? batchIdFrom(req, "RedeemRequested", op.account);
   const facts: WithdrawalFacts = {
     requestMined: mined(req),
+    cancelMined: op.cancelled ? mined(await baseReceipt(c, op.cancelled.hash)) : undefined,
+    now: new Date(),
     openBatchId: ctx.fd.openBatchId,
     closesAt: closesAt(ctx.fd),
     stillOpen: batchId === undefined || batchId === ctx.fd.openBatchId,
@@ -190,9 +197,31 @@ export async function withdrawalFacts(
       facts.payout = { txHash: sent.txHash, messageId, state: Math.min(3, Math.max(0, state)) as 0 | 1 | 2 | 3, at: await blockTime(c, ctx.scan, sent.block) };
     }
   }
-  const claim = ctx.claims.find((k) => k.createdAt >= op.createdAt && k.hashes.claim);
-  if (claim && mined(await baseReceipt(c, claim.hashes.claim))) facts.claimed = { hash: claim.hashes.claim as Hex, at: new Date(claim.createdAt) };
+  const claim = ctx.claims.find((k) => k.withdrawalIds?.includes(op.id) && k.hashes.claim);
+  if (claim) facts.claimed = await claimResult(c, claim);
   return { batchId, facts };
+}
+
+/** What a claim really paid, from its receipts: the TAO claimed and, if it swapped, the USDC received.
+ * Undefined while the claim (or its swap, still in flight) has not settled. */
+async function claimResult(c: Pick<Clients, "base">, k: ClaimOp): Promise<WithdrawalFacts["claimed"]> {
+  const claimReceipt = await baseReceipt(c, k.hashes.claim);
+  if (!mined(claimReceipt)) return undefined;
+  const claimedLog = parseEventLogs({ abi: FRONT_DOOR, logs: claimReceipt!.logs as never, eventName: "Claimed", strict: false }).find(
+    (l) => same(l.args.user as string, k.account),
+  );
+  const taoClaimed = (claimedLog?.args.amount as bigint | undefined) ?? k.amount;
+  const base = { hash: k.hashes.claim as Hex, at: new Date(k.createdAt), taoClaimed };
+  if (k.keepTao) return { ...base, keptTao: true, swapFailed: false };
+  const swapReceipt = await baseReceipt(c, k.hashes.swap);
+  if (mined(swapReceipt)) {
+    const usdcOut = parseEventLogs({ abi: ERC20, logs: swapReceipt!.logs as never, eventName: "Transfer", strict: false })
+      .filter((l) => same(l.address, TOKENS.usdc) && same(l.args.to as string, k.account))
+      .reduce((sum, l) => sum + (l.args.value as bigint), 0n);
+    return { ...base, usdcOut, keptTao: false, swapFailed: false };
+  }
+  // the claim went through; a swap that stopped (not one still running) leaves the TAO in the wallet
+  return k.state === "failed" || k.state === "needs-you" ? { ...base, keptTao: false, swapFailed: true } : undefined;
 }
 
 /** The account's deposits as the vault recorded them, with when they arrived and whether staking followed. */

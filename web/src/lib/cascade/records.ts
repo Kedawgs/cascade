@@ -19,7 +19,7 @@ export interface DepositRecord {
   id: string;
   createdAt: Date;
   sourceChain: "base";
-  status: "in_progress" | "staked" | "failed" | "needs_you";
+  status: "in_progress" | "staked" | "failed" | "needs_you" | "cancelled";
   steps: TrailStep<DepositStepKey>[];
   /** TAO this deposit put in (exact, and as a display number). */
   taoWei: bigint;
@@ -35,7 +35,7 @@ export interface DepositRecord {
 export interface WithdrawalRecord {
   id: string;
   createdAt: Date;
-  status: "in_progress" | "ready" | "paid" | "failed" | "needs_you";
+  status: "in_progress" | "ready" | "paid" | "failed" | "needs_you" | "cancelled";
   steps: TrailStep<WithdrawalStepKey>[];
   shares: bigint;
   taoAmount: number;
@@ -44,6 +44,8 @@ export interface WithdrawalRecord {
   feesUsd?: number;
   /** TAO waiting on Base for the user to claim. */
   claimable: bigint;
+  /** What the claim actually paid, read from its receipts. */
+  received?: { usdc?: number; keptTao?: number };
   /** Shares still in the open batch that can be taken back. */
   cancellableShares?: bigint;
 }

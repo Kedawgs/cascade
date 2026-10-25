@@ -25,6 +25,7 @@ const base: DepositFacts = {
   swapMined: true,
   depositMined: true,
   openBatchId: 3n,
+  now: new Date("2026-10-25T10:05:00Z"),
   closesAt: new Date("2026-10-25T10:10:00Z"),
   waitingForMinimum: false,
   stillOpen: true,
@@ -42,10 +43,32 @@ describe("deposit trail", () => {
     expect(r.status).toBe("in_progress");
   });
 
-  it("is on the bridge once the batch has closed", () => {
-    const r = depositRecord(op, { ...base, openBatchId: 4n, stillOpen: false });
+  it("says the batch can close now once its time has passed", () => {
+    const r = depositRecord(op, { ...base, now: new Date("2026-10-25T10:20:00Z") });
+    expect(r.steps[2].detail).toMatch(/can close now/i);
+    expect(r.steps[2].detail).not.toMatch(/10:10/);
+  });
+
+  it("shows a deposit taken back before the batch closed as cancelled", () => {
+    const r = depositRecord({ ...op, cancelled: { hash: H(12), at: T0.getTime() } }, { ...base, cancelMined: true });
+    expect(r.status).toBe("cancelled");
+    expect(r.cancellableWei).toBeUndefined();
+    expect(r.steps[2]).toMatchObject({ status: "failed" });
+    expect(r.steps[2].detail).toMatch(/back in your wallet/i);
+  });
+
+  it("is on the bridge once the batch has closed, saying for how long and where to watch it", () => {
+    const r = depositRecord(op, {
+      ...base,
+      openBatchId: 4n,
+      stillOpen: false,
+      depositedAt: new Date("2026-10-25T09:53:00Z"),
+      watchUrl: "https://ccip.chain.link/address/0x221C",
+    });
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
-    expect(r.steps[2].detail).toMatch(/bridge/i);
+    expect(r.steps[2].detail).toMatch(/deposited 12 minutes ago/);
+    expect(r.steps[2].detail).toMatch(/finalize/);
+    expect(r.steps[2].txUrl).toBe("https://ccip.chain.link/address/0x221C");
     expect(r.cancellableWei).toBeUndefined();
   });
 
@@ -103,6 +126,7 @@ const wop: WithdrawalOp = {
 const wbase: WithdrawalFacts = {
   requestMined: true,
   openBatchId: 5n,
+  now: new Date("2026-10-25T10:05:00Z"),
   closesAt: new Date("2026-10-25T10:10:00Z"),
   stillOpen: true,
   claimable: 0n,
@@ -126,9 +150,38 @@ describe("withdrawal trail", () => {
     const ready = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 99n * 10n ** 14n });
     expect(statuses(ready)).toEqual(["done", "done", "done", "action"]);
     expect(ready.status).toBe("ready");
-    const paid = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 0n, claimed: { hash: H(11), at: new Date() } });
+    const claimed = { hash: H(11), at: new Date(), taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, keptTao: false, swapFailed: false };
+    const paid = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 0n, claimed });
     expect(paid.status).toBe("paid");
     expect(statuses(paid)).toEqual(["done", "done", "done", "done"]);
+    expect(paid.received).toEqual({ usdc: 2.45 });
+    const kept = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 0n, claimed: { ...claimed, usdcOut: undefined, keptTao: true } });
+    expect(kept.received).toEqual({ keptTao: 0.0099 });
+    expect(kept.steps[3].title).toMatch(/kept as TAO/i);
+  });
+
+  it("says when the claim went through but the swap back to USDC did not", () => {
+    const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+    const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date() };
+    const r = withdrawalRecord(wop, {
+      ...wbase,
+      openBatchId: 6n,
+      stillOpen: false,
+      delivered: redeemed,
+      payout,
+      claimable: 0n,
+      claimed: { hash: H(11), at: new Date(), taoClaimed: 99n * 10n ** 14n, keptTao: false, swapFailed: true },
+    });
+    expect(r.status).toBe("needs_you");
+    expect(r.steps[3]).toMatchObject({ status: "action" });
+    expect(r.steps[3].detail).toMatch(/in your wallet/i);
+  });
+
+  it("shows a request taken back as cancelled, noting the fee is kept", () => {
+    const r = withdrawalRecord({ ...wop, cancelled: { hash: H(13), at: T0.getTime() } }, { ...wbase, cancelMined: true });
+    expect(r.status).toBe("cancelled");
+    expect(r.cancellableShares).toBeUndefined();
+    expect(r.steps[1].detail).toMatch(/fee/i);
   });
 
   it("marks a failed payout message and a skipped redeem", () => {

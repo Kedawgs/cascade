@@ -66,3 +66,23 @@
     font-size: 17px;
   }
 }
+
+.walletTao {
+  margin: 0 24px 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #fff4e5;
+  color: #5c3b00;
+  font-size: 14px;
+}
+
+.walletTaoActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.walletTaoError {
+  margin-top: 8px;
+  color: #b42318;
+}

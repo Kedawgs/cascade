@@ -125,4 +125,21 @@ describe("live data", () => {
     await expect(notConfiguredData().getProtocolStats()).rejects.toBeInstanceOf(NotConfiguredError);
   });
 
+
+  it("never runs two scans of the same account at once", async () => {
+    let running = 0;
+    let overlapped = false;
+    let calls = 0;
+    const scan = async () => {
+      calls++;
+      running++;
+      if (running > 1) overlapped = true;
+      await new Promise((r) => setTimeout(r, 10));
+      running--;
+    };
+    const data = createLiveCascadeData(D, deps({ scan }));
+    await Promise.all([data.getPosition(ME), data.getPosition(ME), data.getPosition(ME)]);
+    expect(overlapped).toBe(false);
+    expect(calls).toBeLessThanOrEqual(1);
+  });
 });

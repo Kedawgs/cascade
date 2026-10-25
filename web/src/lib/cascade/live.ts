@@ -2,7 +2,7 @@ import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
 import { type Deployment, explorer } from "./config";
 import { chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
-import { type ClaimOp, createOpLog, type DepositOp, type OpLog, type WithdrawalOp } from "./oplog";
+import { type ClaimOp, createOpLog, type DepositOp, effectiveState, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { chainOnlyDeposit, depositRecord, withdrawalRecord } from "./trail";
 import type { CascadeData, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
@@ -76,17 +76,32 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   };
   const c = deps.clients;
   const scans = new Map<string, VaultScan>();
+  /** One scan of an account at a time: overlapping scans would read the same blocks twice and
+   * double-count events. Callers arriving while one runs share it. */
+  const inFlight = new Map<string, Promise<VaultScan>>();
 
-  async function scanFor(account?: Address): Promise<VaultScan> {
+  function scanFor(account?: Address): Promise<VaultScan> {
     const key = (account ?? "").toLowerCase();
+    const running = inFlight.get(key);
+    if (running) return running;
     let s = scans.get(key);
     if (!s) {
       s = newScan(d);
       scans.set(key, s);
     }
-    await deps.scan(c, d, s, account);
-    return s;
+    const scan = s;
+    const p = deps.scan(c, d, scan, account).then(
+      () => scan,
+      (e) => Promise.reject(e),
+    );
+    inFlight.set(key, p);
+    const clear = () => void inFlight.delete(key);
+    p.then(clear, clear);
+    return p;
   }
+
+  /** A record's state as this tab sees it: "running" with no flow running here means interrupted. */
+  const live = <T extends DepositOp | WithdrawalOp | ClaimOp>(op: T): T => ({ ...op, state: effectiveState(op, deps.opLog) });
 
   const closesAt = (fd: reads.FrontDoorState) => new Date((fd.openStart + fd.batchInterval) * 1000);
   /** Sent, its batch closed, not yet arrived in the vault. */
@@ -143,7 +158,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
     const out: DepositRecord[] = [];
     const seen = new Set<string>();
-    for (const op of deps.opLog.list(a).filter((o): o is DepositOp => o.kind === "deposit")) {
+    for (const op of deps.opLog.list(a).filter((o): o is DepositOp => o.kind === "deposit").map(live)) {
       const { batchId, facts } = await depositFacts(c, d, op, { fd, vault: v, scan });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       if (facts.delivered) seen.add(facts.delivered.txHash.toLowerCase());
@@ -157,9 +172,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const a = account as Address;
     const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
     const ops = deps.opLog.list(a);
-    const claims = ops.filter((o): o is ClaimOp => o.kind === "claim");
+    const claims = ops.filter((o): o is ClaimOp => o.kind === "claim").map(live);
     const out: WithdrawalRecord[] = [];
-    for (const op of ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal")) {
+    for (const op of ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal").map(live)) {
       const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       out.push(withdrawalRecord({ ...op, batchId: batchId ?? op.batchId }, facts));

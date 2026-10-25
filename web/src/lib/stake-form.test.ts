@@ -5,8 +5,9 @@ import {
   maxUnstakeInputIn,
   stakeButtonLabel,
   switchUnstakeUnit,
-  unstakeAvailableText,
+  unstakeErrorText,
   unstakeLabelUsd,
+  unstakeNote,
   unstakeButtonLabel,
   unstakeEquivalent,
   unstakeRequestWei,
@@ -93,15 +94,32 @@ describe("unstake helpers", () => {
     expect(unstakeLabelUsd({ unit: "USDC", raw: "", fixed: false, requestWei: null, priceUsd: 260 })).toBeUndefined();
   });
 
+  it("states what can be unstaked and the minimum in the unit shown", () => {
+    const available = 70_219_000_000_000_000n;
+    expect(unstakeNote(available, "USDC", 252)).toBe("You can unstake up to $17.69. The minimum is about $1.26 (0.005 TAO).");
+    expect(unstakeNote(available, "TAO", 252)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.005 TAO.");
+  });
+
+  it("explains a refused amount in dollars when typing dollars", () => {
+    const available = 70_219_000_000_000_000n;
+    expect(unstakeErrorText({ ok: false, code: "belowMin", reason: "Unstake at least 0.005 TAO", offerAll: false }, available, "USDC", 252)).toBe(
+      "The minimum unstake is about $1.26 (0.005 TAO).",
+    );
+    expect(unstakeErrorText({ ok: false, code: "tooMuch", reason: "x", offerAll: true }, available, "USDC", 252)).toBe(
+      "That's more than you can unstake (up to $17.69).",
+    );
+    expect(unstakeErrorText({ ok: false, code: "leavesDust", reason: "x", offerAll: true }, available, "USDC", 252)).toBe(
+      "That would leave less than about $1.26 staked, too little to unstake later.",
+    );
+    expect(unstakeErrorText({ ok: false, code: "belowMin", reason: "Unstake at least 0.005 TAO", offerAll: false }, available, "TAO", 252)).toBe(
+      "Unstake at least 0.005 TAO",
+    );
+  });
+
   it("keeps the exact TAO when switching units, so switching never changes what is sent", () => {
     expect(switchUnstakeUnit(5_000_000_000_000_000n, "TAO", 252.4)).toEqual({ unit: "USDC", raw: "1.26", pinned: 5_000_000_000_000_000n });
     expect(switchUnstakeUnit(5_000_000_000_000_000n, "USDC", 252.4)).toEqual({ unit: "TAO", raw: "0.005", pinned: 5_000_000_000_000_000n });
     expect(switchUnstakeUnit(null, "TAO", 252.4)).toEqual({ unit: "USDC", raw: "", pinned: null });
-  });
-
-  it("states what can be unstaked the way MAX fills it, floored, so typing it back always works", () => {
-    expect(unstakeAvailableText(90_086_006_000_000_000n, 252.4)).toBe("0.090086 TAO ($22.73)");
-    expect(unstakeAvailableText(90_086_006_000_000_000n, 0)).toBe("0.090086 TAO");
   });
 
   it("turns a USDC amount into TAO at the current price, floored to whole rao", () => {

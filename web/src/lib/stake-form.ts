@@ -1,5 +1,6 @@
 import { formatUnits, parseUnits } from "viem";
-import { floorRao, toDisplay } from "./cascade/units";
+import { MIN_UNSTAKE_WEI } from "./cascade/config";
+import { floorRao, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 
 /** What the unstake amount is typed in: TAO, or its value in USDC. */
@@ -107,12 +108,6 @@ export function switchUnstakeUnit(
   return { unit: next, raw: request === null ? "" : maxUnstakeInputIn(request, next, priceUsd), pinned: request };
 }
 
-/** What can be unstaked, floored the way MAX fills it: "0.090086 TAO ($22.73)". */
-export function unstakeAvailableText(taoWei: bigint, priceUsd: number): string {
-  const tao = `${maxUnstakeInput(taoWei)} TAO`;
-  return priceUsd > 0 ? `${tao} (${formatUsd(floorTo(toDisplay(taoWei, 18) * priceUsd, 2))})` : tao;
-}
-
 /** The dollars an unstake typed in USDC names on its button. A fixed amount (carried over by a unit
  * switch, or MAX) sends exact TAO, so its dollars follow the current price; otherwise they are the
  * dollars typed. Undefined when the button should name TAO. */
@@ -127,4 +122,33 @@ export function unstakeLabelUsd(s: {
   if (s.fixed) return s.priceUsd > 0 ? floorTo(toDisplay(s.requestWei, 18) * s.priceUsd, 2) : undefined;
   const typed = Number(s.raw);
   return Number.isFinite(typed) && typed > 0 ? typed : undefined;
+}
+
+/** Dollars, floored to cents: what can be unstaked never reads higher than it is. */
+const usdDown = (taoWei: bigint, priceUsd: number) => formatUsd(floorTo(toDisplay(taoWei, 18) * priceUsd, 2));
+const MIN_USD = (priceUsd: number) => `about ${formatUsd(toDisplay(MIN_UNSTAKE_WEI, 18) * priceUsd)}`;
+
+/** The line under the unstake field: how much can go and the minimum, in the unit shown. */
+export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
+  if (unit === "USDC" && priceUsd > 0) {
+    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd)} (0.005 TAO).`;
+  }
+  return `You can unstake up to ${maxUnstakeInput(availableWei)} TAO. The minimum is 0.005 TAO.`;
+}
+
+/** Why an amount can't be unstaked, in dollars when the user types dollars. */
+export function unstakeErrorText(check: Extract<UnstakeCheck, { ok: false }>, availableWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
+  if (unit !== "USDC" || !(priceUsd > 0)) return check.reason;
+  switch (check.code) {
+    case "tooMuch":
+      return `That's more than you can unstake (up to ${usdDown(availableWei, priceUsd)}).`;
+    case "belowMin":
+      return `The minimum unstake is ${MIN_USD(priceUsd)} (0.005 TAO).`;
+    case "leavesDust":
+      return `That would leave less than ${MIN_USD(priceUsd)} staked, too little to unstake later.`;
+    case "stakeBelowMin":
+      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd)} (0.005 TAO).`;
+    default:
+      return check.reason;
+  }
 }

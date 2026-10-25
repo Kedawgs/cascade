@@ -6,7 +6,6 @@ import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useBalances, useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { parseActivityParams } from "@/lib/activity-params";
-import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { DepositList, WithdrawalList } from "../ActivityList";
@@ -149,13 +148,20 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   if (!withdrawal) return <NotFound what="unstake" />;
 
   const paid = withdrawal.status === "paid";
-  const tao = formatTao(withdrawal.taoAmount, 4);
+  // dollars first: what comes back in USDC, falling back to TAO when there is no estimate
+  const got = paid ? withdrawal.received?.usdc : undefined;
+  const title =
+    got !== undefined
+      ? `Your unstake of ${formatUsd(got)}`
+      : withdrawal.usdcAmount !== undefined
+        ? `Your unstake of about ${formatUsd(withdrawal.usdcAmount)}`
+        : `Your unstake of ${formatTao(withdrawal.taoAmount, 4)} TAO`;
   return (
     <>
       <BackLink />
       <div className={`${app.card} ${styles.panel}`}>
         <p className={styles.kicker}>{formatDay(withdrawal.createdAt)} unstake</p>
-        <h2 className={styles.panelTitle}>{paid ? `Where your ${tao} TAO went` : `Where your ${tao} TAO is going`}</h2>
+        <h2 className={styles.panelTitle}>{title}</h2>
         <Trail steps={withdrawal.steps} label="Unstake steps" />
         <dl className={styles.rows}>
           {paid && withdrawal.received ? (
@@ -177,18 +183,19 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
               </div>
             )
           )}
-          {withdrawal.claimable > 0n && (
-            <div>
-              <dt>Waiting for you on Base</dt>
-              <dd>{formatTao(toDisplay(withdrawal.claimable, 18), 4)} TAO</dd>
-            </div>
-          )}
         </dl>
         {withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
           <Actions>
             <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>
               {flows.busy === "claim" ? "Confirm in your wallet…" : "Swap it to USDC"}
             </button>
+          </Actions>
+        )}
+        {withdrawal.unstakeAgain && (
+          <Actions>
+            <Link href="/unstake" className="pill pill-block">
+              Unstake again
+            </Link>
           </Actions>
         )}
         {(withdrawal.status === "ready" || withdrawal.cancellableShares !== undefined) && (
@@ -205,7 +212,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
                 </button>
                 {claimFailed && (
                   <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
-                    Claim the TAO instead (swap it later on the Stake page)
+                    Claim now and swap to USDC separately
                   </button>
                 )}
               </>
@@ -217,7 +224,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
                 disabled={flows.busy !== null}
                 onClick={() => void flows.cancel("withdrawal", id, withdrawal.cancellableShares as bigint).catch(() => undefined)}
               >
-                Cancel before the batch closes (the request fee isn&apos;t refunded)
+                Cancel this unstake (the 0.0001 ETH request fee isn&apos;t refunded)
               </button>
             )}
           </Actions>

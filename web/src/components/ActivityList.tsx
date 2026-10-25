@@ -83,7 +83,7 @@ export function WithdrawalList({ withdrawals }: { withdrawals: WithdrawalRecord[
           <li key={w.id}>
             <Link href={`/activity?withdrawal=${w.id}`} className={styles.row}>
               <span>
-                <span className={styles.t}>{formatTao(w.taoAmount, 4)} TAO to USDC</span>
+                <span className={styles.t}>Unstake</span>
                 <span className={styles.d}>{when(w.createdAt)}</span>
               </span>
               <span className={styles.c}>

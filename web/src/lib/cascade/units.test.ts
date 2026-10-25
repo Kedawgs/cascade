@@ -34,6 +34,15 @@ describe("units", () => {
     expect(checkUnstake(milli(3n), milli(3n))).toMatchObject({ ok: false, offerAll: false });
   });
 
+  it("names why an unstake can't go, so the form can say it in the unit shown", () => {
+    const available = milli(80n);
+    expect(checkUnstake(0n, available)).toMatchObject({ code: "empty" });
+    expect(checkUnstake(milli(90n), available)).toMatchObject({ code: "tooMuch" });
+    expect(checkUnstake(milli(4n), available)).toMatchObject({ code: "belowMin" });
+    expect(checkUnstake(milli(77n), available)).toMatchObject({ code: "leavesDust" });
+    expect(checkUnstake(milli(3n), milli(3n))).toMatchObject({ code: "stakeBelowMin" });
+  });
+
   it("turns exact amounts into display numbers", () => {
     expect(toDisplay(788n * 10n ** 14n, 18)).toBeCloseTo(0.0788, 10);
     expect(toDisplay(20_157_095n, 6)).toBeCloseTo(20.157095, 10);

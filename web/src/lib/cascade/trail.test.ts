@@ -225,7 +225,9 @@ describe("withdrawal trail", () => {
     const redeemed = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const r = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed });
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
-    expect(r.steps[2].detail).toMatch(/11:35 AM/);
+    expect(r.steps[2].detail).toMatch(/safety wait ends around 11:35 AM/);
+    expect(r.steps[0].title).toBe("Request your unstake");
+    expect(r.steps[0].detail).toBeUndefined();
     const flying = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), messageId: H(6), state: 1, at: new Date() } });
     expect(flying.steps[2].txUrl).toContain(H(6));
   });
@@ -243,6 +245,24 @@ describe("withdrawal trail", () => {
     expect(r.steps[1].detail).toMatch(/requested 15 minutes ago/);
     expect(r.steps[1].detail).toMatch(/expected around 10:32 AM/);
     expect(r.steps[1].txUrl).toBe("https://ccip.chain.link/address/0x221C");
+  });
+
+  it("explains an unstake that took nothing, in plain words, and offers to unstake again", () => {
+    const at = new Date();
+    const skipped = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { at, txHash: H(9), outcome: "skipped" as const, taoWei: 0n } });
+    expect(skipped.steps[1].detail).toBe("Your balance was smaller than this unstake when it arrived, so nothing was taken. Your stake is unchanged.");
+    expect(skipped.unstakeAgain).toBe(true);
+    const limited = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { at, txHash: H(9), outcome: "deferred" as const, taoWei: 0n } });
+    expect(limited.steps[1].detail).toBe("The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow.");
+    expect(limited.unstakeAgain).toBe(true);
+  });
+
+  it("calls a payout the bridge hasn't delivered yet delayed, not a problem", () => {
+    const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+    const r = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), messageId: H(6), state: 3, at: new Date() } });
+    expect(r.steps[2].status).toBe("active");
+    expect(r.steps[2].detail).toMatch(/hasn't delivered this payout yet/);
+    expect(r.status).toBe("in_progress");
   });
 
   it("asks the user to claim once the TAO is back on Base, then shows it paid", () => {
@@ -285,10 +305,7 @@ describe("withdrawal trail", () => {
     expect(r.steps[1].detail).toMatch(/fee/i);
   });
 
-  it("marks a failed payout message and a skipped redeem", () => {
-    const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 1n };
-    const failed = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), messageId: H(6), state: 3, at: new Date() } });
-    expect(failed.steps[2].status).toBe("failed");
+  it("marks a skipped redeem as failed (a payout the bridge hasn't delivered is delayed, tested above)", () => {
     const skipped = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { at: new Date(), txHash: H(9), outcome: "skipped" } });
     expect(skipped.steps[1].status).toBe("failed");
   });

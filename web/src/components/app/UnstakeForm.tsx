@@ -12,10 +12,11 @@ import { formatTao, formatUsd, formatUsdcCents } from "@/lib/format";
 import {
   maxUnstakeInputIn,
   switchUnstakeUnit,
-  unstakeAvailableText,
   unstakeButtonLabel,
   unstakeEquivalent,
+  unstakeErrorText,
   unstakeLabelUsd,
+  unstakeNote,
   unstakeRequestWei,
   type UnstakeUnit,
 } from "@/lib/stake-form";
@@ -26,6 +27,12 @@ import { AmountField } from "./AmountField";
 import styles from "./StakeForm.module.css";
 
 const GAS_WEI = 3n * 10n ** 13n;
+
+/** "about 1 hour", "about 2 hours". */
+function hoursText(minutes: number): string {
+  const h = Math.max(1, Math.round(minutes / 60));
+  return `about ${h} hour${h === 1 ? "" : "s"}`;
+}
 
 /** The unstake form: the amount typed in TAO or as its USDC value, a USDC estimate out. */
 export function UnstakeForm({ account }: { account: string | null }) {
@@ -78,7 +85,12 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const quoteQuery = useWithdrawalQuote(account, shares);
   const quote = shares !== null && quoteQuery.data?.shares === shares ? quoteQuery.data : undefined;
   const pending = flows.busy === "unstake";
-  const error = check && !check.ok ? check.reason : quoteQuery.isError && shares !== null ? "This amount can't be sent back right now" : null;
+  const error =
+    check && !check.ok
+      ? unstakeErrorText(check, available, unit, price)
+      : quoteQuery.isError && shares !== null
+        ? "This amount can't be sent back right now"
+        : null;
   const lowEth = quote !== undefined && balances.data !== undefined && balances.data.eth < quote.fee + GAS_WEI;
   const usd = unstakeLabelUsd({ unit, raw, fixed: all || pinned !== null, requestWei: request, priceUsd: price });
   const label = unstakeButtonLabel({
@@ -137,7 +149,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
       <p id={noteId} className={error ? styles.error : styles.note}>
         {error ??
           (position
-            ? `${request !== null && price > 0 ? `${unstakeEquivalent(request, unit, price)}. ` : ""}You can unstake ${unstakeAvailableText(available, price)}. Unstakes start at 0.005 TAO.`
+            ? `${request !== null && price > 0 ? `${unstakeEquivalent(request, unit, price)}. ` : ""}${unstakeNote(available, unit, price)}`
             : "Connect a wallet to see what you can unstake.")}
       </p>
       {check && !check.ok && check.offerAll && (
@@ -192,7 +204,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
         </div>
         <div>
           <dt>Paid out in</dt>
-          <dd>{quote ? `about ${Math.max(1, Math.round(quote.etaMinutes / 60))} hours` : "–"}</dd>
+          <dd>{quote ? hoursText(quote.etaMinutes) : "–"}</dd>
         </div>
       </dl>
       <p className={styles.foot}>Your TAO comes back to Base, then you claim it as USDC in the same wallet.</p>

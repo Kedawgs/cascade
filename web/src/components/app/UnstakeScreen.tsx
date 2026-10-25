@@ -26,7 +26,10 @@ function UnstakeSummary({ account }: { account: string }) {
       </div>
       <div>
         <p className={card.k}>Available to unstake</p>
-        <p className={card.v}>{position.data ? `${formatTao(toDisplay(position.data.availableTaoWei, 18), 4)} TAO` : "–"}</p>
+        <p className={card.v}>
+          {position.data ? formatUsd(Math.floor(toDisplay(position.data.availableTaoWei, 18) * position.data.taoPriceUsd * 100) / 100) : "–"}
+          {position.data && <small>{formatTao(toDisplay(position.data.availableTaoWei, 18), 4)} TAO</small>}
+        </p>
       </div>
     </>
   );

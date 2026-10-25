@@ -233,10 +233,9 @@ export function chainOnlyDeposit(e: { key: Hex; txHash: Hex; at: Date; assets: b
 export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): WithdrawalRecord {
   const request: TrailStep<WithdrawalStepKey> = {
     key: "request",
-    title: "Ask for your TAO back",
+    title: "Request your unstake",
     status: walletStep(f.requestMined, op, true),
     ...(op.hash && f.requestMined ? { txUrl: explorer.baseTx(op.hash) } : {}),
-    ...(f.requestMined && op.batchId !== undefined ? { detail: `In batch ${op.batchId}` } : {}),
   };
 
   let unstake: TrailStep<WithdrawalStepKey> = { key: "unstake", title: "Unstake on Bittensor", status: "pending" };
@@ -245,9 +244,14 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     const link = { at: d.at, txUrl: explorer.bittensorTx(d.txHash), txLabel: "View on Bittensor" };
     if (d.outcome === "redeemed") unstake = { ...unstake, ...link, status: "done" };
     else if (d.outcome === "skipped") {
-      unstake = { ...unstake, ...link, status: "failed", detail: "You had fewer shares than this request when it arrived; nothing was taken" };
+      unstake = {
+        ...unstake,
+        ...link,
+        status: "failed",
+        detail: "Your balance was smaller than this unstake when it arrived, so nothing was taken. Your stake is unchanged.",
+      };
     } else {
-      unstake = { ...unstake, ...link, status: "action", detail: "Today's withdrawal limit was reached; you kept your shares. Ask again tomorrow" };
+      unstake = { ...unstake, ...link, status: "action", detail: "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow." };
     }
   } else if (op.cancelled && f.cancelMined) {
     unstake = {
@@ -273,12 +277,22 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     const p = f.payout;
     if (p && p.state === 2) ret = { ...ret, status: "done", at: p.at, ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
     else if (p && p.state === 3) {
-      ret = { ...ret, status: "failed", detail: "The bridge delivery failed; the operator runs it again", ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
+      // a failed delivery on the bridge is sent again: delayed, not lost
+      ret = {
+        ...ret,
+        status: "active",
+        detail: "The bridge hasn't delivered this payout yet. Cascade sends it again; nothing is lost.",
+        ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}),
+      };
     } else if (p) {
       ret = { ...ret, status: "active", detail: `On the bridge back to Base, ${BRIDGE_TIME}`, ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
     } else {
       const from = new Date(d.at.getTime() + f.payoutDelay * 1000);
-      ret = { ...ret, status: "active", detail: `After a ${Math.round(f.payoutDelay / 3600)}-hour safety delay (from ${hhmm(from)}), then the bridge back` };
+      ret = {
+        ...ret,
+        status: "active",
+        detail: `The ${Math.round(f.payoutDelay / 3600)}-hour safety wait ends around ${hhmm(from)}, then it crosses back to Base (${BRIDGE_TIME})`,
+      };
     }
   }
 
@@ -294,7 +308,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     };
   } else if (c) {
     claim = { ...claim, title: c.keptTao ? "Claimed, kept as TAO" : "Claim as USDC", status: "done", at: c.at, txUrl: explorer.baseTx(c.hash) };
-  } else if (f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your TAO is back on Base. Claim it as USDC" };
+  } else if (f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your money is back on Base. Claim it as USDC" };
 
   const steps = [request, unstake, ret, claim];
   let status: WithdrawalRecord["status"];
@@ -306,6 +320,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   else status = "in_progress";
 
   return {
+    // nothing was taken (balance too small, or the daily limit): the user can simply unstake again
+    ...(d && (d.outcome === "skipped" || d.outcome === "deferred") ? { unstakeAgain: true as const } : {}),
     id: op.id,
     createdAt: new Date(op.createdAt),
     status,

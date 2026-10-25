@@ -27,7 +27,10 @@ export function capFree(f: { depositCap: bigint; netForwarded: bigint; openTotal
   return f.depositCap > used ? f.depositCap - used : 0n;
 }
 
-export type UnstakeCheck = { ok: true; all: boolean } | { ok: false; reason: string; offerAll: boolean };
+/** Why an unstake can't go, so the form can say it in the unit it shows. */
+export type UnstakeRefusal = "empty" | "tooMuch" | "stakeBelowMin" | "belowMin" | "leavesDust";
+
+export type UnstakeCheck = { ok: true; all: boolean } | { ok: false; code: UnstakeRefusal; reason: string; offerAll: boolean };
 
 const MIN_TEXT = "0.005 TAO";
 
@@ -35,14 +38,14 @@ const MIN_TEXT = "0.005 TAO";
  * 0.005 TAO and never leaves a smaller remainder behind (it could never be paid out). */
 export function checkUnstake(requestWei: bigint, availableWei: bigint): UnstakeCheck {
   const canAll = availableWei >= MIN_UNSTAKE_WEI;
-  if (requestWei <= 0n) return { ok: false, reason: "Enter an amount", offerAll: false };
-  if (requestWei > availableWei) return { ok: false, reason: "That's more than you can unstake", offerAll: canAll };
-  if (!canAll) return { ok: false, reason: `Unstakes start at ${MIN_TEXT}; your stake is below that`, offerAll: false };
+  if (requestWei <= 0n) return { ok: false, code: "empty", reason: "Enter an amount", offerAll: false };
+  if (requestWei > availableWei) return { ok: false, code: "tooMuch", reason: "That's more than you can unstake", offerAll: canAll };
+  if (!canAll) return { ok: false, code: "stakeBelowMin", reason: `Unstakes start at ${MIN_TEXT}; your stake is below that`, offerAll: false };
   if (requestWei === availableWei) return { ok: true, all: true };
-  if (requestWei < MIN_UNSTAKE_WEI) return { ok: false, reason: `Unstake at least ${MIN_TEXT}`, offerAll: false };
+  if (requestWei < MIN_UNSTAKE_WEI) return { ok: false, code: "belowMin", reason: `Unstake at least ${MIN_TEXT}`, offerAll: false };
   const rest = availableWei - requestWei;
   if (rest < MIN_UNSTAKE_WEI) {
-    return { ok: false, reason: `That would leave less than ${MIN_TEXT}, too little to unstake later`, offerAll: true };
+    return { ok: false, code: "leavesDust", reason: `That would leave less than ${MIN_TEXT}, too little to unstake later`, offerAll: true };
   }
   return { ok: true, all: false };
 }

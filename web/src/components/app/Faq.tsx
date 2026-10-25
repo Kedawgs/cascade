@@ -19,7 +19,7 @@ const ITEMS: { q: string; a: string }[] = [
   },
   {
     q: "How do I unstake?",
-    a: "Open the Unstake tab and enter an amount of TAO. Your TAO comes back to Base after a short safety delay, and you claim it as USDC in the same wallet. The form shows how long it takes.",
+    a: "Open the Unstake tab and enter how much USDC you want back. Your TAO comes back to Base after a short safety wait, and you claim it as USDC in the same wallet. The form shows how long it takes.",
   },
   {
     q: "Is there a lock-up?",

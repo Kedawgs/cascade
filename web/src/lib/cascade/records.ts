@@ -54,4 +54,6 @@ export interface WithdrawalRecord {
   received?: { usdc?: number; keptTao?: number };
   /** Shares still in the open batch that can be taken back. */
   cancellableShares?: bigint;
+  /** Nothing was taken when it arrived (balance too small, or the daily limit): unstake again. */
+  unstakeAgain?: true;
 }

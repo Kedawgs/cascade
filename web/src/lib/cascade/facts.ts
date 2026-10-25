@@ -24,6 +24,8 @@ export interface VaultScan {
   payouts: Map<Hex, { txHash: Hex; block: bigint }[]>;
   /** The account's own Deposited events (to show deposits made from another browser). */
   deposited: { key: Hex; txHash: Hex; block: bigint; assets: bigint }[];
+  /** The account's own Redeemed events (TAO it took out). */
+  redeemed: { key: Hex; block: bigint; assets: bigint }[];
   receipts: Map<Hex, Receipt>;
   blockTimes: Map<bigint, Date>;
 }
@@ -34,6 +36,7 @@ export const newScan = (d: Deployment): VaultScan => ({
   staked: [],
   payouts: new Map(),
   deposited: [],
+  redeemed: [],
   receipts: new Map(),
   blockTimes: new Map(),
 });
@@ -57,6 +60,8 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
         scan.payouts.set(key, [...(scan.payouts.get(key) ?? []), { txHash, block }]);
       } else if (l.eventName === "Deposited" && account && l.args.user && same(l.args.user, account)) {
         scan.deposited.push({ key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint });
+      } else if (l.eventName === "Redeemed" && account && l.args.user && same(l.args.user, account)) {
+        scan.redeemed.push({ key: l.args.key as Hex, block, assets: l.args.assets as bigint });
       }
     }
     scan.next = to + 1n;

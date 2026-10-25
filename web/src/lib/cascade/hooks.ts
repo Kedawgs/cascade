@@ -1,54 +1,53 @@
 "use client";
 
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useCascadeData } from "./context";
-import type { SourceChain } from "./types";
 
-/** Poll quickly while something is moving, slowly otherwise. */
-const LIVE_MS = 1_000;
+/** Chain reads: every 5 s while something is moving, every 30 s otherwise. */
+const LIVE_MS = 5_000;
 const IDLE_MS = 30_000;
 
+/** Query keys hold bigints as strings (react-query hashes keys with JSON). */
 export const cascadeKeys = {
+  all: () => ["cascade"] as const,
   stats: () => ["cascade", "stats"] as const,
+  limits: () => ["cascade", "limits"] as const,
+  proof: () => ["cascade", "proof"] as const,
   account: (account: string) => ["cascade", account] as const,
-  usdc: (account: string) => ["cascade", account, "usdc"] as const,
+  balances: (account: string) => ["cascade", account, "balances"] as const,
   rewards: (account: string) => ["cascade", account, "rewards"] as const,
   position: (account: string) => ["cascade", account, "position"] as const,
-  proof: (account: string) => ["cascade", account, "proof"] as const,
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
   deposit: (account: string, id: string) => ["cascade", account, "deposit", id] as const,
   withdrawals: (account: string) => ["cascade", account, "withdrawals"] as const,
   withdrawal: (account: string, id: string) => ["cascade", account, "withdrawal", id] as const,
-  depositQuote: (amount: number, chain: SourceChain) => ["quote", "deposit", amount, chain] as const,
-  withdrawalQuote: (tao: number) => ["quote", "withdrawal", tao] as const,
+  depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
+  withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
 };
 
 export function useProtocolStats() {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.stats(),
-    queryFn: () => data.getProtocolStats(),
-    refetchInterval: IDLE_MS,
-  });
+  return useQuery({ queryKey: cascadeKeys.stats(), queryFn: () => data.getProtocolStats(), refetchInterval: IDLE_MS });
 }
 
-/** The demo account's USDC. Connected wallets read their balance from the chain instead. */
-export function useMockUsdcBalance(account: string, enabled = true) {
+export function useLimits() {
+  const data = useCascadeData();
+  return useQuery({ queryKey: cascadeKeys.limits(), queryFn: () => data.getLimits(), refetchInterval: IDLE_MS });
+}
+
+export function useBalances(account: string | null) {
   const data = useCascadeData();
   return useQuery({
-    queryKey: cascadeKeys.usdc(account),
-    queryFn: () => data.getUsdcBalance(account),
+    queryKey: cascadeKeys.balances(account ?? ""),
+    queryFn: () => data.getBalances(account as string),
+    enabled: account !== null,
     refetchInterval: IDLE_MS,
-    enabled,
   });
 }
 
 export function useRewards(account: string) {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.rewards(account),
-    queryFn: () => data.listRewards(account),
-  });
+  return useQuery({ queryKey: cascadeKeys.rewards(account), queryFn: () => data.listRewards(account) });
 }
 
 export function usePosition(account: string, live = false) {
@@ -60,22 +59,19 @@ export function usePosition(account: string, live = false) {
   });
 }
 
-export function useProof(account: string, live = false) {
+export function useProof(live = false) {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.proof(account),
-    queryFn: () => data.getProof(account),
-    refetchInterval: live ? LIVE_MS : IDLE_MS,
-  });
+  return useQuery({ queryKey: cascadeKeys.proof(), queryFn: () => data.getProof(), refetchInterval: live ? LIVE_MS : IDLE_MS });
 }
+
+const moving = (s: string) => s === "in_progress" || s === "needs_you";
 
 export function useDeposits(account: string) {
   const data = useCascadeData();
   return useQuery({
     queryKey: cascadeKeys.deposits(account),
     queryFn: () => data.listDeposits(account),
-    refetchInterval: (q) =>
-      q.state.data?.some((d) => d.status === "in_progress") ? LIVE_MS : IDLE_MS,
+    refetchInterval: (q) => (q.state.data?.some((d) => moving(d.status)) ? LIVE_MS : IDLE_MS),
   });
 }
 
@@ -84,7 +80,7 @@ export function useDeposit(account: string, id: string) {
   return useQuery({
     queryKey: cascadeKeys.deposit(account, id),
     queryFn: () => data.getDeposit(account, id),
-    refetchInterval: (q) => (q.state.data?.status === "in_progress" ? LIVE_MS : false),
+    refetchInterval: (q) => (q.state.data && moving(q.state.data.status) ? LIVE_MS : IDLE_MS),
   });
 }
 
@@ -93,8 +89,7 @@ export function useWithdrawals(account: string) {
   return useQuery({
     queryKey: cascadeKeys.withdrawals(account),
     queryFn: () => data.listWithdrawals(account),
-    refetchInterval: (q) =>
-      q.state.data?.some((w) => w.status === "in_progress") ? LIVE_MS : IDLE_MS,
+    refetchInterval: (q) => (q.state.data?.some((w) => moving(w.status) || w.status === "ready") ? LIVE_MS : IDLE_MS),
   });
 }
 
@@ -103,47 +98,30 @@ export function useWithdrawal(account: string, id: string) {
   return useQuery({
     queryKey: cascadeKeys.withdrawal(account, id),
     queryFn: () => data.getWithdrawal(account, id),
-    refetchInterval: (q) => (q.state.data?.status === "in_progress" ? LIVE_MS : false),
+    refetchInterval: (q) => (q.state.data && (moving(q.state.data.status) || q.state.data.status === "ready") ? LIVE_MS : IDLE_MS),
   });
 }
 
-export function useDepositQuote(amountUsd: number | null, chain: SourceChain) {
+export function useDepositQuote(usdcUnits: bigint | null) {
   const data = useCascadeData();
-  const amount = amountUsd ?? 0;
+  const amount = usdcUnits ?? 0n;
   return useQuery({
-    queryKey: cascadeKeys.depositQuote(amount, chain),
-    queryFn: () => data.quoteDeposit(amount, chain),
-    enabled: amount > 0,
+    queryKey: cascadeKeys.depositQuote(amount),
+    queryFn: () => data.quoteDeposit(amount),
+    enabled: amount > 0n,
     placeholderData: keepPreviousData,
+    refetchInterval: 15_000,
   });
 }
 
-export function useWithdrawalQuote(taoAmount: number | null) {
+export function useWithdrawalQuote(account: string | null, shares: bigint | null) {
   const data = useCascadeData();
-  const tao = taoAmount ?? 0;
+  const amount = shares ?? 0n;
   return useQuery({
-    queryKey: cascadeKeys.withdrawalQuote(tao),
-    queryFn: () => data.quoteWithdrawal(tao),
-    enabled: tao > 0,
+    queryKey: cascadeKeys.withdrawalQuote(account ?? "", amount),
+    queryFn: () => data.quoteWithdrawal(account as string, amount),
+    enabled: account !== null && amount > 0n,
     placeholderData: keepPreviousData,
-  });
-}
-
-export function useStartDeposit(account: string) {
-  const data = useCascadeData();
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ amountUsd, chain }: { amountUsd: number; chain: SourceChain }) =>
-      data.startDeposit(account, amountUsd, chain),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: cascadeKeys.account(account) }),
-  });
-}
-
-export function useStartWithdrawal(account: string) {
-  const data = useCascadeData();
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (taoAmount: number) => data.startWithdrawal(account, taoAmount),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: cascadeKeys.account(account) }),
+    refetchInterval: 15_000,
   });
 }

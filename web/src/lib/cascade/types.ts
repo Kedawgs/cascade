@@ -1,37 +1,52 @@
 /**
- * The data contract between the Cascade UI and wherever the numbers come from.
+ * The data contract between the Cascade UI and the chains.
  *
- * Today everything is served by the mock adapter in `./mock.ts`. A real
- * implementation (contract reads on Base + Bittensor, plus an indexer for the
- * trail receipts) only has to implement `CascadeData`; see `./index.ts`.
+ * Every value comes from Base or Bittensor (see ./live.ts) or is derived from chain data by stated
+ * arithmetic; anything the chain cannot give is left undefined and hidden. Amounts that feed a
+ * transaction are exact `bigint`s (TAO wei, csTAO share units, USDC units, ETH wei); the numbers
+ * beside them are for display only. Writes are wallet flows (./flows.ts), not part of this contract.
  */
+
+import type { Clients } from "./chain";
+import type { Deployment } from "./config";
+import type { OpLog } from "./oplog";
+import type { DepositRecord, WithdrawalRecord } from "./records";
+
+export type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRecord, WithdrawalStepKey } from "./records";
 
 export type SourceChain = "base" | "ethereum" | "arbitrum" | "polygon" | "bnb";
 
 export interface Position {
-  /** Staked TAO the account owns right now, rewards included. */
+  /** csTAO the account holds on Bittensor, and the part not already asked back. */
+  shares: bigint;
+  availableShares: bigint;
+  /** What those shares are worth in TAO now. */
+  taoWei: bigint;
+  availableTaoWei: bigint;
   taoBalance: number;
-  /** `taoBalance` at today's TAO price. */
   usdValue: number;
-  /** Staking rewards earned so far, in TAO. Kept apart from price moves. */
-  rewardsEarnedTao: number;
   taoPriceUsd: number;
-  /** TAO from deposits that are still on their way and not staked yet. */
+  /** TAO from deposits still on their way (open batch or on the bridge). */
   pendingTao: number;
-  /** Average TAO price paid across staked deposits, or null if there are none. */
+  /** Value now + TAO taken out − TAO put in; undefined until there is a deposit. */
+  rewardsEarnedTao?: number;
+  /** Average price paid across this browser's deposits, or null. */
   avgEntryPriceUsd: number | null;
 }
 
 export interface StakeProof {
+  /** Everything that can be staked is staked (idle TAO is below what a stake needs). */
   allStaked: boolean;
   stakedTao: number;
   owedTao: number;
+  /** The vault holds TAO waiting until one position reaches the chain's 0.02-TAO minimum. */
+  waitingForMinimum: boolean;
   checkedAt: Date;
   validatorHotkey: string;
   explorerUrl: string;
 }
 
-/** Protocol-wide figures for the landing page and the statistics card. Missing values are hidden. */
+/** Protocol-wide figures. Missing values are hidden. */
 export interface ProtocolStats {
   aprPercent?: number;
   totalStakedTao?: number;
@@ -39,94 +54,71 @@ export interface ProtocolStats {
   taoPriceUsd?: number;
 }
 
-/** One day's staking rewards for an account. */
 export interface RewardRecord {
   date: Date;
   taoAccrued: number;
   runningTotalTao: number;
 }
 
-export type StepStatus = "done" | "active" | "pending";
-export type DepositStepKey = "received" | "swapped" | "bridged" | "staked";
-export type WithdrawalStepKey = "requested" | "unstaked" | "returned" | "paid";
-
-export interface TrailStep<K extends string = DepositStepKey | WithdrawalStepKey> {
-  key: K;
-  status: StepStatus;
-  title: string;
-  detail?: string;
-  txUrl?: string;
-  /** Link text for `txUrl`. The UI falls back to "View transaction". */
-  txLabel?: string;
-  at?: Date;
-}
-
-export interface DepositRecord {
-  id: string;
-  createdAt: Date;
-  amountUsd: number;
-  sourceChain: SourceChain;
-  status: "in_progress" | "staked";
-  steps: TrailStep<DepositStepKey>[];
-  /** TAO staked by this deposit (expected amount while in progress). */
-  taoAmount: number;
-  feesUsd: number;
-  /** TAO price the USDC was swapped at. */
-  taoPriceUsd: number;
-  /** Rewards this deposit has earned so far. */
-  rewardsTao: number;
-}
-
-export interface WithdrawalRecord {
-  id: string;
-  createdAt: Date;
-  taoAmount: number;
-  status: "in_progress" | "paid";
-  steps: TrailStep<WithdrawalStepKey>[];
-  /** USDC paid out on Base (an estimate until it's paid). */
-  usdcAmount: number;
-  feesUsd: number;
-}
-
 export interface DepositQuote {
-  amountUsd: number;
-  chain: SourceChain;
+  usdcIn: bigint;
+  /** TAO the swap would give now, and the exact (whole-rao) TAO the deposit asks for. */
+  expectedTao: bigint;
+  targetTao: bigint;
   estTao: number;
-  feesUsd: number;
-  etaMinutes: number;
+  amountUsd: number;
   taoPriceUsd: number;
+  /** Uniswap pool fees on this route; Base gas is extra (cents). */
+  feesUsd: number;
+  closesAt: Date;
+  etaMinutes: number;
 }
 
 export interface WithdrawalQuote {
+  shares: bigint;
+  taoWei: bigint;
   taoAmount: number;
   usdcAmount: number;
+  /** ETH to send with `requestRedeem` (the request fee, only for the first request in a batch). */
+  fee: bigint;
+  /** The bridge fee taken from the payout, in TAO wei. */
+  bridgeFeeWei: bigint;
   feesUsd: number;
   taoPriceUsd: number;
-  /** How long until the USDC is paid out on Base. */
+  closesAt: Date;
   etaMinutes: number;
 }
 
-export interface DepositLimits {
+export interface Limits {
+  minTao: bigint;
+  maxTao: bigint;
   minUsd: number;
   maxUsd: number;
 }
 
+export interface Balances {
+  usdc: bigint;
+  tao: bigint;
+  eth: bigint;
+  usdcRouterAllowance: bigint;
+  taoRouterAllowance: bigint;
+  taoFrontDoorAllowance: bigint;
+}
+
 export interface CascadeData {
-  /** Whether the figures are demo samples or read from the chain. */
-  readonly source: "mock" | "live";
-  limits: DepositLimits;
+  readonly deployment: Deployment;
+  readonly clients: Clients;
+  readonly opLog: OpLog;
   getProtocolStats(): Promise<ProtocolStats>;
   getPosition(account: string): Promise<Position>;
-  getProof(account: string): Promise<StakeProof>;
-  /** USDC the account could stake right now (demo accounts get a sample balance). */
-  getUsdcBalance(account: string): Promise<number>;
+  getProof(): Promise<StakeProof>;
+  getLimits(): Promise<Limits>;
+  getBalances(account: string): Promise<Balances>;
   listRewards(account: string): Promise<RewardRecord[]>;
   listDeposits(account: string): Promise<DepositRecord[]>;
   getDeposit(account: string, id: string): Promise<DepositRecord | null>;
-  quoteDeposit(amountUsd: number, chain: SourceChain): Promise<DepositQuote>;
-  startDeposit(account: string, amountUsd: number, chain: SourceChain): Promise<DepositRecord>;
-  quoteWithdrawal(taoAmount: number): Promise<WithdrawalQuote>;
-  startWithdrawal(account: string, taoAmount: number): Promise<WithdrawalRecord>;
   listWithdrawals(account: string): Promise<WithdrawalRecord[]>;
   getWithdrawal(account: string, id: string): Promise<WithdrawalRecord | null>;
+  quoteDeposit(usdcUnits: bigint): Promise<DepositQuote>;
+  quoteWithdrawal(account: string, shares: bigint): Promise<WithdrawalQuote>;
 }

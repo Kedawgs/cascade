@@ -1,5 +1,5 @@
-import type { Address, Hex } from "viem";
-import { ERC20, FRONT_DOOR, QUOTER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
+import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters } from "viem";
+import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
 import type { Clients } from "./chain";
 import { type Deployment, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import { RAO, toDisplay } from "./units";
@@ -158,4 +158,28 @@ export const quoteSell = (c: Pick<Clients, "base">, taoWei: bigint) => quote(c, 
 /** What selling 0.01 TAO pays, per TAO, in dollars: the price a user actually gets. */
 export async function taoPriceUsd(c: Pick<Clients, "base">): Promise<number> {
   return toDisplay((await quoteSell(c, 10n ** 16n)) * 100n, 6);
+}
+
+/** What 0.001 ETH sells for, per ETH, in dollars (WETH –0.05%→ USDC). */
+export async function ethPriceUsd(c: Pick<Clients, "base">): Promise<number> {
+  const path = encodePacked(["address", "uint24", "address"], [TOKENS.weth, 500, TOKENS.usdc]);
+  return toDisplay((await quote(c, "quoteExactInput", path, 10n ** 15n)) * 1000n, 6);
+}
+
+/** The bridge fee the vault would pay to send `taoWei` back to Base for `account` (one payout entry).
+ * The adapter's own quote, which also refuses an amount below the bridge floor. */
+export async function quotePayoutFee(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, taoWei: bigint): Promise<bigint> {
+  const message = encodeAbiParameters(parseAbiParameters("uint8, bytes32, uint32, (address user, uint256 amount)[]"), [
+    2,
+    `0x${"00".repeat(32)}`,
+    0,
+    [{ user: account, amount: taoWei }],
+  ]);
+  return (await c.bittensor.readContract({
+    address: d.bitAdapter,
+    abi: ADAPTER,
+    functionName: "quoteFee",
+    args: [8453n, d.frontDoor, message, taoWei],
+    account: d.vault,
+  })) as bigint;
 }

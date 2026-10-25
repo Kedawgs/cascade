@@ -45,6 +45,7 @@ export const STAKING = parseAbi(["function getNominatorMinRequiredStake() view r
 export const STAKING_ADDRESS = "0x0000000000000000000000000000000000000805" as const;
 
 export const ADAPTER = parseAbi([
+  "function quoteFee(uint64 destChain, address recipient, bytes message, uint256 amount) view returns (uint256)",
   "event Sent(bytes32 indexed messageId, uint64 destChain, address indexed sender, address indexed recipient, uint256 amount, uint256 fee, uint256 gasLimit)",
   "event Delivered(bytes32 indexed messageId, uint64 sourceChain, address indexed sender, address indexed recipient, uint256 amount)",
 ]);

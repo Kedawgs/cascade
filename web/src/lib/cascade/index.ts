@@ -1,16 +1,12 @@
-import { createMockCascadeData } from "./mock";
+import { DEPLOYMENT } from "./config";
+import { createLiveCascadeData, notConfiguredData } from "./live";
 import type { CascadeData } from "./types";
 
 export type * from "./types";
+export { NotConfiguredError } from "./live";
 
-/**
- * The one place that decides where Cascade's data comes from.
- *
- * Everything in the UI goes through `CascadeData` (see ./types.ts). To move off
- * the mock, return a real implementation here that reads the vault on Base,
- * the stake engine on Bittensor and an indexer for trail receipts. The demo
- * account can keep using `createMockCascadeData()`.
- */
+/** The one place that decides where Cascade's data comes from: the live chains, or nothing at all
+ * when `web/.env.local` names no deployment (`pnpm ops web-config --live` writes it). */
 export function createCascadeData(): CascadeData {
-  return createMockCascadeData();
+  return DEPLOYMENT ? createLiveCascadeData(DEPLOYMENT) : notConfiguredData();
 }

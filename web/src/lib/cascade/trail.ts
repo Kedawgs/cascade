@@ -11,6 +11,8 @@ export interface DepositFacts {
   depositMined: boolean;
   /** The cancel (taking it back out of the open batch) went through. */
   cancelMined?: boolean;
+  /** USDC the swap really took (its receipt), when known. */
+  usdcSpent?: bigint;
   now: Date;
   openBatchId: bigint;
   /** When the open batch can close. */
@@ -181,7 +183,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     taoWei: op.targetTao,
     taoAmount: toDisplay(op.targetTao, 18),
     // a deposit of TAO already in the wallet spent no USDC
-    ...(op.usdcIn > 0n ? { amountUsd: toDisplay(op.usdcIn, 6) } : {}),
+    ...(op.usdcIn > 0n ? { amountUsd: toDisplay(f.usdcSpent ?? op.usdcIn, 6) } : {}),
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),

@@ -258,4 +258,30 @@ describe("facts", () => {
     const none = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [other] });
     expect(none.facts.claimed).toBeUndefined();
   });
+
+  it("reads the USDC the swap really spent from its receipt (an exact-output swap spends at most the quote)", async () => {
+    const spent = log(
+      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      encodeEventTopics({ abi: ERC20, eventName: "Transfer", args: { from: ME, to: "0xd0b53D9277642d899DF5C87A3966A349A798F224" } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256"), [19_903_212n]),
+      50n,
+      H(31),
+    );
+    const c = chains({ baseReceipts: { [H(31)]: { status: "success", logs: [spent] }, [H(32)]: { status: "success", logs: [] } } });
+    const op: DepositOp = {
+      id: "d",
+      kind: "deposit",
+      account: ME,
+      createdAt: 0,
+      usdcIn: 20_000_000n,
+      targetTao: 78_336_398n * 10n ** 9n,
+      priceUsd: 254,
+      hashes: { swap: H(31), deposit: H(32) },
+      batchId: 4n,
+      state: "sent",
+    };
+    const f = await depositFacts(c.clients, D, op, { fd, vault, scan: newScan(D) });
+    expect(f.facts.usdcSpent).toBe(19_903_212n);
+  });
 });
+

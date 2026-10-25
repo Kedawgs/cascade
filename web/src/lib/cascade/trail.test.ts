@@ -64,6 +64,11 @@ describe("deposit trail", () => {
     expect(r.steps[2].detail).toMatch(/expected around 10:32 UTC/);
   });
 
+  it("shows what the swap really spent once it is known, not the most it could spend", () => {
+    expect(depositRecord(op, { ...base, usdcSpent: 19_903_212n }).amountUsd).toBeCloseTo(19.903212, 6);
+    expect(depositRecord(op, base).amountUsd).toBe(20);
+  });
+
   it("says the batch can close now once its time has passed", () => {
     const r = depositRecord(op, { ...base, now: new Date("2026-10-25T10:20:00Z") });
     expect(r.steps[2].detail).toMatch(/can close now/i);

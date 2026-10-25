@@ -115,11 +115,18 @@ export async function depositFacts(
 ): Promise<{ batchId?: bigint; facts: DepositFacts }> {
   const swap = await baseReceipt(c, op.hashes.swap);
   const dep = await baseReceipt(c, op.hashes.deposit);
+  // an exact-output swap spends at most the quoted USDC; the receipt says how much it really took
+  const usdcSpent = mined(swap)
+    ? parseEventLogs({ abi: ERC20, logs: swap!.logs as never, eventName: "Transfer", strict: false })
+        .filter((l) => same(l.address, TOKENS.usdc) && same(l.args.from as string, op.account))
+        .reduce((sum, l) => sum + (l.args.value as bigint), 0n)
+    : 0n;
   const batchId = op.batchId ?? batchIdFrom(dep, "DepositRequested", op.account);
   const facts: DepositFacts = {
     // a deposit of TAO already in the wallet has no swap
     swapMined: op.usdcIn === 0n ? mined(dep) || !!op.hashes.deposit : mined(swap),
     depositMined: mined(dep),
+    ...(usdcSpent > 0n ? { usdcSpent } : {}),
     cancelMined: op.cancelled ? mined(await baseReceipt(c, op.cancelled.hash)) : undefined,
     now: new Date(),
     depositedAt: new Date(op.createdAt),

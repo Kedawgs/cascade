@@ -864,3 +864,9 @@ Added by the final whole-branch review (2026-10-24):
     `fundReserve()` with 1e12 wei before
     activating the bridge. Send one single-entry 0.01-TAO batch and watch it deliver before opening
     deposits.
+29. Add a reward cut before taking other people's money (owner decision, 2026-10-25): the contracts
+    charge nothing today, so the keeper's batch, stake and payout fees are pure cost (about $1.60
+    per deposit batch at test-run prices). Planned shape: at each reward claim the vault mints
+    treasury shares worth a set share of the claimed rewards (about 10%, as Lido does), with a
+    hard-coded ceiling and the rate behind the timelock. The vault has 799 bytes of headroom, so it
+    must fit there or go in a new vault version; it gets its own spec, tests and review.

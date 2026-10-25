@@ -83,6 +83,14 @@ mock. Wallets: Base Account and injected wallets (MetaMask, Rabby…). There is 
 
 - Option B: the site swaps USDC↔TAO itself. Real numbers only; no sample data.
 - The test is the user's own money, about $20, on localhost; the site stays unadvertised.
+- The user will test with **MetaMask** ("Probably MetaMask"). MetaMask answers EIP-5792 batching
+  through its EIP-7702 "smart account" (it offers the switch when a site asks to batch); if the
+  user declines, the site falls back to one transaction at a time. Fewer confirmations for plain
+  wallets (a stake-helper contract: USDC permit + swap + `depositFor` in one transaction; a
+  claim-and-swap path in the next front door) is deferred until before the real launch.
+- Approvals: Uniswap's SwapRouter02 may be approved once for unlimited USDC and TAO (standard
+  practice, an immutable and widely used contract); the front door, unaudited, only ever gets the
+  exact amount of each deposit.
 
 ## The design (my calls are marked *call*)
 
@@ -125,7 +133,7 @@ requests (Base bursts, Bittensor ~2 per second). React-query keeps the current p
    the cap still free (`depositCap` − what the front door has forwarded and holds: builder to find
    the exact view). Show: TAO you'll stake, the price, fees (pool fees ≈ 0.35%, Base gas estimate),
    and the time (next batch within 10 minutes, then about 20–30 minutes on the bridge).
-2. Transactions (*call*): `approve(USDC → SwapRouter02, amountUsd)` if needed; `exactOutput` (path
+2. Transactions (*call*): `approve(USDC → SwapRouter02, unlimited)` if the allowance is short; `exactOutput` (path
    TAO←WETH←USDC, `amountOut` = target, `amountInMaximum` = amountUsd, recipient = the user) so
    exactly the target TAO arrives and unused USDC never leaves the wallet; `approve(TAO → front
    door, target)` if needed; `deposit(target)`. When the wallet supports atomic batching on Base

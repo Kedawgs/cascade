@@ -1,0 +1,71 @@
+import { parseAbi } from "viem";
+
+/** The parts of each contract the site calls or reads (signatures from contracts/src). */
+export const FRONT_DOOR = parseAbi([
+  "function deposit(uint256 amount)",
+  "function cancelDeposit(uint256 amount)",
+  "function requestRedeem(uint256 shares) payable",
+  "function cancelRedeem(uint256 shares)",
+  "function claim()",
+  "function depositOf(address user) view returns (uint256)",
+  "function redeemOf(address user) view returns (uint256)",
+  "function claimable(address user) view returns (uint256)",
+  "function openBatch() view returns (uint64 id, uint64 start, uint256 totalDeposits, uint256 feePot, uint256 nDeposits, uint256 nRedeems)",
+  "function netForwarded() view returns (uint256)",
+  "function depositCap() view returns (uint256)",
+  "function minDeposit() view returns (uint256)",
+  "function redeemRequestFee() view returns (uint256)",
+  "function canClose() view returns (bool)",
+  "function batchInterval() view returns (uint64)",
+  "event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)",
+  "event RedeemRequested(uint64 indexed batchId, address indexed user, uint256 shares)",
+  "event Claimed(address indexed user, uint256 amount)",
+]);
+
+export const VAULT = parseAbi([
+  "function balanceOf(address account) view returns (uint256)",
+  "function totalAssets() view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function rootStakeRao() view returns (uint256)",
+  "function pendingPayouts() view returns (uint256)",
+  "function stakeHotkey() view returns (bytes32)",
+  "function payoutDelay() view returns (uint64)",
+  "event BatchDelivered(bytes32 indexed key, uint64 indexed sourceChain, address indexed frontDoor, uint64 batchId, uint256 amount)",
+  "event Deposited(bytes32 indexed key, address indexed user, uint256 assets, uint256 shares)",
+  "event DepositBounced(bytes32 indexed key, address indexed user, uint256 assets)",
+  "event DepositSkipped(bytes32 indexed key, address user, uint256 assets)",
+  "event Redeemed(bytes32 indexed key, address indexed user, uint256 shares, uint256 assets)",
+  "event RedeemSkipped(bytes32 indexed key, address indexed user, uint256 requested)",
+  "event RedeemDeferred(bytes32 indexed key, address indexed user, uint256 requested)",
+  "event Staked(bytes32 indexed hotkey, uint256 rao, uint256 measured)",
+  "event PayoutChunkSent(bytes32 indexed key, uint32 chunk, uint32 taken, uint256 gross, uint256 net, uint256 fee)",
+]);
+
+export const STAKING = parseAbi(["function getNominatorMinRequiredStake() view returns (uint256)"]);
+export const STAKING_ADDRESS = "0x0000000000000000000000000000000000000805" as const;
+
+export const ADAPTER = parseAbi([
+  "event Sent(bytes32 indexed messageId, uint64 destChain, address indexed sender, address indexed recipient, uint256 amount, uint256 fee, uint256 gasLimit)",
+  "event Delivered(bytes32 indexed messageId, uint64 sourceChain, address indexed sender, address indexed recipient, uint256 amount)",
+]);
+
+export const OFFRAMP_ABI = parseAbi(["function getExecutionState(bytes32 messageId) view returns (uint8)"]);
+
+/** QuoterV2's quote functions are not marked view (they revert internally), but eth_call answers them. */
+export const QUOTER = parseAbi([
+  "function quoteExactInput(bytes path, uint256 amountIn) view returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)",
+  "function quoteExactOutput(bytes path, uint256 amountOut) view returns (uint256 amountIn, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)",
+]);
+
+export const ROUTER = parseAbi([
+  "struct ExactInputParams { bytes path; address recipient; uint256 amountIn; uint256 amountOutMinimum; }",
+  "struct ExactOutputParams { bytes path; address recipient; uint256 amountOut; uint256 amountInMaximum; }",
+  "function exactInput(ExactInputParams params) payable returns (uint256 amountOut)",
+  "function exactOutput(ExactOutputParams params) payable returns (uint256 amountIn)",
+]);
+
+export const ERC20 = parseAbi([
+  "function balanceOf(address account) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+]);

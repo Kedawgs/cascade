@@ -13,6 +13,7 @@ import { rehearse } from "./rehearse.ts";
 import { createRpc } from "./rpc.ts";
 import { type Ctx, execFileRunner } from "./send.ts";
 import { verify } from "./verify.ts";
+import { sweep, windDown } from "./winddown.ts";
 
 const env = process.env;
 const log = (l: string) => console.log(l);
@@ -96,9 +97,16 @@ async function run(a: Args): Promise<number> {
       await runLoop(keeperDeps(ctxFor(a.live), rec, a.users as Address[]), rec, { intervalMs: 60_000 });
       return 1;
     }
-    case "wind-down":
+    case "wind-down": {
+      const rec = needRecord(a.live);
+      for (const sent of await windDown(keeperDeps(ctxFor(a.live), rec, a.users as Address[]), rec)) log(`Done (transaction ${sent.hash})`);
+      log("The front door is paused with a deposit cap of 0. Next: sweep the test wallet's leftovers.");
+      return 0;
+    }
     case "sweep":
-      throw new Error(`${a.cmd} is not built yet`);
+      await sweep(ctxFor(a.live), a.taoTo as string, a.ethTo as string);
+      log("Leftovers sent. You can now delete the password file.");
+      return 0;
   }
 }
 

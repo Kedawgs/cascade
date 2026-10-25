@@ -226,3 +226,18 @@ export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   if (!hash) throw new Error(`${chainLabel(req.chain)}: ${req.label} failed: ${out.stderr.trim() || out.stdout.trim()}`);
   return settle(req.chain, req.label, hash, await waitReceipt(ctx, req.chain, req.nonce, hash));
 }
+
+/** A plain value transfer with `cast send <to> --value`, through the same checks. */
+export async function sendValue(
+  ctx: Ctx,
+  req: { chain: ChainName; nonce: number; label: string; to: Address; value: bigint },
+): Promise<Sent> {
+  await guard(ctx, req.chain, req.nonce);
+  const gas = await estimate(ctx, req.chain, { from: WALLET, to: req.to, data: "0x", value: numberToHex(req.value) }, req.label);
+  const common = await prepare(ctx, req.chain, req.label, gas);
+  const args = ["send", req.to, "--value", req.value.toString(), ...common, "--nonce", String(req.nonce), "--async"];
+  const out = await ctx.runner.run(bin(ctx, "cast"), args, { cwd: ctx.paths.contractsDir });
+  const hash = out.code === 0 ? hashIn(out.stdout) : undefined;
+  if (!hash) throw new Error(`${chainLabel(req.chain)}: ${req.label} failed: ${out.stderr.trim() || out.stdout.trim()}`);
+  return settle(req.chain, req.label, hash, await waitReceipt(ctx, req.chain, req.nonce, hash));
+}

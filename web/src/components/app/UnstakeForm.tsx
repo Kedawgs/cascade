@@ -147,7 +147,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
       )}
 
       {account ? (
-        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending}>
+        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth}>
           {label}
         </button>
       ) : (
@@ -155,7 +155,12 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
           <ConnectWallet variant="pill-block" />
         </div>
       )}
-      {lowEth && <p className={styles.error}>You need a little ETH on Base for the request fee and network fees.</p>}
+      {lowEth && quote && (
+        <p className={styles.error}>
+          This unstake needs about {formatEther(quote.fee + GAS_WEI)} ETH on Base for the request fee and network fees, and this
+          wallet has less. Add a little ETH on Base, then come back.
+        </p>
+      )}
       {flows.error && (
         <p role="alert" className={styles.error}>
           {flows.error}

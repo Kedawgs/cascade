@@ -5,13 +5,11 @@ import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { useBalances, useDepositQuote, useLimits } from "@/lib/cascade/hooks";
-import type { SourceChain } from "@/lib/cascade/types";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
 import { maxStakeInput, stakeButtonLabel, validateStakeAmount } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
 import { AmountField } from "./AmountField";
-import { ChainChips } from "./ChainChips";
 import styles from "./StakeForm.module.css";
 
 /** Less than this much ETH on Base can't pay for the swap and deposit. */
@@ -45,7 +43,6 @@ export function StakeForm({
   const balances = useBalances(account);
   const flows = useFlows(account);
   const [raw, setRaw] = useState(initialAmount);
-  const [chain, setChain] = useState<SourceChain>("base");
   const [opId, setOpId] = useState<string | null>(null);
   const inputId = useId();
   const noteId = useId();
@@ -75,9 +72,6 @@ export function StakeForm({
 
   return (
     <form className={styles.form} onSubmit={onSubmit} noValidate>
-      <p className={styles.lbl}>Deposit from</p>
-      <ChainChips value={chain} onChange={setChain} />
-
       <label htmlFor={inputId} className={styles.lbl}>
         Amount
       </label>
@@ -97,7 +91,7 @@ export function StakeForm({
       </p>
 
       {account ? (
-        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending}>
+        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth}>
           {label}
         </button>
       ) : (
@@ -105,14 +99,19 @@ export function StakeForm({
           <ConnectWallet variant="pill-block" />
         </div>
       )}
-      {lowEth && <p className={styles.error}>You need a little ETH on Base to pay the network fees.</p>}
+      {lowEth && (
+        <p className={styles.error}>
+          Network fees on Base are paid in ETH, and this wallet has almost none. Add a little ETH on Base (about $1 covers
+          many transactions), then come back.
+        </p>
+      )}
       {flows.error && (
         <p role="alert" className={styles.error}>
           {flows.error}
           {opId && (
             <>
               {" "}
-              <Link href={`/activity?deposit=${opId}`}>See this deposit</Link>, where you can continue.
+              <Link href={`/activity?deposit=${opId}`}>See this deposit</Link>.
             </>
           )}
         </p>
@@ -124,7 +123,7 @@ export function StakeForm({
           <dd>{quote ? `${formatTao(quote.estTao, 4)} TAO` : "–"}</dd>
         </div>
         <div>
-          <dt>TAO price</dt>
+          <dt>Price per TAO (incl. swap fees)</dt>
           <dd>{quote ? formatUsd(quote.taoPriceUsd) : "–"}</dd>
         </div>
         <div>

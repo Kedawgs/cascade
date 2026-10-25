@@ -13,6 +13,7 @@ import { rehearse } from "./rehearse.ts";
 import { createRpc } from "./rpc.ts";
 import { type Ctx, execFileRunner, unit } from "./send.ts";
 import { verify } from "./verify.ts";
+import { writeWebEnv } from "./webconfig.ts";
 import { sweep, windDown } from "./winddown.ts";
 
 const env = process.env;
@@ -106,6 +107,11 @@ async function run(a: Args): Promise<number> {
       const rec = needRecord(a.live);
       for (const sent of await windDown(keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]), rec)) log(`Done (transaction ${sent.hash})`);
       log("The front door is paused with a deposit cap of 0. Next: sweep the test wallet's leftovers.");
+      return 0;
+    }
+    case "web-config": {
+      const path = writeWebEnv(needRecord(a.live), join(paths(env).contractsDir, ".."));
+      log(`Wrote ${path}. Restart \`pnpm dev\` in web/ to pick it up.`);
       return 0;
     }
     case "sweep":

@@ -1,0 +1,48 @@
+import type { Hex } from "viem";
+import { describe, expect, it } from "vitest";
+import { WALLET, WALLET_SS58 } from "../src/config.ts";
+import { buildPlan } from "../src/plan.ts";
+import type { DeploymentRecord } from "../src/record.ts";
+import { decodeSs58, encodeSs58 } from "../src/ss58.ts";
+import { webEnv } from "../src/webconfig.ts";
+
+const COLDKEY: Hex = "0x9214633d20bb6247cb0475ea91ae10665a084404a04147ea48f673571263ad68";
+const plan = buildPlan(0, 0, COLDKEY);
+const sent = (block: number) => ({ hash: `0x${"ab".repeat(32)}` as Hex, block, gasUsed: 1n, costWei: 1n });
+const rec: DeploymentRecord = {
+  target: "live",
+  wallet: WALLET,
+  createdAt: "",
+  plan,
+  done: { baseAdapter: { recovered: true }, frontDoor: sent(100), bitAdapter: sent(9_357_492), vault: sent(9_357_493) },
+  verify: { ok: true, failures: [], checkedAt: "" },
+};
+
+describe("web-config", () => {
+  it("encodes SS58 addresses back to what they decode from", () => {
+    expect(encodeSs58(decodeSs58(WALLET_SS58))).toBe(WALLET_SS58);
+    expect(encodeSs58(decodeSs58("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"))).toBe(
+      "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+    );
+    expect(encodeSs58(COLDKEY)).toBe("5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu");
+  });
+
+  it("writes the deployment's addresses, the Bittensor deploy block and the SS58 names", () => {
+    expect(webEnv(rec).split("\n")).toEqual([
+      "# Written by `pnpm ops web-config`: the live test deployment. Local only (git-ignored).",
+      `NEXT_PUBLIC_CASCADE_FRONT_DOOR=${plan.addresses.frontDoor}`,
+      `NEXT_PUBLIC_CASCADE_BASE_ADAPTER=${plan.addresses.baseAdapter}`,
+      `NEXT_PUBLIC_CASCADE_VAULT=${plan.addresses.vault}`,
+      `NEXT_PUBLIC_CASCADE_BIT_ADAPTER=${plan.addresses.bitAdapter}`,
+      "NEXT_PUBLIC_CASCADE_BIT_BLOCK=9357492",
+      "NEXT_PUBLIC_CASCADE_VAULT_SS58=5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu",
+      "NEXT_PUBLIC_CASCADE_HOTKEY_SS58=5E4z3h9yVhmQyCFWNbY9BPpwhx4xFiPwq3eeqmBgVF6KULde",
+      "",
+    ]);
+  });
+
+  it("refuses a deployment whose read-back has not passed", () => {
+    expect(() => webEnv({ ...rec, verify: undefined })).toThrow(/verify/);
+    expect(() => webEnv({ ...rec, verify: { ok: false, failures: ["x"], checkedAt: "" } })).toThrow(/verify/);
+  });
+});

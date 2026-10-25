@@ -30,3 +30,23 @@ export function decodeSs58(address: string): Hex {
   if (prefix !== BITTENSOR_PREFIX) throw new Error(`this address is for network prefix ${prefix}, not Bittensor's ${BITTENSOR_PREFIX}`);
   return `0x${Buffer.from(key).toString("hex")}`;
 }
+
+function base58Encode(bytes: Uint8Array): string {
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  let out = "";
+  for (; n > 0n; n /= 58n) out = ALPHABET[Number(n % 58n)] + out;
+  for (const b of bytes) {
+    if (b !== 0) break;
+    out = `1${out}`;
+  }
+  return out;
+}
+
+/** A 32-byte public key as a Bittensor (prefix 42) SS58 address. */
+export function encodeSs58(key: Hex): string {
+  const body = Buffer.concat([Buffer.from([BITTENSOR_PREFIX]), Buffer.from(key.slice(2), "hex")]);
+  if (body.length !== 33) throw new Error("an SS58 key must be 32 bytes");
+  const check = createHash("blake2b512").update(Buffer.from("SS58PRE")).update(body).digest().subarray(0, 2);
+  return base58Encode(Uint8Array.from(Buffer.concat([body, check])));
+}

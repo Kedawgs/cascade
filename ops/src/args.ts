@@ -14,6 +14,7 @@ export const COMMANDS = [
   "run",
   "wind-down",
   "sweep",
+  "web-config",
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];
@@ -41,6 +42,7 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   run                        do whatever is due, every minute, until stopped (Ctrl-C)
   wind-down --user 0x…       pause the front door once everything is paid out
   sweep --tao-to <SS58> --eth-to <0x…>   send the test wallet's leftovers home
+  web-config                 write web/.env.local with the deployment's addresses for the site
 
 Without --live, deploy and the keeper commands use the local forks.`;
 

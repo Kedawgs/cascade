@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   maxStakeInput,
   maxUnstakeInput,
+  maxUnstakeInputIn,
   stakeButtonLabel,
   unstakeButtonLabel,
+  unstakeEquivalent,
+  unstakeRequestWei,
   validateStakeAmount,
 } from "./stake-form";
-import { parseAmount, sanitizeAmountInput } from "./format";
+import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
 const limits = { minUsd: 10, maxUsd: 50_000 };
 
@@ -67,6 +70,36 @@ describe("unstake helpers", () => {
     expect(unstakeButtonLabel({ account: "0xa", amount: null, error: null, pending: false })).toBe(
       "Unstake",
     );
+  });
+
+  it("names the exact amount typed, not a rounded one", () => {
+    const ok = { account: "0xa", error: null, pending: false };
+    expect(unstakeButtonLabel({ ...ok, amount: 0.005 })).toBe("Unstake 0.005 TAO");
+    expect(unstakeButtonLabel({ ...ok, amount: 0.090086006 })).toBe("Unstake 0.0901 TAO");
+  });
+
+  it("turns a USDC amount into TAO at the current price, floored to whole rao", () => {
+    expect(unstakeRequestWei("10", "USDC", 252.4)).toBe(39_619_651_000_000_000n);
+    expect(unstakeRequestWei("0.005", "TAO", 252.4)).toBe(5_000_000_000_000_000n);
+    expect(unstakeRequestWei("", "USDC", 252.4)).toBeNull();
+    expect(unstakeRequestWei("0", "TAO", 252.4)).toBeNull();
+    expect(unstakeRequestWei("10", "USDC", 0)).toBeNull();
+  });
+
+  it("shows the other unit beside what was typed", () => {
+    expect(unstakeEquivalent(5_000_000_000_000_000n, "TAO", 252.4)).toBe("≈ $1.26");
+    expect(unstakeEquivalent(39_619_651_000_000_000n, "USDC", 252.4)).toBe("≈ 0.0396 TAO");
+  });
+
+  it("fills MAX in the unit shown: dollars floored to cents", () => {
+    expect(maxUnstakeInputIn(90_086_006_000_000_000n, "USDC", 252.4)).toBe("22.73");
+    expect(maxUnstakeInputIn(90_086_006_000_000_000n, "TAO", 252.4)).toBe("0.090086");
+  });
+
+  it("shows payouts to the cent", () => {
+    expect(formatUsdcCents(0.9935)).toBe("0.99");
+    expect(formatUsdcCents(1)).toBe("1.00");
+    expect(formatUsdcCents(1234.5)).toBe("1,234.50");
   });
 
   it("shows progress while the wallet asks", () => {

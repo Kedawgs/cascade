@@ -34,6 +34,11 @@ export function formatUsdShort(n: number): string {
   return cents % 100 === 0 ? usd0.format(cents / 100) : usd2.format(n);
 }
 
+/** USDC amounts to the cent: "0.99", "1.00", "1,234.50". */
+export function formatUsdcCents(n: number): string {
+  return formatUsd(n).replace("$", "");
+}
+
 /** USDC amounts in sentences: "1,000" or "284.14". */
 export function formatUsdc(n: number): string {
   return formatUsdShort(n).replace("$", "");

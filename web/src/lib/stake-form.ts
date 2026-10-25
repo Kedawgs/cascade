@@ -1,5 +1,12 @@
-import { formatUnits } from "viem";
-import { formatTao, formatUsdc, formatUsdShort } from "./format";
+import { formatUnits, parseUnits } from "viem";
+import { floorRao, toDisplay } from "./cascade/units";
+import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
+
+/** What the unstake amount is typed in: TAO, or its value in USDC. */
+export type UnstakeUnit = "TAO" | "USDC";
+
+/** TAO on buttons: at least 2 decimals, up to 4, so 0.005 stays 0.005. */
+const taoLabel = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 
 /** What the stake and unstake buttons need to know to name themselves. */
 export type StakeState = {
@@ -48,7 +55,38 @@ export function unstakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";
   if (s.amount !== null && s.amount > 0 && s.error === null) {
-    return `Unstake ${formatTao(s.amount, 2)} TAO`;
+    return `Unstake ${taoLabel.format(s.amount)} TAO`;
   }
   return "Unstake";
+}
+
+/** The TAO (wei) an unstake asks for: typed in TAO, or a USDC value converted at `priceUsd` and
+ * floored to whole rao. Null for nothing, zero or unreadable input. */
+export function unstakeRequestWei(raw: string, unit: UnstakeUnit, priceUsd: number): bigint | null {
+  if (raw.trim() === "") return null;
+  try {
+    if (unit === "TAO") {
+      const wei = parseUnits(raw, 18);
+      return wei > 0n ? wei : null;
+    }
+    if (!(priceUsd > 0)) return null;
+    const usd = parseUnits(raw, 6);
+    if (usd <= 0n) return null;
+    const wei = floorRao((usd * 10n ** 18n) / BigInt(Math.round(priceUsd * 1e6)));
+    return wei > 0n ? wei : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The amount in the other unit, shown under the field: "≈ $1.26" or "≈ 0.0396 TAO". */
+export function unstakeEquivalent(taoWei: bigint, typedIn: UnstakeUnit, priceUsd: number): string {
+  const tao = toDisplay(taoWei, 18);
+  return typedIn === "TAO" ? `≈ ${formatUsd(tao * priceUsd)}` : `≈ ${formatTao(tao, 4)} TAO`;
+}
+
+/** What MAX types in the unit shown: exact TAO (six decimals), or its USDC value floored to cents. */
+export function maxUnstakeInputIn(taoWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
+  if (unit === "TAO") return maxUnstakeInput(taoWei);
+  return (Math.floor(toDisplay(taoWei, 18) * priceUsd * 100) / 100).toFixed(2);
 }

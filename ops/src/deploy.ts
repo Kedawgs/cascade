@@ -19,32 +19,39 @@ const VIEWS = parseAbi([
   "function addressMapping(address addr) view returns (bytes32)",
 ]);
 
-/** Whether a step's result is already on-chain (so a lost record entry is recovered, not re-sent). */
+/** Whether a step's result is already on-chain (so a lost record entry is recovered, not re-sent).
+ * Answers no only when the chain says so; a failed read throws, so nothing is sent on a guess. */
 export async function effectPresent(ctx: Ctx, plan: Plan, step: PlannedStep): Promise<boolean> {
   const a = plan.addresses;
-  try {
-    switch (step.id) {
-      case "baseAdapter":
-      case "frontDoor":
-      case "bitAdapter":
-      case "vault":
-        return (await codeAt(ctx.rpc, step.chain, a[step.id])) !== "0x";
-      // balances read 500 rao (5e11 wei) below what was sent (the existential deposit)
-      case "adapterReserve":
-        return (await balanceOf(ctx.rpc, "bittensor", a.bitAdapter)) >= SETTINGS.adapterReserve - 5n * 10n ** 11n;
-      case "vaultReserve":
-        return (await balanceOf(ctx.rpc, "bittensor", a.vault)) >= SETTINGS.vaultReserve - 5n * 10n ** 11n;
-      case "setKeeper":
-        return (await read(ctx.rpc, "bittensor", { address: a.vault, abi: VIEWS, functionName: "keeper" })) === WALLET;
-      case "setPayoutDelay":
-        return (
-          (await read(ctx.rpc, "bittensor", { address: a.vault, abi: VIEWS, functionName: "payoutDelay" })) ===
+  const hasCode = async (chain: "base" | "bittensor", addr: Address) => (await codeAt(ctx.rpc, chain, addr)) !== "0x";
+  switch (step.id) {
+    case "baseAdapter":
+    case "frontDoor":
+    case "bitAdapter":
+    case "vault":
+      return hasCode(step.chain, a[step.id]);
+    // balances read 500 rao (5e11 wei) below what was sent (the existential deposit)
+    case "adapterReserve":
+      return (
+        (await hasCode("bittensor", a.bitAdapter)) &&
+        (await balanceOf(ctx.rpc, "bittensor", a.bitAdapter)) >= SETTINGS.adapterReserve - 5n * 10n ** 11n
+      );
+    case "vaultReserve":
+      return (
+        (await hasCode("bittensor", a.vault)) &&
+        (await balanceOf(ctx.rpc, "bittensor", a.vault)) >= SETTINGS.vaultReserve - 5n * 10n ** 11n
+      );
+    case "setKeeper":
+      return (
+        (await hasCode("bittensor", a.vault)) &&
+        (await read(ctx.rpc, "bittensor", { address: a.vault, abi: VIEWS, functionName: "keeper" })) === WALLET
+      );
+    case "setPayoutDelay":
+      return (
+        (await hasCode("bittensor", a.vault)) &&
+        (await read(ctx.rpc, "bittensor", { address: a.vault, abi: VIEWS, functionName: "payoutDelay" })) ===
           BigInt(SETTINGS.payoutDelay)
-        );
-    }
-  } catch {
-    // a read from a contract that does not exist yet
-    return false;
+      );
   }
 }
 
@@ -60,6 +67,9 @@ const realDeps: DeployDeps = { sendCreate, sendCall, effectPresent, readColdkey 
 
 type Receipt = { status: Hex; blockNumber: Hex; gasUsed: Hex; effectiveGasPrice: Hex } | null;
 
+const latestNonce = async (ctx: Ctx, chain: "base" | "bittensor") =>
+  hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [WALLET, "latest"])) as Hex);
+
 /** Settles a transaction left pending by an earlier run; returns once nothing is pending. */
 async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Promise<void> {
   const p = rec.pending;
@@ -67,7 +77,16 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
   const where = `${chainLabel(p.chain)} nonce ${p.nonce}`;
   if (p.hash) {
     const r = (await ctx.rpc.request(p.chain, "eth_getTransactionReceipt", [p.hash])) as Receipt;
-    if (!r) throw new Error(`${where} (transaction ${p.hash}) is still pending; run deploy again once it is mined`);
+    if (!r) {
+      const known = await ctx.rpc.request(p.chain, "eth_getTransactionByHash", [p.hash]);
+      if (!known && (await nonceOf(ctx.rpc, p.chain, WALLET)) <= p.nonce) {
+        ctx.log(`${where}: transaction ${p.hash} was dropped by the network; sending that step again`);
+        delete rec.pending;
+        saveRecord(path, rec);
+        return;
+      }
+      throw new Error(`${where} (transaction ${p.hash}) is still pending; run deploy again once it is mined`);
+    }
     if (r.status !== "0x1") {
       throw new Error(`${where} (transaction ${p.hash}) reverted; the plan is void: run deploy --new-plan`);
     }
@@ -81,8 +100,15 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
       ...(step.kind === "create" ? { address: rec.plan.addresses[step.id as keyof Plan["addresses"]] } : {}),
     };
   } else {
-    const mined = hexToNumber((await ctx.rpc.request(p.chain, "eth_getTransactionCount", [WALLET, "latest"])) as Hex);
-    if (mined <= p.nonce) throw new Error(`${where} is still pending; run deploy again once it is mined`);
+    if ((await latestNonce(ctx, p.chain)) <= p.nonce) {
+      if ((await nonceOf(ctx.rpc, p.chain, WALLET)) <= p.nonce) {
+        ctx.log(`${where}: the transaction was dropped by the network; sending that step again`);
+        delete rec.pending;
+        saveRecord(path, rec);
+        return;
+      }
+      throw new Error(`${where} is still pending; run deploy again once it is mined`);
+    }
     // mined: the effect check below records it as recovered, or the nonce check voids the plan
   }
   delete rec.pending;
@@ -117,14 +143,29 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean },
 
   for (const step of rec.plan.steps) {
     if (rec.done[step.id]) continue;
-    if (await deps.effectPresent(ctx, rec.plan, step)) {
+    let present: boolean;
+    try {
+      present = await deps.effectPresent(ctx, rec.plan, step);
+    } catch (e) {
+      throw new Error(
+        `${chainLabel(step.chain)}: could not check whether "${step.label}" is already done (${(e as Error).message}); nothing sent — run deploy again`,
+      );
+    }
+    if (present) {
       rec.done[step.id] = { recovered: true };
       saveRecord(path, rec);
       ctx.log(`${chainLabel(step.chain)}: ${step.label} — already done on-chain, recorded`);
       continue;
     }
     const current = await nonceOf(ctx.rpc, step.chain, WALLET);
-    if (current !== step.nonce) {
+    const mined = await latestNonce(ctx, step.chain);
+    if (mined < current) {
+      throw new Error(
+        `${chainLabel(step.chain)}: a transaction from the test wallet (nonce ${mined}) is still waiting to be mined; run deploy again once it is`,
+      );
+    }
+    // creates must land at their predicted addresses; a configuration call can go at any nonce
+    if (step.kind === "create" && current !== step.nonce) {
       throw new Error(
         `${chainLabel(step.chain)}: the plan no longer matches the wallet (nonce ${current}, expected ${step.nonce}); run deploy --new-plan to start over from the current nonces`,
       );
@@ -133,7 +174,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean },
       rec.done[step.id] =
         step.kind === "create"
           ? await deps.sendCreate(ctx, step, rec.plan.addresses[step.id as keyof Plan["addresses"]])
-          : await deps.sendCall(ctx, step);
+          : await deps.sendCall(ctx, { ...step, nonce: current });
     } catch (e) {
       if (e instanceof ReceiptTimeout) {
         rec.pending = { step: step.id, chain: e.chain, nonce: e.nonce, hash: e.hash };

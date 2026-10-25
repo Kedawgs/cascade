@@ -62,7 +62,15 @@ describe("decideNext", () => {
     now: T,
     frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false },
     alphaVault: { healthy: true },
-    vault: { paused: false, available: 10n ** 16n, minStakeWei: 2n * 10n ** 15n, batches: [{ key: KEY, queuedAt: T - 3600, cursor: 0, count: 1 }], payoutDelay: 3600 },
+    vault: {
+      paused: false,
+      available: 10n ** 16n,
+      minStakeWei: 2n * 10n ** 15n,
+      rootStake: 0n,
+      nominatorMinWei: 0n,
+      batches: [{ key: KEY, queuedAt: T - 3600, cursor: 0, count: 1 }],
+      payoutDelay: 3600,
+    },
   };
   const withVault = (v: Partial<State["vault"]>) => ({ ...base, vault: { ...base.vault, ...v } });
 
@@ -97,6 +105,18 @@ describe("decideNext", () => {
   it("does not pay out or stake while the vault is paused", () => {
     const paused = withVault({ paused: true });
     expect(decideNext(paused).action).toEqual({ kind: "close" });
+  });
+
+  it("waits to stake until the position would reach the nominator minimum", () => {
+    const small = withVault({ batches: [], available: 10n ** 16n, rootStake: 0n, nominatorMinWei: 2n * 10n ** 16n });
+    expect(decideNext(small).action).toEqual({ kind: "close" });
+    expect(decideNext({ ...small, frontDoor: { ...base.frontDoor, nDeposits: 0 } })).toEqual({
+      action: null,
+      reason: "nothing due: 0.01 TAO of idle TAO waits until the stake would reach the 0.02 TAO nominator minimum",
+    });
+    expect(decideNext(withVault({ batches: [], available: 10n ** 16n, rootStake: 10n ** 16n, nominatorMinWei: 2n * 10n ** 16n })).action).toEqual({
+      kind: "stake",
+    });
   });
 
   it("skips a finished batch", () => {

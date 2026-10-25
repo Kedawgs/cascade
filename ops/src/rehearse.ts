@@ -13,6 +13,8 @@ import { type Ctx, execFileRunner } from "./send.ts";
 import { verify } from "./verify.ts";
 
 const BITTENSOR_ARCHIVE = "https://archive.chain.opentensor.ai";
+/** Forks always use the public Base RPC, so a keyed RPC from .env never lands in anvil's log. */
+const PUBLIC_BASE_RPC = "https://mainnet.base.org";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function waitUp(rpc: Rpc, chain: ChainName, ms = 180_000) {
@@ -49,7 +51,7 @@ export async function startForks(env: Env, log: (l: string) => void): Promise<Re
     for (const c of procs) c.kill();
   };
   try {
-    start(["--fork-url", t.live.base.rpcUrl, "--port", "8545", "--chain-id", "31337"], "rehearsal-anvil-base.log");
+    start(["--fork-url", PUBLIC_BASE_RPC, "--port", "8545", "--chain-id", "31337"], "rehearsal-anvil-base.log");
     start(
       ["--fork-url", BITTENSOR_ARCHIVE, "--port", "8547", "--chain-id", "31338", "--retries", "12", "--fork-retry-backoff", "20000", "--timeout", "60000"],
       "rehearsal-anvil-bittensor.log",
@@ -119,7 +121,7 @@ async function rehearseClose(r: Rehearsal, rec: DeploymentRecord, log: (l: strin
   await rpc.request("base", "evm_increaseTime", [600]);
   await rpc.request("base", "evm_mine", []);
 
-  const sent = await close(keeperDeps(r.ctx, rec), rec);
+  const sent = await close(keeperDeps(r.ctx, rec, r.recordPath), rec);
   const receipt = (await rpc.request("base", "eth_getTransactionReceipt", [sent.hash])) as { logs: Log[] };
   const decoded = receipt.logs.flatMap((l) => {
     try {

@@ -5,19 +5,20 @@ import { type Address, type Hex, numberToHex, parseAbi } from "viem";
 import { describe, expect, it } from "vitest";
 import { paths, targets, WALLET } from "../src/config.ts";
 import { buildPlan } from "../src/plan.ts";
-import type { Rpc } from "../src/rpc.ts";
+import { RpcError, type Rpc } from "../src/rpc.ts";
 import { castArg, type Ctx, ReceiptTimeout, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
 import type { CallRequest, CreateRequest } from "../src/types.ts";
 
 const HASH = `0x${"ab".repeat(32)}` as Hex;
 const SENTINEL = "NEVER-PRINT-ME";
 
-function fixture(over: { chainId?: number; nonce?: number; estimate?: "fail" | bigint; receipt?: "none" | "reverted"; created?: Address } = {}) {
+function fixture(over: { chainId?: number; nonce?: number; latestNonce?: number; estimate?: "fail" | "custom" | bigint; receipt?: "none" | "reverted" | "throws"; created?: Address; signer?: Address; castFails?: boolean; castErrors?: string } = {}) {
   const calls: { method: string; params: unknown[] }[] = [];
   const runs: { file: string; args: string[] }[] = [];
   const logs: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), "ops-send-"));
   const passwordFile = join(dir, "pw");
+  let broadcast = false;
   writeFileSync(passwordFile, SENTINEL);
   const rpc: Rpc = {
     async request(chain, method, params) {
@@ -26,21 +27,28 @@ function fixture(over: { chainId?: number; nonce?: number; estimate?: "fail" | b
       switch (method) {
         case "eth_chainId":
           return numberToHex(over.chainId ?? t.chainId);
-        case "eth_getTransactionCount":
-          return numberToHex(over.nonce ?? 0);
+        case "eth_getTransactionCount": {
+          const n = over.nonce ?? 0;
+          if (params[1] === "latest") return numberToHex(over.latestNonce ?? n);
+          return numberToHex(broadcast && over.castFails ? n + 1 : n);
+        }
         case "eth_estimateGas":
-          if (over.estimate === "fail") throw new Error("execution reverted: NotKeeper()");
+          if (over.estimate === "fail") throw new Error("execution reverted");
+          // NothingToStake()
+          if (over.estimate === "custom") throw new RpcError("bittensor eth_estimateGas: execution reverted", 3, "0xd23fa2a3");
           return numberToHex(over.estimate ?? 1_000_001n);
         case "eth_gasPrice":
           return numberToHex(5_000_000_000n);
         case "eth_getTransactionReceipt":
           if (over.receipt === "none") return null;
+          if (over.receipt === "throws") throw new Error("fetch failed");
           return {
             status: over.receipt === "reverted" ? "0x0" : "0x1",
             blockNumber: "0x10",
             gasUsed: numberToHex(900_000n),
             effectiveGasPrice: numberToHex(5_000_000_000n),
             contractAddress: over.created ?? null,
+            logs: [{ address: WALLET, topics: [HASH], data: "0x" }],
           };
         case "eth_getCode":
           return "0x6080";
@@ -51,6 +59,11 @@ function fixture(over: { chainId?: number; nonce?: number; estimate?: "fail" | b
   const runner: Runner = {
     async run(file, args) {
       runs.push({ file, args });
+      if (args[0] === "wallet") return { code: 0, stdout: `${over.signer ?? WALLET}
+`, stderr: "" };
+      if (over.castErrors) return { code: 1, stdout: "", stderr: over.castErrors };
+      broadcast = true;
+      if (over.castFails) return { code: 1, stdout: "", stderr: "Error: server returned an error response" };
       return { code: 0, stdout: `{"deployer":"${WALLET}","deployedTo":"${over.created ?? WALLET}","transactionHash":"${HASH}"}`, stderr: "" };
     },
   };
@@ -64,7 +77,8 @@ function fixture(over: { chainId?: number; nonce?: number; estimate?: "fail" | b
     receiptTimeoutMs: 50,
     pollMs: 5,
   };
-  return { ctx, calls, runs, logs };
+  const sends = () => runs.filter((r) => r.args[0] !== "wallet");
+  return { ctx, calls, runs, logs, sends };
 }
 
 const plan = buildPlan(0, 0, `0x${"11".repeat(32)}`);
@@ -140,7 +154,7 @@ describe("send", () => {
     await refusal(sendCall(f.ctx, call)).catch(() => undefined);
     const ok = fixture();
     await sendCall(ok.ctx, call);
-    const args = ok.runs[0].args;
+    const args = ok.sends()[0].args;
     expect(args[args.indexOf("--password-file") + 1]).toBe(ok.ctx.paths.passwordFile);
     expect(args[args.indexOf("--keystore") + 1]).toBe(ok.ctx.paths.keystore);
     expect(args).not.toContain("--private-key");
@@ -157,13 +171,13 @@ describe("send", () => {
   it("sets the gas limit to 1.25× the estimate, legacy on Bittensor", async () => {
     const f = fixture();
     await sendCall(f.ctx, call);
-    const bit = f.runs[0].args;
+    const bit = f.sends()[0].args;
     expect(bit[bit.indexOf("--gas-limit") + 1]).toBe("1250002");
     expect(bit).toContain("--legacy");
     expect(bit).toContain("--gas-price");
     await sendCall(f.ctx, { ...call, chain: "base" });
-    expect(f.runs[1].args).not.toContain("--legacy");
-    expect(f.runs[1].args).not.toContain("--gas-price");
+    expect(f.sends()[1].args).not.toContain("--legacy");
+    expect(f.sends()[1].args).not.toContain("--gas-price");
   });
 
   it("logs one plain line with the estimated cost", async () => {
@@ -187,6 +201,56 @@ describe("send", () => {
     const err = await sendCall(f.ctx, call).catch((e) => e);
     expect(err).toBeInstanceOf(ReceiptTimeout);
     expect(err.hash).toBe(HASH);
+  });
+
+  it("refuses a keystore that signs as another account", async () => {
+    const f = fixture({ signer: "0x1111111111111111111111111111111111111111" });
+    expect(await refusal(sendCall(f.ctx, call))).toBe("signer");
+    expect(f.sends()).toHaveLength(0);
+    const w = f.runs[0].args;
+    expect(w.slice(0, 2)).toEqual(["wallet", "address"]);
+    expect(w[w.indexOf("--password-file") + 1]).toBe(f.ctx.paths.passwordFile);
+  });
+
+  it("refuses while an earlier transaction is still waiting to be mined", async () => {
+    const f = fixture({ nonce: 1, latestNonce: 0 });
+    expect(await refusal(sendCall(f.ctx, { ...call, nonce: 1 }))).toBe("waiting");
+    expect(f.runs).toHaveLength(0);
+  });
+
+  it("names the contract's error when the estimate fails", async () => {
+    const f = fixture({ estimate: "custom" });
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err).toBeInstanceOf(SendRefused);
+    expect(err.message).toMatch(/NothingToStake\(\)/);
+  });
+
+  it("an RPC error while waiting becomes a ReceiptTimeout with the hash", async () => {
+    const f = fixture({ receipt: "throws" });
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err).toBeInstanceOf(ReceiptTimeout);
+    expect(err.hash).toBe(HASH);
+  });
+
+  it("cast failing after the node accepted the transaction is a ReceiptTimeout, not a plain failure", async () => {
+    const f = fixture({ castFails: true });
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err).toBeInstanceOf(ReceiptTimeout);
+    expect(err.nonce).toBe(0);
+  });
+
+  it("never prints an RPC address, which can carry an API key", async () => {
+    const f = fixture({ castErrors: "error sending request for url (http://127.0.0.1:8547/ogrpc?network=bittensor&dkey=SECRETKEY)" });
+    f.ctx.targets = { ...f.ctx.targets, bittensor: { ...f.ctx.targets.bittensor, rpcUrl: "http://127.0.0.1:8547/ogrpc?network=bittensor&dkey=SECRETKEY" } };
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err.message).toMatch(/failed/);
+    expect(err.message).not.toContain("SECRETKEY");
+    expect(f.logs.join(" ")).not.toContain("SECRETKEY");
+  });
+
+  it("returns the receipt's logs", async () => {
+    const f = fixture();
+    expect((await sendCall(f.ctx, call)).logs).toEqual([{ address: WALLET, topics: [HASH], data: "0x" }]);
   });
 
   it("castArg formats the Base adapter Config tuple", () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { LIVE } from "../src/config.ts";
-import { checkAlphaVault, checkOffRamps, simulationPassed } from "../src/preflight.ts";
+import { checkAlphaVault, checkOffRamps, logProbe, simulationPassed } from "../src/preflight.ts";
 
 const src = LIVE.bittensor.SELECTOR;
 const want = LIVE.base.OFFRAMP;
@@ -29,5 +29,20 @@ describe("preflight", () => {
   it("reads the simulation's verdict", () => {
     expect(simulationPassed("...\nSIMULATION OK: delivered 1 TAO\n")).toBe(true);
     expect(simulationPassed("SIMULATION FAILED: ConversionShort")).toBe(false);
+  });
+
+  it("probes log queries with the keeper's window on each chain", async () => {
+    const asked: [string, bigint][] = [];
+    const rpc = {
+      async request(chain: string, method: string, params: unknown[]) {
+        if (method === "eth_blockNumber") return "0x3e8";
+        const q = params[0] as { fromBlock: string; toBlock: string };
+        asked.push([chain, BigInt(q.toBlock) - BigInt(q.fromBlock) + 1n]);
+        if (chain === "base" && BigInt(q.toBlock) - BigInt(q.fromBlock) + 1n > 200n) throw new Error("limited to a 200 range");
+        return [];
+      },
+    };
+    expect(await logProbe({ rpc } as never, "base")).toBeNull();
+    expect(asked).toEqual([["base", 100n]]);
   });
 });

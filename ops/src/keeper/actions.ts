@@ -1,4 +1,4 @@
-import { type Hex, parseAbi } from "viem";
+import { encodeEventTopics, type Hex, parseAbi } from "viem";
 import type { ChainName } from "../config.ts";
 import type { DeploymentRecord } from "../record.ts";
 import type { Sent } from "../send.ts";
@@ -9,6 +9,11 @@ import type { StatusDetail } from "./status.ts";
 
 export type KeeperState = State & { detail: StatusDetail };
 
+export type Message = { id: Hex; direction: "Base → Bittensor" | "Bittensor → Base"; hash: Hex };
+
+/** A keeper transaction, with the bridge message it sent (close, payouts). */
+export type Done = Sent & { messageId?: Hex };
+
 export interface KeeperDeps {
   readState(): Promise<KeeperState>;
   sendCall(req: CallRequest): Promise<Sent>;
@@ -16,6 +21,7 @@ export interface KeeperDeps {
   quoteClose(s: KeeperState): Promise<bigint>;
   payoutLogs(): Promise<PayoutLog[]>;
   batchInfo(key: Hex): Promise<{ payoutsHash: Hex; count: number }>;
+  recordMessage(m: Message): void;
   log(line: string): void;
 }
 
@@ -25,6 +31,33 @@ export const KEEPER_ABI = parseAbi([
   "struct Payout { address user; uint256 shares; uint256 assets; }",
   "function processPayouts(bytes32 key, Payout[] payouts, uint32 maxEntries)",
 ]);
+
+const SENT_EVENT = parseAbi([
+  "event Sent(bytes32 indexed messageId, uint64 destChain, address indexed sender, address indexed recipient, uint256 amount, uint256 fee, uint256 gasLimit)",
+]);
+const SENT_TOPIC = encodeEventTopics({ abi: SENT_EVENT, eventName: "Sent" })[0];
+
+/** The bridge message id from an adapter's Sent log in a receipt. */
+export function messageIdFrom(logs: Sent["logs"], adapter: Hex): Hex | undefined {
+  const l = (logs ?? []).find((l) => l.address.toLowerCase() === adapter.toLowerCase() && l.topics[0] === SENT_TOPIC);
+  return l?.topics[1];
+}
+
+/** Keeper sends need the whole deployment in place and its read-back passed. */
+export function requireReady(rec: DeploymentRecord): void {
+  const missing = rec.plan.steps.filter((s) => !rec.done[s.id]);
+  if (missing.length || !rec.verify?.ok) {
+    throw new Error(
+      `the deployment is not complete and verified yet (${missing.length ? `${missing.length} step(s) to go` : "the read-back has not passed"}): run deploy, then verify`,
+    );
+  }
+}
+
+async function withMessage(deps: KeeperDeps, sent: Sent, adapter: Hex, direction: Message["direction"]): Promise<Done> {
+  const messageId = messageIdFrom(sent.logs, adapter);
+  if (messageId) deps.recordMessage({ id: messageId, direction, hash: sent.hash });
+  return { ...sent, messageId };
+}
 
 const MIN_CLOSE_VALUE = 15n * 10n ** 14n;
 /** The fee float for closeBatch: three times the live quote, at least 0.0015 ETH (the front door refunds the rest). */
@@ -75,22 +108,26 @@ export function payoutsRequest(
   };
 }
 
-export async function close(deps: KeeperDeps, rec: DeploymentRecord): Promise<Sent> {
+export async function close(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
+  requireReady(rec);
   const s = await deps.readState();
   if (!s.alphaVault.healthy) throw new Error("AlphaVault is paused or migrating — not closing the batch");
   if (s.frontDoor.paused) throw new Error("the front door is paused");
   if (s.frontDoor.nDeposits + s.frontDoor.nRedeems === 0) throw new Error("the open batch is empty");
   if (!s.frontDoor.canClose) throw new Error("the open batch is not ready to close yet");
-  return deps.sendCall(closeRequest(rec, await deps.quoteClose(s), await deps.nonce("base")));
+  const sent = await deps.sendCall(closeRequest(rec, await deps.quoteClose(s), await deps.nonce("base")));
+  return withMessage(deps, sent, rec.plan.addresses.baseAdapter, "Base → Bittensor");
 }
 
-export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Sent> {
+export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
+  requireReady(rec);
   const s = await deps.readState();
   if (s.vault.paused) throw new Error("the vault is paused");
   return deps.sendCall(stakeRequest(rec, await deps.nonce("bittensor")));
 }
 
-export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex): Promise<Sent> {
+export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex): Promise<Done> {
+  requireReady(rec);
   const s = await deps.readState();
   if (!s.alphaVault.healthy) throw new Error("AlphaVault is paused or migrating — not paying out");
   if (s.vault.paused) throw new Error("the vault is paused");
@@ -98,10 +135,11 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
   if (!b || b.cursor >= b.count) throw new Error(`no payout is pending for batch ${key.slice(0, 10)}…`);
   if (s.now < b.queuedAt + s.vault.payoutDelay) throw new Error(`batch ${key.slice(0, 10)}… is not due yet`);
   const list = rebuildPayouts(await deps.payoutLogs(), key);
-  return deps.sendCall(payoutsRequest(rec, key, list, await deps.batchInfo(key), await deps.nonce("bittensor")));
+  const sent = await deps.sendCall(payoutsRequest(rec, key, list, await deps.batchInfo(key), await deps.nonce("bittensor")));
+  return withMessage(deps, sent, rec.plan.addresses.bitAdapter, "Bittensor → Base");
 }
 
-export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Action): Promise<Sent> {
+export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Action): Promise<Done> {
   if (a.kind === "close") return close(deps, rec);
   if (a.kind === "stake") return stake(deps, rec);
   return payouts(deps, rec, a.key);
@@ -124,8 +162,8 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: { i
       deps.log(next.reason);
     } else {
       try {
-        const sent = await act(deps, rec, next.action);
-        deps.log(`Done: ${next.reason} (transaction ${sent.hash})`);
+        const done = await act(deps, rec, next.action);
+        deps.log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
       } catch (e) {
         deps.log(`Stopped: ${(e as Error).message}`);
         return;

@@ -34,10 +34,10 @@ export interface RpcOptions {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** JSON-RPC over fetch. Requests on one chain run one at a time; Bittensor's are spaced (the public
- * node allows ~128 a minute) and an HTTP 429 is retried after a backoff. */
+/** JSON-RPC over fetch. Requests on one chain run one at a time and are spaced (Bittensor's public
+ * node allows ~128 a minute; Base's rate-limits bursts), and an HTTP 429 is retried after a backoff. */
 export function createRpc(targets: Record<ChainName, ChainTarget>, opts: RpcOptions = {}): Rpc {
-  const interval: Record<ChainName, number> = { base: 0, bittensor: 600, ...opts.minIntervalMs };
+  const interval: Record<ChainName, number> = { base: 250, bittensor: 600, ...opts.minIntervalMs };
   const retries = opts.retries ?? 6;
   const backoff = opts.backoffMs ?? 20_000;
   const f = opts.fetch ?? fetch;

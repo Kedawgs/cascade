@@ -1,15 +1,17 @@
 import { type Address, formatEther, type Hex, isAddress, parseAbi } from "viem";
+import { read } from "./rpc.ts";
 import { PRECOMPILE, SETTINGS, WALLET } from "./config.ts";
 import type { KeeperDeps } from "./keeper/actions.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
-import { type Ctx, chainLabel, type Sent, sendCall, sendValue } from "./send.ts";
+import { type Ctx, type Sent, sendCall, sendValue } from "./send.ts";
 import { decodeSs58 } from "./ss58.ts";
 
 const ABI = parseAbi([
   "function pause()",
   "function setCaps(uint256 minDeposit_, uint256 depositCap_)",
   "function transfer(bytes32 data) payable",
+  "function paused() view returns (bool)",
 ]);
 
 /** What still has to finish before the front door can be paused for good. */
@@ -31,23 +33,39 @@ export function windDownBlockers(s: {
   return out;
 }
 
-/** Pauses the front door and sets its cap to 0, once everything is paid out and claimed. */
+/** Pauses the front door and sets its cap to 0, once everything is paid out and claimed. Skips
+ * whichever is already done, so it can be run again after a stop. */
 export async function windDown(deps: KeeperDeps, rec: DeploymentRecord): Promise<Sent[]> {
   const s = await deps.readState();
   const blockers = windDownBlockers({ frontDoor: s.frontDoor, batches: s.vault.batches, claimable: s.detail.claimable });
   if (blockers.length) throw new Error(`not yet — finish these first:\n  ${blockers.join("\n  ")}`);
   const fd = rec.plan.addresses.frontDoor;
   const base = { chain: "base" as const, to: fd, abi: ABI };
-  return [
-    await deps.sendCall({ ...base, nonce: await deps.nonce("base"), label: "pause the front door", functionName: "pause", args: [] }),
-    await deps.sendCall({
-      ...base,
-      nonce: await deps.nonce("base"),
-      label: "set the front door's deposit cap to 0",
-      functionName: "setCaps",
-      args: [SETTINGS.minDeposit, 0n],
-    }),
-  ];
+  const out: Sent[] = [];
+  if (!s.frontDoor.paused) {
+    out.push(await deps.sendCall({ ...base, nonce: await deps.nonce("base"), label: "pause the front door", functionName: "pause", args: [] }));
+  }
+  if (s.detail.depositCap !== 0n) {
+    out.push(
+      await deps.sendCall({
+        ...base,
+        nonce: await deps.nonce("base"),
+        label: "set the front door's deposit cap to 0",
+        functionName: "setCaps",
+        args: [SETTINGS.minDeposit, 0n],
+      }),
+    );
+  }
+  return out;
+}
+
+/** Which leftovers to send: each non-empty one, and only once the front door is paused (the owner and
+ * keeper need gas until then). */
+export function sweepLegs(s: { tao: bigint; eth: bigint; frontDoorPaused: boolean }): ("tao" | "eth")[] {
+  if (!s.frontDoorPaused) throw new Error("the front door is not paused yet: run wind-down first");
+  const legs = [...(s.tao > 0n ? (["tao"] as const) : []), ...(s.eth > 0n ? (["eth"] as const) : [])];
+  if (!legs.length) throw new Error("nothing left to sweep: both balances are already home");
+  return legs;
 }
 
 const floorRao = (wei: bigint) => (wei / 10n ** 9n) * 10n ** 9n;
@@ -68,14 +86,17 @@ export function sweepDestinations(taoTo: string, ethTo: string): { taoKey: Hex; 
   return { taoKey: decodeSs58(taoTo), ethTo };
 }
 
-/** Sends the test wallet's leftover TAO (through the transfer precompile) and ETH home. */
-export async function sweep(ctx: Ctx, taoTo: string, ethToRaw: string): Promise<void> {
+/** Sends the test wallet's leftover TAO (through the transfer precompile) and ETH home; a leg already
+ * swept is skipped, so it can be run again after a stop. */
+export async function sweep(ctx: Ctx, rec: DeploymentRecord, taoTo: string, ethToRaw: string): Promise<void> {
   const { taoKey, ethTo } = sweepDestinations(taoTo, ethToRaw);
+  const tao = taoSweepValue(await balanceOf(ctx.rpc, "bittensor", WALLET), 40_000n, await gasPriceOf(ctx.rpc, "bittensor"));
+  const eth = ethSweepValue(await balanceOf(ctx.rpc, "base", WALLET), 26_250n, await gasPriceOf(ctx.rpc, "base"));
+  const paused = (await read(ctx.rpc, "base", { address: rec.plan.addresses.frontDoor, abi: ABI, functionName: "paused" })) as boolean;
+  const legs = sweepLegs({ tao, eth, frontDoorPaused: paused });
   ctx.log(`Sending leftovers: TAO to Bittensor ${taoTo}, ETH to Base ${ethTo}`);
-  const taoLimit = 40_000n;
-  const tao = taoSweepValue(await balanceOf(ctx.rpc, "bittensor", WALLET), taoLimit, await gasPriceOf(ctx.rpc, "bittensor"));
-  if (tao === 0n) throw new Error(`${chainLabel("bittensor")}: nothing to sweep`);
-  await sendCall(ctx, {
+  if (legs.includes("tao")) {
+    await sendCall(ctx, {
     chain: "bittensor",
     nonce: await nonceOf(ctx.rpc, "bittensor", WALLET),
     label: `send ${formatEther(tao)} TAO home`,
@@ -84,8 +105,9 @@ export async function sweep(ctx: Ctx, taoTo: string, ethToRaw: string): Promise<
     functionName: "transfer",
     args: [taoKey],
     value: tao,
-  });
-  const eth = ethSweepValue(await balanceOf(ctx.rpc, "base", WALLET), 26_250n, await gasPriceOf(ctx.rpc, "base"));
-  if (eth === 0n) throw new Error(`${chainLabel("base")}: nothing to sweep`);
-  await sendValue(ctx, { chain: "base", nonce: await nonceOf(ctx.rpc, "base", WALLET), label: `send ${formatEther(eth)} ETH home`, to: ethTo, value: eth });
+    });
+  }
+  if (legs.includes("eth")) {
+    await sendValue(ctx, { chain: "base", nonce: await nonceOf(ctx.rpc, "base", WALLET), label: `send ${formatEther(eth)} ETH home`, to: ethTo, value: eth });
+  }
 }

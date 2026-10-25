@@ -1,4 +1,4 @@
-import type { Hex } from "viem";
+import { formatEther, type Hex } from "viem";
 
 export interface State {
   now: number;
@@ -8,6 +8,9 @@ export interface State {
     paused: boolean;
     available: bigint;
     minStakeWei: bigint;
+    /** Root stake already held, and the chain's nominator minimum for one position, in wei. */
+    rootStake: bigint;
+    nominatorMinWei: bigint;
     batches: { key: Hex; queuedAt: number; cursor: number; count: number }[];
     payoutDelay: number;
   };
@@ -26,7 +29,9 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   if (due.length && !s.vault.paused && s.alphaVault.healthy) {
     return { action: { kind: "payouts", key: due[0].key }, reason: "a payout batch is past its delay" };
   }
-  if (s.vault.available >= s.vault.minStakeWei && !s.vault.paused) {
+  const stakeable = s.vault.available >= s.vault.minStakeWei;
+  const bigEnough = s.vault.rootStake + s.vault.available >= s.vault.nominatorMinWei;
+  if (stakeable && bigEnough && !s.vault.paused) {
     return { action: { kind: "stake" }, reason: "the vault holds idle TAO above the staking floor" };
   }
   if (closable && !s.frontDoor.paused && s.alphaVault.healthy) {
@@ -41,6 +46,12 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   if (open.length) {
     const next = Math.min(...open.map((b) => b.queuedAt + s.vault.payoutDelay));
     return { action: null, reason: `nothing due: next payout at ${hhmm(next)}` };
+  }
+  if (stakeable && !bigEnough) {
+    return {
+      action: null,
+      reason: `nothing due: ${formatEther(s.vault.available)} TAO of idle TAO waits until the stake would reach the ${formatEther(s.vault.nominatorMinWei)} TAO nominator minimum`,
+    };
   }
   if (s.frontDoor.canClose) return { action: null, reason: "nothing due: the open batch is empty" };
   return { action: null, reason: "nothing due: the open batch is not ready to close yet" };

@@ -25,6 +25,8 @@ export interface DeploymentRecord {
   pending?: { step: StepId; chain: ChainName; nonce: number; hash?: Hex };
   verify?: VerifyResult;
   rehearsalClose?: { gasUsed: bigint; fee: bigint };
+  /** Bridge messages the keeper sent, so status and track need no Base log scans. */
+  messages?: { id: Hex; direction: "Base → Bittensor" | "Bittensor → Base"; hash: Hex; at: string }[];
 }
 
 const replacer = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);

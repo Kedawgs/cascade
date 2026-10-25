@@ -4,6 +4,7 @@ import { type ChainName, LIVE, PRECOMPILE, SETTINGS, WALLET } from "./config.ts"
 import type { Plan } from "./plan.ts";
 import type { DeploymentRecord, VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
+import { scanLogs, startBlock } from "./keeper/state.ts";
 import { type Ctx, chainLabel } from "./send.ts";
 
 export type { VerifyResult } from "./record.ts";
@@ -106,6 +107,21 @@ export function frontDoorActivationFailures(logs: { address: Address; topics: He
   return ok ? [] : [`Bittensor CascadeVault: expected exactly one FrontDoorActivated(8453, front door) at deploy, found ${hits.length}`];
 }
 
+/** The vault's FrontDoorActivated logs: from its creation receipt, or (a recovered creation, whose
+ * transaction was never recorded) from its logs, which only its constructor can have emitted. */
+export async function activationLogs(ctx: Ctx, rec: DeploymentRecord): Promise<{ address: Address; topics: Hex[]; data: Hex }[]> {
+  const created = rec.done.vault;
+  if (created && "hash" in created) {
+    const r = (await ctx.rpc.request("bittensor", "eth_getTransactionReceipt", [created.hash])) as {
+      logs: { address: Address; topics: Hex[]; data: Hex }[];
+    };
+    return r.logs;
+  }
+  const ev = ACTIVATED[0];
+  const logs = await scanLogs(ctx, "bittensor", rec.plan.addresses.vault, ev, await startBlock(ctx, rec, "bittensor"));
+  return logs.map((l) => l.raw);
+}
+
 /** Balances read 500 rao (5e11 wei) below what was sent. */
 export function reserveFailures(adapterBalance: bigint, vaultBalance: bigint): string[] {
   const out: string[] = [];
@@ -148,15 +164,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
     failures.push("Bittensor CascadeVault: the front door is not active under the adapter's remote chain id");
   }
 
-  const created = rec.done.vault;
-  if (created && "hash" in created) {
-    const r = (await ctx.rpc.request("bittensor", "eth_getTransactionReceipt", [created.hash])) as {
-      logs: { address: Address; topics: Hex[]; data: Hex }[];
-    };
-    failures.push(...frontDoorActivationFailures(r.logs, plan));
-  } else {
-    failures.push("Bittensor CascadeVault: its creation was recovered without a transaction, so check its FrontDoorActivated event by hand");
-  }
+  failures.push(...frontDoorActivationFailures(await activationLogs(ctx, rec), plan));
 
   failures.push(
     ...reserveFailures(await balanceOf(ctx.rpc, "bittensor", plan.addresses.bitAdapter), await balanceOf(ctx.rpc, "bittensor", v)),

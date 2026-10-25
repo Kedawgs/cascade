@@ -4,6 +4,7 @@ import { type Address, getContractAddress, parseAbi } from "viem";
 import type { Budget } from "./budget.ts";
 import { type ChainName, LIVE, SETTINGS, WALLET } from "./config.ts";
 import type { DeploymentRecord } from "./record.ts";
+import { WINDOW } from "./keeper/state.ts";
 import { balanceOf, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel } from "./send.ts";
 
@@ -40,6 +41,19 @@ export function checkAlphaVault(s: { isPaused: boolean; migrationReadyAt: bigint
   return null;
 }
 
+/** One eth_getLogs over the keeper's window on `chain`: null if the RPC accepts it. */
+export async function logProbe(ctx: Pick<Ctx, "rpc">, chain: ChainName): Promise<string | null> {
+  try {
+    const latest = BigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as string);
+    await ctx.rpc.request(chain, "eth_getLogs", [
+      { address: LIVE[chain].ROUTER, fromBlock: `0x${(latest - WINDOW[chain] + 1n).toString(16)}`, toBlock: `0x${latest.toString(16)}` },
+    ]);
+    return null;
+  } catch (e) {
+    return `the RPC refused a ${WINDOW[chain]}-block log query (${(e as Error).message})`;
+  }
+}
+
 export const simulationPassed = (out: string) => /^SIMULATION OK/m.test(out);
 
 export const bashPath = (env: Record<string, string | undefined>) =>
@@ -70,6 +84,10 @@ export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?:
       list.push({ ...r, version });
     }
     check(`${label} executes on OffRamp 2.0.0 at ${expected}`, checkOffRamps(list, source, expected));
+  }
+
+  for (const chain of ["base", "bittensor"] as const) {
+    check(`${chainLabel(chain)}'s RPC answers the keeper's log queries`, await logProbe(ctx, chain));
   }
 
   const alpha = (fn: string) => read(ctx.rpc, "bittensor", { address: LIVE.ALPHA_VAULT, abi: ALPHA, functionName: fn });

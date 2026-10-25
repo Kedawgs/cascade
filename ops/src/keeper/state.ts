@@ -9,12 +9,12 @@ import {
   numberToHex,
   parseAbi,
 } from "viem";
-import { type ChainName, LIVE, WALLET } from "../config.ts";
-import type { DeploymentRecord } from "../record.ts";
+import { type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
+import { type DeploymentRecord, saveRecord } from "../record.ts";
 import { balanceOf, nonceOf, read } from "../rpc.ts";
 import { type Ctx, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState } from "./actions.ts";
-import { encodeBatch, type Entry, openBatchId } from "./batch.ts";
+import { encodeBatch, type Entry } from "./batch.ts";
 import type { PayoutLog } from "./payouts.ts";
 
 const FRONT = parseAbi([
@@ -24,6 +24,7 @@ const FRONT = parseAbi([
   "function openRedeems() view returns (Entry[])",
   "function paused() view returns (bool)",
   "function claimable(address) view returns (uint256)",
+  "function depositCap() view returns (uint256)",
   "event BatchClosed(uint64 indexed id, uint256 totalDeposits, uint256 nDeposits, uint256 nRedeems, uint256 fee, uint256 potUsed)",
 ]);
 const VAULT = parseAbi([
@@ -52,14 +53,19 @@ const OFFRAMP = parseAbi([
   "function getExecutionState(bytes32 messageId) view returns (uint8)",
   "event ExecutionStateChanged(uint64 indexed sourceChainSelector, uint64 indexed sequenceNumber, bytes32 indexed messageId, uint8 state, bytes returnData)",
 ]);
+const STAKING = parseAbi(["function getNominatorMinRequiredStake() view returns (uint256)"]);
+/** Every view the keeper reads, by contract (tests answer them with a fake chain). */
+export const KEEPER_READ_ABIS = { FRONT, VAULT, ADAPTER, ALPHA, OFFRAMP, STAKING };
 export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE"];
 const ED_RESERVE = 10n ** 12n;
-const WINDOW: Record<ChainName, bigint> = { base: 2_000n, bittensor: 1_000n };
+/** eth_getLogs block ranges the public RPCs accept: mainnet.base.org refuses more than 200 blocks. */
+export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
 
 const event = (abi: readonly unknown[], name: string) =>
   (abi as AbiEvent[]).find((i) => i.type === "event" && i.name === name) as AbiEvent;
 
 export interface ScannedLog {
+  raw: { address: Address; topics: Hex[]; data: Hex };
   args: Record<string, unknown>;
   blockNumber: bigint;
   logIndex: number;
@@ -75,41 +81,42 @@ export async function scanLogs(ctx: Ctx, chain: ChainName, address: Address, ev:
     const end = start + WINDOW[chain] - 1n < latest ? start + WINDOW[chain] - 1n : latest;
     const logs = (await ctx.rpc.request(chain, "eth_getLogs", [
       { address, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topic0, ...topics] },
-    ])) as { topics: Hex[]; data: Hex; blockNumber: Hex; logIndex: Hex; transactionHash: Hex }[];
+    ])) as { address: Address; topics: Hex[]; data: Hex; blockNumber: Hex; logIndex: Hex; transactionHash: Hex }[];
     for (const l of logs) {
       const d = decodeEventLog({ abi: [ev], topics: l.topics as [Hex, ...Hex[]], data: l.data });
-      out.push({ args: d.args as Record<string, unknown>, blockNumber: hexToBigInt(l.blockNumber), logIndex: hexToNumber(l.logIndex), transactionHash: l.transactionHash });
+      out.push({
+        raw: { address: l.address, topics: l.topics, data: l.data },
+        args: d.args as Record<string, unknown>,
+        blockNumber: hexToBigInt(l.blockNumber),
+        logIndex: hexToNumber(l.logIndex),
+        transactionHash: l.transactionHash,
+      });
     }
   }
   return out;
 }
 
 /** The block each chain's contracts were deployed in (a recovered step falls back to the last 10,000 blocks). */
-async function startBlock(ctx: Ctx, rec: DeploymentRecord, chain: ChainName): Promise<bigint> {
+export async function startBlock(ctx: Ctx, rec: DeploymentRecord, chain: ChainName): Promise<bigint> {
   const first = rec.done[chain === "base" ? "baseAdapter" : "bitAdapter"];
   if (first && "block" in first) return BigInt(first.block);
   const latest = hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
   return latest > 10_000n ? latest - 10_000n : 0n;
 }
 
-export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, users: Address[] = []): KeeperDeps {
+/** The keeper's reads and sends. Base is never scanned for logs here (its public RPC allows 200
+ * blocks a query): bridge messages come from the record, which the keeper fills as it sends. */
+export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
   async function messages(): Promise<KeeperState["detail"]["messages"]> {
     const out: KeeperState["detail"]["messages"] = [];
-    const lanes: [ChainName, Address, ChainName, string][] = [
-      ["base", a.baseAdapter, "bittensor", "Base → Bittensor"],
-      ["bittensor", a.bitAdapter, "base", "Bittensor → Base"],
-    ];
-    for (const [src, adapter, dst, direction] of lanes) {
-      const sent = await scanLogs(ctx, src, adapter, event(ADAPTER, "Sent"), await startBlock(ctx, rec, src));
-      for (const l of sent.slice(-3)) {
-        const id = l.args.messageId as Hex;
-        const state = Number(await r(dst, LIVE[dst].OFFRAMP, OFFRAMP, "getExecutionState", [id]));
-        out.push({ id, direction, state: EXECUTION_STATES[state] ?? String(state) });
-      }
+    for (const m of (rec.messages ?? []).slice(-6)) {
+      const dst: ChainName = m.direction === "Base → Bittensor" ? "bittensor" : "base";
+      const state = Number(await r(dst, LIVE[dst].OFFRAMP, OFFRAMP, "getExecutionState", [m.id]));
+      out.push({ id: m.id, direction: m.direction, state: EXECUTION_STATES[state] ?? String(state) });
     }
     return out;
   }
@@ -140,6 +147,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, users: Address[] = [
       }
       const block = (await ctx.rpc.request("bittensor", "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;
+      const rootStake = ((await r("bittensor", a.vault, VAULT, "rootStakeRao")) as bigint) * 10n ** 9n;
       return {
         now: hexToNumber(block.timestamp),
         frontDoor: { canClose, nDeposits: deposits.length, nRedeems: redeems.length, paused: fdPaused },
@@ -148,6 +156,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, users: Address[] = [
           paused: (await r("bittensor", a.vault, VAULT, "paused")) as boolean,
           available,
           minStakeWei: ((await r("bittensor", a.vault, VAULT, "minStakeRao")) as bigint) * 10n ** 9n,
+          rootStake,
+          nominatorMinWei: ((await r("bittensor", PRECOMPILE.staking, STAKING, "getNominatorMinRequiredStake")) as bigint) * 10n ** 9n,
           batches,
           payoutDelay,
         },
@@ -155,8 +165,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, users: Address[] = [
           openDeposits: [...deposits],
           openRedeems: [...redeems],
           canClose,
+          depositCap: (await r("base", a.frontDoor, FRONT, "depositCap")) as bigint,
           vaultAssets: (await r("bittensor", a.vault, VAULT, "totalAssets")) as bigint,
-          rootStake: ((await r("bittensor", a.vault, VAULT, "rootStakeRao")) as bigint) * 10n ** 9n,
+          rootStake,
           pendingPayouts: pending,
           batches,
           payoutDelay,
@@ -169,10 +180,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, users: Address[] = [
     sendCall: (req) => sendCall(ctx, req),
     nonce: (chain) => nonceOf(ctx.rpc, chain, WALLET),
     async quoteClose(s) {
-      const closed = await scanLogs(ctx, "base", a.frontDoor, event(FRONT, "BatchClosed"), await startBlock(ctx, rec, "base"));
-      const id = openBatchId(closed.map((l) => l.args.id as bigint));
+      // the batch id is a fixed-size word, so its value does not change the message size or the fee
       const total = s.detail.openDeposits.reduce((t, e) => t + e.amount, 0n);
-      const message = encodeBatch(id, s.detail.openDeposits, s.detail.openRedeems);
+      const message = encodeBatch(1n, s.detail.openDeposits, s.detail.openRedeems);
       return (await r("base", a.baseAdapter, ADAPTER, "quoteFee", [BigInt(LIVE.bittensor.CHAIN_ID), a.vault, message, total])) as bigint;
     },
     async payoutLogs() {
@@ -194,6 +204,10 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, users: Address[] = [
       const b = (await r("bittensor", a.vault, VAULT, "getPayoutBatch", [key])) as { payoutsHash: Hex; count: number };
       return { payoutsHash: b.payoutsHash, count: b.count };
     },
+    recordMessage(m) {
+      rec.messages = [...(rec.messages ?? []), { ...m, at: new Date().toISOString() }];
+      saveRecord(recordPath, rec);
+    },
     log: ctx.log,
   };
   return deps;
@@ -204,15 +218,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Follows a bridge message from either adapter to SUCCESS or FAILURE on the destination OffRamp. */
 export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opts = { pollMs: 30_000, maxMs: 2 * 3600_000 }) {
   const a = rec.plan.addresses;
-  let dst: ChainName | undefined;
-  for (const [src, adapter, to] of [
-    ["base", a.baseAdapter, "bittensor"],
-    ["bittensor", a.bitAdapter, "base"],
-  ] as const) {
-    const hits = await scanLogs(ctx, src, adapter, event(ADAPTER, "Sent"), await startBlock(ctx, rec, src), [id]);
-    if (hits.length) dst = to;
+  const known = rec.messages?.find((m) => m.id.toLowerCase() === id.toLowerCase());
+  let dst: ChainName | undefined = known ? (known.direction === "Base → Bittensor" ? "bittensor" : "base") : undefined;
+  if (!dst && (await scanLogs(ctx, "bittensor", a.bitAdapter, event(ADAPTER, "Sent"), await startBlock(ctx, rec, "bittensor"), [id])).length) {
+    dst = "base";
   }
-  if (!dst) throw new Error(`no bridge message ${id} was sent by either adapter`);
+  if (!dst) {
+    // not one the keeper sent: look back over Base's last 1,000 blocks (about half an hour)
+    const latest = hexToBigInt((await ctx.rpc.request("base", "eth_blockNumber", [])) as Hex);
+    if ((await scanLogs(ctx, "base", a.baseAdapter, event(ADAPTER, "Sent"), latest - 1_000n, [id])).length) dst = "bittensor";
+  }
+  if (!dst) throw new Error(`no bridge message ${id} was found from either adapter`);
   const offRamp = LIVE[dst].OFFRAMP;
   const deadline = Date.now() + opts.maxMs;
   let last = "";
@@ -222,7 +238,9 @@ export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opt
     last = state;
     if (state === "SUCCESS") return state;
     if (state === "FAILURE") {
-      const changed = await scanLogs(ctx, dst, offRamp, event(OFFRAMP, "ExecutionStateChanged"), await startBlock(ctx, rec, dst), [null, null, id]);
+      // the change happened since the last poll: a recent window is enough
+      const latest = hexToBigInt((await ctx.rpc.request(dst, "eth_blockNumber", [])) as Hex);
+      const changed = await scanLogs(ctx, dst, offRamp, event(OFFRAMP, "ExecutionStateChanged"), latest - WINDOW[dst] + 1n, [null, null, id]);
       ctx.log(`The delivery failed; the OffRamp returned ${(changed.at(-1)?.args.returnData as Hex) ?? "nothing"}`);
       return state;
     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WALLET } from "../src/config.ts";
-import { ethSweepValue, sweepDestinations, taoSweepValue, windDownBlockers } from "../src/winddown.ts";
+import { ethSweepValue, sweepDestinations, sweepLegs, taoSweepValue, windDownBlockers } from "../src/winddown.ts";
 
 const KEY = `0x${"aa".repeat(32)}` as const;
 
@@ -38,6 +38,13 @@ describe("sweep", () => {
   it("keeps three times the gas and an L1 allowance on Base", () => {
     expect(ethSweepValue(10n ** 15n, 26_250n, 6_000_000n)).toBe(10n ** 15n - 26_250n * 3n * 6_000_000n - 2n * 10n ** 13n);
     expect(ethSweepValue(10n ** 13n, 26_250n, 6_000_000n)).toBe(0n);
+  });
+
+  it("sweeps whichever legs still hold something, and only after the front door is paused", () => {
+    expect(sweepLegs({ tao: 0n, eth: 5n, frontDoorPaused: true })).toEqual(["eth"]);
+    expect(sweepLegs({ tao: 5n, eth: 5n, frontDoorPaused: true })).toEqual(["tao", "eth"]);
+    expect(() => sweepLegs({ tao: 0n, eth: 0n, frontDoorPaused: true })).toThrow(/nothing left to sweep/);
+    expect(() => sweepLegs({ tao: 5n, eth: 5n, frontDoorPaused: false })).toThrow(/wind-down first/);
   });
 
   it("refuses a non-checksummed Base address or a bad SS58", () => {

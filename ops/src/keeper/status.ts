@@ -5,6 +5,7 @@ export interface StatusDetail {
   openDeposits: Entry[];
   openRedeems: Entry[];
   canClose: boolean;
+  depositCap: bigint;
   vaultAssets: bigint;
   rootStake: bigint;
   pendingPayouts: bigint;
@@ -30,7 +31,7 @@ export function formatStatus(d: StatusDetail, opts: { now: number }): string[] {
       `Payout batch ${b.key.slice(0, 10)}…: ${b.count - b.cursor} of ${b.count} entries left, ${opts.now >= due ? "due now" : `due at ${hhmm(due)}`}`,
     );
   }
-  for (const m of d.messages) lines.push(`Bridge message ${m.id.slice(0, 10)}… (${m.direction}): ${m.state}`);
+  for (const m of d.messages) lines.push(`Bridge message ${m.id} (${m.direction}): ${m.state}`);
   for (const c of d.claimable) lines.push(`Claimable on Base for ${c.user}: ${amount(c.amount, "TAO")}`);
   lines.push(`Test wallet: ${amount(d.balances.tao, "TAO")} on Bittensor, ${amount(d.balances.eth, "ETH")} on Base`);
   return lines;

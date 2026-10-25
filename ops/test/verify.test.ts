@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { WALLET } from "../src/config.ts";
 import { buildPlan } from "../src/plan.ts";
 import {
+  activationLogs,
   codeMismatch,
   compare,
   type Expectation,
@@ -69,5 +70,25 @@ describe("verify", () => {
     expect(reserveFailures(499_999_999_999n, 10n ** 12n)).toHaveLength(1);
     expect(reserveFailures(5n * 10n ** 11n, 10n ** 12n)).toEqual([]);
     expect(reserveFailures(5n * 10n ** 11n, 10n ** 12n - 1n)).toHaveLength(1);
+  });
+});
+
+describe("activationLogs", () => {
+  it("finds a recovered vault's FrontDoorActivated in its logs instead of a receipt", async () => {
+    const abi = parseAbi(["event FrontDoorActivated(uint64 indexed chain, address indexed addr)"]);
+    const topics = encodeEventTopics({ abi, args: { chain: 8453n, addr: plan.addresses.frontDoor } }) as Hex[];
+    let served = false;
+    const rpc = {
+      async request(_c: string, method: string) {
+        if (method === "eth_blockNumber") return "0x3e8";
+        if (method === "eth_getLogs" && served) return [];
+        served = true;
+        if (method === "eth_getLogs") return [{ address: plan.addresses.vault, topics, data: "0x", blockNumber: "0x5", logIndex: "0x0", transactionHash: `0x${"11".repeat(32)}` }];
+        throw new Error(method);
+      },
+    };
+    const rec = { target: "live" as const, wallet: WALLET, createdAt: "", plan, done: { vault: { recovered: true as const } } };
+    const logs = await activationLogs({ rpc } as never, rec);
+    expect(frontDoorActivationFailures(logs, plan)).toEqual([]);
   });
 });

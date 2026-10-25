@@ -9,7 +9,7 @@ import app from "./App.module.css";
 import card from "./StakeCard.module.css";
 import styles from "./RewardsCard.module.css";
 
-const EMPTY = "Rewards show here once the vault claims its first staking rewards.";
+const EMPTY = "Your rewards show here once the first ones are collected. Cascade collects them for everyone and adds them to your balance automatically.";
 const SHOW_DAYS = 14;
 
 /** The TAO price, live; an APR appears only once rewards have been measured on-chain. */
@@ -50,7 +50,7 @@ function RewardsForAccount({ account }: { account: string }) {
           <p className={card.v}>
             {earned !== undefined ? (
               <>
-                {formatTao(earned, 6)} TAO <small>{formatUsd(earned * position.data.taoPriceUsd)}</small>
+                {formatUsd(earned * position.data.taoPriceUsd)} <small>{formatTao(earned, 6)} TAO</small>
               </>
             ) : (
               "–"

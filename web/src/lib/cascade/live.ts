@@ -222,7 +222,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
     getLimits,
 
-    getBalances: (account) => deps.readWallet(c, d, account as Address),
+    async getBalances(account) {
+      const a = account as Address;
+      const [w, fd] = await Promise.all([deps.readWallet(c, d, a), deps.readFrontDoor(c, d, a)]);
+      return { ...w, claimable: fd.claimable };
+    },
 
     // Rewards history needs reward claims, which have not happened yet.
     listRewards: async () => [],

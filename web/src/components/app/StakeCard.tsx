@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useBalances, useLimits, usePosition, useProtocolStats } from "@/lib/cascade/hooks";
+import { useBalances, useLimits, usePosition, useProtocolStats, useWithdrawals } from "@/lib/cascade/hooks";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
@@ -71,6 +71,33 @@ function WalletTao({ account }: { account: string }) {
   );
 }
 
+/** Money waiting on Base to be claimed (an unstake's payout, or a deposit the vault sent back), with
+ * one button that claims it all as USDC. Hidden when there is none. */
+function ClaimReady({ account }: { account: string }) {
+  const balances = useBalances(account);
+  const stats = useProtocolStats();
+  const withdrawals = useWithdrawals(account);
+  const flows = useFlows(account);
+  const claimable = balances.data?.claimable ?? 0n;
+  if (claimable === 0n) return null;
+  const price = stats.data?.taoPriceUsd;
+  const ready = (withdrawals.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
+  return (
+    <div className={styles.walletTao}>
+      <p>
+        <b>{price !== undefined ? `About ${formatUsd(toDisplay(claimable, 18) * price)}` : `${formatTao(toDisplay(claimable, 18), 6)} TAO`}</b> is
+        back on Base and ready to claim.
+      </p>
+      <div className={styles.walletTaoActions}>
+        <button type="button" className="pill" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, false).catch(() => undefined)}>
+          {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
+        </button>
+      </div>
+      {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
+    </div>
+  );
+}
+
 /** The main card on the stake page: account summary on top, the stake form below. */
 export function StakeCard({ account }: { account: string | null }) {
   const balance = useUsdcBalance();
@@ -95,6 +122,7 @@ export function StakeCard({ account }: { account: string | null }) {
           </div>
         )}
       </div>
+      {account && <ClaimReady account={account} />}
       {account && <WalletTao account={account} />}
       <div className={styles.form}>
         <StakeForm account={account} maxUsdc={account ? avail.max : null} />

@@ -68,6 +68,11 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
 }
 
 describe("live data", () => {
+  it("includes what is waiting to be claimed on Base with the wallet's balances", async () => {
+    const data = createLiveCascadeData(D, deps({ readFrontDoor: async () => ({ ...fd, claimable: 7n * 10n ** 15n }) }));
+    expect((await data.getBalances(ME)).claimable).toBe(7n * 10n ** 15n);
+  });
+
   it("prices the position and subtracts shares already asked for", async () => {
     const data = createLiveCascadeData(D, deps());
     const p = await data.getPosition(ME);

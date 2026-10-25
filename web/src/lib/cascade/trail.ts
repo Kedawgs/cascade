@@ -160,7 +160,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
         txLabel: "View on Bittensor",
         detail:
           d.outcome === "bounced"
-            ? "The vault sent this deposit back to protect its price; it returns to Base for you to claim"
+            ? "The vault couldn't accept this deposit safely just then, so it sent it back. It returns to Base, where you can claim it as USDC from the Stake page"
             : "The vault skipped this deposit; the TAO stays in the vault",
       };
     }

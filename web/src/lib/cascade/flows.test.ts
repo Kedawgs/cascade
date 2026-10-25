@@ -32,7 +32,7 @@ const ME = getAddress("0x000000000000000000000000000000000000a11c");
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 
 const quote = { usdcIn: 20_000_000n, targetTao: 78_000_000_000_000_000n } as DepositQuote;
-const none: Balances = { usdc: 20_000_000n, tao: 0n, eth: 10n ** 15n, usdcRouterAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n };
+const none: Balances = { usdc: 20_000_000n, tao: 0n, eth: 10n ** 15n, usdcRouterAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n, claimable: 0n };
 
 describe("call builders", () => {
   it("stakes with approve USDC, exact-output swap, approve TAO, deposit", () => {

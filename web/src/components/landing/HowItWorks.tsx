@@ -11,7 +11,7 @@ const STEPS = [
   },
   {
     title: "Earn, and leave any time",
-    body: "Staking rewards grow your balance as they are claimed. Unstake back to USDC whenever you like.",
+    body: "Staking rewards are added to your balance automatically. Unstake back to USDC whenever you like.",
   },
 ];
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCascadeAccount } from "@/lib/account";
+import { useProtocolStats } from "@/lib/cascade/hooks";
 import { Loading } from "../Loading";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
@@ -11,6 +12,8 @@ import { APR_FOOTNOTE } from "./StatsCard";
 export function RewardsScreen() {
   const { state } = useCascadeAccount();
   const account = state.status === "wallet" ? state.account : null;
+  // the APR footnote explains an APR figure, so it shows only with one
+  const stats = useProtocolStats();
 
   return (
     <AppShell active="rewards">
@@ -21,7 +24,7 @@ export function RewardsScreen() {
       ) : (
         <>
           <RewardsCard account={account} />
-          <p className={app.footnote}>{APR_FOOTNOTE}</p>
+          {stats.data?.aprPercent !== undefined && <p className={app.footnote}>{APR_FOOTNOTE}</p>}
         </>
       )}
     </AppShell>

@@ -105,6 +105,8 @@ export interface Balances {
   usdcRouterAllowance: bigint;
   taoRouterAllowance: bigint;
   taoFrontDoorAllowance: bigint;
+  /** TAO waiting to be claimed on Base (an unstake's payout, or a deposit the vault sent back). */
+  claimable: bigint;
 }
 
 export interface CascadeData {

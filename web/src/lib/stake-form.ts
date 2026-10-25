@@ -126,7 +126,8 @@ export function unstakeLabelUsd(s: {
 
 /** Dollars, floored to cents: what can be unstaked never reads higher than it is. */
 const usdDown = (taoWei: bigint, priceUsd: number) => formatUsd(floorTo(toDisplay(taoWei, 18) * priceUsd, 2));
-const MIN_USD = (priceUsd: number) => `about ${formatUsd(toDisplay(MIN_UNSTAKE_WEI, 18) * priceUsd)}`;
+/** The minimum in dollars, rounded up to the cent so typing the figure shown is always enough. */
+const MIN_USD = (priceUsd: number) => `about ${formatUsd(Math.ceil(toDisplay(MIN_UNSTAKE_WEI, 18) * priceUsd * 100 - 1e-7) / 100)}`;
 
 /** The line under the unstake field: how much can go and the minimum, in the unit shown. */
 export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number): string {

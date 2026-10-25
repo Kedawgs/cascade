@@ -13,6 +13,7 @@ import {
   createFlowGuard,
   depositTaoCalls,
   type FlowCall,
+  FlowError,
   type FlowStore,
   retryPatch,
   runFlow,
@@ -237,7 +238,7 @@ export function useFlows(account: string | null) {
     claim: (withdrawalIds: string[], keepTao: boolean) =>
       flow("claim", async () => {
         const fd = await readFrontDoor(data.clients, d(), a);
-        if (fd.claimable === 0n) throw new Error("Nothing is waiting to be claimed yet");
+        if (fd.claimable === 0n) throw new FlowError("Nothing is waiting to be claimed yet", "needs-you");
         const minUsdc = keepTao ? 0n : lessSlippage(await quoteSell(data.clients, fd.claimable));
         const op: ClaimOp = {
           id: newOpId(),
@@ -261,7 +262,7 @@ export function useFlows(account: string | null) {
         const op = data.opLog
           .list(a)
           .find((o): o is ClaimOp => o.kind === "claim" && (o.withdrawalIds ?? []).includes(withdrawalId));
-        if (!op) throw new Error("There is no claim to continue for this unstake");
+        if (!op) throw new FlowError("There is no claim to continue for this unstake", "needs-you");
         await send(op.id, async () => {
           const w = await data.getBalances(a);
           if (op.hashes.claim && !op.keepTao) {

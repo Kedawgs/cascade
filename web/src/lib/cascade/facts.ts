@@ -45,7 +45,8 @@ export const newScan = (d: Deployment): VaultScan => ({
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account?: Address): Promise<void> {
-  const latest = await freshTip(c);
+  // two blocks short of the newest: a block still being imported or replaced is read next time
+  const latest = (await freshTip(c)) - 2n;
   for (let from = scan.next; from <= latest; from += WINDOW) {
     const to = from + WINDOW - 1n < latest ? from + WINDOW - 1n : latest;
     const raw = await windowLogs(c, d, from, to);

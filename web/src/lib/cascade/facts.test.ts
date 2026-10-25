@@ -138,6 +138,13 @@ describe("facts", () => {
     expect(c.windows.length).toBe(before);
   });
 
+  it("stops two blocks short of the newest, so an event landing mid-read is never skipped", async () => {
+    const c = chains({ latest: 1_600n });
+    const scan = newScan(D);
+    await scanVault(c.clients, D, scan, ME);
+    expect(scan.next).toBe(1_599n);
+  });
+
   it("never takes a window of logs from a server that hasn't reached it", async () => {
     // the first answer comes from a server stuck before the delivery: its head is below the window
     const c = chains({ latest: 1_600n, bitLogs: [delivered], heads: [1_200n, 1_600n] });

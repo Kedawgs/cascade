@@ -100,6 +100,10 @@ describe("unstake helpers", () => {
     expect(unstakeNote(available, "TAO", 252)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.005 TAO.");
   });
 
+  it("rounds the dollar minimum up, so typing the minimum shown is always accepted", () => {
+    expect(unstakeNote(70_219_000_000_000_000n, "USDC", 252.4)).toMatch(/minimum is about \$1\.27 /);
+  });
+
   it("explains a refused amount in dollars when typing dollars", () => {
     const available = 70_219_000_000_000_000n;
     expect(unstakeErrorText({ ok: false, code: "belowMin", reason: "Unstake at least 0.005 TAO", offerAll: false }, available, "USDC", 252)).toBe(

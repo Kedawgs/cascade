@@ -34,4 +34,14 @@ describe("freshTip", () => {
     await expect(freshTip(s as never, NOW_MS)).rejects.toBeInstanceOf(StaleChainError);
     await expect(freshTip(s as never, NOW_MS)).rejects.toThrow(/behind/);
   });
+
+  it("judges freshness by Base's clock, so a device clock an hour fast doesn't make a healthy node look stale", async () => {
+    const chainNow = Math.floor(Date.now() / 1000) - 3600; // the chains run an hour behind this device's clock
+    const c = {
+      bittensor: { getBlock: async () => ({ number: 9_400_000n, timestamp: BigInt(chainNow - 10) }) },
+      base: { getBlock: async () => ({ number: 40_000_000n, timestamp: BigInt(chainNow) }) },
+    };
+    expect(await freshTip(c as never)).toBe(9_400_000n);
+  });
 });
+

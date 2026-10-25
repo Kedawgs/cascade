@@ -37,7 +37,7 @@ describe("deposit trail", () => {
   it("waits in the open batch, saying when it closes", () => {
     const r = depositRecord(op, base);
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
-    expect(r.steps[2].detail).toMatch(/10:10 UTC/);
+    expect(r.steps[2].detail).toMatch(/10:10 AM/);
     expect(r.cancellableWei).toBe(78_000_000_000_000_000n);
     expect(r.amountUsd).toBe(20);
     expect(r.status).toBe("in_progress");
@@ -61,7 +61,7 @@ describe("deposit trail", () => {
 
   it("gives the bridge an expected arrival when it knows when the batch was sent", () => {
     const r = depositRecord(op, { ...base, openBatchId: 4n, stillOpen: false, sentAt: new Date("2026-10-25T10:12:00Z") });
-    expect(r.steps[2].detail).toMatch(/expected around 10:32 UTC/);
+    expect(r.steps[2].detail).toMatch(/expected around 10:32 AM/);
   });
 
   it("shows what the swap really spent once it is known, not the most it could spend", () => {
@@ -225,7 +225,7 @@ describe("withdrawal trail", () => {
     const redeemed = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const r = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed });
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
-    expect(r.steps[2].detail).toMatch(/11:35 UTC/);
+    expect(r.steps[2].detail).toMatch(/11:35 AM/);
     const flying = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), messageId: H(6), state: 1, at: new Date() } });
     expect(flying.steps[2].txUrl).toContain(H(6));
   });
@@ -241,7 +241,7 @@ describe("withdrawal trail", () => {
       watchUrl: "https://ccip.chain.link/address/0x221C",
     });
     expect(r.steps[1].detail).toMatch(/requested 15 minutes ago/);
-    expect(r.steps[1].detail).toMatch(/expected around 10:32 UTC/);
+    expect(r.steps[1].detail).toMatch(/expected around 10:32 AM/);
     expect(r.steps[1].txUrl).toBe("https://ccip.chain.link/address/0x221C");
   });
 

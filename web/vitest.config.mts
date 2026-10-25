@@ -7,6 +7,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // times on screen are local; tests read them in one fixed zone
+    env: { TZ: "UTC" },
     include: ["src/**/*.test.ts"],
   },
 });

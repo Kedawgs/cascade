@@ -43,14 +43,6 @@
   background: var(--proof);
 }
 
-.base {
-  display: inline-block;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #0052ff;
-}
-
 .form {
   padding: 20px 24px 24px;
 }

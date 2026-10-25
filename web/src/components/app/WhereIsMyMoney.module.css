@@ -4,9 +4,10 @@
 
 .head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: baseline;
-  gap: 12px;
+  gap: 4px 12px;
   margin-bottom: 12px;
 }
 

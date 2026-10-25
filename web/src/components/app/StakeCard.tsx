@@ -73,7 +73,6 @@ function WalletTao({ account }: { account: string }) {
 
 /** The main card on the stake page: account summary on top, the stake form below. */
 export function StakeCard({ account }: { account: string | null }) {
-  const stats = useProtocolStats();
   const balance = useUsdcBalance();
   const avail = availableToStake(balance);
 
@@ -87,13 +86,6 @@ export function StakeCard({ account }: { account: string | null }) {
           </p>
           <p className={styles.v}>{account ? avail.text : "–"}</p>
         </div>
-        <div>
-          <p className={styles.k}>Network</p>
-          <p className={styles.v}>
-            <span className={styles.base} aria-hidden="true" />
-            Base
-          </p>
-        </div>
         {account ? (
           <StakedSummary account={account} />
         ) : (
@@ -102,10 +94,6 @@ export function StakeCard({ account }: { account: string | null }) {
             <p className={styles.v}>–</p>
           </div>
         )}
-        <div>
-          <p className={styles.k}>TAO price</p>
-          <p className={styles.v}>{stats.data?.taoPriceUsd !== undefined ? formatUsd(stats.data.taoPriceUsd) : "–"}</p>
-        </div>
       </div>
       {account && <WalletTao account={account} />}
       <div className={styles.form}>

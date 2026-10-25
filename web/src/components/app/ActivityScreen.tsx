@@ -47,7 +47,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
   const flows = useFlows(account);
   const router = useRouter();
   if (isError) return <LoadError what="this deposit" onRetry={() => void refetch()} />;
-  if (isPending) return <Loading />;
+  if (isPending) return <Loading label="Loading your deposit…" />;
   if (!deposit) return <NotFound what="deposit" />;
 
   const staked = deposit.status === "staked";
@@ -145,7 +145,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   const ready = (all.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
   const claimIds = ready.includes(id) ? ready : [...ready, id];
   if (isError) return <LoadError what="this unstake" onRetry={() => void refetch()} />;
-  if (isPending) return <Loading />;
+  if (isPending) return <Loading label="Loading your unstake…" />;
   if (!withdrawal) return <NotFound what="unstake" />;
 
   const paid = withdrawal.status === "paid";

@@ -57,7 +57,9 @@ export interface WithdrawalFacts {
   payoutDelay: number;
 }
 
-const hhmm = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
+/** A time of day in the viewer's own zone, like the dates elsewhere on the site: "2:32 PM". */
+const timeOfDay = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" });
+const hhmm = (d: Date) => timeOfDay.format(d);
 const BRIDGE_TIME = "usually 20–30 minutes";
 /** An interrupted flow this old has no wallet prompt still waiting on it. */
 const STALE_MS = 10 * 60_000;

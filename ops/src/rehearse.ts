@@ -1,10 +1,12 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
-import { numberToHex } from "viem";
+import { type Address, decodeEventLog, encodeFunctionData, formatEther, type Hex, numberToHex, parseAbi } from "viem";
 import { loadArtifact } from "./artifacts.ts";
-import { type ChainName, type Env, PRECOMPILE, paths, targets, WALLET } from "./config.ts";
+import { type ChainName, type Env, LIVE, PRECOMPILE, paths, targets, WALLET } from "./config.ts";
 import { deploy } from "./deploy.ts";
+import { close } from "./keeper/actions.ts";
+import { keeperDeps } from "./keeper/state.ts";
 import { type DeploymentRecord, saveRecord } from "./record.ts";
 import { chainIdOf, createRpc, type Rpc } from "./rpc.ts";
 import { type Ctx, execFileRunner } from "./send.ts";
@@ -77,9 +79,67 @@ export async function startForks(env: Env, log: (l: string) => void): Promise<Re
   }
 }
 
+const REHEARSAL_ABI = parseAbi([
+  "function mint(address account, uint256 amount)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function deposit(uint256 amount)",
+  "event BatchClosed(uint64 indexed id, uint256 totalDeposits, uint256 nDeposits, uint256 nRedeems, uint256 fee, uint256 potUsed)",
+  "event Sent(bytes32 indexed messageId, uint64 destChain, address indexed sender, address indexed recipient, uint256 amount, uint256 fee, uint256 gasLimit)",
+]);
+/** anvil's first default account, unlocked on every fork; it plays the depositor. */
+const DEPOSITOR: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+type Log = { address: Address; topics: Hex[]; data: Hex };
+
+async function sendAs(rpc: Rpc, from: Address, to: Address, data: Hex) {
+  const hash = (await rpc.request("base", "eth_sendTransaction", [{ from, to, data }])) as Hex;
+  for (let i = 0; i < 60; i++) {
+    const r = (await rpc.request("base", "eth_getTransactionReceipt", [hash])) as { status: Hex } | null;
+    if (r) {
+      if (r.status !== "0x1") throw new Error(`rehearsal transaction from ${from} reverted (${hash})`);
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error(`rehearsal transaction from ${from} was not mined (${hash})`);
+}
+
+/** On the Base fork: the CCIP token pool (the token's minter) mints 0.01 TAO to an unlocked account,
+ * which deposits it; ten minutes later the keeper's
+ * close through the real Router; records its gas and fee for the budget. */
+async function rehearseClose(r: Rehearsal, rec: DeploymentRecord, log: (l: string) => void) {
+  const { rpc } = r.ctx;
+  const fd = rec.plan.addresses.frontDoor;
+  const call = (functionName: string, args: unknown[]) => encodeFunctionData({ abi: REHEARSAL_ABI, functionName, args } as never);
+  await rpc.request("base", "anvil_impersonateAccount", [LIVE.base.POOL]);
+  await rpc.request("base", "anvil_setBalance", [LIVE.base.POOL, numberToHex(10n ** 18n)]);
+  await sendAs(rpc, LIVE.base.POOL, LIVE.base.TOKEN, call("mint", [DEPOSITOR, 10n ** 16n]));
+  await sendAs(rpc, DEPOSITOR, LIVE.base.TOKEN, call("approve", [fd, 10n ** 16n]));
+  await sendAs(rpc, DEPOSITOR, fd, call("deposit", [10n ** 16n]));
+  await rpc.request("base", "evm_increaseTime", [600]);
+  await rpc.request("base", "evm_mine", []);
+
+  const sent = await close(keeperDeps(r.ctx, rec), rec);
+  const receipt = (await rpc.request("base", "eth_getTransactionReceipt", [sent.hash])) as { logs: Log[] };
+  const decoded = receipt.logs.flatMap((l) => {
+    try {
+      return [{ address: l.address, ...decodeEventLog({ abi: REHEARSAL_ABI, topics: l.topics as [Hex, ...Hex[]], data: l.data }) }];
+    } catch {
+      return [];
+    }
+  });
+  const msg = decoded.find((d) => d.eventName === "Sent" && d.address.toLowerCase() === rec.plan.addresses.baseAdapter.toLowerCase());
+  const closed = decoded.find((d) => d.eventName === "BatchClosed");
+  if (!msg || !closed) throw new Error("the rehearsed close sent no bridge message");
+  const fee = (closed.args as { fee: bigint }).fee;
+  rec.rehearsalClose = { gasUsed: sent.gasUsed, fee };
+  saveRecord(r.recordPath, rec);
+  log(`Rehearsed a batch close: message ${(msg.args as { messageId: Hex }).messageId} sent, bridge fee ${formatEther(fee)} ETH`);
+}
+
 /** The full deployment and read-back on the local forks. Each run starts from fresh forks, so it
- * always plans anew. */
-export async function rehearse(env: Env, log: (l: string) => void, extra?: (r: Rehearsal, rec: DeploymentRecord) => Promise<void>) {
+ * always plans anew; then a batch close. */
+export async function rehearse(env: Env, log: (l: string) => void) {
   const r = await startForks(env, log);
   try {
     const rec = await deploy(r.ctx, r.recordPath, { newPlan: true });
@@ -90,7 +150,7 @@ export async function rehearse(env: Env, log: (l: string) => void, extra?: (r: R
         ? "Read-back check: everything matches the plan"
         : `Read-back check failed:\n  ${rec.verify.failures.join("\n  ")}`,
     );
-    if (rec.verify.ok && extra) await extra(r, rec);
+    if (rec.verify.ok) await rehearseClose(r, rec, log);
     return rec;
   } finally {
     r.stop();

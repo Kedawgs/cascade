@@ -41,6 +41,10 @@ export interface WithdrawalFacts {
   requestMined: boolean;
   cancelMined?: boolean;
   now: Date;
+  /** When the unstake was asked for, when its batch left Base (if known), and where to watch the bridge. */
+  requestedAt?: Date;
+  sentAt?: Date;
+  watchUrl?: string;
   openBatchId: bigint;
   closesAt: Date;
   stillOpen: boolean;
@@ -86,9 +90,9 @@ function waitingForMinimum(f: { vaultWei?: bigint; minimumWei?: bigint; incoming
 const BRIDGE_MS = 20 * 60_000;
 
 /** On the bridge: how long so far, what it is waiting for, and when it should arrive. */
-function onTheBridge(f: { now: Date; depositedAt?: Date; sentAt?: Date }): string {
-  const mins = f.depositedAt ? Math.max(0, Math.round((f.now.getTime() - f.depositedAt.getTime()) / 60_000)) : undefined;
-  const so_far = mins !== undefined ? ` (deposited ${mins} minute${mins === 1 ? "" : "s"} ago)` : "";
+function onTheBridge(f: { now: Date; sentAt?: Date }, since?: { verb: string; at: Date }): string {
+  const mins = since ? Math.max(0, Math.round((f.now.getTime() - since.at.getTime()) / 60_000)) : undefined;
+  const so_far = since && mins !== undefined ? ` (${since.verb} ${mins} minute${mins === 1 ? "" : "s"} ago)` : "";
   const eta = f.sentAt ? new Date(f.sentAt.getTime() + BRIDGE_MS) : undefined;
   const when = !eta
     ? ""
@@ -159,7 +163,9 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     bridge = {
       ...bridge,
       status: "active",
-      detail: f.stillOpen ? `${waitForClose(f)}, then the bridge (${BRIDGE_TIME})` : onTheBridge(f),
+      detail: f.stillOpen
+        ? `${waitForClose(f)}, then the bridge (${BRIDGE_TIME})`
+        : onTheBridge(f, f.depositedAt ? { verb: "deposited", at: f.depositedAt } : undefined),
       ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
   }
@@ -246,7 +252,10 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     unstake = {
       ...unstake,
       status: "active",
-      detail: f.stillOpen ? `${waitForClose(f)}, then the bridge` : `On the bridge to Bittensor, ${BRIDGE_TIME}`,
+      detail: f.stillOpen
+        ? `${waitForClose(f)}, then the bridge`
+        : onTheBridge(f, f.requestedAt ? { verb: "requested", at: f.requestedAt } : undefined),
+      ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
   }
 

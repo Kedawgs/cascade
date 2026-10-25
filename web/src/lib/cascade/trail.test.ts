@@ -211,6 +211,21 @@ describe("withdrawal trail", () => {
     expect(flying.steps[2].txUrl).toContain(H(6));
   });
 
+  it("gives the unstake's bridge leg how long so far, an expected arrival and Chainlink's explorer", () => {
+    const r = withdrawalRecord(wop, {
+      ...wbase,
+      openBatchId: 6n,
+      stillOpen: false,
+      now: new Date("2026-10-25T10:20:00Z"),
+      requestedAt: new Date("2026-10-25T10:05:00Z"),
+      sentAt: new Date("2026-10-25T10:12:00Z"),
+      watchUrl: "https://ccip.chain.link/address/0x221C",
+    });
+    expect(r.steps[1].detail).toMatch(/requested 15 minutes ago/);
+    expect(r.steps[1].detail).toMatch(/expected around 10:32 UTC/);
+    expect(r.steps[1].txUrl).toBe("https://ccip.chain.link/address/0x221C");
+  });
+
   it("asks the user to claim once the TAO is back on Base, then shows it paid", () => {
     const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date() };

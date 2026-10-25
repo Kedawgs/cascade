@@ -78,19 +78,19 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
             </div>
           )}
         </dl>
-        {(deposit.status === "needs_you" || deposit.retryable || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
+        {(deposit.status === "needs_you" || deposit.retryable || deposit.restake || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
           <Actions>
             {deposit.status === "needs_you" && (
               <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
               </button>
             )}
-            {deposit.status === "failed" && deposit.retryable && !deposit.nothingSent && (
+            {deposit.status === "failed" && deposit.retryable && (
               <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Try the deposit again"}
               </button>
             )}
-            {deposit.status === "failed" && deposit.nothingSent && (
+            {deposit.status === "failed" && deposit.restake && (
               <Link href="/stake" className="pill pill-block">
                 Stake again at today&apos;s price
               </Link>

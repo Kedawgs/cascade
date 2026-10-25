@@ -14,6 +14,7 @@ import {
   depositTaoCalls,
   type FlowCall,
   type FlowStore,
+  retryPatch,
   runFlow,
   sellTaoCalls,
   userMessage,
@@ -171,6 +172,8 @@ export function useFlows(account: string | null) {
     /** Carries on a stake that stopped, skipping whatever the chain shows already happened. */
     resumeStake: (id: string) =>
       flow("stake", async () => {
+        const patch = retryPatch(data.opLog.get(a, id) as DepositOp);
+        if (Object.keys(patch).length > 0) data.opLog.update(a, id, patch as Partial<Operation>);
         await send(id, async () => {
           const op = data.opLog.get(a, id) as DepositOp;
           const [w, fd] = await Promise.all([data.getBalances(a), readFrontDoor(data.clients, d(), a)]);

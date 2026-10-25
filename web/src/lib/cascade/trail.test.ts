@@ -74,8 +74,18 @@ describe("deposit trail", () => {
     const r = depositRecord(failed, { ...base, swapMined: false, depositMined: false });
     expect(r.steps[0].status).toBe("failed");
     expect(r.steps[0].detail).toBe("The price moved past your 0.5% limit, so the swap was undone.");
-    expect(r.retryable).toBe(true);
+    expect(r.retryable).toBeUndefined();
+    expect(r.restake).toBe(true);
     expect(r.nothingSent).toBe(true);
+  });
+
+  it("offers a fresh stake, not a retry, when the swap itself reverted (its hash is saved, so a retry would only re-read it)", () => {
+    const reverted = { ...op, state: "failed" as const, hashes: { approveUsdc: H(1), swap: H(2) }, error: "The price moved past your 0.5% limit, so the swap was undone." };
+    const r = depositRecord(reverted, { ...base, swapMined: false, depositMined: false });
+    expect(r.restake).toBe(true);
+    expect(r.retryable).toBeUndefined();
+    const batch = { ...op, state: "failed" as const, hashes: {}, callsId: "0xabc", error: "x" };
+    expect(depositRecord(batch, { ...base, swapMined: false, depositMined: false }).restake).toBe(true);
   });
 
   it("after a swap that worked but a deposit that failed, says the TAO is in the wallet", () => {
@@ -247,14 +257,32 @@ describe("withdrawal trail", () => {
     expect(r.steps[1].txUrl).toBe("https://ccip.chain.link/address/0x221C");
   });
 
-  it("explains an unstake that took nothing, in plain words, and offers to unstake again", () => {
+  it("explains an unstake that took nothing, in plain words, offers to unstake again and promises no payout", () => {
     const at = new Date();
     const skipped = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { at, txHash: H(9), outcome: "skipped" as const, taoWei: 0n } });
-    expect(skipped.steps[1].detail).toBe("Your balance was smaller than this unstake when it arrived, so nothing was taken. Your stake is unchanged.");
+    expect(skipped.steps[1].detail).toBe("There was no stake to take when this request arrived, so nothing was taken.");
     expect(skipped.unstakeAgain).toBe(true);
+    expect(skipped.usdcAmount).toBeUndefined();
     const limited = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { at, txHash: H(9), outcome: "deferred" as const, taoWei: 0n } });
     expect(limited.steps[1].detail).toBe("The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow.");
     expect(limited.unstakeAgain).toBe(true);
+  });
+
+  it("is ready to claim only once its own payout has reached Base, not whenever something is claimable", () => {
+    const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+    const waiting = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, claimable: 5n * 10n ** 15n });
+    expect(waiting.status).toBe("in_progress");
+    expect(waiting.steps[3].status).toBe("pending");
+    const landed = withdrawalRecord(wop, {
+      ...wbase,
+      openBatchId: 6n,
+      stillOpen: false,
+      delivered: redeemed,
+      claimable: 5n * 10n ** 15n,
+      payout: { txHash: H(4), messageId: H(6), state: 2, at: new Date() },
+    });
+    expect(landed.status).toBe("ready");
+    expect(landed.steps[3].status).toBe("action");
   });
 
   it("calls a payout the bridge hasn't delivered yet delayed, not a problem", () => {

@@ -9,6 +9,7 @@ import {
   type FlowCall,
   FlowBusyError,
   FlowError,
+  retryPatch,
   runFlow,
   sellTaoCalls,
   stakeCalls,
@@ -266,6 +267,17 @@ describe("a sequential send the wallet can't make", () => {
     const t = tracker();
     await expect(runFlow(p, t.store as never, calls)).rejects.toThrow(/paid in ETH/);
     expect(t.states.at(-1)).toBe("failed");
+  });
+});
+
+describe("retryPatch", () => {
+  it("forgets a failed deposit attempt but keeps the swap that worked, so a retry sends the deposit again", () => {
+    const op = { state: "failed" as const, hashes: { approveUsdc: H(1), swap: H(2), approveTao: H(3), deposit: H(4) }, callsId: "0xabc", mode: "batch" as const };
+    expect(retryPatch(op)).toEqual({ hashes: { approveUsdc: H(1), swap: H(2) }, callsId: undefined, mode: "sequential", state: "running", error: undefined });
+  });
+
+  it("leaves anything that isn't a failure alone", () => {
+    expect(retryPatch({ state: "needs-you" as const, hashes: { swap: H(2) } })).toEqual({});
   });
 });
 

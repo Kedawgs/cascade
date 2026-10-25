@@ -34,8 +34,10 @@ export interface DepositRecord {
   cancellableWei?: bigint;
   /** Stopped before any transaction was sent, so it can simply be removed. */
   nothingSent?: true;
-  /** Stopped (failed or waiting for the user) before the deposit landed: it can be tried again. */
+  /** The swap worked but the deposit failed: the deposit alone can be tried again. */
   retryable?: true;
+  /** The swap itself failed: start a new stake at today's price. */
+  restake?: true;
 }
 
 export interface WithdrawalRecord {

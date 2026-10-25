@@ -89,7 +89,8 @@ function ClaimReady({ account }: { account: string }) {
         back on Base and ready to claim.
       </p>
       <div className={styles.walletTaoActions}>
-        <button type="button" className="pill" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, false).catch(() => undefined)}>
+        {/* the claim names the unstakes it pays, so it waits until they have loaded */}
+        <button type="button" className="pill" disabled={flows.busy !== null || !withdrawals.data} onClick={() => void flows.claim(ready, false).catch(() => undefined)}>
           {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
         </button>
       </div>

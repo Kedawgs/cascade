@@ -200,8 +200,10 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),
-    // stopped before the deposit landed: it can be tried again
-    ...((op.state === "failed" || op.state === "needs-you") && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
+    // the swap worked but the deposit failed: the deposit alone can be tried again (the TAO is in the wallet)
+    ...(op.state === "failed" && f.swapMined && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
+    // the swap itself failed (reverted, or a batch that failed whole): start a new stake at today's price
+    ...(op.state === "failed" && !f.swapMined && !cancelled ? { restake: true as const } : {}),
     ...((op.state === "needs-you" || op.state === "failed") &&
     !op.callsId &&
     !Object.values(op.hashes).some(Boolean) &&
@@ -248,7 +250,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
         ...unstake,
         ...link,
         status: "failed",
-        detail: "Your balance was smaller than this unstake when it arrived, so nothing was taken. Your stake is unchanged.",
+        detail: "There was no stake to take when this request arrived, so nothing was taken.",
       };
     } else {
       unstake = { ...unstake, ...link, status: "action", detail: "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow." };
@@ -296,6 +298,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     }
   }
 
+  // claimable is the wallet's whole balance on Base: this unstake is ready only once its own payout landed
+  const landed = ret.status === "done";
   let claim: TrailStep<WithdrawalStepKey> = { key: "claim", title: "Claim as USDC", status: "pending" };
   const c = f.claimed;
   if (c && c.swapFailed) {
@@ -308,14 +312,14 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     };
   } else if (c) {
     claim = { ...claim, title: c.keptTao ? "Claimed, kept as TAO" : "Claim as USDC", status: "done", at: c.at, txUrl: explorer.baseTx(c.hash) };
-  } else if (f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your money is back on Base. Claim it as USDC" };
+  } else if (landed && f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your money is back on Base. Claim it as USDC" };
 
   const steps = [request, unstake, ret, claim];
   let status: WithdrawalRecord["status"];
   if (op.cancelled && f.cancelMined && !d) status = "cancelled";
   else if (c && !c.swapFailed) status = "paid";
   else if (steps.some((s) => s.status === "failed")) status = "failed";
-  else if (f.claimable > 0n) status = "ready";
+  else if (landed && f.claimable > 0n) status = "ready";
   else if (steps.some((s) => s.status === "action")) status = "needs_you";
   else status = "in_progress";
 
@@ -328,7 +332,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     steps,
     shares: op.shares,
     taoAmount: toDisplay(d?.taoWei ?? op.taoEstimate, 18),
-    usdcAmount: toDisplay(op.usdcEstimate, 6),
+    // nothing was taken, so nothing comes back
+    ...(d && (d.outcome === "skipped" || d.outcome === "deferred") ? {} : { usdcAmount: toDisplay(op.usdcEstimate, 6) }),
     claimable: f.claimable,
     ...(c && !c.swapFailed ? { received: c.keptTao ? { keptTao: toDisplay(c.taoClaimed, 18) } : { usdc: toDisplay(c.usdcOut ?? 0n, 6) } } : {}),
     ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" ? { cancellableShares: op.shares } : {}),

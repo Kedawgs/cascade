@@ -1,7 +1,7 @@
 import { type Abi, type Address, type Hex, maxUint256 } from "viem";
 import { ERC20, FRONT_DOOR, ROUTER } from "./abi";
 import { type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
-import type { OpState } from "./oplog";
+import type { DepositOp, OpState } from "./oplog";
 import type { Balances, DepositQuote } from "./types";
 import { floorRao } from "./units";
 
@@ -85,6 +85,20 @@ export function stillToSend(
   if (!op.hashes.deposit && chain.depositOf >= op.targetTao) return [];
   if (!op.hashes.swap && chain.walletTao >= op.targetTao) return calls.filter((c) => c.key !== "approveUsdc" && c.key !== "swap");
   return calls;
+}
+
+/** Retrying a deposit whose swap worked but whose deposit failed: forget the failed deposit (its hash
+ * or wallet batch would only be read again) but keep the swap, and send one step at a time. */
+export function retryPatch(op: Pick<DepositOp, "state" | "hashes" | "callsId" | "mode">): Partial<DepositOp> {
+  if (op.state !== "failed") return {};
+  const { approveUsdc, swap } = op.hashes;
+  return {
+    hashes: { ...(approveUsdc ? { approveUsdc } : {}), ...(swap ? { swap } : {}) },
+    callsId: undefined,
+    mode: "sequential",
+    state: "running",
+    error: undefined,
+  };
 }
 
 export class FlowBusyError extends Error {

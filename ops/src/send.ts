@@ -19,14 +19,14 @@ import { chainIdOf, codeAt, gasPriceOf, nonceOf, type Rpc } from "./rpc.ts";
 import type { CallRequest, CreateRequest } from "./types.ts";
 
 export interface Runner {
-  run(file: string, args: string[], opts: { cwd: string }): Promise<{ code: number; stdout: string; stderr: string }>;
+  run(file: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }): Promise<{ code: number; stdout: string; stderr: string }>;
 }
 
 /** Runs Foundry without a shell, so no argument is ever re-parsed. */
 export const execFileRunner: Runner = {
   run: (file, args, opts) =>
     new Promise((resolve) =>
-      execFile(file, args, { cwd: opts.cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) =>
+      execFile(file, args, { cwd: opts.cwd, env: opts.env, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) =>
         resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }),
       ),
     ),

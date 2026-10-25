@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
 import { paths, targets } from "./config.ts";
+import { preflight } from "./preflight.ts";
 import { loadRecord } from "./record.ts";
 import { rehearse } from "./rehearse.ts";
 import { createRpc } from "./rpc.ts";
@@ -20,6 +21,16 @@ async function main(argv: string[]): Promise<number> {
     case "rehearse":
       await rehearse(env, log);
       return 0;
+    case "preflight": {
+      const dir = paths(env).deploymentsDir;
+      const rehearsal = loadRecord(join(dir, "rehearsal.json"));
+      const ctx = liveCtx();
+      const budget = rehearsal ? computeBudget(await gatherBudgetInputs(ctx, rehearsal)) : undefined;
+      const r = await preflight(ctx, loadRecord(join(dir, "test-2026-10.json")), budget);
+      for (const line of r.lines) log(line);
+      log(r.ok ? "Pre-flight: all clear" : "Pre-flight: fix the problems above before deploying");
+      return r.ok ? 0 : 1;
+    }
     case "budget": {
       const rec = loadRecord(join(paths(env).deploymentsDir, "rehearsal.json"));
       if (!rec) throw new Error("run `pnpm ops rehearse` first: the budget uses its measured gas");
@@ -27,7 +38,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     default:
-      console.error("usage: pnpm ops <rehearse|budget>");
+      console.error("usage: pnpm ops <preflight|rehearse|budget>");
       return 2;
   }
 }

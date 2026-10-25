@@ -1,6 +1,6 @@
 # Cascade web wiring — design
 
-Date: 2026-10-25. Piece 4 of the test-run milestone. Status: draft for the builder check.
+Date: 2026-10-25. Piece 4 of the test-run milestone. Status: revised after the builder check (2026-10-25).
 
 ## Intent
 
@@ -46,8 +46,8 @@ swaps USDC to TAO on Base (and back on the way out), so the user only ever handl
   ceiling `max(1%, 0.02 TAO)` (the live Bittensor→Base fee is about 0.00105 TAO per payout chunk).
 - Front door (Base): `deposit(uint256)` (amount whole rao, `% 1e9 == 0`, at least `minDeposit`,
   within the cap), `requestRedeem(uint256 shares)` payable, `cancelDeposit`, `cancelRedeem`,
-  `claim()`, views `depositOf`, `redeemOf`, `claimable`, `canClose`, `openDeposits`, `depositCap`,
-  `minDeposit`, `redeemRequestFee`; events `DepositRequested(batchId, user, amount, payer)`,
+  `claim()`, views `depositOf`, `redeemOf`, `claimable`, `canClose`, `openDeposits`, `openBatch()`
+  (its `id` and `totalDeposits`), `netForwarded`, `depositCap`, `minDeposit`, `redeemRequestFee`; events `DepositRequested(batchId, user, amount, payer)`,
   `RedeemRequested(batchId, user, shares)`, `BatchClosed(id, totalDeposits, nDeposits, nRedeems,
   fee, potUsed)`, `PayoutReceived(batchKey, chunk, user, amount)`, `Claimed(user, amount)`.
 - Vault (Bittensor): csTAO shares with **24 decimals**, non-transferable, held by the same address
@@ -69,9 +69,15 @@ Live quote: 20 USDC → 0.07882 TAO; 0.08 TAO → 20.16 USDC. Tokens: USDC
 bridged TAO) `0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67` (18 decimals).
 
 **RPCs from the browser:** `https://mainnet.base.org` and `https://lite.chain.opentensor.ai` both
-answer cross-origin requests from `http://localhost:3000`. Base's public RPC rate-limits bursts
-and refuses `eth_getLogs` over more than 200 blocks; Bittensor's allows about 128 requests a
-minute and 1,000-block log queries. Multicall3 exists on Base at `0xcA11…CA11` (Bittensor: to check).
+answer cross-origin requests from `http://localhost:3000`. Base's public RPC rate-limits bursts and,
+in the builder check, refused **every** `eth_getLogs` (`-32011 "request limit reached"`, even for one
+block) while `eth_call` kept working: **the site reads no Base logs at all.** Bittensor's allows
+about 128 requests a minute, 1,000-block log queries and batched JSON-RPC. Multicall3 is at
+`0xcA11bde05977b3631167028862bE2a173976CA11` on both chains (checked on Bittensor with `aggregate3`).
+
+**Units:** csTAO has 24 decimals; `price()` is wei per share unit × 1e18 (1e12 at launch), so TAO
+per whole csTAO is `price / 1e12`. The site converts with `totalAssets` / `totalSupply` and keeps
+every chain amount as a `bigint` (wei, share units, USDC units); JS numbers are only for display.
 
 **The web app** (`web/`, Next.js 16 static export, wagmi 3.7.7 + viem 2.57.7, react-query, 62
 vitest tests): every screen reads `CascadeData` (`src/lib/cascade/types.ts`) through
@@ -91,6 +97,8 @@ mock. Wallets: Base Account and injected wallets (MetaMask, Rabby…). There is 
 - Approvals: Uniswap's SwapRouter02 may be approved once for unlimited USDC and TAO (standard
   practice, an immutable and widely used contract); the front door, unaudited, only ever gets the
   exact amount of each deposit.
+- Build both paths: the batched one (MetaMask smart account, Base Account) and the sequential one;
+  the manual test uses MetaMask, offering the smart-account switch first.
 
 ## The design (my calls are marked *call*)
 
@@ -130,8 +138,9 @@ requests (Base bursts, Bittensor ~2 per second). React-query keeps the current p
 
 1. Quote: `quoteExactInput(USDC→WETH→TAO, amountUsd)` → expected TAO; target =
    `floor_rao(expected × (1 − 0.5%))` (*call*: 0.5% slippage); refuse below `minDeposit` or above
-   the cap still free (`depositCap` − what the front door has forwarded and holds: builder to find
-   the exact view). Show: TAO you'll stake, the price, fees (pool fees ≈ 0.35%, Base gas estimate),
+   the cap still free, `depositCap − netForwarded − openBatch().totalDeposits` (the deposit's own
+   check, CascadeFrontDoor.sol:192-193). Limits are read from the chain in TAO and shown in USD at
+   the live price. Show: TAO you'll stake, the price, fees (pool fees ≈ 0.35%, Base gas estimate),
    and the time (next batch within 10 minutes, then about 20–30 minutes on the bridge).
 2. Transactions (*call*): `approve(USDC → SwapRouter02, unlimited)` if the allowance is short; `exactOutput` (path
    TAO←WETH←USDC, `amountOut` = target, `amountInMaximum` = amountUsd, recipient = the user) so
@@ -145,13 +154,22 @@ requests (Base bursts, Bittensor ~2 per second). React-query keeps the current p
 ### Unstaking (front door → back to Base → USDC)
 
 1. The user picks a TAO amount or "all"; shares = TAO × `totalSupply` / `totalAssets` (rounded down;
-   "all" = the full balance). Show the USDC estimate (quote back at today's price), the fees
+   "all" = the full share balance, exactly). Available = the balance less shares already requested
+   (`redeemOf` in the open batch and requests on their way). **Minimum** (*call*): 0.005 TAO, and a
+   partial unstake must leave 0 or at least 0.005 TAO, else the site offers "unstake all": each
+   payout must clear the Bittensor adapter's `floor()` (0.002 TAO) after the ~0.00105-TAO bridge fee,
+   or its shares are burned and the payout can never be sent (only the owner's `cancelPayoutBatch`
+   undoes it). Show the USDC estimate (quote back at today's price), the fees
    (redeem request fee in ETH, the payout's bridge fee share ≈ 0.00105 TAO, pool fees ≈ 0.35%), and
    the time (batch 10 minutes + bridge + the 1-hour payout delay + bridge back).
-2. `requestRedeem(shares)` with `value` = the front door's `redeemRequestFee`.
-3. When `claimable(account)` > 0 on Base, the withdrawal shows "Ready: claim and swap to USDC";
-   that sends `claim()`, `approve(TAO → SwapRouter02)` and `exactInput(TAO→WETH→USDC, min = quote ×
-   (1 − 0.5%))`, batched when possible.
+2. `requestRedeem(shares)` with `value` = the front door's `redeemRequestFee` for the account's
+   first request in the open batch, and **0** when `redeemOf(account)` is already non-zero (any
+   other value reverts `WrongFee`).
+3. When `claimable(account)` > 0 on Base, the withdrawal shows "Ready: claim as USDC"; that sends
+   `claim()`, `approve(TAO → SwapRouter02)` if short, and `exactInput(TAO→WETH→USDC, min = quote ×
+   (1 − 0.5%))`, batched when possible (*call*: USDC is the default, "keep it as TAO" claims only).
+4. Cancelling (*call*): an entry still in the open batch can be cancelled from the activity view
+   (`cancelDeposit` returns the TAO to the wallet; `cancelRedeem` drops the request).
 
 ### Activity and trails
 
@@ -160,16 +178,40 @@ transactions it sent: for a deposit the swap and deposit hashes, the batch id (f
 `DepositRequested`), the TAO and USDC amounts and the swap price; for a withdrawal the request
 hash, batch id and shares. Each step is then resolved from the chain:
 
-- Deposit: received (USDC left the wallet: the swap tx) → swapped (TAO arrived) → bridged (the
-  `BatchClosed` for that batch id, its adapter `Sent` message, and the Bittensor OffRamp's
-  SUCCESS) → staked (a vault `Staked` after the delivery, or "waiting to reach the 0.02-TAO
-  minimum" when the vault is holding it).
-- Withdrawal: requested → unstaked (the vault's `Redeemed` for the account in that batch) →
-  returned (`PayoutReceived` on Base for the account) → paid (`Claimed` and the swap back).
-- Finding a batch's close on Base scans forward from the deposit's block in 200-block windows,
-  bounded (*call*: at most 20 windows per refresh, remembering how far it got).
-- Deposits made outside this browser still appear, from the vault's `Deposited` events
-  (amounts and time only).
+No Base logs are read (see the RPC facts). Each step is resolved from the site's own receipts,
+direct reads and Bittensor logs:
+
+- Deposit: received (the swap receipt) → swapped (TAO arrived; the deposit receipt's
+  `DepositRequested` gives the batch id) → on the bridge (front door `openBatch().id` has moved past
+  that id) → arrived (the vault's `BatchDelivered` on Bittensor for that batch id from this front
+  door; the Bittensor adapter's `Delivered(messageId)` in the same transaction names the message;
+  the account's `Deposited` shows the shares) → staked (a vault `Staked` after the delivery, or
+  "waiting to reach the 0.02-TAO minimum" while the vault holds it). `DepositBounced` or
+  `DepositSkipped` show as a failed step with what happens next.
+- Withdrawal: requested (its receipt; batch id from `RedeemRequested`) → on the bridge (batch id
+  passed) → unstaked (the account's `Redeemed` on Bittensor; `RedeemSkipped`/`RedeemDeferred`
+  shown as such) → returning (the batch's `PayoutChunkSent` and the adapter's `Sent(messageId)` in
+  that transaction; the Base OffRamp's `getExecutionState` by eth_call) → ready to claim
+  (`claimable` > 0) → paid (the site's own claim and swap receipts).
+- Deposits made outside this browser still appear, from the vault's `Deposited` events (TAO,
+  shares and time; no USD figures, which then stay hidden).
+
+### The data contract changes (from the builder check)
+
+`src/lib/cascade/types.ts` changes shape; the mock and the component tests follow it:
+
+- Chain amounts are `bigint` (TAO wei, share units, USDC units) wherever they feed a transaction
+  ("all" is the exact share balance); display numbers are derived.
+- `limits` becomes an async read (`getLimits()`), in TAO with USD at the live price.
+- Staking, unstaking and claiming are **flows**, not single promises: a local operation record is
+  created before the first signature, holds each step's hash, and drives a step list that resumes
+  after a reload. Writes go through the user's wallet (wagmi); reads stay in `CascadeData`.
+- New: a claim action; the wallet's ETH balance and any TAO sitting in the wallet.
+- `WithdrawalRecord.status` gains "ready to claim"; `StepStatus` gains "failed" and "needs you".
+- Fields a chain-only record cannot fill (`amountUsd`, `feesUsd`, `taoPriceUsd`) become optional
+  and are hidden when absent; per-deposit rewards are dropped (the chain cannot attribute them).
+- The money lane shows the account's own TAO, not the vault-wide stake; "available to unstake"
+  subtracts requests already made; copy that says "one transaction" changes to match the path.
 
 ### Removing the samples
 
@@ -190,11 +232,13 @@ deposit while the operator runs `pnpm ops`.
 File layout, hook names, UI copy details within the existing design, the polling cadence, how the
 batched-versus-sequential choice is detected with wagmi, error and empty states.
 
-## Open items for the builder check
+## Settled by the builder check
 
-1. Which front-door view gives the cap still free (`netForwarded`, the open batch total)?
-2. Does Bittensor EVM have Multicall3, and does `lite.chain.opentensor.ai` answer batched JSON-RPC?
-3. Does `exactOutput` through SwapRouter02 behave as described with a smart-account sender, and
-   does Base Account report atomic batching to wagmi on Base?
-4. Anything in the current UI's flows (stake form, receipts, unstake form) that assumes the mock's
-   instant behaviour and needs a different shape for multi-step wallet transactions.
+1. Cap still free: `depositCap() − netForwarded() − openBatch().totalDeposits` (live: 0.15 TAO);
+   `netForwarded` falls only when payouts arrive on Base.
+2. Multicall3 is on Bittensor; the lite node answers batched JSON-RPC (whether a batch counts as
+   one request against its limit is unknown, so spacing stays).
+3. `exactOutput` through SwapRouter02 simulated fine (0.078 TAO for 19.793 USDC); the router takes
+   payment from its caller, so a smart account works like an EOA. Whether a wallet reports atomic
+   batching is only known after connecting, so the site detects it at run time.
+4. The UI needed the data-contract changes above.

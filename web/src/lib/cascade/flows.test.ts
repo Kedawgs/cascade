@@ -62,7 +62,7 @@ function port(over: Partial<WalletPort> = {}) {
     canBatch: vi.fn(async () => false),
     sendBatch: vi.fn(async () => ({ id: "batch-1" })),
     waitBatch: vi.fn(async () => ({ status: "success" as const, hashes: [H(90)] })),
-    send: vi.fn(async (_c: FlowCall) => H(++n)),
+    send: vi.fn<(c: FlowCall) => Promise<Hex>>(async () => H(++n)),
     wait: vi.fn(async () => ({ status: "success" as const })),
     ...over,
   };

@@ -10,7 +10,7 @@ import { APR_FOOTNOTE } from "./StatsCard";
 /** `/rewards`: what the staked TAO has earned. */
 export function RewardsScreen() {
   const { state } = useCascadeAccount();
-  const account = state.status === "wallet" || state.status === "demo" ? state.account : null;
+  const account = state.status === "wallet" ? state.account : null;
 
   return (
     <AppShell active="rewards">

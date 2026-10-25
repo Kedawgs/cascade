@@ -8,7 +8,7 @@ import { availableToStake } from "@/lib/usdc-balance";
 import { ConnectWallet } from "../ConnectWallet";
 import styles from "./AppShell.module.css";
 
-/** Balance plus short address, with a small menu to disconnect or leave the demo. */
+/** Balance plus short address, with a small menu to disconnect. */
 export function WalletPill() {
   const { state, signOut } = useCascadeAccount();
   const balance = useUsdcBalance();
@@ -17,8 +17,7 @@ export function WalletPill() {
   if (state.status === "loading") return <span className={styles.walletGhost} aria-hidden="true" />;
   if (state.status === "none") return <ConnectWallet variant="pill" />;
 
-  const isDemo = state.status === "demo";
-  const name = isDemo ? "Demo account" : shortAddress(state.account);
+  const name = shortAddress(state.account);
 
   return (
     <>
@@ -35,10 +34,10 @@ export function WalletPill() {
         </span>
       </button>
       <div id={menuId} popover="auto" className={styles.menu}>
-        <p className={styles.menuLabel}>{isDemo ? "You're using" : "Connected wallet"}</p>
+        <p className={styles.menuLabel}>Connected wallet</p>
         <p className={styles.menuName}>{name}</p>
         <button type="button" className="pill pill-ghost pill-block" onClick={signOut}>
-          {isDemo ? "Leave the demo" : "Disconnect"}
+          Disconnect
         </button>
       </div>
     </>

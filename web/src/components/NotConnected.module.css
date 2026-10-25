@@ -1,0 +1,12 @@
+.banner {
+  background: #fff4e5;
+  border-bottom: 1px solid #f3d9b1;
+  color: #5c3b00;
+  font-size: 14px;
+  padding: 10px 16px;
+  text-align: center;
+}
+
+.banner code {
+  font-size: 13px;
+}

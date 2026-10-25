@@ -22,7 +22,7 @@ export function statRows(stats: ProtocolStats): StatRow[] {
     rows.push({ label: "Annual percentage rate*", value: formatApr(stats.aprPercent), accent: true });
   }
   if (stats.totalStakedTao !== undefined) {
-    rows.push({ label: "Total staked through Cascade", value: `${formatTao(stats.totalStakedTao, 0)} TAO` });
+    rows.push({ label: "Total staked through Cascade", value: `${formatTao(stats.totalStakedTao, stats.totalStakedTao < 10 ? 4 : 0)} TAO` });
   }
   if (stats.stakers !== undefined) {
     rows.push({ label: "Stakers", value: count.format(stats.stakers) });

@@ -2,10 +2,8 @@
 
 import { usePosition, useProtocolStats } from "@/lib/cascade/hooks";
 import { formatTao, formatUsd } from "@/lib/format";
-import { formatApr } from "@/lib/stats";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
-import { SampleTag } from "../SampleTag";
 import app from "./App.module.css";
 import { StakeForm } from "./StakeForm";
 import styles from "./StakeCard.module.css";
@@ -64,17 +62,8 @@ export function StakeCard({ account }: { account: string | null }) {
           </div>
         )}
         <div>
-          <p className={styles.k}>Cascade APR*</p>
-          <p className={`${styles.v} ${styles.apr}`}>
-            {stats.data?.aprPercent !== undefined ? (
-              <>
-                {formatApr(stats.data.aprPercent)}
-                <SampleTag />
-              </>
-            ) : (
-              "–"
-            )}
-          </p>
+          <p className={styles.k}>TAO price</p>
+          <p className={styles.v}>{stats.data?.taoPriceUsd !== undefined ? formatUsd(stats.data.taoPriceUsd) : "–"}</p>
         </div>
       </div>
       <div className={styles.form}>

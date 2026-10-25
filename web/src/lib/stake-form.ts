@@ -1,3 +1,4 @@
+import { formatUnits } from "viem";
 import { formatTao, formatUsdc, formatUsdShort } from "./format";
 
 /** What the stake and unstake buttons need to know to name themselves. */
@@ -32,21 +33,20 @@ export function maxStakeInput(balance: number): string {
 
 export function stakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
-  if (s.pending) return "Starting your stake…";
+  if (s.pending) return "Confirm in your wallet…";
   if (s.amount !== null && s.amount > 0 && s.error === null) return `Stake ${formatUsdc(s.amount)} USDC`;
   return "Stake";
 }
 
-export function validateUnstakeAmount(amount: number | null, balance: number): string | null {
-  if (amount === null) return null;
-  if (amount === 0) return "Enter how much TAO to unstake.";
-  if (amount > balance + 1e-9) return `You have ${formatTao(balance, 2)} TAO staked.`;
-  return null;
+/** What MAX types into the TAO field: the exact available amount, floored to six decimals. */
+export function maxUnstakeInput(taoWei: bigint): string {
+  const floored = (taoWei / 10n ** 12n) * 10n ** 12n;
+  return formatUnits(floored, 18);
 }
 
 export function unstakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
-  if (s.pending) return "Starting your unstake…";
+  if (s.pending) return "Confirm in your wallet…";
   if (s.amount !== null && s.amount > 0 && s.error === null) {
     return `Unstake ${formatTao(s.amount, 2)} TAO`;
   }

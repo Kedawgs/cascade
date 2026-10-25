@@ -115,3 +115,24 @@
 .tx:hover {
   text-decoration: underline;
 }
+
+/* A step waiting for the user (confirm in the wallet, claim). */
+.action .dot {
+  border-color: #c77700;
+  color: #c77700;
+}
+
+.action .title {
+  color: #8a5300;
+}
+
+/* A step that went wrong; its detail says what happens next. */
+.failed .dot {
+  border-color: #b42318;
+  background: #b42318;
+  color: #fff;
+}
+
+.failed .title {
+  color: #b42318;
+}

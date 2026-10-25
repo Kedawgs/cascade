@@ -24,7 +24,7 @@ function Check({ green = false }: { green?: boolean }) {
 
 /**
  * The route a deposit takes, drawn as a descending cascade: wallet, swapped, staked.
- * Amounts come from a sample quote, never from literals.
+ * Amounts come from a live quote for an example deposit, never from literals.
  */
 export function MoneyFlow({ quote, aprPercent }: { quote?: DepositQuote; aprPercent?: number }) {
   const usdc = quote ? `${formatUsdc(quote.amountUsd)} USDC` : "–";

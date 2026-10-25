@@ -12,7 +12,7 @@ import { WhereIsMyMoney } from "./WhereIsMyMoney";
 /** `/stake`: never redirects; without an account the form shows its connect state. */
 export function StakeScreen() {
   const { state } = useCascadeAccount();
-  const account = state.status === "wallet" || state.status === "demo" ? state.account : null;
+  const account = state.status === "wallet" ? state.account : null;
 
   return (
     <AppShell active="stake">
@@ -24,7 +24,7 @@ export function StakeScreen() {
         <>
           <StakeCard account={account} />
           {account && <WhereIsMyMoney account={account} />}
-          <StatsCardForAccount account={account} />
+          <StatsCardForAccount />
           <Faq />
         </>
       )}

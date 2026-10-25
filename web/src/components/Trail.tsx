@@ -3,18 +3,19 @@ import type { TrailStep } from "@/lib/cascade/types";
 import { ReceiptLink } from "./ReceiptLink";
 import styles from "./Trail.module.css";
 
-const STATUS_WORD = { done: "done", active: "in progress", pending: "not started yet" } as const;
+const STATUS_WORD = { done: "done", active: "in progress", pending: "not started yet", action: "waiting for you", failed: "failed" } as const;
 
 function stepNote(step: TrailStep): string | undefined {
   if (step.detail) return step.detail;
   if (step.at) return formatDateTime(step.at);
-  return step.status === "active" ? "In progress" : undefined;
+  if (step.status === "active") return "In progress";
+  return step.status === "action" ? "Waiting for you" : undefined;
 }
 
 /** The step-by-step trail from mockup B. The last step turns green once it's done. */
 export function Trail({ steps, label }: { steps: TrailStep[]; label: string }) {
   const last = steps.length - 1;
-  const active = steps.findIndex((s) => s.status === "active");
+  const active = steps.findIndex((s) => s.status === "active" || s.status === "action" || s.status === "failed");
   const announcement =
     active === -1
       ? `${steps[last]?.title ?? ""}.`

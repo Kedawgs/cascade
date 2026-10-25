@@ -2,33 +2,23 @@
 
 import { usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
 import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
-import { formatApr } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
-import { SampleTag } from "../SampleTag";
 import app from "./App.module.css";
 import card from "./StakeCard.module.css";
 import styles from "./RewardsCard.module.css";
 
-const EMPTY = "Rewards start the day after your first deposit is staked.";
+const EMPTY = "Rewards show here once the vault claims its first staking rewards.";
 const SHOW_DAYS = 14;
 
-function Apr() {
+/** The TAO price, live; an APR appears only once rewards have been measured on-chain. */
+function Price() {
   const stats = useProtocolStats();
   return (
     <div>
-      <p className={card.k}>Current APR*</p>
-      <p className={`${card.v} ${card.apr}`}>
-        {stats.data?.aprPercent !== undefined ? (
-          <>
-            {formatApr(stats.data.aprPercent)}
-            <SampleTag />
-          </>
-        ) : (
-          "–"
-        )}
-      </p>
+      <p className={card.k}>TAO price</p>
+      <p className={card.v}>{stats.data?.taoPriceUsd !== undefined ? formatUsd(stats.data.taoPriceUsd) : "–"}</p>
     </div>
   );
 }
@@ -58,10 +48,16 @@ function RewardsForAccount({ account }: { account: string }) {
         <div>
           <p className={card.k}>Earned so far</p>
           <p className={card.v}>
-            {formatTao(earned, 4)} TAO <small>{formatUsd(earned * position.data.taoPriceUsd)}</small>
+            {earned !== undefined ? (
+              <>
+                {formatTao(earned, 6)} TAO <small>{formatUsd(earned * position.data.taoPriceUsd)}</small>
+              </>
+            ) : (
+              "–"
+            )}
           </p>
         </div>
-        <Apr />
+        <Price />
       </div>
       {recent.length === 0 ? (
         <p className={styles.empty}>{EMPTY}</p>
@@ -95,7 +91,7 @@ export function RewardsCard({ account }: { account: string | null }) {
               <p className={card.k}>Earned so far</p>
               <p className={card.v}>–</p>
             </div>
-            <Apr />
+            <Price />
           </div>
           <div className={styles.connect}>
             <p className={styles.empty}>{EMPTY}</p>

@@ -3,13 +3,12 @@
 import { useProof, useProtocolStats } from "@/lib/cascade/hooks";
 import { statRows } from "@/lib/stats";
 import { ReceiptLink } from "../ReceiptLink";
-import { SampleTag } from "../SampleTag";
 import styles from "./App.module.css";
 
 export const APR_FOOTNOTE =
   "*APR is an estimate based on recent rewards. It is not guaranteed and changes with network conditions.";
 
-/** Protocol-wide figures. Rows with no value are left out; sample figures are tagged. */
+/** Protocol-wide figures, read from the chains. Rows with no value are left out. */
 export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
   const stats = useProtocolStats();
   const rows = stats.data ? statRows(stats.data) : [];
@@ -42,23 +41,18 @@ export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
               <span>{row.label}</span>
               <span className={row.accent ? styles.accent : undefined}>
                 {row.value}
-                <SampleTag />
               </span>
             </div>
           ))
         )}
       </div>
-      <p className={styles.footnote}>{APR_FOOTNOTE}</p>
+      {stats.data?.aprPercent !== undefined && <p className={styles.footnote}>{APR_FOOTNOTE}</p>}
     </section>
   );
 }
 
-function StatsWithProof({ account }: { account: string }) {
-  const proof = useProof(account);
+/** The statistics card with the "View on Bittensor" link to the vault's stake. */
+export function StatsCardForAccount() {
+  const proof = useProof();
   return <StatsCard explorerUrl={proof.data?.explorerUrl} />;
-}
-
-/** The statistics card with the "View on Bittensor" link when an account has a proof. */
-export function StatsCardForAccount({ account }: { account: string | null }) {
-  return account ? <StatsWithProof account={account} /> : <StatsCard />;
 }

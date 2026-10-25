@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { parseActivityParams } from "@/lib/activity-params";
+import { toDisplay } from "@/lib/cascade/units";
+import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { DepositList, WithdrawalList } from "../ActivityList";
 import { ConnectWallet } from "../ConnectWallet";
@@ -34,41 +36,69 @@ function NotFound({ what }: { what: "deposit" | "unstake" }) {
   );
 }
 
+function Actions({ children }: { children: ReactNode }) {
+  return <div className={styles.actions}>{children}</div>;
+}
+
 function DepositDetail({ account, id }: { account: string; id: string }) {
   const { data: deposit, isPending, isError, refetch } = useDeposit(account, id);
   const { data: position } = usePosition(account);
+  const flows = useFlows(account);
   if (isError) return <LoadError what="this deposit" onRetry={() => void refetch()} />;
   if (isPending) return <Loading />;
   if (!deposit) return <NotFound what="deposit" />;
 
-  const inProgress = deposit.status === "in_progress";
-  const amount = formatUsdShort(deposit.amountUsd);
+  const staked = deposit.status === "staked";
+  const amount = deposit.amountUsd !== undefined ? formatUsdShort(deposit.amountUsd) : `${formatTao(deposit.taoAmount, 4)} TAO`;
   return (
     <>
       <BackLink />
       <div className={`${app.card} ${styles.panel}`}>
         <p className={styles.kicker}>{formatDay(deposit.createdAt)} deposit</p>
-        <h2 className={styles.panelTitle}>
-          {inProgress ? `Where your ${amount} is going` : `Where your ${amount} went`}
-        </h2>
+        <h2 className={styles.panelTitle}>{staked ? `Where your ${amount} went` : `Where your ${amount} is going`}</h2>
         <Trail steps={deposit.steps} label="Deposit steps" />
         <dl className={styles.rows}>
-          {inProgress ? (
+          <div>
+            <dt>{staked ? "Worth now" : "TAO in this deposit"}</dt>
+            <dd>
+              {staked
+                ? position
+                  ? formatUsd(deposit.taoAmount * position.taoPriceUsd)
+                  : "–"
+                : `${formatTao(deposit.taoAmount, 4)} TAO`}
+            </dd>
+          </div>
+          {deposit.feesUsd !== undefined && (
             <div>
-              <dt>You will receive</dt>
-              <dd>about {formatTao(deposit.taoAmount, 2)} TAO</dd>
-            </div>
-          ) : (
-            <div>
-              <dt>Worth now</dt>
-              <dd>
-                {position
-                  ? formatUsd((deposit.taoAmount + deposit.rewardsTao) * position.taoPriceUsd)
-                  : "–"}
-              </dd>
+              <dt>Swap fees</dt>
+              <dd>{formatUsd(deposit.feesUsd)}</dd>
             </div>
           )}
         </dl>
+        {(deposit.status === "needs_you" || deposit.cancellableWei !== undefined) && (
+          <Actions>
+            {deposit.status === "needs_you" && (
+              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
+                {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
+              </button>
+            )}
+            {deposit.cancellableWei !== undefined && (
+              <button
+                type="button"
+                className="pill pill-ghost pill-block"
+                disabled={flows.busy !== null}
+                onClick={() => void flows.cancel("deposit", deposit.cancellableWei as bigint).catch(() => undefined)}
+              >
+                Take it back before the batch closes
+              </button>
+            )}
+          </Actions>
+        )}
+        {flows.error && (
+          <p role="alert" className={styles.alert}>
+            {flows.error}
+          </p>
+        )}
       </div>
     </>
   );
@@ -76,30 +106,66 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
 
 function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   const { data: withdrawal, isPending, isError, refetch } = useWithdrawal(account, id);
+  const flows = useFlows(account);
   if (isError) return <LoadError what="this unstake" onRetry={() => void refetch()} />;
   if (isPending) return <Loading />;
   if (!withdrawal) return <NotFound what="unstake" />;
 
   const paid = withdrawal.status === "paid";
-  const tao = formatTao(withdrawal.taoAmount, 2);
+  const tao = formatTao(withdrawal.taoAmount, 4);
   return (
     <>
       <BackLink />
       <div className={`${app.card} ${styles.panel}`}>
         <p className={styles.kicker}>{formatDay(withdrawal.createdAt)} unstake</p>
-        <h2 className={styles.panelTitle}>
-          {paid ? `Where your ${tao} TAO went` : `Where your ${tao} TAO is going`}
-        </h2>
+        <h2 className={styles.panelTitle}>{paid ? `Where your ${tao} TAO went` : `Where your ${tao} TAO is going`}</h2>
         <Trail steps={withdrawal.steps} label="Unstake steps" />
         <dl className={styles.rows}>
-          <div>
-            <dt>{paid ? "You received" : "You will receive"}</dt>
-            <dd>
-              {paid ? "" : "about "}
-              {formatUsdc(withdrawal.usdcAmount)} USDC on Base
-            </dd>
-          </div>
+          {withdrawal.usdcAmount !== undefined && (
+            <div>
+              <dt>{paid ? "You received" : "You will receive"}</dt>
+              <dd>
+                {paid ? "" : "about "}
+                {formatUsdc(withdrawal.usdcAmount)} USDC on Base
+              </dd>
+            </div>
+          )}
+          {withdrawal.claimable > 0n && (
+            <div>
+              <dt>Waiting for you on Base</dt>
+              <dd>{formatTao(toDisplay(withdrawal.claimable, 18), 4)} TAO</dd>
+            </div>
+          )}
         </dl>
+        {(withdrawal.status === "ready" || withdrawal.cancellableShares !== undefined) && (
+          <Actions>
+            {withdrawal.status === "ready" && (
+              <>
+                <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(false).catch(() => undefined)}>
+                  {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
+                </button>
+                <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(true).catch(() => undefined)}>
+                  Keep it as TAO
+                </button>
+              </>
+            )}
+            {withdrawal.cancellableShares !== undefined && (
+              <button
+                type="button"
+                className="pill pill-ghost pill-block"
+                disabled={flows.busy !== null}
+                onClick={() => void flows.cancel("withdrawal", withdrawal.cancellableShares as bigint).catch(() => undefined)}
+              >
+                Cancel before the batch closes
+              </button>
+            )}
+          </Actions>
+        )}
+        {flows.error && (
+          <p role="alert" className={styles.alert}>
+            {flows.error}
+          </p>
+        )}
       </div>
     </>
   );
@@ -151,7 +217,7 @@ function ActivityBody({ account }: { account: string }) {
 /** `/activity`: the lists, or one receipt trail when the query string names a deposit or unstake. */
 export function ActivityScreen() {
   const { state } = useCascadeAccount();
-  const account = state.status === "wallet" || state.status === "demo" ? state.account : null;
+  const account = state.status === "wallet" ? state.account : null;
 
   return (
     <AppShell active="activity">

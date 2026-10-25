@@ -120,8 +120,9 @@ export function useFlows(account: string | null) {
     busy,
     error,
 
-    /** Starts a stake from a quote; returns the operation id (the Activity receipt). */
-    async stake(q: DepositQuote): Promise<string> {
+    /** Starts a stake from a quote; returns the operation id (the Activity receipt). `onStart` gets the
+     * id before the first wallet prompt, so a stopped stake can still be found and resumed. */
+    async stake(q: DepositQuote, onStart?: (id: string) => void): Promise<string> {
       const op: DepositOp = {
         id: newOpId(),
         kind: "deposit",
@@ -135,6 +136,7 @@ export function useFlows(account: string | null) {
         state: "running",
       };
       data.opLog.put(op);
+      onStart?.(op.id);
       const w = await data.getBalances(a);
       await run("stake", hashesStore(data.opLog, a, op.id), stakeCalls(q, w, d(), a));
       return op.id;
@@ -147,7 +149,7 @@ export function useFlows(account: string | null) {
       await run("stake", hashesStore(data.opLog, a, id), stakeCalls(op, w, d(), a));
     },
 
-    async unstake(q: WithdrawalQuote): Promise<string> {
+    async unstake(q: WithdrawalQuote, onStart?: (id: string) => void): Promise<string> {
       const fd = await readFrontDoor(data.clients, d(), a);
       const c = unstakeCall(q.shares, fd.redeemOf, fd.redeemRequestFee, d());
       const op: WithdrawalOp = {
@@ -162,6 +164,7 @@ export function useFlows(account: string | null) {
         state: "running",
       };
       data.opLog.put(op);
+      onStart?.(op.id);
       await run("unstake", withdrawalStore(data.opLog, a, op.id), [c]);
       return op.id;
     },

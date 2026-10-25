@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Manrope } from "next/font/google";
-import { DemoBanner } from "@/components/DemoBanner";
+import { NotConnectedBanner } from "@/components/NotConnected";
 import { Providers } from "@/components/Providers";
 import "./globals.css";
 
@@ -28,7 +28,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="en" className={manrope.variable}>
       <body>
         <Providers>
-          <DemoBanner />
+          <NotConnectedBanner />
           <main className="page">{children}</main>
         </Providers>
       </body>

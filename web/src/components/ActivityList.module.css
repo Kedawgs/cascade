@@ -115,3 +115,13 @@
     grid-column: 2;
   }
 }
+
+.warn {
+  background: #fff4e5;
+  color: #8a5300;
+}
+
+.bad {
+  background: #fdecec;
+  color: #b42318;
+}

@@ -2,6 +2,7 @@
 
 import { useCascadeAccount } from "@/lib/account";
 import { usePosition } from "@/lib/cascade/hooks";
+import { toDisplay } from "@/lib/cascade/units";
 import { formatTao, formatUsd } from "@/lib/format";
 import { Loading } from "../Loading";
 import app from "./App.module.css";
@@ -13,7 +14,7 @@ import { UnstakeForm } from "./UnstakeForm";
 
 function UnstakeSummary({ account }: { account: string }) {
   const position = usePosition(account);
-  const staked = position.data ? `${formatTao(position.data.taoBalance, 2)} TAO` : "–";
+  const staked = position.data ? `${formatTao(position.data.taoBalance, 4)} TAO` : "–";
   return (
     <>
       <div>
@@ -25,7 +26,7 @@ function UnstakeSummary({ account }: { account: string }) {
       </div>
       <div>
         <p className={card.k}>Available to unstake</p>
-        <p className={card.v}>{staked}</p>
+        <p className={card.v}>{position.data ? `${formatTao(toDisplay(position.data.availableTaoWei, 18), 4)} TAO` : "–"}</p>
       </div>
     </>
   );
@@ -34,7 +35,7 @@ function UnstakeSummary({ account }: { account: string }) {
 /** `/unstake`: TAO back to USDC in the same wallet. */
 export function UnstakeScreen() {
   const { state } = useCascadeAccount();
-  const account = state.status === "wallet" || state.status === "demo" ? state.account : null;
+  const account = state.status === "wallet" ? state.account : null;
 
   return (
     <AppShell active="unstake">
@@ -65,7 +66,7 @@ export function UnstakeScreen() {
               <UnstakeForm account={account} />
             </div>
           </div>
-          <StatsCardForAccount account={account} />
+          <StatsCardForAccount />
           <Faq />
         </>
       )}

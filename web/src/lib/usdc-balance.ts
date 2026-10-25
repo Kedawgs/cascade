@@ -4,7 +4,7 @@ import { formatUsdc } from "./format";
 export const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 export const USDC_DECIMALS = 6;
 
-/** The shape both the demo balance and the on-chain balance are reduced to. */
+/** The shape the on-chain balance is reduced to for display. */
 export type BalanceQuery = { status: "pending" | "error" | "success"; data?: number };
 
 /** What the summary shows for "Available to stake", and what MAX fills in. */

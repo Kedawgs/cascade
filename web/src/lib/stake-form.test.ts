@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   maxStakeInput,
+  maxUnstakeInput,
   stakeButtonLabel,
   unstakeButtonLabel,
   validateStakeAmount,
-  validateUnstakeAmount,
 } from "./stake-form";
 import { parseAmount, sanitizeAmountInput } from "./format";
 
@@ -51,7 +51,7 @@ describe("stakeButtonLabel", () => {
       "Stake",
     );
     expect(stakeButtonLabel({ account: "0xa", amount: 500, error: null, pending: true })).toBe(
-      "Starting your stake…",
+      "Confirm in your wallet…",
     );
   });
 });
@@ -69,11 +69,14 @@ describe("unstake helpers", () => {
     );
   });
 
-  it("validates against the staked balance", () => {
-    expect(validateUnstakeAmount(4, 3.66)).toBe("You have 3.66 TAO staked.");
-    expect(validateUnstakeAmount(0, 3.66)).toBe("Enter how much TAO to unstake.");
-    expect(validateUnstakeAmount(1, 3.66)).toBeNull();
-    expect(validateUnstakeAmount(null, 3.66)).toBeNull();
+  it("shows progress while the wallet asks", () => {
+    expect(unstakeButtonLabel({ account: "0xa", amount: 1, error: null, pending: true })).toBe("Confirm in your wallet…");
+  });
+
+  it("fills MAX with the exact available TAO, floored to six decimals", () => {
+    expect(maxUnstakeInput(788n * 10n ** 14n)).toBe("0.0788");
+    expect(maxUnstakeInput(1_234_567_891n * 10n ** 9n)).toBe("1.234567");
+    expect(maxUnstakeInput(0n)).toBe("0");
   });
 });
 

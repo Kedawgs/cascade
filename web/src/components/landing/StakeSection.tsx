@@ -4,7 +4,6 @@ import { useCascadeAccount } from "@/lib/account";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
 import { StakeForm } from "../app/StakeForm";
-import { SAMPLE_STAKE_USD } from "./Hero";
 import styles from "./Landing.module.css";
 
 const POINTS = [
@@ -28,7 +27,7 @@ function Tick() {
 
 export function StakeSection() {
   const { state } = useCascadeAccount();
-  const account = state.status === "wallet" || state.status === "demo" ? state.account : null;
+  const account = state.status === "wallet" ? state.account : null;
   const balance = useUsdcBalance();
 
   return (
@@ -56,7 +55,6 @@ export function StakeSection() {
         <div className={styles.widget}>
           <StakeForm
             account={account}
-            initialAmount={String(SAMPLE_STAKE_USD)}
             maxUsdc={account ? availableToStake(balance).max : null}
           />
         </div>

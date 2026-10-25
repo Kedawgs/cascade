@@ -1,18 +1,29 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
-import { useCascadeData } from "@/lib/cascade/context";
-import { useDepositQuote, useProtocolStats, useStartDeposit } from "@/lib/cascade/hooks";
+import { parseUnits } from "viem";
+import { useBalances, useDepositQuote, useLimits } from "@/lib/cascade/hooks";
 import type { SourceChain } from "@/lib/cascade/types";
+import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
 import { maxStakeInput, stakeButtonLabel, validateStakeAmount } from "@/lib/stake-form";
-import { formatApr } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
-import { SampleTag } from "../SampleTag";
 import { AmountField } from "./AmountField";
 import { ChainChips } from "./ChainChips";
 import styles from "./StakeForm.module.css";
+
+/** Less than this much ETH on Base can't pay for the swap and deposit. */
+const LOW_ETH_WEI = 5n * 10n ** 13n;
+
+function usdcUnits(raw: string): bigint | null {
+  try {
+    return parseUnits(raw, 6);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The stake form used on the stake page and the landing page. With no account it
@@ -24,35 +35,43 @@ export function StakeForm({
   maxUsdc = null,
 }: {
   account: string | null;
-  /** Pre-filled amount, as typed text (the landing page shows a worked example). */
+  /** Pre-filled amount, as typed text. */
   initialAmount?: string;
   /** The wallet's USDC balance for the MAX button, when known. */
   maxUsdc?: number | null;
 }) {
   const router = useRouter();
-  const { limits } = useCascadeData();
+  const limits = useLimits();
+  const balances = useBalances(account);
+  const flows = useFlows(account);
   const [raw, setRaw] = useState(initialAmount);
   const [chain, setChain] = useState<SourceChain>("base");
+  const [opId, setOpId] = useState<string | null>(null);
   const inputId = useId();
   const noteId = useId();
 
   const amount = parseAmount(raw);
-  const error = validateStakeAmount(amount, limits, account ? maxUsdc : null);
-  const valid = amount !== null && amount > 0 && error === null;
-  const quoteQuery = useDepositQuote(valid ? amount : null, chain);
-  const quote = valid ? quoteQuery.data : undefined;
-  const stats = useProtocolStats();
-  const start = useStartDeposit(account ?? "");
-  const label = stakeButtonLabel({ account, amount, error, pending: start.isPending });
+  const lim = limits.data;
+  const error = lim ? validateStakeAmount(amount, lim, account ? maxUsdc : null) : null;
+  const units = lim && amount !== null && amount > 0 && error === null ? usdcUnits(raw) : null;
+  const quoteQuery = useDepositQuote(units);
+  // ignore the previous amount's quote while the new one loads
+  const quote = units !== null && quoteQuery.data?.usdcIn === units ? quoteQuery.data : undefined;
+  const pending = flows.busy === "stake";
+  const lowEth = account !== null && balances.data !== undefined && balances.data.eth < LOW_ETH_WEI;
+  const label = stakeButtonLabel({ account, amount, error, pending });
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!account || !valid || start.isPending) return;
-    start.mutate(
-      { amountUsd: amount, chain },
-      { onSuccess: (deposit) => router.push(`/activity?deposit=${deposit.id}`) },
+    if (!account || !quote || pending) return;
+    setOpId(null);
+    flows.stake(quote, setOpId).then(
+      (id) => router.push(`/activity?deposit=${id}`),
+      () => undefined, // the message is in flows.error
     );
   }
+
+  const note = error ?? (lim ? `From ${formatUsdShort(lim.minUsd)} to ${formatUsdShort(lim.maxUsd)}` : limits.isError ? "Limits unavailable right now" : "Checking the limits…");
 
   return (
     <form className={styles.form} onSubmit={onSubmit} noValidate>
@@ -74,11 +93,11 @@ export function StakeForm({
         describedBy={noteId}
       />
       <p id={noteId} className={error ? styles.error : styles.note}>
-        {error ?? `From ${formatUsdShort(limits.minUsd)} to ${formatUsdShort(limits.maxUsd)}`}
+        {note}
       </p>
 
       {account ? (
-        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!valid || start.isPending}>
+        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending}>
           {label}
         </button>
       ) : (
@@ -86,44 +105,40 @@ export function StakeForm({
           <ConnectWallet variant="pill-block" />
         </div>
       )}
-      {start.error && (
+      {lowEth && <p className={styles.error}>You need a little ETH on Base to pay the network fees.</p>}
+      {flows.error && (
         <p role="alert" className={styles.error}>
-          {start.error.message}
+          {flows.error}
+          {opId && (
+            <>
+              {" "}
+              <Link href={`/activity?deposit=${opId}`}>See this deposit</Link>, where you can continue.
+            </>
+          )}
         </p>
       )}
 
       <dl className={styles.details} aria-live="polite">
         <div>
-          <dt>You will receive</dt>
-          <dd>{quote ? `about ${formatTao(quote.estTao, 2)} TAO` : "–"}</dd>
+          <dt>You will stake</dt>
+          <dd>{quote ? `${formatTao(quote.estTao, 4)} TAO` : "–"}</dd>
         </div>
         <div>
           <dt>TAO price</dt>
           <dd>{quote ? formatUsd(quote.taoPriceUsd) : "–"}</dd>
         </div>
         <div>
-          <dt>Staking yield</dt>
-          <dd className={styles.yield}>
-            {stats.data?.aprPercent !== undefined ? (
-              <>
-                {formatApr(stats.data.aprPercent)} APR
-                <SampleTag />
-              </>
-            ) : (
-              "–"
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Fees</dt>
-          <dd>{quote ? formatUsd(quote.feesUsd) : "–"}</dd>
+          <dt>Swap fees</dt>
+          <dd>{quote ? `${formatUsd(quote.feesUsd)} + Base network fee` : "–"}</dd>
         </div>
         <div>
           <dt>Staked in</dt>
           <dd>{quote ? `about ${quote.etaMinutes} minutes` : "–"}</dd>
         </div>
       </dl>
-      <p className={styles.foot}>One transaction from your wallet. No Bittensor wallet needed.</p>
+      <p className={styles.foot}>
+        Your wallet asks you to confirm each step, or just once with a smart account. No Bittensor wallet needed.
+      </p>
     </form>
   );
 }

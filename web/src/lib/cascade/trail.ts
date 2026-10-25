@@ -2,6 +2,7 @@ import type { Hex } from "viem";
 import { explorer } from "./config";
 import type { DepositOp, WithdrawalOp } from "./oplog";
 import type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRecord, WithdrawalStepKey } from "./records";
+import { formatTao } from "../format";
 import { toDisplay } from "./units";
 
 /** What the chain says about one deposit (see facts.ts). */
@@ -20,6 +21,11 @@ export interface DepositFacts {
   staked?: { at: Date; txHash: Hex };
   /** In the vault but not staked yet, because one position must reach the 0.02-TAO nominator minimum. */
   waitingForMinimum: boolean;
+  /** TAO the vault has toward that minimum (staked plus idle), and the minimum itself. */
+  vaultWei?: bigint;
+  minimumWei?: bigint;
+  /** TAO from this account's other deposits already sent and not yet delivered. */
+  incomingWei?: bigint;
   /** When the deposit was made (its receipt's block), and where the batch can be watched on the bridge. */
   depositedAt?: Date;
   watchUrl?: string;
@@ -43,6 +49,26 @@ export interface WithdrawalFacts {
 
 const hhmm = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 const BRIDGE_TIME = "usually 20–30 minutes";
+
+/** Delivered but not staked: Bittensor stakes a position only from 0.02 TAO, so it waits for more deposits. */
+function waitingForMinimum(f: { vaultWei?: bigint; minimumWei?: bigint; incomingWei?: bigint }): Pick<TrailStep, "status" | "detail" | "summary"> {
+  const min = f.minimumWei ?? 2n * 10n ** 16n;
+  const minTao = formatTao(toDisplay(min, 18), 2);
+  const tao = (wei: bigint) => formatTao(toDisplay(wei, 18), 4);
+  const incoming = f.incomingWei ?? 0n;
+  let sofar = "";
+  if (f.vaultWei !== undefined && f.vaultWei < min) {
+    sofar =
+      incoming > 0n && f.vaultWei + incoming >= min
+        ? ` The vault holds ${tao(f.vaultWei)} TAO so far, and your ${tao(incoming)} TAO deposit on its way takes it past that: it is staked once that one lands. Nothing for you to do.`
+        : ` The vault holds ${tao(f.vaultWei)} TAO so far; it is staked once ${tao(min - f.vaultWei - incoming)} TAO more arrives, from you or anyone else.`;
+  }
+  return {
+    status: "active",
+    summary: `waiting for the ${minTao} TAO minimum`,
+    detail: `Waiting for the ${minTao} TAO minimum: Bittensor only stakes ${minTao} TAO or more.${sofar} Until then your TAO is safe in the vault and counted as yours, but not earning yet`,
+  };
+}
 
 /** On the bridge: how long so far, and what it is waiting for. */
 function onTheBridge(f: { now: Date; depositedAt?: Date }): string {
@@ -120,9 +146,8 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   let stake: TrailStep<DepositStepKey> = { key: "stake", title: "Stake on Bittensor", status: "pending" };
   if (f.delivered?.outcome === "deposited") {
     if (f.staked) stake = { ...stake, status: "done", at: f.staked.at, txUrl: explorer.bittensorTx(f.staked.txHash), txLabel: "View on Bittensor" };
-    else if (f.waitingForMinimum) {
-      stake = { ...stake, status: "active", detail: "In the vault and counting. It is staked once the vault holds 0.02 TAO, the chain's minimum" };
-    } else stake = { ...stake, status: "active", detail: "Staking shortly" };
+    else if (f.waitingForMinimum) stake = { ...stake, ...waitingForMinimum(f) };
+    else stake = { ...stake, status: "active", detail: "Staking shortly" };
   }
 
   const steps = [swap, deposit, bridge, stake];
@@ -141,6 +166,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),
+    ...(op.state === "needs-you" && !op.callsId && !Object.values(op.hashes).some(Boolean) ? { nothingSent: true as const } : {}),
   };
 }
 

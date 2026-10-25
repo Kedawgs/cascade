@@ -97,6 +97,9 @@ export function createOpLog(storage: Storage, frontDoor: Address) {
     put(op: Operation) {
       write(op.account, [...read(op.account).filter((o) => o.id !== op.id), op]);
     },
+    remove(account: Address, id: string) {
+      write(account, read(account).filter((o) => o.id !== id));
+    },
     update(account: Address, id: string, patch: Partial<Operation>) {
       write(
         account,

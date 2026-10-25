@@ -38,6 +38,15 @@ describe("operation log", () => {
     expect(a.hashes.swap).toBe(`0x${"11".repeat(32)}`);
   });
 
+  it("removes an entry for good", () => {
+    const s = memoryStorage();
+    const log = createOpLog(s, FD);
+    log.put(deposit("a", ME, 1));
+    log.put(deposit("b", ME, 2));
+    log.remove(ME, "a");
+    expect(createOpLog(s, FD).list(ME).map((o) => o.id)).toEqual(["b"]);
+  });
+
   it("keeps each account's log apart, keyed by front door and lowercase account", () => {
     const s = memoryStorage();
     const log = createOpLog(s, FD);

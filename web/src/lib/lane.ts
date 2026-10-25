@@ -44,8 +44,8 @@ export function deriveLane(input: LaneInput): [LaneNode, LaneNode, LaneNode] {
   } else if (moving.length === 1) {
     const steps = moving[0].steps;
     const activeIndex = Math.max(0, steps.findIndex((s) => s.status === "active" || s.status === "action"));
-    const key = steps[activeIndex]?.key ?? "swap";
-    transit = { amount: `${formatTao(movingTao, 2)} TAO`, label: `${TRANSIT_PHRASE[key]}, step ${activeIndex + 1} of 4`, state: "live" };
+    const phrase = steps[activeIndex]?.summary ?? TRANSIT_PHRASE[steps[activeIndex]?.key ?? "swap"];
+    transit = { amount: `${formatTao(movingTao, 2)} TAO`, label: `${phrase}, step ${activeIndex + 1} of 4`, state: "live" };
   } else {
     transit = { amount: `${formatTao(movingTao, 2)} TAO`, label: `${moving.length} deposits on their way`, state: "live" };
   }

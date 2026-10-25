@@ -42,6 +42,13 @@ describe("deriveLane", () => {
     expect(s).toEqual({ amount: "0.05 TAO", label: "yours, staked on Bittensor", state: "done", href: VAULT });
   });
 
+  it("uses a step's own short summary when it has one", () => {
+    const d = dep("a", 0.0117, 3);
+    d.steps[3] = { ...d.steps[3], summary: "waiting for the 0.02 TAO minimum" };
+    const [, t] = deriveLane({ usdcBalance: 0, deposits: [d], position: position(0) });
+    expect(t.label).toBe("waiting for the 0.02 TAO minimum, step 4 of 4");
+  });
+
   it("adds up several deposits in transit", () => {
     const [, t] = deriveLane({ usdcBalance: 0, deposits: [dep("a", 1, 1), dep("b", 2.5, 3), dep("c", 9, 4)], position: position(0) });
     expect(t).toEqual({ amount: "3.50 TAO", label: "2 deposits on their way", state: "live" });

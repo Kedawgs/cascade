@@ -58,7 +58,7 @@ export function DepositList({ deposits }: { deposits: DepositRecord[] }) {
                 {d.status !== "staked" && d.status !== "cancelled" && (
                   <>
                     <Bars done={done} />
-                    <span className={styles.sub}>{current ? TRANSIT_PHRASE[current.key] : "starting"}</span>
+                    <span className={styles.sub}>{current ? (current.summary ?? TRANSIT_PHRASE[current.key]) : "starting"}</span>
                   </>
                 )}
               </span>

@@ -158,12 +158,18 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
     const out: DepositRecord[] = [];
     const seen = new Set<string>();
+    const found = [];
     for (const op of deps.opLog.list(a).filter((o): o is DepositOp => o.kind === "deposit").map(live)) {
       const { batchId, facts } = await depositFacts(c, d, op, { fd, vault: v, scan });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       if (facts.delivered) seen.add(facts.delivered.txHash.toLowerCase());
-      out.push(depositRecord({ ...op, batchId: batchId ?? op.batchId }, facts));
+      found.push({ op: { ...op, batchId: batchId ?? op.batchId }, facts });
     }
+    // TAO this account already sent that is still on its way counts toward the staking minimum
+    const incomingWei = found
+      .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !(op.cancelled && facts.cancelMined))
+      .reduce((sum, { op }) => sum + op.targetTao, 0n);
+    for (const { op, facts } of found) out.push(depositRecord(op, { ...facts, incomingWei }));
     for (const e of await chainDeposits(c, scan)) if (!seen.has(e.txHash.toLowerCase())) out.push(chainOnlyDeposit(e));
     return out.sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());
   }

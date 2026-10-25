@@ -293,6 +293,12 @@ export function useFlows(account: string | null) {
         });
       }),
 
+    /** Drops an entry that never sent a transaction from this browser's list. */
+    remove(id: string) {
+      data.opLog.remove(a, id);
+      void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
+    },
+
     /** Takes an entry back out of the open batch and records it on that entry. */
     cancel: (kind: "deposit" | "withdrawal", id: string, amount: bigint) =>
       flow("cancel", async () => {

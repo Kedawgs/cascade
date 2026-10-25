@@ -43,6 +43,15 @@ describe("deposit trail", () => {
     expect(r.status).toBe("in_progress");
   });
 
+  it("marks a stopped deposit that never sent anything, so it can be removed", () => {
+    const stopped = { ...op, state: "needs-you" as const, hashes: {} };
+    const none = { ...base, swapMined: false, depositMined: false };
+    expect(depositRecord(stopped, none).nothingSent).toBe(true);
+    expect(depositRecord({ ...stopped, hashes: { approveUsdc: H(1) } }, none).nothingSent).toBeUndefined();
+    expect(depositRecord({ ...stopped, callsId: "0xabc" }, none).nothingSent).toBeUndefined();
+    expect(depositRecord({ ...op, state: "running" as const, hashes: {} }, none).nothingSent).toBeUndefined();
+  });
+
   it("says the batch can close now once its time has passed", () => {
     const r = depositRecord(op, { ...base, now: new Date("2026-10-25T10:20:00Z") });
     expect(r.steps[2].detail).toMatch(/can close now/i);
@@ -82,11 +91,34 @@ describe("deposit trail", () => {
     expect(staked.status).toBe("staked");
   });
 
-  it("explains a vault still waiting for the 0.02-TAO minimum", () => {
+  it("explains a vault still waiting for the 0.02-TAO minimum, with how much it holds and how much is missing", () => {
     const delivered = { at: new Date(), txHash: H(9), outcome: "deposited" as const };
-    const r = depositRecord(op, { ...base, openBatchId: 4n, stillOpen: false, delivered, waitingForMinimum: true });
+    const r = depositRecord(op, {
+      ...base,
+      openBatchId: 4n,
+      stillOpen: false,
+      delivered,
+      waitingForMinimum: true,
+      vaultWei: 11_749_608n * 10n ** 9n,
+      minimumWei: 2n * 10n ** 16n,
+    });
     expect(r.steps[3].status).toBe("active");
     expect(r.steps[3].detail).toMatch(/0\.02 TAO/);
+    expect(r.steps[3].detail).toMatch(/holds 0\.0117 TAO/);
+    expect(r.steps[3].detail).toMatch(/0\.0083 TAO more/);
+    expect(r.steps[3].detail).toMatch(/not earning/i);
+    expect(r.steps[3].summary).toBe("waiting for the 0.02 TAO minimum");
+  });
+
+  it("says no more is needed when the user's own deposit on its way covers the minimum", () => {
+    const delivered = { at: new Date(), txHash: H(9), outcome: "deposited" as const };
+    const waiting = { ...base, openBatchId: 4n, stillOpen: false, delivered, waitingForMinimum: true, vaultWei: 11_749_608n * 10n ** 9n, minimumWei: 2n * 10n ** 16n };
+    const covered = depositRecord(op, { ...waiting, incomingWei: 78_336_398n * 10n ** 9n });
+    expect(covered.steps[3].detail).toMatch(/0\.0783 TAO deposit on its way/);
+    expect(covered.steps[3].detail).toMatch(/nothing for you to do/i);
+    expect(covered.steps[3].detail).not.toMatch(/more arrives/);
+    const short = depositRecord(op, { ...waiting, incomingWei: 10n ** 15n });
+    expect(short.steps[3].detail).toMatch(/0\.0073 TAO more arrives/);
   });
 
   it("marks a bounced delivery as failed", () => {

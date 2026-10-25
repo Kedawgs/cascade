@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
@@ -44,6 +44,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
   const { data: deposit, isPending, isError, refetch } = useDeposit(account, id);
   const { data: position } = usePosition(account);
   const flows = useFlows(account);
+  const router = useRouter();
   if (isError) return <LoadError what="this deposit" onRetry={() => void refetch()} />;
   if (isPending) return <Loading />;
   if (!deposit) return <NotFound what="deposit" />;
@@ -80,6 +81,19 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
             {deposit.status === "needs_you" && (
               <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
+              </button>
+            )}
+            {deposit.nothingSent && (
+              <button
+                type="button"
+                className="pill pill-ghost pill-block"
+                disabled={flows.busy !== null}
+                onClick={() => {
+                  flows.remove(id);
+                  router.push("/activity");
+                }}
+              >
+                Remove it (nothing was sent)
               </button>
             )}
             {deposit.cancellableWei !== undefined && (

@@ -9,6 +9,8 @@ export interface TrailStep<K extends string = DepositStepKey | WithdrawalStepKey
   status: StepStatus;
   title: string;
   detail?: string;
+  /** A few words for lists ("waiting for the 0.02 TAO minimum"); lists otherwise use the step's usual phrase. */
+  summary?: string;
   txUrl?: string;
   /** Link text for `txUrl`. The UI falls back to "View transaction". */
   txLabel?: string;
@@ -30,6 +32,8 @@ export interface DepositRecord {
   taoPriceUsd?: number;
   /** TAO still in the open batch that can be taken back. */
   cancellableWei?: bigint;
+  /** Stopped before any transaction was sent, so it can simply be removed. */
+  nothingSent?: true;
 }
 
 export interface WithdrawalRecord {

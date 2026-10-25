@@ -149,6 +149,8 @@ export async function depositFacts(
     else {
       const idle = ctx.vault.balanceWei > ED_RESERVE + ctx.vault.pendingPayouts ? ctx.vault.balanceWei - ED_RESERVE - ctx.vault.pendingPayouts : 0n;
       facts.waitingForMinimum = outcome === "deposited" && ctx.vault.rootStakeWei + idle < ctx.vault.nominatorMinWei;
+      facts.vaultWei = ctx.vault.rootStakeWei + idle;
+      facts.minimumWei = ctx.vault.nominatorMinWei;
     }
   }
   return { batchId, facts };

@@ -7,6 +7,8 @@ solc_version = "0.8.24"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
+# The rehearsal stand-ins force-send with selfdestruct on purpose (local forks only).
+ignored_warnings_from = ["test/rehearsal"]
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "forge-std/=lib/forge-std/src/",

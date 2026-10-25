@@ -1,4 +1,5 @@
 import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters } from "viem";
+import { freshTip } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
 import type { Clients } from "./chain";
 import { type Deployment, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
@@ -76,8 +77,11 @@ export interface VaultState {
 
 export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, account: Address = ZERO): Promise<VaultState> {
   const v = { address: d.vault, abi: VAULT } as const;
+  // read at a block known to be recent: a server that is behind then errors instead of answering from the past
+  const blockNumber = await freshTip(c);
   const [shares, totalAssets, totalSupply, rootStakeRao, pendingPayouts, stakeHotkey, payoutDelay, nominatorMin] =
     await c.bittensor.multicall({
+      blockNumber,
       allowFailure: false,
       contracts: [
         { ...v, functionName: "balanceOf", args: [account] },
@@ -96,7 +100,7 @@ export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, ac
     totalSupply,
     rootStakeWei: rootStakeRao * RAO,
     pendingPayouts,
-    balanceWei: await c.bittensor.getBalance({ address: d.vault }),
+    balanceWei: await c.bittensor.getBalance({ address: d.vault, blockNumber }),
     stakeHotkey,
     payoutDelay: Number(payoutDelay),
     nominatorMinWei: nominatorMin * RAO,

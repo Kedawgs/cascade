@@ -37,8 +37,8 @@ into the site.
 ## How it reads the chains
 
 `src/lib/cascade/types.ts` is the contract (`CascadeData`), `live.ts` implements it over viem public
-clients (`chain.ts`: `https://mainnet.base.org` and `https://lite.chain.opentensor.ai`, JSON-RPC
-batching and Multicall3 on both), `index.ts` picks it (or the not-connected data source) and
+clients (`chain.ts`: `https://mainnet.base.org` and `https://archive.chain.opentensor.ai`, JSON-RPC
+batching and Multicall3 on both; not the lite node, which keeps only minutes of event history), `index.ts` picks it (or the not-connected data source) and
 `hooks.ts` wraps it in react-query. Amounts that feed a transaction are exact `bigint`s; numbers are
 for display only (`units.ts`).
 

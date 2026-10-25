@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, readDeployment } from "./config";
+import { PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, readDeployment, RPC } from "./config";
 
 const ENV = {
   NEXT_PUBLIC_CASCADE_FRONT_DOOR: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -37,5 +37,9 @@ describe("readDeployment", () => {
       "0x833589fcd6edb6e08f4c7c32d4f71b54bda029130001f44200000000000000000000000000000000000006000bb8f3081494b87e8d5fb7960f066e931d1d0e6e3d67",
     );
     expect(PATH_TAO_TO_USDC.slice(0, 42)).toBe("0xf3081494b87e8d5fb7960f066e931d1d0e6e3d67");
+  });
+
+  it("reads Bittensor from OpenTensor's archive node: the lite node keeps only minutes of event history", () => {
+    expect(RPC.bittensor).toBe("https://archive.chain.opentensor.ai");
   });
 });

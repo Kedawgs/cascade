@@ -51,10 +51,26 @@ const deliveredMsg = log(
   2,
 );
 
-function chains(opts: { latest?: bigint; bitLogs?: unknown[]; bitReceipts?: Record<string, unknown>; baseReceipts?: Record<string, unknown>; executionState?: number } = {}) {
+function chains(
+  opts: {
+    latest?: bigint;
+    bitLogs?: unknown[];
+    bitReceipts?: Record<string, unknown>;
+    baseReceipts?: Record<string, unknown>;
+    executionState?: number;
+    /** What each successive request's server reports as its head (defaults to `latest`). */
+    heads?: bigint[];
+  } = {},
+) {
   const windows: [bigint, bigint][] = [];
+  let headCalls = 0;
   const bittensor = {
     getBlockNumber: async () => opts.latest ?? 2_500n,
+    request: async ({ method }: { method: string }) => {
+      if (method !== "eth_blockNumber") throw new Error(`unexpected ${method}`);
+      const h = opts.heads?.[headCalls++] ?? opts.latest ?? 2_500n;
+      return `0x${h.toString(16)}`;
+    },
     getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
       windows.push([fromBlock, toBlock]);
       return (opts.bitLogs ?? []).filter((l) => {
@@ -63,7 +79,10 @@ function chains(opts: { latest?: bigint; bitLogs?: unknown[]; bitReceipts?: Reco
       });
     },
     getTransactionReceipt: async ({ hash }: { hash: Hex }) => opts.bitReceipts?.[hash] ?? null,
-    getBlock: async () => ({ timestamp: 1_800_000_000n }),
+    getBlock: async (q: { blockTag?: string }) =>
+      q?.blockTag === "latest"
+        ? { number: opts.latest ?? 2_500n, timestamp: BigInt(Math.floor(Date.now() / 1000)) }
+        : { timestamp: 1_800_000_000n },
   };
   const base = {
     getLogs: async () => {
@@ -117,6 +136,24 @@ describe("facts", () => {
     const before = c.windows.length;
     await scanVault(c.clients, D, scan, ME);
     expect(c.windows.length).toBe(before);
+  });
+
+  it("never takes a window of logs from a server that hasn't reached it", async () => {
+    // the first answer comes from a server stuck before the delivery: its head is below the window
+    const c = chains({ latest: 1_600n, bitLogs: [delivered], heads: [1_200n, 1_600n] });
+    const lagging = c.clients as { bittensor: { getLogs: (q: { fromBlock: bigint; toBlock: bigint }) => Promise<unknown[]> } };
+    const real = lagging.bittensor.getLogs;
+    let first = true;
+    lagging.bittensor.getLogs = async (q) => {
+      if (first) {
+        first = false;
+        return [];
+      }
+      return real(q);
+    };
+    const scan = newScan(D);
+    await scanVault(c.clients, D, scan, ME);
+    expect(scan.delivered.get("3")?.txHash).toBe(H(9));
   });
 
   it("finds a deposit's delivery, its bridge message and that it waits for the minimum", async () => {

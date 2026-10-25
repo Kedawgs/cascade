@@ -16,8 +16,13 @@ const ME = "0x000000000000000000000000000000000000a11c" as const;
 /** A client that answers multicalls by function name and records what was asked. */
 function fake(answers: Record<string, unknown>, balance = 0n) {
   const asked: string[] = [];
+  const pinned: (bigint | undefined)[] = [];
   const client = {
-    async multicall({ contracts }: { contracts: { functionName: string }[] }) {
+    async getBlock() {
+      return { number: 9_400_000n, timestamp: BigInt(Math.floor(Date.now() / 1000)) };
+    },
+    async multicall({ contracts, blockNumber }: { contracts: { functionName: string }[]; blockNumber?: bigint }) {
+      pinned.push(blockNumber);
       return contracts.map((c) => {
         asked.push(c.functionName);
         if (!(c.functionName in answers)) throw new Error(`unexpected ${c.functionName}`);
@@ -28,11 +33,12 @@ function fake(answers: Record<string, unknown>, balance = 0n) {
       asked.push(functionName);
       return (answers[functionName] as (a: unknown[]) => unknown)(args);
     },
-    async getBalance() {
+    async getBalance({ blockNumber }: { blockNumber?: bigint } = {}) {
+      pinned.push(blockNumber);
       return balance;
     },
   };
-  return { client: client as never, asked };
+  return { client: client as never, asked, pinned };
 }
 
 describe("reads", () => {
@@ -84,6 +90,8 @@ describe("reads", () => {
     );
     const v = await readVault({ bittensor: bit.client }, D, ME);
     expect(v).toMatchObject({ shares: 10n ** 22n, rootStakeWei: 15n * 10n ** 15n, nominatorMinWei: 2n * 10n ** 16n, payoutDelay: 3600, balanceWei: 2n * 10n ** 16n });
+    // read at a block known to be recent, so a lagging server errors instead of answering from the past
+    expect(bit.pinned).toEqual([9_400_000n, 9_400_000n]);
   });
 
   it("reads the wallet's balances and the allowances the flows need", async () => {

@@ -38,6 +38,11 @@ describe("config", () => {
     expect(targets({ OPS_BASE_RPC: "https://x" }).live.base.rpcUrl).toBe("https://x");
   });
 
+  it("reads Bittensor from OpenTensor's archive node by default: the lite node keeps only minutes of logs", () => {
+    expect(targets({}).live.bittensor.rpcUrl).toBe("https://archive.chain.opentensor.ai");
+    expect(targets({ OPS_BITTENSOR_RPC: "https://y" }).live.bittensor.rpcUrl).toBe("https://y");
+  });
+
   it("finds the key material by path only, never the other keystore", () => {
     expect(paths({ OPS_PASSWORD_FILE: "x" }).passwordFile).toBe("x");
     expect(JSON.stringify(paths({}))).not.toContain("sf-mainnet");

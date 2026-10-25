@@ -75,7 +75,8 @@ export function targets(env: Env): { live: Record<ChainName, ChainTarget>; rehea
       base: { name: "base", rpcUrl: env.OPS_BASE_RPC ?? "https://mainnet.base.org", chainId: 8453, legacy: false },
       bittensor: {
         name: "bittensor",
-        rpcUrl: env.OPS_BITTENSOR_RPC ?? "https://lite.chain.opentensor.ai",
+        // the archive node: the lite node keeps only minutes of event history, which the keeper scans
+        rpcUrl: env.OPS_BITTENSOR_RPC ?? "https://archive.chain.opentensor.ai",
         chainId: 964,
         legacy: true,
       },

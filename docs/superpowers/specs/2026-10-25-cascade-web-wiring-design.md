@@ -68,6 +68,12 @@ Live quote: 20 USDC → 0.07882 TAO; 0.08 TAO → 20.16 USDC. Tokens: USDC
 `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (6 decimals), WETH `0x4200…0006`, TAO (ForeverMoney's
 bridged TAO) `0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67` (18 decimals).
 
+**As built (2026-10-25):** the lite node returns event logs for only the last few minutes of blocks
+(all older deliveries and stakes came back empty, so staked deposits showed as "crossing to
+Bittensor"); the site and the ops tool read Bittensor from `https://archive.chain.opentensor.ai`
+(CORS `*`, chain 964), which returns the full history. Reads also check that the newest block is
+recent and that a log window's server has reached the window, and say so instead of guessing.
+
 **RPCs from the browser:** `https://mainnet.base.org` and `https://lite.chain.opentensor.ai` both
 answer cross-origin requests from `http://localhost:3000`. Base's public RPC rate-limits bursts and,
 in the builder check, refused **every** `eth_getLogs` (`-32011 "request limit reached"`, even for one

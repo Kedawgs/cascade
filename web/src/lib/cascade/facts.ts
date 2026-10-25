@@ -1,4 +1,5 @@
 import { type Address, type Hex, parseEventLogs } from "viem";
+import { FRESH_TRIES, freshTip, StaleChainError } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, VAULT } from "./abi";
 import type { Clients } from "./chain";
 import { type Deployment, explorer, OFFRAMP, TOKENS } from "./config";
@@ -44,10 +45,10 @@ export const newScan = (d: Deployment): VaultScan => ({
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account?: Address): Promise<void> {
-  const latest = await c.bittensor.getBlockNumber();
+  const latest = await freshTip(c);
   for (let from = scan.next; from <= latest; from += WINDOW) {
     const to = from + WINDOW - 1n < latest ? from + WINDOW - 1n : latest;
-    const raw = (await c.bittensor.getLogs({ address: d.vault, fromBlock: from, toBlock: to } as never)) as RawLog[];
+    const raw = await windowLogs(c, d, from, to);
     for (const l of parseEventLogs({ abi: VAULT, logs: raw as never, strict: false })) {
       const block = l.blockNumber as bigint;
       const txHash = l.transactionHash as Hex;
@@ -66,6 +67,20 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
     }
     scan.next = to + 1n;
   }
+}
+
+/** One window of the vault's logs, taken only from a server that has reached the window's end. The
+ * logs and the server's head are asked together, so they travel in one request to one server; a
+ * server that is behind answers "no logs" for blocks it hasn't seen, which must not count as none. */
+async function windowLogs(c: Pick<Clients, "bittensor">, d: Deployment, from: bigint, to: bigint): Promise<RawLog[]> {
+  for (let i = 0; i < FRESH_TRIES; i++) {
+    const [raw, head] = await Promise.all([
+      c.bittensor.getLogs({ address: d.vault, fromBlock: from, toBlock: to } as never) as Promise<unknown>,
+      c.bittensor.request({ method: "eth_blockNumber" }),
+    ]);
+    if (BigInt(head as string) >= to) return raw as RawLog[];
+  }
+  throw new StaleChainError();
 }
 
 async function bitReceipt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: Hex): Promise<Receipt | null> {

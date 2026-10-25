@@ -61,7 +61,9 @@ export const OFFRAMP = {
 export const MULTICALL3: Address = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 /** Public RPCs only: no key ever goes into the site. Base's refuses eth_getLogs, so the site never asks it for logs. */
-export const RPC = { base: "https://mainnet.base.org", bittensor: "https://lite.chain.opentensor.ai" } as const;
+/** Public RPCs the browser reads (no keys in the bundle). Bittensor is OpenTensor's archive node: the
+ * lite node keeps only minutes of event history, so older deliveries and stakes would look missing. */
+export const RPC = { base: "https://mainnet.base.org", bittensor: "https://archive.chain.opentensor.ai" } as const;
 
 export const SLIPPAGE_BPS = 50n;
 /** The smallest unstake (and remainder) that can always be paid out (see units.checkUnstake). */

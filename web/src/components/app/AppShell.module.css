@@ -188,9 +188,18 @@
     scrollbar-width: none;
   }
 
+  /* the logo and the wallet share the first row; the tabs take the whole second row */
   .left {
-    flex: 1;
-    flex-wrap: wrap;
+    display: contents;
+  }
+
+  .home {
+    order: 1;
+  }
+
+  .right {
+    order: 2;
+    margin-left: auto;
   }
 
   .walletBalance {
@@ -202,8 +211,14 @@
   }
 }
 
-/* phones: the four tabs share the row equally (no icons), so none is cut off */
+/* phones: the four tabs share the row equally (no icons), so none is cut off; the logo and the
+   wallet keep one row by dropping the network pill (it is always Base, and every flow switches
+   the wallet to Base itself) */
 @media (max-width: 480px) {
+  .net {
+    display: none;
+  }
+
   .tabs {
     display: grid;
     grid-template-columns: repeat(4, 1fr);

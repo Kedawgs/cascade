@@ -79,29 +79,41 @@ settings steps after the contracts go at whatever the wallet's next transaction 
 
 `pnpm ops verify --live` repeats the read-back at any time.
 
-## 5. Deposit
+## 5. Deposit (from the website)
 
-1. On the website, swap a little USDC to TAO on Base and deposit **0.01 TAO** (about $3) first.
-2. `pnpm ops status --live --user <your Base address>` shows the open batch. After 10 minutes,
-   `pnpm ops close --live` sends it to Bittensor and prints the full bridge message id with the
-   command to follow it.
-3. `pnpm ops track <messageId> --live` follows it until SUCCESS (usually tens of minutes). Your
-   shares now exist on Bittensor and the TAO sits in the vault.
-4. Deposit the rest of the $20 and repeat steps 2 and 3.
-5. `pnpm ops stake --live` stakes it with the validator. Staking waits until the vault holds at
-   least 0.02 TAO for one position (the chain's nominator minimum), so the first 0.01 TAO is
-   staked together with the rest; until then it stays in the vault and still counts.
+Run the site on your machine: `pnpm --dir ops ops web-config --live` once, then `pnpm dev` in
+`web/`, and open http://localhost:3000. Connect MetaMask on Base. It needs USDC to stake and a
+little ETH for network fees.
 
-`pnpm ops run --live` does all of this by itself: it checks every minute, does whatever is due and
-prints each bridge message id. It stops at the first problem and says why.
+1. On **Stake**, enter a small amount first (about $3; the form shows the live limits). The form
+   shows the TAO you will stake, the price, the swap fees and how long it takes.
+2. Press **Stake**. If MetaMask offers to switch to a smart account, accepting makes it one
+   confirmation; otherwise it asks four times the first time (approve USDC, swap, approve TAO,
+   deposit), three after. If you stop halfway, the deposit's receipt in **Activity** has
+   **Continue this deposit**, and nothing already confirmed is sent again. **Take it back before
+   the batch closes** returns the TAO to your wallet while the batch is still open.
+3. The operator closes the batch once it is due (every 10 minutes): `pnpm ops close --live`, which
+   prints the bridge message id; `pnpm ops track <messageId> --live` follows it. The receipt in
+   **Activity** moves along on its own: swap, deposit, cross to Bittensor, stake.
+4. Deposit the rest of the $20 the same way.
+5. The operator stakes it: `pnpm ops stake --live`. Staking waits until the vault holds at least
+   0.02 TAO for one position (the chain's nominator minimum), so the first small deposit is staked
+   together with the rest; until then it sits in the vault and still counts in your balance.
 
-## 6. Withdraw
+`pnpm ops run --live` does the operator's part by itself: it checks every minute, does whatever is
+due and prints each bridge message id. It stops at the first problem and says why.
 
-1. On the website, request a withdrawal of everything (it carries a small fee in ETH).
-2. `close`, then `track` as above. The vault burns your shares and queues the payout.
-3. After the 1-hour payout delay, `pnpm ops payouts --live` unstakes and sends the TAO back to
-   Base, and prints the full bridge message id. `track` it to SUCCESS.
-4. Claim the TAO on the website, then swap it back to USDC if you like.
+## 6. Withdraw (from the website)
+
+1. On **Unstake**, enter an amount (at least 0.005 TAO, and never leaving less than that behind;
+   the form offers **Unstake all** instead) and press **Unstake**. The first request in a batch
+   carries a small ETH fee; the form shows it with the bridge fee and the time.
+2. The operator closes the batch (`close`, then `track`). The vault burns your shares and queues
+   the payout.
+3. After the 1-hour payout delay the operator sends it back: `pnpm ops payouts --live`, then
+   `track` the printed message to SUCCESS.
+4. The receipt in **Activity** then says **Ready to claim**: **Claim as USDC** claims and swaps it
+   back in one go (or **Keep it as TAO**).
 
 ## 7. Wind down
 

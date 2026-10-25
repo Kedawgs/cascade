@@ -35,10 +35,10 @@ withdrawals and forwards them over Chainlink CCIP. See `docs/architecture.md` fo
 
 ## Status
 
-Contracts are built and reviewed but not audited and not deployed. The CCIP + ForeverMoney bridge
-adapters are built and fork-tested on both mainnets through the deployed CCIP 2.0 OffRamp, and
-their inbound conversion was simulated against the live Bittensor node. The web app has its real
-design (landing page and stake app) but still runs on mock data. The test-run tool (`ops/`) and
-its runbook are built and rehearsed on forks of both chains; next is the owner's own $20 test run,
-then wiring the web app. Nothing here should hold real money before a professional
-audit and the checklist in `contracts/README.md` is done.
+Contracts are built and reviewed but not audited. They are deployed on Base and Bittensor mainnet
+for the owner's own $20 test run only: unadvertised, unaudited, capped at 0.15 TAO, and nobody else
+should deposit. The CCIP + ForeverMoney bridge adapters were fork-tested on both mainnets through the
+deployed CCIP 2.0 OffRamp and their inbound conversion simulated against the live Bittensor node.
+`ops/` deploys and operates the test deployment, and the web app runs on live chain data with real
+wallet flows (see `web/README.md` and `docs/runbook-test-run.md`). Nothing here should hold anyone
+else's money before a professional audit and the checklist in `contracts/README.md` is done.

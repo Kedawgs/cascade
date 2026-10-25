@@ -797,7 +797,7 @@ Rails and ForeverMoney:
 
 11. ForeverMoney's conversion: answered on 2026-10-23 (`withdrawLiquid` and `depositLiquid` on
     their `AlphaVault`, permissionless and exactly 1:1; `docs/forevermoney-probe.md`). Just before
-    deploying, run `bash script/simulate_inbound.sh` against the live node with the deployment's
+    deploying (`pnpm ops preflight` in `ops/` does this), run `bash script/simulate_inbound.sh` against the live node with the deployment's
     constructor arguments (`REMOTE_ADAPTER`, `GAS_BASE`, `GAS_PER_ENTRY`) and record its output in
     the runbook: it is the only run of their real unstake through the real staking precompile. On
     2026-10-24 it delivered 1 TAO, and exactly 0.002 TAO (so a partial unstake at the floor
@@ -849,7 +849,8 @@ Added by the final whole-branch review (2026-10-24):
     tops up a bounded shortfall (for example at most 1 rao per delivery) from its reserve; the
     current adapter requires exact 1:1.
 27. Confirm how to obtain `verifierResults` for a FAILURE message on these lanes before deploying.
-28. After deploying, read back on chain `adapterBase.remoteAdapter()`, `adapterBit.remoteAdapter()`,
+28. After deploying (`pnpm ops deploy` and `pnpm ops verify` in `ops/` do all of this; see
+    `docs/runbook-test-run.md`), read back on chain `adapterBase.remoteAdapter()`, `adapterBit.remoteAdapter()`,
     both adapters' `router()`, `token()` and `remoteSelector()`, and `adapterBit.alphaVault()`, and
     compare them with the plan: `remoteAdapter` is circular across two chains, and a wrong
     prediction (a stray transaction, a nonce mismatch) makes every delivery `WrongSender` and

@@ -112,3 +112,19 @@ export function unstakeAvailableText(taoWei: bigint, priceUsd: number): string {
   const tao = `${maxUnstakeInput(taoWei)} TAO`;
   return priceUsd > 0 ? `${tao} (${formatUsd(floorTo(toDisplay(taoWei, 18) * priceUsd, 2))})` : tao;
 }
+
+/** The dollars an unstake typed in USDC names on its button. A fixed amount (carried over by a unit
+ * switch, or MAX) sends exact TAO, so its dollars follow the current price; otherwise they are the
+ * dollars typed. Undefined when the button should name TAO. */
+export function unstakeLabelUsd(s: {
+  unit: UnstakeUnit;
+  raw: string;
+  fixed: boolean;
+  requestWei: bigint | null;
+  priceUsd: number;
+}): number | undefined {
+  if (s.unit !== "USDC" || s.requestWei === null) return undefined;
+  if (s.fixed) return s.priceUsd > 0 ? floorTo(toDisplay(s.requestWei, 18) * s.priceUsd, 2) : undefined;
+  const typed = Number(s.raw);
+  return Number.isFinite(typed) && typed > 0 ? typed : undefined;
+}

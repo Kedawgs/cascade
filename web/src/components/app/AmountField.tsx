@@ -41,7 +41,7 @@ export function AmountField({
   return (
     <div className={styles.amount} data-invalid={invalid ? "true" : undefined}>
       {onToggleUnit ? (
-        <button type="button" className={`${styles.tok} ${styles.tokSwitch}`} onClick={onToggleUnit} aria-label={toggleLabel} title={toggleLabel}>
+        <button type="button" className={`${styles.tok} ${styles.tokSwitch}`} onClick={onToggleUnit} aria-label={toggleLabel ? `${unit}: ${toggleLabel}` : undefined} title={toggleLabel}>
           {token}
           <span className={styles.swap} aria-hidden="true">
             ⇅

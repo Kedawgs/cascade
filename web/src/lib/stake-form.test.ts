@@ -6,6 +6,7 @@ import {
   stakeButtonLabel,
   switchUnstakeUnit,
   unstakeAvailableText,
+  unstakeLabelUsd,
   unstakeButtonLabel,
   unstakeEquivalent,
   unstakeRequestWei,
@@ -83,6 +84,13 @@ describe("unstake helpers", () => {
 
   it("names a USDC-typed unstake in dollars", () => {
     expect(unstakeButtonLabel({ account: "0xa", amount: 0.039619, usd: 10, error: null, pending: false })).toBe("Unstake $10.00");
+  });
+
+  it("prices the dollar label from the TAO actually sent when the amount is fixed (switched or MAX)", () => {
+    expect(unstakeLabelUsd({ unit: "USDC", raw: "252.40", fixed: true, requestWei: 10n ** 18n, priceUsd: 260 })).toBe(260);
+    expect(unstakeLabelUsd({ unit: "USDC", raw: "10", fixed: false, requestWei: 39_619_651_000_000_000n, priceUsd: 260 })).toBe(10);
+    expect(unstakeLabelUsd({ unit: "TAO", raw: "1", fixed: false, requestWei: 10n ** 18n, priceUsd: 260 })).toBeUndefined();
+    expect(unstakeLabelUsd({ unit: "USDC", raw: "", fixed: false, requestWei: null, priceUsd: 260 })).toBeUndefined();
   });
 
   it("keeps the exact TAO when switching units, so switching never changes what is sent", () => {

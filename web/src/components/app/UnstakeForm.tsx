@@ -15,6 +15,7 @@ import {
   unstakeAvailableText,
   unstakeButtonLabel,
   unstakeEquivalent,
+  unstakeLabelUsd,
   unstakeRequestWei,
   type UnstakeUnit,
 } from "@/lib/stake-form";
@@ -79,11 +80,11 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const pending = flows.busy === "unstake";
   const error = check && !check.ok ? check.reason : quoteQuery.isError && shares !== null ? "This amount can't be sent back right now" : null;
   const lowEth = quote !== undefined && balances.data !== undefined && balances.data.eth < quote.fee + GAS_WEI;
-  const typedUsd = unit === "USDC" ? Number(raw) : NaN;
+  const usd = unstakeLabelUsd({ unit, raw, fixed: all || pinned !== null, requestWei: request, priceUsd: price });
   const label = unstakeButtonLabel({
     account,
     amount: request === null ? null : toDisplay(request, 18),
-    ...(Number.isFinite(typedUsd) && typedUsd > 0 ? { usd: typedUsd } : {}),
+    ...(usd !== undefined ? { usd } : {}),
     error,
     pending,
   });

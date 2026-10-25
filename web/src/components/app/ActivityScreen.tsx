@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, type ReactNode } from "react";
+import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { parseActivityParams } from "@/lib/activity-params";
@@ -121,6 +121,8 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   const { data: withdrawal, isPending, isError, refetch } = useWithdrawal(account, id);
   const all = useWithdrawals(account);
   const flows = useFlows(account);
+  // a claim whose swap failed (with a batching wallet both roll back): offer the TAO without the swap
+  const [claimFailed, setClaimFailed] = useState(false);
   // one claim pays everything back on Base, so it settles every unstake that is ready
   const ready = (all.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
   const claimIds = ready.includes(id) ? ready : [...ready, id];
@@ -174,9 +176,21 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
         {(withdrawal.status === "ready" || withdrawal.cancellableShares !== undefined) && (
           <Actions>
             {withdrawal.status === "ready" && (
-              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, false).catch(() => undefined)}>
-                {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="pill pill-block"
+                  disabled={flows.busy !== null}
+                  onClick={() => void flows.claim(claimIds, false).then(() => setClaimFailed(false), () => setClaimFailed(true))}
+                >
+                  {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
+                </button>
+                {claimFailed && (
+                  <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
+                    Claim the TAO instead (swap it later on the Stake page)
+                  </button>
+                )}
+              </>
             )}
             {withdrawal.cancellableShares !== undefined && (
               <button

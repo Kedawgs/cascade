@@ -47,6 +47,17 @@ describe("operation log", () => {
     expect(createOpLog(s, FD).list(ME).map((o) => o.id)).toEqual(["b"]);
   });
 
+  it("removes only an entry that never sent anything and is not running in this tab", () => {
+    const log = createOpLog(memoryStorage(), FD);
+    log.put({ ...deposit("hashed", ME, 1), hashes: { approveUsdc: `0x${"11".repeat(32)}` } });
+    log.put({ ...deposit("batched", ME, 2), callsId: "0xabc" });
+    log.put(deposit("running", ME, 3));
+    log.put(deposit("idle", ME, 4));
+    log.markActive("running");
+    expect(["hashed", "batched", "running", "idle"].map((id) => log.removeUnsent(ME, id))).toEqual([false, false, false, true]);
+    expect(log.list(ME).map((o) => o.id).sort()).toEqual(["batched", "hashed", "running"]);
+  });
+
   it("keeps each account's log apart, keyed by front door and lowercase account", () => {
     const s = memoryStorage();
     const log = createOpLog(s, FD);

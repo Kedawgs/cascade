@@ -22,7 +22,8 @@ import {
   type WalletPort,
 } from "./flows";
 import { cascadeKeys } from "./hooks";
-import { type ClaimOp, type DepositOp, newOpId, type OpLog, type Operation, type WithdrawalOp } from "./oplog";
+import { opStore } from "./op-store";
+import { type ClaimOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
 import { quoteSell, readFrontDoor } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao, lessSlippage } from "./units";
@@ -72,30 +73,6 @@ export function wagmiPort(config: Config, account: Address): WalletPort {
       const r = await waitForTransactionReceipt(config, { hash, chainId: base.id });
       return { status: r.status === "success" ? "success" : "reverted" };
     },
-  };
-}
-
-/** A flow's progress kept in its operation log entry. A withdrawal has one call ("request"). */
-function opStore(log: OpLog, account: Address, id: string): FlowStore {
-  const op = () => log.get(account, id) as Operation;
-  return {
-    hashes: () => {
-      const o = op();
-      return o.kind === "withdrawal" ? { request: o.hash } : { ...o.hashes };
-    },
-    setHash: (k, h) => {
-      const o = op();
-      if (o.kind === "withdrawal") log.update(account, id, { hash: h });
-      else log.update(account, id, { hashes: { ...o.hashes, [k]: h } } as Partial<Operation>);
-    },
-    setState: (state, error) => log.update(account, id, { state, error }),
-    callsId: () => {
-      const o = op();
-      return o.kind === "withdrawal" ? undefined : o.callsId;
-    },
-    setCallsId: (callsId) => log.update(account, id, { callsId } as Partial<Operation>),
-    mode: () => op().mode,
-    setMode: (mode) => log.update(account, id, { mode }),
   };
 }
 
@@ -293,10 +270,13 @@ export function useFlows(account: string | null) {
         });
       }),
 
-    /** Drops an entry that never sent a transaction from this browser's list. */
-    remove(id: string) {
-      data.opLog.remove(a, id);
+    /** Drops an entry that never sent a transaction from this browser's list; false (and kept) if it
+     * sent something or is running in this tab. */
+    remove(id: string): boolean {
+      const removed = data.opLog.removeUnsent(a, id);
+      if (!removed) setError("This one has started sending, so it stays in your activity");
       void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
+      return removed;
     },
 
     /** Takes an entry back out of the open batch and records it on that entry. */

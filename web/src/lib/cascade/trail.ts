@@ -24,8 +24,12 @@ export interface DepositFacts {
   /** TAO the vault has toward that minimum (staked plus idle), and the minimum itself. */
   vaultWei?: bigint;
   minimumWei?: bigint;
-  /** TAO from this account's other deposits already sent and not yet delivered. */
+  /** TAO from this account's other deposits made and not yet delivered. */
   incomingWei?: bigint;
+  /** Stored as running but not running in this tab: its wallet prompt may still be open somewhere. */
+  interrupted?: boolean;
+  /** When the deposit's batch left Base, if known. */
+  sentAt?: Date;
   /** When the deposit was made (its receipt's block), and where the batch can be watched on the bridge. */
   depositedAt?: Date;
   watchUrl?: string;
@@ -49,19 +53,25 @@ export interface WithdrawalFacts {
 
 const hhmm = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 const BRIDGE_TIME = "usually 20–30 minutes";
+/** An interrupted flow this old has no wallet prompt still waiting on it. */
+const STALE_MS = 10 * 60_000;
 
 /** Delivered but not staked: Bittensor stakes a position only from 0.02 TAO, so it waits for more deposits. */
+const STEP = 10n ** 14n; // 0.0001 TAO, the smallest amount these messages show
+const down = (wei: bigint) => formatTao(Number(wei / STEP) / 1e4, 4);
+const up = (wei: bigint) => formatTao(Number((wei + STEP - 1n) / STEP) / 1e4, 4);
+
 function waitingForMinimum(f: { vaultWei?: bigint; minimumWei?: bigint; incomingWei?: bigint }): Pick<TrailStep, "status" | "detail" | "summary"> {
   const min = f.minimumWei ?? 2n * 10n ** 16n;
-  const minTao = formatTao(toDisplay(min, 18), 2);
-  const tao = (wei: bigint) => formatTao(toDisplay(wei, 18), 4);
+  const minTao = String(toDisplay(min, 18));
   const incoming = f.incomingWei ?? 0n;
   let sofar = "";
   if (f.vaultWei !== undefined && f.vaultWei < min) {
-    sofar =
-      incoming > 0n && f.vaultWei + incoming >= min
-        ? ` The vault holds ${tao(f.vaultWei)} TAO so far, and your ${tao(incoming)} TAO deposit on its way takes it past that: it is staked once that one lands. Nothing for you to do.`
-        : ` The vault holds ${tao(f.vaultWei)} TAO so far; it is staked once ${tao(min - f.vaultWei - incoming)} TAO more arrives, from you or anyone else.`;
+    if (incoming > 0n && f.vaultWei + incoming >= min)
+      sofar = ` The vault holds ${down(f.vaultWei)} TAO so far, and your ${down(incoming)} TAO deposit on its way takes it past that: it is staked once that one lands. Nothing for you to do.`;
+    else if (incoming > 0n)
+      sofar = ` The vault holds ${down(f.vaultWei)} TAO so far; with your ${down(incoming)} TAO deposit on its way, it is staked once ${up(min - f.vaultWei - incoming)} TAO more arrives, from you or anyone else.`;
+    else sofar = ` The vault holds ${down(f.vaultWei)} TAO so far; it is staked once ${up(min - f.vaultWei)} TAO more arrives, from you or anyone else.`;
   }
   return {
     status: "active",
@@ -70,11 +80,20 @@ function waitingForMinimum(f: { vaultWei?: bigint; minimumWei?: bigint; incoming
   };
 }
 
-/** On the bridge: how long so far, and what it is waiting for. */
-function onTheBridge(f: { now: Date; depositedAt?: Date }): string {
+/** Chainlink's usual Base → Bittensor delivery time. */
+const BRIDGE_MS = 20 * 60_000;
+
+/** On the bridge: how long so far, what it is waiting for, and when it should arrive. */
+function onTheBridge(f: { now: Date; depositedAt?: Date; sentAt?: Date }): string {
   const mins = f.depositedAt ? Math.max(0, Math.round((f.now.getTime() - f.depositedAt.getTime()) / 60_000)) : undefined;
   const so_far = mins !== undefined ? ` (deposited ${mins} minute${mins === 1 ? "" : "s"} ago)` : "";
-  return `On the bridge to Bittensor${so_far}. Chainlink waits for Base to finalize the batch (about 15–25 minutes), then delivers it on Bittensor`;
+  const eta = f.sentAt ? new Date(f.sentAt.getTime() + BRIDGE_MS) : undefined;
+  const when = !eta
+    ? ""
+    : eta.getTime() > f.now.getTime()
+      ? `, expected around ${hhmm(eta)}`
+      : `; Chainlink's estimate was ${hhmm(eta)}, so it should land any minute`;
+  return `On the bridge to Bittensor${so_far}. Chainlink waits for Base to finalize the batch (about 15–25 minutes), then delivers it on Bittensor${when}`;
 }
 
 /** Before the batch closes: its time, or that it can close now once that time has passed. */
@@ -166,7 +185,12 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),
-    ...(op.state === "needs-you" && !op.callsId && !Object.values(op.hashes).some(Boolean) ? { nothingSent: true as const } : {}),
+    ...(op.state === "needs-you" &&
+    !op.callsId &&
+    !Object.values(op.hashes).some(Boolean) &&
+    (!f.interrupted || f.now.getTime() - op.createdAt >= STALE_MS)
+      ? { nothingSent: true as const }
+      : {}),
   };
 }
 

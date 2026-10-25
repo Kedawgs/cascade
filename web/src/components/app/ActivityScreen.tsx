@@ -89,8 +89,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
                 className="pill pill-ghost pill-block"
                 disabled={flows.busy !== null}
                 onClick={() => {
-                  flows.remove(id);
-                  router.push("/activity");
+                  if (flows.remove(id)) router.push("/activity");
                 }}
               >
                 Remove it (nothing was sent)

@@ -101,7 +101,10 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   }
 
   /** A record's state as this tab sees it: "running" with no flow running here means interrupted. */
-  const live = <T extends DepositOp | WithdrawalOp | ClaimOp>(op: T): T => ({ ...op, state: effectiveState(op, deps.opLog) });
+  const live = <T extends DepositOp | WithdrawalOp | ClaimOp>(op: T): T & { interrupted: boolean } => {
+    const seen: T = { ...op, state: effectiveState(op, deps.opLog) };
+    return { ...seen, interrupted: op.state === "running" && seen.state !== "running" };
+  };
 
   const closesAt = (fd: reads.FrontDoorState) => new Date((fd.openStart + fd.batchInterval) * 1000);
   /** Sent, its batch closed, not yet arrived in the vault. */
@@ -163,9 +166,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       const { batchId, facts } = await depositFacts(c, d, op, { fd, vault: v, scan });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       if (facts.delivered) seen.add(facts.delivered.txHash.toLowerCase());
-      found.push({ op: { ...op, batchId: batchId ?? op.batchId }, facts });
+      found.push({ op: { ...op, batchId: batchId ?? op.batchId }, facts: { ...facts, interrupted: op.interrupted } });
     }
-    // TAO this account already sent that is still on its way counts toward the staking minimum
+    // TAO this account deposited that hasn't reached the vault yet (open batch or bridge) counts toward the staking minimum
     const incomingWei = found
       .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !(op.cancelled && facts.cancelMined))
       .reduce((sum, { op }) => sum + op.targetTao, 0n);
@@ -208,6 +211,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       return {
         allStaked: idle < MIN_STAKE_WEI,
         waitingForMinimum: idle >= MIN_STAKE_WEI && v.rootStakeWei + idle < v.nominatorMinWei,
+        minimumTao: toDisplay(v.nominatorMinWei, 18),
         stakedTao: toDisplay(v.rootStakeWei, 18),
         owedTao: toDisplay(v.totalAssets, 18),
         checkedAt: new Date(deps.now()),

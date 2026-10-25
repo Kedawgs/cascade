@@ -100,6 +100,16 @@ export function createOpLog(storage: Storage, frontDoor: Address) {
     remove(account: Address, id: string) {
       write(account, read(account).filter((o) => o.id !== id));
     },
+    /** Removes an entry only if it never sent anything (no hash, no wallet batch) and isn't running in
+     * this tab, re-checked against what is stored now. */
+    removeUnsent(account: Address, id: string): boolean {
+      const o = read(account).find((x) => x.id === id);
+      if (!o || active.has(id)) return false;
+      const sent = o.kind === "withdrawal" ? !!o.hash : !!o.callsId || Object.values(o.hashes).some(Boolean);
+      if (sent) return false;
+      write(account, read(account).filter((x) => x.id !== id));
+      return true;
+    },
     update(account: Address, id: string, patch: Partial<Operation>) {
       write(
         account,

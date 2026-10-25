@@ -52,6 +52,18 @@ describe("deposit trail", () => {
     expect(depositRecord({ ...op, state: "running" as const, hashes: {} }, none).nothingSent).toBeUndefined();
   });
 
+  it("does not offer removal for a flow interrupted moments ago: its wallet prompt may still be open", () => {
+    const left = { ...op, state: "needs-you" as const, hashes: {} };
+    const none = { ...base, swapMined: false, depositMined: false, interrupted: true };
+    expect(depositRecord(left, { ...none, now: new Date(T0.getTime() + 2 * 60_000) }).nothingSent).toBeUndefined();
+    expect(depositRecord(left, { ...none, now: new Date(T0.getTime() + 15 * 60_000) }).nothingSent).toBe(true);
+  });
+
+  it("gives the bridge an expected arrival when it knows when the batch was sent", () => {
+    const r = depositRecord(op, { ...base, openBatchId: 4n, stillOpen: false, sentAt: new Date("2026-10-25T10:12:00Z") });
+    expect(r.steps[2].detail).toMatch(/expected around 10:32 UTC/);
+  });
+
   it("says the batch can close now once its time has passed", () => {
     const r = depositRecord(op, { ...base, now: new Date("2026-10-25T10:20:00Z") });
     expect(r.steps[2].detail).toMatch(/can close now/i);
@@ -118,7 +130,25 @@ describe("deposit trail", () => {
     expect(covered.steps[3].detail).toMatch(/nothing for you to do/i);
     expect(covered.steps[3].detail).not.toMatch(/more arrives/);
     const short = depositRecord(op, { ...waiting, incomingWei: 10n ** 15n });
-    expect(short.steps[3].detail).toMatch(/0\.0073 TAO more arrives/);
+    expect(short.steps[3].detail).toMatch(/with your 0\.0010 TAO deposit on its way, it is staked once 0\.0073 TAO more arrives/);
+  });
+
+  it("rounds what the vault holds down and what is missing up, and shows the live minimum as it is", () => {
+    const delivered = { at: new Date(), txHash: H(9), outcome: "deposited" as const };
+    const almost = depositRecord(op, {
+      ...base,
+      openBatchId: 4n,
+      stillOpen: false,
+      delivered,
+      waitingForMinimum: true,
+      vaultWei: 19_996n * 10n ** 12n,
+      minimumWei: 2n * 10n ** 16n,
+    });
+    expect(almost.steps[3].detail).toMatch(/holds 0\.0199 TAO/);
+    expect(almost.steps[3].detail).toMatch(/0\.0001 TAO more/);
+    const odd = depositRecord(op, { ...base, openBatchId: 4n, stillOpen: false, delivered, waitingForMinimum: true, minimumWei: 25n * 10n ** 15n });
+    expect(odd.steps[3].detail).toMatch(/the 0\.025 TAO minimum/);
+    expect(odd.steps[3].summary).toBe("waiting for the 0.025 TAO minimum");
   });
 
   it("marks a bounced delivery as failed", () => {

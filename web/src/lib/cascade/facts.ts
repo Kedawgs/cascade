@@ -128,6 +128,8 @@ export async function depositFacts(
     closesAt: closesAt(ctx.fd),
     stillOpen: batchId === undefined || batchId === ctx.fd.openBatchId,
     waitingForMinimum: false,
+    // the batch before the open one left Base when the open one started
+    ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
   };
   const hit = batchId !== undefined ? ctx.scan.delivered.get(String(batchId)) : undefined;
   if (hit) {

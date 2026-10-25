@@ -1,6 +1,7 @@
 "use client";
 
-import { useDeposits, usePosition, useProof } from "@/lib/cascade/hooks";
+import { useBalances, useDeposits, usePosition, useProof } from "@/lib/cascade/hooks";
+import { toDisplay } from "@/lib/cascade/units";
 import { useNow } from "@/lib/client-state";
 import { formatRelative } from "@/lib/format";
 import { deriveLane } from "@/lib/lane";
@@ -16,6 +17,7 @@ export function WhereIsMyMoney({ account }: { account: string }) {
   const proof = useProof(live);
   const position = usePosition(account, live);
   const balance = useUsdcBalance();
+  const wallet = useBalances(account);
   const now = useNow();
 
   const lane = deriveLane({
@@ -25,6 +27,8 @@ export function WhereIsMyMoney({ account }: { account: string }) {
     positionError: position.isError,
     explorerUrl: proof.data?.explorerUrl,
     waitingForMinimum: proof.data?.waitingForMinimum,
+    minimumTao: proof.data?.minimumTao,
+    walletTao: wallet.data ? toDisplay(wallet.data.tao, 18) : undefined,
   });
 
   if (deposits.isError) {

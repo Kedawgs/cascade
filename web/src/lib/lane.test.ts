@@ -36,7 +36,13 @@ const VAULT = "https://taostats.io/account/5FNE";
 
 describe("deriveLane", () => {
   it("shows one deposit's phrase and step, and the account's own stake", () => {
-    const [w, t, s] = deriveLane({ usdcBalance: 2400, deposits: [dep("a", 0.0788, 2)], position: position(0.05), explorerUrl: VAULT });
+    const [w, t, s] = deriveLane({
+      usdcBalance: 2400,
+      deposits: [dep("a", 0.0788, 2)],
+      position: position(0.05),
+      explorerUrl: VAULT,
+      waitingForMinimum: false,
+    });
     expect(w).toEqual({ amount: "2,400 USDC", label: "in your wallet on Base", state: "muted" });
     expect(t).toEqual({ amount: "0.0788 TAO", label: "crossing to Bittensor, step 3 of 4", state: "live" });
     expect(s).toEqual({ amount: "0.0500 TAO", label: "yours, staked on Bittensor", state: "done", href: VAULT });
@@ -66,10 +72,27 @@ describe("deriveLane", () => {
   });
 
   it("says TAO waiting for the staking minimum is in the vault, not staked", () => {
-    const [, , s] = deriveLane({ usdcBalance: 0, deposits: [], position: position(0.0117), waitingForMinimum: true, explorerUrl: VAULT });
+    const [, , s] = deriveLane({
+      usdcBalance: 0,
+      deposits: [],
+      position: position(0.0117),
+      waitingForMinimum: true,
+      minimumTao: 0.025,
+      explorerUrl: VAULT,
+    });
     expect(s.amount).toBe("0.0117 TAO");
-    expect(s.label).toBe("yours, in the vault on Bittensor, staked once it reaches 0.02 TAO");
+    expect(s.label).toBe("yours, in the vault on Bittensor, staked once the vault reaches 0.025 TAO");
     expect(s.state).toBe("live");
+  });
+
+  it("does not claim it is staked before the vault check has loaded", () => {
+    const [, , s] = deriveLane({ usdcBalance: 0, deposits: [], position: position(0.0117) });
+    expect(s.label).toBe("yours on Bittensor");
+  });
+
+  it("shows TAO sitting in the wallet next to the USDC", () => {
+    const [w] = deriveLane({ usdcBalance: 50.44, walletTao: 0.01, deposits: [], position: position(0) });
+    expect(w.amount).toBe("50.44 USDC + 0.0100 TAO");
   });
 
   it("mutes empty nodes and keeps the lane shape", () => {

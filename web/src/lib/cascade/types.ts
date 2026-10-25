@@ -41,6 +41,8 @@ export interface StakeProof {
   owedTao: number;
   /** The vault holds TAO waiting until one position reaches the chain's 0.02-TAO minimum. */
   waitingForMinimum: boolean;
+  /** Bittensor's minimum stake for one position. */
+  minimumTao: number;
   checkedAt: Date;
   validatorHotkey: string;
   explorerUrl: string;

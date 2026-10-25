@@ -147,6 +147,23 @@ export class FlowError extends Error {
   }
 }
 
+/** The wallet can't pay the network fee (viem's and the node's wordings). */
+const noGas = (e: unknown): boolean => {
+  const err = e as { message?: string; cause?: unknown } | undefined;
+  return /insufficient funds|exceeds the balance/i.test(err?.message ?? "") || (err?.cause !== undefined && noGas(err.cause));
+};
+
+const NO_ETH = "Network fees on Base are paid in ETH, and this wallet doesn't have enough. Add a little ETH on Base and try again.";
+
+/** What a user sees for an error: our own messages as written, a refusal or missing ETH in plain words,
+ * and never a raw RPC or library message (those can carry an RPC address). */
+export function userMessage(e: unknown): string {
+  if (e instanceof FlowError || e instanceof FlowBusyError) return e.message;
+  if (rejected(e)) return "You declined in your wallet. Nothing was sent.";
+  if (noGas(e)) return NO_ETH;
+  return "We couldn't reach Base just now. Nothing was sent. Try again.";
+}
+
 const codeOf = (e: unknown): number | undefined => {
   const err = e as { code?: number; cause?: unknown };
   return err?.code ?? (err?.cause !== undefined ? codeOf(err.cause) : undefined);
@@ -237,7 +254,7 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
         hash = await port.send(c);
       } catch (e) {
         if (rejected(e)) fail(store, "You cancelled in your wallet. Continue when you're ready.", "needs-you");
-        fail(store, `Your wallet could not send the transaction (${(e as Error).message.split("\n")[0]}).`, "failed");
+        fail(store, noGas(e) ? NO_ETH : "Your wallet couldn't send this step. Try again.", "failed");
       }
       store.setHash(c.key, hash);
     }

@@ -8,11 +8,13 @@ import {
   depositTaoCalls,
   type FlowCall,
   FlowBusyError,
+  FlowError,
   runFlow,
   sellTaoCalls,
   stakeCalls,
   stillToSend,
   unstakeCall,
+  userMessage,
   type WalletPort,
 } from "./flows";
 import type { Balances, DepositQuote } from "./types";
@@ -233,3 +235,37 @@ describe("TAO already in the wallet", () => {
     expect(c[1]).toMatchObject({ functionName: "exactInput", args: [{ amountIn: 10n ** 16n, amountOutMinimum: 2_400_000n, recipient: ME }] });
   });
 });
+
+describe("userMessage", () => {
+  it("passes our own flow messages through", () => {
+    expect(userMessage(new FlowError("You cancelled in your wallet.", "needs-you"))).toBe("You cancelled in your wallet.");
+    expect(userMessage(new FlowBusyError())).toMatch(/already busy/);
+  });
+
+  it("turns a wallet refusal into plain words", () => {
+    const reject = Object.assign(new Error("User rejected the request."), { name: "UserRejectedRequestError" });
+    expect(userMessage(reject)).toBe("You declined in your wallet. Nothing was sent.");
+  });
+
+  it("explains missing ETH for network fees instead of viem's gas arithmetic", () => {
+    const e = new Error("The total cost (gas * gas fee + value) of executing this transaction exceeds the balance of the account.");
+    expect(userMessage(e)).toMatch(/paid in ETH/);
+    expect(userMessage(new Error("insufficient funds for gas * price + value"))).toMatch(/paid in ETH/);
+  });
+
+  it("never shows raw RPC errors (they can carry URLs)", () => {
+    const e = new Error("HTTP request failed. URL: https://lb.example/abc?dkey=SECRET Status: 429");
+    expect(userMessage(e)).toBe("We couldn't reach Base just now. Nothing was sent. Try again.");
+  });
+});
+
+describe("a sequential send the wallet can't make", () => {
+  it("says so in plain words, never quoting the raw error", async () => {
+    const broke = new Error("The total cost (gas * gas fee + value) of executing this transaction exceeds the balance of the account. URL: https://x");
+    const p = port({ send: vi.fn(async () => Promise.reject(broke)) });
+    const t = tracker();
+    await expect(runFlow(p, t.store as never, calls)).rejects.toThrow(/paid in ETH/);
+    expect(t.states.at(-1)).toBe("failed");
+  });
+});
+

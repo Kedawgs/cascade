@@ -6,7 +6,13 @@ export function NotConnectedBanner() {
   if (DEPLOYMENT) return null;
   return (
     <p className={styles.banner} role="status">
-      Cascade isn&apos;t connected to a deployment yet. Run <code>pnpm ops web-config --live</code> and restart the site.
+      Cascade is getting ready. Staking opens here soon.
+      {process.env.NODE_ENV === "development" && (
+        <>
+          {" "}
+          (Developers: run <code>pnpm ops web-config --live</code> and restart the site.)
+        </>
+      )}
     </p>
   );
 }

@@ -16,6 +16,7 @@ import {
   type FlowStore,
   runFlow,
   sellTaoCalls,
+  userMessage,
   stakeCalls,
   stillToSend,
   unstakeCall,
@@ -111,7 +112,7 @@ export function useFlows(account: string | null) {
     try {
       return await guard.run(label, body);
     } catch (e) {
-      setError((e as Error).message);
+      setError(userMessage(e));
       throw e;
     } finally {
       void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });

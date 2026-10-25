@@ -130,6 +130,23 @@ export function createFlowGuard(onChange: (label: string | null) => void) {
   };
 }
 
+/** One flow at a time across the whole app (the stake form, the claim box and the wallet-TAO box each
+ * use the flows hook): every screen subscribes to see which flow runs, and a second is refused. */
+export function createSharedFlowGuard() {
+  const listeners = new Set<(label: string | null) => void>();
+  const guard = createFlowGuard((label) => listeners.forEach((l) => l(label)));
+  return {
+    get active() {
+      return guard.active;
+    },
+    run: guard.run,
+    subscribe(listener: (label: string | null) => void): () => void {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+  };
+}
+
 /** What a flow needs from the wallet; wagmi provides it in the app (use-flows.ts), fakes in tests. */
 export interface WalletPort {
   switchToBase(): Promise<void>;

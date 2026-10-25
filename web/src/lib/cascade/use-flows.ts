@@ -1,7 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Address, Hex } from "viem";
 import { base } from "viem/chains";
 import { type Config, useConfig } from "wagmi";
@@ -10,7 +10,7 @@ import { useCascadeData } from "./context";
 import {
   cancelCall,
   claimCalls,
-  createFlowGuard,
+  createSharedFlowGuard,
   depositTaoCalls,
   type FlowCall,
   FlowError,
@@ -94,15 +94,19 @@ function scratchStore(): FlowStore {
   };
 }
 
+/** The app's one flow lock: a claim can't start while a stake waits in the wallet, and so on. */
+const appGuard = createSharedFlowGuard();
+
 /** Staking, unstaking, claiming and cancelling from the connected wallet. One flow at a time; each is
  * recorded before the first signature, so it shows in Activity and can be continued after a stop. */
 export function useFlows(account: string | null) {
   const config = useConfig();
   const data = useCascadeData();
   const queryClient = useQueryClient();
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(appGuard.active);
   const [error, setError] = useState<string | null>(null);
-  const guard = useRef(createFlowGuard(setBusy)).current;
+  const guard = appGuard;
+  useEffect(() => appGuard.subscribe(setBusy), []);
 
   const a = account as Address;
   const d = () => data.deployment;

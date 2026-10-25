@@ -5,6 +5,7 @@ import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
 import {
   claimCalls,
   createFlowGuard,
+  createSharedFlowGuard,
   depositTaoCalls,
   type FlowCall,
   FlowBusyError,
@@ -278,6 +279,28 @@ describe("retryPatch", () => {
 
   it("leaves anything that isn't a failure alone", () => {
     expect(retryPatch({ state: "needs-you" as const, hashes: { swap: H(2) } })).toEqual({});
+  });
+});
+
+describe("createSharedFlowGuard", () => {
+  it("allows one money-moving flow across the whole app and tells every screen which one runs", async () => {
+    const guard = createSharedFlowGuard();
+    const stakeForm: (string | null)[] = [];
+    const claimBox: (string | null)[] = [];
+    guard.subscribe((l) => stakeForm.push(l));
+    const stop = guard.subscribe((l) => claimBox.push(l));
+    let release!: () => void;
+    const staking = guard.run("stake", () => new Promise<void>((r) => (release = r)));
+    await expect(guard.run("claim", async () => undefined)).rejects.toBeInstanceOf(FlowBusyError);
+    expect(guard.active).toBe("stake");
+    release();
+    await staking;
+    expect(stakeForm).toEqual(["stake", null]);
+    expect(claimBox).toEqual(["stake", null]);
+    stop();
+    await guard.run("claim", async () => undefined);
+    expect(claimBox).toEqual(["stake", null]);
+    expect(stakeForm).toEqual(["stake", null, "claim", null]);
   });
 });
 

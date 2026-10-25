@@ -876,3 +876,11 @@ Added by the final whole-branch review (2026-10-24):
     Give deposits a small fee into the batch's fee pot, as redeem requests already have, sized so a
     full batch pays its own close; raise `minDeposit` for launch; and give the keeper a close policy
     (close a full batch at once, otherwise on the timer).
+30. USDC lands in the wallet (owner decision, 2026-10-25): no claim step for users. Planned shape:
+    with the redeem request the user signs (EIP-712) a minimum USDC out and a deadline; when the
+    payout reaches Base, the keeper calls the next front door's claim-and-swap for that user, which
+    swaps through the fixed Uniswap route and reverts below the signed minimum, then sends USDC to
+    the user. Below the minimum or past the deadline it waits or delivers the TAO; the user can
+    always claim by hand. No keeper-chosen slippage, so a keeper or a sandwich bot cannot take more
+    than the user agreed to. Own spec, tests and review; launch can ship one-click claim-and-swap
+    first if this is not ready.

@@ -870,3 +870,9 @@ Added by the final whole-branch review (2026-10-24):
     treasury shares worth a set share of the claimed rewards (about 10%, as Lido does), with a
     hard-coded ceiling and the rate behind the timelock. The vault has 799 bytes of headroom, so it
     must fit there or go in a new vault version; it gets its own spec, tests and review.
+    The cut alone does not cover spam: costs are per batch, and 50 minimum deposits from 50
+    addresses fill the deposit list (`maxDeposits`), which makes the batch closable at once and
+    reverts every other deposit (`BatchFull`) until someone pays the ~$1.45 bridge fee to close it.
+    Give deposits a small fee into the batch's fee pot, as redeem requests already have, sized so a
+    full batch pays its own close; raise `minDeposit` for launch; and give the keeper a close policy
+    (close a full batch at once, otherwise on the timer).

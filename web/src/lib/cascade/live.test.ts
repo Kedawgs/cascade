@@ -42,7 +42,7 @@ const vault: VaultState = {
   payoutDelay: 3600,
   nominatorMinWei: 2n * 10n ** 16n,
 };
-const wallet: WalletState = { usdc: 20_000_000n, tao: 0n, eth: 10n ** 15n, usdcRouterAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n };
+const wallet: WalletState = { usdc: 20_000_000n, tao: 0n, eth: 10n ** 15n, usdcRouterAllowance: 0n, usdcStakerAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n };
 
 function memory() {
   const m = new Map<string, string>();

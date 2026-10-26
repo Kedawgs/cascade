@@ -3,7 +3,9 @@ import type { Address, Hex } from "viem";
 /** Where an operation stands on the user's side: still sending, waiting for the user, all sent, or failed. */
 export type OpState = "running" | "needs-you" | "sent" | "failed";
 
-export type DepositCall = "approveUsdc" | "swap" | "approveTao" | "deposit";
+/** v2 stakes swap and deposit in separate calls; a v3 stake is one `stake` call to CascadeStaker
+ * (after `approveUsdc` when it isn't paid by a permit). */
+export type DepositCall = "approveUsdc" | "swap" | "approveTao" | "deposit" | "stake";
 export type ClaimCall = "claim" | "approveTao" | "swap";
 
 interface OpBase {
@@ -18,8 +20,12 @@ interface OpBase {
 
 export interface DepositOp extends OpBase {
   kind: "deposit";
+  /** A stake through CascadeStaker (v3): swap and deposit happen in its one `stake` transaction. */
+  v?: 3;
   usdcIn: bigint;
   targetTao: bigint;
+  /** v3: the least TAO the stake may deposit, as quoted; carrying the stake on later keeps this floor. */
+  minTaoOut?: bigint;
   priceUsd: number;
   feesUsd?: number;
   hashes: Partial<Record<DepositCall, Hex>>;

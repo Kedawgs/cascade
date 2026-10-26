@@ -85,4 +85,6 @@ export const ERC20 = parseAbi([
   "function allowance(address owner, address spender) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
   "function nonces(address owner) view returns (uint256)",
+  // EIP-2612: only ever simulated, to tell a permit USDC refuses from a stake that can't go through
+  "function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)",
 ]);

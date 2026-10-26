@@ -113,13 +113,16 @@ async function baseReceipt(c: Pick<Clients, "base">, hash: Hex | undefined): Pro
 
 const mined = (r: Receipt | null) => r?.status === "success";
 
-function batchIdFrom(r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address): bigint | undefined {
+/** The front door's request event for `account` in a receipt (the batch it joined and, for a deposit, the TAO). */
+function requestIn(r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address) {
   if (!r) return undefined;
-  const hit = parseEventLogs({ abi: FRONT_DOOR, logs: r.logs as never, eventName, strict: false }).find(
+  return parseEventLogs({ abi: FRONT_DOOR, logs: r.logs as never, eventName, strict: false }).find(
     (l) => l.args.user && same(l.args.user as string, account),
   );
-  return hit?.args.batchId as bigint | undefined;
 }
+
+const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address): bigint | undefined =>
+  requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
 const closesAt = (fd: FrontDoorState) => new Date((fd.openStart + fd.batchInterval) * 1000);
 
@@ -129,20 +132,26 @@ export async function depositFacts(
   op: DepositOp,
   ctx: { fd: FrontDoorState; vault: VaultState; scan: VaultScan },
 ): Promise<{ batchId?: bigint; facts: DepositFacts }> {
-  const swap = await baseReceipt(c, op.hashes.swap);
-  const dep = await baseReceipt(c, op.hashes.deposit);
-  // an exact-output swap spends at most the quoted USDC; the receipt says how much it really took
+  // v3: CascadeStaker swaps and deposits in its one `stake` transaction, so both steps read that receipt
+  const v3 = op.v === 3;
+  const swap = await baseReceipt(c, v3 ? op.hashes.stake : op.hashes.swap);
+  const dep = v3 ? swap : await baseReceipt(c, op.hashes.deposit);
+  // an exact-output swap spends at most the quoted USDC, and a v3 stake takes its fees from the USDC it
+  // pulls: the receipt says how much really left the account
   const usdcSpent = mined(swap)
     ? parseEventLogs({ abi: ERC20, logs: swap!.logs as never, eventName: "Transfer", strict: false })
         .filter((l) => same(l.address, TOKENS.usdc) && same(l.args.from as string, op.account))
         .reduce((sum, l) => sum + (l.args.value as bigint), 0n)
     : 0n;
   const batchId = op.batchId ?? batchIdFrom(dep, "DepositRequested", op.account);
+  // the stake deposits whatever the swap gave (at least its floor), not the quote: the front door's record says
+  const taoDeposited = v3 ? (requestIn(dep, "DepositRequested", op.account)?.args as { amount?: bigint } | undefined)?.amount : undefined;
   const facts: DepositFacts = {
     // a deposit of TAO already in the wallet has no swap
     swapMined: op.usdcIn === 0n ? mined(dep) || !!op.hashes.deposit : mined(swap),
     depositMined: mined(dep),
     ...(usdcSpent > 0n ? { usdcSpent } : {}),
+    ...(taoDeposited !== undefined ? { taoDeposited } : {}),
     cancelMined: op.cancelled ? mined(await baseReceipt(c, op.cancelled.hash)) : undefined,
     now: new Date(),
     depositedAt: new Date(op.createdAt),

@@ -1,6 +1,7 @@
-import { type Abi, type Address, type Hex, maxUint256 } from "viem";
-import { ERC20, FRONT_DOOR, ROUTER } from "./abi";
-import { type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
+import { type Abi, type Address, type Hex, maxUint256, parseSignature, size } from "viem";
+import { base } from "viem/chains";
+import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
+import { type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
 import type { DepositOp, OpState } from "./oplog";
 import type { Balances, DepositQuote } from "./types";
 import { floorRao } from "./units";
@@ -36,6 +37,155 @@ export function stakeCalls(q: Pick<DepositQuote, "usdcIn" | "targetTao">, w: Bal
   );
   out.push(...depositTaoCalls(q.targetTao, w, d));
   return out;
+}
+
+// ---- v3: one stake through CascadeStaker ----
+
+/** CascadeStaker's route 0: the default Uniswap route. */
+export const STAKE_ROUTE = 0;
+/** How long a permit, and the stake it pays for, stay valid: 30 minutes. */
+export const STAKE_WINDOW_S = 30 * 60;
+export const stakeDeadline = (nowMs: number): bigint => BigInt(Math.floor(nowMs / 1000) + STAKE_WINDOW_S);
+
+/** A USDC permit the user signed, split as `stakeWithPermit` takes it. */
+export interface PermitSignature {
+  deadline: bigint;
+  v: number;
+  r: Hex;
+  s: Hex;
+}
+
+function stakerOf(d: Deployment): Address {
+  if (!d.staker) throw new Error("This deployment has no staker (v2), so a v3 stake can't be built for it");
+  return d.staker;
+}
+
+/** v3: USDC → TAO → the front door in one CascadeStaker transaction, always for the connected account.
+ * With a permit, one `stakeWithPermit`; without, an approval of exactly `usdcIn` to the staker (left out
+ * when its allowance already covers it), then `stake`. The staker is never allowed more than this stake. */
+export function stakeV3Calls(
+  q: Pick<DepositQuote, "usdcIn" | "minTaoOut">,
+  w: Balances,
+  d: Deployment,
+  account: Address,
+  permit?: PermitSignature,
+  deadline: bigint = permit?.deadline ?? stakeDeadline(Date.now()),
+): FlowCall[] {
+  const staker = stakerOf(d);
+  const terms = [account, q.usdcIn, q.minTaoOut, STAKE_ROUTE, deadline] as const;
+  if (permit) return [call("stake", staker, STAKER, "stakeWithPermit", [...terms, permit.deadline, permit.v, permit.r, permit.s])];
+  const out: FlowCall[] = [];
+  if (w.usdcStakerAllowance < q.usdcIn) out.push(call("approveUsdc", TOKENS.usdc, ERC20, "approve", [staker, q.usdcIn]));
+  out.push(call("stake", staker, STAKER, "stake", terms));
+  return out;
+}
+
+const PERMIT_TYPES = {
+  Permit: [
+    { name: "owner", type: "address" },
+    { name: "spender", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+/** The EIP-2612 permit one stake signs: USDC's own domain on Base, exactly `value` for the staker. */
+export function permitTypedData(owner: Address, d: Deployment, value: bigint, nonce: bigint, deadline: bigint) {
+  return {
+    domain: { name: USDC_PERMIT.name, version: USDC_PERMIT.version, chainId: base.id, verifyingContract: TOKENS.usdc },
+    types: PERMIT_TYPES,
+    primaryType: "Permit",
+    message: { owner, spender: stakerOf(d), value, nonce, deadline },
+  } as const;
+}
+
+export type PermitTypedData = ReturnType<typeof permitTypedData>;
+
+/** A wallet's 65-byte signature as USDC's permit takes it (v is 27 or 28, however the wallet wrote it).
+ * Anything else, like a smart wallet's wrapped signature, can't be a permit from this account. */
+export function splitSignature(sig: Hex): { v: number; r: Hex; s: Hex } {
+  if (size(sig) !== 65) throw new Error("not a 65-byte signature");
+  const p = parseSignature(sig);
+  return { v: p.v !== undefined ? Number(p.v) : 27 + (p.yParity ?? 0), r: p.r, s: p.s };
+}
+
+/** Base answered a call with a revert (rather than not answering at all). */
+export function isRevert(e: unknown): boolean {
+  const err = e as { name?: string; cause?: unknown } | undefined;
+  return err?.name === "ContractFunctionRevertedError" || (err?.cause !== undefined && err.cause !== e && isRevert(err.cause));
+}
+
+const permitCall = (owner: Address, d: Deployment, value: bigint, p: PermitSignature): FlowCall =>
+  call("permit", TOKENS.usdc, ERC20, "permit", [owner, stakerOf(d), value, p.deadline, p.v, p.r, p.s]);
+
+const DECLINED_SIGNATURE =
+  "You declined the signature in your wallet, so nothing was sent. Continue when you're ready: your wallet will then ask you to approve the USDC and to stake.";
+const WONT_GO_THROUGH =
+  "This stake wouldn't go through on Base right now (usually because the price moved since your quote), so nothing was sent. Stake again at today's price.";
+const UNREACHABLE = "We couldn't reach Base just now. Nothing was sent. Continue to try again.";
+
+export interface StakeV3Input {
+  q: Pick<DepositQuote, "usdcIn" | "minTaoOut">;
+  w: Balances;
+  d: Deployment;
+  account: Address;
+  /** USDC's permit nonce for the account, read fresh just before signing. */
+  nonce: () => Promise<bigint>;
+  /** ms since the epoch */
+  now: number;
+}
+
+/** v3: how this stake is paid for, as the calls to send. A plain key account signs one USDC permit and
+ * sends one `stakeWithPermit`. An account with code (an EIP-7702 smart account, whose permit USDC may
+ * refuse), a wallet that can't sign a permit, or a permit USDC refuses in the pre-send check pays by an
+ * exact approval and `stake` instead (one batch where the wallet can). An allowance that already covers
+ * the stake needs neither. A declined signature stops here, "needs you", with nothing asked again until
+ * the user continues; a stake that would revert for its own reasons stops before anything is sent. */
+export async function planStakeV3(port: WalletPort, x: StakeV3Input): Promise<FlowCall[]> {
+  const deadline = stakeDeadline(x.now);
+  const byApproval = () => stakeV3Calls(x.q, x.w, x.d, x.account, undefined, deadline);
+  if (x.w.usdcStakerAllowance >= x.q.usdcIn || (await port.hasCode(x.account))) return byApproval();
+
+  // wallets sign for Base's chain id only while they are on Base
+  await toBase(port);
+  const typed = permitTypedData(x.account, x.d, x.q.usdcIn, await x.nonce(), deadline);
+  let permit: PermitSignature;
+  try {
+    const { v, r, s } = await port.signPermit(typed);
+    permit = { deadline, v, r, s };
+  } catch (e) {
+    if (rejected(e)) throw new FlowError(DECLINED_SIGNATURE, "needs-you");
+    return byApproval();
+  }
+
+  const calls = stakeV3Calls(x.q, x.w, x.d, x.account, permit);
+  let refused: boolean;
+  try {
+    if (await port.simulate(calls[0])) return calls;
+    // the stake would revert: because USDC refuses this permit, or because the stake itself can't go through
+    refused = !(await port.simulate(permitCall(x.account, x.d, x.q.usdcIn, permit)));
+  } catch {
+    throw new FlowError(UNREACHABLE, "needs-you");
+  }
+  if (refused) return byApproval();
+  throw new FlowError(WONT_GO_THROUGH, "failed");
+}
+
+/** Carrying on a v3 stake that stopped: by approval (a declined or refused permit is never asked for
+ * again), at the floor the user agreed to, with a fresh deadline. A stake already sent is only waited
+ * for, and a wallet batch still being checked is rebuilt as it was sent so its receipts line up. */
+export function resumeStakeV3Calls(
+  op: Pick<DepositOp, "usdcIn" | "minTaoOut" | "hashes" | "callsId">,
+  w: Balances,
+  d: Deployment,
+  account: Address,
+  nowMs: number,
+): FlowCall[] {
+  if (op.minTaoOut === undefined) throw new Error("This stake has no recorded minimum, so it can't be carried on");
+  // a batch is only ever sent for an approval and the stake together
+  const calls = stakeV3Calls({ usdcIn: op.usdcIn, minTaoOut: op.minTaoOut }, op.callsId ? { ...w, usdcStakerAllowance: 0n } : w, d, account, undefined, stakeDeadline(nowMs));
+  return op.hashes.stake && !op.callsId ? calls.filter((c) => c.key === "stake") : calls;
 }
 
 /** TAO already in the wallet into the front door: an exact approval, then the deposit, in whole rao. */
@@ -156,6 +306,13 @@ export interface WalletPort {
   waitBatch(id: string): Promise<{ status: "success" | "failure"; hashes: Hex[] }>;
   send(call: FlowCall): Promise<Hex>;
   wait(hash: Hex): Promise<{ status: "success" | "reverted" }>;
+  /** The account has code on Base (an EIP-7702 smart account or a contract wallet). */
+  hasCode(account: Address): Promise<boolean>;
+  /** Asks the wallet to sign a USDC permit, split into v, r, s; rejects if the user declines. */
+  signPermit(typedData: PermitTypedData): Promise<{ v: number; r: Hex; s: Hex }>;
+  /** Runs `call` from the account on Base without sending it: false if it would revert. Throws when
+   * Base can't be asked. */
+  simulate(call: FlowCall): Promise<boolean>;
 }
 
 /** Where a flow keeps its progress: the operation log entry it belongs to. */
@@ -216,6 +373,7 @@ const NO_BATCH = new Set([5750, 5760, 5710, 5700, 4100, -32601]);
 
 function revertMessage(key: string): string {
   if (key === "swap") return "The price moved before the swap went through, so nothing was deposited. Try again.";
+  if (key === "stake") return "The price moved before the stake went through, so no USDC left your wallet. Stake again at today's price.";
   return "A transaction failed on Base. Nothing after it was sent.";
 }
 
@@ -226,15 +384,23 @@ function fail(store: FlowStore, message: string, state: OpState): never {
   throw new FlowError(message, state);
 }
 
+async function toBase(port: WalletPort): Promise<void> {
+  try {
+    await port.switchToBase();
+  } catch (e) {
+    throw new FlowError(rejected(e) ? "Switch your wallet to Base to continue." : "Your wallet could not switch to Base.", "needs-you");
+  }
+}
+
 /** Sends `calls`: as one batch when the wallet can (and has not turned batching down), else one at a
  * time. A call whose hash is already recorded is never sent again, only waited for, so a stopped flow
  * resumes where it stopped. Anything that stops the flow leaves the record "needs-you" or "failed". */
 export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCall[]): Promise<void> {
   store.setState("running");
   try {
-    await port.switchToBase();
+    await toBase(port);
   } catch (e) {
-    fail(store, rejected(e) ? "Switch your wallet to Base to continue." : "Your wallet could not switch to Base.", "needs-you");
+    fail(store, (e as FlowError).message, "needs-you");
   }
 
   const pendingBatch = store.callsId();

@@ -1,6 +1,18 @@
-import { getAddress, type Hex, maxUint256 } from "viem";
+import {
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  encodeFunctionData,
+  getAddress,
+  type Hex,
+  HttpRequestError,
+  maxUint256,
+  recoverTypedDataAddress,
+  serializeSignature,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it, vi } from "vitest";
 import type { Deployment } from "./config";
+import { STAKER } from "./abi";
 import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
 import {
   claimCalls,
@@ -8,6 +20,13 @@ import {
   createSharedFlowGuard,
   depositTaoCalls,
   type FlowCall,
+  isRevert,
+  permitTypedData,
+  planStakeV3,
+  resumeStakeV3Calls,
+  splitSignature,
+  stakeDeadline,
+  stakeV3Calls,
   FlowBusyError,
   FlowError,
   retryPatch,
@@ -34,7 +53,16 @@ const ME = getAddress("0x000000000000000000000000000000000000a11c");
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 
 const quote = { usdcIn: 20_000_000n, targetTao: 78_000_000_000_000_000n } as DepositQuote;
-const none: Balances = { usdc: 20_000_000n, tao: 0n, eth: 10n ** 15n, usdcRouterAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n, claimable: 0n };
+const none: Balances = {
+  usdc: 20_000_000n,
+  tao: 0n,
+  eth: 10n ** 15n,
+  usdcRouterAllowance: 0n,
+  usdcStakerAllowance: 0n,
+  taoRouterAllowance: 0n,
+  taoFrontDoorAllowance: 0n,
+  claimable: 0n,
+};
 
 describe("call builders", () => {
   it("stakes with approve USDC, exact-output swap, approve TAO, deposit", () => {
@@ -80,6 +108,9 @@ function port(over: Partial<WalletPort> = {}) {
     waitBatch: vi.fn(async () => ({ status: "success" as const, hashes: [H(90)] })),
     send: vi.fn<(c: FlowCall) => Promise<Hex>>(async () => H(++n)),
     wait: vi.fn(async () => ({ status: "success" as const })),
+    hasCode: vi.fn(async () => false),
+    signPermit: vi.fn<WalletPort["signPermit"]>(async () => ({ v: 28, r: H(201), s: H(202) })),
+    simulate: vi.fn<(c: FlowCall) => Promise<boolean>>(async () => true),
     ...over,
   };
 }
@@ -304,3 +335,222 @@ describe("createSharedFlowGuard", () => {
   });
 });
 
+
+// ---- v3: one-signature stake through CascadeStaker ----
+
+const STAKER_AT = getAddress("0x00000000000000000000000000000000005a4e12");
+const D3: Deployment = { ...D, staker: STAKER_AT, oracle: getAddress("0x000000000000000000000000000000000000041e") };
+const q3 = { usdcIn: 20_000_000n, minTaoOut: 77_611_000_000_000_000n } as DepositQuote;
+const NOW = 1_800_000_000_000; // ms
+const DEADLINE = 1_800_001_800n; // NOW + 30 minutes, in seconds
+const declined = () => Object.assign(new Error("User rejected the request."), { name: "UserRejectedRequestError", code: 4001 });
+
+describe("v3 stake calls", () => {
+  it("pays by permit in one stakeWithPermit call, for the connected account, at the quote's floor on route 0", () => {
+    const permit = { deadline: DEADLINE, v: 27, r: H(1), s: H(2) };
+    const c = stakeV3Calls(q3, none, D3, ME, permit);
+    expect(c).toHaveLength(1);
+    expect(c[0]).toMatchObject({
+      key: "stake",
+      to: STAKER_AT,
+      functionName: "stakeWithPermit",
+      args: [ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE, DEADLINE, 27, H(1), H(2)],
+    });
+    expect(c[0].value).toBeUndefined();
+    // the arguments encode against the staker's real signature
+    expect(encodeFunctionData({ abi: STAKER, functionName: "stakeWithPermit", args: c[0].args as never }).slice(0, 10)).toBe("0x85d45b3a");
+  });
+
+  it("without a permit approves exactly usdcIn to the staker, then stakes", () => {
+    const c = stakeV3Calls(q3, { ...none, usdcRouterAllowance: maxUint256 }, D3, ME, undefined, DEADLINE);
+    expect(c.map((x) => x.key)).toEqual(["approveUsdc", "stake"]);
+    expect(c[0]).toMatchObject({ to: TOKENS.usdc, functionName: "approve", args: [STAKER_AT, q3.usdcIn] });
+    expect(c[1]).toMatchObject({ to: STAKER_AT, functionName: "stake", args: [ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE] });
+  });
+
+  it("drops the approval when the staker's allowance already covers the stake", () => {
+    expect(stakeV3Calls(q3, { ...none, usdcStakerAllowance: q3.usdcIn }, D3, ME, undefined, DEADLINE).map((x) => x.key)).toEqual(["stake"]);
+    expect(stakeV3Calls(q3, { ...none, usdcStakerAllowance: q3.usdcIn - 1n }, D3, ME, undefined, DEADLINE).map((x) => x.key)).toEqual([
+      "approveUsdc",
+      "stake",
+    ]);
+  });
+
+  it("refuses to build a v3 stake for a deployment without a staker", () => {
+    expect(() => stakeV3Calls(q3, none, D, ME)).toThrow(/staker/i);
+  });
+
+  it("gives the stake 30 minutes", () => {
+    expect(stakeDeadline(NOW)).toBe(DEADLINE);
+  });
+});
+
+describe("the USDC permit", () => {
+  it("is EIP-2612 in USDC's Base domain, for exactly usdcIn to the staker", () => {
+    const t = permitTypedData(ME, D3, q3.usdcIn, 7n, DEADLINE);
+    expect(t.domain).toEqual({ name: "USD Coin", version: "2", chainId: 8453, verifyingContract: TOKENS.usdc });
+    expect(t.primaryType).toBe("Permit");
+    expect(t.types.Permit.map((f) => `${f.type} ${f.name}`)).toEqual(["address owner", "address spender", "uint256 value", "uint256 nonce", "uint256 deadline"]);
+    expect(t.message).toEqual({ owner: ME, spender: STAKER_AT, value: q3.usdcIn, nonce: 7n, deadline: DEADLINE });
+  });
+
+  it("is never made for a deployment without a staker", () => {
+    expect(() => permitTypedData(ME, D, q3.usdcIn, 7n, DEADLINE)).toThrow(/staker/i);
+  });
+
+  it("splits a wallet's signature into the v, r, s USDC checks, whichever way the wallet writes v", async () => {
+    const key = privateKeyToAccount(`0x${"42".repeat(32)}`);
+    const t = permitTypedData(key.address, D3, q3.usdcIn, 7n, DEADLINE);
+    const sig = await key.signTypedData(t);
+    const split = splitSignature(sig);
+    expect([27, 28]).toContain(split.v);
+    const back = serializeSignature({ r: split.r, s: split.s, v: BigInt(split.v) });
+    expect(await recoverTypedDataAddress({ ...t, signature: back })).toBe(key.address);
+    // some wallets (hardware ones) end the signature with 0/1 instead of 27/28
+    const lowV = `${sig.slice(0, 130)}0${split.v - 27}` as Hex;
+    expect(splitSignature(lowV)).toEqual(split);
+  });
+
+  it("refuses a signature that isn't a plain 65-byte one (a smart wallet's wrapped signature)", () => {
+    expect(() => splitSignature(`0x${"11".repeat(64)}`)).toThrow();
+    expect(() => splitSignature(`0x${"11".repeat(200)}`)).toThrow();
+  });
+
+  it("tells a revert from Base being unreachable", () => {
+    const revert = new ContractFunctionExecutionError(
+      new ContractFunctionRevertedError({ abi: STAKER, functionName: "stake", message: "execution reverted: Too little received" }),
+      { abi: STAKER, functionName: "stake", args: [] },
+    );
+    expect(isRevert(revert)).toBe(true);
+    expect(isRevert(new HttpRequestError({ url: "https://mainnet.base.org", status: 429 }))).toBe(false);
+  });
+});
+
+describe("planStakeV3", () => {
+  const plan = (p: ReturnType<typeof port>, w: Balances = none, nonce = 7n) =>
+    planStakeV3(p, { q: q3, w, d: D3, account: ME, nonce: async () => nonce, now: NOW });
+
+  it("an account without code signs one permit, on Base, for exactly usdcIn to the staker, then sends one stakeWithPermit", async () => {
+    const p = port();
+    const calls = await plan(p);
+    expect(p.hasCode).toHaveBeenCalledWith(ME);
+    expect(p.signPermit).toHaveBeenCalledOnce();
+    const typed = vi.mocked(p.signPermit).mock.calls[0][0];
+    expect(typed.domain.chainId).toBe(8453);
+    expect(typed.message).toEqual({ owner: ME, spender: STAKER_AT, value: q3.usdcIn, nonce: 7n, deadline: DEADLINE });
+    expect(vi.mocked(p.switchToBase).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(p.signPermit).mock.invocationCallOrder[0]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ functionName: "stakeWithPermit", args: [ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE, DEADLINE, 28, H(201), H(202)] });
+    expect(p.simulate).toHaveBeenCalledWith(calls[0]);
+  });
+
+  it("a declined signature stops at 'needs you' with nothing sent and no second prompt", async () => {
+    const p = port({ signPermit: vi.fn(async () => Promise.reject(declined())) });
+    const err = await plan(p).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect((err as FlowError).message).toMatch(/declined/i);
+    expect(p.signPermit).toHaveBeenCalledOnce();
+    expect(p.simulate).not.toHaveBeenCalled();
+    expect(p.send).not.toHaveBeenCalled();
+    expect(p.sendBatch).not.toHaveBeenCalled();
+  });
+
+  it("an account with code (an EIP-7702 smart account) approves exactly usdcIn and stakes, with no signature", async () => {
+    const p = port({ hasCode: vi.fn(async () => true) });
+    const calls = await plan(p);
+    expect(p.signPermit).not.toHaveBeenCalled();
+    expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+    expect(calls[0].args).toEqual([STAKER_AT, q3.usdcIn]);
+    expect(calls[1]).toMatchObject({ functionName: "stake", args: [ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE] });
+  });
+
+  it("the approve path goes as one batch when the wallet can", async () => {
+    const p = port({ hasCode: vi.fn(async () => true), canBatch: vi.fn(async () => true) });
+    const t = tracker();
+    await runFlow(p, t.store as never, await plan(p));
+    expect(p.sendBatch).toHaveBeenCalledOnce();
+    expect(vi.mocked(p.sendBatch).mock.calls[0][0].map((c: FlowCall) => c.functionName)).toEqual(["approve", "stake"]);
+    expect(p.send).not.toHaveBeenCalled();
+  });
+
+  it("USDC refusing the permit (the stake and the permit both fail to simulate) falls back to approve and stake", async () => {
+    const p = port({ simulate: vi.fn(async () => false) });
+    const calls = await plan(p);
+    expect(p.signPermit).toHaveBeenCalledOnce();
+    expect(vi.mocked(p.simulate).mock.calls.map(([c]) => c.functionName)).toEqual(["stakeWithPermit", "permit"]);
+    const permitCheck = vi.mocked(p.simulate).mock.calls[1][0];
+    expect(permitCheck).toMatchObject({ to: TOKENS.usdc, args: [ME, STAKER_AT, q3.usdcIn, DEADLINE, 28, H(201), H(202)] });
+    expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+    expect(calls[0].args).toEqual([STAKER_AT, q3.usdcIn]);
+  });
+
+  it("a stake that would revert for its own reasons (the price moved) stops before anything is sent", async () => {
+    const p = port({ simulate: vi.fn(async (c: FlowCall) => c.functionName === "permit") });
+    const err = await plan(p).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("failed");
+    expect((err as FlowError).message).toMatch(/price moved.*nothing was sent/i);
+    expect(p.send).not.toHaveBeenCalled();
+  });
+
+  it("a wallet that can't sign a permit at all (not a refusal) uses approve and stake", async () => {
+    const p = port({ signPermit: vi.fn(async () => Promise.reject(new Error("eth_signTypedData_v4 is not supported"))) });
+    expect((await plan(p)).map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+  });
+
+  it("an allowance that already covers the stake needs no signature", async () => {
+    const p = port();
+    const calls = await plan(p, { ...none, usdcStakerAllowance: q3.usdcIn });
+    expect(p.signPermit).not.toHaveBeenCalled();
+    expect(calls.map((c) => c.functionName)).toEqual(["stake"]);
+  });
+
+  it("Base not answering the simulation stops and asks the user to continue, rather than guessing a path", async () => {
+    const p = port({ simulate: vi.fn(async () => Promise.reject(new HttpRequestError({ url: "https://mainnet.base.org", status: 503 }))) });
+    const err = await plan(p).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect((err as FlowError).message).not.toMatch(/mainnet\.base\.org/);
+  });
+
+  it("a wallet that won't switch to Base is asked to, before any signature", async () => {
+    const p = port({ switchToBase: vi.fn(async () => Promise.reject(declined())) });
+    const err = await plan(p).catch((e: unknown) => e);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect(p.signPermit).not.toHaveBeenCalled();
+  });
+
+  it("a stake that reverts on Base fails with 'stake again at today's price'", async () => {
+    const p = port({ wait: vi.fn(async () => ({ status: "reverted" as const })) });
+    const t = tracker();
+    await expect(runFlow(p, t.store as never, await plan(p))).rejects.toThrow(/price moved.*today's price/i);
+    expect(t.states.at(-1)).toBe("failed");
+    expect(t.hashes.stake).toBeDefined();
+  });
+});
+
+describe("resumeStakeV3Calls", () => {
+  const op = { usdcIn: q3.usdcIn, minTaoOut: q3.minTaoOut, hashes: {} as Partial<Record<string, Hex>>, callsId: undefined as string | undefined };
+
+  it("carries on by approval at the floor the user agreed to, with a fresh deadline, never asking for a signature again", () => {
+    const calls = resumeStakeV3Calls(op, none, D3, ME, NOW);
+    expect(calls.map((c) => c.functionName)).toEqual(["approve", "stake"]);
+    expect(calls[0].args).toEqual([STAKER_AT, q3.usdcIn]);
+    expect(calls[1].args).toEqual([ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE]);
+  });
+
+  it("only waits for a stake already sent, never approving again in front of it", () => {
+    const calls = resumeStakeV3Calls({ ...op, hashes: { stake: H(5) } }, none, D3, ME, NOW);
+    expect(calls.map((c) => c.key)).toEqual(["stake"]);
+  });
+
+  it("rebuilds a wallet batch still being checked exactly as it was sent, so its receipts line up", () => {
+    const calls = resumeStakeV3Calls({ ...op, callsId: "batch-1" }, { ...none, usdcStakerAllowance: q3.usdcIn }, D3, ME, NOW);
+    expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+  });
+
+  it("needs the floor recorded on the stake", () => {
+    expect(() => resumeStakeV3Calls({ ...op, minTaoOut: undefined }, none, D3, ME, NOW)).toThrow(/no recorded minimum/);
+  });
+});

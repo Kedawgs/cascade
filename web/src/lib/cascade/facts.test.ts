@@ -329,3 +329,63 @@ describe("facts", () => {
   });
 });
 
+describe("v3 deposit facts (one stake through CascadeStaker)", () => {
+  const STAKER_AT = getAddress("0x00000000000000000000000000000000005a4e12");
+  const TREASURY = getAddress("0x000000000000000000000000000000000000beef");
+  const D3: Deployment = { ...D, staker: STAKER_AT, oracle: getAddress("0x000000000000000000000000000000000000041e") };
+  const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const transfer = (from: Hex, to: Hex, value: bigint, index: number) =>
+    log(USDC, encodeEventTopics({ abi: ERC20, eventName: "Transfer", args: { from, to } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256"), [value]), 50n, H(41), index);
+  const requested = log(
+    D.frontDoor,
+    encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId: 3n, user: ME } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint256, address"), [77_700_000_000_000_000n, STAKER_AT]),
+    50n,
+    H(41),
+    3,
+  );
+  const op3: DepositOp = {
+    id: "d3",
+    kind: "deposit",
+    v: 3,
+    account: ME,
+    createdAt: 0,
+    usdcIn: 20_000_000n,
+    targetTao: 78_000_000_000_000_000n,
+    minTaoOut: 77_611_000_000_000_000n,
+    priceUsd: 254,
+    hashes: { stake: H(41) },
+    state: "sent",
+  };
+
+  it("reads the swap and the deposit from the stake receipt: USDC that left the account (fees included), the batch and the TAO deposited", async () => {
+    const c = chains({
+      baseReceipts: {
+        [H(41)]: {
+          status: "success",
+          blockNumber: 50n,
+          // the account pays the staker; the staker's own transfers (fees to the treasury) are not the account's
+          logs: [transfer(ME, STAKER_AT, 20_000_000n, 0), transfer(STAKER_AT, TREASURY, 79_925n, 1), requested],
+        },
+      },
+    });
+    const f = await depositFacts(c.clients, D3, op3, { fd, vault, scan: newScan(D3) });
+    expect(f.facts.swapMined).toBe(true);
+    expect(f.facts.depositMined).toBe(true);
+    expect(f.facts.usdcSpent).toBe(20_000_000n);
+    expect(f.batchId).toBe(3n);
+    expect(f.facts.taoDeposited).toBe(77_700_000_000_000_000n);
+    expect(f.facts.stillOpen).toBe(false);
+  });
+
+  it("leaves both undone when the stake reverted or was never sent", async () => {
+    const c = chains({ baseReceipts: { [H(42)]: { status: "reverted", blockNumber: 50n, logs: [] } } });
+    const reverted = await depositFacts(c.clients, D3, { ...op3, hashes: { stake: H(42) }, state: "failed" }, { fd, vault, scan: newScan(D3) });
+    expect(reverted.facts).toMatchObject({ swapMined: false, depositMined: false });
+    expect(reverted.facts.usdcSpent).toBeUndefined();
+    expect(reverted.batchId).toBeUndefined();
+    const unsent = await depositFacts(c.clients, D3, { ...op3, hashes: {}, state: "needs-you" }, { fd, vault, scan: newScan(D3) });
+    expect(unsent.facts).toMatchObject({ swapMined: false, depositMined: false });
+  });
+});
+

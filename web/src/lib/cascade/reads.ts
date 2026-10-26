@@ -112,6 +112,8 @@ export interface WalletState {
   tao: bigint;
   eth: bigint;
   usdcRouterAllowance: bigint;
+  /** v3: USDC the staker may take (zero on v2, which has no staker). */
+  usdcStakerAllowance: bigint;
   taoRouterAllowance: bigint;
   taoFrontDoorAllowance: bigint;
 }
@@ -119,24 +121,36 @@ export interface WalletState {
 export async function readWallet(c: Pick<Clients, "base">, d: Deployment, account: Address): Promise<WalletState> {
   const usdc = { address: TOKENS.usdc, abi: ERC20 } as const;
   const tao = { address: TOKENS.tao, abi: ERC20 } as const;
-  const [usdcBal, taoBal, usdcRouter, taoRouter, taoFrontDoor] = await c.base.multicall({
-    allowFailure: false,
-    contracts: [
-      { ...usdc, functionName: "balanceOf", args: [account] },
-      { ...tao, functionName: "balanceOf", args: [account] },
-      { ...usdc, functionName: "allowance", args: [account, UNISWAP.router] },
-      { ...tao, functionName: "allowance", args: [account, UNISWAP.router] },
-      { ...tao, functionName: "allowance", args: [account, d.frontDoor] },
-    ],
-  });
+  const [[usdcBal, taoBal, usdcRouter, taoRouter, taoFrontDoor], [usdcStaker]] = await Promise.all([
+    c.base.multicall({
+      allowFailure: false,
+      contracts: [
+        { ...usdc, functionName: "balanceOf", args: [account] },
+        { ...tao, functionName: "balanceOf", args: [account] },
+        { ...usdc, functionName: "allowance", args: [account, UNISWAP.router] },
+        { ...tao, functionName: "allowance", args: [account, UNISWAP.router] },
+        { ...tao, functionName: "allowance", args: [account, d.frontDoor] },
+      ],
+    }),
+    // v2 has no staker to ask about
+    d.staker
+      ? c.base.multicall({ allowFailure: false, contracts: [{ ...usdc, functionName: "allowance", args: [account, d.staker] }] })
+      : Promise.resolve([0n] as const),
+  ]);
   return {
     usdc: usdcBal,
     tao: taoBal,
     eth: await c.base.getBalance({ address: account }),
     usdcRouterAllowance: usdcRouter,
+    usdcStakerAllowance: usdcStaker,
     taoRouterAllowance: taoRouter,
     taoFrontDoorAllowance: taoFrontDoor,
   };
+}
+
+/** USDC's permit nonce for `account`: the next permit it signs must carry it. */
+export async function readPermitNonce(c: Pick<Clients, "base">, account: Address): Promise<bigint> {
+  return (await c.base.readContract({ address: TOKENS.usdc, abi: ERC20, functionName: "nonces", args: [account] })) as bigint;
 }
 
 async function quote(

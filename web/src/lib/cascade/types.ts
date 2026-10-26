@@ -112,6 +112,8 @@ export interface Balances {
   tao: bigint;
   eth: bigint;
   usdcRouterAllowance: bigint;
+  /** v3: USDC the staker may already take (zero on v2, which has no staker). */
+  usdcStakerAllowance: bigint;
   taoRouterAllowance: bigint;
   taoFrontDoorAllowance: bigint;
   /** TAO waiting to be claimed on Base (an unstake's payout, or a deposit the vault sent back). */

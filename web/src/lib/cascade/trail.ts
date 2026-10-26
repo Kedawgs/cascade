@@ -13,6 +13,8 @@ export interface DepositFacts {
   cancelMined?: boolean;
   /** USDC the swap really took (its receipt), when known. */
   usdcSpent?: bigint;
+  /** v3: the TAO the front door recorded for this stake (the swap's output, at least the floor), when known. */
+  taoDeposited?: bigint;
   now: Date;
   openBatchId: bigint;
   /** When the open batch can close. */
@@ -125,12 +127,16 @@ function walletStep(mined: boolean, op: { state: string }, started: boolean): St
 }
 
 export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
+  // v3: one `stake` transaction is both the swap and the deposit
+  const swapHash = op.v === 3 ? op.hashes.stake : op.hashes.swap;
+  const depositHash = op.v === 3 ? op.hashes.stake : op.hashes.deposit;
+  const taoWei = f.taoDeposited ?? op.targetTao;
   const swapStatus = walletStep(f.swapMined, op, true);
   const swap: TrailStep<DepositStepKey> = {
     key: "swap",
     title: "Swap USDC for TAO",
     status: swapStatus,
-    ...(op.hashes.swap && f.swapMined ? { txUrl: explorer.baseTx(op.hashes.swap) } : {}),
+    ...(swapHash && f.swapMined ? { txUrl: explorer.baseTx(swapHash) } : {}),
     ...(!f.swapMined && op.callsId && swapStatus === "active" ? { detail: "Sent from your wallet as one batch" } : {}),
     ...(swapStatus === "failed" || swapStatus === "action" ? { detail: op.error ?? "Waiting for you to confirm in your wallet" } : {}),
   };
@@ -141,7 +147,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     key: "deposit",
     title: "Deposit into Cascade",
     status: depositStatus,
-    ...(op.hashes.deposit && f.depositMined ? { txUrl: explorer.baseTx(op.hashes.deposit) } : {}),
+    ...(depositHash && f.depositMined ? { txUrl: explorer.baseTx(depositHash) } : {}),
     ...(depositStatus === "action" ? { detail: op.error ?? "Waiting for you to confirm in your wallet" } : {}),
     ...(depositStatus === "failed" ? { detail: `${op.error ?? "The deposit didn't go through."}${taoInWallet}` } : {}),
   };
@@ -193,13 +199,13 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     sourceChain: "base",
     status: cancelled ? "cancelled" : state === "done" ? "staked" : (state as DepositRecord["status"]),
     steps,
-    taoWei: op.targetTao,
-    taoAmount: toDisplay(op.targetTao, 18),
+    taoWei,
+    taoAmount: toDisplay(taoWei, 18),
     // a deposit of TAO already in the wallet spent no USDC
     ...(op.usdcIn > 0n ? { amountUsd: toDisplay(f.usdcSpent ?? op.usdcIn, 6) } : {}),
     taoPriceUsd: op.priceUsd,
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
-    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: op.targetTao } : {}),
+    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: taoWei } : {}),
     // the swap worked but the deposit failed: the deposit alone can be tried again (the TAO is in the wallet)
     ...(op.state === "failed" && f.swapMined && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
     // the swap itself failed (reverted, or a batch that failed whole): start a new stake at today's price

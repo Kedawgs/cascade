@@ -205,6 +205,38 @@ describe("deposit trail", () => {
   });
 });
 
+describe("v3 deposit trail (one stake through CascadeStaker)", () => {
+  const op3: DepositOp = { ...op, v: 3, minTaoOut: 77_611_000_000_000_000n, hashes: { stake: H(5) } };
+
+  it("marks the swap and the deposit done together from the one stake receipt, both linking to it", () => {
+    const r = depositRecord(op3, { ...base, taoDeposited: 77_700_000_000_000_000n });
+    expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
+    expect(r.steps[0].txUrl).toContain(H(5));
+    expect(r.steps[1].txUrl).toContain(H(5));
+    // the TAO the front door recorded, which the cancel must ask for exactly
+    expect(r.taoWei).toBe(77_700_000_000_000_000n);
+    expect(r.cancellableWei).toBe(77_700_000_000_000_000n);
+  });
+
+  it("offers 'Stake again at today's price' for a stake that reverted, never a retry of the deposit alone", () => {
+    const failed = { ...op3, state: "failed" as const, error: "The price moved before the stake went through, so no USDC left your wallet." };
+    const r = depositRecord(failed, { ...base, swapMined: false, depositMined: false });
+    expect(statuses(r)).toEqual(["failed", "pending", "pending", "pending"]);
+    expect(r.steps[0].detail).toMatch(/price moved/);
+    expect(r.status).toBe("failed");
+    expect(r.restake).toBe(true);
+    expect(r.retryable).toBeUndefined();
+  });
+
+  it("waits for the user after a declined signature, and can be removed since nothing was sent", () => {
+    const stopped = { ...op3, hashes: {}, state: "needs-you" as const, error: "You declined the signature in your wallet." };
+    const r = depositRecord(stopped, { ...base, swapMined: false, depositMined: false });
+    expect(r.status).toBe("needs_you");
+    expect(r.steps[0]).toMatchObject({ status: "action", detail: "You declined the signature in your wallet." });
+    expect(r.nothingSent).toBe(true);
+  });
+});
+
 const wop: WithdrawalOp = {
   id: "w1",
   kind: "withdrawal",

@@ -97,8 +97,17 @@ describe("reads", () => {
   it("reads the wallet's balances and the allowances the flows need", async () => {
     const base = fake({ balanceOf: 7n, allowance: 0n }, 3n);
     const w = await readWallet({ base: base.client }, D, ME);
-    expect(w).toEqual({ usdc: 7n, tao: 7n, eth: 3n, usdcRouterAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n });
+    expect(w).toEqual({ usdc: 7n, tao: 7n, eth: 3n, usdcRouterAllowance: 0n, usdcStakerAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n });
+    // a v2 deployment has no staker to ask about
     expect(base.asked.filter((n) => n === "allowance")).toHaveLength(3);
+  });
+
+  it("on v3 also reads the USDC allowance the staker has", async () => {
+    const base = fake({ balanceOf: 7n, allowance: 20_000_000n }, 3n);
+    const D3 = { ...D, staker: "0x00000000000000000000000000000000005A4E12", oracle: "0x000000000000000000000000000000000000041E" } as Deployment;
+    const w = await readWallet({ base: base.client }, D3, ME);
+    expect(w.usdcStakerAllowance).toBe(20_000_000n);
+    expect(base.asked.filter((n) => n === "allowance")).toHaveLength(4);
   });
 
   it("prices TAO from what selling 0.01 TAO would pay, in dollars", async () => {

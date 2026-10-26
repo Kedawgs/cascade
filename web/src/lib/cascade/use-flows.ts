@@ -2,10 +2,20 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { Address, Hex } from "viem";
+import type { Address, Hex, PublicClient } from "viem";
 import { base } from "viem/chains";
 import { type Config, useConfig } from "wagmi";
-import { getCapabilities, getChainId, sendCalls, switchChain, waitForCallsStatus, waitForTransactionReceipt, writeContract } from "wagmi/actions";
+import {
+  getCapabilities,
+  getChainId,
+  sendCalls,
+  signTypedData,
+  switchChain,
+  waitForCallsStatus,
+  waitForTransactionReceipt,
+  writeContract,
+} from "wagmi/actions";
+import { isV3 } from "./config";
 import { useCascadeData } from "./context";
 import {
   cancelCall,
@@ -15,9 +25,13 @@ import {
   type FlowCall,
   FlowError,
   type FlowStore,
+  isRevert,
+  planStakeV3,
+  resumeStakeV3Calls,
   retryPatch,
   runFlow,
   sellTaoCalls,
+  splitSignature,
   userMessage,
   stakeCalls,
   stillToSend,
@@ -27,12 +41,13 @@ import {
 import { cascadeKeys } from "./hooks";
 import { opStore } from "./op-store";
 import { type ClaimOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
-import { quoteSell, readFrontDoor } from "./reads";
+import { quoteSell, readFrontDoor, readPermitNonce } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao, lessSlippage } from "./units";
 
-/** The wallet as a flow sees it, through wagmi (EIP-5792 batches when the wallet offers them). */
-export function wagmiPort(config: Config, account: Address): WalletPort {
+/** The wallet as a flow sees it, through wagmi (EIP-5792 batches when the wallet offers them); Base's
+ * public RPC (`reader`) answers what the wallet doesn't need to: code at the account, and simulations. */
+export function wagmiPort(config: Config, account: Address, reader: PublicClient): WalletPort {
   return {
     async switchToBase() {
       if (getChainId(config) !== base.id) await switchChain(config, { chainId: base.id });
@@ -76,6 +91,22 @@ export function wagmiPort(config: Config, account: Address): WalletPort {
       const r = await waitForTransactionReceipt(config, { hash, chainId: base.id });
       return { status: r.status === "success" ? "success" : "reverted" };
     },
+    async hasCode(address: Address) {
+      const code = await reader.getCode({ address });
+      return code !== undefined && code !== "0x";
+    },
+    async signPermit(typedData) {
+      return splitSignature(await signTypedData(config, { account, ...typedData }));
+    },
+    async simulate(c: FlowCall) {
+      try {
+        await reader.simulateContract({ account, address: c.to, abi: c.abi, functionName: c.functionName, args: c.args, value: c.value } as never);
+        return true;
+      } catch (e) {
+        if (isRevert(e)) return false;
+        throw e;
+      }
+    },
   };
 }
 
@@ -110,6 +141,7 @@ export function useFlows(account: string | null) {
 
   const a = account as Address;
   const d = () => data.deployment;
+  const port = () => wagmiPort(config, a, data.clients.base);
 
   /** Runs `body` under the guard (claimed before any read), records errors and refreshes the data. */
   async function flow<T>(label: string, body: () => Promise<T>): Promise<T> {
@@ -127,23 +159,26 @@ export function useFlows(account: string | null) {
   }
 
   /** Sends `calls` for the operation `id`, marked as running in this tab while it does. A read that
-   * fails before sending leaves the operation waiting for the user, not stuck as "running". */
-  async function send(id: string, build: () => Promise<FlowCall[]>) {
+   * fails before sending leaves the operation waiting for the user, not stuck as "running"; a stop of
+   * our own before sending (a declined signature, a stake that can't go through) keeps its words. */
+  async function send(id: string, build: (wallet: WalletPort) => Promise<FlowCall[]>) {
     const store = opStore(data.opLog, a, id);
+    const wallet = port();
     data.opLog.markActive(id);
     try {
       let calls: FlowCall[];
       try {
-        calls = await build();
+        calls = await build(wallet);
       } catch (e) {
-        store.setState("needs-you", "We couldn't read your wallet just now. Continue to try again.");
+        if (e instanceof FlowError) store.setState(e.state, e.message);
+        else store.setState("needs-you", "We couldn't read your wallet just now. Continue to try again.");
         throw e;
       }
       if (calls.length === 0) {
         store.setState("sent");
         return;
       }
-      await runFlow(wagmiPort(config, a), store, calls);
+      await runFlow(wallet, store, calls);
     } finally {
       data.opLog.markInactive(id);
     }
@@ -153,9 +188,11 @@ export function useFlows(account: string | null) {
     busy,
     error,
 
-    /** Starts a stake from a quote; `onStart` gets the operation id before the first wallet prompt. */
+    /** Starts a stake from a quote; `onStart` gets the operation id before the first wallet prompt. On
+     * v3 it is one CascadeStaker transaction, paid by a USDC permit or, failing that, an exact approval. */
     stake: (q: DepositQuote, onStart?: (id: string) => void) =>
       flow("stake", async () => {
+        const v3 = isV3(d());
         const op: DepositOp = {
           id: newOpId(),
           kind: "deposit",
@@ -165,22 +202,30 @@ export function useFlows(account: string | null) {
           targetTao: q.targetTao,
           priceUsd: q.taoPriceUsd,
           feesUsd: q.feesUsd,
+          ...(v3 ? { v: 3 as const, minTaoOut: q.minTaoOut } : {}),
           hashes: {},
           state: "running",
         };
         data.opLog.put(op);
         onStart?.(op.id);
-        await send(op.id, async () => stakeCalls(q, await data.getBalances(a), d(), a));
+        await send(op.id, async (wallet) => {
+          const w = await data.getBalances(a);
+          if (!v3) return stakeCalls(q, w, d(), a);
+          return planStakeV3(wallet, { q, w, d: d(), account: a, nonce: () => readPermitNonce(data.clients, a), now: Date.now() });
+        });
         return op.id;
       }),
 
-    /** Carries on a stake that stopped, skipping whatever the chain shows already happened. */
+    /** Carries on a stake that stopped, skipping whatever the chain shows already happened. A v3 stake
+     * carries on by approval at the floor it was quoted with. */
     resumeStake: (id: string) =>
       flow("stake", async () => {
-        const patch = retryPatch(data.opLog.get(a, id) as DepositOp);
+        const stored = data.opLog.get(a, id) as DepositOp;
+        const patch = stored.v === 3 ? {} : retryPatch(stored);
         if (Object.keys(patch).length > 0) data.opLog.update(a, id, patch as Partial<Operation>);
         await send(id, async () => {
           const op = data.opLog.get(a, id) as DepositOp;
+          if (op.v === 3) return resumeStakeV3Calls(op, await data.getBalances(a), d(), a, Date.now());
           const [w, fd] = await Promise.all([data.getBalances(a), readFrontDoor(data.clients, d(), a)]);
           const calls = op.usdcIn === 0n ? depositTaoCalls(op.targetTao, w, d()) : stakeCalls(op, w, d(), a);
           return stillToSend(calls, op, { walletTao: w.tao, depositOf: fd.depositOf });
@@ -211,7 +256,7 @@ export function useFlows(account: string | null) {
     sellWalletTao: (taoWei: bigint) =>
       flow("swap", async () => {
         const [w, out] = await Promise.all([data.getBalances(a), quoteSell(data.clients, taoWei)]);
-        await runFlow(wagmiPort(config, a), scratchStore(), sellTaoCalls(taoWei, lessSlippage(out), w, a));
+        await runFlow(port(), scratchStore(), sellTaoCalls(taoWei, lessSlippage(out), w, a));
       }),
 
     unstake: (q: WithdrawalQuote, onStart?: (id: string) => void) =>
@@ -292,7 +337,7 @@ export function useFlows(account: string | null) {
     cancel: (kind: "deposit" | "withdrawal", id: string, amount: bigint) =>
       flow("cancel", async () => {
         const store = scratchStore();
-        await runFlow(wagmiPort(config, a), store, [cancelCall(kind, amount, d())]);
+        await runFlow(port(), store, [cancelCall(kind, amount, d())]);
         const hash = store.hashes().cancel;
         if (hash) data.opLog.update(a, id, { cancelled: { hash, at: Date.now() } } as Partial<Operation>);
       }),

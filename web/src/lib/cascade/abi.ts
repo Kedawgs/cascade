@@ -35,6 +35,21 @@ export const STAKER = parseAbi([
   "function swapFeeBps() view returns (uint16)",
   "function depositFeeUsdc() view returns (uint256)",
   "event Staked(address indexed payer, address indexed beneficiary, uint256 usdcIn, uint256 fees, uint256 taoDeposited)",
+  // what a stake can revert with, so a pre-send check can say why: the staker's own errors, and the
+  // front door's that its depositFor passes back (EnforcedPause is OpenZeppelin's Pausable)
+  "error Expired()",
+  "error BadBeneficiary()",
+  "error RouteInactive()",
+  "error AmountTooSmall()",
+  "error InsufficientOutput()",
+  "error SwapIncomplete()",
+  "error ZeroAmount()",
+  "error NotRaoAligned()",
+  "error BelowMinDeposit()",
+  "error CapExceeded()",
+  "error BatchValueFull()",
+  "error BatchFull()",
+  "error EnforcedPause()",
 ]);
 
 export const VAULT = parseAbi([

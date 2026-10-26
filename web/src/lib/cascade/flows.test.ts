@@ -1,6 +1,9 @@
 import {
+  concat,
   ContractFunctionExecutionError,
   ContractFunctionRevertedError,
+  encodeAbiParameters,
+  encodeErrorResult,
   encodeFunctionData,
   getAddress,
   type Hex,
@@ -25,6 +28,8 @@ import {
   planResumeStakeV3,
   planStakeV3,
   resumeStakeV3Calls,
+  revertReason,
+  type Simulation,
   splitSignature,
   stakeDeadline,
   stakeV3Calls,
@@ -124,7 +129,7 @@ function port(over: Partial<WalletPort> = {}) {
     wait: vi.fn(async () => ({ status: "success" as const })),
     hasCode: vi.fn(async () => false),
     signPermit: vi.fn<WalletPort["signPermit"]>(async () => ({ v: 28, r: H(201), s: H(202) })),
-    simulate: vi.fn<(c: FlowCall) => Promise<boolean>>(async () => true),
+    simulate: vi.fn<(c: FlowCall) => Promise<Simulation>>(async () => ({ ok: true })),
     ...over,
   };
 }
@@ -489,7 +494,7 @@ describe("planStakeV3", () => {
   });
 
   it("USDC refusing the permit (the stake and the permit both fail to simulate) falls back to approve and stake", async () => {
-    const p = port({ simulate: vi.fn(async () => false) });
+    const p = port({ simulate: vi.fn(async () => ({ ok: false })) });
     const calls = await plan(p);
     expect(p.signPermit).toHaveBeenCalledOnce();
     expect(vi.mocked(p.simulate).mock.calls.map(([c]) => c.functionName)).toEqual(["stakeWithPermit", "permit"]);
@@ -500,12 +505,78 @@ describe("planStakeV3", () => {
   });
 
   it("a stake that would revert for its own reasons (the price moved) stops before anything is sent", async () => {
-    const p = port({ simulate: vi.fn(async (c: FlowCall) => c.functionName === "permit") });
+    const p = port({ simulate: vi.fn(async (c: FlowCall) => ({ ok: c.functionName === "permit" })) });
     const err = await plan(p).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(FlowError);
     expect((err as FlowError).state).toBe("failed");
     expect((err as FlowError).message).toMatch(/price moved.*nothing was sent/i);
     expect(p.send).not.toHaveBeenCalled();
+  });
+
+  describe("says why a stake wouldn't go through, from the error the staker or the front door gives", () => {
+    /** The stake reverts with `revert` in the pre-send check; USDC takes the permit. */
+    const refusing = (revert: string) =>
+      port({ simulate: vi.fn(async (c: FlowCall) => (c.functionName === "permit" ? { ok: true as const } : { ok: false as const, revert })) });
+    const why = async (revert: string, minUsd?: () => Promise<number>) => {
+      const p = refusing(revert);
+      const err = await planStakeV3(p, { q: q3, w: none, d: D3, account: ME, nonce: async () => 7n, now: NOW, minUsd }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(FlowError);
+      expect((err as FlowError).state).toBe("failed");
+      expect(p.send).not.toHaveBeenCalled();
+      expect(p.sendBatch).not.toHaveBeenCalled();
+      return (err as FlowError).message;
+    };
+
+    it("below the front door's minimum (BelowMinDeposit), or not even the flat fee (AmountTooSmall): the minimum in dollars", async () => {
+      expect(await why("BelowMinDeposit", async () => 2.64)).toBe("That's below the minimum stake of about $2.64, so nothing was sent.");
+      expect(await why("AmountTooSmall", async () => 3)).toBe("That's below the minimum stake of about $3, so nothing was sent.");
+      // the minimum can't be read just now: said without a figure
+      expect(await why("BelowMinDeposit", async () => Promise.reject(new Error("down")))).toBe("That's below the minimum stake, so nothing was sent.");
+      expect(await why("BelowMinDeposit")).toBe("That's below the minimum stake, so nothing was sent.");
+    });
+
+    it("over the cap, or the open batch full by value or by count: Cascade is full for now", async () => {
+      for (const revert of ["CapExceeded", "BatchValueFull", "BatchFull"]) {
+        expect(await why(revert)).toBe("Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.");
+      }
+    });
+
+    it("the front door paused (EnforcedPause) or the staker's route turned off: staking is paused", async () => {
+      for (const revert of ["EnforcedPause", "RouteInactive"]) {
+        expect(await why(revert)).toBe("Staking is paused right now, so nothing was sent. Try again later.");
+      }
+    });
+
+    it("the swap would pay under the floor (the staker's InsufficientOutput, or the router's own check): the price moved", async () => {
+      for (const revert of ["InsufficientOutput", "Too little received", "execution reverted: Too little received"]) {
+        expect(await why(revert)).toBe("The price moved since your quote, so this stake wouldn't go through and nothing was sent. Stake again at today's price.");
+      }
+    });
+
+    it("anything else keeps the general wording", async () => {
+      expect(await why("Panic")).toMatch(/^This stake wouldn't go through on Base right now \(usually because the price moved/);
+    });
+
+    it("only reads the minimum when it is the reason", async () => {
+      const minUsd = vi.fn(async () => 2.64);
+      await why("CapExceeded", minUsd);
+      expect(minUsd).not.toHaveBeenCalled();
+    });
+  });
+
+  it("reads the error's name from Base's answer, the front door's errors included, or a revert string", () => {
+    const reverted = (data: Hex) =>
+      new ContractFunctionExecutionError(new ContractFunctionRevertedError({ abi: STAKER, functionName: "stakeWithPermit", data }), {
+        abi: STAKER,
+        functionName: "stakeWithPermit",
+        args: [],
+      });
+    for (const errorName of ["BelowMinDeposit", "CapExceeded", "BatchValueFull", "BatchFull", "EnforcedPause", "InsufficientOutput", "AmountTooSmall", "RouteInactive"] as const) {
+      expect(revertReason(reverted(encodeErrorResult({ abi: STAKER, errorName })))).toBe(errorName);
+    }
+    const tooLittle = concat(["0x08c379a0", encodeAbiParameters([{ type: "string" }], ["Too little received"])]);
+    expect(revertReason(reverted(tooLittle))).toBe("Too little received");
+    expect(revertReason(new HttpRequestError({ url: "https://mainnet.base.org", status: 429 }))).toBeUndefined();
   });
 
   it("a wallet that can't sign a permit at all (not a refusal) uses approve and stake", async () => {

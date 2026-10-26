@@ -5,6 +5,7 @@ import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, U
 import type { DepositOp, OpState } from "./oplog";
 import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao } from "./units";
+import { formatUsdShort } from "../format";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
 export interface FlowCall {
@@ -119,11 +120,43 @@ export function isRevert(e: unknown): boolean {
 const permitCall = (owner: Address, d: Deployment, value: bigint, p: PermitSignature): FlowCall =>
   call("permit", TOKENS.usdc, ERC20, "permit", [owner, stakerOf(d), value, p.deadline, p.v, p.r, p.s]);
 
+/** The reason a call reverted, as Base answered it: a custom error's name (when the call's ABI lists it)
+ * or a revert string, like Uniswap's "Too little received". Undefined when there is none to read. */
+export function revertReason(e: unknown): string | undefined {
+  const err = e as { name?: string; data?: { errorName?: string }; reason?: string; cause?: unknown } | undefined;
+  if (err?.name === "ContractFunctionRevertedError") {
+    const name = err.data?.errorName;
+    return name && name !== "Error" ? name : err.reason;
+  }
+  return err?.cause !== undefined && err.cause !== e ? revertReason(err.cause) : undefined;
+}
+
 const DECLINED_SIGNATURE =
   "You declined the signature in your wallet, so nothing was sent. Continue when you're ready: your wallet will then ask you to approve the USDC and to stake.";
 const WONT_GO_THROUGH =
   "This stake wouldn't go through on Base right now (usually because the price moved since your quote), so nothing was sent. Stake again at today's price.";
 const UNREACHABLE = "We couldn't reach Base just now. Nothing was sent. Continue to try again.";
+
+/** Reasons the staker or the front door gives, in plain words (contracts/src/CascadeStaker.sol and
+ * CascadeFrontDoor.sol); anything else keeps the general wording. */
+const BELOW_MIN = new Set(["BelowMinDeposit", "AmountTooSmall"]);
+const FULL = new Set(["CapExceeded", "BatchValueFull", "BatchFull"]);
+const PAUSED = new Set(["EnforcedPause", "RouteInactive"]);
+/** The staker's floor check, or the router's own ("Too little received", which some nodes answer
+ * with no data, only "execution reverted: Too little received"). */
+const priceMoved = (reason: string) => reason === "InsufficientOutput" || /too little received/i.test(reason);
+
+/** What the user reads when the pre-send check says a stake would revert. */
+export function stakeRefusal(reason: string | undefined, minUsd?: number): string {
+  if (reason === undefined) return WONT_GO_THROUGH;
+  if (BELOW_MIN.has(reason)) {
+    return `That's below the minimum stake${minUsd !== undefined ? ` of about ${formatUsdShort(minUsd)}` : ""}, so nothing was sent.`;
+  }
+  if (FULL.has(reason)) return "Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.";
+  if (PAUSED.has(reason)) return "Staking is paused right now, so nothing was sent. Try again later.";
+  if (priceMoved(reason)) return "The price moved since your quote, so this stake wouldn't go through and nothing was sent. Stake again at today's price.";
+  return WONT_GO_THROUGH;
+}
 
 export interface StakeV3Input {
   q: Pick<DepositQuote, "usdcIn" | "minTaoOut">;
@@ -134,6 +167,8 @@ export interface StakeV3Input {
   nonce: () => Promise<bigint>;
   /** ms since the epoch */
   now: number;
+  /** The smallest stake in dollars, as the form shows it; read only to explain a stake under it. */
+  minUsd?: () => Promise<number>;
 }
 
 /** v3: how this stake is paid for, as the calls to send. A plain key account signs one USDC permit and
@@ -160,16 +195,19 @@ export async function planStakeV3(port: WalletPort, x: StakeV3Input): Promise<Fl
   }
 
   const calls = stakeV3Calls(x.q, x.w, x.d, x.account, permit);
+  let stake: Simulation;
   let refused: boolean;
   try {
-    if (await port.simulate(calls[0])) return calls;
+    stake = await port.simulate(calls[0]);
+    if (stake.ok) return calls;
     // the stake would revert: because USDC refuses this permit, or because the stake itself can't go through
-    refused = !(await port.simulate(permitCall(x.account, x.d, x.q.usdcIn, permit)));
+    refused = !(await port.simulate(permitCall(x.account, x.d, x.q.usdcIn, permit))).ok;
   } catch {
     throw new FlowError(UNREACHABLE, "needs-you");
   }
   if (refused) return byApproval();
-  throw new FlowError(WONT_GO_THROUGH, "failed");
+  const minUsd = stake.revert !== undefined && BELOW_MIN.has(stake.revert) ? await x.minUsd?.().catch(() => undefined) : undefined;
+  throw new FlowError(stakeRefusal(stake.revert, minUsd), "failed");
 }
 
 /** Carrying on a v3 stake that stopped: by approval (a declined or refused permit is never asked for
@@ -355,9 +393,15 @@ export interface WalletPort {
   hasCode(account: Address): Promise<boolean>;
   /** Asks the wallet to sign a USDC permit, split into v, r, s; rejects if the user declines. */
   signPermit(typedData: PermitTypedData): Promise<{ v: number; r: Hex; s: Hex }>;
-  /** Runs `call` from the account on Base without sending it: false if it would revert. Throws when
-   * Base can't be asked. */
-  simulate(call: FlowCall): Promise<boolean>;
+  /** Runs `call` from the account on Base without sending it: not ok if it would revert, with the
+   * reason when Base gives one. Throws when Base can't be asked. */
+  simulate(call: FlowCall): Promise<Simulation>;
+}
+
+/** A pre-send check: whether the call would go through and, when not, why (see `revertReason`). */
+export interface Simulation {
+  ok: boolean;
+  revert?: string;
 }
 
 /** Where a flow keeps its progress: the operation log entry it belongs to. */

@@ -30,6 +30,7 @@ import {
   planResumeStakeV3,
   planStakeV3,
   retryPatch,
+  revertReason,
   runFlow,
   sellTaoCalls,
   splitSignature,
@@ -103,10 +104,11 @@ export function wagmiPort(config: Config, account: Address, reader: PublicClient
     async simulate(c: FlowCall) {
       try {
         await reader.simulateContract({ account, address: c.to, abi: c.abi, functionName: c.functionName, args: c.args, value: c.value } as never);
-        return true;
+        return { ok: true };
       } catch (e) {
-        if (isRevert(e)) return false;
-        throw e;
+        if (!isRevert(e)) throw e;
+        const revert = revertReason(e);
+        return { ok: false, ...(revert !== undefined ? { revert } : {}) };
       }
     },
   };
@@ -213,7 +215,15 @@ export function useFlows(account: string | null) {
         await send(op.id, async (wallet) => {
           const w = await data.getBalances(a);
           if (!v3) return stakeCalls(q, w, d(), a);
-          return planStakeV3(wallet, { q, w, d: d(), account: a, nonce: () => readPermitNonce(data.clients, a), now: Date.now() });
+          return planStakeV3(wallet, {
+            q,
+            w,
+            d: d(),
+            account: a,
+            nonce: () => readPermitNonce(data.clients, a),
+            now: Date.now(),
+            minUsd: () => data.getLimits().then((l) => l.minUsd),
+          });
         });
         return op.id;
       }),

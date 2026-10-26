@@ -22,6 +22,7 @@ import {
   type FlowCall,
   isRevert,
   permitTypedData,
+  planResumeStakeV3,
   planStakeV3,
   resumeStakeV3Calls,
   splitSignature,
@@ -552,5 +553,50 @@ describe("resumeStakeV3Calls", () => {
 
   it("needs the floor recorded on the stake", () => {
     expect(() => resumeStakeV3Calls({ ...op, minTaoOut: undefined }, none, D3, ME, NOW)).toThrow(/no recorded minimum/);
+  });
+});
+
+describe("carrying on a v3 stake the chain may already show", () => {
+  const op = { usdcIn: q3.usdcIn, minTaoOut: q3.minTaoOut, hashes: {} as Partial<Record<string, Hex>>, callsId: undefined as string | undefined };
+  const resume = (over: Partial<Parameters<typeof planResumeStakeV3>[0]>) =>
+    planResumeStakeV3({ op, w: none, d: D3, account: ME, now: NOW, findStake: async () => null, adopt: vi.fn(), ...over });
+
+  it("adopts a stake that already went through as this one's, and sends nothing", async () => {
+    const t = tracker();
+    const calls = await resume({ findStake: async () => H(61), adopt: (h) => t.store.setHash("stake", h) });
+    expect(t.hashes.stake).toBe(H(61));
+    expect(calls.map((c) => c.key)).toEqual(["stake"]);
+    const p = port({ canBatch: vi.fn(async () => true) });
+    await runFlow(p, t.store as never, calls);
+    expect(p.send).not.toHaveBeenCalled();
+    expect(p.sendBatch).not.toHaveBeenCalled();
+    expect(p.wait).toHaveBeenCalledWith(H(61));
+    expect(t.states.at(-1)).toBe("sent");
+  });
+
+  it("sends nothing when it can't check, and says so", async () => {
+    const adopt = vi.fn();
+    const err = await resume({ findStake: async () => Promise.reject(new Error("HTTP request failed. URL: https://base-rpc.publicnode.com")), adopt }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect((err as FlowError).message).toBe("We couldn't check whether your stake already went through. Try again in a moment.");
+    expect(adopt).not.toHaveBeenCalled();
+  });
+
+  it("carries on by approval, as before, when the chain shows no such stake", async () => {
+    const adopt = vi.fn();
+    const calls = await resume({ findStake: async () => null, adopt });
+    expect(calls.map((c) => c.functionName)).toEqual(["approve", "stake"]);
+    expect(calls[1].args).toEqual([ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE]);
+    expect(adopt).not.toHaveBeenCalled();
+  });
+
+  it("doesn't search when the stake's hash or its wallet batch is recorded (those are only waited for)", async () => {
+    const findStake = vi.fn(async () => H(61));
+    expect((await resume({ op: { ...op, hashes: { stake: H(5) } }, findStake })).map((c) => c.key)).toEqual(["stake"]);
+    expect((await resume({ op: { ...op, callsId: "batch-1" }, findStake })).map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+    expect(findStake).not.toHaveBeenCalled();
   });
 });

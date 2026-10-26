@@ -17,6 +17,7 @@ import {
 } from "wagmi/actions";
 import { isV3 } from "./config";
 import { useCascadeData } from "./context";
+import { findStakeTx } from "./facts";
 import {
   cancelCall,
   claimCalls,
@@ -26,8 +27,8 @@ import {
   FlowError,
   type FlowStore,
   isRevert,
+  planResumeStakeV3,
   planStakeV3,
-  resumeStakeV3Calls,
   retryPatch,
   runFlow,
   sellTaoCalls,
@@ -161,14 +162,14 @@ export function useFlows(account: string | null) {
   /** Sends `calls` for the operation `id`, marked as running in this tab while it does. A read that
    * fails before sending leaves the operation waiting for the user, not stuck as "running"; a stop of
    * our own before sending (a declined signature, a stake that can't go through) keeps its words. */
-  async function send(id: string, build: (wallet: WalletPort) => Promise<FlowCall[]>) {
+  async function send(id: string, build: (wallet: WalletPort, store: FlowStore) => Promise<FlowCall[]>) {
     const store = opStore(data.opLog, a, id);
     const wallet = port();
     data.opLog.markActive(id);
     try {
       let calls: FlowCall[];
       try {
-        calls = await build(wallet);
+        calls = await build(wallet, store);
       } catch (e) {
         if (e instanceof FlowError) store.setState(e.state, e.message);
         else store.setState("needs-you", "We couldn't read your wallet just now. Continue to try again.");
@@ -217,15 +218,33 @@ export function useFlows(account: string | null) {
       }),
 
     /** Carries on a stake that stopped, skipping whatever the chain shows already happened. A v3 stake
-     * carries on by approval at the floor it was quoted with. */
+     * whose transaction the chain already shows is adopted, not sent again; otherwise it carries on by
+     * approval at the floor it was quoted with. */
     resumeStake: (id: string) =>
       flow("stake", async () => {
         const stored = data.opLog.get(a, id) as DepositOp;
         const patch = stored.v === 3 ? {} : retryPatch(stored);
         if (Object.keys(patch).length > 0) data.opLog.update(a, id, patch as Partial<Operation>);
-        await send(id, async () => {
+        await send(id, async (_wallet, store) => {
           const op = data.opLog.get(a, id) as DepositOp;
-          if (op.v === 3) return resumeStakeV3Calls(op, await data.getBalances(a), d(), a, Date.now());
+          if (op.v === 3) {
+            // stakes other records of this browser already own are never adopted for this one
+            const owned = new Set(
+              data.opLog
+                .list(a)
+                .filter((o): o is DepositOp => o.kind === "deposit" && o.id !== id)
+                .flatMap((o) => Object.values(o.hashes).filter((h): h is Hex => !!h)),
+            );
+            return planResumeStakeV3({
+              op,
+              w: await data.getBalances(a),
+              d: d(),
+              account: a,
+              now: Date.now(),
+              findStake: () => findStakeTx(data.clients, d(), { account: a, usdcIn: op.usdcIn, createdAtMs: op.createdAt, nowMs: Date.now(), skip: owned }),
+              adopt: (hash) => store.setHash("stake", hash),
+            });
+          }
           const [w, fd] = await Promise.all([data.getBalances(a), readFrontDoor(data.clients, d(), a)]);
           const calls = op.usdcIn === 0n ? depositTaoCalls(op.targetTao, w, d()) : stakeCalls(op, w, d(), a);
           return stillToSend(calls, op, { walletTao: w.tao, depositOf: fd.depositOf });

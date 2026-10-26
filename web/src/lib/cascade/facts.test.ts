@@ -1,8 +1,8 @@
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
-import { ADAPTER, ERC20, FRONT_DOOR, VAULT } from "./abi";
+import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { depositFacts, newScan, scanVault, withdrawalFacts } from "./facts";
+import { depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
 
@@ -389,3 +389,77 @@ describe("v3 deposit facts (one stake through CascadeStaker)", () => {
   });
 });
 
+describe("finding a v3 stake that went through before its hash was recorded", () => {
+  const STAKER_AT = getAddress("0x00000000000000000000000000000000005a4e12");
+  const D3: Deployment = { ...D, staker: STAKER_AT, oracle: getAddress("0x000000000000000000000000000000000000041e") };
+  const OTHER = getAddress("0x000000000000000000000000000000000000b0b0");
+  const HEAD = 10_000_000n;
+  const NOW = 1_800_000_000_000;
+  const staked = (payer: Hex, usdcIn: bigint, block: bigint, tx: Hex) =>
+    log(
+      STAKER_AT,
+      encodeEventTopics({ abi: STAKER, eventName: "Staked", args: { payer, beneficiary: payer } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256, uint256, uint256"), [usdcIn, 79_925n, 77_700_000_000_000_000n]),
+      block,
+      tx,
+    );
+
+  /** Base's logs RPC: eth_blockNumber (successive answers from `heads`) and topic-filtered eth_getLogs. */
+  function logsRpc(opts: { logs?: ReturnType<typeof staked>[]; heads?: bigint[]; fail?: boolean; baseHead?: bigint }) {
+    const windows: [bigint, bigint][] = [];
+    const asked: unknown[] = [];
+    let headCalls = 0;
+    const baseLogs = {
+      request: async ({ method, params }: { method: string; params?: { address: string; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }[] }) => {
+        if (method === "eth_blockNumber") return `0x${(opts.heads?.[headCalls++] ?? HEAD).toString(16)}`;
+        if (method !== "eth_getLogs") throw new Error(`unexpected ${method}`);
+        if (opts.fail) throw new Error("HTTP request failed. URL: https://base-rpc.publicnode.com Status: 503");
+        const q = params![0];
+        const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+        windows.push([from, to]);
+        asked.push({ address: q.address, topics: q.topics });
+        return (opts.logs ?? []).filter((l) => l.blockNumber >= from && l.blockNumber <= to);
+      },
+    };
+    const base = { getBlockNumber: async () => opts.baseHead ?? HEAD };
+    return { clients: { base, baseLogs } as never, windows, asked };
+  }
+  // made two hours ago: 3,600 Base blocks
+  const find = (rpc: ReturnType<typeof logsRpc>, over: Partial<Parameters<typeof findStakeTx>[2]> = {}) =>
+    findStakeTx(rpc.clients, D3, { account: ME, usdcIn: 20_000_000n, createdAtMs: NOW - 7_200_000, nowMs: NOW, skip: new Set(), ...over });
+
+  it("finds the account's own stake of this amount since the record was made, in windows of at most 2,000 blocks", async () => {
+    const rpc = logsRpc({ logs: [staked(ME, 20_000_000n, HEAD - 100n, H(51))] });
+    expect(await find(rpc)).toBe(H(51));
+    for (const [from, to] of rpc.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
+    // two hours of 2-second blocks back from the head, and a little earlier in case the timing is off
+    expect(rpc.windows[0][0]).toBeLessThan(HEAD - 3_600n);
+    expect(rpc.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 3_600n - 600n);
+    expect(rpc.windows.at(-1)![1]).toBe(HEAD);
+    // only the staker's logs, paid by and for the account
+    expect(rpc.asked[0]).toEqual({
+      address: STAKER_AT,
+      topics: encodeEventTopics({ abi: STAKER, eventName: "Staked", args: { payer: ME, beneficiary: ME } }),
+    });
+  });
+
+  it("ignores a stake of a different amount, another account's, and one another record already owns", async () => {
+    const logs = [staked(ME, 19_000_000n, HEAD - 300n, H(52)), staked(OTHER, 20_000_000n, HEAD - 200n, H(53)), staked(ME, 20_000_000n, HEAD - 100n, H(54))];
+    expect(await find(logsRpc({ logs }), { skip: new Set([H(54)]) })).toBeNull();
+    expect(await find(logsRpc({ logs: [staked(ME, 19_000_000n, HEAD - 300n, H(52))] }))).toBeNull();
+  });
+
+  it("throws, never answering 'not found', when the logs can't be read or the server is behind", async () => {
+    await expect(find(logsRpc({ fail: true }))).rejects.toThrow();
+    // the head first, then every answer from a server stuck before the first window
+    const behind = HEAD - 10_000n;
+    await expect(find(logsRpc({ heads: [HEAD, behind, behind, behind, behind, behind] }))).rejects.toThrow();
+  });
+
+  it("searches up to Base's own head, so a logs server that is behind can't answer 'not found' for the newest blocks", async () => {
+    // Base is 50 blocks ahead of everything the logs server says; the stake landed in those blocks
+    const rpc = logsRpc({ baseHead: HEAD + 50n, logs: [staked(ME, 20_000_000n, HEAD + 10n, H(55))] });
+    await expect(find(rpc)).rejects.toThrow();
+    expect(rpc.windows.at(-1)![1]).toBe(HEAD + 50n);
+  });
+});

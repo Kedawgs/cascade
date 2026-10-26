@@ -188,6 +188,39 @@ export function resumeStakeV3Calls(
   return op.hashes.stake && !op.callsId ? calls.filter((c) => c.key === "stake") : calls;
 }
 
+const UNCHECKED = "We couldn't check whether your stake already went through. Try again in a moment.";
+
+/** Carrying on a v3 stake, first making sure it didn't already go through. Unless its stake hash or its
+ * wallet batch is recorded (those are only waited for), the chain is searched (`findStake`) for this
+ * account's stake of this amount: one found is adopted as this stake's (`adopt`) and only waited for,
+ * so nothing is sent; none found carries on as `resumeStakeV3Calls` does. A search that can't be
+ * completed sends nothing. */
+export async function planResumeStakeV3(x: {
+  op: Pick<DepositOp, "usdcIn" | "minTaoOut" | "hashes" | "callsId">;
+  w: Balances;
+  d: Deployment;
+  account: Address;
+  now: number;
+  /** The stake transaction the chain shows for this record, or null; throws when it can't tell. */
+  findStake: () => Promise<Hex | null>;
+  adopt: (hash: Hex) => void;
+}): Promise<FlowCall[]> {
+  let hashes = x.op.hashes;
+  if (!hashes.stake && !x.op.callsId) {
+    let found: Hex | null;
+    try {
+      found = await x.findStake();
+    } catch {
+      throw new FlowError(UNCHECKED, "needs-you");
+    }
+    if (found) {
+      x.adopt(found);
+      hashes = { ...hashes, stake: found };
+    }
+  }
+  return resumeStakeV3Calls({ ...x.op, hashes }, x.w, x.d, x.account, x.now);
+}
+
 /** TAO already in the wallet into the front door: an exact approval, then the deposit, in whole rao. */
 export function depositTaoCalls(taoWei: bigint, w: Balances, d: Deployment): FlowCall[] {
   const amount = floorRao(taoWei);

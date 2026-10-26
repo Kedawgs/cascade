@@ -33,6 +33,7 @@ export const STAKER = parseAbi([
   "function stakeWithPermit(address beneficiary, uint256 usdcIn, uint256 minTaoOut, uint8 routeId, uint256 deadline, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s) returns (uint256)",
   "function swapFeeBps() view returns (uint16)",
   "function depositFeeUsdc() view returns (uint256)",
+  "event Staked(address indexed payer, address indexed beneficiary, uint256 usdcIn, uint256 fees, uint256 taoDeposited)",
 ]);
 
 export const VAULT = parseAbi([

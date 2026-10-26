@@ -12,6 +12,8 @@ export const bittensor = defineChain({
 
 export interface Clients {
   base: PublicClient;
+  /** Base log reads only (RPC.baseLogs: mainnet.base.org refuses eth_getLogs), in windows of at most 2,000 blocks. */
+  baseLogs: PublicClient;
   bittensor: PublicClient;
 }
 
@@ -20,6 +22,7 @@ export function createClients(): Clients {
   const transport = (url: string) => http(url, { batch: { wait: 50 }, retryCount: 4, retryDelay: 1_500 });
   return {
     base: createPublicClient({ chain: base, transport: transport(RPC.base), batch: { multicall: { wait: 50 } } }) as PublicClient,
+    baseLogs: createPublicClient({ chain: base, transport: transport(RPC.baseLogs) }) as PublicClient,
     bittensor: createPublicClient({
       chain: bittensor,
       transport: transport(RPC.bittensor),

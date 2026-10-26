@@ -1,6 +1,6 @@
-import { type Address, type Hex, parseEventLogs } from "viem";
+import { type Address, encodeEventTopics, type Hex, parseEventLogs, toHex } from "viem";
 import { FRESH_TRIES, freshTip, StaleChainError } from "./fresh";
-import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, VAULT } from "./abi";
+import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, STAKER, VAULT } from "./abi";
 import type { Clients } from "./chain";
 import { type Deployment, explorer, OFFRAMP, TOKENS } from "./config";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
@@ -261,6 +261,69 @@ async function claimResult(c: Pick<Clients, "base">, k: ClaimOp): Promise<Withdr
   }
   // the claim went through; a swap that stopped (not one still running) leaves the TAO in the wallet
   return k.state === "failed" || k.state === "needs-you" ? { ...base, keptTao: false, swapFailed: true } : undefined;
+}
+
+/** Base log windows on RPC.baseLogs: at most 2,000 blocks. */
+const BASE_LOG_WINDOW = 2_000n;
+/** Base makes a block every 2 seconds. */
+const BASE_BLOCK_MS = 2_000;
+/** How far before a record's creation a search for its stake starts: 5 minutes of blocks. */
+const STAKE_SEARCH_MARGIN = 150n;
+
+/** One window of Base logs, taken only from a server that has reached the window's end: the logs and
+ * the server's head travel in one request (see windowLogs), so "no logs" from a server that is behind
+ * is never taken for none. */
+async function baseWindowLogs(c: Pick<Clients, "baseLogs">, filter: { address: Address; topics: (Hex | Hex[] | null)[] }, from: bigint, to: bigint): Promise<RawLog[]> {
+  for (let i = 0; i < FRESH_TRIES; i++) {
+    const [raw, head] = await Promise.all([
+      c.baseLogs.request({ method: "eth_getLogs", params: [{ ...filter, fromBlock: toHex(from), toBlock: toHex(to) }] } as never) as Promise<unknown>,
+      c.baseLogs.request({ method: "eth_blockNumber" }),
+    ]);
+    if (BigInt(head as string) >= to) return raw as RawLog[];
+  }
+  throw new Error("Base's log server is behind right now");
+}
+
+/** The transaction of a v3 stake the account paid for itself (payer and beneficiary both the account)
+ * of exactly `usdcIn`, mined since the record was made (a little earlier, for timing), that no other
+ * record (`skip`) owns: the stake a reload lost the hash of. Null if there is none; throws when the
+ * logs can't be read, which must never be taken for "none". */
+export async function findStakeTx(
+  c: Pick<Clients, "base" | "baseLogs">,
+  d: Deployment,
+  s: { account: Address; usdcIn: bigint; createdAtMs: number; nowMs: number; skip: ReadonlySet<string> },
+): Promise<Hex | null> {
+  if (!d.staker) return null;
+  const staker = d.staker;
+  // up to the newer of two servers' heads: a logs server that is behind then fails its window check
+  // instead of answering "none" for blocks it hasn't seen
+  const [logsHead, baseHead] = await Promise.all([
+    c.baseLogs.request({ method: "eth_blockNumber" }).then((h) => BigInt(h as string)),
+    c.base.getBlockNumber(),
+  ]);
+  const head = logsHead > baseHead ? logsHead : baseHead;
+  // the device clock made both times, so their difference is the time since the record, whatever the clock says
+  const back = BigInt(Math.ceil(Math.max(0, s.nowMs - s.createdAtMs) / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
+  const start = head > back ? head - back : 0n;
+  const topics = encodeEventTopics({ abi: STAKER, eventName: "Staked", args: { payer: s.account, beneficiary: s.account } });
+  const skip = new Set([...s.skip].map((h) => h.toLowerCase()));
+  for (let from = start; from <= head; from += BASE_LOG_WINDOW) {
+    const to = from + BASE_LOG_WINDOW - 1n < head ? from + BASE_LOG_WINDOW - 1n : head;
+    const raw = await baseWindowLogs(c, { address: staker, topics }, from, to);
+    const hit = parseEventLogs({ abi: STAKER, logs: raw as never, eventName: "Staked", strict: false }).find(
+      (l) =>
+        same(l.address, staker) &&
+        !!l.args.payer &&
+        same(l.args.payer, s.account) &&
+        !!l.args.beneficiary &&
+        same(l.args.beneficiary, s.account) &&
+        l.args.usdcIn === s.usdcIn &&
+        !!l.transactionHash &&
+        !skip.has(l.transactionHash.toLowerCase()),
+    );
+    if (hit) return hit.transactionHash as Hex;
+  }
+  return null;
 }
 
 /** The account's deposits as the vault recorded them, with when they arrived and whether staking followed. */

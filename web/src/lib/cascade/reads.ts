@@ -2,7 +2,7 @@ import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiPara
 import { freshTip } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
 import type { Clients } from "./chain";
-import { type Deployment, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
+import { type Deployment, isV3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import { RAO, toDisplay } from "./units";
 
 const ZERO: Address = "0x0000000000000000000000000000000000000000";
@@ -105,6 +105,41 @@ export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, ac
     payoutDelay: Number(payoutDelay),
     nominatorMinWei: nominatorMin * RAO,
   };
+}
+
+export interface PendingRewards {
+  /** Root dividends the whole vault has earned and not yet collected (wei). */
+  wei: bigint;
+  /** The share Cascade keeps, in basis points (0 on v2, which has no cut). */
+  cutBps: number;
+}
+
+/** What the vault has earned but not collected yet; undefined when any read fails (unknown, not zero). */
+export async function readPendingRewards(
+  c: Pick<Clients, "bittensor">,
+  d: Deployment,
+  stakeHotkey: Hex,
+): Promise<PendingRewards | undefined> {
+  const v = { address: d.vault, abi: VAULT } as const;
+  try {
+    const [coldkey, cut] = await c.bittensor.multicall({
+      allowFailure: false,
+      contracts: [
+        { ...v, functionName: "coldkey" },
+        // v2 has no cut, so there is nothing to ask
+        isV3(d) ? { ...v, functionName: "rewardCutBps" } : { ...v, functionName: "totalSupply" },
+      ],
+    });
+    const wei = await c.bittensor.readContract({
+      address: STAKING_ADDRESS,
+      abi: STAKING,
+      functionName: "getUnclaimedRootTaoByHotkey",
+      args: [coldkey as Hex, stakeHotkey],
+    });
+    return { wei, cutBps: isV3(d) ? Number(cut) : 0 };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface WalletState {

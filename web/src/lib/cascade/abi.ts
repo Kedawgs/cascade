@@ -46,6 +46,7 @@ export const VAULT = parseAbi([
   "function stakeHotkey() view returns (bytes32)",
   "function payoutDelay() view returns (uint64)",
   "function rewardCutBps() view returns (uint16)",
+  "function coldkey() view returns (bytes32)",
   "event BatchDelivered(bytes32 indexed key, uint64 indexed sourceChain, address indexed frontDoor, uint64 batchId, uint256 amount)",
   "event Deposited(bytes32 indexed key, address indexed user, uint256 assets, uint256 shares)",
   "event DepositBounced(bytes32 indexed key, address indexed user, uint256 assets)",
@@ -57,7 +58,10 @@ export const VAULT = parseAbi([
   "event PayoutChunkSent(bytes32 indexed key, uint32 chunk, uint32 taken, uint256 gross, uint256 net, uint256 fee)",
 ]);
 
-export const STAKING = parseAbi(["function getNominatorMinRequiredStake() view returns (uint256)"]);
+export const STAKING = parseAbi([
+  "function getNominatorMinRequiredStake() view returns (uint256)",
+  "function getUnclaimedRootTaoByHotkey(bytes32 coldkey, bytes32 hotkey) view returns (uint256)",
+]);
 export const STAKING_ADDRESS = "0x0000000000000000000000000000000000000805" as const;
 
 export const ADAPTER = parseAbi([

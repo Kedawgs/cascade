@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
-import { readFrontDoor, readVault, readWallet, taoPriceUsd } from "./reads";
+import { readFrontDoor, readPendingRewards, readVault, readWallet, taoPriceUsd } from "./reads";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -113,5 +113,23 @@ describe("reads", () => {
   it("prices TAO from what selling 0.01 TAO would pay, in dollars", async () => {
     const base = fake({ quoteExactInput: () => [2_515_000n, [], [], 0n] });
     expect(await taoPriceUsd({ base: base.client })).toBeCloseTo(251.5, 6);
+  });
+});
+
+describe("readPendingRewards", () => {
+  const hotkey = `0x${"58".repeat(32)}` as const;
+  it("asks the staking precompile with the vault's own coldkey and hotkey", async () => {
+    const bit = fake({
+      coldkey: `0x${"11".repeat(32)}`,
+      rewardCutBps: 1000,
+      totalSupply: 0n,
+      getUnclaimedRootTaoByHotkey: (a: unknown[]) => (a[0] === `0x${"11".repeat(32)}` && a[1] === hotkey ? 5n : 0n),
+    });
+    const r = await readPendingRewards({ bittensor: bit.client }, D, hotkey);
+    expect(r?.wei).toBe(5n);
+  });
+  it("is undefined when a read fails", async () => {
+    const bit = fake({ coldkey: `0x${"11".repeat(32)}`, rewardCutBps: 1000, totalSupply: 0n, getUnclaimedRootTaoByHotkey: () => { throw new Error("boom"); } });
+    expect(await readPendingRewards({ bittensor: bit.client }, D, hotkey)).toBeUndefined();
   });
 });

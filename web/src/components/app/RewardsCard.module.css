@@ -51,3 +51,9 @@
     padding-right: 18px;
   }
 }
+
+.waiting {
+  padding: 16px 24px 0;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}

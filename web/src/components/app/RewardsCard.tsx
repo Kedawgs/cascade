@@ -40,6 +40,7 @@ function RewardsForAccount({ account }: { account: string }) {
   if (!position.data || !rewards.data) return <Loading />;
 
   const earned = position.data.rewardsEarnedTao;
+  const waiting = position.data.pendingRewardsTao;
   const recent = [...rewards.data].reverse().slice(0, SHOW_DAYS);
 
   return (
@@ -59,6 +60,12 @@ function RewardsForAccount({ account }: { account: string }) {
         </div>
         <Price />
       </div>
+      {waiting !== undefined && (
+        <p className={styles.waiting}>
+          Earned, not yet collected: {formatTao(waiting, 6)} TAO ({formatUsd(waiting * position.data.taoPriceUsd)}). Cascade collects rewards for everyone, at
+          least monthly, and adds them to your balance.
+        </p>
+      )}
       {recent.length === 0 ? (
         <p className={styles.empty}>{EMPTY}</p>
       ) : (

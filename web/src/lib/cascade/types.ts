@@ -30,6 +30,8 @@ export interface Position {
   pendingTao: number;
   /** Value now + TAO taken out − TAO put in; undefined until there is a deposit. */
   rewardsEarnedTao?: number;
+  /** Rewards earned but not yet collected, this account's share after Cascade's cut; undefined when unknown. */
+  pendingRewardsTao?: number;
   /** Average price paid across this browser's deposits, or null. */
   avgEntryPriceUsd: number | null;
 }

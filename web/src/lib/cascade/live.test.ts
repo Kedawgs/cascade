@@ -56,6 +56,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     readFrontDoor: async () => fd,
     readVault: async () => vault,
     readWallet: async () => wallet,
+    readPendingRewards: async () => undefined,
     taoPriceUsd: async () => 250,
     ethPriceUsd: async () => 4000,
     readStakerFees: async () => ({ swapFeeBps: 15n, depositFeeUsdc: 50_000n }),
@@ -67,6 +68,30 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     ...over,
   };
 }
+
+describe("rewards waiting", () => {
+  it("is the account's share of the vault's uncollected rewards, less the 10% cut", async () => {
+    const half = { ...vault, shares: vault.totalSupply / 2n };
+    const data = createLiveCascadeData(
+      D,
+      deps({ readVault: async () => half, readPendingRewards: async () => ({ wei: 4n * 10n ** 15n, cutBps: 1000 }) }),
+    );
+    // 0.004 TAO x 1/2 x 0.9
+    expect((await data.getPosition(ME)).pendingRewardsTao).toBeCloseTo(0.0018, 12);
+  });
+
+  it("stays undefined when the read fails, and the rest of the position is intact", async () => {
+    const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => undefined }));
+    const p = await data.getPosition(ME);
+    expect(p.pendingRewardsTao).toBeUndefined();
+    expect(p.taoBalance).toBeCloseTo(0.08, 12);
+  });
+
+  it("is zero, not unknown, when the chain says nothing is waiting", async () => {
+    const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => ({ wei: 0n, cutBps: 1000 }) }));
+    expect((await data.getPosition(ME)).pendingRewardsTao).toBe(0);
+  });
+});
 
 describe("live data", () => {
   it("includes what is waiting to be claimed on Base with the wallet's balances", async () => {

@@ -21,6 +21,7 @@ export interface LiveDeps {
   readFrontDoor: typeof reads.readFrontDoor;
   readVault: typeof reads.readVault;
   readWallet: typeof reads.readWallet;
+  readPendingRewards: typeof reads.readPendingRewards;
   taoPriceUsd: typeof reads.taoPriceUsd;
   ethPriceUsd: typeof reads.ethPriceUsd;
   readStakerFees: typeof reads.readStakerFees;
@@ -66,6 +67,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     readFrontDoor: reads.readFrontDoor,
     readVault: reads.readVault,
     readWallet: reads.readWallet,
+    readPendingRewards: reads.readPendingRewards,
     taoPriceUsd: reads.taoPriceUsd,
     ethPriceUsd: reads.ethPriceUsd,
     readStakerFees: reads.readStakerFees,
@@ -116,6 +118,12 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   async function getPosition(account: string): Promise<Position> {
     const a = account as Address;
     const [fd, v, price, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), deps.taoPriceUsd(c), scanFor(a)]);
+    // a failed read leaves it unknown; it never shows as zero
+    const waiting = await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined);
+    const pendingRewardsTao =
+      waiting && v.totalSupply > 0n
+        ? toDisplay((waiting.wei * v.shares * BigInt(10_000 - waiting.cutBps)) / (v.totalSupply * 10_000n), 18)
+        : undefined;
     const ops = deps.opLog.list(a);
     const withdrawals = ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal" && o.state !== "failed");
     const deposits = ops.filter((o): o is DepositOp => o.kind === "deposit");
@@ -138,6 +146,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       usdValue: toDisplay(taoWei, 18) * price,
       taoPriceUsd: price,
       pendingTao: toDisplay(pendingWei, 18),
+      ...(pendingRewardsTao !== undefined ? { pendingRewardsTao } : {}),
       ...(putIn > 0n ? { rewardsEarnedTao: toDisplay(earned > 0n ? earned : 0n, 18) } : {}),
       avgEntryPriceUsd:
         pricedTao > 0n

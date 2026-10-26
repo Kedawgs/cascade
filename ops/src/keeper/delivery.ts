@@ -5,7 +5,8 @@ import type { CallRequest } from "../types.ts";
 
 /** Circle's CCTP domain for Base: the only delivery destination the front door accepts. */
 export const DESTINATION_BASE = 6;
-/** The keeper's own minimum is the quote less 0.5%: room for the price to move before the sale lands. */
+/** The keeper's own minimum is the quote less 0.5% (room for the price to move before the sale lands),
+ * raised to the contract's floors when the quote sits within 0.5% of them. */
 const KEEPER_ROOM_BPS = 50n;
 
 export const TWAP_UNAVAILABLE = "the pool's price history doesn't reach 30 minutes; the user can claim by hand";
@@ -45,9 +46,10 @@ export function preferenceProblem(pref: DeliveryPref | null, now: number): strin
   return null;
 }
 
-/** Deliver only with a live Base preference and a quote that clears every floor deliver applies (the
- * user's, rounded up, and the TWAP's less the slippage allowance) by at least 0.5%; the keeper's own
- * minimum is then the quote less 0.5%. */
+/** Deliver only with a live Base preference and a quote (already net of the staker's fee) at or above
+ * every floor deliver applies: the user's, rounded up, and the TWAP's less the slippage allowance, each
+ * computed as the front door does. The keeper's own minimum is the quote less 0.5%, never below either
+ * floor, so the keeper never narrows the window the contract allows. */
 export function deliveryDecision(i: DeliveryInput): { deliver: boolean; keeperMinOut?: bigint; reason: string } {
   if (i.claimable === 0n) return no("nothing is claimable");
   const problem = preferenceProblem(i.pref, i.now);
@@ -56,14 +58,15 @@ export function deliveryDecision(i: DeliveryInput): { deliver: boolean; keeperMi
   const pref = i.pref as DeliveryPref;
   const userFloor = (i.claimable * pref.minUsdcPerTao + 10n ** 18n - 1n) / 10n ** 18n;
   const twapFloor = (i.twapUsdc * BigInt(10_000 - i.slippageBps)) / 10_000n;
-  const keeperMinOut = (i.quoteUsdc * (10_000n - KEEPER_ROOM_BPS)) / 10_000n;
   const quote = `the quote, ${usdc(i.quoteUsdc)} after the swap fee,`;
-  if (keeperMinOut < userFloor) return no(`${quote} doesn't clear the user's floor of ${usdc(userFloor)} by 0.5%; it waits for a later round`);
-  if (keeperMinOut < twapFloor) return no(`${quote} doesn't clear the 30-minute TWAP floor of ${usdc(twapFloor)} by 0.5%; it waits for a later round`);
+  if (i.quoteUsdc < userFloor) return no(`${quote} is below the user's floor of ${usdc(userFloor)}; it waits for a later round`);
+  if (i.quoteUsdc < twapFloor) return no(`${quote} is below the 30-minute TWAP floor of ${usdc(twapFloor)}; it waits for a later round`);
+  const roomy = (i.quoteUsdc * (10_000n - KEEPER_ROOM_BPS)) / 10_000n;
+  const keeperMinOut = [roomy, userFloor, twapFloor].reduce((a, b) => (a > b ? a : b));
   return {
     deliver: true,
     keeperMinOut,
-    reason: `${quote} clears the user's floor (${usdc(userFloor)}) and the TWAP floor (${usdc(twapFloor)}) by at least 0.5%`,
+    reason: `${quote} clears the user's floor (${usdc(userFloor)}) and the TWAP floor (${usdc(twapFloor)})`,
   };
 }
 

@@ -48,9 +48,41 @@ describe("deliveryDecision", () => {
     expect(twap).toEqual({ deliver: false, reason: expect.stringMatching(/30-minute TWAP floor of 246\.25 USDC/) });
   });
 
-  it("needs 0.5% of room above every floor", () => {
-    // 246.25 × 1.004: above the TWAP floor, but less than 0.5% above it
-    expect(deliveryDecision({ ...input, quoteUsdc: 247_235_000n }).deliver).toBe(false);
+  it("delivers a quote 1.2% below the TWAP value, with the keeper's minimum at the TWAP floor (the contract's whole window)", () => {
+    // 250 × (1 - 1.2%) = 247: clears the TWAP floor (246.25) by less than 0.5%, as deliver allows
+    const d = deliveryDecision({ ...input, quoteUsdc: 247_000_000n });
+    expect(d.deliver).toBe(true);
+    expect(d.keeperMinOut).toBe(246_250_000n);
+    // a quote exactly at the TWAP floor still delivers, at that floor
+    expect(deliveryDecision({ ...input, quoteUsdc: 246_250_000n })).toMatchObject({ deliver: true, keeperMinOut: 246_250_000n });
+    // one unit below waits, with the floor named
+    expect(deliveryDecision({ ...input, quoteUsdc: 246_249_999n })).toEqual({ deliver: false, reason: expect.stringMatching(/30-minute TWAP floor of 246\.25 USDC/) });
+  });
+
+  it("delivers a quote just above the user's floor with the keeper's minimum at that floor, rounded up as on chain", () => {
+    // 1/3 TAO at 249 USDC a TAO: 83 USDC rounded up to the unit; the TWAP floor is 82.08… USDC
+    const third = TAO / 3n;
+    const userFloor = (third * 249_000_000n + TAO - 1n) / TAO;
+    const at = { ...input, claimable: third, pref: { ...pref, minUsdcPerTao: 249_000_000n }, twapUsdc: 83_333_333n };
+    expect(deliveryDecision({ ...at, quoteUsdc: userFloor })).toMatchObject({ deliver: true, keeperMinOut: userFloor });
+    expect(deliveryDecision({ ...at, quoteUsdc: userFloor - 1n })).toEqual({ deliver: false, reason: expect.stringMatching(/user's floor of 83 USDC/) });
+  });
+
+  it("never sends a keeper's minimum below either floor or above the quote", () => {
+    for (let quote = 230_000_000n; quote <= 260_000_000n; quote += 250_000n) {
+      for (const minUsdcPerTao of [100_000_000n, 240_000_000n, 247_500_000n]) {
+        const i = { ...input, pref: { ...pref, minUsdcPerTao }, quoteUsdc: quote };
+        const userFloor = minUsdcPerTao; // 1 TAO
+        const twapFloor = 246_250_000n;
+        const d = deliveryDecision(i);
+        expect(d.deliver).toBe(quote >= userFloor && quote >= twapFloor);
+        if (!d.deliver) continue;
+        expect(d.keeperMinOut).toBeGreaterThanOrEqual(userFloor);
+        expect(d.keeperMinOut).toBeGreaterThanOrEqual(twapFloor);
+        expect(d.keeperMinOut).toBeGreaterThanOrEqual((quote * 9950n) / 10000n);
+        expect(d.keeperMinOut).toBeLessThanOrEqual(quote);
+      }
+    }
   });
 
   it("delivers a quote 1% above every floor with the keeper's minimum at quote × 0.995", () => {

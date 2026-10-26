@@ -19,6 +19,8 @@ export interface DepositFacts {
   openBatchId: bigint;
   /** When the open batch can close. */
   closesAt: Date;
+  /** closesAt is an upper bound (the deployment has a max wait; the keeper may close sooner). */
+  closesBy?: boolean;
   /** The deposit's batch is still the open one. */
   stillOpen: boolean;
   delivered?: { at: Date; txHash: Hex; messageId?: Hex; outcome: "deposited" | "bounced" | "skipped" };
@@ -49,6 +51,7 @@ export interface WithdrawalFacts {
   watchUrl?: string;
   openBatchId: bigint;
   closesAt: Date;
+  closesBy?: boolean;
   stillOpen: boolean;
   delivered?: { at: Date; txHash: Hex; outcome: "redeemed" | "skipped" | "deferred"; taoWei?: bigint };
   payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date };
@@ -128,10 +131,19 @@ function onTheBridge(f: { now: Date; sentAt?: Date }, since?: { verb: string; at
 }
 
 /** Before the batch closes: its time, or that it can close now once that time has passed. */
-const waitForClose = (f: { closesAt: Date; now: Date }) =>
+const dayLabel = (at: Date, now: Date): string => {
+  const days = Math.round((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000);
+  if (days <= 0) return "";
+  return days === 1 ? " tomorrow" : ` on ${weekday.format(at)}`;
+};
+const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long" });
+
+const waitForClose = (f: { closesAt: Date; now: Date; closesBy?: boolean }) =>
   f.closesAt.getTime() <= f.now.getTime()
     ? "The batch can close now; it crosses as soon as it is sent"
-    : `Waits for the batch to close at ${hhmm(f.closesAt)}`;
+    : f.closesBy
+      ? `Waits for the batch to close, by about ${hhmm(f.closesAt)}${dayLabel(f.closesAt, f.now)}`
+      : `Waits for the batch to close at ${hhmm(f.closesAt)}`;
 
 function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "failed" | "needs_you" | "done" | "in_progress" {
   if (steps.some((s) => s.status === "failed")) return "failed";

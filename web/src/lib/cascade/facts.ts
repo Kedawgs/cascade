@@ -2,7 +2,7 @@ import { type Address, encodeEventTopics, type Hex, parseEventLogs, toHex } from
 import { FRESH_TRIES, freshTip, StaleChainError } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, STAKER, VAULT } from "./abi";
 import type { Clients } from "./chain";
-import { type Deployment, explorer, isV3, OFFRAMP, TOKENS } from "./config";
+import { batchCloseAt, type Deployment, explorer, isV3, OFFRAMP, TOKENS } from "./config";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import { type FrontDoorState, quoteSell, readStakerFees, type VaultState } from "./reads";
 import type { DepositFacts, WithdrawalFacts } from "./trail";
@@ -127,7 +127,7 @@ function requestIn(r: Receipt | null, eventName: "DepositRequested" | "RedeemReq
 const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address): bigint | undefined =>
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
-const closesAt = (fd: FrontDoorState) => new Date((fd.openStart + fd.batchInterval) * 1000);
+const closesAt = (fd: FrontDoorState, d: Deployment) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
 
 export async function depositFacts(
   c: Pick<Clients, "base" | "bittensor">,
@@ -160,7 +160,8 @@ export async function depositFacts(
     depositedAt: new Date(op.createdAt),
     watchUrl: explorer.ccipAddress(d.baseAdapter),
     openBatchId: ctx.fd.openBatchId,
-    closesAt: closesAt(ctx.fd),
+    closesAt: closesAt(ctx.fd, d),
+    ...(d.batchMaxWaitS ? { closesBy: true as const } : {}),
     stillOpen: batchId === undefined || batchId === ctx.fd.openBatchId,
     waitingForMinimum: false,
     // the batch before the open one left Base when the open one started
@@ -209,7 +210,8 @@ export async function withdrawalFacts(
     watchUrl: explorer.ccipAddress(d.baseAdapter),
     ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
     openBatchId: ctx.fd.openBatchId,
-    closesAt: closesAt(ctx.fd),
+    closesAt: closesAt(ctx.fd, d),
+    ...(d.batchMaxWaitS ? { closesBy: true as const } : {}),
     stillOpen: batchId === undefined || batchId === ctx.fd.openBatchId,
     claimable: ctx.fd.claimable,
     payoutDelay: ctx.vault.payoutDelay,

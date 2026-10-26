@@ -1,6 +1,6 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
-import { DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
+import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
 import { chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
@@ -116,7 +116,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   };
 
   /** When the open batch can be expected to close: a launch-cadence deployment may wait up to its max wait. */
-  const closesAt = (fd: reads.FrontDoorState) => new Date((fd.openStart + Math.max(fd.batchInterval, d.batchMaxWaitS ?? 0)) * 1000);
+  const closesAt = (fd: reads.FrontDoorState) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
   /** Sent, its batch closed, not yet arrived in the vault. */
   const onTheBridge = (op: { batchId?: bigint }, fd: reads.FrontDoorState, scan: VaultScan) =>
     op.batchId !== undefined && op.batchId < fd.openBatchId && !scan.delivered.has(String(op.batchId));

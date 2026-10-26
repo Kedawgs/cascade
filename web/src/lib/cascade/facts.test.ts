@@ -203,6 +203,18 @@ describe("facts", () => {
     expect(f.facts.waitingForMinimum).toBe(true);
   });
 
+  it("closes at the interval, or by the deployment's max wait (flagged as an upper bound)", async () => {
+    const c = chains({ baseReceipts: { [H(1)]: { status: "success", logs: [] }, [H(2)]: { status: "success", logs: [] } } });
+    const scan = newScan(D);
+    const op = { kind: "deposit", id: "x", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: { swap: H(1), deposit: H(2) }, state: "sent" } as const;
+    const plain = await depositFacts(c.clients, D, op, { fd, vault, scan });
+    expect(plain.facts.closesAt.getTime()).toBe((fd.openStart + fd.batchInterval) * 1000);
+    expect(plain.facts.closesBy).toBeUndefined();
+    const L = await depositFacts(c.clients, { ...D, batchMaxWaitS: 86_400 }, op, { fd, vault, scan });
+    expect(L.facts.closesAt.getTime()).toBe((fd.openStart + 86_400) * 1000);
+    expect(L.facts.closesBy).toBe(true);
+  });
+
   it("reads a payout's bridge state from the Base OffRamp, without Base logs", async () => {
     const redeemedLog = log(
       D.vault,

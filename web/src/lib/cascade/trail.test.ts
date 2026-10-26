@@ -33,6 +33,17 @@ const base: DepositFacts = {
 
 const statuses = (r: { steps: { status: string }[] }) => r.steps.map((s) => s.status);
 
+describe("deposit trail with a max wait", () => {
+  it("words the close time as an upper bound, with the day when it is not today", () => {
+    const same = depositRecord(op, { ...base, closesBy: true });
+    expect(same.steps[2].detail).toMatch(/^Waits for the batch to close, by about 10:10 AM, then the bridge/);
+    expect(same.steps[2].detail).not.toMatch(/tomorrow/);
+    const next = depositRecord(op, { ...base, closesBy: true, now: new Date(2026, 9, 25, 10, 5), closesAt: new Date(2026, 9, 26, 14, 5) });
+    expect(next.steps[2].detail).toMatch(/close, by about 2:05 PM tomorrow, then/);
+    expect(depositRecord(op, base).steps[2].detail).toMatch(/^Waits for the batch to close at /);
+  });
+});
+
 describe("deposit trail", () => {
   it("waits in the open batch, saying when it closes", () => {
     const r = depositRecord(op, base);

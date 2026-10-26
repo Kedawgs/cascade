@@ -17,6 +17,10 @@ export interface Deployment {
   batchMaxWaitS?: number;
 }
 
+/** When the open batch can be expected to close, by the latest: its interval, or the deployment's max wait if longer. */
+export const batchCloseAt = (openStart: number, batchInterval: number, batchMaxWaitS?: number): Date =>
+  new Date((openStart + Math.max(batchInterval, batchMaxWaitS ?? 0)) * 1000);
+
 /** A v3 deployment has both the staker and the oracle; otherwise the site keeps the v2 flows. */
 export const isV3 = (d: Deployment): boolean => Boolean(d.staker && d.oracle);
 

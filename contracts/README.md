@@ -618,8 +618,11 @@ floor, and the 30-minute TWAP value less 1.5% (owner-set, hard maximum 3%).
 holding about $200k. Holding such a pool off-price for 30 minutes costs more than the margin on
 capped deliveries (the 1.5% edge), so it is not worth attacking, but nothing on chain checks pool
 depth. If liquidity thins a lot, the owner lowers the delivery slippage or swaps the oracle.
-Deliveries pause when the spot price is more than about 1.35% below the 30-minute average and resume
-as the average catches up; users can claim by hand meanwhile.
+A delivery reverts unless the swap can pay at least the 30-minute average less
+`maxDeliverySlippageBps` (1.5%). The keeper then skips it and retries later, and the user can always
+claim by hand. Observation, not a guarantee: on a Base fork in October 2026 (pool fees about 0.35%,
+the 0.15% swap fee, pools near $200k) deliveries went through only while spot was within roughly
+1.35% of the average.
 
 **The reward cut.** At each reward claim the vault mints shares worth 10% of the claimed rewards
 (owner-set, hard maximum 20%) to the treasury, at the price from before the claim, so the cut never
@@ -632,12 +635,12 @@ insolvency line); that claim then vests normally for everyone.
   1% of assets), because the treasury's new shares also share in that claim's 7-day vesting. Say
   "about 10%" in copy.
 - Unclaimed rewards sit outside the share price until collected. Collection is expensive (one claim
-  is about 53M gas), so the keeper claims only when the rewards waiting are at least 25 times the
+  is about 53M gas; the vault requires `claimGasRequired` = 55M and the ops tool sends a 57M limit), so the keeper claims only when the rewards waiting are at least 25 times the
   claim's cost, or monthly while a claim costs under $20 and does not exceed what is waiting.
   Someone who leaves before a collection misses up to about a month of yield. Anyone can still
   claim by hand.
 
-**Validator.** The v3 test deployment stakes with tao.bot (0% take, the largest, cheapest estimated
+**Validator.** The v3 test deployment stakes with tao.bot (0% take, the largest, among the cheapest estimated
 claim; see `reports/Cascade v3 root validators.md`). Moving to another validator later is
 `setStakeHotkey` plus `moveStake`.
 
@@ -941,7 +944,7 @@ Added by the final whole-branch review (2026-10-24):
 Added for v3 (2026-10-26):
 
 31. Measure a real claim on Bittensor testnet 945 (gas used and TAO cost) and compare candidate
-    validators' basket sizes; set `OPS_CLAIM_COST_TAO` from the measurement. The 53M gas limit and
+    validators' basket sizes; set `OPS_CLAIM_COST_TAO` from the measurement. The 53M gas figure (the vault requires 55M, ops sends 57M) and
     the tao.bot cost estimate (about 0.045 TAO) come from research, not from a run.
 32. Check both pools' observation cardinality before launch (Uniswap TAO/WETH 0.3% and WETH/USDC
     0.05%): the oracle needs history covering 30 minutes, so if a pool's cardinality is too low,

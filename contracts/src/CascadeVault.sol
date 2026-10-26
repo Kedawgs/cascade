@@ -25,6 +25,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint256 public constant MAX_HOTKEYS = 4;
     uint64 public constant KEEPER_FALLBACK = 7 days;
     uint64 public constant REWARD_VESTING = 7 days;
+    uint16 public constant MAX_REWARD_CUT_BPS = 2_000;
     IStaking public constant STAKING = IStaking(ISTAKING_ADDRESS);
     IAddressMapping public constant ADDRESS_MAPPING = IAddressMapping(ADDRESS_MAPPING_ADDRESS);
 
@@ -50,6 +51,10 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint256 public pendingPayouts;
     uint256 public vestingAmount;
     uint64 public vestingStart;
+
+    // reward cut: the share of each claim minted to the treasury as csTAO
+    address public treasury;
+    uint16 public rewardCutBps;
 
     // front doors and direct users
     mapping(bytes32 => bool) public frontDoorActive;
@@ -149,6 +154,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     /// `deltaRao` is the vault's measured position increase from the claim (stake across the set plus
     /// liquid balance), in rao, floored.
     event RewardsClaimed(bytes32 indexed hotkey, uint256 deltaRao);
+    event RewardCutSet(address treasury, uint16 bps);
+    /// `assets` is the cut, 18-decimal; `shares` its csTAO at the price before the claim.
+    event RewardCutMinted(address indexed treasury, uint256 assets, uint256 shares);
     event FrontDoorProposed(uint64 indexed chain, address indexed addr, uint64 readyAt);
     event FrontDoorActivated(uint64 indexed chain, address indexed addr);
     event FrontDoorProposalCancelled(uint64 indexed chain, address indexed addr);
@@ -402,7 +410,10 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     /// Claims `hotkey`'s root rewards and vests the measured increase of the whole position (stake
     /// across the set plus liquid balance, wherever the chain credits the claim) over REWARD_VESTING,
-    /// on top of what is still unvested. An empty claim leaves the schedule as it is. Keeper only, or
+    /// on top of what is still unvested. The reward cut (rewardCutBps of the increase, floored) does not
+    /// vest: it is minted to the treasury as csTAO at the price before the claim, rounded down, so the
+    /// price is unchanged; below half the launch price it is skipped and vests with the rest. An empty
+    /// claim leaves the schedule as it is. Keeper only, or
     /// anyone once KEEPER_FALLBACK has passed since this hotkey's last claim (or since it was first
     /// added). Works while paused. The chain can refuse a claim by burning the forwarded gas; the
     /// revert bubbles up and nothing changes.
@@ -417,9 +428,27 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         STAKING.claimRootWithHotkey(hotkey);
         uint256 delta = _sub0(_positionWei(), before);
         lastClaimAt[hotkey] = uint64(block.timestamp);
-        // restarting on 0 would re-spread the unvested remainder over a fresh REWARD_VESTING
-        if (delta != 0) {
-            vestingAmount = unvestedRewards() + delta;
+        uint256 fee = delta * rewardCutBps / 10_000;
+        if (fee != 0) {
+            // the price before this claim: totalAssets() already counts delta, the old schedule does not
+            uint256 assetsBefore = _sub0(totalAssets(), delta);
+            uint256 supply = totalSupply();
+            if (assetsBefore * 2_000_000 < supply) {
+                // Below half the launch price (as for deposits) the cut is skipped and vests with the
+                // rest: minted at a price reading a loss, it could take most of the vault once the
+                // loss is repaired (e.g. stake a hotkey swap moved outside the set). S == 0 never trips it.
+                fee = 0;
+            } else {
+                address t = treasury;
+                uint256 shares = CascadeMath.sharesForDeposit(fee, assetsBefore, supply);
+                _mint(t, shares);
+                emit RewardCutMinted(t, fee, shares);
+            }
+        }
+        // The cut does not vest, so the mint leaves the price as it was. Restarting on 0 would re-spread
+        // the unvested remainder over a fresh REWARD_VESTING.
+        if (delta - fee != 0) {
+            vestingAmount = unvestedRewards() + (delta - fee);
             vestingStart = uint64(block.timestamp);
         }
         emit RewardsClaimed(hotkey, delta / RAO);
@@ -657,6 +686,16 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         if (delay > 7 days) revert InvalidParameter();
         payoutDelay = delay;
         emit LimitSet("payoutDelay", delay, 0);
+    }
+
+    /// The treasury and its cut of each claim, in bps, at most MAX_REWARD_CUT_BPS. A zero treasury
+    /// is allowed only with a zero cut.
+    function setRewardCut(address treasury_, uint16 bps) external onlyOwner {
+        if (bps > MAX_REWARD_CUT_BPS) revert FeeTooHigh();
+        if (treasury_ == address(0) && bps != 0) revert ZeroAddress();
+        treasury = treasury_;
+        rewardCutBps = bps;
+        emit RewardCutSet(treasury_, bps);
     }
 
     function setClaimGasRequired(uint256 gasRequired) external onlyOwner {

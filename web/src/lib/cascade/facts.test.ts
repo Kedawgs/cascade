@@ -408,9 +408,10 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     log(D.frontDoor, encodeEventTopics({ abi: FRONT_DOOR, eventName, args } as never) as Hex[], data, block, tx, index);
   const landedFor = (user: Hex, block: bigint, index = 0) =>
     fdLog("PayoutReceived", { batchKey: KEY, user }, encodeAbiParameters(parseAbiParameters("uint32, uint256"), [0, TAO_BACK]), block, H(60), index);
-  const deliveredUsdc = (usdcOut: bigint, block: bigint, tx: Hex) =>
-    fdLog("Delivered", { user: ME }, encodeAbiParameters(parseAbiParameters("uint256, uint256"), [TAO_BACK, usdcOut]), block, tx);
-  const claimedBy = (block: bigint, tx: Hex) => fdLog("Claimed", { user: ME }, encodeAbiParameters(parseAbiParameters("uint256"), [TAO_BACK]), block, tx);
+  const deliveredUsdc = (usdcOut: bigint, block: bigint, tx: Hex, taoIn = TAO_BACK) =>
+    fdLog("Delivered", { user: ME }, encodeAbiParameters(parseAbiParameters("uint256, uint256"), [taoIn, usdcOut]), block, tx);
+  const claimedBy = (block: bigint, tx: Hex, amount = TAO_BACK) =>
+    fdLog("Claimed", { user: ME }, encodeAbiParameters(parseAbiParameters("uint256"), [amount]), block, tx);
 
   const redeemedLog = log(
     D.vault,
@@ -519,6 +520,8 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     const f = await factsOf(b);
     expect(f.payout?.state).toBe(2);
     expect(f.usdcDelivered).toEqual({ hash: H(62), at: baseTime(HEAD - 3_990n), usdcOut: 2_431_337n });
+    expect(f.credited).toEqual({ at: baseTime(HEAD - 4_000n), taoWei: TAO_BACK });
+    expect(f.traceFailed).toBeUndefined();
     for (const [from, to] of b.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
     // from a little before the payout left Bittensor (three hours of 2-second Base blocks back from the head)
     expect(b.windows[0][0]).toBeLessThan(HEAD - 5_400n);
@@ -536,14 +539,57 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), claimedBy(HEAD - 3_995n, H(63)), deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62))] });
     const f = await factsOf(b);
     expect(f.usdcDelivered).toBeUndefined();
-    expect(f.claimedOnChain).toEqual({ hash: H(63), at: baseTime(HEAD - 3_995n) });
+    expect(f.claimedOnChain).toEqual({ hash: H(63), at: baseTime(HEAD - 3_995n), taoClaimed: TAO_BACK });
   });
 
-  it("never shows an amount it couldn't read: a failed logs read leaves no receipt and the other facts stand", async () => {
+  it("marks a delivery or a claim that took more than this payout's credit as shared", async () => {
+    // a second payout landed before the keeper sold the first: one sale of both
+    const sold = await factsOf(backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), deliveredUsdc(4_862_674n, HEAD - 3_990n, H(62), 2n * TAO_BACK)] }));
+    expect(sold.usdcDelivered).toEqual({ hash: H(62), at: baseTime(HEAD - 3_990n), usdcOut: 4_862_674n, shared: true });
+    const taken = await factsOf(backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), claimedBy(HEAD - 3_995n, H(63), 2n * TAO_BACK)] }));
+    expect(taken.claimedOnChain).toEqual({ hash: H(63), at: baseTime(HEAD - 3_995n), taoClaimed: 2n * TAO_BACK, shared: true });
+  });
+
+  it("never shows an amount it couldn't read: a failed logs read leaves no receipt, says so, and the other facts stand", async () => {
     const f = await factsOf(backOnBase({ failLogs: true }));
     expect(f.usdcDelivered).toBeUndefined();
     expect(f.claimedOnChain).toBeUndefined();
+    expect(f.credited).toBeUndefined();
+    expect(f.traceFailed).toBe(true);
     expect(f.payout?.state).toBe(2);
+  });
+
+  it("still finds this payout's credit beside a settled claim from this browser, so the claim's amount is shown only if it was this payout's", async () => {
+    const claimedLog = log(
+      D.frontDoor,
+      encodeEventTopics({ abi: FRONT_DOOR, eventName: "Claimed", args: { user: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256"), [TAO_BACK]),
+      HEAD - 3_995n,
+      H(21),
+    );
+    const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), claimedBy(HEAD - 3_995n, H(21))] });
+    (b.clients as unknown as { base: { getTransactionReceipt: unknown } }).base.getTransactionReceipt = async ({ hash }: { hash: Hex }) => {
+      if (hash === H(3)) return { status: "success", blockNumber: 40n, logs: [] };
+      if (hash === H(21)) return { status: "success", logs: [claimedLog] };
+      throw new Error("receipt not found");
+    };
+    const claim: ClaimOp = {
+      id: "k",
+      kind: "claim",
+      account: ME,
+      createdAt: 10,
+      amount: TAO_BACK,
+      keepTao: true,
+      minUsdc: 0n,
+      hashes: { claim: H(21) },
+      withdrawalIds: ["w3"],
+      state: "sent",
+    };
+    const f = await factsOf(b, TAO_BACK, D3, [claim]);
+    expect(f.claimed).toMatchObject({ hash: H(21), taoClaimed: TAO_BACK, keptTao: true });
+    expect(f.credited?.taoWei).toBe(TAO_BACK);
+    // nothing else is needed for a payout this browser's claim settled
+    expect(b.reads).not.toContain("deliveryOf");
   });
 
   it("reads up to Base's own head, so a logs server that is behind can't hide a recent delivery, and later reads only new blocks", async () => {

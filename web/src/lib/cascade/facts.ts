@@ -242,14 +242,16 @@ export async function withdrawalFacts(
   const claim = ctx.claims.find((k) => k.withdrawalIds?.includes(op.id) && k.hashes.claim);
   if (claim) facts.claimed = await claimResult(c, claim);
   if (claim && !facts.claimed && (claim.state === "running" || claim.state === "sent")) facts.claimPending = true;
-  // v3: once the payout is back on Base, what took it (a claim from this browser already says)
-  if (isV3(d) && hit && facts.payout?.state === 2 && !facts.claimed) await deliveryFacts(c, d, op, ctx, hit.key, facts);
+  // v3: once the payout is back on Base, what took it, and how much of it was this payout's
+  if (isV3(d) && hit && facts.payout?.state === 2) await deliveryFacts(c, d, op, ctx, hit.key, facts);
   return { batchId, facts };
 }
 
-/** A v3 payout back on Base: the delivery that sold it (its receipt is the only source of the USDC
- * received) or a claim by hand that took it; while neither has, the account's delivery preference and
- * what the TAO would sell for now, so the trail can say whether delivery can still happen. */
+/** A v3 payout back on Base: what it credited the account, then the delivery that sold it (its receipt
+ * is the only source of the USDC received) or a claim by hand that took it, each marked shared when it
+ * took more than this payout's credit (one sale or claim of several payouts). While neither has, and no
+ * claim from this browser settled it, the account's delivery preference and what the TAO would sell for
+ * now, so the trail can say whether delivery can still happen. */
 async function deliveryFacts(
   c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
   d: Deployment,
@@ -260,7 +262,10 @@ async function deliveryFacts(
 ): Promise<void> {
   // the batch's first chunk left Bittensor first: no part of the payout can land on Base before it
   const first = ctx.scan.payouts.get(key)?.[0];
-  if (!first) return;
+  if (!first) {
+    facts.traceFailed = true;
+    return;
+  }
   const id = key.toLowerCase();
   const t = ctx.scan.onBase.get(id) ?? {};
   ctx.scan.onBase.set(id, t);
@@ -268,10 +273,18 @@ async function deliveryFacts(
     await tracePayout(c, d, { account: op.account, batchKey: key, sentAt: await blockTime(c, ctx.scan, first.block) }, t);
   } catch {
     // unreadable right now: no receipt and no amount, never a guessed one; what was read is kept
+    if (!t.end) facts.traceFailed = true;
   }
-  if (t.end?.kind === "delivered") facts.usdcDelivered = { hash: t.end.hash, at: t.end.at, usdcOut: t.end.usdcOut };
-  else if (t.end) facts.claimedOnChain = { hash: t.end.hash, at: t.end.at };
-  if (t.end || ctx.fd.claimable === 0n) return;
+  const credit = t.landed?.amount;
+  if (t.landed) facts.credited = { at: t.landed.at, taoWei: t.landed.amount };
+  if (t.end?.kind === "delivered") {
+    const { hash, at, usdcOut, taoIn } = t.end;
+    facts.usdcDelivered = { hash, at, usdcOut, ...(taoIn !== credit ? { shared: true as const } : {}) };
+  } else if (t.end) {
+    const { hash, at, amount } = t.end;
+    facts.claimedOnChain = { hash, at, taoClaimed: amount, ...(amount !== credit ? { shared: true as const } : {}) };
+  }
+  if (t.end || facts.claimed || ctx.fd.claimable === 0n) return;
   try {
     const [minUsdcPerTao, deadline] = (await c.base.readContract({
       address: d.frontDoor,
@@ -351,13 +364,16 @@ const later = (a: LogPos, b: LogPos) => a.block > b.block || (a.block === b.bloc
 export interface BasePayout {
   /** The first Base block not read yet; unset before the first read. */
   next?: bigint;
-  /** Where the account's share was credited (its PayoutReceived). */
-  landed?: LogPos;
-  /** What took it first after that: the keeper's delivery, or a claim by hand. */
-  end?: { kind: "delivered"; hash: Hex; at: Date; usdcOut: bigint } | { kind: "claimed"; hash: Hex; at: Date };
+  /** Where, when and how much the account's share was credited (its PayoutReceived). */
+  landed?: LogPos & { at: Date; amount: bigint };
+  /** What took it first after that: the keeper's delivery (the TAO it sold, the USDC it paid), or a
+   * claim by hand (the TAO it took). Either may have taken other payouts' credit too. */
+  end?: { kind: "delivered"; hash: Hex; at: Date; taoIn: bigint; usdcOut: bigint } | { kind: "claimed"; hash: Hex; at: Date; amount: bigint };
   /** A read under way: another caller waits for it rather than reading the same blocks again. */
   reading?: Promise<void>;
 }
+
+const baseBlockTime = async (c: Pick<Clients, "base">, block: bigint) => new Date(Number((await c.base.getBlock({ blockNumber: block })).timestamp) * 1000);
 
 const frontDoorTopic = (eventName: "PayoutReceived" | "Delivered" | "Claimed") => encodeEventTopics({ abi: FRONT_DOOR, eventName } as never)[0] as Hex;
 
@@ -407,14 +423,18 @@ async function readPayout(c: Pick<Clients, "base" | "baseLogs">, d: Deployment, 
     for (const l of mine) {
       const at = posOf(l);
       if (!t.landed) {
-        if (l.eventName === "PayoutReceived" && same((l.args as { batchKey?: string }).batchKey ?? "0x", s.batchKey)) t.landed = at;
+        const args = l.args as { batchKey?: string; amount?: bigint };
+        if (l.eventName === "PayoutReceived" && same(args.batchKey ?? "0x", s.batchKey)) {
+          t.landed = { ...at, at: await baseBlockTime(c, at.block), amount: args.amount ?? 0n };
+        }
       } else if ((l.eventName === "Delivered" || l.eventName === "Claimed") && later(at, t.landed)) {
         const hash = l.transactionHash as Hex;
-        const when = new Date(Number((await c.base.getBlock({ blockNumber: at.block })).timestamp) * 1000);
+        const when = await baseBlockTime(c, at.block);
+        const args = l.args as { taoIn?: bigint; usdcOut?: bigint; amount?: bigint };
         t.end =
           l.eventName === "Delivered"
-            ? { kind: "delivered", hash, at: when, usdcOut: (l.args as { usdcOut: bigint }).usdcOut }
-            : { kind: "claimed", hash, at: when };
+            ? { kind: "delivered", hash, at: when, taoIn: args.taoIn ?? 0n, usdcOut: args.usdcOut ?? 0n }
+            : { kind: "claimed", hash, at: when, amount: args.amount ?? 0n };
         break;
       }
     }

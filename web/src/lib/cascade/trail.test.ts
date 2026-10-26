@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DepositOp, WithdrawalOp } from "./oplog";
-import { chainOnlyDeposit, type DepositFacts, depositRecord, type WithdrawalFacts, withdrawalRecord } from "./trail";
+import { chainOnlyDeposit, type DepositFacts, depositRecord, offersClaim, type WithdrawalFacts, withdrawalRecord } from "./trail";
 
 const ME = "0x000000000000000000000000000000000000A11c" as const;
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
@@ -379,9 +379,10 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
   const DEADLINE = Math.floor(T0.getTime() / 1000) + 604_800;
   const asked = { minUsdcPerTao: 245_000_000n, deadline: DEADLINE };
   const wop3: WithdrawalOp = { ...wop, delivery: asked };
-  const redeemed = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+  const CREDIT = 99n * 10n ** 14n;
+  const redeemed = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "redeemed" as const, taoWei: CREDIT };
   const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date("2026-10-25T11:40:00Z") };
-  // back on Base, nothing has taken it yet: 0.0099 TAO waits in the front door
+  // back on Base 25 minutes ago, nothing has taken it yet: 0.0099 TAO waits in the front door
   const back: WithdrawalFacts = {
     ...wbase,
     openBatchId: 6n,
@@ -389,15 +390,18 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     delivered: redeemed,
     payout,
     now: new Date("2026-10-25T12:10:00Z"),
-    claimable: 99n * 10n ** 14n,
+    claimable: CREDIT,
+    credited: { at: new Date("2026-10-25T11:45:00Z"), taoWei: CREDIT },
     preference: asked,
   };
-  const receipt = { hash: H(30), at: new Date("2026-10-25T11:45:00Z"), usdcOut: 2_431_337n };
+  const receipt = { hash: H(30), at: new Date("2026-10-25T11:50:00Z"), usdcOut: 2_431_337n };
+  const claimed = { hash: H(11), at: new Date(), taoClaimed: CREDIT, usdcOut: 2_450_000n, keptTao: false, swapFailed: false };
 
   it("waits for its payout to reach Base before anything can be delivered", () => {
-    const r = withdrawalRecord(wop3, { ...back, payout: { ...payout, state: 1 } });
+    const r = withdrawalRecord(wop3, { ...back, payout: { ...payout, state: 1 }, credited: undefined });
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
     expect(r.status).toBe("in_progress");
+    expect(offersClaim(r)).toBe(false);
   });
 
   it("shows 'USDC delivered' with the amount from the Delivered log and a link to its receipt", () => {
@@ -417,20 +421,46 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(r.steps[3].status).toBe("done");
   });
 
+  it("shows one delivery that sold two payouts together without a per-unstake amount: its receipt and the total", () => {
+    const r = withdrawalRecord(wop3, { ...back, claimable: 0n, usdcDelivered: { ...receipt, usdcOut: 4_862_674n, shared: true } });
+    expect(r.status).toBe("paid");
+    expect(r.steps[3]).toMatchObject({ title: "USDC delivered", status: "done", detail: "Delivered together with your other payout: 4.86 USDC in all" });
+    expect(r.steps[3].txUrl).toContain(H(30));
+    expect(r.received).toBeUndefined();
+    expect(r.usdcAmount).toBeUndefined();
+  });
+
   it("says USDC is on its way automatically while the delivery preference is live", () => {
     const r = withdrawalRecord(wop3, back);
     expect(statuses(r)).toEqual(["done", "done", "done", "active"]);
     expect(r.steps[3].detail).toBe("USDC is being delivered to your wallet automatically");
     expect(r.status).toBe("in_progress");
+    expect(offersClaim(r)).toBe(false);
     expect(r.received).toBeUndefined();
     // the preference couldn't be read: the one this unstake asked for stands in
     expect(withdrawalRecord(wop3, { ...back, preference: undefined }).steps[3].status).toBe("active");
+  });
+
+  it("offers the claim as well once delivery is taking longer than usual: an hour after the payout landed", () => {
+    const slow = withdrawalRecord(wop3, { ...back, now: new Date("2026-10-25T12:46:00Z") });
+    expect(slow.steps[3]).toMatchObject({ title: "USDC to your wallet", status: "action" });
+    expect(slow.steps[3].detail).toBe(
+      "USDC is being delivered to your wallet automatically. It's taking longer than usual. You can keep waiting, or claim it as USDC now.",
+    );
+    expect(slow.status).toBe("ready");
+    expect(offersClaim(slow)).toBe(true);
+    expect(offersClaim(withdrawalRecord(wop3, { ...back, now: new Date("2026-10-25T12:44:00Z") }))).toBe(false);
+    // when it landed isn't known: the payout left Bittensor at 11:40, plus 30 minutes on the bridge, plus the hour
+    const unknown = { ...back, credited: undefined, traceFailed: true as const };
+    expect(offersClaim(withdrawalRecord(wop3, { ...unknown, now: new Date("2026-10-25T13:09:00Z") }))).toBe(false);
+    expect(offersClaim(withdrawalRecord(wop3, { ...unknown, now: new Date("2026-10-25T13:11:00Z") }))).toBe(true);
   });
 
   it("offers 'Claim as USDC' once the preference has expired, or when there is none", () => {
     const expired = withdrawalRecord(wop3, { ...back, preference: { ...asked, deadline: Math.floor(back.now.getTime() / 1000) - 1 } });
     expect(expired.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action" });
     expect(expired.status).toBe("ready");
+    expect(offersClaim(expired)).toBe(true);
     const none = withdrawalRecord(wop3, { ...back, preference: null });
     expect(none.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action", detail: "Your money is back on Base. Claim it as USDC" });
     expect(none.status).toBe("ready");
@@ -446,36 +476,71 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(over.steps[3].status).toBe("active");
   });
 
-  it("shows no amount when the Delivered log can't be read, with the status still right: nothing claimable and no claim made", () => {
-    const r = withdrawalRecord(wop3, { ...back, claimable: 0n });
-    expect(r.steps[3].status).toBe("done");
+  it("stays 'Claim as USDC' in progress while a claim from this browser settles, whatever is claimable", () => {
+    for (const claimable of [0n, CREDIT]) {
+      const r = withdrawalRecord(wop3, { ...back, claimable, preference: null, claimPending: true });
+      expect(r.steps[3]).toMatchObject({ title: "Claim as USDC", status: "active" });
+      expect(r.status).toBe("in_progress");
+      expect(offersClaim(r)).toBe(false);
+    }
+  });
+
+  it("shows no amount when the logs can't be read, with the status still right: nothing claimable and no claim made", () => {
+    const r = withdrawalRecord(wop3, { ...back, claimable: 0n, traceFailed: true });
+    expect(r.steps[3]).toMatchObject({ title: "Paid out", status: "done" });
     expect(r.steps[3].txUrl).toBeUndefined();
     expect(r.status).toBe("paid");
     expect(r.received).toBeUndefined();
     expect(r.usdcAmount).toBeUndefined();
-    // a claim from this browser still settling is not paid yet
-    const claiming = withdrawalRecord(wop3, { ...back, claimable: 0n, claimPending: true });
-    expect(claiming.status).toBe("in_progress");
-    expect(claiming.steps[3].status).toBe("active");
   });
 
-  it("shows a claim by hand from this browser as today, and one made elsewhere without an amount", () => {
-    const claimed = { hash: H(11), at: new Date(), taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, keptTao: false, swapFailed: false };
+  it("doesn't call it paid when the logs were read and show nothing taking it, or no credit for this account", () => {
+    // credited, and nothing after it: the empty balance is an older read, not a payment
+    const untaken = withdrawalRecord(wop3, { ...back, claimable: 0n });
+    expect(untaken.status).toBe("in_progress");
+    expect(untaken.steps[3].status).toBe("active");
+    // nothing credited to this account at all (too small to send after the bridge fee, say)
+    const none = withdrawalRecord(wop3, { ...back, claimable: 0n, credited: undefined });
+    expect(none.status).toBe("in_progress");
+    expect(none.steps[3].title).not.toBe("Paid out");
+  });
+
+  it("shows a claim by hand from this browser as today when it took exactly this payout", () => {
     const here = withdrawalRecord(wop3, { ...back, claimable: 0n, claimed });
     expect(here.status).toBe("paid");
     expect(here.steps[3]).toMatchObject({ title: "Claim as USDC", status: "done" });
     expect(here.received).toEqual({ usdc: 2.45 });
-    const elsewhere = withdrawalRecord(wop3, { ...back, claimable: 0n, claimedOnChain: { hash: H(31), at: new Date() } });
+  });
+
+  it("shows one hand claim that took two payouts without a per-unstake amount", () => {
+    const both = withdrawalRecord(wop3, { ...back, claimable: 0n, claimed: { ...claimed, taoClaimed: 2n * CREDIT, usdcOut: 4_900_000n } });
+    expect(both.status).toBe("paid");
+    expect(both.steps[3]).toMatchObject({ status: "done", detail: "Claimed together with your other payout: 4.90 USDC in all" });
+    expect(both.received).toBeUndefined();
+    expect(both.usdcAmount).toBeUndefined();
+    // what this payout was credited isn't known yet: no amount rather than one that may be shared
+    const unknown = withdrawalRecord(wop3, { ...back, claimable: 0n, credited: undefined, traceFailed: true, claimed });
+    expect(unknown.status).toBe("paid");
+    expect(unknown.received).toBeUndefined();
+  });
+
+  it("shows a claim made elsewhere without an amount, and says when it took other payouts too", () => {
+    const elsewhere = withdrawalRecord(wop3, { ...back, claimable: 0n, claimedOnChain: { hash: H(31), at: new Date(), taoClaimed: CREDIT } });
     expect(elsewhere.status).toBe("paid");
     expect(elsewhere.steps[3].txUrl).toContain(H(31));
     expect(elsewhere.received).toBeUndefined();
     expect(elsewhere.usdcAmount).toBeUndefined();
+    const both = withdrawalRecord(wop3, { ...back, claimable: 0n, claimedOnChain: { hash: H(31), at: new Date(), taoClaimed: 2n * CREDIT, shared: true } });
+    expect(both.steps[3].detail).toBe("Claimed together with your other payout: 0.0198 TAO in all");
   });
 
   it("leaves a v2 unstake as it was, whatever the delivery facts say", () => {
-    const r = withdrawalRecord(wop, { ...back, saleNowUsdc: 9_999_999n });
+    const r = withdrawalRecord(wop, { ...back, saleNowUsdc: 9_999_999n, now: new Date("2026-10-26T12:00:00Z") });
     expect(r.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action", detail: "Your money is back on Base. Claim it as USDC" });
     expect(r.status).toBe("ready");
+    expect(offersClaim(r)).toBe(true);
     expect(r.usdcAmount).toBe(2.5);
+    const paid = withdrawalRecord(wop, { ...back, claimable: 0n, claimed: { ...claimed, taoClaimed: 2n * CREDIT } });
+    expect(paid.received).toEqual({ usdc: 2.45 });
   });
 });

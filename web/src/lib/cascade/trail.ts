@@ -2,7 +2,7 @@ import type { Hex } from "viem";
 import { explorer } from "./config";
 import type { DepositOp, WithdrawalOp } from "./oplog";
 import type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRecord, WithdrawalStepKey } from "./records";
-import { formatDay, formatTao } from "../format";
+import { formatDay, formatTao, formatUsdc } from "../format";
 import { toDisplay } from "./units";
 
 /** What the chain says about one deposit (see facts.ts). */
@@ -60,10 +60,15 @@ export interface WithdrawalFacts {
   claimPending?: true;
   payoutDelay: number;
   // v3 only, once the payout is back on Base (all absent on v2):
-  /** The front door's Delivered event that sold this payout for USDC: the only source of the USDC received. */
-  usdcDelivered?: { hash: Hex; at: Date; usdcOut: bigint };
-  /** A Claimed event took the payout first, from a claim this browser has no record of. */
-  claimedOnChain?: { hash: Hex; at: Date };
+  /** This account's credit from the payout (its PayoutReceived): when it landed and the TAO credited. */
+  credited?: { at: Date; taoWei: bigint };
+  /** The Base logs couldn't be read just now: what isn't known from them is unknown, not absent. */
+  traceFailed?: true;
+  /** The front door's Delivered event that sold this payout for USDC: the only source of the USDC received.
+   * `shared` when it sold more than this payout's credit (other payouts with it): its USDC isn't this one's alone. */
+  usdcDelivered?: { hash: Hex; at: Date; usdcOut: bigint; shared?: true };
+  /** A Claimed event took the payout first, from a claim this browser has no record of (`shared` as above). */
+  claimedOnChain?: { hash: Hex; at: Date; taoClaimed: bigint; shared?: true };
   /** The account's delivery preference (`deliveryOf`): null when none is set, undefined when not read. */
   preference?: { minUsdcPerTao: bigint; deadline: number } | null;
   /** What everything claimable would sell for now, in USDC units, after the staker's swap fee. */
@@ -100,6 +105,11 @@ function waitingForMinimum(f: { vaultWei?: bigint; minimumWei?: bigint; incoming
     detail: `Waiting for the ${minTao} TAO minimum: Bittensor only stakes ${minTao} TAO or more.${sofar} Until then your TAO is safe in the vault and counted as yours, but not earning yet`,
   };
 }
+
+/** A payout's trip back to Base, at the slow end of its usual 20–30 minutes (when its landing isn't known). */
+const RETURN_MS = 30 * 60_000;
+/** How long a payout waits on Base for automatic delivery before the claim by hand is offered too. */
+const DELIVERY_PATIENCE_MS = 60 * 60_000;
 
 /** Chainlink's usual Base → Bittensor delivery time. */
 const BRIDGE_MS = 20 * 60_000;
@@ -326,8 +336,18 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   /** v3: delivery can't happen, so the claim by hand is offered. */
   let offered = false;
   const c = f.claimed;
+  // v3: a claim from this browser shows its amount only when it took exactly this payout's credit
+  const ownClaim = !auto || (c !== undefined && f.credited !== undefined && c.taoClaimed === f.credited.taoWei);
   if (sold) {
-    claim = { ...claim, title: "USDC delivered", status: "done", at: sold.at, txUrl: explorer.baseTx(sold.hash), txLabel: "View the receipt" };
+    claim = {
+      ...claim,
+      title: "USDC delivered",
+      status: "done",
+      at: sold.at,
+      txUrl: explorer.baseTx(sold.hash),
+      txLabel: "View the receipt",
+      ...(sold.shared ? { detail: `Delivered together with your other payout: ${formatUsdc(toDisplay(sold.usdcOut, 6))} USDC in all` } : {}),
+    };
     settled = true;
   } else if (c && c.swapFailed) {
     claim = {
@@ -339,7 +359,16 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       detail: "Claimed, but the swap back to USDC didn't go through: the TAO is in your wallet. Swap it from the Stake page",
     };
   } else if (c) {
-    claim = { ...claim, title: c.keptTao ? "Claimed, kept as TAO" : "Claim as USDC", status: "done", at: c.at, txUrl: explorer.baseTx(c.hash) };
+    const total = c.keptTao ? `${formatTao(toDisplay(c.taoClaimed, 18), 4)} TAO` : `${formatUsdc(toDisplay(c.usdcOut ?? 0n, 6))} USDC`;
+    claim = {
+      ...claim,
+      title: c.keptTao ? "Claimed, kept as TAO" : "Claim as USDC",
+      status: "done",
+      at: c.at,
+      txUrl: explorer.baseTx(c.hash),
+      // it took more than this payout: the total, not a share of it (an unknown credit says nothing)
+      ...(!ownClaim && f.credited ? { detail: `Claimed together with your other payout: ${total} in all` } : {}),
+    };
   } else if (auto && landed) {
     const v3 = deliveryStep(op, f, claim);
     claim = v3.step;
@@ -357,9 +386,12 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   else status = "in_progress";
 
   const nothingTaken = d !== undefined && (d.outcome === "skipped" || d.outcome === "deferred");
+  // only what was this unstake's alone: one sale or claim of several payouts shows its total in the step instead
   const received = sold
-    ? { usdc: toDisplay(sold.usdcOut, 6) }
-    : c && !c.swapFailed
+    ? sold.shared
+      ? undefined
+      : { usdc: toDisplay(sold.usdcOut, 6) }
+    : c && !c.swapFailed && ownClaim
       ? c.keptTao
         ? { keptTao: toDisplay(c.taoClaimed, 18) }
         : { usdc: toDisplay(c.usdcOut ?? 0n, 6) }
@@ -382,20 +414,41 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   };
 }
 
+/** Whether the record offers the claim by hand ("Claim as USDC"): on v2 once its payout is back on
+ * Base; on v3 only when automatic delivery can't happen or is taking longer than usual. The one test
+ * the screens use to show the claim button or banner. */
+export const offersClaim = (r: Pick<WithdrawalRecord, "status">): boolean => r.status === "ready";
+
 /** v3's last step once the payout is back on Base and no claim from this browser has settled it. */
 function deliveryStep(
   op: WithdrawalOp,
   f: WithdrawalFacts,
   step: TrailStep<WithdrawalStepKey>,
 ): { step: TrailStep<WithdrawalStepKey>; settled: boolean; offered: boolean } {
-  // the claim this browser sent went through and its swap is still settling
-  if (f.claimPending && (f.claimable === 0n || f.claimedOnChain)) return { step: { ...step, title: "Claim as USDC", status: "active" }, settled: false, offered: false };
+  const waiting = { settled: false, offered: false };
+  // a claim this browser sent hasn't settled: it is what takes this payout, whatever else is claimable
+  if (f.claimPending) return { step: { ...step, title: "Claim as USDC", status: "active" }, ...waiting };
   if (f.claimedOnChain) {
-    const { hash, at } = f.claimedOnChain;
-    return { step: { ...step, title: "Claimed", status: "done", at, txUrl: explorer.baseTx(hash) }, settled: true, offered: false };
+    const { hash, at, taoClaimed, shared } = f.claimedOnChain;
+    return {
+      step: {
+        ...step,
+        title: "Claimed",
+        status: "done",
+        at,
+        txUrl: explorer.baseTx(hash),
+        ...(shared ? { detail: `Claimed together with your other payout: ${formatTao(toDisplay(taoClaimed, 18), 4)} TAO in all` } : {}),
+      },
+      settled: true,
+      offered: false,
+    };
   }
-  // nothing claimable and no claim from here: it was delivered, but the receipt can't be read now
-  if (f.claimable === 0n) {
+  if (!f.traceFailed) {
+    // the logs were read: nothing credited to this account from this payout (too small to send after the
+    // bridge fee, say), or credited with nothing taking it while the balance read empty (an older read)
+    if (!f.credited || f.claimable === 0n) return { step: { ...step, status: "active" }, ...waiting };
+  } else if (f.claimable === 0n) {
+    // the logs can't be read, nothing is claimable and no claim from here: paid out, amount unknown
     return {
       step: { ...step, title: "Paid out", status: "done", detail: "Sent to your wallet. The receipt can't be read right now, so the amount isn't shown" },
       settled: true,
@@ -408,7 +461,15 @@ function deliveryStep(
   // the keeper sells everything claimable at once, and only at or above the minimum (rounded up, as the front door does)
   const floor = pref ? (f.claimable * pref.minUsdcPerTao + 10n ** 18n - 1n) / 10n ** 18n : 0n;
   const under = live && f.saleNowUsdc !== undefined && f.saleNowUsdc < floor;
-  if (live && !under) return { step: { ...step, status: "active", detail: "USDC is being delivered to your wallet automatically" }, settled: false, offered: false };
+  if (live && !under) {
+    // the keeper can skip for reasons this page can't see (the 30-minute price floor, a pause, not running):
+    // after an hour back on Base the claim by hand is offered too
+    const landedAt = f.credited?.at ?? (f.payout ? new Date(f.payout.at.getTime() + RETURN_MS) : undefined);
+    const slow = landedAt !== undefined && f.now.getTime() - landedAt.getTime() > DELIVERY_PATIENCE_MS;
+    const detail = "USDC is being delivered to your wallet automatically";
+    if (slow) return { step: { ...step, status: "action", detail: `${detail}. It's taking longer than usual. You can keep waiting, or claim it as USDC now.` }, settled: false, offered: true };
+    return { step: { ...step, status: "active", detail }, ...waiting };
+  }
   const until = pref ? formatDay(new Date(pref.deadline * 1000)) : "";
   const detail = under
     ? `The price is below your minimum, so it hasn't been sold for you yet. Claim it as USDC at today's price, or wait: it's still sold for you automatically if the price recovers by ${until}`

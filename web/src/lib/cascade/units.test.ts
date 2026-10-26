@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capFree, checkUnstake, floorRao, lessSlippage, sharesFor, taoFor, toDisplay } from "./units";
+import { capFree, ceilRao, checkUnstake, floorRao, lessSlippage, sharesFor, taoFor, toDisplay } from "./units";
 
 const TAO = 10n ** 18n;
 const milli = (n: bigint) => (n * TAO) / 1000n;
@@ -8,6 +8,13 @@ describe("units", () => {
   it("floors to whole rao and takes 0.5% slippage off", () => {
     expect(floorRao(1_234_567_891_234n)).toBe(1_234_000_000_000n);
     expect(lessSlippage(10_000n)).toBe(9_950n);
+  });
+
+  it("rounds up to whole rao", () => {
+    expect(ceilRao(1n)).toBe(10n ** 9n);
+    expect(ceilRao(10n ** 9n)).toBe(10n ** 9n);
+    expect(ceilRao(0n)).toBe(0n);
+    expect(ceilRao(1_234_567_891_234n)).toBe(1_235_000_000_000n);
   });
 
   it("converts TAO and shares exactly, one to one into an empty vault", () => {

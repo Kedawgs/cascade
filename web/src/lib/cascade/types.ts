@@ -74,6 +74,12 @@ export interface DepositQuote {
   feesUsd: number;
   closesAt: Date;
   etaMinutes: number;
+  /** The least TAO the swap may return (whole rao, rounded up); v2 has no such floor, so it equals targetTao. */
+  minTaoOut: bigint;
+  /** Cascade's flat and percentage fees in USDC units (zero on v2), and both in dollars. */
+  depositFeeUsdc: bigint;
+  swapFeeUsdc: bigint;
+  cascadeFeesUsd: number;
 }
 
 export interface WithdrawalQuote {
@@ -89,6 +95,9 @@ export interface WithdrawalQuote {
   taoPriceUsd: number;
   closesAt: Date;
   etaMinutes: number;
+  /** v3 delivery: the least USDC (units) per whole TAO the sale may pay, and its unix-second deadline. Zero on v2. */
+  minUsdcPerTao: bigint;
+  deliveryDeadline: number;
 }
 
 export interface Limits {

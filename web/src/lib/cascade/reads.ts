@@ -1,6 +1,6 @@
 import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters } from "viem";
 import { freshTip } from "./fresh";
-import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
+import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
 import type { Clients } from "./chain";
 import { type Deployment, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import { RAO, toDisplay } from "./units";
@@ -186,4 +186,23 @@ export async function quotePayoutFee(c: Pick<Clients, "bittensor">, d: Deploymen
     args: [8453n, d.frontDoor, message, taoWei],
     account: d.vault,
   })) as bigint;
+}
+
+export interface StakerFees {
+  swapFeeBps: bigint;
+  depositFeeUsdc: bigint;
+}
+
+/** Cascade's fees on the staker: a percentage of the swap and a flat USDC fee per deposit. */
+export async function readStakerFees(c: Pick<Clients, "base">, d: Deployment): Promise<StakerFees> {
+  if (!d.staker) return { swapFeeBps: 0n, depositFeeUsdc: 0n };
+  const staker = { address: d.staker, abi: STAKER } as const;
+  const [swapFeeBps, depositFeeUsdc] = await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { ...staker, functionName: "swapFeeBps" },
+      { ...staker, functionName: "depositFeeUsdc" },
+    ],
+  });
+  return { swapFeeBps: BigInt(swapFeeBps), depositFeeUsdc };
 }

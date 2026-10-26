@@ -6,6 +6,7 @@ export const RAO = 10n ** 9n;
 const LAUNCH_SHARES_PER_WEI = 10n ** 6n;
 
 export const floorRao = (wei: bigint) => (wei / RAO) * RAO;
+export const ceilRao = (wei: bigint) => ((wei + RAO - 1n) / RAO) * RAO;
 
 export const lessSlippage = (x: bigint, bps: bigint = SLIPPAGE_BPS) => (x * (10_000n - bps)) / 10_000n;
 

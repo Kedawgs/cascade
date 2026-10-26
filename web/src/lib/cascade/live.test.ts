@@ -58,6 +58,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     readWallet: async () => wallet,
     taoPriceUsd: async () => 250,
     ethPriceUsd: async () => 4000,
+    readStakerFees: async () => ({ swapFeeBps: 15n, depositFeeUsdc: 50_000n }),
     quoteBuy: async (_c, usdc) => (usdc * 10n ** 12n) / 252n,
     quoteSell: async (_c, tao) => (tao * 250n) / 10n ** 12n,
     quotePayoutFee: async () => 105n * 10n ** 13n,
@@ -124,6 +125,46 @@ describe("live data", () => {
     const first = await createLiveCascadeData(D, deps({ readFrontDoor: async () => ({ ...fd, redeemOf: 0n }) })).quoteWithdrawal(ME, 4n * 10n ** 22n);
     expect(first.fee).toBe(10n ** 14n);
     expect(first.feesUsd).toBeGreaterThan(0.26);
+  });
+
+  it("v3 quotes a deposit net of the staker's fees, with a rao-rounded floor", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    const seen: bigint[] = [];
+    const q = await createLiveCascadeData(
+      D3,
+      deps({ quoteBuy: async (_c, usdc) => (seen.push(usdc), (usdc * 10n ** 12n) / 252n) }),
+    ).quoteDeposit(1_000_000_000n);
+    expect(seen).toEqual([998_450_075n]);
+    expect(q.depositFeeUsdc).toBe(50_000n);
+    expect(q.swapFeeUsdc).toBe(1_499_925n);
+    expect(q.cascadeFeesUsd).toBeCloseTo(1.549925, 6);
+    const exactMin = (q.expectedTao * 9_950n) / 10_000n;
+    expect(q.minTaoOut % 10n ** 9n).toBe(0n);
+    expect(q.minTaoOut).toBeGreaterThanOrEqual(exactMin);
+    expect(q.minTaoOut - exactMin).toBeLessThan(10n ** 9n);
+    expect(q.targetTao).toBe((q.expectedTao / 10n ** 9n) * 10n ** 9n);
+    expect(q.feesUsd).toBeCloseTo(q.cascadeFeesUsd + 998.450075 * 0.0034985, 4);
+  });
+
+  it("v3 quotes a withdrawal with a delivery price floor and a week's deadline", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    const q = await createLiveCascadeData(D3, deps()).quoteWithdrawal(ME, 4n * 10n ** 22n);
+    const gross = (10n ** 18n * 250n) / 10n ** 12n; // mocked 1 TAO sale
+    const net = gross - (gross * 15n) / 10_000n;
+    expect(q.minUsdcPerTao).toBe((net * 9_800n) / 10_000n);
+    expect(q.deliveryDeadline).toBe(1_800_000_100 + 604_800);
+  });
+
+  it("v2 quotes carry no v3 fees or limits", async () => {
+    const data = createLiveCascadeData(D, deps());
+    const q = await data.quoteDeposit(20_000_000n);
+    expect(q.depositFeeUsdc).toBe(0n);
+    expect(q.swapFeeUsdc).toBe(0n);
+    expect(q.cascadeFeesUsd).toBe(0);
+    expect(q.feesUsd).toBeCloseTo(20 * 0.0034985, 4);
+    const w = await data.quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(w.minUsdcPerTao).toBe(0n);
+    expect(w.deliveryDeadline).toBe(0);
   });
 
   it("a site without a deployment refuses every read", async () => {

@@ -1,12 +1,12 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
-import { type Deployment, explorer } from "./config";
+import { DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
 import { chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { chainOnlyDeposit, depositRecord, withdrawalRecord } from "./trail";
-import type { CascadeData, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
-import { capFree, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
+import type { CascadeData, DepositQuote, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
+import { capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
 
 export class NotConfiguredError extends Error {
   constructor() {
@@ -23,6 +23,7 @@ export interface LiveDeps {
   readWallet: typeof reads.readWallet;
   taoPriceUsd: typeof reads.taoPriceUsd;
   ethPriceUsd: typeof reads.ethPriceUsd;
+  readStakerFees: typeof reads.readStakerFees;
   quoteBuy: typeof reads.quoteBuy;
   quoteSell: typeof reads.quoteSell;
   quotePayoutFee: typeof reads.quotePayoutFee;
@@ -67,6 +68,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     readWallet: reads.readWallet,
     taoPriceUsd: reads.taoPriceUsd,
     ethPriceUsd: reads.ethPriceUsd,
+    readStakerFees: reads.readStakerFees,
     quoteBuy: reads.quoteBuy,
     quoteSell: reads.quoteSell,
     quotePayoutFee: reads.quotePayoutFee,
@@ -191,6 +193,45 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     return out;
   }
 
+  /** v3: Cascade's fees come off the USDC before the swap, mirroring CascadeStaker._stake. */
+  async function quoteDepositV3(usdcUnits: bigint): Promise<DepositQuote> {
+    const [fees, fd] = await Promise.all([deps.readStakerFees(c, d), deps.readFrontDoor(c, d)]);
+    const depositFee = fees.depositFeeUsdc;
+    const swapFee = usdcUnits > depositFee ? ((usdcUnits - depositFee) * fees.swapFeeBps) / 10_000n : 0n;
+    const rest = usdcUnits > depositFee + swapFee ? usdcUnits - depositFee - swapFee : 0n;
+    const expected = rest > 0n ? await deps.quoteBuy(c, rest) : 0n;
+    const amountUsd = toDisplay(usdcUnits, 6);
+    const cascadeFeesUsd = toDisplay(depositFee + swapFee, 6);
+    const at = closesAt(fd);
+    const targetTao = floorRao(expected);
+    return {
+      usdcIn: usdcUnits,
+      expectedTao: expected,
+      targetTao,
+      estTao: toDisplay(targetTao, 18),
+      amountUsd,
+      taoPriceUsd: expected > 0n ? amountUsd / toDisplay(expected, 18) : 0,
+      feesUsd: cascadeFeesUsd + toDisplay(rest, 6) * POOL_FEE,
+      closesAt: at,
+      etaMinutes: minutesUntil(at, deps.now()) + BRIDGE_MINUTES + STAKE_MINUTES,
+      minTaoOut: ceilRao(lessSlippage(expected, SLIPPAGE_BPS)),
+      depositFeeUsdc: depositFee,
+      swapFeeUsdc: swapFee,
+      cascadeFeesUsd,
+    };
+  }
+
+  /** v3: the lowest price per TAO a delivery sale may accept, and when the request lapses. */
+  async function deliveryTerms(): Promise<{ minUsdcPerTao: bigint; deliveryDeadline: number }> {
+    if (!isV3(d)) return { minUsdcPerTao: 0n, deliveryDeadline: 0 };
+    const [fees, gross] = await Promise.all([deps.readStakerFees(c, d), deps.quoteSell(c, 10n ** 18n)]);
+    const net = gross - (gross * fees.swapFeeBps) / 10_000n;
+    return {
+      minUsdcPerTao: (net * (10_000n - BigInt(DELIVERY_TOLERANCE_BPS))) / 10_000n,
+      deliveryDeadline: Math.floor(deps.now() / 1000) + DELIVERY_VALIDITY_S,
+    };
+  }
+
   return {
     deployment: d,
     clients: c,
@@ -237,11 +278,16 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     getWithdrawal: async (account, id) => (await listWithdrawals(account)).find((r) => r.id === id) ?? null,
 
     async quoteDeposit(usdcUnits) {
+      if (isV3(d)) return quoteDepositV3(usdcUnits);
       const [expected, fd] = await Promise.all([deps.quoteBuy(c, usdcUnits), deps.readFrontDoor(c, d)]);
       const targetTao = floorRao(lessSlippage(expected));
       const amountUsd = toDisplay(usdcUnits, 6);
       const at = closesAt(fd);
       return {
+        minTaoOut: targetTao,
+        depositFeeUsdc: 0n,
+        swapFeeUsdc: 0n,
+        cascadeFeesUsd: 0,
         usdcIn: usdcUnits,
         expectedTao: expected,
         targetTao,
@@ -280,6 +326,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         taoPriceUsd: price,
         closesAt: at,
         etaMinutes: minutesUntil(at, deps.now()) + 2 * BRIDGE_MINUTES + Math.round(v.payoutDelay / 60),
+        ...(await deliveryTerms()),
       };
     },
   };

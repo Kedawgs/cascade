@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
@@ -74,13 +75,15 @@ contract FrontDoorDeliveryTest is FrontDoorTestBase {
         assertEq(dest, destination, "destination");
     }
 
-    /// Nothing moved: alice's 10 TAO still credited and held, no USDC paid, the preference intact.
+    /// Nothing moved: alice's 10 TAO still credited and held, no USDC paid or left in the front door,
+    /// the preference intact.
     function assertRestored() internal view {
         assertEq(fd.claimable(alice), 10e18);
         assertEq(fd.totalClaimable(), 10e18);
         assertEq(tao.balanceOf(address(fd)), 10e18);
         assertEq(tao.balanceOf(address(swapper)), 0);
         assertEq(usdc.balanceOf(alice), 0);
+        assertEq(usdc.balanceOf(address(fd)), 0);
         assertPreference(alice, USER_FLOOR, deadline, BASE_DOMAIN);
     }
 
@@ -95,11 +98,13 @@ contract FrontDoorDeliveryTest is FrontDoorTestBase {
         assertEq(received, 2_480e6);
         assertGe(received, MIN_OUT);
         assertEq(usdc.balanceOf(alice), 2_480e6);
-        // the swapper was asked for the largest floor, to alice, with the TAO already in hand
+        // the swapper was asked for the largest floor, paid to the front door (which forwarded all of
+        // it), with the TAO already in hand
         assertEq(swapper.lastMinOut(), MIN_OUT);
         assertEq(swapper.lastTaoIn(), 10e18);
-        assertEq(swapper.lastRecipient(), alice);
+        assertEq(swapper.lastRecipient(), address(fd));
         assertEq(swapper.taoHeldAtCall(), 10e18);
+        assertEq(usdc.balanceOf(address(fd)), 0);
         assertEq(fd.claimable(alice), 0);
         assertEq(fd.totalClaimable(), totalBefore - 10e18);
         assertEq(tao.balanceOf(address(fd)), 0);
@@ -168,6 +173,56 @@ contract FrontDoorDeliveryTest is FrontDoorTestBase {
         vm.expectRevert(MockSwapper.SwapFailed.selector);
         fd.deliver(alice, 0);
         assertRestored();
+    }
+
+    /// USDC landing on the user mid-sell from someone else (e.g. a relayed CCTP message) is not the
+    /// delivery: the swapper paid the front door nothing, so it reverts and the TAO stays.
+    function test_unrelatedPayoutToUserDoesNotCount() public {
+        swapper.setBystander(alice);
+        swapper.setMode(MockSwapper.Mode.TriggersUnrelatedPayout, 5_000e6);
+        vm.prank(keeper);
+        vm.expectRevert(CascadeFrontDoor.BelowMinimum.selector);
+        fd.deliver(alice, 0);
+        assertRestored();
+    }
+
+    /// USDC already in the front door (sent to it by anyone) is never counted or forwarded.
+    function test_strayFrontDoorUsdcIsNotCounted() public {
+        usdc.mint(address(fd), 5_000e6);
+        swapper.setMode(MockSwapper.Mode.KeepsTao, 0);
+        vm.prank(keeper);
+        vm.expectRevert(CascadeFrontDoor.BelowMinimum.selector);
+        fd.deliver(alice, 0);
+        assertEq(fd.claimable(alice), 10e18);
+        assertEq(tao.balanceOf(address(fd)), 10e18);
+
+        swapper.setMode(MockSwapper.Mode.Honest, SWAP_RATE);
+        assertEq(deliverAs(keeper, alice, 0), 2_480e6);
+        assertEq(usdc.balanceOf(alice), 2_480e6);
+        assertEq(usdc.balanceOf(address(fd)), 5_000e6);
+    }
+
+    /// An unset oracle or swapper only blocks delivery; the claim stays open.
+    function test_unsetOracleOrSwapperBlocksDelivery() public {
+        vm.prank(owner);
+        fd.setOracle(ICascadeTwap(address(0)));
+        vm.prank(keeper);
+        vm.expectRevert();
+        fd.deliver(alice, 0);
+        assertRestored();
+
+        vm.startPrank(owner);
+        fd.setOracle(twap);
+        fd.setSwapper(address(0));
+        vm.stopPrank();
+        vm.prank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+        fd.deliver(alice, 0);
+        assertRestored();
+
+        vm.prank(alice);
+        fd.claim();
+        assertEq(tao.balanceOf(alice), 1_010e18);
     }
 
     /// Review Focus 1: an address USDC refuses still gets out by claiming the TAO.

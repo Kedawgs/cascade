@@ -13,19 +13,22 @@ import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 
 /// @notice Cascade front door on Base: holds bridged TAO, collects deposits and redeem requests
 /// into one open batch (one merged entry per user per list) and forwards the batch to the vault
-/// through the primary bridge. It never prices anything; the vault does.
+/// through the primary bridge. It never prices deposits or redeems; the vault does. The one price
+/// it reads is a delivery's floor: a TWAP oracle's 30-minute value of the TAO being sold.
 /// @dev Redeem requests need no shares (the front door cannot see Bittensor), so the first request
 /// per user per batch pays `redeemRequestFee` in ETH into the batch's fee pot, the pot pays the
 /// batch's bridge fee first, and a request that meets a full redeem list closes the batch itself.
 /// ETH held always equals the open batch's `feePot` plus `totalFeeCredit`. Payouts from the vault
 /// arrive in chunks and are credited for users to claim; the asset held is always at least the open
 /// batch's `totalDeposits` plus `totalClaimable`. A user may instead leave a delivery preference: the
-/// keeper then sells their credit for USDC through the owner-set swapper, and the front door itself
-/// requires the user's USDC balance to rise by at least the largest of the user's floor, the keeper's
-/// floor and the oracle's 30-minute value less `maxDeliverySlippageBps`, or reverts everything.
-/// `claim()` works in every state and clears the preference.
+/// keeper then sells their credit for USDC through the owner-set swapper, which pays the front door;
+/// the front door requires its own USDC balance to rise by at least the largest of the user's floor,
+/// the keeper's floor and the oracle's 30-minute value less `maxDeliverySlippageBps`, then forwards
+/// all of it to the user, or reverts everything. `claim()` works in every state and clears the
+/// preference.
 contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     using SafeERC20 for IERC20Metadata;
+    using SafeERC20 for IERC20;
 
     // ---- constants and immutables ----
 
@@ -166,6 +169,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     ) CascadeBase(owner_, guardian_, address(bridge)) {
         if (asset_.decimals() != 18) revert UnsupportedDecimals();
         if (vault_ == address(0) || address(usdc_) == address(0)) revert ZeroAddress();
+        if (address(usdc_) == address(asset_)) revert InvalidParameter();
         asset = asset_;
         vaultChain = vaultChain_;
         vault = vault_;
@@ -407,11 +411,13 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         _setDelivery(minUsdcPerTao, deadline, destination);
     }
 
-    /// Keeper only: sells everything credited to `user` through the swapper for USDC paid to `user`.
-    /// The minimum is the largest of the user's floor (rounded up), `keeperMinOut`, and the oracle's
-    /// 30-minute value less `maxDeliverySlippageBps`. The front door measures the user's USDC itself,
-    /// so a swapper that pays short, keeps the TAO or reverts, a USDC that refuses the user, or an
-    /// oracle that can't answer only reverts the delivery, TAO included; `claim()` stays open.
+    /// Keeper only: sells everything credited to `user` through the swapper, which pays the USDC to
+    /// the front door, and forwards all of it to `user`. The minimum is the largest of the user's
+    /// floor (rounded up), `keeperMinOut`, and the oracle's 30-minute value less
+    /// `maxDeliverySlippageBps`. The front door measures its own USDC across the sell (never the
+    /// user's, which anyone could top up mid-call with an unrelated payout), so a swapper that pays
+    /// short, keeps the TAO or reverts, a USDC that refuses the user, or an oracle that can't answer
+    /// only reverts the delivery, TAO included; `claim()` stays open.
     function deliver(address user, uint256 keeperMinOut)
         external
         whenNotPaused
@@ -436,11 +442,12 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         totalClaimable -= amount;
         address s = swapper;
         asset.safeTransfer(s, amount);
-        uint256 before = usdc.balanceOf(user);
-        ICascadeSwapper(s).sellFor(amount, user, minOut);
-        uint256 balance = usdc.balanceOf(user);
+        uint256 before = usdc.balanceOf(address(this));
+        ICascadeSwapper(s).sellFor(amount, address(this), minOut);
+        uint256 balance = usdc.balanceOf(address(this));
         received = balance > before ? balance - before : 0;
         if (received < minOut) revert BelowMinimum();
+        usdc.safeTransfer(user, received);
         emit Delivered(user, amount, received);
     }
 
@@ -483,7 +490,8 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         emit KeeperSet(newKeeper);
     }
 
-    /// The swapper receives a delivery's TAO; it can make a delivery revert, never pay short.
+    /// The swapper receives a delivery's TAO and pays the front door; it can make a delivery revert,
+    /// never pay short.
     function setSwapper(address newSwapper) external onlyOwner {
         swapper = newSwapper;
         emit SwapperSet(newSwapper);

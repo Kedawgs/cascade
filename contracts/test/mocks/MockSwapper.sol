@@ -7,14 +7,16 @@ import {MockUSDC} from "./MockUSDC.sol";
 
 /// @notice Delivery swapper stand-in. Honest pays `taoIn * param / 1e18` USDC (param = USDC units
 /// per 1e18 TAO) whatever the minimum; KeepsTao pays nothing; PaysLess pays `minUsdcOut` less `param`
-/// bps; Reverts reverts. The dishonest modes still report `minUsdcOut` as paid. Every call records
-/// what it was asked and how much TAO it held when called.
+/// bps; Reverts reverts; TriggersUnrelatedPayout pays nothing itself but, mid-call, lands an unrelated
+/// `param` USDC on `bystander` (as anyone relaying someone's CCTP message could). The dishonest modes
+/// still report `minUsdcOut` as paid. Every call records what it was asked and how much TAO it held.
 contract MockSwapper is ICascadeSwapper {
     enum Mode {
         Honest,
         KeepsTao,
         PaysLess,
-        Reverts
+        Reverts,
+        TriggersUnrelatedPayout
     }
 
     IERC20 public immutable tao;
@@ -22,6 +24,7 @@ contract MockSwapper is ICascadeSwapper {
 
     Mode public mode;
     uint256 public param;
+    address public bystander;
 
     uint256 public calls;
     uint256 public lastTaoIn;
@@ -41,6 +44,10 @@ contract MockSwapper is ICascadeSwapper {
         param = param_;
     }
 
+    function setBystander(address bystander_) external {
+        bystander = bystander_;
+    }
+
     function sellFor(uint256 taoIn, address recipient, uint256 minUsdcOut) external returns (uint256) {
         calls++;
         lastTaoIn = taoIn;
@@ -49,6 +56,10 @@ contract MockSwapper is ICascadeSwapper {
         taoHeldAtCall = tao.balanceOf(address(this));
         if (mode == Mode.Reverts) revert SwapFailed();
         if (mode == Mode.KeepsTao) return minUsdcOut;
+        if (mode == Mode.TriggersUnrelatedPayout) {
+            usdc.mint(bystander, param);
+            return minUsdcOut;
+        }
         if (mode == Mode.PaysLess) {
             usdc.mint(recipient, minUsdcOut * (10_000 - param) / 10_000);
             return minUsdcOut;

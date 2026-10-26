@@ -69,6 +69,10 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         new CascadeFrontDoor(
             tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14, IERC20(address(0))
         );
+
+        // and USDC that is the asset itself
+        vm.expectRevert(CascadeFrontDoor.InvalidParameter.selector);
+        new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14, tao);
     }
 
     function test_constructorOpensBatchOne() public view {

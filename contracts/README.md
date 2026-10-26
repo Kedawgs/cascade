@@ -620,9 +620,12 @@ capped deliveries (the 1.5% edge), so it is not worth attacking, but nothing on 
 depth. If liquidity thins a lot, the owner lowers the delivery slippage or swaps the oracle.
 A delivery reverts unless the swap can pay at least the 30-minute average less
 `maxDeliverySlippageBps` (1.5%). The keeper then skips it and retries later, and the user can always
-claim by hand. Observation, not a guarantee: on a Base fork in October 2026 (pool fees about 0.35%,
-the 0.15% swap fee, pools near $200k) deliveries went through only while spot was within roughly
-1.35% of the average.
+claim by hand. The keeper uses that whole window: it delivers once its quote (after the 0.15% swap
+fee) reaches both floors, with its own minimum at the quote less 0.5% but never below either floor.
+Observation, not a guarantee: on a Base fork in October 2026 (pool fees about 0.35%, the 0.15% swap
+fee, pools near $200k) deliveries went through while the pools' sell quote (pool fees and price
+impact included) was within about 1.35% of the 30-minute average, which is the mid price within
+about 1.0% of it.
 
 **The reward cut.** At each reward claim the vault mints shares worth 10% of the claimed rewards
 (owner-set, hard maximum 20%) to the treasury, at the price from before the claim, so the cut never
@@ -634,6 +637,8 @@ insolvency line); that claim then vests normally for everyone.
 - The effective share is slightly above the rate, about 10.01% at normal claim sizes (a claim near
   1% of assets), because the treasury's new shares also share in that claim's 7-day vesting. Say
   "about 10%" in copy.
+- If a reward claim happens while no shares are outstanding, the treasury (the only holder) ends up
+  with the whole claim as it vests; nobody else is affected.
 - Unclaimed rewards sit outside the share price until collected. Collection is expensive (one claim
   is about 53M gas; the vault requires `claimGasRequired` = 55M and the ops tool sends a 57M limit), so the keeper claims only when the rewards waiting are at least 25 times the
   claim's cost, or monthly while a claim costs under $20 and does not exceed what is waiting.
@@ -948,7 +953,11 @@ Added for v3 (2026-10-26):
     the tao.bot cost estimate (about 0.045 TAO) come from research, not from a run.
 32. Check both pools' observation cardinality before launch (Uniswap TAO/WETH 0.3% and WETH/USDC
     0.05%): the oracle needs history covering 30 minutes, so if a pool's cardinality is too low,
-    grow it with `increaseObservationCardinalityNext` and wait.
+    grow it with `increaseObservationCardinalityNext` and wait. Concretely, before launch call
+    `increaseObservationCardinalityNext(1800)` on the TAO/WETH pool
+    (`0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A`): 30 minutes is 900 Base blocks but the pool has
+    600 slots, so dust swaps in more than 600 of 900 blocks could block deliveries (no loss; claims
+    still work).
 33. Set the launch values (6-hour batches, 24-hour payout delay; the test deployment uses 10
     minutes and 1 hour). First make `verify` read the expected values from the deployment record
     rather than from today's `SETTINGS_V3`; otherwise changing `SETTINGS_V3` makes the existing

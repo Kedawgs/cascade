@@ -73,6 +73,8 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     uint256 public totalFeeCredit;
 
     // parameters
+    /// @notice Upper bound on `batchInterval`, so a mistaken setting cannot strand a batch for long.
+    uint64 public constant MAX_BATCH_INTERVAL = 7 days;
     uint64 public batchInterval;
     uint32 public maxDeposits;
     uint32 public maxRedeems;
@@ -174,6 +176,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         vaultChain = vaultChain_;
         vault = vault_;
         usdc = usdc_;
+        if (batchInterval_ > MAX_BATCH_INTERVAL) revert InvalidParameter();
         batchInterval = batchInterval_;
         minDeposit = minDeposit_;
         depositCap = depositCap_;
@@ -475,6 +478,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     }
 
     function setBatchInterval(uint64 interval) external onlyOwner {
+        if (interval > MAX_BATCH_INTERVAL) revert InvalidParameter();
         batchInterval = interval;
         emit LimitSet("batchInterval", interval, 0);
     }

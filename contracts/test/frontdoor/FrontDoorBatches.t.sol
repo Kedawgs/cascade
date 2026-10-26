@@ -982,6 +982,34 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         vm.stopPrank();
     }
 
+    function test_batchIntervalCapAtSevenDays() public {
+        assertEq(fd.MAX_BATCH_INTERVAL(), 7 days);
+
+        vm.startPrank(owner);
+        vm.expectRevert(CascadeFrontDoor.InvalidParameter.selector);
+        fd.setBatchInterval(7 days + 1);
+
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.LimitSet("batchInterval", 7 days, 0);
+        fd.setBatchInterval(7 days);
+        assertEq(fd.batchInterval(), 7 days);
+
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.LimitSet("batchInterval", 0, 0);
+        fd.setBatchInterval(0);
+        assertEq(fd.batchInterval(), 0);
+        vm.stopPrank();
+    }
+
+    function test_constructorRejectsIntervalOverCap() public {
+        vm.expectRevert(CascadeFrontDoor.InvalidParameter.selector);
+        new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 7 days + 1, 1e18, 10_000e18, 1e14, usdc);
+
+        CascadeFrontDoor ok =
+            new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 7 days, 1e18, 10_000e18, 1e14, usdc);
+        assertEq(ok.batchInterval(), 7 days);
+    }
+
     function test_receiveRejectsEth() public {
         vm.prank(alice);
         (bool ok, bytes memory ret) = address(fd).call{value: 1}("");

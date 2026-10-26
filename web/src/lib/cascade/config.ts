@@ -10,7 +10,13 @@ export interface Deployment {
   bitBlock: bigint;
   vaultSs58: string;
   hotkeySs58: string;
+  /** v3 only: the one-transaction staker and the price oracle. Absent on a v2 deployment. */
+  staker?: Address;
+  oracle?: Address;
 }
+
+/** A v3 deployment has both the staker and the oracle; otherwise the site keeps the v2 flows. */
+export const isV3 = (d: Deployment): boolean => Boolean(d.staker && d.oracle);
 
 type Env = Record<string, string | undefined>;
 
@@ -27,7 +33,19 @@ export function readDeployment(env: Env): Deployment | null {
   if (!frontDoor || !baseAdapter || !vault || !bitAdapter || !block || !/^\d+$/.test(block) || !vaultSs58 || !hotkeySs58) {
     return null;
   }
-  return { frontDoor, baseAdapter, vault, bitAdapter, bitBlock: BigInt(block), vaultSs58, hotkeySs58 };
+  const staker = address(env.NEXT_PUBLIC_CASCADE_STAKER);
+  const oracle = address(env.NEXT_PUBLIC_CASCADE_ORACLE);
+  return {
+    frontDoor,
+    baseAdapter,
+    vault,
+    bitAdapter,
+    bitBlock: BigInt(block),
+    vaultSs58,
+    hotkeySs58,
+    ...(staker ? { staker } : {}),
+    ...(oracle ? { oracle } : {}),
+  };
 }
 
 /** Next inlines each NEXT_PUBLIC_ value only where it is written out by name. */
@@ -39,6 +57,8 @@ export const DEPLOYMENT = readDeployment({
   NEXT_PUBLIC_CASCADE_BIT_BLOCK: process.env.NEXT_PUBLIC_CASCADE_BIT_BLOCK,
   NEXT_PUBLIC_CASCADE_VAULT_SS58: process.env.NEXT_PUBLIC_CASCADE_VAULT_SS58,
   NEXT_PUBLIC_CASCADE_HOTKEY_SS58: process.env.NEXT_PUBLIC_CASCADE_HOTKEY_SS58,
+  NEXT_PUBLIC_CASCADE_STAKER: process.env.NEXT_PUBLIC_CASCADE_STAKER,
+  NEXT_PUBLIC_CASCADE_ORACLE: process.env.NEXT_PUBLIC_CASCADE_ORACLE,
 });
 
 export const TOKENS = {
@@ -63,7 +83,21 @@ export const MULTICALL3: Address = "0xcA11bde05977b3631167028862bE2a173976CA11";
 /** Public RPCs only: no key ever goes into the site. Base's refuses eth_getLogs, so the site never asks it for logs. */
 /** Public RPCs the browser reads (no keys in the bundle). Bittensor is OpenTensor's archive node: the
  * lite node keeps only minutes of event history, so older deliveries and stakes would look missing. */
-export const RPC = { base: "https://mainnet.base.org", bittensor: "https://archive.chain.opentensor.ai" } as const;
+export const RPC = {
+  base: "https://mainnet.base.org",
+  /** Base log reads: mainnet.base.org refuses eth_getLogs. PublicNode allows CORS *, windows of at most 2,000 blocks. */
+  baseLogs: "https://base-rpc.publicnode.com",
+  bittensor: "https://archive.chain.opentensor.ai",
+} as const;
+
+/** How far below the oracle's value a delivery's price floor sits, in basis points. */
+export const DELIVERY_TOLERANCE_BPS = 200;
+/** How long a delivery instruction stays valid: 7 days, in seconds. */
+export const DELIVERY_VALIDITY_S = 604_800;
+/** The delivery destination code for USDC on Base. */
+export const DESTINATION_BASE = 6;
+/** USDC's EIP-712 domain for permits (chainId 8453, verifyingContract TOKENS.usdc). */
+export const USDC_PERMIT = { name: "USD Coin", version: "2" } as const;
 
 export const SLIPPAGE_BPS = 50n;
 /** The smallest unstake (and remainder) that can always be paid out (see units.checkUnstake). */

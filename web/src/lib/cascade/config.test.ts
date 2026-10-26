@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, readDeployment, RPC } from "./config";
+import { toFunctionSelector } from "viem";
+import { ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
+import {
+  DELIVERY_TOLERANCE_BPS,
+  DELIVERY_VALIDITY_S,
+  DESTINATION_BASE,
+  isV3,
+  PATH_TAO_TO_USDC,
+  PATH_USDC_TO_TAO,
+  readDeployment,
+  RPC,
+  USDC_PERMIT,
+} from "./config";
 
 const ENV = {
   NEXT_PUBLIC_CASCADE_FRONT_DOOR: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -41,5 +53,58 @@ describe("readDeployment", () => {
 
   it("reads Bittensor from OpenTensor's archive node: the lite node keeps only minutes of event history", () => {
     expect(RPC.bittensor).toBe("https://archive.chain.opentensor.ai");
+  });
+});
+
+const STAKER_ADDR = "0x221Cc4cF9c72EA7270f90E8C0756F8f003b6887b";
+const ORACLE_ADDR = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750";
+
+describe("v3 deployment", () => {
+  it("reads staker and oracle, and isV3 needs both", () => {
+    const both = readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR });
+    expect(both?.staker).toBe(STAKER_ADDR);
+    expect(both?.oracle).toBe(ORACLE_ADDR);
+    expect(isV3(both!)).toBe(true);
+    expect(isV3(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR })!)).toBe(false);
+    expect(isV3(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR })!)).toBe(false);
+  });
+
+  it("a v2 env still reads and is not v3", () => {
+    const d = readDeployment(ENV)!;
+    expect(d).not.toBeNull();
+    expect(isV3(d)).toBe(false);
+  });
+
+  it("pins the constants", () => {
+    expect(RPC.baseLogs).toBe("https://base-rpc.publicnode.com");
+    expect(RPC.base).toBe("https://mainnet.base.org");
+    expect(DELIVERY_TOLERANCE_BPS).toBe(200);
+    expect(DELIVERY_VALIDITY_S).toBe(604_800);
+    expect(DESTINATION_BASE).toBe(6);
+    expect(USDC_PERMIT).toEqual({ name: "USD Coin", version: "2" });
+  });
+});
+
+describe("v3 ABIs match the contracts (selectors from cast sig)", () => {
+  const sel = (abi: readonly { type: string; name?: string }[], name: string) => {
+    const f = abi.find((x) => x.type === "function" && x.name === name);
+    expect(f, name).toBeDefined();
+    return toFunctionSelector(f as never);
+  };
+  it("staker", () => {
+    expect(sel(STAKER, "stake")).toBe("0x8f582f94");
+    expect(sel(STAKER, "stakeWithPermit")).toBe("0x85d45b3a");
+    expect(sel(STAKER, "swapFeeBps")).toBe("0x2ffdaf89");
+    expect(sel(STAKER, "depositFeeUsdc")).toBe("0xc53d4ada");
+  });
+  it("front door, erc20, vault", () => {
+    expect(sel(FRONT_DOOR, "requestRedeemWithDelivery")).toBe("0x2ef4028b");
+    expect(sel(FRONT_DOOR, "setDelivery")).toBe("0x42047915");
+    expect(sel(FRONT_DOOR, "deliveryOf")).toBe("0xe981e53d");
+    expect(sel(FRONT_DOOR, "usdc")).toBe("0x3e413bee");
+    expect(sel(FRONT_DOOR, "maxDeliverySlippageBps")).toBe("0x663da68a");
+    expect(sel(ERC20, "nonces")).toBe("0x7ecebe00");
+    expect(sel(VAULT, "rewardCutBps")).toBe("0xabbee453");
+    expect(FRONT_DOOR.some((x) => x.type === "event" && x.name === "Delivered")).toBe(true);
   });
 });

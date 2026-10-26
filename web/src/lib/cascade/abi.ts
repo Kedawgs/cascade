@@ -17,9 +17,22 @@ export const FRONT_DOOR = parseAbi([
   "function redeemRequestFee() view returns (uint256)",
   "function canClose() view returns (bool)",
   "function batchInterval() view returns (uint64)",
+  "function usdc() view returns (address)",
+  "function deliveryOf(address user) view returns (uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
+  "function setDelivery(uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
+  "function requestRedeemWithDelivery(uint256 shares, uint128 minUsdcPerTao, uint64 deadline, uint32 destination) payable",
+  "function maxDeliverySlippageBps() view returns (uint16)",
   "event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)",
   "event RedeemRequested(uint64 indexed batchId, address indexed user, uint256 shares)",
   "event Claimed(address indexed user, uint256 amount)",
+  "event Delivered(address indexed user, uint256 taoIn, uint256 usdcOut)",
+]);
+
+export const STAKER = parseAbi([
+  "function stake(address beneficiary, uint256 usdcIn, uint256 minTaoOut, uint8 routeId, uint256 deadline) returns (uint256)",
+  "function stakeWithPermit(address beneficiary, uint256 usdcIn, uint256 minTaoOut, uint8 routeId, uint256 deadline, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s) returns (uint256)",
+  "function swapFeeBps() view returns (uint16)",
+  "function depositFeeUsdc() view returns (uint256)",
 ]);
 
 export const VAULT = parseAbi([
@@ -30,6 +43,7 @@ export const VAULT = parseAbi([
   "function pendingPayouts() view returns (uint256)",
   "function stakeHotkey() view returns (bytes32)",
   "function payoutDelay() view returns (uint64)",
+  "function rewardCutBps() view returns (uint16)",
   "event BatchDelivered(bytes32 indexed key, uint64 indexed sourceChain, address indexed frontDoor, uint64 batchId, uint256 amount)",
   "event Deposited(bytes32 indexed key, address indexed user, uint256 assets, uint256 shares)",
   "event DepositBounced(bytes32 indexed key, address indexed user, uint256 assets)",
@@ -70,4 +84,5 @@ export const ERC20 = parseAbi([
   "function balanceOf(address account) view returns (uint256)",
   "function allowance(address owner, address spender) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
+  "function nonces(address owner) view returns (uint256)",
 ]);

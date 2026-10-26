@@ -5,6 +5,7 @@ import {CascadeVault} from "../src/CascadeVault.sol";
 import {CascadeFrontDoor} from "../src/CascadeFrontDoor.sol";
 import {CascadeMessages} from "../src/libraries/CascadeMessages.sol";
 import {MockTAO} from "./mocks/MockTAO.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {VaultTestBase} from "./VaultTestBase.sol";
 
 /// @notice Delivery gas against the bridge's delivery budget, and deployed code size against EIP-170.
@@ -66,7 +67,17 @@ contract GasTest is VaultTestBase {
 
     function test_size_vaultAndFrontDoorUnderLimit() public {
         CascadeFrontDoor fd = new CascadeFrontDoor(
-            new MockTAO(18), bridge, BITTENSOR, address(vault), owner, guardian, 12 hours, 1e18, 10_000e18, 1e14
+            new MockTAO(18),
+            bridge,
+            BITTENSOR,
+            address(vault),
+            owner,
+            guardian,
+            12 hours,
+            1e18,
+            10_000e18,
+            1e14,
+            new MockUSDC()
         );
         emit log_named_uint("vault runtime bytes", address(vault).code.length);
         emit log_named_uint("front door runtime bytes", address(fd).code.length);

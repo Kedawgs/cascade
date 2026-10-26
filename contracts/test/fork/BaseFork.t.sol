@@ -24,6 +24,7 @@ interface IRouterExtra {
 /// OffRamp 2.0.0 (verifiers stubbed), pool and Router. Run with `FORK=1` (optionally `BASE_RPC=<url>`).
 contract BaseForkTest is ForkBase {
     uint64 constant BITTENSOR = 964;
+    address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
 
     address owner = makeAddr("owner");
     address guardian = makeAddr("guardian");
@@ -65,7 +66,8 @@ contract BaseForkTest is ForkBase {
             12 hours,
             0.01e18,
             10_000e18,
-            1e14
+            1e14,
+            IERC20(BASE_USDC)
         );
         vm.deal(keeper, 1 ether);
     }

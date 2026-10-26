@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeBase} from "./CascadeBase.sol";
 import {ICascadeBridge, ICascadeReceiver} from "./interfaces/ICascadeBridge.sol";
+import {ICascadeSwapper} from "./interfaces/ICascadeSwapper.sol";
+import {ICascadeTwap} from "./interfaces/ICascadeTwap.sol";
 import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 
 /// @notice Cascade front door on Base: holds bridged TAO, collects deposits and redeem requests
@@ -15,17 +19,25 @@ import {CascadeMessages} from "./libraries/CascadeMessages.sol";
 /// batch's bridge fee first, and a request that meets a full redeem list closes the batch itself.
 /// ETH held always equals the open batch's `feePot` plus `totalFeeCredit`. Payouts from the vault
 /// arrive in chunks and are credited for users to claim; the asset held is always at least the open
-/// batch's `totalDeposits` plus `totalClaimable`.
+/// batch's `totalDeposits` plus `totalClaimable`. A user may instead leave a delivery preference: the
+/// keeper then sells their credit for USDC through the owner-set swapper, and the front door itself
+/// requires the user's USDC balance to rise by at least the largest of the user's floor, the keeper's
+/// floor and the oracle's 30-minute value less `maxDeliverySlippageBps`, or reverts everything.
+/// `claim()` works in every state and clears the preference.
 contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     using SafeERC20 for IERC20Metadata;
 
     // ---- constants and immutables ----
 
     uint256 public constant RAO = 1e9;
+    /// Circle CCTP domain number of Base, the only delivery destination accepted.
+    uint32 public constant DESTINATION_BASE = 6;
+    uint16 public constant MAX_DELIVERY_SLIPPAGE_BPS = 300;
 
     IERC20Metadata public immutable asset;
     uint64 public immutable vaultChain;
     address public immutable vault;
+    IERC20 public immutable usdc;
 
     // ---- state ----
 
@@ -66,6 +78,21 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     uint256 public redeemRequestFee;
     uint256 public maxBatchValue;
 
+    // USDC delivery
+    /// `minUsdcPerTao` is USDC units (6 decimals) per 1e18 TAO wei; live while `block.timestamp <=
+    /// deadline`; `destination` is a CCTP domain number. All zero = no preference.
+    struct Delivery {
+        uint128 minUsdcPerTao;
+        uint64 deadline;
+        uint32 destination;
+    }
+
+    mapping(address => Delivery) public deliveryOf;
+    address public keeper;
+    address public swapper;
+    ICascadeTwap public oracle;
+    uint16 public maxDeliverySlippageBps = 150;
+
     // ---- errors ----
 
     error UnsupportedDecimals();
@@ -88,6 +115,13 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     error TokensNotReceived();
     error DuplicatePayouts();
     error NothingToClaim();
+    error NotKeeper();
+    error NoDelivery();
+    error DeliveryExpired();
+    error BelowMinimum();
+    error UnsupportedDestination();
+    error DeadlinePassed();
+    error FeeTooHigh();
 
     // ---- events ----
 
@@ -107,6 +141,13 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     event PayoutsDelivered(bytes32 indexed batchKey, uint32 chunk, uint256 amount, address bridge);
     event PayoutReceived(bytes32 indexed batchKey, uint32 chunk, address indexed user, uint256 amount);
     event Claimed(address indexed user, uint256 amount);
+    /// All zero when the preference is cleared (by the user or by `claim`).
+    event DeliverySet(address indexed user, uint128 minUsdcPerTao, uint64 deadline, uint32 destination);
+    event Delivered(address indexed user, uint256 taoIn, uint256 usdcOut);
+    event KeeperSet(address indexed keeper);
+    event SwapperSet(address indexed swapper);
+    event OracleSet(address indexed oracle);
+    event MaxDeliverySlippageSet(uint16 bps);
 
     // ---- constructor ----
 
@@ -120,13 +161,15 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         uint64 batchInterval_,
         uint256 minDeposit_,
         uint256 depositCap_,
-        uint256 redeemRequestFee_
+        uint256 redeemRequestFee_,
+        IERC20 usdc_
     ) CascadeBase(owner_, guardian_, address(bridge)) {
         if (asset_.decimals() != 18) revert UnsupportedDecimals();
-        if (vault_ == address(0)) revert ZeroAddress();
+        if (vault_ == address(0) || address(usdc_) == address(0)) revert ZeroAddress();
         asset = asset_;
         vaultChain = vaultChain_;
         vault = vault_;
+        usdc = usdc_;
         batchInterval = batchInterval_;
         minDeposit = minDeposit_;
         depositCap = depositCap_;
@@ -239,6 +282,21 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     /// full it first closes the batch on the pot alone (any remainder to the caller) and lands in
     /// the next one.
     function requestRedeem(uint256 shares) external payable whenNotPaused nonReentrant {
+        _requestRedeem(shares);
+    }
+
+    /// `setDelivery` and `requestRedeem` in one call, under the same fee rule.
+    function requestRedeemWithDelivery(uint256 shares, uint128 minUsdcPerTao, uint64 deadline, uint32 destination)
+        external
+        payable
+        whenNotPaused
+        nonReentrant
+    {
+        _setDelivery(minUsdcPerTao, deadline, destination);
+        _requestRedeem(shares);
+    }
+
+    function _requestRedeem(uint256 shares) internal {
         if (shares == 0) revert ZeroAmount();
         uint256 slot = redeemSlot[open.id][msg.sender];
         if (slot != 0) {
@@ -325,14 +383,65 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         netForwarded = forwarded > amount ? forwarded - amount : 0;
     }
 
-    /// Sends the caller everything credited to them; works while paused.
+    /// Sends the caller everything credited to them and clears their delivery preference; works
+    /// while paused.
     function claim() external nonReentrant {
         uint256 amount = claimable[msg.sender];
         if (amount == 0) revert NothingToClaim();
         claimable[msg.sender] = 0;
         totalClaimable -= amount;
+        if (deliveryOf[msg.sender].minUsdcPerTao != 0) {
+            delete deliveryOf[msg.sender];
+            emit DeliverySet(msg.sender, 0, 0, 0);
+        }
         asset.safeTransfer(msg.sender, amount);
         emit Claimed(msg.sender, amount);
+    }
+
+    // ---- USDC delivery ----
+
+    /// The caller's delivery preference: at least `minUsdcPerTao` USDC units per 1e18 TAO for every
+    /// payout delivered until `deadline` (inclusive), to `destination` (only `DESTINATION_BASE`). It
+    /// survives deliveries; a zero floor clears it. Works while paused.
+    function setDelivery(uint128 minUsdcPerTao, uint64 deadline, uint32 destination) external {
+        _setDelivery(minUsdcPerTao, deadline, destination);
+    }
+
+    /// Keeper only: sells everything credited to `user` through the swapper for USDC paid to `user`.
+    /// The minimum is the largest of the user's floor (rounded up), `keeperMinOut`, and the oracle's
+    /// 30-minute value less `maxDeliverySlippageBps`. The front door measures the user's USDC itself,
+    /// so a swapper that pays short, keeps the TAO or reverts, a USDC that refuses the user, or an
+    /// oracle that can't answer only reverts the delivery, TAO included; `claim()` stays open.
+    function deliver(address user, uint256 keeperMinOut)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (uint256 received)
+    {
+        if (msg.sender != keeper) revert NotKeeper();
+        uint256 amount = claimable[user];
+        if (amount == 0) revert NothingToClaim();
+        Delivery memory d = deliveryOf[user];
+        if (d.minUsdcPerTao == 0) revert NoDelivery();
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp > d.deadline) revert DeliveryExpired();
+        // setDelivery stores no other destination; checked again so none is ever delivered elsewhere
+        if (d.destination != DESTINATION_BASE) revert UnsupportedDestination();
+
+        uint256 userFloor = Math.mulDiv(amount, d.minUsdcPerTao, 1e18, Math.Rounding.Ceil);
+        uint256 marketFloor = oracle.usdcValue(amount) * (10_000 - maxDeliverySlippageBps) / 10_000;
+        uint256 minOut = Math.max(userFloor, Math.max(keeperMinOut, marketFloor));
+
+        claimable[user] = 0;
+        totalClaimable -= amount;
+        address s = swapper;
+        asset.safeTransfer(s, amount);
+        uint256 before = usdc.balanceOf(user);
+        ICascadeSwapper(s).sellFor(amount, user, minOut);
+        uint256 balance = usdc.balanceOf(user);
+        received = balance > before ? balance - before : 0;
+        if (received < minOut) revert BelowMinimum();
+        emit Delivered(user, amount, received);
     }
 
     // ---- admin ----
@@ -368,6 +477,30 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         emit LimitSet("redeemRequestFee", fee, 0);
     }
 
+    /// address(0) stops deliveries; manual claims are unaffected.
+    function setKeeper(address newKeeper) external onlyOwner {
+        keeper = newKeeper;
+        emit KeeperSet(newKeeper);
+    }
+
+    /// The swapper receives a delivery's TAO; it can make a delivery revert, never pay short.
+    function setSwapper(address newSwapper) external onlyOwner {
+        swapper = newSwapper;
+        emit SwapperSet(newSwapper);
+    }
+
+    function setOracle(ICascadeTwap newOracle) external onlyOwner {
+        oracle = newOracle;
+        emit OracleSet(address(newOracle));
+    }
+
+    /// The market floor's discount to the oracle's value, in bps, at most MAX_DELIVERY_SLIPPAGE_BPS.
+    function setMaxDeliverySlippage(uint16 bps) external onlyOwner {
+        if (bps > MAX_DELIVERY_SLIPPAGE_BPS) revert FeeTooHigh();
+        maxDeliverySlippageBps = bps;
+        emit MaxDeliverySlippageSet(bps);
+    }
+
     // ---- receive ----
 
     /// ETH enters only through requestRedeem, creditRedeemFee and closeBatch.
@@ -376,6 +509,19 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     }
 
     // ---- internal ----
+
+    function _setDelivery(uint128 minUsdcPerTao, uint64 deadline, uint32 destination) internal {
+        if (minUsdcPerTao == 0) {
+            delete deliveryOf[msg.sender];
+            emit DeliverySet(msg.sender, 0, 0, 0);
+            return;
+        }
+        if (destination != DESTINATION_BASE) revert UnsupportedDestination();
+        // forge-lint: disable-next-line(block-timestamp)
+        if (deadline <= block.timestamp) revert DeadlinePassed();
+        deliveryOf[msg.sender] = Delivery(minUsdcPerTao, deadline, destination);
+        emit DeliverySet(msg.sender, minUsdcPerTao, deadline, destination);
+    }
 
     /// Sends the open batch through the primary bridge with `budget` wei for the fee, opens the
     /// next batch, and pays `budget - fee` to the caller.

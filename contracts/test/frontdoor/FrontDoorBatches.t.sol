@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Vm} from "forge-std/Vm.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeBase} from "../../src/CascadeBase.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
@@ -57,11 +58,17 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
     function test_constructorRejectsNon18Decimals() public {
         MockTAO six = new MockTAO(6);
         vm.expectRevert(CascadeFrontDoor.UnsupportedDecimals.selector);
-        new CascadeFrontDoor(six, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14);
+        new CascadeFrontDoor(six, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14, usdc);
 
         // and a zero vault
         vm.expectRevert(CascadeBase.ZeroAddress.selector);
-        new CascadeFrontDoor(tao, bridge, BITTENSOR, address(0), owner, guardian, 12 hours, 1e18, 10_000e18, 1e14);
+        new CascadeFrontDoor(tao, bridge, BITTENSOR, address(0), owner, guardian, 12 hours, 1e18, 10_000e18, 1e14, usdc);
+
+        // and a zero USDC
+        vm.expectRevert(CascadeBase.ZeroAddress.selector);
+        new CascadeFrontDoor(
+            tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14, IERC20(address(0))
+        );
     }
 
     function test_constructorOpensBatchOne() public view {

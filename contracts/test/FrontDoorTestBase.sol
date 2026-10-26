@@ -4,11 +4,12 @@ pragma solidity 0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {CascadeFrontDoor} from "../src/CascadeFrontDoor.sol";
 import {MockTAO} from "./mocks/MockTAO.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {StubBridge} from "./mocks/StubBridge.sol";
 
-/// @notice Shared front-door fixture: 18-decimal bridged TAO, an ERC-20-side stub bridge charging
-/// 1e15 wei, and a front door with a 12h interval, 1 TAO minimum, 10,000 TAO cap and a 1e14 wei
-/// redeem-request fee. alice, bob and carol each hold 1,000 TAO (approved) and 1 ether.
+/// @notice Shared front-door fixture: 18-decimal bridged TAO, 6-decimal USDC, an ERC-20-side stub
+/// bridge charging 1e15 wei, and a front door with a 12h interval, 1 TAO minimum, 10,000 TAO cap and
+/// a 1e14 wei redeem-request fee. alice, bob and carol each hold 1,000 TAO (approved) and 1 ether.
 abstract contract FrontDoorTestBase is Test {
     uint64 constant BITTENSOR = 964;
 
@@ -20,15 +21,17 @@ abstract contract FrontDoorTestBase is Test {
     address carol = makeAddr("carol");
 
     MockTAO tao;
+    MockUSDC usdc;
     StubBridge bridge;
     CascadeFrontDoor fd;
     uint256 fillerCount;
 
     function setUp() public virtual {
         tao = new MockTAO(18);
+        usdc = new MockUSDC();
         bridge = new StubBridge(tao);
         bridge.setFee(1e15);
-        fd = new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14);
+        fd = new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e14, usdc);
 
         address[3] memory users = [alice, bob, carol];
         for (uint256 i; i < users.length; ++i) {

@@ -13,6 +13,7 @@ import {MockStaking} from "./mocks/MockStaking.sol";
 import {MockAddressMapping} from "./mocks/MockAddressMapping.sol";
 import {MockBridge} from "./mocks/MockBridge.sol";
 import {MockTAO} from "./mocks/MockTAO.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {mirror} from "./mocks/Mirror.sol";
 
 /// @notice Both chains in one EVM: the vault on BITTENSOR (native TAO) and a front door on BASE
@@ -36,6 +37,7 @@ contract EndToEndTest is Test {
 
     MockStaking staking = MockStaking(ISTAKING_ADDRESS);
     MockTAO tao;
+    MockUSDC usdc;
     MockBridge bridge;
     CascadeVault vault;
     CascadeFrontDoor fd;
@@ -47,6 +49,7 @@ contract EndToEndTest is Test {
         staking.setOneRaoShort(false);
 
         tao = new MockTAO(18);
+        usdc = new MockUSDC();
         bridge = new MockBridge(tao);
         bridge.setFee(FEE);
 
@@ -76,7 +79,7 @@ contract EndToEndTest is Test {
 
     function newFrontDoor() internal returns (CascadeFrontDoor) {
         return new CascadeFrontDoor(
-            tao, bridge, BITTENSOR, address(vault), owner, guardian, 12 hours, 1e18, 10_000e18, REQUEST_FEE
+            tao, bridge, BITTENSOR, address(vault), owner, guardian, 12 hours, 1e18, 10_000e18, REQUEST_FEE, usdc
         );
     }
 

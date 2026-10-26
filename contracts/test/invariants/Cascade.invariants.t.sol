@@ -12,6 +12,7 @@ import {MockStaking} from "../mocks/MockStaking.sol";
 import {MockAddressMapping} from "../mocks/MockAddressMapping.sol";
 import {MockBridge} from "../mocks/MockBridge.sol";
 import {MockTAO} from "../mocks/MockTAO.sol";
+import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {mirror} from "../mocks/Mirror.sol";
 import {Handler} from "./Handler.sol";
 
@@ -35,6 +36,7 @@ contract CascadeInvariantTest is Test {
 
     MockStaking staking = MockStaking(ISTAKING_ADDRESS);
     MockTAO tao;
+    MockUSDC usdc;
     MockBridge bridge;
     CascadeVault vault;
     CascadeFrontDoor fd;
@@ -47,6 +49,7 @@ contract CascadeInvariantTest is Test {
         staking.setOneRaoShort(false);
 
         tao = new MockTAO(18);
+        usdc = new MockUSDC();
         bridge = new MockBridge(tao);
         bridge.setFee(FEE);
 
@@ -55,7 +58,7 @@ contract CascadeInvariantTest is Test {
         vm.deal(address(vault), ED);
 
         fd = new CascadeFrontDoor(
-            tao, bridge, BITTENSOR, address(vault), owner, guardian, 12 hours, 1e18, HIGH_CAP, REQUEST_FEE
+            tao, bridge, BITTENSOR, address(vault), owner, guardian, 12 hours, 1e18, HIGH_CAP, REQUEST_FEE, usdc
         );
         bridge.connect(BITTENSOR, address(vault), true);
         bridge.connect(BASE, address(fd), false);

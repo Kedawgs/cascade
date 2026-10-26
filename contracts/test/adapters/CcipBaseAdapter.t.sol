@@ -9,6 +9,7 @@ import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {Client} from "../../src/vendor/ccip/Client.sol";
 import {MockRouter} from "../mocks/MockRouter.sol";
 import {MockTAO} from "../mocks/MockTAO.sol";
+import {MockUSDC} from "../mocks/MockUSDC.sol";
 
 contract CcipBaseAdapterTest is Test {
     uint64 constant BITTENSOR = 964;
@@ -44,7 +45,7 @@ contract CcipBaseAdapterTest is Test {
             0.01e18
         );
         fd = new CascadeFrontDoor(
-            tao, adapter, BITTENSOR, vaultAddr, owner, guardian, 12 hours, 0.01e18, 10_000e18, 1e14
+            tao, adapter, BITTENSOR, vaultAddr, owner, guardian, 12 hours, 0.01e18, 10_000e18, 1e14, new MockUSDC()
         );
         tao.mint(alice, 1_000e18);
         vm.prank(alice);

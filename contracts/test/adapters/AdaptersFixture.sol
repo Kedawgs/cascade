@@ -19,6 +19,7 @@ import {MockAlphaVault} from "../mocks/MockAlphaVault.sol";
 import {MockRouter} from "../mocks/MockRouter.sol";
 import {MockStaking} from "../mocks/MockStaking.sol";
 import {MockTAO} from "../mocks/MockTAO.sol";
+import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {mirror} from "../mocks/Mirror.sol";
 
 /// @notice Two "chains" in one EVM, joined by the two CCIP adapters over two mock routers: Base holds the
@@ -43,6 +44,7 @@ abstract contract AdaptersFixture is Test {
 
     MockStaking staking = MockStaking(ISTAKING_ADDRESS);
     MockTAO taoBase;
+    MockUSDC usdcBase;
     MockTAO taoBit;
     MockRouter routerBase;
     MockRouter routerBit;
@@ -58,6 +60,7 @@ abstract contract AdaptersFixture is Test {
         staking.addHotkey(HK1);
 
         taoBase = new MockTAO(18);
+        usdcBase = new MockUSDC();
         routerBase = new MockRouter(taoBase);
         routerBase.setFee(FEE);
         taoBit = new MockTAO(18);
@@ -169,7 +172,17 @@ abstract contract AdaptersFixture is Test {
 
     function newFrontDoor() internal returns (CascadeFrontDoor) {
         return new CascadeFrontDoor(
-            taoBase, adapterBase, BITTENSOR, address(vault), owner, guardian, 12 hours, 0.01e18, 10_000e18, REQUEST_FEE
+            taoBase,
+            adapterBase,
+            BITTENSOR,
+            address(vault),
+            owner,
+            guardian,
+            12 hours,
+            0.01e18,
+            10_000e18,
+            REQUEST_FEE,
+            usdcBase
         );
     }
 

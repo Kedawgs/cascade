@@ -6,7 +6,7 @@ import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
-import { offerClaim } from "@/lib/stake-form";
+import { CLAIM_ENDS_DELIVERY, claimEndsDelivery, offerClaim } from "@/lib/stake-form";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
 import app from "./App.module.css";
@@ -92,6 +92,7 @@ function ClaimReady({ account }: { account: string }) {
         <b>{price !== undefined ? `About ${formatUsd(toDisplay(claimable, 18) * price)}` : `${formatTao(toDisplay(claimable, 18), 6)} TAO`}</b> is
         back on Base and ready to claim.
       </p>
+      {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.walletTaoNote}>{CLAIM_ENDS_DELIVERY}</p>}
       <div className={styles.walletTaoActions}>
         {/* the claim names the unstakes it pays, so it waits until they have loaded; if they can't be read
             it claims without naming them (the chain needs no names) */}

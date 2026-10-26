@@ -441,6 +441,24 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(withdrawalRecord(wop3, { ...back, preference: undefined }).steps[3].status).toBe("active");
   });
 
+  it("marks an unstake still on its way back with automatic delivery ahead, which a claim by hand would turn off", () => {
+    // in the open batch, on the bridge, in the safety wait, on the way back to Base
+    expect(withdrawalRecord(wop3, wbase).awaitingDelivery).toBe(true);
+    expect(withdrawalRecord(wop3, { ...back, payout: undefined, credited: undefined, claimable: 0n, preference: undefined }).awaitingDelivery).toBe(true);
+    expect(withdrawalRecord(wop3, { ...back, payout: { ...payout, state: 1 }, credited: undefined, preference: undefined }).awaitingDelivery).toBe(true);
+    // landed (being delivered, or offering the claim), paid, or never going to be delivered: not
+    expect(withdrawalRecord(wop3, back).awaitingDelivery).toBeUndefined();
+    expect(withdrawalRecord(wop3, { ...back, claimable: 0n, usdcDelivered: receipt }).awaitingDelivery).toBeUndefined();
+    expect(withdrawalRecord(wop3, { ...wbase, now: new Date((DEADLINE + 1) * 1000) }).awaitingDelivery).toBeUndefined();
+    expect(withdrawalRecord(wop3, { ...wbase, requestMined: false }).awaitingDelivery).toBeUndefined();
+    expect(withdrawalRecord({ ...wop3, cancelled: { hash: H(12), at: T0.getTime() } }, { ...wbase, cancelMined: true }).awaitingDelivery).toBeUndefined();
+    expect(
+      withdrawalRecord(wop3, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { ...redeemed, outcome: "skipped" as const, taoWei: 0n } }).awaitingDelivery,
+    ).toBeUndefined();
+    // v2 delivers nothing automatically
+    expect(withdrawalRecord(wop, wbase).awaitingDelivery).toBeUndefined();
+  });
+
   it("tells the screens when an unstake's USDC is on its way by itself", () => {
     expect(isDelivering(withdrawalRecord(wop3, back))).toBe(true);
     // taking longer than usual: the claim is offered, so it no longer counts as delivering

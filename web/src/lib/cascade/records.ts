@@ -58,6 +58,9 @@ export interface WithdrawalRecord {
   /** v3: today's price is under the unstake's minimum, so its USDC hasn't been sold for it: what its
    * payout would sell for at today's price, in USDC (absent when its share of what waits isn't known). */
   belowMinimum?: { usdcNow?: number };
+  /** v3: still on its way back to Base, its USDC to be delivered automatically when it lands. A claim by
+   * hand clears the account's delivery preference, so it would then be claimed by hand too. */
+  awaitingDelivery?: true;
   /** Shares still in the open batch that can be taken back. */
   cancellableShares?: bigint;
   /** Nothing was taken when it arrived (balance too small, or the daily limit): unstake again. */

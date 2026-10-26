@@ -138,6 +138,15 @@ export function offerClaim(
   return !withdrawals.some(isDelivering);
 }
 
+/** v3: a claim by hand clears the account's delivery preference (CascadeFrontDoor.claim), so the claim
+ * banner says so while any unstake is still on its way with automatic delivery ahead of it. */
+export function claimEndsDelivery(v3: boolean, withdrawals: readonly WithdrawalRecord[] | undefined): boolean {
+  return v3 && (withdrawals ?? []).some((w) => w.awaitingDelivery === true);
+}
+
+export const CLAIM_ENDS_DELIVERY =
+  "Claiming now also turns off automatic delivery for unstakes still on their way: you'll claim those by hand when they arrive.";
+
 /** What MAX types into the TAO field: the exact available amount, floored to six decimals. */
 export function maxUnstakeInput(taoWei: bigint): string {
   const floored = (taoWei / 10n ** 12n) * 10n ** 12n;

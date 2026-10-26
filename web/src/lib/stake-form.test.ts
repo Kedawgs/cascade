@@ -4,6 +4,8 @@ import {
   breakEvenDays,
   breakEvenText,
   cascadeFeesText,
+  CLAIM_ENDS_DELIVERY,
+  claimEndsDelivery,
   deliveryFloorUsd,
   deliveryNote,
   maxStakeInput,
@@ -330,5 +332,36 @@ describe("offerClaim", () => {
 
   it("v3: offered whenever any unstake offers the claim by hand, even beside one still being delivered", () => {
     expect(offerClaim(waiting, true, [unstake("in_progress", "active"), unstake("ready", "action")])).toBe(true);
+  });
+});
+
+describe("claimEndsDelivery", () => {
+  const record = (awaitingDelivery: boolean): WithdrawalRecord => ({
+    id: "w",
+    createdAt: new Date(0),
+    status: awaitingDelivery ? "in_progress" : "ready",
+    steps: [],
+    shares: 1n,
+    taoAmount: 0.08,
+    claimable: 0n,
+    ...(awaitingDelivery ? { awaitingDelivery: true as const } : {}),
+  });
+
+  it("v3: warns when an unstake still on its way would lose its automatic delivery to a claim now", () => {
+    expect(claimEndsDelivery(true, [record(false), record(true)])).toBe(true);
+    expect(claimEndsDelivery(true, [record(false)])).toBe(false);
+    expect(claimEndsDelivery(true, [])).toBe(false);
+    // not known yet, or not readable: nothing said
+    expect(claimEndsDelivery(true, undefined)).toBe(false);
+  });
+
+  it("v2: never, since nothing is delivered automatically", () => {
+    expect(claimEndsDelivery(false, [record(true)])).toBe(false);
+  });
+
+  it("says it in one plain sentence", () => {
+    expect(CLAIM_ENDS_DELIVERY).toBe(
+      "Claiming now also turns off automatic delivery for unstakes still on their way: you'll claim those by hand when they arrive.",
+    );
   });
 });

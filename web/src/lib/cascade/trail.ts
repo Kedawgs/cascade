@@ -401,6 +401,15 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       : undefined;
   // nothing was taken, so nothing comes back; a paid v3 unstake shows what arrived (its receipt) or nothing, never the estimate
   const usdcAmount = nothingTaken ? undefined : auto && status === "paid" ? received?.usdc : toDisplay(op.usdcEstimate, 6);
+  // v3: asked for, still on its way back, its USDC to be delivered when it lands (the preference it set
+  // hasn't run out); claim() clears the account's preference, so a claim by hand now would turn that off
+  const awaitingDelivery =
+    op.delivery !== undefined &&
+    op.delivery.deadline * 1000 >= f.now.getTime() &&
+    f.requestMined &&
+    !landed &&
+    !nothingTaken &&
+    (status === "in_progress" || status === "needs_you");
   return {
     // nothing was taken (balance too small, or the daily limit): the user can simply unstake again
     ...(nothingTaken ? { unstakeAgain: true as const } : {}),
@@ -414,6 +423,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     claimable: f.claimable,
     ...(received ? { received } : {}),
     ...(belowMinimum ? { belowMinimum } : {}),
+    ...(awaitingDelivery ? { awaitingDelivery: true as const } : {}),
     ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" ? { cancellableShares: op.shares } : {}),
   };
 }

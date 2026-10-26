@@ -1,6 +1,6 @@
 import { encodeDeployData, formatEther, getContractAddress, type Hex, hexToBigInt } from "viem";
 import { loadArtifact } from "./artifacts.ts";
-import { CLAIM_POLICY, SETTINGS, WALLET, WALLET_SS58 } from "./config.ts";
+import { CLAIM_POLICY, type ClaimPolicy, SETTINGS, WALLET, WALLET_SS58 } from "./config.ts";
 import { readColdkey } from "./deploy.ts";
 import { claimGasLimit, VAULT_CLAIM_GAS_REQUIRED } from "./keeper/rewards.ts";
 import { buildPlan, buildPlanV3, isPlanV3 } from "./plan.ts";
@@ -27,6 +27,8 @@ export interface BudgetInputs {
   ethBalance: bigint;
   /** v3: the gas limit a reward claim is sent with, which Bittensor charges up front */
   claimGasLimit?: bigint;
+  /** v3: what one claim costs (the claim policy's, so OPS_CLAIM_COST_TAO applies) */
+  claimCostTao?: bigint;
 }
 
 export interface Budget {
@@ -64,7 +66,8 @@ export function computeBudget(i: BudgetInputs): Budget {
   const baseTxs = BigInt(i.baseDeploySteps) + CLOSES + deliveries;
   const ethNeed = ceil13(baseGas * i.baseGasPrice + (CLOSES * i.baseFeeQuote * 125n) / 100n) + baseTxs * L1_PER_TX;
   const taoToSend = toSend(taoNeed, i.taoBalance, 10n ** 15n);
-  const upfront = i.claimGasLimit === undefined ? undefined : i.claimGasLimit * i.bitGasPrice;
+  // the same 30% margin as the rest of the TAO need, for a gas price that rises before the claim
+  const upfront = i.claimGasLimit === undefined ? undefined : ceil13(i.claimGasLimit * i.bitGasPrice);
   return {
     taoNeed,
     ethNeed,
@@ -79,7 +82,7 @@ export function computeBudget(i: BudgetInputs): Budget {
           claim: {
             gasLimit: i.claimGasLimit,
             upfront,
-            cost: CLAIM_POLICY.claimCostTao,
+            cost: i.claimCostTao ?? CLAIM_POLICY.claimCostTao,
             // the claim comes after the deployment's and the keeper's spending, so it needs its up-front sum on top
             taoToSendWith: toSend(taoNeed + upfront, i.taoBalance, 10n ** 15n),
           },
@@ -103,7 +106,7 @@ export function formatBudget(b: Budget): string[] {
   const c = b.claim;
   if (c) {
     lines.push(
-      `Optional, not counted above: a reward claim is sent with a ${c.gasLimit.toLocaleString("en-US")} gas limit, so the wallet must hold ${formatEther(c.upfront)} TAO up front when it claims; Bittensor refunds the unused gas, and a claim costs about ${formatEther(c.cost)} TAO`,
+      `Optional, not counted above: a reward claim is sent with a ${c.gasLimit.toLocaleString("en-US")} gas limit, so the wallet must hold about ${formatEther(c.upfront)} TAO up front when it claims (that limit at today's gas price, plus 30%); Bittensor refunds the unused gas, and a claim costs about ${formatEther(c.cost)} TAO`,
       c.taoToSendWith > b.taoToSend
         ? `To be able to claim during the test, send ${formatEther(c.taoToSendWith)} TAO in all instead`
         : "The wallet already holds enough TAO to claim as well",
@@ -125,9 +128,9 @@ const estimateCreate = async (ctx: Ctx, name: string, args: unknown[]) => {
 };
 
 /** Live reads and estimates (no sends) plus the rehearsal's measured gas: every Base step of its plan,
- * every Bittensor configuration call and, for v3, its round trip's USDC delivery. `ctx` points at the
- * live chains. */
-export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord): Promise<BudgetInputs> {
+ * every Bittensor configuration call and, for v3, its round trip's USDC delivery and the claim policy's
+ * cost of a claim. `ctx` points at the live chains. */
+export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord, policy: ClaimPolicy = CLAIM_POLICY): Promise<BudgetInputs> {
   // an estimate creates at the wallet's current nonce, so the vault's coldkey is that address's
   const nonce = await nonceOf(ctx.rpc, "bittensor", WALLET);
   const here = getContractAddress({ from: WALLET, nonce: BigInt(nonce) });
@@ -154,6 +157,8 @@ export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord):
     baseGasPrice: await gasPriceOf(ctx.rpc, "base"),
     taoBalance: await balanceOf(ctx.rpc, "bittensor", WALLET),
     ethBalance: await balanceOf(ctx.rpc, "base", WALLET),
-    ...(v3 ? { deliverGas: delivery?.gasUsed ?? DEFAULT_DELIVER_GAS, claimGasLimit: claimGasLimit(VAULT_CLAIM_GAS_REQUIRED) } : {}),
+    ...(v3
+      ? { deliverGas: delivery?.gasUsed ?? DEFAULT_DELIVER_GAS, claimGasLimit: claimGasLimit(VAULT_CLAIM_GAS_REQUIRED), claimCostTao: policy.claimCostTao }
+      : {}),
   };
 }

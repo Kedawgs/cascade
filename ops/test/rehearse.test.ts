@@ -12,9 +12,10 @@ import {
   type DeliveryResult,
   deliveryMessage,
   extraArgsGas,
+  formatReceivers,
   formatStep,
+  forkPermitDomain,
   type Measured,
-  permitChainId,
   ROUND_TRIP,
   type RoundTripDeps,
   runRoundTrip,
@@ -215,16 +216,45 @@ describe("the staking stand-in's debits", () => {
   });
 });
 
-describe("permitChainId", () => {
+describe("forkPermitDomain", () => {
   const domain = { name: "USD Coin", version: "2", verifyingContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address };
   // EIP-712 domain separators of USDC on Base computed independently (cast keccak of the encoded domain)
   const BASE_8453: Hex = "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f";
   const FORK_31337: Hex = "0xf18492e40a6e518a1b6f7edab84066be6742f11e84f48b72f4c41554c984fe8b";
 
-  it("picks the chain id whose domain matches the token's separator", () => {
-    expect(permitChainId(BASE_8453, domain, [31337, 8453])).toBe(8453);
-    expect(permitChainId(FORK_31337, domain, [31337, 8453])).toBe(31337);
-    expect(() => permitChainId(BASE_8453, domain, [31337])).toThrow(/matches none of chain ids 31337/);
+  it("signs in the fork's own chain id when the token's separator is for it", () => {
+    expect(forkPermitDomain(FORK_31337, domain, 31337)).toEqual({ ...domain, chainId: 31337 });
+  });
+
+  it("fails loudly, before anything is signed, for a separator of another chain or for Base itself", () => {
+    expect(() => forkPermitDomain(BASE_8453, domain, 31337)).toThrow("the token's permit domain is not for the fork's chain id 31337; nothing signed");
+    expect(() => forkPermitDomain(BASE_8453, domain, 8453)).toThrow("a rehearsal never signs a permit for Base's chain id 8453; nothing signed");
+  });
+});
+
+describe("formatReceivers", () => {
+  it("puts each relay's need against its message's enforced limit on one line", () => {
+    const relay = (step: StepReport["step"], need: bigint, limit: bigint): StepReport => ({
+      step,
+      chain: "base",
+      payer: "bridge",
+      gasUsed: 1n,
+      costWei: 1n,
+      receiver: { need, limit },
+      detail: "",
+    });
+    const close: StepReport = { step: "close the deposit batch", chain: "base", payer: "keeper", gasUsed: 1n, costWei: 1n, detail: "" };
+    expect(formatReceivers([close, relay("deliver the deposit batch on Bittensor", 207_051n, 566_450n), relay("deliver the payout on Base", 126_000n, 189_900n)])).toBe(
+      "Receiver gas needed of the message's limit, each relay sent with that limit enforced: deliver the deposit batch on Bittensor: 207,051 of 566,450 (36.5%); deliver the payout on Base: 126,000 of 189,900 (66.3%)",
+    );
+  });
+
+  it("is carried from a relay's measurement into its report", async () => {
+    const receiver = { need: 5n, limit: 10n };
+    const { deps } = fakeSteps({ relayToBase: async () => ({ chain: "base", payer: "bridge", gasUsed: 1n, costWei: 1n, receiver, detail: "" }) });
+    const { reports } = await runRoundTrip(deps, () => undefined);
+    expect(reports[8].receiver).toEqual(receiver);
+    expect(reports[7]).not.toHaveProperty("receiver");
   });
 });
 

@@ -1,7 +1,7 @@
 import { type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import { type BudgetInputs, computeBudget, formatBudget, gatherBudgetInputs } from "../src/budget.ts";
-import { paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
+import { claimPolicy, paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import type { Ctx, Sent } from "../src/send.ts";
@@ -73,19 +73,25 @@ describe("budget v3", () => {
     expect(b.taoToSend).toBe(45_000_000_000_000_000n);
   });
 
-  it("lists the optional claim's up-front TAO separately, outside the totals", () => {
+  it("lists the optional claim's up-front TAO separately, outside the totals, with the same 30% margin", () => {
     const b = computeBudget(v3Inputs);
-    // 57,000,000 gas × 5 gwei = τ0.285 up front; with the need, 0.365379182 − 0.036 held → 0.330
-    expect(b.claim).toEqual({ gasLimit: 57_000_000n, upfront: 285_000_000_000_000_000n, cost: 57_000_000_000_000_000n, taoToSendWith: 330_000_000_000_000_000n });
+    // 57,000,000 gas × 5 gwei = τ0.285, × 1.3 = τ0.3705 up front; with the need, 0.450879182 − 0.036 held → 0.415
+    expect(b.claim).toEqual({ gasLimit: 57_000_000n, upfront: 370_500_000_000_000_000n, cost: 57_000_000_000_000_000n, taoToSendWith: 415_000_000_000_000_000n });
     expect(computeBudget({ ...v3Inputs, claimGasLimit: undefined }).taoNeed).toBe(b.taoNeed);
     const lines = formatBudget(b);
     expect(lines).toContain(
-      "Optional, not counted above: a reward claim is sent with a 57,000,000 gas limit, so the wallet must hold 0.285 TAO up front when it claims; Bittensor refunds the unused gas, and a claim costs about 0.057 TAO",
+      "Optional, not counted above: a reward claim is sent with a 57,000,000 gas limit, so the wallet must hold about 0.3705 TAO up front when it claims (that limit at today's gas price, plus 30%); Bittensor refunds the unused gas, and a claim costs about 0.057 TAO",
     );
-    expect(lines).toContain("To be able to claim during the test, send 0.33 TAO in all instead");
+    expect(lines).toContain("To be able to claim during the test, send 0.415 TAO in all instead");
     expect(lines).toContain("Send 0.045 TAO to the test wallet's Bittensor address 5FxSW9dM8DbAWUFtADJPX5Wb7DctrJHadkJ3TB1GpBGvxQH2");
     expect(lines.find((l) => l.startsWith("Base:"))).toMatch(/the deployment's 11 transactions, 3 batch closes with their bridge fees, 2 USDC deliveries/);
     expect(formatBudget(computeBudget({ ...v3Inputs, taoBalance: 10n ** 18n }))).toContain("The wallet already holds enough TAO to claim as well");
+  });
+
+  it("states a claim's cost from the claim policy, so a measured OPS_CLAIM_COST_TAO shows", () => {
+    const b = computeBudget({ ...v3Inputs, claimCostTao: 45_000_000_000_000_000n });
+    expect(b.claim?.cost).toBe(45_000_000_000_000_000n);
+    expect(formatBudget(b).some((l) => l.endsWith("and a claim costs about 0.045 TAO"))).toBe(true);
   });
 });
 
@@ -137,7 +143,9 @@ describe("gatherBudgetInputs", () => {
     expect(i.baseDeployGas).toBe(sumOf(plan, (s) => s.chain === "base"));
     // adapterReserve, vaultReserve, setKeeper, setPayoutDelay, setRewardCut: steps 14–18
     expect(i.bitConfigGas).toBe(1_000n * (14n + 15n + 16n + 17n + 18n));
-    expect(i).toMatchObject({ closeGas: 410_000n, baseFeeQuote: 6n * 10n ** 14n, deliverGas: 333_333n, claimGasLimit: 57_000_000n });
+    expect(i).toMatchObject({ closeGas: 410_000n, baseFeeQuote: 6n * 10n ** 14n, deliverGas: 333_333n, claimGasLimit: 57_000_000n, claimCostTao: 57n * 10n ** 15n });
+    const measured = await gatherBudgetInputs(liveChains().ctx, rec, claimPolicy({ OPS_CLAIM_COST_TAO: "0.045" }));
+    expect(measured.claimCostTao).toBe(45n * 10n ** 15n);
     // the vault is estimated with the v3 arguments: tao.bot's hotkey
     expect(estimates[1]).toContain(SETTINGS_V3.hotkey.slice(2));
   });
@@ -150,5 +158,6 @@ describe("gatherBudgetInputs", () => {
     expect(i.bitConfigGas).toBe(1_000n * (5n + 6n + 7n + 8n));
     expect(i.deliverGas).toBeUndefined();
     expect(i.claimGasLimit).toBeUndefined();
+    expect(i.claimCostTao).toBeUndefined();
   });
 });

@@ -91,7 +91,8 @@ export const DELIVERY_READ_ABIS = { FRONT, DELIVERY_FRONT, STAKER, ORACLE, QUOTE
 /** The staker's RouterKind.UniswapV3: the only route kind QuoterV2 can price. */
 const UNISWAP_V3 = 0;
 
-/** The call really reverted: JSON-RPC code 3, revert data, or a message that says so. A node that
+/** The call really failed in the contract: JSON-RPC code 3, revert data, or a message that says so
+ * (a revert, out of gas, an invalid opcode). A node that
  * answered with an error of its own (-32005 limit exceeded, -32000 header not found, -32603) did not
  * run the call, so its answer says nothing about the contract. */
 export function isRevert(e: unknown): boolean {
@@ -100,7 +101,8 @@ export function isRevert(e: unknown): boolean {
   const raw = e.data;
   const data = typeof raw === "string" ? raw : (raw as { data?: unknown } | undefined)?.data;
   if (typeof data === "string" && /^0x[0-9a-fA-F]{8,}$/.test(data)) return true;
-  return /revert/i.test(e.message);
+  // geth reports a call that ran out of gas or hit an invalid opcode as -32000, with no revert data
+  return /revert|out of gas|invalid opcode/i.test(e.message);
 }
 
 /** A node's own error (not a revert): the delivery is skipped for a later round, never sent on it. */
@@ -165,12 +167,15 @@ export async function startBlock(ctx: Ctx, rec: DeploymentRecord, chain: ChainNa
 /** The keeper's reads and sends. Base is never scanned for logs here (its public RPC allows 200
  * blocks a query): bridge messages come from the record, which the keeper fills as it sends. The
  * delivery candidates are kept for the life of these deps (one `run` loop), so each round scans only
- * the blocks since the last. */
+ * the blocks since the last, and a few before them (OVERLAP). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
   let candidates: Address[] = [];
   /** The last Bittensor block scanned for Redeemed events, once a scan has finished. */
   let scannedTo: bigint | undefined;
+  /** Each later scan starts this many blocks back, so a block a lagging (load-balanced) node hadn't
+   * indexed yet is read again rather than skipped for the whole run; the users are deduplicated. */
+  const OVERLAP = 10n;
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
@@ -285,7 +290,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     async deliveryCandidates() {
       if (!isPlanV3(rec.plan)) return [];
       const latest = hexToBigInt((await ctx.rpc.request("bittensor", "eth_blockNumber", [])) as Hex);
-      const from = scannedTo === undefined ? await startBlock(ctx, rec, "bittensor") : scannedTo + 1n;
+      const start = await startBlock(ctx, rec, "bittensor");
+      const from = scannedTo === undefined || scannedTo + 1n - OVERLAP < start ? start : scannedTo + 1n - OVERLAP;
       if (from <= latest) {
         const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), from, [], latest);
         candidates = uniqueUsers([...candidates, ...redeemed.map((l) => l.args.user as Address)]);

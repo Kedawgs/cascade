@@ -953,7 +953,9 @@ Added for v3 (2026-10-26):
     minutes and 1 hour). First make `verify` read the expected values from the deployment record
     rather than from today's `SETTINGS_V3`; otherwise changing `SETTINGS_V3` makes the existing
     test record fail its verify.
-34. Raise the v3 Bittensor adapter's payout gas (`bitGas.base` from 120,000 to 160,000 in the v3
-    plan; the Base payout receiver used about 126k of 149,900 for one entry). Not yet done in
-    `ops/src/config.ts` when this was written. A failed delivery would need manual CCIP
-    re-execution.
+34. **Done in v3.** The v3 Bittensor adapter's payout gas is raised: `SETTINGS_V3.bitGas.base`
+    goes from 120,000 to 170,000 (29,900 per entry, unchanged), and v2 keeps 120,000. The Base
+    payout receiver needs about 134.6k for one entry: the node's estimate, which counts gas before
+    refunds. That was 90% of the old 149,900 limit and is about 67% of 199,900. The ops rehearsal
+    now relays each message with exactly the gas limit the message asks for, and fails when a
+    receiver needs more. A failed delivery would need manual CCIP re-execution.

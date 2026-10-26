@@ -11,7 +11,7 @@ import {
   parseAbi,
   parseAbiParameters,
 } from "viem";
-import type { ChainName } from "./config.ts";
+import { type ChainName, LIVE } from "./config.ts";
 import { chainLabel, unit } from "./send.ts";
 
 /** One step of the v3 round trip, as measured on the forks. */
@@ -26,6 +26,8 @@ export interface StepReport {
   costWei: bigint;
   /** The bridge fee the step paid, in the same unit (the closes and the payout) */
   bridgeFeeWei?: bigint;
+  /** A relay: the gas the receiving adapter needs, and the limit the message gave it (enforced) */
+  receiver?: { need: bigint; limit: bigint };
   /** What the step did, in words */
   detail: string;
 }
@@ -121,8 +123,17 @@ export async function runRoundTrip(
     } catch (e) {
       throw new Error(`step ${i + 1} (${ROUND_TRIP[i]}) failed: ${(e as Error).message}`);
     }
-    const { chain, payer, gasUsed, costWei, bridgeFeeWei, detail } = m;
-    const r: StepReport = { step: ROUND_TRIP[i], chain, payer, gasUsed, costWei, ...(bridgeFeeWei === undefined ? {} : { bridgeFeeWei }), detail };
+    const { chain, payer, gasUsed, costWei, bridgeFeeWei, receiver, detail } = m;
+    const r: StepReport = {
+      step: ROUND_TRIP[i],
+      chain,
+      payer,
+      gasUsed,
+      costWei,
+      ...(bridgeFeeWei === undefined ? {} : { bridgeFeeWei }),
+      ...(receiver === undefined ? {} : { receiver }),
+      detail,
+    };
     reports.push(r);
     onStep(r);
     log(formatStep(i + 1, r));
@@ -229,14 +240,28 @@ export function calldataGas(data: Hex): bigint {
   return gas;
 }
 
-/** The chain id a token's EIP-712 domain uses, among `candidates`: USDC computes it from the chain at
- * call time, so on a fork it is the fork's own chain id; the check guards against a cached separator. */
-export function permitChainId(
+/** The domain a rehearsal signs a permit in: the fork's own chain id, and only if the token's
+ * separator says so (USDC computes it from the chain at call time). Nothing a rehearsal signs may be
+ * valid on Base, so Base's chain id, or a separator for any other chain, fails before anything is signed. */
+export function forkPermitDomain(
   separator: Hex,
   domain: { name: string; version: string; verifyingContract: Address },
-  candidates: readonly number[],
-): number {
-  const hit = candidates.find((chainId) => domainSeparator({ domain: { ...domain, chainId } }).toLowerCase() === separator.toLowerCase());
-  if (hit === undefined) throw new Error(`the token's permit domain matches none of chain ids ${candidates.join(", ")}`);
-  return hit;
+  forkChainId: number,
+): { name: string; version: string; verifyingContract: Address; chainId: number } {
+  if (forkChainId === LIVE.base.CHAIN_ID) throw new Error(`a rehearsal never signs a permit for Base's chain id ${LIVE.base.CHAIN_ID}; nothing signed`);
+  const d = { ...domain, chainId: forkChainId };
+  if (domainSeparator({ domain: d }).toLowerCase() !== separator.toLowerCase()) {
+    throw new Error(`the token's permit domain is not for the fork's chain id ${forkChainId}; nothing signed`);
+  }
+  return d;
+}
+
+/** One line for the relays: what each receiver needed of the gas its message gave it. */
+export function formatReceivers(reports: readonly StepReport[]): string {
+  const parts = reports.flatMap((r) =>
+    r.receiver
+      ? [`${r.step}: ${r.receiver.need.toLocaleString("en-US")} of ${r.receiver.limit.toLocaleString("en-US")} (${Number((r.receiver.need * 1000n) / r.receiver.limit) / 10}%)`]
+      : [],
+  );
+  return `Receiver gas needed of the message's limit, each relay sent with that limit enforced: ${parts.join("; ")}`;
 }

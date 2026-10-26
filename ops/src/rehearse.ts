@@ -36,7 +36,8 @@ import {
   deliveryMessage,
   extraArgsGas,
   type Measured,
-  permitChainId,
+  forkPermitDomain,
+  formatReceivers,
   type RoundTripDeps,
   runRoundTrip,
   type StepReport,
@@ -147,28 +148,37 @@ async function warp(rpc: Rpc, chain: ChainName, seconds: number) {
 const traceOf = async (rpc: Rpc, chain: ChainName, hash: Hex) =>
   (await rpc.request(chain, "debug_traceTransaction", [hash, { tracer: "callTracer" }])) as CallFrame;
 
-/** Sends as an account the fork lets us impersonate (a CCIP router or token pool), then puts its balance
- * back: the top-up only pays this transaction's gas. */
-async function sendAs(ctx: Ctx, chain: ChainName, from: Address, to: Address, data: Hex, label: string): Promise<Receipt> {
+/** Runs `send` as an account the fork lets us impersonate (a CCIP router or token pool), then puts its
+ * balance back: the top-up only pays the gas. */
+async function impersonating<T>(ctx: Ctx, chain: ChainName, from: Address, send: () => Promise<T>): Promise<T> {
   const { rpc } = ctx;
   const before = await balanceOf(rpc, chain, from);
   await rpc.request(chain, "anvil_impersonateAccount", [from]);
   await setBalance(rpc, chain, from, before + TAO);
   try {
-    let hash: Hex;
-    try {
-      hash = (await rpc.request(chain, "eth_sendTransaction", [{ from, to, data }])) as Hex;
-    } catch (e) {
-      throw new Error(`${label} would fail (${describeRevert(ctx, e)})`);
-    }
-    const r = await receiptOf(rpc, chain, hash);
-    if (r.status !== "0x1") throw new Error(`${label} reverted (transaction ${hash})`);
-    return r;
+    return await send();
   } finally {
     await setBalance(rpc, chain, from, before);
     await rpc.request(chain, "anvil_stopImpersonatingAccount", [from]);
   }
 }
+
+/** One transaction from an impersonated account, with `gas` as its limit when given (else anvil's estimate). */
+async function submit(ctx: Ctx, chain: ChainName, tx: { from: Address; to: Address; data: Hex; gas?: bigint }, label: string): Promise<Receipt> {
+  let hash: Hex;
+  try {
+    const { gas, ...rest } = tx;
+    hash = (await ctx.rpc.request(chain, "eth_sendTransaction", [{ ...rest, ...(gas === undefined ? {} : { gas: numberToHex(gas) }) }])) as Hex;
+  } catch (e) {
+    throw new Error(`${label} would fail (${describeRevert(ctx, e)})`);
+  }
+  const r = await receiptOf(ctx.rpc, chain, hash);
+  if (r.status !== "0x1") throw new Error(`${label} reverted (transaction ${hash})`);
+  return r;
+}
+
+const sendAs = (ctx: Ctx, chain: ChainName, from: Address, to: Address, data: Hex, label: string) =>
+  impersonating(ctx, chain, from, () => submit(ctx, chain, { from, to, data }, label));
 
 /** A Base transaction the user signs with its fork-only key: chain id 31337, so it means nothing on Base. */
 async function sendAsUser(ctx: Ctx, user: PrivateKeyAccount, to: Address, data: Hex, label: string, value = 0n): Promise<Receipt> {
@@ -323,16 +333,12 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
   const closes: Partial<Record<"deposit" | "redeem", Hex>> = {};
   let payoutHash: Hex | undefined;
 
-  /** What the receiving adapter used, against the gas the sending adapter asked CCIP for. */
-  const receiverGas = (receipt: Receipt, data: Hex, extraArgs: Hex) => {
-    const used = hexToBigInt(receipt.gasUsed) - 21_000n - calldataGas(data);
-    const limit = extraArgsGas(extraArgs);
-    const fits = used <= limit ? "within" : "OVER";
-    return `the receiver used about ${used.toLocaleString("en-US")} gas, ${fits} the message's ${limit.toLocaleString("en-US")} limit`;
-  };
-
   /** Relays the one CCIP message `hash` sent through `from`'s router: the destination pool hands the
-   * tokens to the receiving adapter, then the destination router calls it, as CCIP's executor would. */
+   * tokens to the receiving adapter, then the destination router calls it, as CCIP's executor would,
+   * with the gas the sending adapter asked CCIP for. The OffRamp gives ccipReceive that limit, so the
+   * relay is sent with exactly it for the receiver (plus 21,000 and the calldata): a receiver that needs
+   * more fails the step. What it needs is the node's estimate (the least gas that succeeds, before
+   * refunds) less those two. */
   async function relay(from: ChainName, hash: Hex) {
     const to: ChainName = from === "base" ? "bittensor" : "base";
     const [srcAdapter, dstAdapter] = from === "base" ? [a.baseAdapter, a.bitAdapter] : [a.bitAdapter, a.baseAdapter];
@@ -346,10 +352,28 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
       await sendAs(ctx, to, LIVE[to].POOL, LIVE[to].TOKEN, release, `the ${to} token pool's release`);
     }
     const data = encodeFunctionData({ abi: CCIP_ROUTER_ABI, functionName: "ccipReceive", args: [deliveryMessage(sent, LIVE[from].SELECTOR, LIVE[to].TOKEN)] });
-    const receipt = await sendAs(ctx, to, LIVE[to].ROUTER, dstAdapter, data, `delivering message ${short(sent.messageId)}`);
+    const limit = extraArgsGas(sent.extraArgs);
+    const overhead = 21_000n + calldataGas(data);
+    const router = LIVE[to].ROUTER;
+    const label = `delivering message ${short(sent.messageId)} with the message's ${limit.toLocaleString("en-US")} gas for the receiver`;
+    const { receipt, need } = await impersonating(ctx, to, router, async () => {
+      let estimate: bigint;
+      try {
+        estimate = hexToBigInt((await rpc.request(to, "eth_estimateGas", [{ from: router, to: dstAdapter, data }])) as Hex);
+      } catch (e) {
+        throw new Error(`${label} would fail (${describeRevert(ctx, e)})`);
+      }
+      const need = estimate - overhead;
+      if (need > limit) {
+        throw new Error(`the receiver needs about ${need.toLocaleString("en-US")} gas, more than the message's ${limit.toLocaleString("en-US")}: CCIP would fail this message`);
+      }
+      return { need, receipt: await submit(ctx, to, { from: router, to: dstAdapter, data, gas: overhead + limit }, label) };
+    });
     eventIn(receipt.logs, dstAdapter, ADAPTER, "Delivered");
     if (to === "bittensor") await settleDebits(rpc, receipt.logs);
-    return { sent, amount, receipt, gas: receiverGas(receipt, data, sent.extraArgs) };
+    const pct = Number((need * 1000n) / limit) / 10;
+    const gas = `the receiver needs about ${need.toLocaleString("en-US")} gas of the ${limit.toLocaleString("en-US")} the message gives it (${pct}%), and ran with that limit enforced`;
+    return { sent, amount, receipt, gas, receiver: { need, limit } };
   }
 
   const keeperStep = (chain: ChainName, done: { gasUsed: bigint; costWei: bigint }, detail: string, bridgeFeeWei?: bigint): Measured => ({
@@ -375,10 +399,10 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
       const version = (await view("base", BASE_V3.USDC, ERC20, "version")) as string;
       const nonce = (await view("base", BASE_V3.USDC, ERC20, "nonces", [user.address])) as bigint;
       const separator = (await view("base", BASE_V3.USDC, ERC20, "DOMAIN_SEPARATOR")) as Hex;
-      const domain = { name, version, verifyingContract: BASE_V3.USDC };
-      const chainId = permitChainId(separator, domain, [ctx.targets.base.chainId, LIVE.base.CHAIN_ID]);
+      // the fork's chain id only: nothing signed here may be valid on Base
+      const domain = forkPermitDomain(separator, { name, version, verifyingContract: BASE_V3.USDC }, ctx.targets.base.chainId);
       const signature = await user.signTypedData({
-        domain: { ...domain, chainId },
+        domain,
         types: {
           Permit: [
             { name: "owner", type: "address" },
@@ -408,7 +432,7 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
         chain: "base",
         payer: "user",
         ...gasOf(receipt),
-        detail: `${usdc(USDC_IN)} in by a permit signed with the user's key (permit domain chain id ${chainId}); ${usdc(staked.fees)} in fees to the treasury; ${tao(staked.taoDeposited)} into the open batch (minimum ${tao(minTaoOut)})`,
+        detail: `${usdc(USDC_IN)} in by a permit signed with the user's key (permit domain chain id ${domain.chainId}); ${usdc(staked.fees)} in fees to the treasury; ${tao(staked.taoDeposited)} into the open batch (minimum ${tao(minTaoOut)})`,
       };
     },
 
@@ -428,7 +452,7 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
     async relayToBittensor(which) {
       const hash = closes[which];
       if (!hash) throw new Error(`the ${which} batch was not closed`);
-      const { sent, amount, receipt, gas } = await relay("base", hash);
+      const { sent, amount, receipt, gas, receiver } = await relay("base", hash);
       let what: string;
       if (which === "deposit") {
         const shares = (await view("bittensor", a.vault, VAULT, "balanceOf", [user.address])) as bigint;
@@ -439,7 +463,7 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
         if ((await view("bittensor", a.vault, VAULT, "balanceOf", [user.address])) !== 0n) throw new Error("the user still holds csTAO after redeeming all of it");
         what = `the user's csTAO burned; a payout of ${tao(q.total)} queued (batch ${short(q.key)})`;
       }
-      return { chain: "bittensor", payer: "bridge", ...gasOf(receipt), detail: `message ${short(sent.messageId)}: ${what}; ${gas}` };
+      return { chain: "bittensor", payer: "bridge", ...gasOf(receipt), receiver, detail: `message ${short(sent.messageId)}: ${what}; ${gas}` };
     },
 
     async stake() {
@@ -492,10 +516,16 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
     async relayToBase() {
       if (!payoutHash) throw new Error("no payout was sent");
       const before = (await view("base", a.frontDoor, FRONT, "claimable", [user.address])) as bigint;
-      const { sent, amount, receipt, gas } = await relay("bittensor", payoutHash);
+      const { sent, amount, receipt, gas, receiver } = await relay("bittensor", payoutHash);
       const credited = ((await view("base", a.frontDoor, FRONT, "claimable", [user.address])) as bigint) - before;
       if (credited !== amount) throw new Error(`the front door credited the user ${tao(credited)} of the ${tao(amount)} that arrived`);
-      return { chain: "base", payer: "bridge", ...gasOf(receipt), detail: `message ${short(sent.messageId)}: ${tao(amount)} credited to the user's claim at the front door; ${gas}` };
+      return {
+        chain: "base",
+        payer: "bridge",
+        ...gasOf(receipt),
+        receiver,
+        detail: `message ${short(sent.messageId)}: ${tao(amount)} credited to the user's claim at the front door; ${gas}`,
+      };
     },
 
     async deliver() {
@@ -550,6 +580,7 @@ export async function rehearse(env: Env, log: (l: string) => void): Promise<bool
       rec.roundTrip = [...reports];
       saveRecord(path, rec);
     });
+    log(formatReceivers(reports));
     const back = Number((delivery.usdcOut * 10_000n) / USDC_IN) / 100;
     log(`In: ${usdc(USDC_IN)} by permit. Out: ${usdc(delivery.usdcOut)} delivered (${back}% back after the fees, both swaps and the payout's bridge fee).`);
     log(`Record: ${path}`);

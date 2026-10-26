@@ -39,7 +39,7 @@ async function run(a: Args): Promise<number> {
     case "preflight": {
       const ctx = ctxFor(true);
       const rehearsal = loadRecordFor(recordPath(false), false);
-      const budget = rehearsal ? computeBudget(await gatherBudgetInputs(ctx, rehearsal)) : undefined;
+      const budget = rehearsal ? computeBudget(await gatherBudgetInputs(ctx, rehearsal, claimPolicy(env))) : undefined;
       const r = await preflight(ctx, loadRecordFor(recordPath(true), true), budget);
       for (const line of r.lines) log(line);
       log(r.ok ? "Pre-flight: all clear" : "Pre-flight: fix the problems above before deploying");
@@ -48,7 +48,7 @@ async function run(a: Args): Promise<number> {
     case "budget": {
       const rehearsal = loadRecordFor(recordPath(false), false);
       if (!rehearsal) throw new Error("run `pnpm ops rehearse` first: the budget uses its measured gas");
-      for (const line of formatBudget(computeBudget(await gatherBudgetInputs(ctxFor(true), rehearsal)))) log(line);
+      for (const line of formatBudget(computeBudget(await gatherBudgetInputs(ctxFor(true), rehearsal, claimPolicy(env))))) log(line);
       return 0;
     }
     case "deploy":

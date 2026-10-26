@@ -185,6 +185,34 @@ describe("delivery reads", () => {
     ]);
   });
 
+  it("rereads the last blocks, so a log a lagging node hadn't indexed yet is found on the next round", async () => {
+    const REDEEMED = DELIVERY_READ_ABIS.VAULT.find((i) => i.type === "event" && i.name === "Redeemed")!;
+    const carol: Address = "0x000000000000000000000000000000000000ca01";
+    const late = {
+      address: plan.addresses.vault,
+      topics: encodeEventTopics({ abi: [REDEEMED], args: { key: `0x${"aa".repeat(32)}`, user: carol } } as never),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [1n, TAO]),
+      blockNumber: numberToHex(898),
+      logIndex: "0x0",
+      transactionHash: `0x${"bb".repeat(32)}`,
+    };
+    let indexed = false;
+    let head = 900;
+    const f = fakeChain([], {}, {
+      eth_blockNumber: () => numberToHex(head),
+      eth_getLogs: (_c, p) => {
+        const q = p[0] as { fromBlock: Hex; toBlock: Hex };
+        return indexed && BigInt(q.fromBlock) <= 898n && BigInt(q.toBlock) >= 898n ? [late] : [];
+      },
+    });
+    const deps = keeperDeps(f.ctx, rec, "unused.json");
+    // the node says block 900 is the head, but hasn't indexed block 898's logs yet
+    expect(await deps.deliveryCandidates()).toEqual([]);
+    indexed = true;
+    head = 905;
+    expect(await deps.deliveryCandidates()).toEqual([carol]);
+  });
+
   it("keeps the candidates for the life of the deps: each later round scans only the new blocks", async () => {
     const REDEEMED = DELIVERY_READ_ABIS.VAULT.find((i) => i.type === "event" && i.name === "Redeemed")!;
     const carol: Address = "0x000000000000000000000000000000000000ca01";
@@ -221,9 +249,11 @@ describe("delivery reads", () => {
     // the failed round is scanned again, from the same block
     expect(await deps.deliveryCandidates()).toEqual([alice, carol]);
     expect(await deps.deliveryCandidates()).toEqual([alice, carol]);
+    // each later round starts 10 blocks back, so a block a lagging node hadn't indexed is read again
     expect(windows).toEqual([
       [1n, 900n],
-      [901n, 1_200n],
+      [891n, 1_200n],
+      [1_191n, 1_200n],
     ]);
     // a new deps (a new run) starts over from the deploy block
     windows.length = 0;
@@ -242,6 +272,9 @@ describe("a node's own error is not a revert", () => {
     expect(isRevert(new RpcError("base eth_call: execution reverted", -32000))).toBe(true);
     expect(isRevert(new RpcError("base eth_call: VM Exception while processing transaction: revert", -32603))).toBe(true);
     expect(isRevert(new RpcError("base eth_call: error", -32015, data))).toBe(true);
+    // geth's contract failures without revert data: still the contract's answer, not the node's
+    expect(isRevert(new RpcError("base eth_call: out of gas", -32000))).toBe(true);
+    expect(isRevert(new RpcError("base eth_call: invalid opcode: INVALID", -32000))).toBe(true);
     expect(isRevert(new RpcError("base eth_call: limit exceeded", -32005))).toBe(false);
     expect(isRevert(new RpcError("base eth_call: header not found", -32000))).toBe(false);
     expect(isRevert(new RpcError("base eth_call: internal error", -32603, "0x"))).toBe(false);

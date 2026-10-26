@@ -44,9 +44,10 @@ describe("v3 config", () => {
     expect(SETTINGS_V3.swapFeeBps).toBe(15);
     expect(SETTINGS_V3.depositFeeUsdc).toBe(50_000n);
     expect(SETTINGS_V3.maxDeliverySlippageBps).toBe(150);
-    // unchanged from v2: the bridge gas models and the reserves
+    // unchanged from v2: the Base adapter's gas model and the reserves; the payout gas is raised
     expect(SETTINGS_V3.baseGas).toEqual(SETTINGS.baseGas);
-    expect(SETTINGS_V3.bitGas).toEqual(SETTINGS.bitGas);
+    expect(SETTINGS_V3.bitGas).toEqual({ base: 170_000n, perEntry: 29_900n });
+    expect(SETTINGS.bitGas).toEqual({ base: 120_000n, perEntry: 29_900n });
     expect([SETTINGS_V3.adapterReserve, SETTINGS_V3.vaultReserve]).toEqual([SETTINGS.adapterReserve, SETTINGS.vaultReserve]);
   });
 

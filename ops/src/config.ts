@@ -101,9 +101,14 @@ export const SETTINGS = {
 
 /** The v3 test deployment: the spec's launch values, except the batch interval and the payout delay,
  * kept at 10 minutes and 1 hour so the owner's test run doesn't wait (at launch: 21_600 s, and the
- * vault's default of 24 hours). The bridge gas models, reserves and direct-deposit minimum are v2's. */
+ * vault's default of 24 hours). The reserves, direct-deposit minimum and Base adapter's gas model are
+ * v2's; the Bittensor adapter's payout gas is raised (below). */
 export const SETTINGS_V3 = {
   ...SETTINGS,
+  /** The gas a payout asks CCIP for on Base. The rehearsal, relaying with the limit enforced, measured
+   * the Base receiver needing about 134.6k for one entry: 90% of v2's 149,900. 170,000 + 29,900 per
+   * entry keeps one entry at about two thirds of its limit. */
+  bitGas: { base: 170_000n, perEntry: 29_900n },
   minDeposit: 4n * 10n ** 16n,
   depositCap: 40n * 10n ** 18n,
   maxBatchValue: 10n * 10n ** 18n,

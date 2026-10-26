@@ -142,37 +142,101 @@ The contracts stay on-chain, paused. The tiny reserves (about 0.0000025 TAO) sta
   reason. If `stake` refuses, the TAO stays in the vault and still pays out: carry on with
   `close` and the withdrawal.
 
-## v3 test deployment
+## v3 test deployment (the one to run)
 
-v3 has its own deployment record, so the v2 test deployment stays intact. Set the name once per
-shell and every command below uses the v3 contracts:
+Sections 1 to 7 above describe the v2 test and stay as history. For the v3 test, follow this section.
+v3 has its own deployment record, so the v2 one stays intact. Words used below: a **deployment** is
+putting the contracts on the real chains; the **keeper** is the program that does the batch work the
+site cannot (closing batches, staking, paying out); **gas** is the network fee on each transaction.
+
+Where you type: commands starting `pnpm ops` run in `E:\projects\cascade\ops`. Commands that send real
+money (`deploy --live`, `stake --live`) are blocked for Claude by a safety check, so you run them
+yourself by typing `! ` in front of the command in the Claude Code prompt, for example
+`! pnpm ops deploy --live`. Never paste a private key or the password anywhere: the tools take the
+password file by its path only.
+
+Set the name once per shell. It picks which record every command reads and writes:
 
 ```
 $env:OPS_DEPLOYMENT = "v3-test"
 ```
 
-Without it, `deploy` and `--new-plan` refuse (they would otherwise try to build a v3 plan on the
-v2 record). `verify` also refuses a v2 record now: the build has moved to v3.
+Use the same name for rehearsing and deploying: `budget` and `preflight` read
+`rehearsal-v3-test.json`, which only `rehearse` under that name writes (the live record is
+`ops/deployments/v3-test.json`). Without the name, `deploy` and `--new-plan` refuse, and `verify`
+refuses the old v2 record (`test-2026-10.json`).
 
-1. **Budget and preflight.** `pnpm ops budget` prints the v3 amounts; `pnpm ops preflight` checks
-   the lanes and balances as before.
-2. **Rehearse.** `pnpm ops rehearse` deploys v3 on local forks, stakes with a USDC permit and
-   delivers USDC back, signing on local chain ids (never replayable on the real ones).
-3. **Deploy.** `pnpm ops deploy --live` (resumes after a stop). The test settings use 10-minute
-   batches and a 1-hour payout delay; the validator is tao.bot, and the treasury is the test
-   wallet.
-4. **Verify.** `pnpm ops verify --live` reads every setting back, including that the treasury has
-   no code on either chain, the oracle's two pool addresses, and the front door's delivery
-   slippage (150 basis points).
-5. **Stake from the site.** One signature plus one transaction. The keeper runs as in v2 (`close`,
-   `stake`, `payouts`, or `run`).
-6. **Rewards and claim.** `pnpm ops rewards --live` shows what is waiting, a claim's cost and
-   whether the policy says to claim. `pnpm ops claim --live` claims only when the policy allows
-   (at least 25 times the cost, or monthly while a claim costs under $20 and does not exceed what
-   is waiting). After the first claim, set `OPS_CLAIM_COST_TAO` to the cost it printed.
-7. **Deliver.** After an exit with a delivery request reaches Base: `pnpm ops deliver --live`
-   (optionally `--user 0x...`). A user whose minimum is not met is told why and can claim the TAO
-   by hand.
-8. **Wind down** as in section 7.
+1. **Rehearse (free, on local copies).** `pnpm ops rehearse`. It deploys v3 on local copies of both
+   chains, stakes with a USDC permit and delivers USDC back, signing on local chain ids so nothing
+   can be replayed on the real networks. Good: it finishes with a success line and writes
+   `ops/deployments/rehearsal-v3-test.json`. If it fails, stop and tell Claude.
+2. **Budget.** `pnpm ops budget` prints exactly what to send. For a v3 deploy that is about
+   0.044 TAO on Bittensor plus 0.002 ETH on Base; use the live figure it prints. A reward claim is
+   not part of this test. If you ever want one it needs about 0.37 TAO up front (a large gas limit,
+   refunded down to about 0.057 TAO afterwards); `budget` lists that separately, so ignore that line
+   tomorrow.
+3. **Top up.** As in section 3: TAO goes Kraken, then your Tangem wallet, then the test wallet's
+   SS58 address (`5FxSW9dM8DbAWUFtADJPX5Wb7DctrJHadkJ3TB1GpBGvxQH2`); ETH goes to
+   `0x770932787DD3bcE64f14E31f4746bCe22E214fFF` on the **Base** network. Withdraw a little extra
+   for fees. You stake from your own MetaMask in step 8, so the test wallet does not need USDC.
+4. **Preflight (read-only).** `pnpm ops preflight`. Good: every line says OK, including both
+   balances and `SIMULATION OK`. A balance line short of the budget means send a bit more.
+5. **Deploy (real money, you type it).** `! pnpm ops deploy --live`. It prints one line per step with
+   its cost, then reads everything back. The test settings: 10-minute batches, 1-hour payout delay,
+   validator tao.bot, treasury = the test wallet. If it stops halfway, run the same command again;
+   it resumes and never repeats a step. If it says a transaction is still waiting, wait and rerun.
+   Good: it ends with the read-back passing.
+6. **Verify.** `pnpm ops verify --live`. It reads every setting back, including that the treasury has
+   no code on either chain (so it is a plain wallet), the price oracle's two pool addresses, and
+   the front door's delivery slippage of 150 basis points (1.5%). Good: all checks pass. If
+   anything fails, stop and do not stake.
+7. **Point the site at v3.** `pnpm ops web-config --live` writes `web/.env.local` with the
+   deployment's public addresses (never a key). Then in `web/` run `pnpm dev` and open
+   http://localhost:3000. The site reads `.env.local` only when it starts, so restart `pnpm dev` if
+   it was already running. This is the same step as for v2: a record that includes the v3 staker
+   and price oracle addresses switches the site to the v3 flows by itself. Good: the Stake tab shows
+   live limits and a price. Bad: "isn't connected to a deployment" means `.env.local` is missing or
+   was not reloaded.
+8. **Stake a small amount from the site.** Connect MetaMask on Base (it needs a few dollars of USDC
+   and a little ETH for fees). Enter about $3. A normal MetaMask account signs one message (a USDC
+   permit, which allows exactly this amount once, for 30 minutes) and then sends one transaction. A
+   smart account asks for approve, then stake. Good: Activity shows a receipt for the deposit. If
+   you stop midway, **Continue this deposit** on the receipt picks up where it left off.
+9. **Hand-run the keeper.** One step at a time: `pnpm ops close --live` (closes the batch once its
+   10 minutes are up and prints a bridge message id; `pnpm ops track <id> --live` follows it until
+   SUCCESS), then `! pnpm ops stake --live` (stakes the TAO on Bittensor; the vault must hold at
+   least 0.02 TAO, so if it says too little, deposit a bit more). Or all in one: `pnpm ops run
+   --live`, which checks every minute, does whatever is due, prints each message id and never claims
+   rewards. On a problem with stake, close or payouts it stops and says why. A delivery it cannot
+   send does not stop it: it logs the reason once, holds that user until their facts change, and
+   carries on. Good: the lines advance without errors.
+10. **Watch Activity.** The deposit receipt moves along on its own: swap, deposit, cross to
+    Bittensor, stake. Activity reads Base history from https://base-rpc.publicnode.com (the main
+    Base RPC refuses log queries), so it needs internet access to that address. Good: the last step
+    says staked and your balance shows on Stake and Unstake.
+11. **Unstake.** On the Unstake tab enter an amount (at least 0.005 TAO, leaving at least that
+    behind, or **Unstake all**). The form says USDC arrives automatically, at least today's price
+    less 2%, and that floor is valid for 7 days. The first request in a batch pays a small ETH fee.
+    Then the keeper does `close` and, after the 1-hour payout delay, `payouts`
+    (`pnpm ops payouts --live`, then `track` the message to SUCCESS); `run` does both.
+12. **Watch USDC arrive.** Once the TAO is back on Base the keeper sells it and sends USDC to your
+    wallet: `run` does this by itself, or use `pnpm ops deliver --live` (add `--user <your address>`
+    to deal with only you). Good: the receipt ends with USDC received, and USDC lands in MetaMask
+    at or above the floor shown. If it does not arrive, after one hour back on Base the receipt
+    says "taking longer than usual" and offers **Claim as USDC**; it also offers it at once if the
+    price is below your floor. Claiming by hand is safe and always available. To retry a held
+    delivery from the keeper side: `pnpm ops deliver --live --user <your address>`, or restart `run`.
+13. **Wind down** as in section 7 (`wind-down`, `sweep`, then delete the password file).
 
-Open before launch (not before this test): checklist items 31 to 34 in `contracts/README.md`.
+Rewards are not part of tomorrow. `pnpm ops rewards --live` shows what is waiting and a claim's
+cost; `pnpm ops claim --live` claims only when the policy allows (at least 25 times the cost, or
+monthly while a claim costs under $20 and does not exceed what is waiting). After a first claim, set
+`OPS_CLAIM_COST_TAO` to the cost it printed.
+
+The old v2 test deployment (record `test-2026-10.json`) still holds about 0.0702 TAO staked. You
+unstake that yourself through the v2 site flows, separately; v3 `deploy` and `verify` refuse v2
+records, so the two never mix.
+
+Before any launch (not tomorrow): call `increaseObservationCardinalityNext(1800)` on the TAO/WETH
+pool (checklist item 32 in `contracts/README.md`; it gives the price average enough history), and
+close the rest of items 31 to 34.

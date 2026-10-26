@@ -42,8 +42,9 @@ batching and Multicall3 on both; not the lite node, which keeps only minutes of 
 `hooks.ts` wraps it in react-query. Amounts that feed a transaction are exact `bigint`s; numbers are
 for display only (`units.ts`).
 
-- **Base logs are never read** (the public Base RPC refuses `eth_getLogs`). Base is read by `eth_call`
-  and by transaction hash.
+- **Base logs** come from a separate public RPC, `https://base-rpc.publicnode.com` (`baseLogs` in
+  `config.ts`), because `https://mainnet.base.org` refuses `eth_getLogs`. Everything else on Base is
+  read by `eth_call` and by transaction hash.
 - **Activity without an indexer:** `oplog.ts` keeps, in the browser, the transactions this site sent
   for each account; `facts.ts` follows each one through the site's own receipts, direct reads and the
   vault's Bittensor logs (1,000-block windows); `trail.ts` turns that into the receipt trails.
@@ -56,13 +57,24 @@ for display only (`units.ts`).
 `flows.ts` builds the calls and runs them; `use-flows.ts` binds them to the connected wallet through
 wagmi. Every flow is recorded in the operation log before the first signature.
 
-- **Stake:** approve USDC to Uniswap's SwapRouter02 if needed (an open approval, standard for that
-  router), `exactOutput` along TAO←WETH←USDC for exactly the deposit's TAO (0.5% slippage; unused
-  USDC never leaves the wallet), approve exactly that TAO to the front door, `deposit`.
-- **Unstake:** `requestRedeem(shares)`, with the request fee only for the first request in the open
-  batch. At least 0.005 TAO, and never leaving less than that behind.
-- **Claim:** `claim()`, then (unless the user keeps TAO) `exactInput` back to USDC.
+A deployment with a staker and price oracle in `.env.local` runs the v3 flows; one without keeps v2.
+
+- **Stake (v3):** one signature plus one transaction. The wallet signs a USDC permit (EIP-2612, exactly
+  the amount, valid 30 minutes) and the site sends `CascadeStaker.stakeWithPermit`, which swaps the
+  USDC to TAO and deposits it. An account with code (a smart account), a wallet that can't sign a
+  permit, or a permit USDC refuses instead approves exactly that USDC to the staker, then `stake`.
+- **Unstake (v3):** `requestRedeem(shares)` with a delivery preference: a minimum USDC per TAO of
+  today's price less 2%, valid 7 days. When the TAO is back on Base the keeper sells it and sends the
+  USDC to the wallet (the form shows the floor). The request fee is only for the first request in the
+  open batch. At least 0.005 TAO, and never leaving less than that behind.
+- **Claim by hand:** `claim()`, then (unless the user keeps TAO) `exactInput` back to USDC. On v3 the
+  claim banner and the receipt's **Claim as USDC** appear only when automatic delivery can't happen
+  (price below the floor, deadline passed) or more than an hour has passed since the TAO landed on
+  Base ("It's taking longer than usual").
 - **Cancel:** `cancelDeposit` / `cancelRedeem` while the batch is still open.
+- **Stake (v2):** approve USDC to Uniswap's SwapRouter02 if needed, `exactOutput` along
+  TAO←WETH←USDC for exactly the deposit's TAO (0.5% slippage), approve that TAO to the front door,
+  `deposit`. v2 unstakes pay nothing automatically and always end in a claim.
 
 A wallet that offers EIP-5792 batching (MetaMask's smart account, Base Account) gets one
 confirmation; any other wallet gets the steps one at a time, and a stopped stake continues from its

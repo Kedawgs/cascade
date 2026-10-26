@@ -5,6 +5,7 @@ import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
 import { cadenceFromEnv, claimPolicy, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
+import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
@@ -59,7 +60,7 @@ async function run(a: Args): Promise<number> {
     case "status": {
       const deps = keeperDeps(ctxFor(a.live), needRecord(a.live), recordPath(a.live), a.users as Address[]);
       const s = await deps.readState();
-      for (const line of formatStatus(s.detail, { now: s.now })) log(line);
+      for (const line of formatStatus(s.detail, { now: s.now, hold: closeHold(s) })) log(line);
       return 0;
     }
     case "close":

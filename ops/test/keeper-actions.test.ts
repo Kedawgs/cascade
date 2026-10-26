@@ -7,7 +7,7 @@ import { payoutsHash } from "../src/keeper/payouts.ts";
 import { formatStatus, type StatusDetail } from "../src/keeper/status.ts";
 import { buildPlan } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
-import { type Sent, SendRefused } from "../src/send.ts";
+import { RevertedOnChain, type Sent, SendRefused } from "../src/send.ts";
 import type { CallRequest } from "../src/types.ts";
 import { windDown } from "../src/winddown.ts";
 
@@ -53,7 +53,7 @@ const detail: StatusDetail = {
 function state(over: Partial<State> = {}): State & { detail: StatusDetail } {
   return {
     now: T,
-    frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false },
+    frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false, now: T },
     closeMaxWaitS: 0,
     alphaVault: { healthy: true },
     vault: { paused: false, available: 0n, minStakeWei: 2n * 10n ** 15n, rootStake: 0n, nominatorMinWei: 2n * 10n ** 16n, batches: [], payoutDelay: 3600 },
@@ -116,7 +116,7 @@ describe("keeper actions", () => {
   });
 
   it("wind-down skips what is already done, so it can be run again", async () => {
-    const d = deps(state({ frontDoor: { canClose: false, nDeposits: 0, nRedeems: 0, paused: true, openStart: T, batchInterval: 600, full: false } }));
+    const d = deps(state({ frontDoor: { canClose: false, nDeposits: 0, nRedeems: 0, paused: true, openStart: T, batchInterval: 600, full: false, now: T } }));
     await windDown(d, rec);
     expect(d.send.mock.calls.map((c) => c[0].functionName)).toEqual(["setCaps"]);
   });
@@ -153,7 +153,7 @@ describe("keeper actions", () => {
   describe("roll", () => {
     /** A launch batch with no entries that the front door would let close. */
     const empty = () =>
-      state({ frontDoor: { canClose: true, nDeposits: 0, nRedeems: 0, paused: false, openStart: T - 7200, batchInterval: 3600, full: false }, closeMaxWaitS: 86_400 });
+      state({ frontDoor: { canClose: true, nDeposits: 0, nRedeems: 0, paused: false, openStart: T - 7200, batchInterval: 3600, full: false, now: T }, closeMaxWaitS: 86_400 });
 
     it("calls closeBatch on Base with no value", async () => {
       const d = deps(empty());
@@ -185,7 +185,7 @@ describe("keeper actions", () => {
       const refused = vi.fn(async (): Promise<Sent> => {
         throw new SendRefused("estimate", "Base: roll the empty open batch would fail, nothing sent (InsufficientFee())");
       });
-      expect(await roll(deps(empty(), refused), rec)).toEqual({ rolled: false, reason: expect.stringMatching(/InsufficientFee/) });
+      expect(await roll(deps(empty(), refused), rec)).toEqual({ rolled: false, reason: expect.stringMatching(/InsufficientFee.*; the next round decides again$/) });
       const waiting = vi.fn(async (): Promise<Sent> => {
         throw new SendRefused("waiting", "Base: an earlier transaction is still waiting");
       });
@@ -201,8 +201,9 @@ describe("keeper actions", () => {
 
     it("run logs a roll, and a refused roll waits for the next round instead of stopping", async () => {
       const lines: string[] = [];
-      await runLoop({ ...deps(empty()), log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
-      expect(lines.at(-1)).toMatch(/^Done: rolling the empty batch so its 24-hour wait starts from the next deposit \(transaction 0x/);
+      const plain = vi.fn(async (_req: CallRequest): Promise<Sent> => ({ hash: KEY, block: 1, gasUsed: 1n, costWei: 1n, logs: [] }));
+      await runLoop({ ...deps(empty(), plain), log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+      expect(lines.at(-1)).toBe(`Done: rolling the empty batch so its 24-hour wait starts from the next deposit (transaction ${KEY})`);
       const refused = vi.fn(async (): Promise<Sent> => {
         throw new SendRefused("estimate", "Base: roll the empty open batch would fail, nothing sent (InsufficientFee())");
       });
@@ -212,6 +213,42 @@ describe("keeper actions", () => {
       expect(more.filter((l) => l.startsWith("Not rolled:"))).toHaveLength(2);
       expect(more.some((l) => l.startsWith("Stopped"))).toBe(false);
     });
+
+    it("run says when a roll closed the batch instead (a redeem landed first), with its bridge message", async () => {
+      const lines: string[] = [];
+      await runLoop({ ...deps(empty()), log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+      expect(lines.at(-1)).toBe(
+        `Done: the open batch closed instead of rolling: an entry landed first and its fee pot paid the bridge (transaction ${KEY}, bridge message ${MESSAGE})`,
+      );
+    });
+
+    it("a roll that reverts on chain because a deposit or another close landed first is a skip; otherwise it stops", async () => {
+      /** The chain as read before the roll is mined, then after: `after` changes the front door. */
+      const racing = (after: Partial<State["frontDoor"]>) => {
+        let mined = false;
+        const before = empty();
+        const send = vi.fn(async (): Promise<Sent> => {
+          mined = true;
+          throw new RevertedOnChain("base", "roll the empty open batch (restart its timer)", SENT.hash);
+        });
+        return { ...deps(before, send), readState: async () => (mined ? { ...before, frontDoor: { ...before.frontDoor, ...after } } : before) };
+      };
+      const reason = `a deposit or another close landed first; the roll reverted (transaction ${SENT.hash})`;
+      expect(await roll(racing({ nDeposits: 1 }), rec)).toEqual({ rolled: false, reason });
+      expect(await roll(racing({ canClose: false, openStart: T }), rec)).toEqual({ rolled: false, reason });
+      await expect(roll(racing({}), rec)).rejects.toThrow(/reverted on chain/);
+      const lines: string[] = [];
+      await runLoop({ ...racing({ nDeposits: 1 }), log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+      expect(lines.at(-1)).toBe(`Not rolled: ${reason}`);
+    });
+  });
+
+  it("formatStatus says when the keeper holds a batch the front door would let close", () => {
+    const hold = "the keeper holds it: it waits until 06:00 UTC tomorrow or until its fees cover the bridge fee ($0.31 of $1.42)";
+    const [line] = formatStatus(detail, { now: T, hold });
+    expect(line).toMatch(new RegExp(`; ${hold.replace(/[$()]/g, "\\$&")}$`));
+    expect(line).not.toContain("it can close now");
+    expect(formatStatus(detail, { now: T })[0]).toMatch(/; it can close now$/);
   });
 
   it("formatStatus prints the open batch in TAO, when a payout is due and full message ids", () => {

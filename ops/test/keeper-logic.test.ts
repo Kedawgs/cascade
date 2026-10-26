@@ -2,7 +2,7 @@ import { decodeAbiParameters, encodeAbiParameters, type Hex, keccak256, parseAbi
 import { describe, expect, it } from "vitest";
 import { WALLET } from "../src/config.ts";
 import { BATCH_PARAMS, encodeBatch, openBatchId } from "../src/keeper/batch.ts";
-import { decideNext, type State } from "../src/keeper/due.ts";
+import { closeHold, decideNext, type State } from "../src/keeper/due.ts";
 import { type PayoutLog, payoutsHash, rebuildPayouts } from "../src/keeper/payouts.ts";
 
 const alice = "0x000000000000000000000000000000000000a11c" as const;
@@ -61,7 +61,7 @@ describe("decideNext", () => {
   const base: State = {
     now: T,
     // the test cadence: no max wait, the batch closes as soon as the front door allows
-    frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false },
+    frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false, now: T },
     closeMaxWaitS: 0,
     alphaVault: { healthy: true },
     vault: {
@@ -143,6 +143,7 @@ describe("the close rule", () => {
       openStart: START,
       batchInterval: HOUR,
       full: false,
+      now: T,
       closeEconomics: { feesUsdc: 310_000n, bridgeFeeUsdc: 1_420_000n },
     },
     closeMaxWaitS: 86_400,
@@ -151,13 +152,15 @@ describe("the close rule", () => {
   };
   const fd = (over: Partial<State["frontDoor"]>, s: State = launch): State => ({ ...s, frontDoor: { ...s.frontDoor, ...over } });
   const CLOSE = { action: { kind: "close" }, reason: "the open batch is ready to close" };
+  const TOMORROW = `${hhmm(START + 86_400)} tomorrow`;
 
   it("test cadence (max wait 0): closes as soon as the contract allows", () => {
     const test: State = { ...fd({ batchInterval: 600, openStart: T - 600, closeEconomics: undefined }), closeMaxWaitS: 0 };
     expect(decideNext(test)).toEqual(CLOSE);
-    // with the interval at 0 the batch may be seconds old on Base, while the keeper's `now`
-    // (Bittensor's block time) trails Base's clock
+    // with the interval at 0, Base's time may come from a block before the one canClose was read at
     expect(decideNext(fd({ batchInterval: 0, openStart: T + 10 }, test))).toEqual(CLOSE);
+    // the age is never read from Bittensor's clock
+    expect(decideNext({ ...test, now: 0 })).toEqual(CLOSE);
     expect(decideNext(fd({ canClose: false }, test)).action).toBeNull();
   });
 
@@ -171,10 +174,10 @@ describe("the close rule", () => {
   it("launch: a young batch whose fees don't cover the bridge fee waits, and says for what", () => {
     expect(decideNext(launch)).toEqual({
       action: null,
-      reason: `nothing due: the open batch waits until ${hhmm(START + 86_400)} or until its fees cover the bridge fee ($0.31 of $1.42)`,
+      reason: `nothing due: the open batch waits until ${TOMORROW} or until its fees cover the bridge fee ($0.31 of $1.42)`,
     });
     // fees not read: still no early close
-    expect(decideNext(fd({ closeEconomics: undefined }))).toEqual({ action: null, reason: `nothing due: the open batch waits until ${hhmm(START + 86_400)}` });
+    expect(decideNext(fd({ closeEconomics: undefined }))).toEqual({ action: null, reason: `nothing due: the open batch waits until ${TOMORROW}` });
   });
 
   it("launch: closes once its fees cover the bridge fee", () => {
@@ -182,9 +185,22 @@ describe("the close rule", () => {
     expect(decideNext(fd({ closeEconomics: { feesUsdc: 1_419_999n, bridgeFeeUsdc: 1_420_000n } })).action).toBeNull();
   });
 
-  it("launch: closes once the batch is 24 hours old, whatever its fees", () => {
-    expect(decideNext({ ...launch, now: START + 86_400 })).toEqual(CLOSE);
-    expect(decideNext({ ...launch, now: START + 86_399 }).action).toBeNull();
+  it("launch: closes once the batch is 24 hours old on Base's clock, whatever its fees", () => {
+    expect(decideNext(fd({ now: START + 86_400 }))).toEqual(CLOSE);
+    expect(decideNext(fd({ now: START + 86_399 })).action).toBeNull();
+    // openStart is a Base time: Bittensor's clock (`now`, the payouts' clock) never decides the age
+    expect(decideNext({ ...launch, now: START + 7 * 86_400 }).action).toBeNull();
+    expect(decideNext({ ...fd({ now: START + 86_400 }), now: T - HOUR })).toEqual(CLOSE);
+  });
+
+  it("the wait's end names its day when it isn't today", () => {
+    expect(decideNext(fd({ openStart: T - 23 * HOUR - 30 * 60, closeEconomics: undefined })).reason).toBe(
+      `nothing due: the open batch waits until ${hhmm(T + 30 * 60)}`,
+    );
+    const later = { ...fd({ closeEconomics: undefined }), closeMaxWaitS: 3 * 86_400 };
+    expect(decideNext(later).reason).toBe(
+      `nothing due: the open batch waits until ${hhmm(START + 3 * 86_400)} on ${new Date((START + 3 * 86_400) * 1000).toISOString().slice(0, 10)}`,
+    );
   });
 
   it("closes a full batch at once, whatever its age or fees", () => {
@@ -196,14 +212,14 @@ describe("the close rule", () => {
     const unpriced = fd({ closeEconomics: null });
     expect(decideNext(unpriced)).toEqual({
       action: null,
-      reason: `nothing due: the open batch waits until ${hhmm(START + 86_400)}: its fees or the bridge fee could not be priced, so it does not close early`,
+      reason: `nothing due: the open batch waits until ${TOMORROW}: its fees or the bridge fee could not be priced, so it does not close early`,
     });
-    expect(decideNext({ ...unpriced, now: START + 86_400 })).toEqual(CLOSE);
+    expect(decideNext(fd({ now: START + 86_400 }, unpriced))).toEqual(CLOSE);
   });
 
   it("never closes an empty batch", () => {
     const covered = { feesUsdc: 10n ** 9n, bridgeFeeUsdc: 1n };
-    const empty = { ...fd({ nDeposits: 0, closeEconomics: covered }), now: START + 7 * 86_400 };
+    const empty = fd({ nDeposits: 0, closeEconomics: covered, now: START + 7 * 86_400 });
     // the launch cadence only rolls it (no value, no bridge fee); the test cadence leaves it
     expect(decideNext(empty).action).toEqual({ kind: "roll" });
     expect(decideNext({ ...empty, closeMaxWaitS: 0 })).toEqual({ action: null, reason: "nothing due: the open batch is empty" });
@@ -212,7 +228,7 @@ describe("the close rule", () => {
   it("names a waiting batch alongside the next payout", () => {
     const s: State = { ...launch, vault: { ...launch.vault, batches: [{ key: KEY, queuedAt: T - HOUR, cursor: 0, count: 1 }] } };
     expect(decideNext(s).reason).toBe(
-      `nothing due: next payout at ${hhmm(T - HOUR + 86_400)}; the open batch waits until ${hhmm(START + 86_400)} or until its fees cover the bridge fee ($0.31 of $1.42)`,
+      `nothing due: next payout at ${hhmm(T - HOUR + 86_400)}; the open batch waits until ${TOMORROW} or until its fees cover the bridge fee ($0.31 of $1.42)`,
     );
   });
 
@@ -240,6 +256,8 @@ describe("the close rule", () => {
       expect(decideNext(fd({ batchInterval: 0 }, empty)).action).toBeNull();
       // canClose through a limit (a maxBatchValue below minDeposit), a minute after the last roll
       expect(decideNext(fd({ openStart: T - 60 }, empty)).action).toBeNull();
+      // on Base's clock, not Bittensor's
+      expect(decideNext({ ...fd({ openStart: T - 60 }, empty), now: T + 2 * HOUR }).action).toBeNull();
     });
 
     it("comes after a due payout and staking, like a close", () => {
@@ -247,6 +265,14 @@ describe("the close rule", () => {
       expect(decideNext(due).action).toEqual({ kind: "payouts", key: KEY });
       expect(decideNext({ ...empty, vault: { ...empty.vault, available: 10n ** 16n } }).action).toEqual({ kind: "stake" });
     });
+  });
+
+  it("closeHold says why the keeper holds a batch the front door would let close, and nothing otherwise", () => {
+    expect(closeHold(launch)).toBe(`the keeper holds it: it waits until ${TOMORROW} or until its fees cover the bridge fee ($0.31 of $1.42)`);
+    expect(closeHold(fd({ closeEconomics: { feesUsdc: 2_000_000n, bridgeFeeUsdc: 1_420_000n } }))).toBeUndefined();
+    expect(closeHold({ ...launch, closeMaxWaitS: 0 })).toBeUndefined();
+    expect(closeHold(fd({ nDeposits: 0 }))).toBeUndefined();
+    expect(closeHold(fd({ canClose: false }))).toBeUndefined();
   });
 
   it("a held batch is not reported as blocked by a pause", () => {

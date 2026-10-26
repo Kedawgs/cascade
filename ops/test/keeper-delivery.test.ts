@@ -461,7 +461,7 @@ const T = NOW;
 const KEY: Hex = `0x${"aa".repeat(32)}`;
 const baseState: State = {
   now: T,
-  frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false },
+  frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false, now: T },
   closeMaxWaitS: 0,
   alphaVault: { healthy: true },
   vault: {

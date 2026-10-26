@@ -135,7 +135,8 @@ export type Cadence = "test" | "launch";
 
 export const SETTINGS_V3_LAUNCH = { ...SETTINGS_V3, batchInterval: 3_600, payoutDelay: 86_400 } as const;
 
-/** The keeper's longest wait before closing a batch: null = the plan's batch interval. */
+/** The keeper's longest wait before closing a batch with entries: null = no extra wait, close as soon as
+ * the contract allows (closeMaxWaitS returns 0). */
 export const CADENCE = {
   test: { closeMaxWaitS: null },
   launch: { closeMaxWaitS: 86_400 },

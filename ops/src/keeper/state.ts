@@ -230,7 +230,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;
       const rootStake = ((await r("bittensor", a.vault, VAULT, "rootStakeRao")) as bigint) * 10n ** 9n;
       const now = hexToNumber(block.timestamp);
-      const { frontDoor, closeMaxWaitS } = await openBatchState(now, deposits, redeems, canClose, fdPaused);
+      const { frontDoor, closeMaxWaitS } = await openBatchState(deposits, redeems, canClose, fdPaused);
       return {
         now,
         frontDoor,
@@ -375,11 +375,11 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     return (await r("base", a.baseAdapter, ADAPTER, "quoteFee", [BigInt(LIVE.bittensor.CHAIN_ID), a.vault, message, total])) as bigint;
   }
 
-  /** The open batch as the close rule sees it, with the record's max wait. Its limits are read only when
-   * it has entries and can close, and its prices only when they decide the close (it can close, is
-   * neither full nor past the max wait), so the test cadence never reads them. */
+  /** The open batch as the close rule sees it, with the record's max wait and Base's time (read after
+   * canClose, so not older than the block it was decided at). Its limits and prices are read only when
+   * they can change the decision: it has entries, can close, and is younger than the max wait (never
+   * under the test cadence); the prices only when it is not full either. */
   async function openBatchState(
-    now: number,
     deposits: readonly Entry[],
     redeems: readonly Entry[],
     canClose: boolean,
@@ -388,10 +388,13 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     const fd = a.frontDoor;
     const [, start, totalDeposits, feePot] = (await r("base", fd, FRONT, "openBatch")) as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
     const batchInterval = Number(await r("base", fd, FRONT, "batchInterval"));
+    const now = await blockTime("base");
+    const openStart = Number(start);
     const closeMaxWaitS = planMaxWait(rec.plan);
     const entries = deposits.length + redeems.length > 0;
+    const undecided = entries && canClose && !closesWithoutFees({ closeMaxWaitS, frontDoor: { full: false, openStart, batchInterval, now } });
     let full = false;
-    if (entries && canClose) {
+    if (undecided) {
       // canClose's own limits, without its clock: full before or after the interval
       const maxDeposits = Number(await r("base", fd, FRONT, "maxDeposits"));
       const maxRedeems = Number(await r("base", fd, FRONT, "maxRedeems"));
@@ -408,11 +411,12 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       nDeposits: deposits.length,
       nRedeems: redeems.length,
       paused,
-      openStart: Number(start),
+      openStart,
       batchInterval,
       full,
+      now,
     };
-    if (entries && canClose && !closesWithoutFees({ now, closeMaxWaitS, frontDoor })) {
+    if (undecided && !full) {
       frontDoor.closeEconomics = await closeEconomics(deposits, redeems, totalDeposits, feePot);
     }
     return { frontDoor, closeMaxWaitS };

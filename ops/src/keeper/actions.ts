@@ -2,7 +2,7 @@ import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, pa
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy } from "../config.ts";
 import { isPlanV3, type PlanV3 } from "../plan.ts";
 import type { DeploymentRecord } from "../record.ts";
-import { type Sent, SendRefused } from "../send.ts";
+import { RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
 import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
@@ -139,9 +139,11 @@ export type Rolled = ({ rolled: true } & Done) | { rolled: false; reason: string
 /** Rolls the empty open batch (see decideNext), through the same send path as close: the wallet's
  * guards, then a simulation with no value. It re-reads first and sends only while the batch is still
  * empty and can close, the front door is open, and the record has a max wait. A roll is never needed,
- * so anything that would stop it (an entry arriving, or a simulation that would revert because one did)
- * is a skip for a later round. If a redeem lands between the simulation and the transaction, its fee pot
- * may pay for a real close; its bridge message is then recorded like a close's. */
+ * so a race it loses is a skip for a later round: an entry arriving before the simulation (which then
+ * would revert), or a deposit or another close landing before it is mined (it reverts on chain; the
+ * front door is re-read to tell that from an unexplained revert, which still stops the keeper, as do a
+ * missing receipt and the send guards' refusals). If a redeem lands between the simulation and the
+ * transaction, its fee pot may pay for a real close; its bridge message is then recorded like a close's. */
 export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rolled> {
   requireReady(rec);
   const s = await deps.readState();
@@ -155,7 +157,13 @@ export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rol
   try {
     sent = await deps.sendCall(rollRequest(rec, await deps.nonce("base")));
   } catch (e) {
-    if (e instanceof SendRefused && e.reason === "estimate") return skip(`${e.message}; tried again next round`);
+    if (e instanceof SendRefused && e.reason === "estimate") return skip(`${e.message}; the next round decides again`);
+    if (e instanceof RevertedOnChain) {
+      const after = (await deps.readState()).frontDoor;
+      if (after.nDeposits + after.nRedeems > 0 || !after.canClose) {
+        return skip(`a deposit or another close landed first; the roll reverted (transaction ${e.hash})`);
+      }
+    }
     throw e;
   }
   return { rolled: true, ...(await withMessage(deps, sent, rec.plan.addresses.baseAdapter, "Base → Bittensor")) };
@@ -343,7 +351,12 @@ export async function runLoop(
         if (action.kind === "roll") {
           // a roll that can't go ahead now is only a skip: the round ends, the next one decides again
           const r = await roll(deps, rec);
-          deps.log(r.rolled ? `Done: ${next.reason} (transaction ${r.hash}${r.messageId ? `, bridge message ${r.messageId}` : ""})` : `Not rolled: ${r.reason}`);
+          if (!r.rolled) deps.log(`Not rolled: ${r.reason}`);
+          else if (r.messageId) {
+            deps.log(
+              `Done: the open batch closed instead of rolling: an entry landed first and its fee pot paid the bridge (transaction ${r.hash}, bridge message ${r.messageId})`,
+            );
+          } else deps.log(`Done: ${next.reason} (transaction ${r.hash})`);
           break;
         }
         if (action.kind !== "deliver") {

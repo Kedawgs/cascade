@@ -65,6 +65,18 @@ export class SendRefused extends Error {
   }
 }
 
+/** The transaction was mined and reverted: its receipt's status is not 1. */
+export class RevertedOnChain extends Error {
+  readonly chain: ChainName;
+  readonly hash: Hex;
+
+  constructor(chain: ChainName, label: string, hash: Hex) {
+    super(`${chainLabel(chain)}: ${label} reverted on chain (transaction ${hash})`);
+    this.chain = chain;
+    this.hash = hash;
+  }
+}
+
 /** The transaction was sent but no receipt came within the wait. `hash` is unknown when forge timed out. */
 export class ReceiptTimeout extends Error {
   readonly hash?: Hex;
@@ -250,7 +262,7 @@ async function noHash(ctx: Ctx, chain: ChainName, nonce: number, label: string, 
 }
 
 function settle(chain: ChainName, label: string, hash: Hex, r: Receipt): Sent {
-  if (r.status !== "0x1") throw new Error(`${chainLabel(chain)}: ${label} reverted on chain (transaction ${hash})`);
+  if (r.status !== "0x1") throw new RevertedOnChain(chain, label, hash);
   const gasUsed = hexToBigInt(r.gasUsed);
   return { hash, block: hexToNumber(r.blockNumber), gasUsed, costWei: gasUsed * hexToBigInt(r.effectiveGasPrice), logs: r.logs ?? [] };
 }

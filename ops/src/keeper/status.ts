@@ -19,10 +19,11 @@ export interface StatusDetail {
 const amount = (wei: bigint, unit: string) => `${Number(formatEther(wei)).toFixed(4)} ${unit}`;
 const hhmm = (unix: number) => `${new Date(unix * 1000).toISOString().slice(11, 16)} UTC`;
 
-export function formatStatus(d: StatusDetail, opts: { now: number }): string[] {
+/** `hold`: why the keeper holds a batch the front door would let close (closeHold), if it does. */
+export function formatStatus(d: StatusDetail, opts: { now: number; hold?: string }): string[] {
   const total = d.openDeposits.reduce((s, e) => s + e.amount, 0n);
   const lines = [
-    `Base front door: the open batch has ${d.openDeposits.length} deposit(s) totalling ${amount(total, "TAO")} and ${d.openRedeems.length} redeem request(s); ${d.canClose ? "it can close now" : "not ready to close yet"}`,
+    `Base front door: the open batch has ${d.openDeposits.length} deposit(s) totalling ${amount(total, "TAO")} and ${d.openRedeems.length} redeem request(s); ${d.canClose ? (opts.hold ?? "it can close now") : "not ready to close yet"}`,
     `Bittensor vault: ${amount(d.vaultAssets, "TAO")} in total, ${amount(d.rootStake, "TAO")} staked, ${amount(d.pendingPayouts, "TAO")} queued for payouts`,
   ];
   for (const b of d.batches.filter((b) => b.cursor < b.count)) {

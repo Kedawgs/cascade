@@ -20,7 +20,7 @@ import { KEEPER_READ_ABIS, keeperDeps, scanLogs } from "../src/keeper/state.ts";
 import { buildPlan, buildPlanV3, closeMaxWaitS } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { type Rpc, RpcError } from "../src/rpc.ts";
-import { type Ctx, SendRefused } from "../src/send.ts";
+import { type Ctx, ReceiptTimeout, RevertedOnChain, SendRefused } from "../src/send.ts";
 import { type Answer, COLDKEY, fakeChain, revert, v3Record } from "./fake-keeper.ts";
 
 const ZERO32: Hex = `0x${"00".repeat(32)}`;
@@ -116,7 +116,7 @@ describe("the open batch and its close's economics", () => {
 
   /** A launch batch two hours old, the contract able to close it: one deposit of 0.4 TAO, a 0.0001 ETH
    * fee pot; TAO at $250, ETH at $2,300, a 15 bps swap fee, a $0.05 deposit fee, a 0.0006 ETH bridge fee. */
-  function chain(over: Record<string, Answer> = {}) {
+  function chain(over: Record<string, Answer> = {}, methods: Record<string, (chain: ChainName, params: unknown[]) => unknown> = {}) {
     const answers: Record<string, Answer> = {
       openDeposits: () => [{ user: alice, amount: 4n * 10n ** 17n }],
       openRedeems: () => [],
@@ -155,8 +155,10 @@ describe("the open batch and its close's economics", () => {
       eth_getBalance: () => "0x0",
       eth_blockNumber: () => numberToHex(1_000),
       eth_getLogs: () => [],
+      ...methods,
     });
   }
+  const LIMIT_READS = ["maxDeposits", "maxRedeems", "maxBatchValue", "minDeposit"];
   const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
   const read = (f: ReturnType<typeof chain>, r: DeploymentRecord = launch) => keeperDeps(f.ctx, r, recordPath()).readState();
   const called = (f: ReturnType<typeof chain>) => f.calls.map((c) => c.fn).filter((n) => n !== undefined);
@@ -198,6 +200,20 @@ describe("the open batch and its close's economics", () => {
       if (f !== test) expect((await read(f)).frontDoor.closeEconomics).toBeUndefined();
       expect(called(f).filter((n) => PRICE_READS.includes(n))).toEqual([]);
     }
+    // nor the limits when they can't change it: the test cadence reads only openBatch and batchInterval
+    for (const f of [test, old]) expect(called(f).filter((n) => LIMIT_READS.includes(n))).toEqual([]);
+  });
+
+  it("ages the batch on Base's clock (openStart is a Base time); Bittensor's stays the keeper's `now`", async () => {
+    // 24 hours old on Base, 23 on Bittensor's trailing clock: past the max wait, so no prices are read
+    const blocks = { eth_getBlockByNumber: (c: ChainName) => ({ timestamp: numberToHex(c === "base" ? T : T - HOUR) }) };
+    const f = chain({ openBatch: () => [7n, BigInt(T - 86_400), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] }, blocks);
+    const s = await read(f);
+    expect([s.now, s.frontDoor.now]).toEqual([T - HOUR, T]);
+    expect(called(f).filter((n) => PRICE_READS.includes(n) || LIMIT_READS.includes(n))).toEqual([]);
+    // and the other way round: 23 hours on Base, 24 on Bittensor, so the fees still decide
+    const behind = { eth_getBlockByNumber: (c: ChainName) => ({ timestamp: numberToHex(c === "base" ? T - HOUR : T) }) };
+    expect((await read(chain({ openBatch: () => [7n, BigInt(T - 86_400), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] }, behind))).frontDoor.closeEconomics).not.toBeUndefined();
   });
 
   it("a batch at a list or value limit is full, before or after its interval, and needs no prices", async () => {
@@ -218,12 +234,16 @@ describe("a roll goes through the same send guards as close", () => {
 
   /** An empty launch batch two hours old that the front door would let close; the wallet's next nonce
    * is 4. `chain` overrides the node's answers. */
-  function chain(methods: Record<string, (chain: ChainName, params: unknown[]) => unknown> = {}) {
+  function chain(methods: Record<string, (chain: ChainName, params: unknown[]) => unknown> = {}, answers: Record<string, Answer> = {}) {
     const estimates: unknown[] = [];
     const zero = () => 0n;
     const f = fakeChain(
       Object.values(KEEPER_READ_ABIS),
       {
+        maxDeposits: () => 100,
+        maxRedeems: () => 100,
+        maxBatchValue: () => 4_000n * 10n ** 18n,
+        minDeposit: () => 10n ** 16n,
         openDeposits: () => [],
         openRedeems: () => [],
         canClose: () => true,
@@ -241,6 +261,7 @@ describe("a roll goes through the same send guards as close", () => {
         minStakeRao: zero,
         getNominatorMinRequiredStake: zero,
         totalAssets: zero,
+        ...answers,
       },
       {
         eth_getBalance: () => "0x0",
@@ -273,5 +294,87 @@ describe("a roll goes through the same send guards as close", () => {
     const r = await roll(keeperDeps(f.ctx, launch, recordPath()), launch);
     expect(r).toMatchObject({ rolled: false, reason: expect.stringMatching(/would fail/) });
     expect(f.estimates).toEqual([{ from: WALLET, to: launch.plan.addresses.frontDoor, data: toFunctionSelector("closeBatch()"), value: "0x0" }]);
+  });
+});
+
+describe("a roll that reverts on chain", () => {
+  const T = 1_800_000_000;
+  const HASH: Hex = `0x${"7e".repeat(32)}`;
+  const alice: Address = "0x000000000000000000000000000000000000a11c";
+  const launch: DeploymentRecord = { ...v3Record(), plan: buildPlanV3(0, 0, COLDKEY, "launch") };
+  const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-roll-")), "rec.json");
+
+  /** An empty launch batch two hours old that the front door would let close. The roll passes every
+   * guard and its simulation, is signed and sent, then its receipt says it reverted (`receipt` null:
+   * none comes). Once it is sent, the front door answers with `after`. */
+  function racing(after: Record<string, Answer>, receipt: unknown = { status: "0x0", blockNumber: "0x10", gasUsed: "0x8000", effectiveGasPrice: "0x1", contractAddress: null, logs: [] }) {
+    let sent = false;
+    const zero = () => 0n;
+    const before: Record<string, Answer> = {
+      maxDeposits: () => 100,
+      maxRedeems: () => 100,
+      maxBatchValue: () => 4_000n * 10n ** 18n,
+      minDeposit: () => 10n ** 16n,
+      openDeposits: () => [],
+      openRedeems: () => [],
+      canClose: () => true,
+      paused: () => false,
+      claimable: zero,
+      depositCap: zero,
+      openBatch: () => [7n, BigInt(T - 7200), 0n, 0n, 0n, 0n],
+      batchInterval: () => 3600n,
+      isPaused: () => false,
+      migrationReadyAt: zero,
+      migrationFinished: () => false,
+      pendingPayouts: zero,
+      payoutDelay: () => 86_400n,
+      rootStakeRao: zero,
+      minStakeRao: zero,
+      getNominatorMinRequiredStake: zero,
+      totalAssets: zero,
+    };
+    const answers = Object.fromEntries(
+      Object.keys({ ...before, ...after }).map((name) => [name, ((args, call) => (sent && after[name] ? after[name] : before[name])(args, call)) as Answer]),
+    );
+    const f = fakeChain(Object.values(KEEPER_READ_ABIS), answers, {
+      eth_getBalance: () => "0x0",
+      eth_blockNumber: () => numberToHex(1_000),
+      eth_getLogs: () => [],
+      eth_chainId: (c) => numberToHex(f.ctx.targets[c].chainId),
+      eth_getTransactionCount: () => numberToHex(4),
+      eth_estimateGas: () => "0x88b8",
+      eth_gasPrice: () => "0x1",
+      eth_getTransactionReceipt: () => receipt,
+    });
+    const ctx: Ctx = {
+      ...f.ctx,
+      pollMs: 1,
+      runner: {
+        run: async (_file, args) => {
+          if (args[0] === "wallet") return { code: 0, stdout: WALLET, stderr: "" };
+          sent = true;
+          return { code: 0, stdout: `transactionHash ${HASH}`, stderr: "" };
+        },
+      },
+    };
+    return keeperDeps(ctx, launch, recordPath());
+  }
+  const reason = `a deposit or another close landed first; the roll reverted (transaction ${HASH})`;
+
+  it("is a skip when a deposit landed first", async () => {
+    const deposited = racing({ openDeposits: () => [{ user: alice, amount: 10n ** 16n }], openBatch: () => [7n, BigInt(T - 7200), 10n ** 16n, 0n, 1n, 0n] });
+    expect(await roll(deposited, launch)).toEqual({ rolled: false, reason });
+  });
+
+  it("is a skip when another roll or close landed first", async () => {
+    expect(await roll(racing({ canClose: () => false, openBatch: () => [8n, BigInt(T), 0n, 0n, 0n, 0n] }), launch)).toEqual({ rolled: false, reason });
+  });
+
+  it("stops the keeper when the batch is still empty and could close: that revert is unexplained", async () => {
+    await expect(roll(racing({}), launch)).rejects.toThrow(RevertedOnChain);
+  });
+
+  it("a roll with no receipt still stops the keeper", async () => {
+    await expect(roll(racing({ openDeposits: () => [{ user: alice, amount: 10n ** 16n }] }, null), launch)).rejects.toThrow(ReceiptTimeout);
   });
 });

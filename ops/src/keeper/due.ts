@@ -24,8 +24,11 @@ export interface State {
     /** When the open batch started (Base time), and the front door's batch interval, in seconds */
     openStart: number;
     batchInterval: number;
-    /** At one of the front door's list or value limits: it can close before its interval */
+    /** At one of the front door's list or value limits: it can close before its interval. Read only when
+     * it can change the close decision (false otherwise). */
     full: boolean;
+    /** Base's latest block time: the clock of openStart and canClose (the keeper's `now` is Bittensor's) */
+    now: number;
     /** Read only when the fees decide the close; null = a price or fee could not be read */
     closeEconomics?: CloseEconomics | null;
   };
@@ -55,15 +58,23 @@ export type Action =
   | { kind: "roll" };
 
 const hhmm = (unix: number) => `${new Date(unix * 1000).toISOString().slice(11, 16)} UTC`;
+const DAY = 86_400;
+/** A time, with its day when it isn't `now`'s (UTC): "14:05 UTC", "14:05 UTC tomorrow", "14:05 UTC on 2027-01-18". */
+function when(unix: number, now: number): string {
+  const days = Math.floor(unix / DAY) - Math.floor(now / DAY);
+  if (days === 0) return hhmm(unix);
+  if (days === 1) return `${hhmm(unix)} tomorrow`;
+  return `${hhmm(unix)} on ${new Date(unix * 1000).toISOString().slice(0, 10)}`;
+}
 const usd = (units: bigint) => `$${(Number(units) / 1e6).toFixed(2)}`;
 
-/** A batch that can close needs no fee check when it is full or at least `closeMaxWaitS` old. A max wait
- * no longer than the batch interval has always passed once the batch can close (canClose and not full
- * means the interval has passed on Base's clock), so the test cadence closes as soon as the contract
- * allows, whichever chain's clock `now` comes from. */
-export function closesWithoutFees(s: { now: number; closeMaxWaitS: number; frontDoor: Pick<State["frontDoor"], "full" | "openStart" | "batchInterval"> }): boolean {
+/** A batch that can close needs no fee check when it is full or at least `closeMaxWaitS` old on Base's
+ * clock. A max wait no longer than the batch interval has always passed once the batch can close (canClose
+ * and not full means the interval has passed), so the test cadence (0) closes as soon as the contract
+ * allows, whatever any clock read says. */
+export function closesWithoutFees(s: { closeMaxWaitS: number; frontDoor: Pick<State["frontDoor"], "full" | "openStart" | "batchInterval" | "now"> }): boolean {
   const fd = s.frontDoor;
-  return fd.full || s.closeMaxWaitS <= fd.batchInterval || s.now >= fd.openStart + s.closeMaxWaitS;
+  return fd.full || s.closeMaxWaitS <= fd.batchInterval || fd.now >= fd.openStart + s.closeMaxWaitS;
 }
 
 /** The fee estimate for a batch, in USDC units: a deposit fee per deposit, the swap fee on its TAO at
@@ -92,19 +103,30 @@ export function closeEconomicsOf(r: {
 function rollable(s: State): boolean {
   const fd = s.frontDoor;
   const empty = fd.nDeposits + fd.nRedeems === 0;
-  return s.closeMaxWaitS > 0 && empty && fd.canClose && fd.batchInterval > 0 && s.now >= fd.openStart + fd.batchInterval;
+  return s.closeMaxWaitS > 0 && empty && fd.canClose && fd.batchInterval > 0 && fd.now >= fd.openStart + fd.batchInterval;
 }
 
 const hours = (seconds: number) => `${Number((seconds / 3600).toFixed(2))}-hour`;
 
-/** Why a batch that can close is held: what it waits for. */
-function holdReason(s: State): string {
-  const until = `the open batch waits until ${hhmm(s.frontDoor.openStart + s.closeMaxWaitS)}`;
+/** What a held batch waits for. */
+function holdWait(s: State): string {
+  const until = `waits until ${when(s.frontDoor.openStart + s.closeMaxWaitS, s.frontDoor.now)}`;
   const e = s.frontDoor.closeEconomics;
   if (e) return `${until} or until its fees cover the bridge fee (${usd(e.feesUsdc)} of ${usd(e.bridgeFeeUsdc)})`;
   if (e === null) return `${until}: its fees or the bridge fee could not be priced, so it does not close early`;
   return until;
 }
+
+/** A batch with entries the front door would let close but the close rule holds. */
+function isHeld(s: State): boolean {
+  const fd = s.frontDoor;
+  const e = fd.closeEconomics;
+  const canCloseEntries = fd.canClose && fd.nDeposits + fd.nRedeems > 0;
+  return canCloseEntries && !closesWithoutFees(s) && !(!!e && e.feesUsdc >= e.bridgeFeeUsdc);
+}
+
+/** For `status`: why the keeper holds a batch the front door would let close, or undefined. */
+export const closeHold = (s: State): string | undefined => (isHeld(s) ? `the keeper holds it: it ${holdWait(s)}` : undefined);
 
 /** The next thing the keeper should do: a due payout, then a USDC delivery, then staking, then closing
  * (or rolling) the batch. A batch with entries closes once the front door allows it and it is full, at
@@ -113,10 +135,8 @@ function holdReason(s: State): string {
 export function decideNext(s: State): { action: Action | null; reason: string } {
   const open = s.vault.batches.filter((b) => b.cursor < b.count);
   const due = open.filter((b) => s.now >= b.queuedAt + s.vault.payoutDelay);
-  const e = s.frontDoor.closeEconomics;
-  const canCloseEntries = s.frontDoor.canClose && s.frontDoor.nDeposits + s.frontDoor.nRedeems > 0;
-  const closable = canCloseEntries && (closesWithoutFees(s) || (!!e && e.feesUsdc >= e.bridgeFeeUsdc));
-  const held = canCloseEntries && !closable;
+  const held = isHeld(s);
+  const closable = s.frontDoor.canClose && s.frontDoor.nDeposits + s.frontDoor.nRedeems > 0 && !held;
 
   if (due.length && !s.vault.paused && s.alphaVault.healthy) {
     return { action: { kind: "payouts", key: due[0].key }, reason: "a payout batch is past its delay" };
@@ -147,7 +167,7 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   if (s.frontDoor.paused && roll) return { action: null, reason: "the front door is paused — not rolling the empty batch" };
   const waits: string[] = [];
   if (open.length) waits.push(`next payout at ${hhmm(Math.min(...open.map((b) => b.queuedAt + s.vault.payoutDelay)))}`);
-  if (held) waits.push(holdReason(s));
+  if (held) waits.push(`the open batch ${holdWait(s)}`);
   if (waits.length) return { action: null, reason: `nothing due: ${waits.join("; ")}` };
   if (stakeable && !bigEnough) {
     return {

@@ -1,15 +1,15 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
-import { PRECOMPILE, SETTINGS, WALLET } from "./config.ts";
-import { buildPlan, type Plan } from "./plan.ts";
+import { type ChainName, PRECOMPILE, SETTINGS_V3, WALLET } from "./config.ts";
+import { buildPlan, buildPlanV3, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, loadRecord, saveRecord } from "./record.ts";
 import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
-import type { CallRequest, CreateRequest, PlannedStep } from "./types.ts";
+import type { CallRequest, CreateRequest, PlannedStep, StepId } from "./types.ts";
 
 export interface DeployDeps {
   sendCreate(ctx: Ctx, req: CreateRequest, predicted: Address): Promise<Sent>;
   sendCall(ctx: Ctx, req: CallRequest): Promise<Sent>;
-  effectPresent(ctx: Ctx, plan: Plan, step: PlannedStep): Promise<boolean>;
+  effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep): Promise<boolean>;
   readColdkey(ctx: Ctx, vault: Address): Promise<Hex>;
 }
 
@@ -17,40 +17,89 @@ const VIEWS = parseAbi([
   "function keeper() view returns (address)",
   "function payoutDelay() view returns (uint64)",
   "function addressMapping(address addr) view returns (bytes32)",
+  "function swapper() view returns (address)",
+  "function oracle() view returns (address)",
+  "function maxBatchValue() view returns (uint256)",
+  "function routes(uint8) view returns (uint8 kind, address router, bytes buyPath, bytes sellPath, bool active)",
+  "function swapFeeBps() view returns (uint16)",
+  "function depositFeeUsdc() view returns (uint256)",
+  "function treasury() view returns (address)",
+  "function rewardCutBps() view returns (uint16)",
 ]);
+
+const eq = (x: unknown, y: unknown) => typeof x === "string" && typeof y === "string" && x.toLowerCase() === y.toLowerCase();
+
+/** The address a create step deploys to. */
+const createdAt = (plan: Plan | PlanV3, id: StepId): Address => {
+  const a = (plan.addresses as Record<string, Address | undefined>)[id];
+  if (!a) throw new Error(`the plan has no address for "${id}"`);
+  return a;
+};
 
 /** Whether a step's result is already on-chain (so a lost record entry is recovered, not re-sent).
  * Answers no only when the chain says so; a failed read throws, so nothing is sent on a guess. */
-export async function effectPresent(ctx: Ctx, plan: Plan, step: PlannedStep): Promise<boolean> {
+export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep): Promise<boolean> {
   const a = plan.addresses;
-  const hasCode = async (chain: "base" | "bittensor", addr: Address) => (await codeAt(ctx.rpc, chain, addr)) !== "0x";
+  const s = settingsOf(plan);
+  const hasCode = async (chain: ChainName, addr: Address) => (await codeAt(ctx.rpc, chain, addr)) !== "0x";
+  const view = (chain: ChainName, address: Address, functionName: string, args?: unknown[]) =>
+    read(ctx.rpc, chain, { address, abi: VIEWS, functionName, args });
+  const v3 = () => {
+    if (!isPlanV3(plan)) throw new Error(`"${step.id}" is a v3 step, but the plan is v2`);
+    return plan.addresses;
+  };
   switch (step.id) {
     case "baseAdapter":
     case "frontDoor":
     case "bitAdapter":
     case "vault":
-      return hasCode(step.chain, a[step.id]);
+    case "oracle":
+    case "staker":
+      return hasCode(step.chain, createdAt(plan, step.id));
     // balances read 500 rao (5e11 wei) below what was sent (the existential deposit)
     case "adapterReserve":
       return (
         (await hasCode("bittensor", a.bitAdapter)) &&
-        (await balanceOf(ctx.rpc, "bittensor", a.bitAdapter)) >= SETTINGS.adapterReserve - 5n * 10n ** 11n
+        (await balanceOf(ctx.rpc, "bittensor", a.bitAdapter)) >= s.adapterReserve - 5n * 10n ** 11n
       );
     case "vaultReserve":
       return (
         (await hasCode("bittensor", a.vault)) &&
-        (await balanceOf(ctx.rpc, "bittensor", a.vault)) >= SETTINGS.vaultReserve - 5n * 10n ** 11n
+        (await balanceOf(ctx.rpc, "bittensor", a.vault)) >= s.vaultReserve - 5n * 10n ** 11n
       );
     case "setKeeper":
-      return (
-        (await hasCode("bittensor", a.vault)) &&
-        (await read(ctx.rpc, "bittensor", { address: a.vault, abi: VIEWS, functionName: "keeper" })) === WALLET
-      );
+      return (await hasCode("bittensor", a.vault)) && (await view("bittensor", a.vault, "keeper")) === WALLET;
     case "setPayoutDelay":
+      return (await hasCode("bittensor", a.vault)) && (await view("bittensor", a.vault, "payoutDelay")) === BigInt(s.payoutDelay);
+    case "setRewardCut":
       return (
         (await hasCode("bittensor", a.vault)) &&
-        (await read(ctx.rpc, "bittensor", { address: a.vault, abi: VIEWS, functionName: "payoutDelay" })) ===
-          BigInt(SETTINGS.payoutDelay)
+        eq(await view("bittensor", a.vault, "treasury"), SETTINGS_V3.treasury) &&
+        (await view("bittensor", a.vault, "rewardCutBps")) === SETTINGS_V3.rewardCutBps
+      );
+    case "fdSetKeeper":
+      return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "keeper"), WALLET);
+    case "fdSetSwapper":
+      return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "swapper"), v3().staker);
+    case "fdSetOracle":
+      return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "oracle"), v3().oracle);
+    case "fdSetMaxBatchValue":
+      return (await hasCode("base", a.frontDoor)) && (await view("base", a.frontDoor, "maxBatchValue")) === SETTINGS_V3.maxBatchValue;
+    case "stakerSetRoute0": {
+      if (!(await hasCode("base", v3().staker))) return false;
+      const [kind, router, buyPath, sellPath, active] = (await view("base", v3().staker, "routes", [0])) as readonly unknown[];
+      return (
+        kind === ROUTE_0.kind && eq(router, ROUTE_0.router) && eq(buyPath, ROUTE_0.buyPath) && eq(sellPath, ROUTE_0.sellPath) && active === ROUTE_0.active
+      );
+    }
+    // the delivery route id defaults to 0, the id it is set to, so no read can tell; sending it again is harmless
+    case "stakerSetDeliveryRoute":
+      return false;
+    case "stakerSetFees":
+      return (
+        (await hasCode("base", v3().staker)) &&
+        (await view("base", v3().staker, "swapFeeBps")) === SETTINGS_V3.swapFeeBps &&
+        (await view("base", v3().staker, "depositFeeUsdc")) === SETTINGS_V3.depositFeeUsdc
       );
   }
 }
@@ -69,7 +118,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** The wallet moved past a create's nonce but its code read empty: a load-balanced RPC can lag a
  * block behind, so look again for a few seconds before calling the plan void. */
-async function landedAfterAll(ctx: Ctx, plan: Plan, step: PlannedStep, deps: DeployDeps): Promise<boolean> {
+async function landedAfterAll(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep, deps: DeployDeps): Promise<boolean> {
   for (let i = 0; i < 5; i++) {
     if (await deps.effectPresent(ctx, plan, step)) return true;
     await pause(ctx.pollMs ?? 3_000);
@@ -109,7 +158,7 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
       block: hexToNumber(r.blockNumber),
       gasUsed,
       costWei: gasUsed * hexToBigInt(r.effectiveGasPrice),
-      ...(step.kind === "create" ? { address: rec.plan.addresses[step.id as keyof Plan["addresses"]] } : {}),
+      ...(step.kind === "create" ? { address: createdAt(rec.plan, step.id) } : {}),
     };
   } else {
     if ((await latestNonce(ctx, p.chain)) <= p.nonce) {
@@ -127,9 +176,16 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
   saveRecord(path, rec);
 }
 
-/** Deploys and configures everything, resuming after any stop; saves the record after every step. */
-export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean }, deps: DeployDeps = realDeps) {
+/** Deploys and configures everything, resuming after any stop; saves the record after every step.
+ * A new record gets the v3 plan when `v3` is set (a deployment named v3…), else the v2 plan; an
+ * existing record keeps its own plan, and one of the other version is refused before anything else. */
+export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v3?: boolean }, deps: DeployDeps = realDeps) {
+  const v3 = opts.v3 ?? false;
   let rec = loadRecord(path);
+  if (rec && isPlanV3(rec.plan) !== v3) {
+    const [has, wants] = v3 ? ["v2", "v3"] : ["v3", "v2"];
+    throw new Error(`${path} holds a ${has} plan, not ${wants}: check OPS_DEPLOYMENT (a deployment named v3-… is v3); nothing sent`);
+  }
   if (rec && opts.newPlan) {
     ctx.log(`Archived the old plan to ${archiveRecord(path)}`);
     rec = null;
@@ -137,16 +193,18 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean },
   if (!rec) {
     const baseNonce = await nonceOf(ctx.rpc, "base", WALLET);
     const bitNonce = await nonceOf(ctx.rpc, "bittensor", WALLET);
+    // in both plans the vault is the second create on Bittensor
     const vault = getContractAddress({ from: WALLET, nonce: BigInt(bitNonce + 1) });
+    const coldkey = await deps.readColdkey(ctx, vault);
     rec = {
       target: ctx.live ? "live" : "rehearsal",
       wallet: WALLET,
       createdAt: new Date().toISOString(),
-      plan: buildPlan(baseNonce, bitNonce, await deps.readColdkey(ctx, vault)),
+      plan: v3 ? buildPlanV3(baseNonce, bitNonce, coldkey) : buildPlan(baseNonce, bitNonce, coldkey),
       done: {},
     };
     saveRecord(path, rec);
-    ctx.log(`Planned the deployment from the wallet's nonces: Base ${baseNonce}, Bittensor ${bitNonce}`);
+    ctx.log(`Planned the ${v3 ? "v3 " : ""}deployment from the wallet's nonces: Base ${baseNonce}, Bittensor ${bitNonce}`);
   }
   if (rec.target !== (ctx.live ? "live" : "rehearsal")) {
     throw new Error(`${path} is a ${rec.target} record; it cannot be used for this run`);
@@ -191,7 +249,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean },
     try {
       rec.done[step.id] =
         step.kind === "create"
-          ? await deps.sendCreate(ctx, step, rec.plan.addresses[step.id as keyof Plan["addresses"]])
+          ? await deps.sendCreate(ctx, step, createdAt(rec.plan, step.id))
           : await deps.sendCall(ctx, { ...step, nonce: current });
     } catch (e) {
       if (e instanceof ReceiptTimeout) {

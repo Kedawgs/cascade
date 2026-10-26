@@ -1,9 +1,77 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { LIVE, paths, SETTINGS, targets } from "../src/config.ts";
+import { BASE_V3, deploymentName, isV3Deployment, LIVE, paths, recordPath, SETTINGS, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
+import { decodeSs58, encodeSs58 } from "../src/ss58.ts";
 
 const forkBase = readFileSync(new URL("../../contracts/test/fork/ForkBase.sol", import.meta.url), "utf8");
 const constant = (name: string) => forkBase.match(new RegExp(`${name} = (\\w+);`))?.[1];
+const forkV3 = readFileSync(new URL("../../contracts/test/fork/BaseForkV3.t.sol", import.meta.url), "utf8");
+const constantV3 = (name: string) => forkV3.match(new RegExp(`${name} = (\\w+);`))?.[1];
+
+describe("v3 config", () => {
+  it("names the record after OPS_DEPLOYMENT, and without it keeps the v2 records", () => {
+    const dir = paths({}).deploymentsDir;
+    expect(recordPath({}, true)).toBe(join(dir, "test-2026-10.json"));
+    expect(recordPath({}, false)).toBe(join(dir, "rehearsal.json"));
+    expect(recordPath({ OPS_DEPLOYMENT: "" }, true)).toBe(join(dir, "test-2026-10.json"));
+    expect(recordPath({ OPS_DEPLOYMENT: "v3-test" }, true)).toBe(join(dir, "v3-test.json"));
+    expect(recordPath({ OPS_DEPLOYMENT: "v3-test" }, false)).toBe(join(dir, "rehearsal-v3-test.json"));
+    expect(deploymentName({})).toBe("test-2026-10");
+  });
+
+  it("plans v3 only for a deployment named v3…", () => {
+    expect(isV3Deployment({})).toBe(false);
+    expect(isV3Deployment({ OPS_DEPLOYMENT: "test-2026-10" })).toBe(false);
+    expect(isV3Deployment({ OPS_DEPLOYMENT: "v3-test" })).toBe(true);
+  });
+
+  it("refuses a deployment name that could leave the deployments folder", () => {
+    for (const bad of ["../v3-test", "v3/../../x", "..\\x", ".hidden", "v3 test"]) {
+      expect(() => recordPath({ OPS_DEPLOYMENT: bad }, true), bad).toThrow(/OPS_DEPLOYMENT/);
+    }
+  });
+
+  it("holds the v3 test settings: launch values except a 10-minute batch and a 1-hour payout delay", () => {
+    expect(SETTINGS_V3.minDeposit).toBe(40_000_000_000_000_000n);
+    expect(SETTINGS_V3.depositCap).toBe(40_000_000_000_000_000_000n);
+    expect(SETTINGS_V3.maxBatchValue).toBe(10_000_000_000_000_000_000n);
+    expect(SETTINGS_V3.batchInterval).toBe(600);
+    expect(SETTINGS_V3.payoutDelay).toBe(3600);
+    expect(SETTINGS_V3.redeemRequestFee).toBe(100_000_000_000_000n);
+    expect(SETTINGS_V3.rewardCutBps).toBe(1_000);
+    expect(SETTINGS_V3.treasury).toBe(WALLET);
+    expect(SETTINGS_V3.swapFeeBps).toBe(15);
+    expect(SETTINGS_V3.depositFeeUsdc).toBe(50_000n);
+    expect(SETTINGS_V3.maxDeliverySlippageBps).toBe(150);
+    // unchanged from v2: the bridge gas models and the reserves
+    expect(SETTINGS_V3.baseGas).toEqual(SETTINGS.baseGas);
+    expect(SETTINGS_V3.bitGas).toEqual(SETTINGS.bitGas);
+    expect([SETTINGS_V3.adapterReserve, SETTINGS_V3.vaultReserve]).toEqual([SETTINGS.adapterReserve, SETTINGS.vaultReserve]);
+  });
+
+  it("stakes with tao.bot's hotkey", () => {
+    expect(SETTINGS_V3.hotkey).toBe("0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748");
+    expect(decodeSs58("5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u")).toBe(SETTINGS_V3.hotkey);
+    expect(encodeSs58(SETTINGS_V3.hotkey)).toBe("5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u");
+    expect(SETTINGS.hotkey).not.toBe(SETTINGS_V3.hotkey);
+  });
+
+  it("copies the Base tokens, pools and router from the plan and BaseForkV3.t.sol", () => {
+    expect(BASE_V3).toEqual({
+      USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      WETH: "0x4200000000000000000000000000000000000006",
+      TAO_WETH_POOL: "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A",
+      WETH_USDC_POOL: "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+      SWAP_ROUTER_02: "0x2626664c2603336E57B271c5C0b26F421741e481",
+    });
+    expect(BASE_V3.USDC).toBe(constantV3("BASE_USDC"));
+    expect(BASE_V3.WETH).toBe(constantV3("BASE_WETH"));
+    expect(BASE_V3.TAO_WETH_POOL).toBe(constantV3("TAO_WETH_POOL"));
+    expect(BASE_V3.WETH_USDC_POOL).toBe(constantV3("WETH_USDC_POOL"));
+    expect(BASE_V3.SWAP_ROUTER_02).toBe(constantV3("SWAP_ROUTER_02"));
+  });
+});
 
 describe("config", () => {
   it("copies the live constants from ForkBase.sol", () => {

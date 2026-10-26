@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
 import type { ChainName } from "./config.ts";
-import type { Plan } from "./plan.ts";
+import type { Plan, PlanV3 } from "./plan.ts";
 import type { Sent } from "./send.ts";
 import type { StepId } from "./types.ts";
 
@@ -19,7 +19,8 @@ export interface DeploymentRecord {
   target: "live" | "rehearsal";
   wallet: Address;
   createdAt: string;
-  plan: Plan;
+  /** A v2 plan (no `version`) or a v3 plan. */
+  plan: Plan | PlanV3;
   done: Partial<Record<StepId, DoneStep>>;
   /** A sent transaction with no receipt yet; nothing more is sent until it resolves. */
   pending?: { step: StepId; chain: ChainName; nonce: number; hash?: Hex };

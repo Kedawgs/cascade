@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { WALLET, WALLET_SS58 } from "../src/config.ts";
-import { buildPlan } from "../src/plan.ts";
+import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { decodeSs58, encodeSs58 } from "../src/ss58.ts";
 import { webEnv } from "../src/webconfig.ts";
@@ -37,6 +37,24 @@ describe("web-config", () => {
       "NEXT_PUBLIC_CASCADE_BIT_BLOCK=9357492",
       "NEXT_PUBLIC_CASCADE_VAULT_SS58=5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu",
       "NEXT_PUBLIC_CASCADE_HOTKEY_SS58=5E4z3h9yVhmQyCFWNbY9BPpwhx4xFiPwq3eeqmBgVF6KULde",
+      "",
+    ]);
+  });
+
+  it("adds the staker and the oracle for a v3 deployment, and names tao.bot as the validator", () => {
+    const plan3 = buildPlanV3(0, 40, COLDKEY);
+    const lines = webEnv({ ...rec, plan: plan3 }).split("\n");
+    expect(lines).toEqual([
+      "# Written by `pnpm ops web-config`: the live test deployment. Local only (git-ignored).",
+      `NEXT_PUBLIC_CASCADE_FRONT_DOOR=${plan3.addresses.frontDoor}`,
+      `NEXT_PUBLIC_CASCADE_BASE_ADAPTER=${plan3.addresses.baseAdapter}`,
+      `NEXT_PUBLIC_CASCADE_STAKER=${plan3.addresses.staker}`,
+      `NEXT_PUBLIC_CASCADE_ORACLE=${plan3.addresses.oracle}`,
+      `NEXT_PUBLIC_CASCADE_VAULT=${plan3.addresses.vault}`,
+      `NEXT_PUBLIC_CASCADE_BIT_ADAPTER=${plan3.addresses.bitAdapter}`,
+      "NEXT_PUBLIC_CASCADE_BIT_BLOCK=9357492",
+      "NEXT_PUBLIC_CASCADE_VAULT_SS58=5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu",
+      "NEXT_PUBLIC_CASCADE_HOTKEY_SS58=5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u",
       "",
     ]);
   });

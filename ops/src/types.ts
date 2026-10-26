@@ -31,6 +31,17 @@ export type StepId =
   | "adapterReserve"
   | "vaultReserve"
   | "setKeeper"
-  | "setPayoutDelay";
+  | "setPayoutDelay"
+  // v3
+  | "oracle"
+  | "staker"
+  | "fdSetKeeper"
+  | "fdSetSwapper"
+  | "fdSetOracle"
+  | "fdSetMaxBatchValue"
+  | "stakerSetRoute0"
+  | "stakerSetDeliveryRoute"
+  | "stakerSetFees"
+  | "setRewardCut";
 
 export type PlannedStep = { id: StepId } & (({ kind: "create" } & CreateRequest) | ({ kind: "call" } & CallRequest));

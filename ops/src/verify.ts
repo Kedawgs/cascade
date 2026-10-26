@@ -1,7 +1,7 @@
-import { type Address, decodeEventLog, type Hex, parseAbi } from "viem";
+import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
-import { type ChainName, LIVE, PRECOMPILE, SETTINGS, WALLET } from "./config.ts";
-import type { Plan } from "./plan.ts";
+import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, WALLET } from "./config.ts";
+import { isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
 import type { DeploymentRecord, VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
@@ -13,19 +13,34 @@ export interface Expectation {
   chain: ChainName;
   contract: string;
   address: Address;
+  /** The name failures use, e.g. "routes(0).buyPath". */
   field: string;
+  /** The view to call, when it is not `field`. */
+  fn?: string;
   args?: readonly unknown[];
+  /** The position of the value in a view that returns several. */
+  pick?: number;
   expected: unknown;
 }
 
 export const keyOf = (e: Pick<Expectation, "chain" | "contract" | "field">) => `${e.chain}:${e.contract}.${e.field}`;
 
-const same = (a: unknown, b: unknown) =>
-  typeof a === "string" && typeof b === "string" ? a.toLowerCase() === b.toLowerCase() : a === b;
+const whole = (x: unknown): x is bigint | number => typeof x === "bigint" || (typeof x === "number" && Number.isInteger(x));
 
-/** Every setting the spec's read-back lists, from the plan. */
-export function expectations(plan: Plan): Expectation[] {
+/** Addresses and bytes without regard to case; integers by value (viem reads small uints as numbers). */
+const same = (a: unknown, b: unknown) => {
+  if (typeof a === "string" && typeof b === "string") return a.toLowerCase() === b.toLowerCase();
+  if (whole(a) && whole(b)) return BigInt(a) === BigInt(b);
+  return a === b;
+};
+
+const ROUTE_FIELDS = ["kind", "router", "buyPath", "sellPath", "active"] as const;
+
+/** Every setting the spec's read-back lists, from the plan; a v3 plan adds the staker, the oracle, the
+ * front door's delivery settings and the vault's reward cut. */
+export function expectations(plan: Plan | PlanV3): Expectation[] {
   const a = plan.addresses;
+  const s = settingsOf(plan);
   const out: Expectation[] = [];
   const add = (chain: ChainName, contract: string, address: Address, fields: Record<string, unknown>) => {
     for (const [field, expected] of Object.entries(fields)) out.push({ chain, contract, address, field, expected });
@@ -44,11 +59,11 @@ export function expectations(plan: Plan): Expectation[] {
     };
   };
   add("base", "CcipBaseAdapter", a.baseAdapter, {
-    ...adapter("base", a.bitAdapter, SETTINGS.baseGas),
-    minSendAmount: SETTINGS.minSendAmount,
+    ...adapter("base", a.bitAdapter, s.baseGas),
+    minSendAmount: s.minSendAmount,
   });
   add("bittensor", "CcipBittensorAdapter", a.bitAdapter, {
-    ...adapter("bittensor", a.baseAdapter, SETTINGS.bitGas),
+    ...adapter("bittensor", a.baseAdapter, s.bitGas),
     alphaVault: LIVE.ALPHA_VAULT,
   });
   add("base", "CascadeFrontDoor", a.frontDoor, {
@@ -58,19 +73,111 @@ export function expectations(plan: Plan): Expectation[] {
     asset: LIVE.base.TOKEN,
     owner: WALLET,
     guardian: WALLET,
-    batchInterval: BigInt(SETTINGS.batchInterval),
-    minDeposit: SETTINGS.minDeposit,
-    depositCap: SETTINGS.depositCap,
-    redeemRequestFee: SETTINGS.redeemRequestFee,
+    batchInterval: BigInt(s.batchInterval),
+    minDeposit: s.minDeposit,
+    depositCap: s.depositCap,
+    redeemRequestFee: s.redeemRequestFee,
   });
   add("bittensor", "CascadeVault", a.vault, {
-    stakeHotkey: SETTINGS.hotkey,
+    stakeHotkey: s.hotkey,
     primaryBridge: a.bitAdapter,
     owner: WALLET,
     guardian: WALLET,
     keeper: WALLET,
-    payoutDelay: BigInt(SETTINGS.payoutDelay),
+    payoutDelay: BigInt(s.payoutDelay),
   });
+  if (!isPlanV3(plan)) return out;
+
+  const v = SETTINGS_V3;
+  const a3 = plan.addresses;
+  add("base", "CascadeFrontDoor", a3.frontDoor, {
+    usdc: BASE_V3.USDC,
+    keeper: WALLET,
+    swapper: a3.staker,
+    oracle: a3.oracle,
+    maxDeliverySlippageBps: v.maxDeliverySlippageBps,
+    maxBatchValue: v.maxBatchValue,
+  });
+  add("base", "CascadeStaker", a3.staker, {
+    usdc: BASE_V3.USDC,
+    tao: LIVE.base.TOKEN,
+    frontDoor: a3.frontDoor,
+    owner: WALLET,
+    treasury: v.treasury,
+    swapFeeBps: v.swapFeeBps,
+    depositFeeUsdc: v.depositFeeUsdc,
+  });
+  ROUTE_FIELDS.forEach((name, pick) =>
+    out.push({ chain: "base", contract: "CascadeStaker", address: a3.staker, field: `routes(0).${name}`, fn: "routes", args: [0], pick, expected: ROUTE_0[name] }),
+  );
+  add("base", "CascadeStaker", a3.staker, { deliveryRouteId: v.deliveryRouteId });
+  add("base", "CascadeTwapOracle", a3.oracle, {
+    taoWethPool: BASE_V3.TAO_WETH_POOL,
+    wethUsdcPool: BASE_V3.WETH_USDC_POOL,
+    tao: LIVE.base.TOKEN,
+    weth: BASE_V3.WETH,
+    usdc: BASE_V3.USDC,
+  });
+  add("bittensor", "CascadeVault", a3.vault, { treasury: v.treasury, rewardCutBps: v.rewardCutBps });
+  return out;
+}
+
+/** Reads each expectation's view into a map by `keyOf`, calling a view once per address and arguments.
+ * A failed read is kept as "unreadable (…)", so it shows as a mismatch instead of stopping the check. */
+export async function readBack(
+  ctx: Pick<Ctx, "rpc">,
+  exp: Expectation[],
+  abiOf: (contract: string) => { abi: Abi },
+): Promise<Map<string, unknown>> {
+  const calls = new Map<string, Promise<unknown>>();
+  const actual = new Map<string, unknown>();
+  for (const e of exp) {
+    const fn = e.fn ?? e.field;
+    const id = `${e.chain}:${e.address}:${fn}(${(e.args ?? []).map(String).join(",")})`;
+    try {
+      let call = calls.get(id);
+      if (!call) {
+        call = read(ctx.rpc, e.chain, { address: e.address, abi: abiOf(e.contract).abi, functionName: fn, args: e.args });
+        calls.set(id, call);
+      }
+      const value = await call;
+      actual.set(keyOf(e), e.pick === undefined ? value : (value as readonly unknown[])[e.pick]);
+    } catch (err) {
+      actual.set(keyOf(e), `unreadable (${(err as Error).message.split("\n")[0]})`);
+    }
+  }
+  return actual;
+}
+
+/** The treasury holds csTAO on Bittensor and redeems it through the front door on Base, so its address
+ * must be the same owner on both chains: a plain account, never a contract (whose address on the other
+ * chain could belong to someone else). */
+export function treasuryCodeFailures(treasury: Address, code: Record<ChainName, Hex>): string[] {
+  return (["base", "bittensor"] as const)
+    .filter((c) => code[c] !== "0x")
+    .map((c) => `${chainLabel(c)} treasury ${treasury}: has contract code; the treasury must be a plain account, the same owner on Base and Bittensor`);
+}
+
+const readAt = (actual: Map<string, unknown>, chain: ChainName, contract: string, field: string) => actual.get(keyOf({ chain, contract, field }));
+const anAddress = (x: unknown): x is Address => typeof x === "string" && isAddress(x, { strict: false });
+
+/** v3's cross-checks on the read-back: the front door's USDC is not its asset, and no treasury is one of
+ * Cascade's own contracts. */
+export function v3AddressFailures(plan: PlanV3, actual: Map<string, unknown>): string[] {
+  const a = plan.addresses;
+  const out: string[] = [];
+  const usdc = readAt(actual, "base", "CascadeFrontDoor", "usdc");
+  if (anAddress(usdc) && same(usdc, readAt(actual, "base", "CascadeFrontDoor", "asset"))) {
+    out.push(`Base CascadeFrontDoor.usdc: ${usdc} is the same as its asset`);
+  }
+  const staker = readAt(actual, "base", "CascadeStaker", "treasury");
+  if (anAddress(staker) && [a.staker, a.frontDoor].some((c) => same(c, staker))) {
+    out.push(`Base CascadeStaker.treasury: ${staker} is the staker or the front door; the treasury must be an account, not a Cascade contract`);
+  }
+  const vault = readAt(actual, "bittensor", "CascadeVault", "treasury");
+  if (anAddress(vault) && [a.vault, a.frontDoor, a.staker].some((c) => same(c, vault))) {
+    out.push(`Bittensor CascadeVault.treasury: ${vault} is the vault, the front door or the staker; the treasury must be an account, not a Cascade contract`);
+  }
   return out;
 }
 
@@ -93,7 +200,7 @@ export function codeMismatch(
 
 const ACTIVATED = parseAbi(["event FrontDoorActivated(uint64 indexed chain, address indexed addr)"]);
 
-export function frontDoorActivationFailures(logs: { address: Address; topics: Hex[]; data: Hex }[], plan: Plan): string[] {
+export function frontDoorActivationFailures(logs: { address: Address; topics: Hex[]; data: Hex }[], plan: Plan | PlanV3): string[] {
   const hits = logs
     .filter((l) => same(l.address, plan.addresses.vault))
     .flatMap((l) => {
@@ -142,17 +249,21 @@ const VAULT_EXTRA = parseAbi([
 export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyResult> {
   const plan = rec.plan;
   const exp = expectations(plan);
-  const actual = new Map<string, unknown>();
   const artifacts = new Map<string, Artifact>();
   const art = (name: string) => artifacts.get(name) ?? artifacts.set(name, loadArtifact(ctx.paths.contractsDir, name)).get(name)!;
-  for (const e of exp) {
-    try {
-      actual.set(keyOf(e), await read(ctx.rpc, e.chain, { address: e.address, abi: art(e.contract).abi, functionName: e.field }));
-    } catch (err) {
-      actual.set(keyOf(e), `unreadable (${(err as Error).message.split("\n")[0]})`);
+  const actual = await readBack(ctx, exp, art);
+  const failures = compare(exp, actual);
+
+  if (isPlanV3(plan)) {
+    failures.push(...v3AddressFailures(plan, actual));
+    const treasuries = new Map<string, Address>();
+    for (const t of [SETTINGS_V3.treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
+      if (anAddress(t)) treasuries.set(t.toLowerCase(), t);
+    }
+    for (const t of treasuries.values()) {
+      failures.push(...treasuryCodeFailures(t, { base: await codeAt(ctx.rpc, "base", t), bittensor: await codeAt(ctx.rpc, "bittensor", t) }));
     }
   }
-  const failures = compare(exp, actual);
 
   const v = plan.addresses.vault;
   const coldkey = await read(ctx.rpc, "bittensor", { address: v, abi: VAULT_EXTRA, functionName: "coldkey" });
@@ -175,6 +286,12 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
     ["base", "CascadeFrontDoor", plan.addresses.frontDoor],
     ["bittensor", "CcipBittensorAdapter", plan.addresses.bitAdapter],
     ["bittensor", "CascadeVault", v],
+    ...(isPlanV3(plan)
+      ? ([
+          ["base", "CascadeTwapOracle", plan.addresses.oracle],
+          ["base", "CascadeStaker", plan.addresses.staker],
+        ] as [ChainName, string, Address][])
+      : []),
   ];
   for (const [c, name, addr] of contracts) {
     const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), art(name));

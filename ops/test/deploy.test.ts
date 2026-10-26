@@ -1,11 +1,12 @@
 import { existsSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Hex, numberToHex } from "viem";
+import { decodeFunctionData, encodeFunctionResult, type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
+import { loadArtifact } from "../src/artifacts.ts";
 import { type ChainName, paths, targets, WALLET } from "../src/config.ts";
 import { type DeployDeps, deploy, effectPresent } from "../src/deploy.ts";
-import { buildPlan } from "../src/plan.ts";
+import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import { type DeploymentRecord, loadRecord, saveRecord } from "../src/record.ts";
 import type { Rpc } from "../src/rpc.ts";
 import type { Ctx, Sent } from "../src/send.ts";
@@ -198,5 +199,113 @@ describe("effectPresent", () => {
       throw new Error("fetch failed");
     });
     await expect(effectPresent(ctx, plan, step("vault"))).rejects.toThrow(/fetch failed/);
+  });
+});
+
+const V3: StepId[] = [
+  "baseAdapter",
+  "oracle",
+  "frontDoor",
+  "staker",
+  "fdSetKeeper",
+  "fdSetSwapper",
+  "fdSetOracle",
+  "fdSetMaxBatchValue",
+  "stakerSetRoute0",
+  "stakerSetDeliveryRoute",
+  "stakerSetFees",
+  "bitAdapter",
+  "vault",
+  "adapterReserve",
+  "vaultReserve",
+  "setKeeper",
+  "setPayoutDelay",
+  "setRewardCut",
+];
+
+describe("deploy v3", () => {
+  it("plans a new record with the v3 plan and sends its steps in order", async () => {
+    const w = world({ base: 4, bittensor: 9 });
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    expect(rec.plan).toMatchObject({ version: 3, baseNonce: 4, bitNonce: 9 });
+    expect(w.sent).toEqual(V3);
+    expect(w.sentNonces).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 9, 10, 11, 12, 13, 14, 15]);
+    expect(loadRecord(w.recordPath)!.plan).toMatchObject({ version: 3 });
+  });
+
+  it("resumes an existing v3 record whatever it is asked to plan, and refuses a record of the other version", async () => {
+    const w = world({ base: 0, bittensor: 0 });
+    await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    await expect(deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps)).rejects.toThrow(/holds a v3 plan.*OPS_DEPLOYMENT/);
+
+    const v2 = world({ base: 0, bittensor: 0 });
+    saveRecord(v2.recordPath, recordWith([]));
+    await expect(deploy(v2.ctx, v2.recordPath, { newPlan: false, v3: true }, v2.deps)).rejects.toThrow(/holds a v2 plan.*OPS_DEPLOYMENT/);
+    expect(v2.sent).toEqual([]);
+  });
+});
+
+describe("effectPresent v3", () => {
+  const plan = buildPlanV3(0, 40, COLDKEY);
+  const step = (id: StepId) => plan.steps.find((s) => s.id === id)!;
+  const dir = paths({}).contractsDir;
+  const abi = ["CascadeFrontDoor", "CascadeStaker", "CascadeVault"].flatMap((n) => loadArtifact(dir, n).abi);
+  const route = step("stakerSetRoute0").args[1] as { kind: number; router: Hex; buyPath: Hex; sellPath: Hex; active: boolean };
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  const configured: Record<string, unknown> = {
+    keeper: WALLET,
+    swapper: plan.addresses.staker,
+    oracle: plan.addresses.oracle,
+    maxBatchValue: 10n ** 19n,
+    routes: [route.kind, route.router, route.buyPath, route.sellPath, route.active],
+    deliveryRouteId: 0,
+    swapFeeBps: 15,
+    depositFeeUsdc: 50_000n,
+    treasury: WALLET,
+    rewardCutBps: 1_000,
+  };
+  const ctxWith = (values: Record<string, unknown>, code: Hex = "0x6080"): Ctx => ({
+    ...world({ base: 0, bittensor: 0 }).ctx,
+    rpc: {
+      async request(_c, method, params) {
+        if (method === "eth_getCode") return code;
+        if (method !== "eth_call") throw new Error(method);
+        const { functionName } = decodeFunctionData({ abi, data: (params[0] as { data: Hex }).data });
+        return encodeFunctionResult({ abi, functionName, result: values[functionName] } as never);
+      },
+    },
+  });
+  const ids: StepId[] = ["fdSetKeeper", "fdSetSwapper", "fdSetOracle", "fdSetMaxBatchValue", "stakerSetRoute0", "stakerSetFees", "setRewardCut"];
+
+  it("finds each configuration already on-chain", async () => {
+    const ctx = ctxWith(configured);
+    for (const id of ids) expect(await effectPresent(ctx, plan, step(id)), id).toBe(true);
+    expect(await effectPresent(ctx, plan, step("oracle"))).toBe(true);
+    expect(await effectPresent(ctx, plan, step("staker"))).toBe(true);
+  });
+
+  it("answers no for a contract with no code yet", async () => {
+    const ctx = ctxWith(configured, "0x");
+    for (const id of [...ids, "oracle", "staker"] as StepId[]) expect(await effectPresent(ctx, plan, step(id)), id).toBe(false);
+  });
+
+  it("answers no when any part of a setting differs", async () => {
+    const unset: Record<string, unknown> = {
+      keeper: ZERO,
+      swapper: ZERO,
+      oracle: ZERO,
+      maxBatchValue: 4_000n * 10n ** 18n,
+      routes: [route.kind, route.router, route.buyPath, `${route.buyPath}`, route.active],
+      swapFeeBps: 15,
+      depositFeeUsdc: 0n,
+      treasury: WALLET,
+      rewardCutBps: 0,
+    };
+    const ctx = ctxWith(unset);
+    for (const id of ids) expect(await effectPresent(ctx, plan, step(id)), id).toBe(false);
+  });
+
+  it("always sends the delivery route: 0 is also its default, so a read cannot tell", async () => {
+    expect(await effectPresent(ctxWith(configured), plan, step("stakerSetDeliveryRoute"))).toBe(false);
   });
 });

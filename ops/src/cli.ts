@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
-import { paths, targets } from "./config.ts";
+import { isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deploy } from "./deploy.ts";
 import { close, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
@@ -25,7 +25,8 @@ function ctxFor(live: boolean): Ctx {
   return { live, targets: t, rpc, runner: execFileRunner, paths: paths(env), log, receiptTimeoutMs: 300_000 };
 }
 
-const recordPath = (live: boolean) => join(paths(env).deploymentsDir, live ? "test-2026-10.json" : "rehearsal.json");
+/** The record of the deployment OPS_DEPLOYMENT names (without it, the v2 test deployment's). */
+const recordPath = (live: boolean) => recordFor(env, live);
 
 function needRecord(live: boolean): DeploymentRecord {
   const rec = loadRecord(recordPath(live));
@@ -62,8 +63,14 @@ async function run(a: Args): Promise<number> {
       return 0;
     }
     case "deploy": {
+      const v3 = isV3Deployment(env);
+      // the v2 plan's front door no longer matches the contracts build, and planning anew under the
+      // v2 name would archive the record that status, wind-down and sweep still read
+      if (!v3 && (a.newPlan || !loadRecord(recordPath(a.live)))) {
+        throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");
+      }
       const ctx = ctxFor(a.live);
-      const rec = await deploy(ctx, recordPath(a.live), { newPlan: a.newPlan ?? false });
+      const rec = await deploy(ctx, recordPath(a.live), { newPlan: a.newPlan ?? false, v3 });
       return (await checkAndSave(ctx, recordPath(a.live), rec)) ? 0 : 1;
     }
     case "verify":

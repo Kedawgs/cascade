@@ -53,6 +53,34 @@ export const WALLET: Address = "0x770932787DD3bcE64f14E31f4746bCe22E214fFF";
 /** Its Bittensor twin (SS58, prefix 42), where TAO top-ups go. */
 export const WALLET_SS58 = "5FxSW9dM8DbAWUFtADJPX5Wb7DctrJHadkJ3TB1GpBGvxQH2";
 
+/** Base tokens, Uniswap v3 pools and router for v3 (checked on chain 2026-10-26; the same constants as
+ * contracts/test/fork/BaseForkV3.t.sol). TAO on Base is LIVE.base.TOKEN. */
+export const BASE_V3 = {
+  USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  WETH: "0x4200000000000000000000000000000000000006",
+  /** Uniswap v3 TAO/WETH, 0.3% */
+  TAO_WETH_POOL: "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A",
+  /** Uniswap v3 WETH/USDC, 0.05% */
+  WETH_USDC_POOL: "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+  SWAP_ROUTER_02: "0x2626664c2603336E57B271c5C0b26F421741e481",
+} as const satisfies Record<string, Address>;
+
+/** What a deployment plan reads from its settings (v2 and v3 alike). */
+export interface DeploySettings {
+  baseGas: { base: bigint; perEntry: bigint };
+  minSendAmount: bigint;
+  bitGas: { base: bigint; perEntry: bigint };
+  batchInterval: number;
+  minDeposit: bigint;
+  depositCap: bigint;
+  redeemRequestFee: bigint;
+  hotkey: Hex;
+  minDirectDeposit: bigint;
+  payoutDelay: number;
+  adapterReserve: bigint;
+  vaultReserve: bigint;
+}
+
 /** Test settings from the spec's table. */
 export const SETTINGS = {
   baseGas: { base: 540_000n, perEntry: 26_450n },
@@ -67,7 +95,55 @@ export const SETTINGS = {
   payoutDelay: 3600,
   adapterReserve: 10n ** 12n,
   vaultReserve: 15n * 10n ** 11n,
+} as const satisfies DeploySettings;
+
+/** The v3 test deployment: the spec's launch values, except the batch interval and the payout delay,
+ * kept at 10 minutes and 1 hour so the owner's test run doesn't wait (at launch: 21_600 s, and the
+ * vault's default of 24 hours). The bridge gas models, reserves and direct-deposit minimum are v2's. */
+export const SETTINGS_V3 = {
+  ...SETTINGS,
+  minDeposit: 4n * 10n ** 16n,
+  depositCap: 40n * 10n ** 18n,
+  maxBatchValue: 10n * 10n ** 18n,
+  batchInterval: 600,
+  payoutDelay: 3600,
+  redeemRequestFee: 10n ** 14n,
+  /** tao.bot, 5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u */
+  hotkey: "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748" as Hex,
+  /** The test wallet for the test run. It must be a plain account (verify checks it has no code on
+   * either chain), so its address means the same owner on Base and on Bittensor. */
+  treasury: WALLET,
+  rewardCutBps: 1_000,
+  swapFeeBps: 15,
+  /** $0.05, in USDC units */
+  depositFeeUsdc: 50_000n,
+  /** The front door's default, read back by verify. */
+  maxDeliverySlippageBps: 150,
+  deliveryRouteId: 0,
 } as const;
+
+const V2_DEPLOYMENT = "test-2026-10";
+
+/** The deployment the CLI works on: OPS_DEPLOYMENT (e.g. v3-test), else the v2 test deployment. It
+ * names the record file, so it holds only letters, digits, '.', '_' and '-', from a letter or digit. */
+export function deploymentName(env: Env): string {
+  const name = env.OPS_DEPLOYMENT?.trim() || V2_DEPLOYMENT;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+    throw new Error(`OPS_DEPLOYMENT "${name}" is not a plain name: use letters, digits, '.', '_' and '-' (e.g. v3-test)`);
+  }
+  return name;
+}
+
+/** A deployment named v3… gets the v3 plan when its record is first created. */
+export const isV3Deployment = (env: Env): boolean => deploymentName(env).startsWith("v3");
+
+/** The deployment's record: deployments/<name>.json, or rehearsal-<name>.json on the local forks;
+ * without OPS_DEPLOYMENT, the v2 records test-2026-10.json and rehearsal.json. */
+export function recordPath(env: Env, live: boolean): string {
+  const name = deploymentName(env);
+  const file = live ? `${name}.json` : name === V2_DEPLOYMENT ? "rehearsal.json" : `rehearsal-${name}.json`;
+  return join(paths(env).deploymentsDir, file);
+}
 
 export function targets(env: Env): { live: Record<ChainName, ChainTarget>; rehearsal: Record<ChainName, ChainTarget> } {
   return {

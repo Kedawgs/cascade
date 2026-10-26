@@ -161,7 +161,7 @@ let errorAbi: Abi | undefined;
 /** The contracts' custom errors, so a failed estimate can say which one. */
 function contractErrors(ctx: Ctx): Abi {
   if (!errorAbi) {
-    const names = ["CascadeVault", "CascadeFrontDoor", "CcipBaseAdapter", "CcipBittensorAdapter"];
+    const names = ["CascadeVault", "CascadeFrontDoor", "CcipBaseAdapter", "CcipBittensorAdapter", "CascadeStaker", "CascadeTwapOracle"];
     errorAbi = names.flatMap((n) => {
       try {
         return loadArtifact(ctx.paths.contractsDir, n).abi.filter((i) => i.type === "error");

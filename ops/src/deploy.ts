@@ -1,6 +1,6 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
-import { type Cadence, type ChainName, PRECOMPILE, SETTINGS_V3, WALLET } from "./config.ts";
-import { buildPlan, buildPlanV3, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
+import { type Cadence, type ChainName, PRECOMPILE, WALLET } from "./config.ts";
+import { buildPlan, buildPlanV3, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, loadRecordFor, saveRecord } from "./record.ts";
 import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
@@ -49,6 +49,7 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
     if (!isPlanV3(plan)) throw new Error(`"${step.id}" is a v3 step, but the plan is v2`);
     return plan.addresses;
   };
+  const sv3 = () => (v3(), settingsV3Of(plan as PlanV3));
   switch (step.id) {
     case "baseAdapter":
     case "frontDoor":
@@ -75,8 +76,8 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
     case "setRewardCut":
       return (
         (await hasCode("bittensor", a.vault)) &&
-        eq(await view("bittensor", a.vault, "treasury"), SETTINGS_V3.treasury) &&
-        (await view("bittensor", a.vault, "rewardCutBps")) === SETTINGS_V3.rewardCutBps
+        eq(await view("bittensor", a.vault, "treasury"), sv3().treasury) &&
+        (await view("bittensor", a.vault, "rewardCutBps")) === sv3().rewardCutBps
       );
     case "fdSetKeeper":
       return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "keeper"), WALLET);
@@ -85,7 +86,7 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
     case "fdSetOracle":
       return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "oracle"), v3().oracle);
     case "fdSetMaxBatchValue":
-      return (await hasCode("base", a.frontDoor)) && (await view("base", a.frontDoor, "maxBatchValue")) === SETTINGS_V3.maxBatchValue;
+      return (await hasCode("base", a.frontDoor)) && (await view("base", a.frontDoor, "maxBatchValue")) === sv3().maxBatchValue;
     case "stakerSetRoute0": {
       if (!(await hasCode("base", v3().staker))) return false;
       const [kind, router, buyPath, sellPath, active] = (await view("base", v3().staker, "routes", [0])) as readonly unknown[];
@@ -99,8 +100,8 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
     case "stakerSetFees":
       return (
         (await hasCode("base", v3().staker)) &&
-        (await view("base", v3().staker, "swapFeeBps")) === SETTINGS_V3.swapFeeBps &&
-        (await view("base", v3().staker, "depositFeeUsdc")) === SETTINGS_V3.depositFeeUsdc
+        (await view("base", v3().staker, "swapFeeBps")) === sv3().swapFeeBps &&
+        (await view("base", v3().staker, "depositFeeUsdc")) === sv3().depositFeeUsdc
       );
   }
 }
@@ -207,7 +208,11 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
       done: {},
     };
     saveRecord(path, rec);
-    ctx.log(`Planned the ${v3 ? "v3 " : ""}deployment from the wallet's nonces: Base ${baseNonce}, Bittensor ${bitNonce}`);
+    const named = v3 && opts.cadence === "launch" ? " (launch cadence: 1-hour batches, 24-hour payout delay)" : "";
+    ctx.log(`Planned the ${v3 ? "v3 " : ""}deployment${named} from the wallet's nonces: Base ${baseNonce}, Bittensor ${bitNonce}`);
+  }
+  else if (opts.cadence === "launch" && cadenceOf(rec.plan) === "test") {
+    ctx.log("OPS_CADENCE=launch ignored: the record's cadence is test; use --new-plan to plan anew");
   }
   await settlePending(ctx, rec, path);
 

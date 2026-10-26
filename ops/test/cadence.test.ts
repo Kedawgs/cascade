@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { CADENCE, cadenceFromEnv, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "../src/config.ts";
-import { buildPlan, buildPlanV3, cadenceOf, closeMaxWaitS, settingsOf } from "../src/plan.ts";
+import { buildPlan, buildPlanV3, cadenceOf, closeMaxWaitS, settingsOf, settingsV3Of } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { expectations } from "../src/verify.ts";
 import { webEnv } from "../src/webconfig.ts";
@@ -11,10 +11,32 @@ const field = (plan: ReturnType<typeof buildPlanV3>, contract: string, f: string
   expectations(plan).find((e) => e.contract === contract && e.field === f)?.expected;
 
 describe("cadence", () => {
-  it("reads the cadence from the environment: only OPS_CADENCE=launch means launch", () => {
+  it("reads the cadence from the environment: unset, empty or test is test, launch is launch, anything else throws", () => {
     expect(cadenceFromEnv({ OPS_CADENCE: "launch" })).toBe("launch");
     expect(cadenceFromEnv({ OPS_CADENCE: " launch " })).toBe("launch");
-    for (const v of [undefined, "", "test", "Launch", "fast"]) expect(cadenceFromEnv({ OPS_CADENCE: v })).toBe("test");
+    for (const v of [undefined, "", " ", "test"]) expect(cadenceFromEnv({ OPS_CADENCE: v })).toBe("test");
+    for (const v of ["Launch", "fast", "mainnet"]) {
+      expect(() => cadenceFromEnv({ OPS_CADENCE: v })).toThrow(`OPS_CADENCE "${v}" is not a cadence: use launch, or leave it unset for test; nothing sent`);
+    }
+  });
+
+  it("refuses an unrecognised cadence in a record; an absent one is test", () => {
+    const bad = { ...buildPlanV3(0, 40, COLDKEY), cadence: "fast" } as unknown as ReturnType<typeof buildPlanV3>;
+    expect(() => cadenceOf(bad)).toThrow(/cadence "fast"/);
+    expect(() => settingsOf(bad)).toThrow(/cadence "fast"/);
+  });
+
+  it("settingsV3Of gives a plan's full v3 settings, and verify's expectations come from them", () => {
+    const test = buildPlanV3(0, 40, COLDKEY);
+    const launch = buildPlanV3(0, 40, COLDKEY, "launch");
+    expect(settingsV3Of(test)).toBe(SETTINGS_V3);
+    expect(settingsV3Of(launch)).toBe(SETTINGS_V3_LAUNCH);
+    expect(() => settingsV3Of(buildPlan(0, 0, COLDKEY) as never)).toThrow(/v2/);
+    const exp = expectations(launch);
+    const get = (c: string, f: string) => exp.find((e) => e.contract === c && e.field === f)?.expected;
+    expect(get("CascadeFrontDoor", "maxBatchValue")).toBe(SETTINGS_V3_LAUNCH.maxBatchValue);
+    expect(get("CascadeStaker", "swapFeeBps")).toBe(SETTINGS_V3_LAUNCH.swapFeeBps);
+    expect(get("CascadeVault", "rewardCutBps")).toBe(SETTINGS_V3_LAUNCH.rewardCutBps);
   });
 
   it("launch settings change only the batch interval and the payout delay", () => {
@@ -34,9 +56,9 @@ describe("cadence", () => {
     expect(field(v3, "CascadeVault", "payoutDelay")).toBe(3600n);
   });
 
-  it("the keeper's close wait is the batch interval for test and a day for launch", () => {
-    expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY))).toBe(600);
-    expect(closeMaxWaitS(buildPlan(0, 0, COLDKEY))).toBe(600);
+  it("the keeper's extra close wait is none for test and a day for launch", () => {
+    expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY))).toBe(0);
+    expect(closeMaxWaitS(buildPlan(0, 0, COLDKEY))).toBe(0);
     expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY, "launch"))).toBe(86_400);
   });
 
@@ -71,6 +93,12 @@ describe("cadence", () => {
     });
     expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch")))).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400\n");
     expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY)))).not.toContain("MAX_WAIT");
+    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch"))).split("\n")[0]).toBe(
+      "# Written by `pnpm ops web-config`: the live launch deployment. Local only (git-ignored).",
+    );
+    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY))).split("\n")[0]).toBe(
+      "# Written by `pnpm ops web-config`: the live test deployment. Local only (git-ignored).",
+    );
     expect(webEnv(rec(buildPlan(0, 0, COLDKEY)))).not.toContain("MAX_WAIT");
   });
 });

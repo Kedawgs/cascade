@@ -141,8 +141,13 @@ export const CADENCE = {
   launch: { closeMaxWaitS: 86_400 },
 } as const satisfies Record<Cadence, { closeMaxWaitS: number | null }>;
 
-/** OPS_CADENCE=launch makes a new v3 plan a launch plan; anything else or unset is test. */
-export const cadenceFromEnv = (env: Env): Cadence => (env.OPS_CADENCE?.trim() === "launch" ? "launch" : "test");
+/** OPS_CADENCE=launch makes a new v3 plan a launch plan; unset, empty or "test" is test; anything else is refused. */
+export function cadenceFromEnv(env: Env): Cadence {
+  const v = env.OPS_CADENCE?.trim() ?? "";
+  if (v === "" || v === "test") return "test";
+  if (v === "launch") return "launch";
+  throw new Error(`OPS_CADENCE "${v}" is not a cadence: use launch, or leave it unset for test; nothing sent`);
+}
 
 /** When a reward claim is worth its cost (spec, keeper and reward policy): when what is waiting is at
  * least `claimMultiple` times the cost, or monthly while one claim costs under `monthlyClaimMaxUsd`. */

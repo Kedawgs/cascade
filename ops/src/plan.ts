@@ -21,13 +21,25 @@ export interface PlanV3 extends Omit<Plan, "addresses"> {
 export const isPlanV3 = (plan: Plan | PlanV3): plan is PlanV3 => "version" in plan && plan.version === 3;
 
 /** The settings a plan was built with. */
-export const settingsOf = (plan: Plan | PlanV3): DeploySettings =>
-  isPlanV3(plan) ? (cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3) : SETTINGS;
+export const settingsOf = (plan: Plan | PlanV3): DeploySettings => (isPlanV3(plan) ? settingsV3Of(plan) : SETTINGS);
 
-export const cadenceOf = (plan: Plan | PlanV3): Cadence => (isPlanV3(plan) && plan.cadence === "launch" ? "launch" : "test");
+/** A v3 plan's full settings, for its cadence. */
+export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS_V3_LAUNCH {
+  if (!isPlanV3(plan)) throw new Error("settingsV3Of: the plan is v2");
+  return cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
+}
 
-/** The keeper's longest wait, in seconds, before closing a batch: the plan's batch interval for test. */
-export const closeMaxWaitS = (plan: Plan | PlanV3): number => CADENCE[cadenceOf(plan)].closeMaxWaitS ?? settingsOf(plan).batchInterval;
+/** A record's cadence: absent is test; anything unrecognised is refused. */
+export function cadenceOf(plan: Plan | PlanV3): Cadence {
+  const c = isPlanV3(plan) ? plan.cadence : undefined;
+  if (c === undefined || c === "test") return "test";
+  if (c === "launch") return "launch";
+  throw new Error(`the record's plan has a cadence "${String(c)}" this tool does not know; nothing sent`);
+}
+
+/** The keeper's extra wait, in seconds, before closing a batch. 0 (test) means none: close as soon as the
+ * contract allows, so a later on-chain interval change cannot make the keeper wait longer than the contract. */
+export const closeMaxWaitS = (plan: Plan | PlanV3): number => CADENCE[cadenceOf(plan)].closeMaxWaitS ?? 0;
 
 export const CONFIG_ABI = {
   fundReserve: parseAbi(["function fundReserve() payable"]),

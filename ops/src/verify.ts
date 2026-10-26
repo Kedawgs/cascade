@@ -1,8 +1,8 @@
 import { basename } from "node:path";
 import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
-import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, V2_DEPLOYMENT, WALLET } from "./config.ts";
-import { isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
+import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
+import { isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
 import { type DeploymentRecord, saveRecord, type VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
@@ -89,7 +89,7 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
   });
   if (!isPlanV3(plan)) return out;
 
-  const v = SETTINGS_V3;
+  const v = settingsV3Of(plan);
   const a3 = plan.addresses;
   add("base", "CascadeFrontDoor", a3.frontDoor, {
     usdc: BASE_V3.USDC,
@@ -269,7 +269,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
   if (isPlanV3(plan)) {
     failures.push(...v3AddressFailures(plan, actual));
     const treasuries = new Map<string, Address>();
-    for (const t of [SETTINGS_V3.treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
+    for (const t of [settingsV3Of(plan).treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
       if (anAddress(t)) treasuries.set(t.toLowerCase(), t);
     }
     for (const t of treasuries.values()) {

@@ -261,6 +261,7 @@ describe("formatReceivers", () => {
 describe("rehearse", () => {
   it("refuses a v2 deployment name before starting anything", async () => {
     const lines: string[] = [];
+    await expect(rehearse({ OPS_DEPLOYMENT: "v3-x", OPS_CADENCE: "fast" }, (l) => lines.push(l))).rejects.toThrow(/not a cadence.*nothing sent/);
     await expect(rehearse({}, (l) => lines.push(l))).rejects.toThrow(/set OPS_DEPLOYMENT=v3-rehearsal.*v2 rehearsal record is left as it is/);
     expect(lines).toEqual([]);
   });

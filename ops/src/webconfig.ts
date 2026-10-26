@@ -15,7 +15,7 @@ export function webEnv(rec: DeploymentRecord): string {
   if (!bit || !("block" in bit)) throw new Error("the Bittensor adapter's deploy block is not in the record");
   const [coldkey, hotkey] = plan.steps.find((s) => s.id === "vault")!.args as [Hex, Hex];
   return [
-    "# Written by `pnpm ops web-config`: the live test deployment. Local only (git-ignored).",
+    "# Written by `pnpm ops web-config`: the live " + cadenceOf(plan) + " deployment. Local only (git-ignored).",
     `NEXT_PUBLIC_CASCADE_FRONT_DOOR=${a.frontDoor}`,
     `NEXT_PUBLIC_CASCADE_BASE_ADAPTER=${a.baseAdapter}`,
     ...(isPlanV3(plan) ? [`NEXT_PUBLIC_CASCADE_STAKER=${plan.addresses.staker}`, `NEXT_PUBLIC_CASCADE_ORACLE=${plan.addresses.oracle}`] : []),

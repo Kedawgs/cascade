@@ -21,7 +21,7 @@ import {
 } from "viem";
 import { generatePrivateKey, type PrivateKeyAccount, privateKeyToAccount } from "viem/accounts";
 import { loadArtifact } from "./artifacts.ts";
-import { BASE_V3, type ChainName, type Env, isV3Deployment, LIVE, PRECOMPILE, paths, recordPath, targets, WALLET } from "./config.ts";
+import { BASE_V3, cadenceFromEnv, type ChainName, type Env, isV3Deployment, LIVE, PRECOMPILE, paths, recordPath, targets, WALLET } from "./config.ts";
 import { deploy } from "./deploy.ts";
 import { close as keeperClose, deliver as keeperDeliver, payouts as keeperPayouts, stake as keeperStake } from "./keeper/actions.ts";
 import { checkDelivery, DESTINATION_BASE } from "./keeper/delivery.ts";
@@ -562,10 +562,11 @@ export async function rehearse(env: Env, log: (l: string) => void): Promise<bool
   if (!isV3Deployment(env)) {
     throw new Error("the rehearsal deploys the v3 contracts: set OPS_DEPLOYMENT=v3-rehearsal (or another v3-… name); the v2 rehearsal record is left as it is");
   }
+  const cadence = cadenceFromEnv(env);
   const path = recordPath(env, false);
   const r = await startForks(env, log);
   try {
-    const rec = await deploy(r.ctx, path, { newPlan: true, v3: true });
+    const rec = await deploy(r.ctx, path, { newPlan: true, v3: true, cadence });
     rec.verify = await verify(r.ctx, rec);
     saveRecord(path, rec);
     if (!rec.verify.ok) {

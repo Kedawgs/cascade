@@ -20,6 +20,7 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
   const sentNonces: number[] = [];
   const receipts = new Map<Hex, unknown>();
   const sent: StepId[] = [];
+  const logs: string[] = [];
   const effects = new Set<StepId>();
   const dir = mkdtempSync(join(tmpdir(), "ops-deploy-"));
   const recordPath = join(dir, "rec.json");
@@ -39,7 +40,7 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
     rpc,
     runner: { run: async () => ({ code: 1, stdout: "", stderr: "not in tests" }) },
     paths: paths({}),
-    log: () => undefined,
+    log: (l) => void logs.push(l),
     receiptTimeoutMs: 10,
     pollMs: 1,
   };
@@ -60,7 +61,7 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
     effectPresent: async (_c, _p, step) => effects.has(step.id),
     readColdkey: async () => COLDKEY,
   };
-  return { ctx, deps, nonce, receipts, sent, sentNonces, effects, dir, recordPath };
+  return { ctx, deps, nonce, receipts, sent, sentNonces, effects, dir, recordPath, logs };
 }
 
 const ALL: StepId[] = ["baseAdapter", "frontDoor", "bitAdapter", "vault", "adapterReserve", "vaultReserve", "setKeeper", "setPayoutDelay"];
@@ -332,6 +333,31 @@ describe("deploy cadence", () => {
     // a later run reads the record, not the option
     const again = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "test" }, w.deps);
     expect(again.plan).toMatchObject({ cadence: "launch" });
+  });
+
+  it("names the cadence when planning a launch record, and leaves the test line as it was", async () => {
+    const l = world({ base: 4, bittensor: 9 });
+    await deploy(l.ctx, l.recordPath, { newPlan: false, v3: true, cadence: "launch" }, l.deps);
+    expect(l.logs).toContain(
+      "Planned the v3 deployment (launch cadence: 1-hour batches, 24-hour payout delay) from the wallet's nonces: Base 4, Bittensor 9",
+    );
+    const t = world({ base: 4, bittensor: 9 });
+    await deploy(t.ctx, t.recordPath, { newPlan: false, v3: true, cadence: "test" }, t.deps);
+    expect(t.logs).toContain("Planned the v3 deployment from the wallet's nonces: Base 4, Bittensor 9");
+  });
+
+  it("says once that OPS_CADENCE=launch is ignored when a test record is resumed", async () => {
+    const w = world({ base: 4, bittensor: 9 });
+    await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    w.logs.length = 0;
+    await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch" }, w.deps);
+    const ignored = "OPS_CADENCE=launch ignored: the record's cadence is test; use --new-plan to plan anew";
+    expect(w.logs.filter((x) => x === ignored)).toHaveLength(1);
+    // a launch record resumed under launch, and a test record without it, say nothing
+    const q = world({ base: 4, bittensor: 9 });
+    await deploy(q.ctx, q.recordPath, { newPlan: false, v3: true, cadence: "launch" }, q.deps);
+    await deploy(q.ctx, q.recordPath, { newPlan: false, v3: true, cadence: "launch" }, q.deps);
+    expect(q.logs.some((x) => x.includes("ignored"))).toBe(false);
   });
 
   it("a new v3 record without a cadence has none stored", async () => {

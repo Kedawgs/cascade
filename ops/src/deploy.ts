@@ -1,7 +1,7 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
 import { type ChainName, PRECOMPILE, SETTINGS_V3, WALLET } from "./config.ts";
 import { buildPlan, buildPlanV3, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
-import { archiveRecord, type DeploymentRecord, loadRecord, loadRecordFor, saveRecord } from "./record.ts";
+import { archiveRecord, type DeploymentRecord, loadRecordFor, saveRecord } from "./record.ts";
 import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
 import type { CallRequest, CreateRequest, PlannedStep, StepId } from "./types.ts";
@@ -179,10 +179,12 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
 
 /** Deploys and configures everything, resuming after any stop; saves the record after every step.
  * A new record gets the v3 plan when `v3` is set (a deployment named v3…), else the v2 plan; an
- * existing record keeps its own plan, and one of the other version is refused before anything else. */
+ * existing record keeps its own plan. A record of the other version, or of the other kind of run (a
+ * rehearsal record for a --live run, or a live one on the forks), is refused before anything else,
+ * archiving included. */
 export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v3?: boolean }, deps: DeployDeps = realDeps) {
   const v3 = opts.v3 ?? false;
-  let rec = loadRecord(path);
+  let rec = loadRecordFor(path, ctx.live);
   if (rec && isPlanV3(rec.plan) !== v3) {
     const [has, wants] = v3 ? ["v2", "v3"] : ["v3", "v2"];
     throw new Error(`${path} holds a ${has} plan, not ${wants}: check OPS_DEPLOYMENT (a deployment named v3-… is v3); nothing sent`);
@@ -206,9 +208,6 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
     };
     saveRecord(path, rec);
     ctx.log(`Planned the ${v3 ? "v3 " : ""}deployment from the wallet's nonces: Base ${baseNonce}, Bittensor ${bitNonce}`);
-  }
-  if (rec.target !== (ctx.live ? "live" : "rehearsal")) {
-    throw new Error(`${path} is a ${rec.target} record; it cannot be used for this run`);
   }
   await settlePending(ctx, rec, path);
 

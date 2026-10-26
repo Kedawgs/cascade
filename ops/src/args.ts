@@ -37,7 +37,8 @@ export interface Args {
 export const USAGE = `usage: pnpm ops <command> [--live]
 
   preflight                  read-only checks against the live chains
-  rehearse                   deploy and check everything on local forks
+  rehearse                   on local forks: deploy v3, check it, and run a USDC stake through to a
+                             USDC delivery (needs OPS_DEPLOYMENT=v3-…)
   budget                     how much TAO and ETH to send to the test wallet
   deploy [--new-plan]        deploy and configure (resumes after a stop), then check
   verify                     read every setting back and compare it with the plan

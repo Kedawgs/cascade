@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
 import type { ChainName } from "./config.ts";
 import type { Plan, PlanV3 } from "./plan.ts";
+import type { StepReport } from "./roundtrip.ts";
 import type { Sent } from "./send.ts";
 import type { StepId } from "./types.ts";
 
@@ -26,6 +27,8 @@ export interface DeploymentRecord {
   pending?: { step: StepId; chain: ChainName; nonce: number; hash?: Hex };
   verify?: VerifyResult;
   rehearsalClose?: { gasUsed: bigint; fee: bigint };
+  /** The v3 rehearsal's round trip on the forks, step by step (the budget reads the delivery's gas). */
+  roundTrip?: StepReport[];
   /** Bridge messages the keeper sent, so status and track need no Base log scans. */
   messages?: { id: Hex; direction: "Base → Bittensor" | "Bittensor → Base"; hash: Hex; at: string }[];
 }

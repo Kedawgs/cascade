@@ -35,8 +35,7 @@ const needRecord = (live: boolean) => needRecordAt(recordPath(live), live);
 async function run(a: Args): Promise<number> {
   switch (a.cmd) {
     case "rehearse":
-      await rehearse(env, log);
-      return 0;
+      return (await rehearse(env, log)) ? 0 : 1;
     case "preflight": {
       const ctx = ctxFor(true);
       const rehearsal = loadRecordFor(recordPath(false), false);

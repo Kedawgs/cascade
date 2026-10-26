@@ -83,6 +83,8 @@ export const decideClaim = (r: RewardsRead, p: ClaimPolicy) =>
 
 /** Above the vault's claimGasRequired: the gas the vault spends before its check, and after the claim. */
 export const CLAIM_GAS_MARGIN = 2_000_000n;
+/** CascadeVault's claimGasRequired until the owner changes it. */
+export const VAULT_CLAIM_GAS_REQUIRED = 55_000_000n;
 /** The claim is sent with a fixed gas limit (55M + 2M by default, under Bittensor's 75M block): the
  * precompile refuses less than ~53.2M, and the vault checks claimGasRequired is left before calling it. */
 export const claimGasLimit = (claimGasRequired: bigint) => claimGasRequired + CLAIM_GAS_MARGIN;

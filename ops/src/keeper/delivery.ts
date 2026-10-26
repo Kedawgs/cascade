@@ -9,6 +9,8 @@ export const DESTINATION_BASE = 6;
 const KEEPER_ROOM_BPS = 50n;
 
 export const TWAP_UNAVAILABLE = "the pool's price history doesn't reach 30 minutes; the user can claim by hand";
+/** The node answered a read or the simulation with an error of its own, not a revert. */
+export const NO_ANSWER = "the node didn't answer; trying again later";
 
 export interface DeliveryPref {
   /** USDC units (6 decimals) per 1e18 TAO wei */
@@ -74,13 +76,15 @@ export interface DeliveryRead extends DeliveryInput {
   quoteError?: string;
 }
 
-export type Simulation = { ok: true; usdcOut: bigint } | { ok: false; reason: string };
+/** `unanswered`: the node failed to run the call (not a revert); the delivery waits all the same. */
+export type Simulation = { ok: true; usdcOut: bigint } | { ok: false; reason: string; unanswered?: true };
 
 export interface DeliveryDeps {
   /** Every user with a Redeemed event on the vault since it was deployed, once each */
   deliveryCandidates(): Promise<Address[]>;
   readDelivery(user: Address): Promise<DeliveryRead>;
-  /** deliver(user, keeperMinOut) as an eth_call from the keeper: any revert comes back as its reason */
+  /** deliver(user, keeperMinOut) as an eth_call from the keeper: any revert comes back as its reason,
+   * and a node that didn't run the call as `unanswered` */
   simulateDeliver(user: Address, keeperMinOut: bigint): Promise<Simulation>;
 }
 
@@ -101,7 +105,10 @@ export async function checkDelivery(deps: Pick<DeliveryDeps, "readDelivery" | "s
   const d = deliveryDecision(r);
   if (!d.deliver || d.keeperMinOut === undefined) return { user, claimable: r.claimable, deliver: false, reason: d.reason };
   const sim = await deps.simulateDeliver(user, d.keeperMinOut);
-  if (!sim.ok) return { user, claimable: r.claimable, deliver: false, reason: `deliver would revert now (${sim.reason}); it waits for a later round` };
+  if (!sim.ok) {
+    const reason = sim.unanswered ? NO_ANSWER : `deliver would revert now (${sim.reason}); it waits for a later round`;
+    return { user, claimable: r.claimable, deliver: false, reason };
+  }
   return { user, claimable: r.claimable, deliver: true, keeperMinOut: d.keeperMinOut, reason: d.reason };
 }
 

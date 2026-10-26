@@ -18,7 +18,7 @@ import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
-import { DELIVER_ABI, type DeliveryRead, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
+import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
 import type { PayoutLog } from "./payouts.ts";
 import { vaultColdkey } from "./rewards.ts";
 
@@ -91,8 +91,20 @@ export const DELIVERY_READ_ABIS = { FRONT, DELIVERY_FRONT, STAKER, ORACLE, QUOTE
 /** The staker's RouterKind.UniswapV3: the only route kind QuoterV2 can price. */
 const UNISWAP_V3 = 0;
 
-/** The node answered the call with an error (a revert), as opposed to the request failing. */
-const reverted = (e: unknown) => e instanceof RpcError && e.code !== undefined;
+/** The call really reverted: JSON-RPC code 3, revert data, or a message that says so. A node that
+ * answered with an error of its own (-32005 limit exceeded, -32000 header not found, -32603) did not
+ * run the call, so its answer says nothing about the contract. */
+export function isRevert(e: unknown): boolean {
+  if (!(e instanceof RpcError)) return false;
+  if (e.code === 3) return true;
+  const raw = e.data;
+  const data = typeof raw === "string" ? raw : (raw as { data?: unknown } | undefined)?.data;
+  if (typeof data === "string" && /^0x[0-9a-fA-F]{8,}$/.test(data)) return true;
+  return /revert/i.test(e.message);
+}
+
+/** A node's own error (not a revert): the delivery is skipped for a later round, never sent on it. */
+const unanswered = (e: unknown) => e instanceof RpcError && !isRevert(e);
 export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE"];
 const ED_RESERVE = 10n ** 12n;
 /** eth_getLogs block ranges the public RPCs accept: mainnet.base.org refuses more than 200 blocks. */
@@ -109,9 +121,18 @@ export interface ScannedLog {
   transactionHash: Hex;
 }
 
-/** One event from one contract, from `from` to the latest block, in windows the public RPCs accept. */
-export async function scanLogs(ctx: Ctx, chain: ChainName, address: Address, ev: AbiEvent, from: bigint, topics: (Hex | null)[] = []) {
-  const latest = hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
+/** One event from one contract, from `from` to `to` (default: the latest block), in windows the public
+ * RPCs accept. */
+export async function scanLogs(
+  ctx: Ctx,
+  chain: ChainName,
+  address: Address,
+  ev: AbiEvent,
+  from: bigint,
+  topics: (Hex | null)[] = [],
+  to?: bigint,
+) {
+  const latest = to ?? hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
   const topic0 = encodeEventTopics({ abi: [ev], eventName: ev.name } as never)[0];
   const out: ScannedLog[] = [];
   for (let start = from; start <= latest; start += WINDOW[chain]) {
@@ -142,9 +163,14 @@ export async function startBlock(ctx: Ctx, rec: DeploymentRecord, chain: ChainNa
 }
 
 /** The keeper's reads and sends. Base is never scanned for logs here (its public RPC allows 200
- * blocks a query): bridge messages come from the record, which the keeper fills as it sends. */
+ * blocks a query): bridge messages come from the record, which the keeper fills as it sends. The
+ * delivery candidates are kept for the life of these deps (one `run` loop), so each round scans only
+ * the blocks since the last. */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
+  let candidates: Address[] = [];
+  /** The last Bittensor block scanned for Redeemed events, once a scan has finished. */
+  let scannedTo: bigint | undefined;
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
@@ -258,8 +284,15 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     async deliveryCandidates() {
       if (!isPlanV3(rec.plan)) return [];
-      const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), await startBlock(ctx, rec, "bittensor"));
-      return uniqueUsers(redeemed.map((l) => l.args.user as Address));
+      const latest = hexToBigInt((await ctx.rpc.request("bittensor", "eth_blockNumber", [])) as Hex);
+      const from = scannedTo === undefined ? await startBlock(ctx, rec, "bittensor") : scannedTo + 1n;
+      if (from <= latest) {
+        const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), from, [], latest);
+        candidates = uniqueUsers([...candidates, ...redeemed.map((l) => l.args.user as Address)]);
+      }
+      // only once the whole range is in: a failed scan is retried from the same block
+      scannedTo = latest;
+      return candidates;
     },
     async readDelivery(user) {
       if (!isPlanV3(rec.plan)) throw new Error("USDC delivery needs a v3 deployment");
@@ -276,7 +309,11 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       try {
         out.twapUsdc = (await r("base", oracle, ORACLE, "usdcValue", [claimable])) as bigint;
       } catch (e) {
-        if (!reverted(e)) throw e;
+        if (unanswered(e)) {
+          out.quoteError = NO_ANSWER;
+          return out;
+        }
+        if (!isRevert(e)) throw e;
         out.twapUsdc = null;
         return out;
       }
@@ -293,8 +330,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
         const [gross] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [sellPath, claimable])) as readonly [bigint];
         out.quoteUsdc = netOfFee(gross, feeBps);
       } catch (e) {
-        if (!reverted(e)) throw e;
-        out.quoteError = `Uniswap could not quote the sale (${describeRevert(ctx, e)}); it waits`;
+        if (unanswered(e)) out.quoteError = NO_ANSWER;
+        else if (isRevert(e)) out.quoteError = `Uniswap could not quote the sale (${describeRevert(ctx, e)}); it waits`;
+        else throw e;
       }
       return out;
     },
@@ -304,7 +342,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
         const out = (await ctx.rpc.request("base", "eth_call", [{ from: WALLET, to: a.frontDoor, data }, "latest"])) as Hex;
         return { ok: true, usdcOut: decodeFunctionResult({ abi: DELIVER_ABI, functionName: "deliver", data: out }) };
       } catch (e) {
-        if (!reverted(e)) throw e;
+        if (unanswered(e)) return { ok: false, reason: NO_ANSWER, unanswered: true };
+        if (!isRevert(e)) throw e;
         return { ok: false, reason: describeRevert(ctx, e) };
       }
     },

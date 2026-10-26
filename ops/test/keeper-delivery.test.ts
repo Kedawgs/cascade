@@ -8,13 +8,15 @@ import {
   type DeliveryRead,
   deliveryDecision,
   DESTINATION_BASE,
+  NO_ANSWER,
   netOfFee,
   TWAP_UNAVAILABLE,
 } from "../src/keeper/delivery.ts";
 import { decideNext, type State } from "../src/keeper/due.ts";
-import { DELIVERY_READ_ABIS, keeperDeps } from "../src/keeper/state.ts";
+import { DELIVERY_READ_ABIS, isRevert, keeperDeps } from "../src/keeper/state.ts";
 import type { StatusDetail } from "../src/keeper/status.ts";
 import { isPlanV3, ROUTE_0 } from "../src/plan.ts";
+import { RpcError } from "../src/rpc.ts";
 import { type Sent, SendRefused } from "../src/send.ts";
 import type { CallRequest } from "../src/types.ts";
 import { fakeChain, revert, SENT, stubDeps, v3Record } from "./fake-keeper.ts";
@@ -181,6 +183,115 @@ describe("delivery reads", () => {
       [1_001n, 2_000n],
       [2_001n, 2_600n],
     ]);
+  });
+
+  it("keeps the candidates for the life of the deps: each later round scans only the new blocks", async () => {
+    const REDEEMED = DELIVERY_READ_ABIS.VAULT.find((i) => i.type === "event" && i.name === "Redeemed")!;
+    const carol: Address = "0x000000000000000000000000000000000000ca01";
+    const log = (user: Address, block: number) => ({
+      address: plan.addresses.vault,
+      topics: encodeEventTopics({ abi: [REDEEMED], args: { key: `0x${"aa".repeat(32)}`, user } } as never),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [1n, TAO]),
+      blockNumber: numberToHex(block),
+      logIndex: "0x0",
+      transactionHash: `0x${"bb".repeat(32)}`,
+    });
+    const logs = [log(alice, 5), log(carol, 950), log(alice, 951)];
+    let head = 900;
+    let failNext = false;
+    const windows: [bigint, bigint][] = [];
+    const f = fakeChain([], {}, {
+      eth_blockNumber: () => numberToHex(head),
+      eth_getLogs: (_c, p) => {
+        if (failNext) {
+          failNext = false;
+          throw new Error("fetch failed");
+        }
+        const q = p[0] as { fromBlock: Hex; toBlock: Hex };
+        const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+        windows.push([from, to]);
+        return logs.filter((l) => BigInt(l.blockNumber) >= from && BigInt(l.blockNumber) <= to);
+      },
+    });
+    const deps = keeperDeps(f.ctx, rec, "unused.json");
+    expect(await deps.deliveryCandidates()).toEqual([alice]);
+    head = 1_200;
+    failNext = true;
+    await expect(deps.deliveryCandidates()).rejects.toThrow(/fetch failed/);
+    // the failed round is scanned again, from the same block
+    expect(await deps.deliveryCandidates()).toEqual([alice, carol]);
+    expect(await deps.deliveryCandidates()).toEqual([alice, carol]);
+    expect(windows).toEqual([
+      [1n, 900n],
+      [901n, 1_200n],
+    ]);
+    // a new deps (a new run) starts over from the deploy block
+    windows.length = 0;
+    expect(await keeperDeps(f.ctx, rec, "unused.json").deliveryCandidates()).toEqual([alice, carol]);
+    expect(windows).toEqual([
+      [1n, 1_000n],
+      [1_001n, 1_200n],
+    ]);
+  });
+});
+
+describe("a node's own error is not a revert", () => {
+  const data = "0x08c379a0" + "00".repeat(96);
+  it("counts code 3, revert data or 'revert' in the message as a revert, and nothing else", () => {
+    expect(isRevert(revert("OLD"))).toBe(true);
+    expect(isRevert(new RpcError("base eth_call: execution reverted", -32000))).toBe(true);
+    expect(isRevert(new RpcError("base eth_call: VM Exception while processing transaction: revert", -32603))).toBe(true);
+    expect(isRevert(new RpcError("base eth_call: error", -32015, data))).toBe(true);
+    expect(isRevert(new RpcError("base eth_call: limit exceeded", -32005))).toBe(false);
+    expect(isRevert(new RpcError("base eth_call: header not found", -32000))).toBe(false);
+    expect(isRevert(new RpcError("base eth_call: internal error", -32603, "0x"))).toBe(false);
+    expect(isRevert(new Error("fetch failed"))).toBe(false);
+  });
+
+  const answers = {
+    claimable: () => TAO,
+    deliveryOf: () => [240_000_000n, BigInt(NOW + 3600), DESTINATION_BASE],
+    oracle: () => plan.addresses.oracle,
+    swapper: () => plan.addresses.staker,
+    maxDeliverySlippageBps: () => 150,
+    usdcValue: () => 250_000_000n,
+    deliveryRouteId: () => 0,
+    routes: () => [0, ROUTE_0.router, ROUTE_0.buyPath, ROUTE_0.sellPath, true],
+    swapFeeBps: () => 15,
+    quoteExactInput: () => [251_000_000n, [], [], 0n],
+  };
+  const failing = (e: Error) => () => {
+    throw e;
+  };
+
+  it("an oracle read the node didn't answer waits, instead of reading as a short price history", async () => {
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), { ...answers, usdcValue: failing(new RpcError("base eth_call: limit exceeded", -32005)) });
+    const deps = keeperDeps(f.ctx, rec, "unused.json");
+    const r = await deps.readDelivery(alice);
+    expect(r.twapUsdc).not.toBeNull();
+    expect(r.quoteError).toBe(NO_ANSWER);
+    const simulateDeliver = vi.fn();
+    expect(await checkDelivery({ readDelivery: async () => r, simulateDeliver }, alice)).toMatchObject({ deliver: false, reason: NO_ANSWER });
+    expect(simulateDeliver).not.toHaveBeenCalled();
+    expect(NO_ANSWER).toBe("the node didn't answer; trying again later");
+  });
+
+  it("a quote the node didn't answer waits with the same reason", async () => {
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), { ...answers, quoteExactInput: failing(new RpcError("base eth_call: header not found", -32000)) });
+    expect((await keeperDeps(f.ctx, rec, "unused.json").readDelivery(alice)).quoteError).toBe(NO_ANSWER);
+  });
+
+  it("a simulation the node didn't run is a skip that says so, never 'deliver would revert'", async () => {
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), { deliver: failing(new RpcError("base eth_call: internal error", -32603)) });
+    const sim = await keeperDeps(f.ctx, rec, "unused.json").simulateDeliver(alice, 7n);
+    expect(sim).toEqual({ ok: false, reason: NO_ANSWER, unanswered: true });
+    const c = await checkDelivery({ readDelivery: async () => ready(), simulateDeliver: async () => sim }, alice);
+    expect(c).toMatchObject({ deliver: false, reason: NO_ANSWER });
+  });
+
+  it("a request that failed outright still stops the round, as before", async () => {
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), { ...answers, usdcValue: failing(new Error("fetch failed")) });
+    await expect(keeperDeps(f.ctx, rec, "unused.json").readDelivery(alice)).rejects.toThrow(/fetch failed/);
   });
 });
 

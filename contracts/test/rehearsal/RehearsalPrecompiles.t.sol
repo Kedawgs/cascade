@@ -47,18 +47,94 @@ contract RehearsalPrecompilesTest is Test {
         (bool ok,) = address(vault).call{value: 1}("");
         assertFalse(ok);
 
-        uint256 before = address(vault).balance;
         RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1.5e12}(vault.coldkey());
-        assertEq(address(vault).balance - before, 1.5e12);
+        assertEq(address(vault).balance, 1e12, "an empty account reads 500 rao below what was sent");
+        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1e12}(vault.coldkey());
+        assertEq(address(vault).balance, 2e12, "later transfers are credited in full");
+        vm.expectRevert(bytes("rehearsal: below the existential deposit"));
+        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 500e9}(bytes32(uint256(0xE0A)));
     }
 
-    function test_stakingReadsAndRefusesWrites() public {
+    /// The reserve reads exactly ED_RESERVE, so the first deposit mints at the launch price (1e6 share
+    /// units per wei), as on the real chain.
+    function test_aReservedVaultMintsTheFirstDepositAtTheLaunchPrice() public {
+        CascadeVault vault = newVault();
+        vm.deal(address(this), 1 ether);
+        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1.5e12}(vault.coldkey());
+        assertEq(vault.totalAssets(), 0);
+        assertEq(vault.price(), 1e12, "1 wei per 1e6 shares, scaled by 1e18");
+    }
+
+    function test_stakingReads() public {
         IStaking s = IStaking(ISTAKING_ADDRESS);
         assertEq(s.getDefaultMinStake(), 2_000_000);
         assertEq(s.getNominatorMinRequiredStake(), 20_000_000);
         assertEq(s.getStake(HK, bytes32(uint256(1)), 0), 0);
+        assertEq(s.getUnclaimedRootTaoByHotkey(bytes32(uint256(1)), HK), 0);
         s.setRejectStakingHotkeyGrowth(true);
-        vm.expectRevert(bytes("rehearsal: no staking"));
-        s.addStake(HK, 1, 0);
+    }
+
+    /// The stand-in cannot debit its caller on anvil: it records the stake and emits Debit for the
+    /// rehearsal to settle, here with vm.deal as the rehearsal does with anvil_setBalance.
+    function test_vaultStakesAndTheDebitIsLeftToSettle() public {
+        CascadeVault vault = newVault();
+        vm.prank(WALLET);
+        vault.setKeeper(WALLET);
+        vm.deal(address(vault), 1e12 + 1e17);
+
+        vm.expectEmit(true, false, false, true, ISTAKING_ADDRESS);
+        emit RehearsalStaking.Debit(address(vault), 1e17);
+        vm.prank(WALLET);
+        vault.stakeIdle();
+        assertEq(vault.rootStakeRao(), 1e8, "stake recorded on the vault's coldkey");
+        assertEq(address(vault).balance, 1e12 + 1e17, "balance untouched until the rehearsal settles");
+    }
+
+    function test_addStakeRefusesValueTheMinimumAndAShortBalance() public {
+        IStaking s = IStaking(ISTAKING_ADDRESS);
+        vm.deal(address(this), 1 ether);
+        vm.expectRevert(bytes("rehearsal: addStake takes no value"));
+        s.addStake{value: 1}(HK, 2_000_000, 0);
+        vm.expectRevert(bytes("rehearsal: below the minimum stake"));
+        s.addStake(HK, 1_999_999, 0);
+        vm.expectRevert(bytes("rehearsal: balance too low"));
+        s.addStake(HK, 2e9, 0);
+    }
+
+    function test_unstakePaysFromItsOwnBalanceByForcedSend() public {
+        CascadeVault vault = newVault();
+        vm.prank(WALLET);
+        vault.setKeeper(WALLET);
+        vm.deal(address(vault), 1e12 + 1e17);
+        vm.prank(WALLET);
+        vault.stakeIdle();
+        vm.deal(address(vault), 1e12); // the rehearsal's settlement
+        vm.deal(ISTAKING_ADDRESS, 1 ether);
+
+        // a redeem pays out of stake: the vault unstakes through the stand-in, which force-sends
+        vm.prank(address(vault));
+        IStaking(ISTAKING_ADDRESS).removeStakeFull(HK, 0);
+        assertEq(address(vault).balance, 1e12 + 1e17, "paid into a vault that refuses plain transfers");
+        assertEq(ISTAKING_ADDRESS.balance, 1 ether - 1e17);
+        assertEq(vault.rootStakeRao(), 0);
+    }
+
+    function test_removeStakeTakesThePositionWhenLessThanTheNominatorMinimumWouldRemain() public {
+        RehearsalStaking s = RehearsalStaking(ISTAKING_ADDRESS);
+        bytes32 cold = bytes32(uint256(0xC01D));
+        address av = makeAddr("alphaVault");
+        s.setColdkeyAlias(av, cold);
+        s.seedStake(HK, cold, 0, 30_000_000);
+        vm.deal(ISTAKING_ADDRESS, 1 ether);
+
+        vm.prank(av);
+        s.removeStake(HK, 5_000_000, 0);
+        assertEq(s.getStake(HK, cold, 0), 25_000_000, "under its alias");
+        assertEq(av.balance, 5e15);
+
+        vm.prank(av);
+        s.removeStake(HK, 10_000_000, 0);
+        assertEq(s.getStake(HK, cold, 0), 0, "15,000,000 rao would remain, below the nominator minimum");
+        assertEq(av.balance, 5e15 + 25e15);
     }
 }

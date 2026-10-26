@@ -167,6 +167,20 @@ describe("deploy", () => {
     expect(w.sent).toEqual(ALL.slice(1));
   });
 
+  it("refuses a record of the other kind of run before archiving or sending anything", async () => {
+    const w = world({ base: 0, bittensor: 0 });
+    saveRecord(w.recordPath, recordWith([]));
+    const live = { ...w.ctx, live: true };
+    await expect(deploy(live, w.recordPath, { newPlan: true }, w.deps)).rejects.toThrow(/is a rehearsal record, but this is a --live run; nothing done/);
+    expect(readdirSync(w.dir)).toEqual(["rec.json"]);
+    expect(w.sent).toEqual([]);
+
+    saveRecord(w.recordPath, { ...recordWith([]), target: "live" });
+    await expect(deploy(w.ctx, w.recordPath, { newPlan: true }, w.deps)).rejects.toThrow(/is a live record, but this is a rehearsal/);
+    expect(readdirSync(w.dir)).toEqual(["rec.json"]);
+    expect(w.sent).toEqual([]);
+  });
+
   it("a pending step blocks the run until its receipt exists", async () => {
     const w = world({ base: 2, bittensor: 0 }, { known: new Set([HASH]) });
     saveRecord(w.recordPath, recordWith(["baseAdapter"], { pending: { step: "frontDoor", chain: "base", nonce: 1, hash: HASH } }));

@@ -248,3 +248,24 @@ records, so the two never mix.
 Before any launch (not tomorrow): call `increaseObservationCardinalityNext(1800)` on the TAO/WETH
 pool (checklist item 32 in `contracts/README.md`; it gives the price average enough history), and
 close the rest of items 31 to 34.
+
+## Launch cadence (for later, not the test run)
+
+The test settings above (10-minute batches, close as soon as allowed) are the default. A launch
+deployment is chosen once, when a new v3 plan is made: set `$env:OPS_CADENCE = "launch"` before
+`--new-plan` (unset or `test` is the test cadence; any other value is refused). The choice is stored
+in the record, and existing records are `test` and behave exactly as before. Launch means a 1-hour
+minimum batch interval, a 24-hour payout delay and a keeper maximum wait of 24 hours. Treasury,
+owner and caps are unchanged, so a real launch still needs its own treasury, a timelock owner and a
+caps decision.
+
+How the keeper decides (launch): it closes a non-empty batch when the contract allows it and the
+batch is full, or 24 hours old, or its estimated Cascade fees are at least the bridge fee (about
+$1.40, which a batch of about $900 of deposits covers). If a price or fee read fails it does not
+close early; the 24-hour rule still closes it. It also rolls an empty batch (a close with no value,
+a little Base gas) so the 24 hours count from about the first deposit. The test cadence closes as
+soon as allowed and never touches an empty batch.
+
+Shortening later: as volume grows, the owner can shorten (or lengthen) the interval with
+`setBatchInterval`, never beyond 7 days. At launch the owner is meant to be a timelock, so the
+change is announced first and applied after the delay.

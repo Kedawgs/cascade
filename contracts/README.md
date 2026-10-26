@@ -713,8 +713,10 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
 8. **Pause on any unexplained drop in `totalAssets`.** The insolvency guard trips only below half
    the launch price. A smaller unexplained drop (a misread stake, for example) still lets batches
    and direct deposits through at the lowered price until someone pauses.
-9. **`batchInterval` has no lower bound.** A very short interval lets anyone close a batch before a
-   user's cancel lands. Set it behind the timelock with care.
+9. **`batchInterval` has no lower bound, but it has an upper one.** A very short interval lets anyone
+   close a batch before a user's cancel lands. Set it behind the timelock with care. The other way,
+   `MAX_BATCH_INTERVAL` is 7 days: the constructor and `setBatchInterval` refuse more
+   (`InvalidParameter`), so even a captured owner cannot stretch the wait for deposits.
 10. **The primary bridge is a single point of liveness.** Disabling a contract's primary bridge stops
     its outgoing messages (closes on Base, payouts on Bittensor) until the owner sets another enabled
     bridge as primary, and a new adapter takes 7 days to register. Keep a standby adapter registered.
@@ -776,7 +778,7 @@ Defaults at deploy:
 |---|---|---|
 | `maxDeposits` / `maxRedeems` | 50 / 50 per batch (ceiling 100) | front door |
 | `maxBatchValue` | 4,000 TAO | front door |
-| `batchInterval`, `minDeposit`, `depositCap`, `redeemRequestFee` | constructor arguments (beta: 12 hours; fee 1e14 wei) | front door |
+| `batchInterval`, `minDeposit`, `depositCap`, `redeemRequestFee` | constructor arguments (beta: 12 hours; fee 1e14 wei); `batchInterval` is capped at `MAX_BATCH_INTERVAL` (7 days) | front door |
 | `maxDailyOutflowBps` / `minDailyOutflow` | 20% / 100 TAO per 24-hour window per front door | vault |
 | `maxEntryValue` / `maxMessageValue` / `minChunk` | 2,000 TAO / 4,000 TAO / 10 entries | vault |
 | `payoutDelay` | 24 hours (owner-settable, 0 to 7 days) | vault |
@@ -958,10 +960,13 @@ Added for v3 (2026-10-26):
     (`0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A`): 30 minutes is 900 Base blocks but the pool has
     600 slots, so dust swaps in more than 600 of 900 blocks could block deliveries (no loss; claims
     still work).
-33. Set the launch values (6-hour batches, 24-hour payout delay; the test deployment uses 10
-    minutes and 1 hour). First make `verify` read the expected values from the deployment record
-    rather than from today's `SETTINGS_V3`; otherwise changing `SETTINGS_V3` makes the existing
-    test record fail its verify.
+33. **Partly done.** The launch cadence now exists in ops: `OPS_CADENCE=launch` when making a new v3
+    plan gives a 1-hour minimum batch interval, a 24-hour payout delay and a keeper that closes a
+    batch when it is full, 24 hours old, or its estimated Cascade fees cover its bridge fee (the
+    test cadence is 10 minutes and 1 hour; the cadence is stored in the record, so `verify` checks
+    each record against its own values). Still to decide before real users: the treasury (the test
+    deployment uses the test wallet), a timelock as owner (so interval changes are announced first),
+    and the caps.
 34. **Done in v3.** The v3 Bittensor adapter's payout gas is raised: `SETTINGS_V3.bitGas.base`
     goes from 120,000 to 170,000 (29,900 per entry, unchanged), and v2 keeps 120,000. The Base
     payout receiver needs about 134.6k for one entry: the node's estimate, which counts gas before

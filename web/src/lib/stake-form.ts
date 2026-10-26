@@ -255,3 +255,19 @@ export function unstakeErrorText(check: Extract<UnstakeCheck, { ok: false }>, av
       return check.reason;
   }
 }
+
+const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+
+/** A wait for the stake form: minutes up to 90, hours up to 36, then days ("about 27 minutes", "about 3 hours", "about 2 days"). */
+export function etaText(minutes: number): string {
+  const m = Math.max(1, Math.round(minutes));
+  if (m <= 90) return `about ${plural(m, "minute")}`;
+  if (m <= 36 * 60) return `about ${plural(Math.round(m / 60), "hour")}`;
+  return `about ${plural(Math.round(m / 1_440), "day")}`;
+}
+
+/** A wait for the unstake form: hours as the smallest unit, days past 36 hours. */
+export function unstakeEtaText(minutes: number): string {
+  const h = Math.max(1, Math.round(minutes / 60));
+  return h <= 36 ? `about ${plural(h, "hour")}` : `about ${plural(Math.round(h / 24), "day")}`;
+}

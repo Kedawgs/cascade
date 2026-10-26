@@ -216,6 +216,31 @@ describe("live data", () => {
     expect(first.feesUsd).toBeGreaterThan(0.26);
   });
 
+  it("estimates wait for the batch's max wait when the deployment has one, and are unchanged without", async () => {
+    const now = fd.openStart * 1000; // the batch has just opened
+    const L = { ...D, batchMaxWaitS: 86_400 };
+    const plain = createLiveCascadeData(D, deps({ now: () => now }));
+    const waits = createLiveCascadeData(L, deps({ now: () => now }));
+    const base = await plain.quoteDeposit(20_000_000n);
+    expect(base.etaMinutes).toBe(10 + 25 + 2);
+    const dep = await waits.quoteDeposit(20_000_000n);
+    expect(dep.etaMinutes).toBe(1_440 + 25 + 2);
+    expect(dep.closesAt.getTime()).toBe((fd.openStart + 86_400) * 1000);
+    const w0 = await plain.quoteWithdrawal(ME, 4n * 10n ** 22n);
+    const w1 = await waits.quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(w1.etaMinutes - w0.etaMinutes).toBe(1_440 - 10);
+    expect(w1.etaMinutes).toBeGreaterThanOrEqual(1_440 + 60);
+    // a max wait shorter than the interval never shortens the estimate
+    const short = await createLiveCascadeData({ ...D, batchMaxWaitS: 60 }, deps({ now: () => now })).quoteDeposit(20_000_000n);
+    expect(short.etaMinutes).toBe(base.etaMinutes);
+  });
+
+  it("v3 deposit estimate also uses the max wait", async () => {
+    const L3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2", batchMaxWaitS: 86_400 };
+    const q = await createLiveCascadeData(L3, deps({ now: () => fd.openStart * 1000 })).quoteDeposit(20_000_000n);
+    expect(q.etaMinutes).toBeGreaterThanOrEqual(1_440);
+  });
+
   it("v3 quotes a deposit net of the staker's fees, with a rao-rounded floor", async () => {
     const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
     const seen: bigint[] = [];

@@ -12,6 +12,7 @@ import {
   breakEvenDays,
   breakEvenText,
   cascadeFeesText,
+  etaText,
   maxStakeInput,
   POOL_FEES_TEXT,
   stakeAmountText,
@@ -182,7 +183,7 @@ export function StakeForm({
         )}
         <div>
           <dt>Staked in</dt>
-          <dd>{quote ? `about ${quote.etaMinutes} minutes` : "–"}</dd>
+          <dd>{quote ? etaText(quote.etaMinutes) : "–"}</dd>
         </div>
       </dl>
       {breakEven !== null && <p className={styles.breakEven}>{breakEvenText(breakEven)}</p>}

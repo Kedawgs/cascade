@@ -13,6 +13,8 @@ export interface Deployment {
   /** v3 only: the one-transaction staker and the price oracle. Absent on a v2 deployment. */
   staker?: Address;
   oracle?: Address;
+  /** Launch cadence only: the longest a batch waits before it can close, in seconds. Absent = batchInterval alone. */
+  batchMaxWaitS?: number;
 }
 
 /** A v3 deployment has both the staker and the oracle; otherwise the site keeps the v2 flows. */
@@ -35,6 +37,8 @@ export function readDeployment(env: Env): Deployment | null {
   }
   const staker = address(env.NEXT_PUBLIC_CASCADE_STAKER);
   const oracle = address(env.NEXT_PUBLIC_CASCADE_ORACLE);
+  const maxWait = env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S;
+  const batchMaxWaitS = maxWait && /^[1-9]\d*$/.test(maxWait) ? Number(maxWait) : undefined;
   return {
     frontDoor,
     baseAdapter,
@@ -45,6 +49,7 @@ export function readDeployment(env: Env): Deployment | null {
     hotkeySs58,
     ...(staker ? { staker } : {}),
     ...(oracle ? { oracle } : {}),
+    ...(batchMaxWaitS ? { batchMaxWaitS } : {}),
   };
 }
 
@@ -59,6 +64,7 @@ export const DEPLOYMENT = readDeployment({
   NEXT_PUBLIC_CASCADE_HOTKEY_SS58: process.env.NEXT_PUBLIC_CASCADE_HOTKEY_SS58,
   NEXT_PUBLIC_CASCADE_STAKER: process.env.NEXT_PUBLIC_CASCADE_STAKER,
   NEXT_PUBLIC_CASCADE_ORACLE: process.env.NEXT_PUBLIC_CASCADE_ORACLE,
+  NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: process.env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S,
 });
 
 export const TOKENS = {

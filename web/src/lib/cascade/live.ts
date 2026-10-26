@@ -115,7 +115,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     return { ...seen, interrupted: op.state === "running" && seen.state !== "running" };
   };
 
-  const closesAt = (fd: reads.FrontDoorState) => new Date((fd.openStart + fd.batchInterval) * 1000);
+  /** When the open batch can be expected to close: a launch-cadence deployment may wait up to its max wait. */
+  const closesAt = (fd: reads.FrontDoorState) => new Date((fd.openStart + Math.max(fd.batchInterval, d.batchMaxWaitS ?? 0)) * 1000);
   /** Sent, its batch closed, not yet arrived in the vault. */
   const onTheBridge = (op: { batchId?: bigint }, fd: reads.FrontDoorState, scan: VaultScan) =>
     op.batchId !== undefined && op.batchId < fd.openBatchId && !scan.delivered.has(String(op.batchId));

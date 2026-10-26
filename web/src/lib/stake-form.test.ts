@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { WithdrawalRecord } from "./cascade/types";
 import {
   breakEvenDays,
+  etaText,
+  unstakeEtaText,
   breakEvenText,
   cascadeFeesText,
   CLAIM_ENDS_DELIVERY,
@@ -369,5 +371,29 @@ describe("claimEndsDelivery", () => {
     expect(CLAIM_ENDS_DELIVERY).toBe(
       "Claiming now also turns off automatic delivery for unstakes still on their way: you'll claim those by hand when they arrive.",
     );
+  });
+});
+
+describe("etaText", () => {
+  it("says minutes up to 90, hours up to 36, then days", () => {
+    expect(etaText(27)).toBe("about 27 minutes");
+    expect(etaText(90)).toBe("about 90 minutes");
+    expect(etaText(180)).toBe("about 3 hours");
+    expect(etaText(91)).toBe("about 2 hours");
+    expect(etaText(1_467)).toBe("about 24 hours");
+    expect(etaText(1_440 + 27 + 24 * 60)).toBe("about 2 days");
+    expect(etaText(2_160)).toBe("about 36 hours");
+    expect(etaText(2_161)).toBe("about 2 days");
+    expect(etaText(1_440 * 2)).toBe("about 2 days");
+    expect(etaText(1)).toBe("about 1 minute");
+  });
+});
+
+describe("unstakeEtaText", () => {
+  it("keeps hours as the smallest unit and moves to days past 36 hours", () => {
+    expect(unstakeEtaText(30)).toBe("about 1 hour");
+    expect(unstakeEtaText(150)).toBe("about 3 hours");
+    expect(unstakeEtaText(1_500)).toBe("about 25 hours");
+    expect(unstakeEtaText(60 * 72)).toBe("about 3 days");
   });
 });

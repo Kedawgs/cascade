@@ -15,6 +15,7 @@ import {
   maxUnstakeInputIn,
   switchUnstakeUnit,
   unstakeButtonLabel,
+  unstakeEtaText,
   unstakeEquivalent,
   unstakeErrorText,
   unstakeLabelUsd,
@@ -29,12 +30,6 @@ import { AmountField } from "./AmountField";
 import styles from "./StakeForm.module.css";
 
 const GAS_WEI = 3n * 10n ** 13n;
-
-/** "about 1 hour", "about 2 hours". */
-function hoursText(minutes: number): string {
-  const h = Math.max(1, Math.round(minutes / 60));
-  return `about ${h} hour${h === 1 ? "" : "s"}`;
-}
 
 /** The unstake form: the amount typed in TAO or as its USDC value, a USDC estimate out. */
 export function UnstakeForm({ account }: { account: string | null }) {
@@ -208,7 +203,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
         </div>
         <div>
           <dt>Paid out in</dt>
-          <dd>{quote ? hoursText(quote.etaMinutes) : "–"}</dd>
+          <dd>{quote ? unstakeEtaText(quote.etaMinutes) : "–"}</dd>
         </div>
       </dl>
       {!v3 && <p className={styles.foot}>Your TAO comes back to Base, then you claim it as USDC in the same wallet.</p>}

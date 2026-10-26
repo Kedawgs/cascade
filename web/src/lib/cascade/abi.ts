@@ -26,6 +26,7 @@ export const FRONT_DOOR = parseAbi([
   "event RedeemRequested(uint64 indexed batchId, address indexed user, uint256 shares)",
   "event Claimed(address indexed user, uint256 amount)",
   "event Delivered(address indexed user, uint256 taoIn, uint256 usdcOut)",
+  "event PayoutReceived(bytes32 indexed batchKey, uint32 chunk, address indexed user, uint256 amount)",
 ]);
 
 export const STAKER = parseAbi([

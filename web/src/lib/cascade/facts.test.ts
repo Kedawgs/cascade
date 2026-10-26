@@ -389,6 +389,230 @@ describe("v3 deposit facts (one stake through CascadeStaker)", () => {
   });
 });
 
+describe("v3: what happened to a payout once it was back on Base", () => {
+  const D3: Deployment = {
+    ...D,
+    staker: getAddress("0x00000000000000000000000000000000005a4e12"),
+    oracle: getAddress("0x000000000000000000000000000000000000041e"),
+  };
+  const OTHER = getAddress("0x000000000000000000000000000000000000b0b0");
+  const HEAD = 30_000_000n;
+  /** The payout left Bittensor at this time (the Bittensor mock's time for every block)... */
+  const SENT_S = 1_800_000_000;
+  /** ...and Base's newest block is three hours later: 5,400 Base blocks. */
+  const TIP_S = SENT_S + 10_800;
+  const baseTime = (block: bigint) => new Date((TIP_S - Number(HEAD - block) * 2) * 1000);
+  const TAO_BACK = 99n * 10n ** 14n;
+
+  const fdLog = (eventName: "PayoutReceived" | "Delivered" | "Claimed", args: Record<string, unknown>, data: Hex, block: bigint, tx: Hex, index = 0) =>
+    log(D.frontDoor, encodeEventTopics({ abi: FRONT_DOOR, eventName, args } as never) as Hex[], data, block, tx, index);
+  const landedFor = (user: Hex, block: bigint, index = 0) =>
+    fdLog("PayoutReceived", { batchKey: KEY, user }, encodeAbiParameters(parseAbiParameters("uint32, uint256"), [0, TAO_BACK]), block, H(60), index);
+  const deliveredUsdc = (usdcOut: bigint, block: bigint, tx: Hex) =>
+    fdLog("Delivered", { user: ME }, encodeAbiParameters(parseAbiParameters("uint256, uint256"), [TAO_BACK, usdcOut]), block, tx);
+  const claimedBy = (block: bigint, tx: Hex) => fdLog("Claimed", { user: ME }, encodeAbiParameters(parseAbiParameters("uint256"), [TAO_BACK]), block, tx);
+
+  const redeemedLog = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user: ME } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint256, uint256"), [10n ** 22n, 10n ** 16n]),
+    1_500n,
+    H(9),
+    1,
+  );
+  const payoutLog = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT, eventName: "PayoutChunkSent", args: { key: KEY } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256"), [0, 1, 10n ** 16n, TAO_BACK, 10n ** 14n]),
+    1_900n,
+    H(10),
+  );
+  const sentLog = log(
+    D.bitAdapter,
+    encodeEventTopics({ abi: ADAPTER, eventName: "Sent", args: { messageId: H(6), sender: D.vault, recipient: D.frontDoor } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint64, uint256, uint256, uint256"), [8453n, TAO_BACK, 10n ** 14n, 1n]),
+    1_900n,
+    H(10),
+    1,
+  );
+  const op: WithdrawalOp = {
+    id: "w3",
+    kind: "withdrawal",
+    account: ME,
+    createdAt: 0,
+    shares: 10n ** 22n,
+    taoEstimate: 10n ** 16n,
+    usdcEstimate: 2_500_000n,
+    fee: 0n,
+    delivery: { minUsdcPerTao: 245_000_000n, deadline: TIP_S + 600_000 },
+    hash: H(3),
+    batchId: 3n,
+    state: "sent",
+  };
+
+  /** A payout that the bridge has delivered to Base (OffRamp state 2), with Base's logs RPC and Base reads. */
+  function backOnBase(
+    opts: {
+      logs?: ReturnType<typeof log>[];
+      /** The head the logs server reports (HEAD unless given). */
+      logsHead?: () => bigint;
+      failLogs?: boolean;
+      pref?: readonly [bigint, bigint, number];
+      sale?: bigint;
+      d?: Deployment;
+    } = {},
+  ) {
+    const c = chains({
+      bitReceipts: { [H(9)]: { status: "success", logs: [delivered, redeemedLog] }, [H(10)]: { status: "success", logs: [payoutLog, sentLog] } },
+      baseReceipts: { [H(3)]: { status: "success", blockNumber: 40n, logs: [] } },
+    });
+    const windows: [bigint, bigint][] = [];
+    const asked: unknown[] = [];
+    const reads: string[] = [];
+    const base = c.clients as unknown as { base: Record<string, unknown> };
+    base.base.getBlock = async (q: { blockTag?: string; blockNumber?: bigint }) =>
+      q.blockTag === "latest" ? { number: HEAD, timestamp: BigInt(TIP_S) } : { number: q.blockNumber, timestamp: BigInt(baseTime(q.blockNumber!).getTime() / 1000) };
+    base.base.readContract = async ({ functionName }: { functionName: string }) => {
+      reads.push(functionName);
+      if (functionName === "getExecutionState") return 2;
+      if (functionName === "deliveryOf") return opts.pref ?? [0n, 0n, 0];
+      if (functionName === "quoteExactInput") return [opts.sale ?? 0n, [], [], 0n];
+      throw new Error(`unexpected ${functionName}`);
+    };
+    base.base.multicall = async ({ contracts }: { contracts: { functionName: string }[] }) =>
+      contracts.map((k) => {
+        reads.push(k.functionName);
+        return k.functionName === "swapFeeBps" ? 15 : 50_000n;
+      });
+    const baseLogs = {
+      request: async ({ method, params }: { method: string; params?: { address: string; topics: unknown[]; fromBlock: Hex; toBlock: Hex }[] }) => {
+        if (method === "eth_blockNumber") return `0x${(opts.logsHead?.() ?? HEAD).toString(16)}`;
+        if (method !== "eth_getLogs") throw new Error(`unexpected ${method}`);
+        if (opts.failLogs) throw new Error("HTTP request failed. URL: https://base-rpc.publicnode.com Status: 503");
+        const q = params![0];
+        const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+        windows.push([from, to]);
+        asked.push({ address: q.address, topics: q.topics });
+        return (opts.logs ?? []).filter((l) => l.blockNumber >= from && l.blockNumber <= to);
+      },
+    };
+    (c.clients as unknown as Record<string, unknown>).baseLogs = baseLogs;
+    // the vault's side as a scan would have found it: the batch arrived, and its payout left
+    const scan = newScan(opts.d ?? D3);
+    scan.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n });
+    scan.payouts.set(KEY, [{ txHash: H(10), block: 1_900n }]);
+    return { clients: c.clients, scan, windows, asked, reads };
+  }
+  const factsOf = (b: ReturnType<typeof backOnBase>, claimable = 0n, d = D3, claims: ClaimOp[] = []) =>
+    withdrawalFacts(b.clients, d, op, { fd: { ...fd, claimable }, vault, scan: b.scan, claims }).then((r) => r.facts);
+
+  it("reads the USDC a delivery paid from the front door's Delivered log after the payout landed, in windows of at most 2,000 blocks", async () => {
+    const b = backOnBase({
+      logs: [
+        // an earlier payout's delivery, before this one landed: not this unstake's
+        deliveredUsdc(7_777_777n, HEAD - 5_000n, H(61)),
+        landedFor(OTHER, HEAD - 4_000n, 0),
+        landedFor(ME, HEAD - 4_000n, 1),
+        deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62)),
+      ],
+    });
+    const f = await factsOf(b);
+    expect(f.payout?.state).toBe(2);
+    expect(f.usdcDelivered).toEqual({ hash: H(62), at: baseTime(HEAD - 3_990n), usdcOut: 2_431_337n });
+    for (const [from, to] of b.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
+    // from a little before the payout left Bittensor (three hours of 2-second Base blocks back from the head)
+    expect(b.windows[0][0]).toBeLessThan(HEAD - 5_400n);
+    expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 5_400n - 600n);
+    // and no further than the delivery
+    expect(b.windows).toHaveLength(1);
+    // only the front door's logs: this batch's credits, and the account's deliveries and claims
+    const sig = (eventName: "PayoutReceived" | "Delivered" | "Claimed") => encodeEventTopics({ abi: FRONT_DOOR, eventName } as never)[0];
+    const [, mine] = encodeEventTopics({ abi: FRONT_DOOR, eventName: "Delivered", args: { user: ME } });
+    expect(b.asked[0]).toEqual({ address: D.frontDoor, topics: [[sig("PayoutReceived"), sig("Delivered"), sig("Claimed")], [KEY, mine]] });
+    expect(b.reads).not.toContain("deliveryOf");
+  });
+
+  it("takes a claim by hand after the payout landed as its end: a later delivery belongs to another payout", async () => {
+    const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), claimedBy(HEAD - 3_995n, H(63)), deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62))] });
+    const f = await factsOf(b);
+    expect(f.usdcDelivered).toBeUndefined();
+    expect(f.claimedOnChain).toEqual({ hash: H(63), at: baseTime(HEAD - 3_995n) });
+  });
+
+  it("never shows an amount it couldn't read: a failed logs read leaves no receipt and the other facts stand", async () => {
+    const f = await factsOf(backOnBase({ failLogs: true }));
+    expect(f.usdcDelivered).toBeUndefined();
+    expect(f.claimedOnChain).toBeUndefined();
+    expect(f.payout?.state).toBe(2);
+  });
+
+  it("reads up to Base's own head, so a logs server that is behind can't hide a recent delivery, and later reads only new blocks", async () => {
+    // the logs server is 100 blocks behind Base, and the delivery is in those blocks
+    let serverHead = HEAD - 100n;
+    const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), deliveredUsdc(2_431_337n, HEAD - 50n, H(62))], logsHead: () => serverHead });
+    const first = await factsOf(b);
+    expect(first.usdcDelivered).toBeUndefined();
+    expect(b.windows.at(-1)![1]).toBeGreaterThan(serverHead);
+    // it catches up: the blocks already read aren't asked for again, and the delivery is found
+    const read = b.windows.length;
+    serverHead = HEAD;
+    const caughtUp = await factsOf(b);
+    expect(caughtUp.usdcDelivered?.hash).toBe(H(62));
+    expect(b.windows[read][0]).toBeGreaterThan(HEAD - 2_000n);
+  });
+
+  it("reads no more logs once the payout's end is known", async () => {
+    const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62))] });
+    await factsOf(b);
+    const read = b.windows.length;
+    const again = await factsOf(b);
+    expect(again.usdcDelivered?.hash).toBe(H(62));
+    expect(b.windows).toHaveLength(read);
+  });
+
+  it("reads the delivery preference and what the TAO would sell for now, once it is back and nothing has taken it", async () => {
+    const pref = [245_000_000n, BigInt(TIP_S + 600_000), 6] as const;
+    const live = await factsOf(backOnBase({ logs: [landedFor(ME, HEAD - 4_000n)], pref, sale: 2_440_000n }), TAO_BACK);
+    expect(live.usdcDelivered).toBeUndefined();
+    expect(live.preference).toEqual({ minUsdcPerTao: 245_000_000n, deadline: TIP_S + 600_000 });
+    // the sale less the staker's 0.15% fee
+    expect(live.saleNowUsdc).toBe(2_440_000n - 3_660n);
+    const noneSet = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n)], sale: 2_440_000n });
+    const none = await factsOf(noneSet, TAO_BACK);
+    expect(none.preference).toBeNull();
+    expect(none.saleNowUsdc).toBeUndefined();
+    expect(noneSet.reads).not.toContain("quoteExactInput");
+  });
+
+  it("knows a claim from this browser is still settling", async () => {
+    const claim: ClaimOp = {
+      id: "k",
+      kind: "claim",
+      account: ME,
+      createdAt: 10,
+      amount: TAO_BACK,
+      keepTao: false,
+      minUsdc: 1n,
+      hashes: { claim: H(21) },
+      withdrawalIds: ["w3"],
+      state: "running",
+    };
+    const f = await factsOf(backOnBase({ logs: [landedFor(ME, HEAD - 4_000n)] }), 0n, D3, [claim]);
+    expect(f.claimed).toBeUndefined();
+    expect(f.claimPending).toBe(true);
+  });
+
+  it("v2: reads no Base logs and no preference", async () => {
+    const b = backOnBase({ d: D, logs: [landedFor(ME, HEAD - 4_000n), deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62))] });
+    const f = await factsOf(b, TAO_BACK, D);
+    expect(f.payout?.state).toBe(2);
+    expect(b.windows).toHaveLength(0);
+    expect(f.usdcDelivered).toBeUndefined();
+    expect(f.preference).toBeUndefined();
+    expect(b.reads).toEqual(["getExecutionState"]);
+  });
+});
+
 describe("finding a v3 stake that went through before its hash was recorded", () => {
   const STAKER_AT = getAddress("0x00000000000000000000000000000000005a4e12");
   const D3: Deployment = { ...D, staker: STAKER_AT, oracle: getAddress("0x000000000000000000000000000000000000041e") };

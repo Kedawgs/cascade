@@ -2,7 +2,7 @@ import type { Hex } from "viem";
 import { explorer } from "./config";
 import type { DepositOp, WithdrawalOp } from "./oplog";
 import type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRecord, WithdrawalStepKey } from "./records";
-import { formatTao } from "../format";
+import { formatDay, formatTao } from "../format";
 import { toDisplay } from "./units";
 
 /** What the chain says about one deposit (see facts.ts). */
@@ -56,7 +56,18 @@ export interface WithdrawalFacts {
   /** The claim's receipts: TAO claimed, the USDC the swap paid (if it ran), and whether it was kept as TAO
    * or the swap failed after the claim (the TAO then sits in the wallet). */
   claimed?: { hash: Hex; at: Date; taoClaimed: bigint; usdcOut?: bigint; keptTao: boolean; swapFailed: boolean };
+  /** A claim from this browser names this unstake and hasn't settled yet. */
+  claimPending?: true;
   payoutDelay: number;
+  // v3 only, once the payout is back on Base (all absent on v2):
+  /** The front door's Delivered event that sold this payout for USDC: the only source of the USDC received. */
+  usdcDelivered?: { hash: Hex; at: Date; usdcOut: bigint };
+  /** A Claimed event took the payout first, from a claim this browser has no record of. */
+  claimedOnChain?: { hash: Hex; at: Date };
+  /** The account's delivery preference (`deliveryOf`): null when none is set, undefined when not read. */
+  preference?: { minUsdcPerTao: bigint; deadline: number } | null;
+  /** What everything claimable would sell for now, in USDC units, after the staker's swap fee. */
+  saleNowUsdc?: bigint;
 }
 
 /** A time of day in the viewer's own zone, like the dates elsewhere on the site: "2:32 PM". */
@@ -306,11 +317,22 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
 
   // claimable is the wallet's whole balance on Base: this unstake is ready only once its own payout landed
   const landed = ret.status === "done";
-  let claim: TrailStep<WithdrawalStepKey> = { key: "claim", title: "Claim as USDC", status: "pending" };
+  // v3: the unstake asked for USDC sent to the wallet automatically; claiming by hand is the fallback
+  const auto = op.delivery !== undefined;
+  const sold = auto ? f.usdcDelivered : undefined;
+  let claim: TrailStep<WithdrawalStepKey> = { key: "claim", title: auto ? "USDC to your wallet" : "Claim as USDC", status: "pending" };
+  /** v3: paid out without a claim from this browser (delivered, or taken some other way). */
+  let settled = false;
+  /** v3: delivery can't happen, so the claim by hand is offered. */
+  let offered = false;
   const c = f.claimed;
-  if (c && c.swapFailed) {
+  if (sold) {
+    claim = { ...claim, title: "USDC delivered", status: "done", at: sold.at, txUrl: explorer.baseTx(sold.hash), txLabel: "View the receipt" };
+    settled = true;
+  } else if (c && c.swapFailed) {
     claim = {
       ...claim,
+      title: "Claim as USDC",
       status: "action",
       at: c.at,
       txUrl: explorer.baseTx(c.hash),
@@ -318,30 +340,80 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     };
   } else if (c) {
     claim = { ...claim, title: c.keptTao ? "Claimed, kept as TAO" : "Claim as USDC", status: "done", at: c.at, txUrl: explorer.baseTx(c.hash) };
+  } else if (auto && landed) {
+    const v3 = deliveryStep(op, f, claim);
+    claim = v3.step;
+    settled = v3.settled;
+    offered = v3.offered;
   } else if (landed && f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your money is back on Base. Claim it as USDC" };
 
   const steps = [request, unstake, ret, claim];
   let status: WithdrawalRecord["status"];
   if (op.cancelled && f.cancelMined && !d) status = "cancelled";
-  else if (c && !c.swapFailed) status = "paid";
+  else if ((c && !c.swapFailed) || settled) status = "paid";
   else if (steps.some((s) => s.status === "failed")) status = "failed";
-  else if (landed && f.claimable > 0n) status = "ready";
+  else if (landed && f.claimable > 0n && (!auto || offered)) status = "ready";
   else if (steps.some((s) => s.status === "action")) status = "needs_you";
   else status = "in_progress";
 
+  const nothingTaken = d !== undefined && (d.outcome === "skipped" || d.outcome === "deferred");
+  const received = sold
+    ? { usdc: toDisplay(sold.usdcOut, 6) }
+    : c && !c.swapFailed
+      ? c.keptTao
+        ? { keptTao: toDisplay(c.taoClaimed, 18) }
+        : { usdc: toDisplay(c.usdcOut ?? 0n, 6) }
+      : undefined;
+  // nothing was taken, so nothing comes back; a paid v3 unstake shows what arrived (its receipt) or nothing, never the estimate
+  const usdcAmount = nothingTaken ? undefined : auto && status === "paid" ? received?.usdc : toDisplay(op.usdcEstimate, 6);
   return {
     // nothing was taken (balance too small, or the daily limit): the user can simply unstake again
-    ...(d && (d.outcome === "skipped" || d.outcome === "deferred") ? { unstakeAgain: true as const } : {}),
+    ...(nothingTaken ? { unstakeAgain: true as const } : {}),
     id: op.id,
     createdAt: new Date(op.createdAt),
     status,
     steps,
     shares: op.shares,
     taoAmount: toDisplay(d?.taoWei ?? op.taoEstimate, 18),
-    // nothing was taken, so nothing comes back
-    ...(d && (d.outcome === "skipped" || d.outcome === "deferred") ? {} : { usdcAmount: toDisplay(op.usdcEstimate, 6) }),
+    ...(usdcAmount !== undefined ? { usdcAmount } : {}),
     claimable: f.claimable,
-    ...(c && !c.swapFailed ? { received: c.keptTao ? { keptTao: toDisplay(c.taoClaimed, 18) } : { usdc: toDisplay(c.usdcOut ?? 0n, 6) } } : {}),
+    ...(received ? { received } : {}),
     ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" ? { cancellableShares: op.shares } : {}),
   };
+}
+
+/** v3's last step once the payout is back on Base and no claim from this browser has settled it. */
+function deliveryStep(
+  op: WithdrawalOp,
+  f: WithdrawalFacts,
+  step: TrailStep<WithdrawalStepKey>,
+): { step: TrailStep<WithdrawalStepKey>; settled: boolean; offered: boolean } {
+  // the claim this browser sent went through and its swap is still settling
+  if (f.claimPending && (f.claimable === 0n || f.claimedOnChain)) return { step: { ...step, title: "Claim as USDC", status: "active" }, settled: false, offered: false };
+  if (f.claimedOnChain) {
+    const { hash, at } = f.claimedOnChain;
+    return { step: { ...step, title: "Claimed", status: "done", at, txUrl: explorer.baseTx(hash) }, settled: true, offered: false };
+  }
+  // nothing claimable and no claim from here: it was delivered, but the receipt can't be read now
+  if (f.claimable === 0n) {
+    return {
+      step: { ...step, title: "Paid out", status: "done", detail: "Sent to your wallet. The receipt can't be read right now, so the amount isn't shown" },
+      settled: true,
+      offered: false,
+    };
+  }
+  // the chain's preference, or the one this unstake asked for when it couldn't be read
+  const pref = f.preference !== undefined ? f.preference : (op.delivery ?? null);
+  const live = pref !== null && pref.deadline * 1000 >= f.now.getTime();
+  // the keeper sells everything claimable at once, and only at or above the minimum (rounded up, as the front door does)
+  const floor = pref ? (f.claimable * pref.minUsdcPerTao + 10n ** 18n - 1n) / 10n ** 18n : 0n;
+  const under = live && f.saleNowUsdc !== undefined && f.saleNowUsdc < floor;
+  if (live && !under) return { step: { ...step, status: "active", detail: "USDC is being delivered to your wallet automatically" }, settled: false, offered: false };
+  const until = pref ? formatDay(new Date(pref.deadline * 1000)) : "";
+  const detail = under
+    ? `The price is below your minimum, so it hasn't been sold for you yet. Claim it as USDC at today's price, or wait: it's still sold for you automatically if the price recovers by ${until}`
+    : pref
+      ? `Automatic delivery ended on ${until}. Your money is back on Base. Claim it as USDC`
+      : "Your money is back on Base. Claim it as USDC";
+  return { step: { ...step, title: "Claim as USDC", status: "action", detail }, settled: false, offered: true };
 }

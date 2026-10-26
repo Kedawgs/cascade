@@ -2,9 +2,9 @@ import { type Address, encodeEventTopics, type Hex, parseEventLogs, toHex } from
 import { FRESH_TRIES, freshTip, StaleChainError } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, STAKER, VAULT } from "./abi";
 import type { Clients } from "./chain";
-import { type Deployment, explorer, OFFRAMP, TOKENS } from "./config";
+import { type Deployment, explorer, isV3, OFFRAMP, TOKENS } from "./config";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
-import type { FrontDoorState, VaultState } from "./reads";
+import { type FrontDoorState, quoteSell, readStakerFees, type VaultState } from "./reads";
 import type { DepositFacts, WithdrawalFacts } from "./trail";
 
 /** Bittensor's public node answers log queries of up to 1,000 blocks. Base logs are never read. */
@@ -29,6 +29,8 @@ export interface VaultScan {
   redeemed: { key: Hex; block: bigint; assets: bigint }[];
   receipts: Map<Hex, Receipt>;
   blockTimes: Map<bigint, Date>;
+  /** v3: each payout's life on Base after it left the vault, by batch key (lowercase). */
+  onBase: Map<string, BasePayout>;
 }
 
 export const newScan = (d: Deployment): VaultScan => ({
@@ -40,6 +42,7 @@ export const newScan = (d: Deployment): VaultScan => ({
   redeemed: [],
   receipts: new Map(),
   blockTimes: new Map(),
+  onBase: new Map(),
 });
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -191,7 +194,7 @@ export async function depositFacts(
 }
 
 export async function withdrawalFacts(
-  c: Pick<Clients, "base" | "bittensor">,
+  c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
   d: Deployment,
   op: WithdrawalOp,
   ctx: { fd: FrontDoorState; vault: VaultState; scan: VaultScan; claims: ClaimOp[] },
@@ -238,7 +241,57 @@ export async function withdrawalFacts(
   }
   const claim = ctx.claims.find((k) => k.withdrawalIds?.includes(op.id) && k.hashes.claim);
   if (claim) facts.claimed = await claimResult(c, claim);
+  if (claim && !facts.claimed && (claim.state === "running" || claim.state === "sent")) facts.claimPending = true;
+  // v3: once the payout is back on Base, what took it (a claim from this browser already says)
+  if (isV3(d) && hit && facts.payout?.state === 2 && !facts.claimed) await deliveryFacts(c, d, op, ctx, hit.key, facts);
   return { batchId, facts };
+}
+
+/** A v3 payout back on Base: the delivery that sold it (its receipt is the only source of the USDC
+ * received) or a claim by hand that took it; while neither has, the account's delivery preference and
+ * what the TAO would sell for now, so the trail can say whether delivery can still happen. */
+async function deliveryFacts(
+  c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
+  d: Deployment,
+  op: WithdrawalOp,
+  ctx: { fd: FrontDoorState; scan: VaultScan },
+  key: Hex,
+  facts: WithdrawalFacts,
+): Promise<void> {
+  // the batch's first chunk left Bittensor first: no part of the payout can land on Base before it
+  const first = ctx.scan.payouts.get(key)?.[0];
+  if (!first) return;
+  const id = key.toLowerCase();
+  const t = ctx.scan.onBase.get(id) ?? {};
+  ctx.scan.onBase.set(id, t);
+  try {
+    await tracePayout(c, d, { account: op.account, batchKey: key, sentAt: await blockTime(c, ctx.scan, first.block) }, t);
+  } catch {
+    // unreadable right now: no receipt and no amount, never a guessed one; what was read is kept
+  }
+  if (t.end?.kind === "delivered") facts.usdcDelivered = { hash: t.end.hash, at: t.end.at, usdcOut: t.end.usdcOut };
+  else if (t.end) facts.claimedOnChain = { hash: t.end.hash, at: t.end.at };
+  if (t.end || ctx.fd.claimable === 0n) return;
+  try {
+    const [minUsdcPerTao, deadline] = (await c.base.readContract({
+      address: d.frontDoor,
+      abi: FRONT_DOOR,
+      functionName: "deliveryOf",
+      args: [op.account],
+    })) as readonly [bigint, bigint, number];
+    facts.preference = minUsdcPerTao === 0n ? null : { minUsdcPerTao, deadline: Number(deadline) };
+  } catch {
+    // unread: the trail goes by the preference this unstake asked for
+  }
+  const p = facts.preference;
+  if (!p || p.deadline * 1000 < facts.now.getTime()) return;
+  try {
+    // the keeper sells everything claimable at once, and the staker takes its fee from the sale's USDC
+    const [gross, fees] = await Promise.all([quoteSell(c, ctx.fd.claimable), readStakerFees(c, d)]);
+    facts.saleNowUsdc = gross - (gross * fees.swapFeeBps) / 10_000n;
+  } catch {
+    // no quote: the trail can't tell the price is under the minimum, so it doesn't say so
+  }
 }
 
 /** What a claim really paid, from its receipts: the TAO claimed and, if it swapped, the USDC received.
@@ -282,6 +335,91 @@ async function baseWindowLogs(c: Pick<Clients, "baseLogs">, filter: { address: A
     if (BigInt(head as string) >= to) return raw as RawLog[];
   }
   throw new Error("Base's log server is behind right now");
+}
+
+/** How far before a payout left Bittensor its search on Base starts, for the two chains' clocks: 5 minutes of blocks. */
+const PAYOUT_SEARCH_MARGIN = 150n;
+/** Base's newest blocks are left for the next read: one still being made or replaced is read then. */
+const BASE_SETTLE = 2n;
+
+type LogPos = { block: bigint; index: number };
+/** Where a log sits on Base. Raw JSON-RPC logs carry hex strings, decoded ones numbers. */
+const posOf = (l: { blockNumber: unknown; logIndex: unknown }): LogPos => ({ block: BigInt(l.blockNumber as string), index: Number(l.logIndex) });
+const later = (a: LogPos, b: LogPos) => a.block > b.block || (a.block === b.block && a.index > b.index);
+
+/** A v3 payout's life on Base, read forward from the front door's logs and kept between reads. */
+export interface BasePayout {
+  /** The first Base block not read yet; unset before the first read. */
+  next?: bigint;
+  /** Where the account's share was credited (its PayoutReceived). */
+  landed?: LogPos;
+  /** What took it first after that: the keeper's delivery, or a claim by hand. */
+  end?: { kind: "delivered"; hash: Hex; at: Date; usdcOut: bigint } | { kind: "claimed"; hash: Hex; at: Date };
+  /** A read under way: another caller waits for it rather than reading the same blocks again. */
+  reading?: Promise<void>;
+}
+
+const frontDoorTopic = (eventName: "PayoutReceived" | "Delivered" | "Claimed") => encodeEventTopics({ abi: FRONT_DOOR, eventName } as never)[0] as Hex;
+
+/** Follows the account's share of a v3 payout on Base: the PayoutReceived that credited it, then the
+ * first Delivered (the keeper sold it for USDC) or Claimed (taken by hand) for the account after it;
+ * earlier ones took earlier payouts. Topic-filtered front door logs in windows of at most 2,000 blocks,
+ * from a little before the payout left Bittensor (it can't land earlier) up to the newer of the logs
+ * server's head and Base's own, so a logs server that is behind fails its window check instead of
+ * hiding a recent log. Resumes where it stopped; throws when a window can't be read, keeping what was. */
+export function tracePayout(
+  c: Pick<Clients, "base" | "baseLogs">,
+  d: Deployment,
+  s: { account: Address; batchKey: Hex; sentAt: Date },
+  t: BasePayout,
+): Promise<void> {
+  if (t.end) return Promise.resolve();
+  t.reading ??= readPayout(c, d, s, t).finally(() => {
+    t.reading = undefined;
+  });
+  return t.reading;
+}
+
+async function readPayout(c: Pick<Clients, "base" | "baseLogs">, d: Deployment, s: { account: Address; batchKey: Hex; sentAt: Date }, t: BasePayout): Promise<void> {
+  const [logsHead, tip] = await Promise.all([
+    c.baseLogs.request({ method: "eth_blockNumber" }).then((h) => BigInt(h as string)),
+    c.base.getBlock({ blockTag: "latest" }),
+  ]);
+  if (t.next === undefined) {
+    // counted back from Base's newest block by its own clock, not the device's
+    const back = BigInt(Math.ceil(Math.max(0, Number(tip.timestamp) * 1000 - s.sentAt.getTime()) / BASE_BLOCK_MS)) + PAYOUT_SEARCH_MARGIN;
+    t.next = tip.number > back ? tip.number - back : 0n;
+  }
+  const head = logsHead > tip.number ? logsHead : tip.number;
+  const latest = head - BASE_SETTLE;
+  const [, user] = encodeEventTopics({ abi: FRONT_DOOR, eventName: "Delivered", args: { user: s.account } });
+  // this batch's credits (any user: the user is the third topic) and the account's deliveries and claims
+  const filter = {
+    address: d.frontDoor,
+    topics: [[frontDoorTopic("PayoutReceived"), frontDoorTopic("Delivered"), frontDoorTopic("Claimed")], [s.batchKey, user as Hex]],
+  };
+  for (let from = t.next; from <= latest && !t.end; from += BASE_LOG_WINDOW) {
+    const to = from + BASE_LOG_WINDOW - 1n < latest ? from + BASE_LOG_WINDOW - 1n : latest;
+    const raw = await baseWindowLogs(c, filter, from, to);
+    const mine = parseEventLogs({ abi: FRONT_DOOR, logs: raw as never, strict: false })
+      .filter((l) => same(l.address, d.frontDoor) && same(((l.args as { user?: string }).user ?? "0x"), s.account))
+      .sort((a, b) => (later(posOf(a), posOf(b)) ? 1 : -1));
+    for (const l of mine) {
+      const at = posOf(l);
+      if (!t.landed) {
+        if (l.eventName === "PayoutReceived" && same((l.args as { batchKey?: string }).batchKey ?? "0x", s.batchKey)) t.landed = at;
+      } else if ((l.eventName === "Delivered" || l.eventName === "Claimed") && later(at, t.landed)) {
+        const hash = l.transactionHash as Hex;
+        const when = new Date(Number((await c.base.getBlock({ blockNumber: at.block })).timestamp) * 1000);
+        t.end =
+          l.eventName === "Delivered"
+            ? { kind: "delivered", hash, at: when, usdcOut: (l.args as { usdcOut: bigint }).usdcOut }
+            : { kind: "claimed", hash, at: when };
+        break;
+      }
+    }
+    t.next = to + 1n;
+  }
 }
 
 /** The transaction of a v3 stake the account paid for itself (payer and beneficiary both the account)

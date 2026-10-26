@@ -374,3 +374,108 @@ describe("withdrawal trail", () => {
     expect(withdrawalRecord(wop, wbase).cancellableShares).toBe(10n ** 22n);
   });
 });
+
+describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () => {
+  const DEADLINE = Math.floor(T0.getTime() / 1000) + 604_800;
+  const asked = { minUsdcPerTao: 245_000_000n, deadline: DEADLINE };
+  const wop3: WithdrawalOp = { ...wop, delivery: asked };
+  const redeemed = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+  const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date("2026-10-25T11:40:00Z") };
+  // back on Base, nothing has taken it yet: 0.0099 TAO waits in the front door
+  const back: WithdrawalFacts = {
+    ...wbase,
+    openBatchId: 6n,
+    stillOpen: false,
+    delivered: redeemed,
+    payout,
+    now: new Date("2026-10-25T12:10:00Z"),
+    claimable: 99n * 10n ** 14n,
+    preference: asked,
+  };
+  const receipt = { hash: H(30), at: new Date("2026-10-25T11:45:00Z"), usdcOut: 2_431_337n };
+
+  it("waits for its payout to reach Base before anything can be delivered", () => {
+    const r = withdrawalRecord(wop3, { ...back, payout: { ...payout, state: 1 } });
+    expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
+    expect(r.status).toBe("in_progress");
+  });
+
+  it("shows 'USDC delivered' with the amount from the Delivered log and a link to its receipt", () => {
+    const r = withdrawalRecord(wop3, { ...back, claimable: 0n, usdcDelivered: receipt });
+    expect(statuses(r)).toEqual(["done", "done", "done", "done"]);
+    expect(r.steps[3]).toMatchObject({ title: "USDC delivered", status: "done", at: receipt.at });
+    expect(r.steps[3].txUrl).toContain(H(30));
+    expect(r.status).toBe("paid");
+    expect(r.received).toEqual({ usdc: 2.431337 });
+    // what arrived, not the estimate
+    expect(r.usdcAmount).toBe(2.431337);
+  });
+
+  it("finds the delivery even when a later payout is waiting on Base", () => {
+    const r = withdrawalRecord(wop3, { ...back, claimable: 5n * 10n ** 15n, usdcDelivered: receipt });
+    expect(r.status).toBe("paid");
+    expect(r.steps[3].status).toBe("done");
+  });
+
+  it("says USDC is on its way automatically while the delivery preference is live", () => {
+    const r = withdrawalRecord(wop3, back);
+    expect(statuses(r)).toEqual(["done", "done", "done", "active"]);
+    expect(r.steps[3].detail).toBe("USDC is being delivered to your wallet automatically");
+    expect(r.status).toBe("in_progress");
+    expect(r.received).toBeUndefined();
+    // the preference couldn't be read: the one this unstake asked for stands in
+    expect(withdrawalRecord(wop3, { ...back, preference: undefined }).steps[3].status).toBe("active");
+  });
+
+  it("offers 'Claim as USDC' once the preference has expired, or when there is none", () => {
+    const expired = withdrawalRecord(wop3, { ...back, preference: { ...asked, deadline: Math.floor(back.now.getTime() / 1000) - 1 } });
+    expect(expired.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action" });
+    expect(expired.status).toBe("ready");
+    const none = withdrawalRecord(wop3, { ...back, preference: null });
+    expect(none.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action", detail: "Your money is back on Base. Claim it as USDC" });
+    expect(none.status).toBe("ready");
+  });
+
+  it("offers 'Claim as USDC' when today's price is under the minimum, since it can't be delivered at that price", () => {
+    // the floor on 0.0099 TAO at 245 USDC per TAO is 2.4255 USDC
+    const under = withdrawalRecord(wop3, { ...back, saleNowUsdc: 2_400_000n });
+    expect(under.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action" });
+    expect(under.steps[3].detail).toMatch(/below your minimum/);
+    expect(under.status).toBe("ready");
+    const over = withdrawalRecord(wop3, { ...back, saleNowUsdc: 2_425_500n });
+    expect(over.steps[3].status).toBe("active");
+  });
+
+  it("shows no amount when the Delivered log can't be read, with the status still right: nothing claimable and no claim made", () => {
+    const r = withdrawalRecord(wop3, { ...back, claimable: 0n });
+    expect(r.steps[3].status).toBe("done");
+    expect(r.steps[3].txUrl).toBeUndefined();
+    expect(r.status).toBe("paid");
+    expect(r.received).toBeUndefined();
+    expect(r.usdcAmount).toBeUndefined();
+    // a claim from this browser still settling is not paid yet
+    const claiming = withdrawalRecord(wop3, { ...back, claimable: 0n, claimPending: true });
+    expect(claiming.status).toBe("in_progress");
+    expect(claiming.steps[3].status).toBe("active");
+  });
+
+  it("shows a claim by hand from this browser as today, and one made elsewhere without an amount", () => {
+    const claimed = { hash: H(11), at: new Date(), taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, keptTao: false, swapFailed: false };
+    const here = withdrawalRecord(wop3, { ...back, claimable: 0n, claimed });
+    expect(here.status).toBe("paid");
+    expect(here.steps[3]).toMatchObject({ title: "Claim as USDC", status: "done" });
+    expect(here.received).toEqual({ usdc: 2.45 });
+    const elsewhere = withdrawalRecord(wop3, { ...back, claimable: 0n, claimedOnChain: { hash: H(31), at: new Date() } });
+    expect(elsewhere.status).toBe("paid");
+    expect(elsewhere.steps[3].txUrl).toContain(H(31));
+    expect(elsewhere.received).toBeUndefined();
+    expect(elsewhere.usdcAmount).toBeUndefined();
+  });
+
+  it("leaves a v2 unstake as it was, whatever the delivery facts say", () => {
+    const r = withdrawalRecord(wop, { ...back, saleNowUsdc: 9_999_999n });
+    expect(r.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action", detail: "Your money is back on Base. Claim it as USDC" });
+    expect(r.status).toBe("ready");
+    expect(r.usdcAmount).toBe(2.5);
+  });
+});

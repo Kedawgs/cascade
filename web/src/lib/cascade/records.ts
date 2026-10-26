@@ -47,12 +47,13 @@ export interface WithdrawalRecord {
   steps: TrailStep<WithdrawalStepKey>[];
   shares: bigint;
   taoAmount: number;
-  /** An estimate until it's paid; absent when unknown. */
+  /** An estimate until it's paid; absent when unknown. A paid v3 unstake shows what arrived, or nothing. */
   usdcAmount?: number;
   feesUsd?: number;
-  /** TAO waiting on Base for the user to claim. */
+  /** TAO waiting on Base for the user to claim (or, on v3, to be delivered as USDC). */
   claimable: bigint;
-  /** What the claim actually paid, read from its receipts. */
+  /** What was actually paid: a claim's receipts, or on v3 the front door's Delivered event. Absent when
+   * it can't be read; never estimated. */
   received?: { usdc?: number; keptTao?: number };
   /** Shares still in the open batch that can be taken back. */
   cancellableShares?: bigint;

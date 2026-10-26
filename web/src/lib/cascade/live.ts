@@ -123,8 +123,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   async function getPosition(account: string): Promise<Position> {
     const a = account as Address;
     const [fd, v, price, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), deps.taoPriceUsd(c), scanFor(a)]);
-    // a failed read leaves it unknown; it never shows as zero
-    const waiting = await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined);
+    // v3 only (v2's Rewards page stays as it was); a failed read leaves it unknown, never zero
+    const waiting = isV3(d) ? await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined) : undefined;
     const pendingRewardsTao =
       waiting && v.totalSupply > 0n
         ? toDisplay((waiting.wei * v.shares * BigInt(10_000 - waiting.cutBps)) / (v.totalSupply * 10_000n), 18)

@@ -70,11 +70,13 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
   };
 }
 
-describe("rewards waiting", () => {
+describe("rewards waiting (v3)", () => {
+  const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+
   it("is the account's share of the vault's uncollected rewards, less the 10% cut", async () => {
     const half = { ...vault, shares: vault.totalSupply / 2n };
     const data = createLiveCascadeData(
-      D,
+      D3,
       deps({ readVault: async () => half, readPendingRewards: async () => ({ wei: 4n * 10n ** 15n, cutBps: 1000 }) }),
     );
     // 0.004 TAO x 1/2 x 0.9
@@ -82,15 +84,24 @@ describe("rewards waiting", () => {
   });
 
   it("stays undefined when the read fails, and the rest of the position is intact", async () => {
-    const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => undefined }));
+    const data = createLiveCascadeData(D3, deps({ readPendingRewards: async () => undefined }));
     const p = await data.getPosition(ME);
     expect(p.pendingRewardsTao).toBeUndefined();
     expect(p.taoBalance).toBeCloseTo(0.08, 12);
   });
 
   it("is zero, not unknown, when the chain says nothing is waiting", async () => {
-    const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => ({ wei: 0n, cutBps: 1000 }) }));
+    const data = createLiveCascadeData(D3, deps({ readPendingRewards: async () => ({ wei: 0n, cutBps: 1000 }) }));
     expect((await data.getPosition(ME)).pendingRewardsTao).toBe(0);
+  });
+
+  it("isn't read or shown on v2, whose Rewards page stays as it was", async () => {
+    let asked = 0;
+    const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => (asked++, { wei: 4n * 10n ** 15n, cutBps: 1000 }) }));
+    const p = await data.getPosition(ME);
+    expect(asked).toBe(0);
+    expect(p).not.toHaveProperty("pendingRewardsTao");
+    expect(p.taoBalance).toBeCloseTo(0.08, 12);
   });
 });
 

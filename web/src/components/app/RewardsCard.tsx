@@ -1,6 +1,6 @@
 "use client";
 
-import { usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
+import { useIsV3, usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
 import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
@@ -24,6 +24,7 @@ function Price() {
 }
 
 function RewardsForAccount({ account }: { account: string }) {
+  const v3 = useIsV3();
   const position = usePosition(account);
   const rewards = useRewards(account);
   if (position.isError || rewards.isError) {
@@ -60,7 +61,7 @@ function RewardsForAccount({ account }: { account: string }) {
         </div>
         <Price />
       </div>
-      {waiting !== undefined && (
+      {v3 && waiting !== undefined && (
         <p className={styles.waiting}>
           Earned, not yet collected: {formatTao(waiting, 6)} TAO ({formatUsd(waiting * position.data.taoPriceUsd)}). Cascade collects rewards for everyone, at
           least monthly, and adds them to your balance.

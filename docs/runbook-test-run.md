@@ -141,3 +141,38 @@ The contracts stay on-chain, paused. The tiny reserves (about 0.0000025 TAO) sta
   trial run on the network failed, so no gas was spent; the name in brackets is the contract's
   reason. If `stake` refuses, the TAO stays in the vault and still pays out: carry on with
   `close` and the withdrawal.
+
+## v3 test deployment
+
+v3 has its own deployment record, so the v2 test deployment stays intact. Set the name once per
+shell and every command below uses the v3 contracts:
+
+```
+$env:OPS_DEPLOYMENT = "v3-test"
+```
+
+Without it, `deploy` and `--new-plan` refuse (they would otherwise try to build a v3 plan on the
+v2 record). `verify` also refuses a v2 record now: the build has moved to v3.
+
+1. **Budget and preflight.** `pnpm ops budget` prints the v3 amounts; `pnpm ops preflight` checks
+   the lanes and balances as before.
+2. **Rehearse.** `pnpm ops rehearse` deploys v3 on local forks, stakes with a USDC permit and
+   delivers USDC back, signing on local chain ids (never replayable on the real ones).
+3. **Deploy.** `pnpm ops deploy --live` (resumes after a stop). The test settings use 10-minute
+   batches and a 1-hour payout delay; the validator is tao.bot, and the treasury is the test
+   wallet.
+4. **Verify.** `pnpm ops verify --live` reads every setting back, including that the treasury has
+   no code on either chain, the oracle's two pool addresses, and the front door's delivery
+   slippage (150 basis points).
+5. **Stake from the site.** One signature plus one transaction. The keeper runs as in v2 (`close`,
+   `stake`, `payouts`, or `run`).
+6. **Rewards and claim.** `pnpm ops rewards --live` shows what is waiting, a claim's cost and
+   whether the policy says to claim. `pnpm ops claim --live` claims only when the policy allows
+   (at least 25 times the cost, or monthly while a claim costs under $20 and does not exceed what
+   is waiting). After the first claim, set `OPS_CLAIM_COST_TAO` to the cost it printed.
+7. **Deliver.** After an exit with a delivery request reaches Base: `pnpm ops deliver --live`
+   (optionally `--user 0x...`). A user whose minimum is not met is told why and can claim the TAO
+   by hand.
+8. **Wind down** as in section 7.
+
+Open before launch (not before this test): checklist items 31 to 34 in `contracts/README.md`.

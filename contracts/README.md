@@ -1,4 +1,4 @@
-# Cascade contracts (v2)
+# Cascade contracts (v3)
 
 Solidity contracts for Cascade: staked TAO for people who do not have a Bittensor wallet. Users
 deposit TAO on Base, the TAO is staked on Bittensor's root network (netuid 0), and users hold csTAO
@@ -11,15 +11,24 @@ shares whose price rises as staking rewards come in.
 - Bridge adapters: [`docs/superpowers/specs/2026-10-24-cascade-ccip-adapters-design.md`](../docs/superpowers/specs/2026-10-24-cascade-ccip-adapters-design.md)
   and [`docs/forevermoney-probe.md`](../docs/forevermoney-probe.md).
 
-Not in this build: the keeper bot, deployment scripts, and the app's USDC swaps. See the
+v3 (2026-10-26) adds one-signature staking from USDC, USDC delivered on exit, and a reward cut. Design:
+[`docs/superpowers/specs/2026-10-26-cascade-v3-design.md`](../docs/superpowers/specs/2026-10-26-cascade-v3-design.md);
+research: [`reports/Cascade v3 swap routes and permits.md`](../reports/Cascade%20v3%20swap%20routes%20and%20permits.md)
+and [`reports/Cascade v3 root validators.md`](../reports/Cascade%20v3%20root%20validators.md). The
+[v3 trust model](#v3-trust-model) says plainly what each new power can and cannot do. See the
 [pre-mainnet checklist](#pre-mainnet-checklist).
+
+Licence: the repository is MIT, except `src/CascadeTwapOracle.sol`, which is GPL-2.0-or-later
+because it ports the maths of Uniswap's `OracleLibrary`.
 
 ## Contracts
 
 | Contract | Chain | What it does |
 |---|---|---|
-| `CascadeVault` | Bittensor EVM (chain 964) | Holds the root stake and the csTAO balances. Prices every batch from the stake it reads directly. Queues payouts and sends them in chunks. Lets Bittensor-native users deposit and redeem directly. |
-| `CascadeFrontDoor` | Base | Collects deposits of ForeverMoney's bridged TAO and redeem requests into batches, forwards each batch to the vault with each user's address, receives payouts and lets users claim them. It never prices anything. |
+| `CascadeVault` | Bittensor EVM (chain 964) | Holds the root stake and the csTAO balances. Prices every batch from the stake it reads directly. Queues payouts and sends them in chunks. Lets Bittensor-native users deposit and redeem directly. v3 adds the reward cut. |
+| `CascadeFrontDoor` | Base | Collects deposits of ForeverMoney's bridged TAO and redeem requests into batches, forwards each batch to the vault with each user's address, receives payouts and lets users claim them. It never prices anything. v3 adds USDC delivery: `setDelivery`, `requestRedeemWithDelivery` and a keeper-only `deliver`. |
+| `CascadeStaker` | Base | One-signature staking. Takes USDC (by permit signature, or by approval for wallets that cannot sign a permit), pays the fees to the treasury, swaps through an owner-set route with a minimum checked by the balance it actually received, and calls the front door's `depositFor` for the user. `sellFor` does the reverse swap for deliveries. |
+| `CascadeTwapOracle` | Base | A 30-minute average TAO price in USDC, from Uniswap's TAO/WETH 0.3% and WETH/USDC 0.05% pools. Used only as a floor for deliveries. GPL-2.0-or-later (ports Uniswap's `OracleLibrary`). |
 | `CascadeBase` | both | Shared admin: two-step owner, guardian, pause, and the bridge registry (a new bridge waits 7 days). The guardian is replaced only 8 days after the owner proposes it. `renounceOwnership` is disabled. |
 | `CcipBaseAdapter` | Base | The front door's bridge: sends ForeverMoney's TAO plus a `BATCH` over Chainlink CCIP, and delivers incoming tokens plus `PAYOUTS` to the front door. See [Bridge adapters](#bridge-adapters-ccip-20). |
 | `CcipBittensorAdapter` | Bittensor EVM | The vault's bridge: converts between native TAO and ForeverMoney's TAO through their `AlphaVault` in the same transaction as each send and delivery. |
@@ -588,6 +597,50 @@ code is vendored, not a dependency: three files of `@chainlink/contracts-ccip@2.
 `src/vendor/ccip` and its message codec in `test/vendor/ccip` (tests only), each with a `VENDOR.md`
 giving the package's integrity hash.
 
+## v3 trust model
+
+**Delivery (USDC on exit).** With `requestRedeemWithDelivery` the user states a minimum USDC out and
+a deadline. When the payout reaches Base, the keeper calls `deliver`: the front door hands the TAO to
+the swapper, measures its own USDC balance before and after, and forwards what it received to the
+user. The result must be at least the largest of three floors: the user's floor, the keeper's
+floor, and the 30-minute TWAP value less 1.5% (owner-set, hard maximum 3%).
+
+- A stolen keeper key can time deliveries but cannot sell a user's TAO more than 1.5% below the
+  30-minute average price (or below the user's own floor).
+- A malicious swapper can only make a delivery revert. It cannot keep the TAO or count an unrelated
+  transfer as the proceeds, because the front door measures its own balance.
+- `claim()` always works. If a delivery keeps failing, or the user's USDC address is blocked, the
+  user claims the TAO by hand, as in v2.
+- The owner changes the swapper, routes and fee values only behind the timelock and only within the
+  hard caps in the code.
+
+**The oracle has no liquidity check.** The price is a 30-minute average of two pools, the smaller
+holding about $200k. Holding such a pool off-price for 30 minutes costs more than the margin on
+capped deliveries (the 1.5% edge), so it is not worth attacking, but nothing on chain checks pool
+depth. If liquidity thins a lot, the owner lowers the delivery slippage or swaps the oracle.
+Deliveries pause when the spot price is more than about 1.35% below the 30-minute average and resume
+as the average catches up; users can claim by hand meanwhile.
+
+**The reward cut.** At each reward claim the vault mints shares worth 10% of the claimed rewards
+(owner-set, hard maximum 20%) to the treasury, at the price from before the claim, so the cut never
+moves the share price. It is skipped when the price is below half the launch price (the existing
+insolvency line); that claim then vests normally for everyone.
+
+- The treasury must be an address with no code on both chains. `pnpm ops verify` checks it. A
+  contract treasury could be impersonated by a twin at the same address on the other chain.
+- The effective share is slightly above the rate, about 10.01% at normal claim sizes (a claim near
+  1% of assets), because the treasury's new shares also share in that claim's 7-day vesting. Say
+  "about 10%" in copy.
+- Unclaimed rewards sit outside the share price until collected. Collection is expensive (one claim
+  is about 53M gas), so the keeper claims only when the rewards waiting are at least 25 times the
+  claim's cost, or monthly while a claim costs under $20 and does not exceed what is waiting.
+  Someone who leaves before a collection misses up to about a month of yield. Anyone can still
+  claim by hand.
+
+**Validator.** The v3 test deployment stakes with tao.bot (0% take, the largest, cheapest estimated
+claim; see `reports/Cascade v3 root validators.md`). Moving to another validator later is
+`setStakeHotkey` plus `moveStake`.
+
 ## Who can use direct access
 
 - **Bittensor-native users, and anyone with a plain key-pair wallet (EOA) who holds TAO for gas on
@@ -864,7 +917,7 @@ Added by the final whole-branch review (2026-10-24):
     `fundReserve()` with 1e12 wei before
     activating the bridge. Send one single-entry 0.01-TAO batch and watch it deliver before opening
     deposits.
-29. Add a reward cut before taking other people's money (owner decision, 2026-10-25): the contracts
+29. **Implemented in v3.** Add a reward cut before taking other people's money (owner decision, 2026-10-25): the contracts
     charge nothing today, so the keeper's batch, stake and payout fees are pure cost (about $1.60
     per deposit batch at test-run prices). Planned shape: at each reward claim the vault mints
     treasury shares worth a set share of the claimed rewards (about 10%, as Lido does), with a
@@ -876,7 +929,7 @@ Added by the final whole-branch review (2026-10-24):
     Give deposits a small fee into the batch's fee pot, as redeem requests already have, sized so a
     full batch pays its own close; raise `minDeposit` for launch; and give the keeper a close policy
     (close a full batch at once, otherwise on the timer).
-30. USDC lands in the wallet (owner decision, 2026-10-25): no claim step for users. Planned shape:
+30. **Implemented in v3.** USDC lands in the wallet (owner decision, 2026-10-25): no claim step for users. Planned shape:
     with the redeem request the user signs (EIP-712) a minimum USDC out and a deadline; when the
     payout reaches Base, the keeper calls the next front door's claim-and-swap for that user, which
     swaps through the fixed Uniswap route and reverts below the signed minimum, then sends USDC to
@@ -884,3 +937,20 @@ Added by the final whole-branch review (2026-10-24):
     always claim by hand. No keeper-chosen slippage, so a keeper or a sandwich bot cannot take more
     than the user agreed to. Own spec, tests and review; launch can ship one-click claim-and-swap
     first if this is not ready.
+
+Added for v3 (2026-10-26):
+
+31. Measure a real claim on Bittensor testnet 945 (gas used and TAO cost) and compare candidate
+    validators' basket sizes; set `OPS_CLAIM_COST_TAO` from the measurement. The 53M gas limit and
+    the tao.bot cost estimate (about 0.045 TAO) come from research, not from a run.
+32. Check both pools' observation cardinality before launch (Uniswap TAO/WETH 0.3% and WETH/USDC
+    0.05%): the oracle needs history covering 30 minutes, so if a pool's cardinality is too low,
+    grow it with `increaseObservationCardinalityNext` and wait.
+33. Set the launch values (6-hour batches, 24-hour payout delay; the test deployment uses 10
+    minutes and 1 hour). First make `verify` read the expected values from the deployment record
+    rather than from today's `SETTINGS_V3`; otherwise changing `SETTINGS_V3` makes the existing
+    test record fail its verify.
+34. Raise the v3 Bittensor adapter's payout gas (`bitGas.base` from 120,000 to 160,000 in the v3
+    plan; the Base payout receiver used about 126k of 149,900 for one entry). Not yet done in
+    `ops/src/config.ts` when this was written. A failed delivery would need manual CCIP
+    re-execution.

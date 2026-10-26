@@ -1,4 +1,4 @@
-# Cascade architecture (v2)
+# Cascade architecture (v3)
 
 Cascade lets someone get staked-TAO exposure without a Bittensor wallet and without knowing what
 alpha tokens are. They deposit from a normal wallet, see one balance, and can check at any time
@@ -7,7 +7,10 @@ that their TAO really is staked.
 Design: `docs/superpowers/specs/2026-10-21-cascade-v2-vault-on-bittensor-design.md`. Contract
 details, operator notes and the pre-mainnet checklist: `contracts/README.md`. Research:
 `reports/Cascade v2 Bittensor vault rails.md` (rails and chain behaviour) and
-`reports/Cascade subnet index vault.md` (background).
+`reports/Cascade subnet index vault.md` (background). v3 research: `reports/Cascade v3 swap
+routes and permits.md` (USDC permits, swap routes, liquidity) and `reports/Cascade v3 root
+validators.md` (which validator to stake with). v3 design:
+`docs/superpowers/specs/2026-10-26-cascade-v3-design.md`.
 
 ## Product decisions
 
@@ -129,6 +132,43 @@ Bittensor's sudo key can each stop or change them with no delay, and a validator
 reprices the vault until the hotkey is re-added (the owner, guardian or keeper can do that at
 once). The README has the full honest statement, the soft spots, and what each outside party can
 do.
+
+## v3 flows
+
+v3 keeps the v2 vault and bridge and adds two contracts on Base, a delivery path in the front door,
+and a reward cut in the vault.
+
+```
+ STAKE (one signature)
+ user: signs a USDC permit (or approves once), sends one transaction
+   v
+ CascadeStaker (Base)   takes USDC; fees to the treasury; swaps USDC -> WETH -> TAO along an
+   |                    owner-set route; reverts if the TAO it received is below the user's minimum
+   v
+ CascadeFrontDoor.depositFor(user)  ->  same batch, bridge and vault as v2
+
+ EXIT (USDC delivered)
+ user: requestRedeemWithDelivery(minimum USDC, deadline)   (or a plain redeem, then claim by hand)
+   v   ... batch, vault burn, payout delay, bridge back (as v2) ...
+ CascadeFrontDoor (Base)  holds the user's TAO
+   |  keeper calls deliver(user): the TAO goes to the swapper (CascadeStaker.sellFor)
+   |  the front door measures its own USDC rise; it must be at least the largest of:
+   |    the user's floor, the keeper's floor, the 30-minute TWAP value less 1.5%
+   v
+ user's wallet receives USDC.  claim() for the TAO always works.
+
+ REWARD CUT
+ keeper claims rewards (rarely) -> the vault vests them over 7 days and mints treasury shares worth
+ 10% of the claim at the pre-claim price.
+```
+
+`CascadeTwapOracle` supplies the 30-minute price used as the delivery floor. The keeper claims
+rewards only when they are worth at least 25 times a claim's cost, or monthly while a claim is
+cheap. The trust model, including what a stolen keeper key can and cannot do, is in
+`contracts/README.md` under "v3 trust model". Unclaimed rewards are outside the share price until
+collected, so someone leaving just before a collection can miss up to about a month of yield. The
+reward cut is about 10% (slightly above, since the treasury's new shares share in that claim's
+vesting). The v3 test deployment stakes with tao.bot (`reports/Cascade v3 root validators.md`).
 
 ## Before mainnet
 

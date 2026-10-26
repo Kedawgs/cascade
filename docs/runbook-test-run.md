@@ -202,8 +202,10 @@ refuses the old v2 record (`test-2026-10.json`).
    $250 per TAO; the contract error is BelowMinDeposit), so stake at least what the form's
    "From $X" shows. Enter $15 to $20 so fees and price moves cannot push it under. A normal MetaMask account signs one message (a USDC
    permit, which allows exactly this amount once, for 30 minutes) and then sends one transaction. A
-   smart account asks for approve, then stake. Good: Activity shows a receipt for the deposit. If
-   you stop midway, **Continue this deposit** on the receipt picks up where it left off.
+   smart account approves the USDC and stakes instead: a wallet that batches asks once for both,
+   otherwise it asks twice. Keep one Cascade tab open while a stake is in flight, and don't press
+   **Continue** while a wallet prompt is still open. Good: Activity shows a receipt for the
+   deposit. If you stop midway, **Continue this deposit** on the receipt picks up where it left off.
 9. **Hand-run the keeper.** One step at a time: `pnpm ops close --live` (closes the batch once its
    10 minutes are up and prints a bridge message id; `pnpm ops track <id> --live` follows it until
    SUCCESS), then `! pnpm ops stake --live` (stakes the TAO on Bittensor; the vault must hold at

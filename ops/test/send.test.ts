@@ -182,6 +182,17 @@ describe("send", () => {
     expect(f.sends()[1].args).not.toContain("--gas-price");
   });
 
+  it("sends with the request's own gas limit, and refuses an estimate above it", async () => {
+    const f = fixture({ estimate: 55_100_000n });
+    await sendCall(f.ctx, { ...call, gasLimit: 57_000_000n });
+    const args = f.sends()[0].args;
+    expect(args[args.indexOf("--gas-limit") + 1]).toBe("57000000");
+
+    const over = fixture({ estimate: 57_000_001n });
+    expect(await refusal(sendCall(over.ctx, { ...call, gasLimit: 57_000_000n }))).toBe("estimate");
+    expect(over.sends()).toHaveLength(0);
+  });
+
   it("logs one plain line with the estimated cost", async () => {
     const f = fixture();
     await sendCall(f.ctx, call);

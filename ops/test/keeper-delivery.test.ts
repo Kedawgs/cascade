@@ -1,0 +1,321 @@
+import { type Address, encodeAbiParameters, encodeEventTopics, type Hex, numberToHex, parseAbiParameters } from "viem";
+import { describe, expect, it, vi } from "vitest";
+import { BASE_V3, CLAIM_POLICY, WALLET } from "../src/config.ts";
+import { deliver, deliverAll, runLoop } from "../src/keeper/actions.ts";
+import {
+  checkDelivery,
+  DELIVER_ABI,
+  type DeliveryRead,
+  deliveryDecision,
+  DESTINATION_BASE,
+  netOfFee,
+  TWAP_UNAVAILABLE,
+} from "../src/keeper/delivery.ts";
+import { decideNext, type State } from "../src/keeper/due.ts";
+import { DELIVERY_READ_ABIS, keeperDeps } from "../src/keeper/state.ts";
+import type { StatusDetail } from "../src/keeper/status.ts";
+import { isPlanV3, ROUTE_0 } from "../src/plan.ts";
+import { type Sent, SendRefused } from "../src/send.ts";
+import type { CallRequest } from "../src/types.ts";
+import { fakeChain, revert, SENT, stubDeps, v3Record } from "./fake-keeper.ts";
+
+const TAO = 10n ** 18n;
+const NOW = 1_800_000_000;
+const alice: Address = "0x000000000000000000000000000000000000a11c";
+const bob: Address = "0x0000000000000000000000000000000000000B0b";
+const pref = { minUsdcPerTao: 240_000_000n, deadline: NOW + 3600, destination: DESTINATION_BASE };
+/** 1 TAO; the user's floor is 240 USDC; the TWAP floor 250 × (1 - 1.5%) = 246.25 USDC. */
+const input = { claimable: TAO, pref, quoteUsdc: 250_000_000n, twapUsdc: 250_000_000n, slippageBps: 150, now: NOW };
+
+describe("deliveryDecision", () => {
+  it("leaves the TAO claimable with no preference, an expired one, or one for another destination", () => {
+    expect(deliveryDecision({ ...input, pref: null })).toEqual({ deliver: false, reason: expect.stringMatching(/no USDC delivery preference/) });
+    expect(deliveryDecision({ ...input, pref: { ...pref, deadline: NOW - 1 } })).toEqual({ deliver: false, reason: expect.stringMatching(/expired/) });
+    expect(deliveryDecision({ ...input, pref: { ...pref, destination: 0 } })).toEqual({
+      deliver: false,
+      reason: expect.stringMatching(/destination 0, not Base \(6\)/),
+    });
+    expect(deliveryDecision({ ...input, claimable: 0n })).toEqual({ deliver: false, reason: expect.stringMatching(/nothing is claimable/) });
+    // the deadline itself is still live, as on chain
+    expect(deliveryDecision({ ...input, pref: { ...pref, deadline: NOW } }).deliver).toBe(true);
+  });
+
+  it("refuses a quote below the user's floor or the TWAP floor", () => {
+    expect(deliveryDecision({ ...input, quoteUsdc: 239_000_000n })).toEqual({ deliver: false, reason: expect.stringMatching(/user's floor of 240 USDC/) });
+    const twap = deliveryDecision({ ...input, pref: { ...pref, minUsdcPerTao: 100_000_000n }, quoteUsdc: 246_000_000n });
+    expect(twap).toEqual({ deliver: false, reason: expect.stringMatching(/30-minute TWAP floor of 246\.25 USDC/) });
+  });
+
+  it("needs 0.5% of room above every floor", () => {
+    // 246.25 × 1.004: above the TWAP floor, but less than 0.5% above it
+    expect(deliveryDecision({ ...input, quoteUsdc: 247_235_000n }).deliver).toBe(false);
+  });
+
+  it("delivers a quote 1% above every floor with the keeper's minimum at quote × 0.995", () => {
+    const quote = (246_250_000n * 101n) / 100n;
+    const d = deliveryDecision({ ...input, quoteUsdc: quote });
+    expect(d.deliver).toBe(true);
+    expect(d.keeperMinOut).toBe((quote * 9950n) / 10000n);
+    // the user's floor rounds up, as on chain: 1 wei of TAO at 240 USDC a TAO needs 1 USDC unit
+    expect(deliveryDecision({ ...input, claimable: 1n, quoteUsdc: 0n, twapUsdc: 0n }).deliver).toBe(false);
+  });
+
+  it("says why when the pool's price history doesn't reach 30 minutes (Review Focus 5)", () => {
+    expect(deliveryDecision({ ...input, twapUsdc: null })).toEqual({ deliver: false, reason: TWAP_UNAVAILABLE });
+    expect(TWAP_UNAVAILABLE).toBe("the pool's price history doesn't reach 30 minutes; the user can claim by hand");
+  });
+
+  it("takes the staker's swap fee off the quote", () => {
+    expect(netOfFee(1_000_000_000n, 15)).toBe(998_500_000n);
+    expect(netOfFee(1_000_000_000n, 0)).toBe(1_000_000_000n);
+  });
+});
+
+const rec = v3Record();
+const plan = rec.plan;
+if (!isPlanV3(plan)) throw new Error("v3 plan expected");
+const DELIVERED = DELIVER_ABI.find((i) => i.type === "event" && i.name === "Delivered")!;
+const deliveredLog = (user: Address, usdcOut: bigint) => ({
+  address: plan.addresses.frontDoor,
+  topics: encodeEventTopics({ abi: [DELIVERED], args: { user } } as never) as Hex[],
+  data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [TAO, usdcOut]),
+});
+
+describe("delivery reads", () => {
+  const answers = (over: Record<string, (args: readonly unknown[]) => unknown> = {}) => ({
+    claimable: () => TAO,
+    deliveryOf: () => [240_000_000n, BigInt(NOW + 3600), DESTINATION_BASE],
+    oracle: () => plan.addresses.oracle,
+    swapper: () => plan.addresses.staker,
+    maxDeliverySlippageBps: () => 150,
+    usdcValue: ([amount]: readonly unknown[]) => {
+      expect(amount).toBe(TAO);
+      return 250_000_000n;
+    },
+    deliveryRouteId: () => 0,
+    routes: ([id]: readonly unknown[]) => {
+      expect(id).toBe(0);
+      return [0, ROUTE_0.router, ROUTE_0.buyPath, ROUTE_0.sellPath, true];
+    },
+    swapFeeBps: () => 15,
+    quoteExactInput: ([path, amountIn]: readonly unknown[]) => {
+      expect([path, amountIn]).toEqual([ROUTE_0.sellPath.toLowerCase(), TAO]);
+      return [251_000_000n, [], [], 0n];
+    },
+    ...over,
+  });
+
+  it("quotes the claimable TAO along the staker's delivery route, net of its 0.15% fee", async () => {
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), answers());
+    const r = await keeperDeps(f.ctx, rec, "unused.json").readDelivery(alice);
+    expect(r).toEqual({ user: alice, claimable: TAO, pref, quoteUsdc: 251_000_000n - 376_500n, twapUsdc: 250_000_000n, slippageBps: 150, now: NOW });
+    const quoter = f.calls.find((c) => c.fn === "quoteExactInput")!;
+    expect([quoter.chain, quoter.to?.toLowerCase()]).toEqual(["base", BASE_V3.QUOTER_V2.toLowerCase()]);
+  });
+
+  it("reads a reverting oracle as 'no TWAP', and a user with nothing claimable with one read", async () => {
+    const old = fakeChain(
+      Object.values(DELIVERY_READ_ABIS),
+      answers({
+        usdcValue: () => {
+          throw revert("OLD");
+        },
+      }),
+    );
+    const r = await keeperDeps(old.ctx, rec, "unused.json").readDelivery(alice);
+    expect(r.twapUsdc).toBeNull();
+    expect(deliveryDecision(r)).toEqual({ deliver: false, reason: TWAP_UNAVAILABLE });
+
+    const none = fakeChain(Object.values(DELIVERY_READ_ABIS), answers({ claimable: () => 0n }));
+    expect((await keeperDeps(none.ctx, rec, "unused.json").readDelivery(alice)).claimable).toBe(0n);
+    expect(none.calls.filter((c) => c.method === "eth_call").map((c) => c.fn)).toEqual(["claimable"]);
+  });
+
+  it("does not quote a preference that isn't live", async () => {
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), answers({ deliveryOf: () => [240_000_000n, BigInt(NOW - 1), DESTINATION_BASE] }));
+    const r = await keeperDeps(f.ctx, rec, "unused.json").readDelivery(alice);
+    expect(deliveryDecision(r).reason).toMatch(/expired/);
+    expect(f.calls.some((c) => c.fn === "quoteExactInput" || c.fn === "usdcValue")).toBe(false);
+  });
+
+  it("simulates deliver from the keeper and names the revert, the router's included", async () => {
+    let reply: () => unknown = () => 250_000_000n;
+    const f = fakeChain(Object.values(DELIVERY_READ_ABIS), {
+      deliver: ([user, minOut], c) => {
+        expect([user, minOut, c.from, c.to]).toEqual([alice, 7n, WALLET, plan.addresses.frontDoor]);
+        return reply();
+      },
+    });
+    const deps = keeperDeps(f.ctx, rec, "unused.json");
+    expect(await deps.simulateDeliver(alice, 7n)).toEqual({ ok: true, usdcOut: 250_000_000n });
+    reply = () => {
+      throw revert("Too little received");
+    };
+    expect(await deps.simulateDeliver(alice, 7n)).toEqual({ ok: false, reason: expect.stringContaining("Too little received") });
+  });
+
+  it("lists each user with a Redeemed event since the deploy block once, scanning 1,000 blocks at a time", async () => {
+    const REDEEMED = DELIVERY_READ_ABIS.VAULT.find((i) => i.type === "event" && i.name === "Redeemed")!;
+    const log = (user: Address, block: number) => ({
+      address: plan.addresses.vault,
+      topics: encodeEventTopics({ abi: [REDEEMED], args: { key: `0x${"aa".repeat(32)}`, user } } as never),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [1n, TAO]),
+      blockNumber: numberToHex(block),
+      logIndex: "0x0",
+      transactionHash: `0x${"bb".repeat(32)}`,
+    });
+    const windows: [bigint, bigint][] = [];
+    const f = fakeChain([], {}, {
+      eth_blockNumber: () => numberToHex(2_600),
+      eth_getLogs: (chain, p) => {
+        expect(chain).toBe("bittensor");
+        const q = p[0] as { fromBlock: Hex; toBlock: Hex };
+        windows.push([BigInt(q.fromBlock), BigInt(q.toBlock)]);
+        return BigInt(q.fromBlock) === 1n ? [log(alice, 5), log(bob, 6), log(alice, 7)] : [log(bob, 1_500)];
+      },
+    });
+    expect(await keeperDeps(f.ctx, rec, "unused.json").deliveryCandidates()).toEqual([alice, bob]);
+    // the record's deploy block is 1
+    expect(windows).toEqual([
+      [1n, 1_000n],
+      [1_001n, 2_000n],
+      [2_001n, 2_600n],
+    ]);
+  });
+});
+
+const ready = (over: Partial<DeliveryRead> = {}): DeliveryRead => ({ user: alice, ...input, quoteUsdc: 252_000_000n, ...over });
+const sentWith = (logs: Sent["logs"]) => vi.fn(async (_r: CallRequest): Promise<Sent> => ({ ...SENT, logs }));
+
+describe("deliver", () => {
+  it("simulates first and skips any revert, naming it, without sending", async () => {
+    const sendCall = sentWith([]);
+    const simulateDeliver = vi.fn(async () => ({ ok: false as const, reason: "Error(Too little received)" }));
+    const deps = stubDeps({ readDelivery: async () => ready(), simulateDeliver, sendCall });
+    expect(await deliver(deps, rec, alice)).toEqual({ user: alice, delivered: false, reason: expect.stringContaining("Too little received") });
+    expect(simulateDeliver).toHaveBeenCalledOnce();
+    expect(sendCall).not.toHaveBeenCalled();
+  });
+
+  it("sends deliver(user, keeperMinOut) to the front door and reads the USDC from its Delivered event", async () => {
+    const sendCall = sentWith([deliveredLog(alice, 251_000_000n)]);
+    const deps = stubDeps({ readDelivery: async () => ready(), simulateDeliver: async () => ({ ok: true, usdcOut: 251_000_000n }), sendCall });
+    const out = await deliver(deps, rec, alice);
+    expect(sendCall.mock.calls[0][0]).toMatchObject({
+      chain: "base",
+      to: plan.addresses.frontDoor,
+      functionName: "deliver",
+      args: [alice, (252_000_000n * 9950n) / 10000n],
+      nonce: 4,
+    });
+    expect(out).toMatchObject({ user: alice, delivered: true, usdcOut: 251_000_000n, hash: SENT.hash });
+  });
+
+  it("treats a refused estimate as a skip too", async () => {
+    const sendCall = vi.fn(async (_r: CallRequest): Promise<Sent> => {
+      throw new SendRefused("estimate", "Base: deliver would fail, nothing sent (BelowMinimum())");
+    });
+    const deps = stubDeps({ readDelivery: async () => ready(), simulateDeliver: async () => ({ ok: true, usdcOut: 1n }), sendCall });
+    expect(await deliver(deps, rec, alice)).toEqual({ user: alice, delivered: false, reason: expect.stringContaining("BelowMinimum") });
+  });
+
+  it("tries each user once, and needs a complete, verified v3 deployment", async () => {
+    const readDelivery = vi.fn(async (user: Address) => ready({ user, pref: null }));
+    const deps = stubDeps({ readDelivery, sendCall: sentWith([]) });
+    const out = await deliverAll(deps, rec, [alice, bob]);
+    expect(out.map((o) => [o.user, o.delivered])).toEqual([
+      [alice, false],
+      [bob, false],
+    ]);
+    expect(readDelivery).toHaveBeenCalledTimes(2);
+    await expect(deliverAll(deps, { ...rec, verify: undefined }, [alice])).rejects.toThrow(/not complete and verified/);
+    const v2 = { ...rec, plan: { ...plan, version: undefined } } as never;
+    await expect(deliverAll(deps, v2, [alice])).rejects.toThrow(/v3 deployment/);
+  });
+
+  it("checkDelivery passes the decision's minimum to the simulation", async () => {
+    const simulateDeliver = vi.fn(async () => ({ ok: true as const, usdcOut: 1n }));
+    const c = await checkDelivery(stubDeps({ readDelivery: async () => ready(), simulateDeliver }), alice);
+    expect(c).toMatchObject({ user: alice, deliver: true, keeperMinOut: (252_000_000n * 9950n) / 10000n });
+    expect(simulateDeliver).toHaveBeenCalledWith(alice, (252_000_000n * 9950n) / 10000n);
+  });
+});
+
+const T = NOW;
+const KEY: Hex = `0x${"aa".repeat(32)}`;
+const baseState: State = {
+  now: T,
+  frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false },
+  alphaVault: { healthy: true },
+  vault: {
+    paused: false,
+    available: 10n ** 16n,
+    minStakeWei: 2n * 10n ** 15n,
+    rootStake: 0n,
+    nominatorMinWei: 0n,
+    batches: [{ key: KEY, queuedAt: T - 3600, cursor: 0, count: 1 }],
+    payoutDelay: 3600,
+  },
+};
+
+describe("decideNext with deliveries", () => {
+  it("delivers after a due payout and before staking or closing", () => {
+    const deliveries = [{ user: alice, keeperMinOut: 5n }];
+    expect(decideNext({ ...baseState, deliveries }).action).toEqual({ kind: "payouts", key: KEY });
+    const noPayout = { ...baseState, vault: { ...baseState.vault, batches: [] }, deliveries };
+    expect(decideNext(noPayout).action).toEqual({ kind: "deliver", user: alice, keeperMinOut: 5n });
+    expect(decideNext({ ...noPayout, deliveries: [] }).action).toEqual({ kind: "stake" });
+    expect(decideNext({ ...noPayout, frontDoor: { ...noPayout.frontDoor, paused: true } }).action).toEqual({ kind: "stake" });
+  });
+});
+
+describe("run with deliveries and rewards", () => {
+  const detail = { claimable: [] } as unknown as StatusDetail;
+  const state = { ...baseState, vault: { ...baseState.vault, batches: [] }, detail };
+  const rewards = async () => ({
+    hotkey: KEY,
+    waitingWei: 2n * TAO,
+    lastClaimAt: T,
+    now: T,
+    taoPriceUsd: 250,
+    claimGasRequired: 55_000_000n,
+    gasPriceWei: 1n,
+    walletWei: TAO,
+  });
+
+  it("skips a delivery whose simulation reverts, stakes instead, and only reports the claim", async () => {
+    const lines: string[] = [];
+    const sendCall = sentWith([]);
+    const simulateDeliver = vi.fn(async () => ({ ok: false as const, reason: "Error(Too little received)" }));
+    const deps = stubDeps({
+      readState: async () => state,
+      deliveryCandidates: async () => [alice],
+      readDelivery: async () => ready(),
+      simulateDeliver,
+      readRewards: rewards,
+      sendCall,
+      log: (l) => lines.push(l),
+    });
+    await runLoop(deps, rec, { intervalMs: 0, maxTicks: 2, policy: CLAIM_POLICY });
+    expect(sendCall.mock.calls.map((c) => c[0].functionName)).toEqual(["stakeIdle", "stakeIdle"]);
+    expect(simulateDeliver).toHaveBeenCalledTimes(2);
+    // the same reason is logged once, not every round
+    expect(lines.filter((l) => l.includes("Too little received"))).toHaveLength(1);
+    expect(lines.filter((l) => /claim/i.test(l) && l.includes("pnpm ops claim"))).toHaveLength(1);
+    expect(lines.some((l) => l.startsWith("Stopped"))).toBe(false);
+  });
+
+  it("delivers when the simulation passes, before staking", async () => {
+    const sendCall = sentWith([deliveredLog(alice, 251_000_000n)]);
+    const deps = stubDeps({
+      readState: async () => state,
+      deliveryCandidates: async () => [alice],
+      readDelivery: async () => ready(),
+      simulateDeliver: async () => ({ ok: true, usdcOut: 251_000_000n }),
+      readRewards: rewards,
+      sendCall,
+    });
+    await runLoop(deps, rec, { intervalMs: 0, maxTicks: 1, policy: CLAIM_POLICY });
+    expect(sendCall.mock.calls.map((c) => c[0].functionName)).toEqual(["deliver"]);
+  });
+});

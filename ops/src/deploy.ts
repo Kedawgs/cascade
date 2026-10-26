@@ -1,10 +1,11 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
 import { type ChainName, PRECOMPILE, SETTINGS_V3, WALLET } from "./config.ts";
 import { buildPlan, buildPlanV3, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
-import { archiveRecord, type DeploymentRecord, loadRecord, saveRecord } from "./record.ts";
+import { archiveRecord, type DeploymentRecord, loadRecord, loadRecordFor, saveRecord } from "./record.ts";
 import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
 import type { CallRequest, CreateRequest, PlannedStep, StepId } from "./types.ts";
+import { refuseV2Verify, verifyAndSave } from "./verify.ts";
 
 export interface DeployDeps {
   sendCreate(ctx: Ctx, req: CreateRequest, predicted: Address): Promise<Sent>;
@@ -261,4 +262,19 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
     saveRecord(path, rec);
   }
   return rec;
+}
+
+/** `pnpm ops deploy`: deploys (or resumes) and then reads everything back into the record. A new
+ * deployment or a new plan must be v3: the v2 plan's front door no longer matches the build, and planning
+ * anew under the v2 name would archive the record that status, wind-down and sweep still read. An
+ * existing v2 record is refused too, before anything is read or sent: resuming it would re-run the
+ * read-back and save a failed code comparison into it. A record of the other kind of run is refused. */
+export async function deployAndVerify(ctx: Ctx, path: string, opts: { newPlan: boolean; v3: boolean }, deps: DeployDeps = realDeps) {
+  const existing = loadRecordFor(path, ctx.live);
+  if (!opts.v3 && (opts.newPlan || !existing)) {
+    throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");
+  }
+  // (a v3 run that finds a v2 record is refused by deploy itself, which names OPS_DEPLOYMENT)
+  if (existing && !opts.v3) refuseV2Verify(path, existing);
+  return verifyAndSave(ctx, path, await deploy(ctx, path, opts, deps));
 }

@@ -38,6 +38,25 @@ export function loadRecord(path: string): DeploymentRecord | null {
   return existsSync(path) ? JSON.parse(readFileSync(path, "utf8"), reviver) : null;
 }
 
+/** The record at `path` for a --live run (`live`) or a rehearsal run on the local forks, or null when
+ * there is none yet. A record of the other kind is refused, so a --live action never works from a
+ * rehearsal record, nor a rehearsal action from a live one. */
+export function loadRecordFor(path: string, live: boolean): DeploymentRecord | null {
+  const rec = loadRecord(path);
+  const want = live ? "live" : "rehearsal";
+  if (rec && rec.target !== want) {
+    throw new Error(`${path} is a ${rec.target} record, but this is a ${live ? "--live" : "rehearsal (local forks)"} run; nothing done`);
+  }
+  return rec;
+}
+
+/** As loadRecordFor, for actions that need the deployment to exist. */
+export function needRecord(path: string, live: boolean): DeploymentRecord {
+  const rec = loadRecordFor(path, live);
+  if (!rec) throw new Error(`no ${live ? "live" : "rehearsal"} deployment record yet: run deploy${live ? " --live" : ""} first`);
+  return rec;
+}
+
 /** Writes a temp file and renames it over the record, so a crash never leaves half a record. */
 export function saveRecord(path: string, rec: DeploymentRecord): void {
   mkdirSync(dirname(path), { recursive: true });

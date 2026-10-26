@@ -233,7 +233,7 @@ describe("deploy v3", () => {
     expect(loadRecord(w.recordPath)!.plan).toMatchObject({ version: 3 });
   });
 
-  it("resumes an existing v3 record whatever it is asked to plan, and refuses a record of the other version", async () => {
+  it("refuses a record of the other version: a v3 record asked to plan v2, and a v2 record asked to plan v3", async () => {
     const w = world({ base: 0, bittensor: 0 });
     await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
     await expect(deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps)).rejects.toThrow(/holds a v3 plan.*OPS_DEPLOYMENT/);

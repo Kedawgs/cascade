@@ -1,5 +1,16 @@
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseArgs, UsageError } from "../src/args.ts";
+import { WALLET } from "../src/config.ts";
+import { deployAndVerify } from "../src/deploy.ts";
+import { buildPlan } from "../src/plan.ts";
+import { type DeploymentRecord, loadRecordFor, needRecord, saveRecord } from "../src/record.ts";
+import { refuseV2Verify, V2_VERIFY_REFUSED, verify, verifyAndSave } from "../src/verify.ts";
+import { fakeChain, SENT, v3Record } from "./fake-keeper.ts";
+
+const ALICE = "0x000000000000000000000000000000000000a11c";
 
 describe("cli arguments", () => {
   it("parses deploy --live --new-plan", () => {
@@ -24,5 +35,112 @@ describe("cli arguments", () => {
     expect(parseArgs(["wind-down", "--user", "0x1", "--user", "0x2"]).users).toEqual(["0x1", "0x2"]);
     expect(() => parseArgs(["launch"])).toThrow(UsageError);
     expect(() => parseArgs(["status", "--force"])).toThrow(UsageError);
+  });
+
+  it("parses rewards, claim and deliver", () => {
+    expect(parseArgs(["rewards"])).toEqual({ cmd: "rewards", live: false, users: [] });
+    expect(parseArgs(["rewards", "--live"])).toEqual({ cmd: "rewards", live: true, users: [] });
+    expect(parseArgs(["claim", "--live"])).toEqual({ cmd: "claim", live: true, users: [] });
+    expect(parseArgs(["deliver"])).toEqual({ cmd: "deliver", live: false, users: [] });
+    expect(parseArgs(["deliver", "--live", "--user", ALICE])).toEqual({ cmd: "deliver", live: true, users: [ALICE] });
+    // deliver sends a transaction naming the user: a mistyped address is refused here
+    expect(() => parseArgs(["deliver", "--user", "0x1"])).toThrow(UsageError);
+    expect(() => parseArgs(["claim", "--new-plan"])).toThrow(UsageError);
+  });
+});
+
+function v2Record(target: DeploymentRecord["target"] = "live"): DeploymentRecord {
+  const plan = buildPlan(0, 0, `0x${"44".repeat(32)}`);
+  return {
+    target,
+    wallet: WALLET,
+    createdAt: "",
+    plan,
+    done: Object.fromEntries(plan.steps.map((s) => [s.id, SENT])),
+    verify: { ok: true, failures: [], checkedAt: "2026-10-24T00:00:00Z" },
+  };
+}
+
+/** A complete, verified v2 record saved as test-2026-10.json, and a chain that records every request. */
+function v2World() {
+  const dir = mkdtempSync(join(tmpdir(), "ops-cli-"));
+  const path = join(dir, "test-2026-10.json");
+  saveRecord(path, v2Record());
+  const f = fakeChain([], {});
+  return { dir, path, before: readFileSync(path, "utf8"), ...f };
+}
+
+describe("v2 records are never verified again", () => {
+  it("names the reason", () => {
+    expect(V2_VERIFY_REFUSED).toBe("v2 contracts were verified at deploy; the build has since moved to v3");
+  });
+
+  it("refuses a v2 plan, or the v2 record's file, and lets a v3 record through", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-cli-"));
+    expect(() => refuseV2Verify(join(dir, "v3-test.json"), v2Record())).toThrow(V2_VERIFY_REFUSED);
+    expect(() => refuseV2Verify(join(dir, "test-2026-10.json"), v3Record())).toThrow(V2_VERIFY_REFUSED);
+    expect(() => refuseV2Verify(join(dir, "v3-test.json"), v3Record())).not.toThrow();
+  });
+
+  it("verify reads nothing and writes nothing for a v2 record", async () => {
+    const w = v2World();
+    const rec = needRecord(w.path, true);
+    await expect(verifyAndSave(w.ctx, w.path, rec)).rejects.toThrow(V2_VERIFY_REFUSED);
+    await expect(verify(w.ctx, rec)).rejects.toThrow(V2_VERIFY_REFUSED);
+    expect(w.calls).toEqual([]);
+    expect(readFileSync(w.path, "utf8")).toBe(w.before);
+  });
+
+  it("deploy --live on a v2 record, complete or not, refuses before deploying or verifying", async () => {
+    const w = v2World();
+    await expect(deployAndVerify(w.ctx, w.path, { newPlan: false, v3: false })).rejects.toThrow(V2_VERIFY_REFUSED);
+    expect(w.calls).toEqual([]);
+    expect(readFileSync(w.path, "utf8")).toBe(w.before);
+    expect(needRecord(w.path, true).verify).toMatchObject({ ok: true });
+
+    // an unfinished v2 record is refused before deploy reads a nonce or sends anything
+    const unfinished = v2Record();
+    delete unfinished.done.setPayoutDelay;
+    saveRecord(w.path, unfinished);
+    const saved = readFileSync(w.path, "utf8");
+    await expect(deployAndVerify(w.ctx, w.path, { newPlan: false, v3: false })).rejects.toThrow(V2_VERIFY_REFUSED);
+    // a v3 run that finds a v2 record is told to check OPS_DEPLOYMENT
+    await expect(deployAndVerify(w.ctx, w.path, { newPlan: false, v3: true })).rejects.toThrow(/holds a v2 plan.*OPS_DEPLOYMENT/);
+    expect(w.calls).toEqual([]);
+    expect(readFileSync(w.path, "utf8")).toBe(saved);
+  });
+
+  it("a new deployment, or a new plan, must be v3", async () => {
+    const w = v2World();
+    await expect(deployAndVerify(w.ctx, w.path, { newPlan: true, v3: false })).rejects.toThrow(/uses the v3 contracts/);
+    await expect(deployAndVerify(w.ctx, join(w.dir, "none.json"), { newPlan: false, v3: false })).rejects.toThrow(/uses the v3 contracts/);
+    expect(w.calls).toEqual([]);
+    expect(readFileSync(w.path, "utf8")).toBe(w.before);
+  });
+});
+
+describe("records stay with their own kind of run", () => {
+  it("a --live action refuses a rehearsal record, and a rehearsal action a live one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-cli-"));
+    const rehearsal = join(dir, "rehearsal-v3-test.json");
+    const live = join(dir, "v3-test.json");
+    saveRecord(rehearsal, v3Record("rehearsal"));
+    saveRecord(live, v3Record("live"));
+    expect(() => needRecord(rehearsal, true)).toThrow(/is a rehearsal record.*--live/);
+    expect(() => loadRecordFor(rehearsal, true)).toThrow(/is a rehearsal record/);
+    expect(() => needRecord(live, false)).toThrow(/is a live record.*local forks/);
+    expect(needRecord(rehearsal, false).target).toBe("rehearsal");
+    expect(needRecord(live, true).target).toBe("live");
+    expect(loadRecordFor(join(dir, "none.json"), true)).toBeNull();
+    expect(() => needRecord(join(dir, "none.json"), true)).toThrow(/no live deployment record yet/);
+  });
+
+  it("deploy --live refuses a rehearsal record before reading the chains", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-cli-"));
+    const path = join(dir, "v3-test.json");
+    saveRecord(path, v3Record("rehearsal"));
+    const f = fakeChain([], {});
+    await expect(deployAndVerify(f.ctx, path, { newPlan: false, v3: true })).rejects.toThrow(/is a rehearsal record/);
+    expect(f.calls).toEqual([]);
   });
 });

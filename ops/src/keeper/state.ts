@@ -2,20 +2,25 @@ import {
   type AbiEvent,
   type Address,
   decodeEventLog,
+  decodeFunctionResult,
   encodeEventTopics,
+  encodeFunctionData,
   type Hex,
   hexToBigInt,
   hexToNumber,
   numberToHex,
   parseAbi,
 } from "viem";
-import { type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
+import { BASE_V3, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
+import { isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, saveRecord } from "../record.ts";
-import { balanceOf, nonceOf, read } from "../rpc.ts";
-import { type Ctx, sendCall } from "../send.ts";
+import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
+import { type Ctx, describeRevert, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
+import { DELIVER_ABI, type DeliveryRead, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
 import type { PayoutLog } from "./payouts.ts";
+import { vaultColdkey } from "./rewards.ts";
 
 const FRONT = parseAbi([
   "struct Entry { address user; uint256 amount; }",
@@ -56,6 +61,38 @@ const OFFRAMP = parseAbi([
 const STAKING = parseAbi(["function getNominatorMinRequiredStake() view returns (uint256)"]);
 /** Every view the keeper reads, by contract (tests answer them with a fake chain). */
 export const KEEPER_READ_ABIS = { FRONT, VAULT, ADAPTER, ALPHA, OFFRAMP, STAKING };
+
+const REWARDS_VAULT = parseAbi([
+  "function stakeHotkey() view returns (bytes32)",
+  "function lastClaimAt(bytes32 hotkey) view returns (uint64)",
+  "function claimGasRequired() view returns (uint256)",
+]);
+const UNCLAIMED = parseAbi(["function getUnclaimedRootTaoByHotkey(bytes32 coldkey, bytes32 hotkey) view returns (uint256)"]);
+/** Uniswap's QuoterV2 is not a view (it quotes by reverting inside), but answers an eth_call. */
+const QUOTER = parseAbi([
+  "function quoteExactInput(bytes path, uint256 amountIn) returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)",
+]);
+const DELIVERY_FRONT = parseAbi([
+  "function deliveryOf(address user) view returns (uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
+  "function oracle() view returns (address)",
+  "function swapper() view returns (address)",
+  "function maxDeliverySlippageBps() view returns (uint16)",
+]);
+const STAKER = parseAbi([
+  "function deliveryRouteId() view returns (uint8)",
+  "function routes(uint8 id) view returns (uint8 kind, address router, bytes buyPath, bytes sellPath, bool active)",
+  "function swapFeeBps() view returns (uint16)",
+]);
+const ORACLE = parseAbi(["function usdcValue(uint256 taoWei) view returns (uint256)"]);
+/** The reads behind `rewards` and `claim`. */
+export const REWARD_READ_ABIS = { REWARDS_VAULT, UNCLAIMED, QUOTER };
+/** The reads (and the simulated deliver) behind `deliver`. */
+export const DELIVERY_READ_ABIS = { FRONT, DELIVERY_FRONT, STAKER, ORACLE, QUOTER, DELIVER: DELIVER_ABI, VAULT };
+/** The staker's RouterKind.UniswapV3: the only route kind QuoterV2 can price. */
+const UNISWAP_V3 = 0;
+
+/** The node answered the call with an error (a revert), as opposed to the request failing. */
+const reverted = (e: unknown) => e instanceof RpcError && e.code !== undefined;
 export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE"];
 const ED_RESERVE = 10n ** 12n;
 /** eth_getLogs block ranges the public RPCs accept: mainnet.base.org refuses more than 200 blocks. */
@@ -208,8 +245,77 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       rec.messages = [...(rec.messages ?? []), { ...m, at: new Date().toISOString() }];
       saveRecord(recordPath, rec);
     },
+    async readRewards() {
+      const hotkey = (await r("bittensor", a.vault, REWARDS_VAULT, "stakeHotkey")) as Hex;
+      const waitingWei = (await r("bittensor", PRECOMPILE.staking, UNCLAIMED, "getUnclaimedRootTaoByHotkey", [vaultColdkey(rec.plan), hotkey])) as bigint;
+      const lastClaimAt = Number(await r("bittensor", a.vault, REWARDS_VAULT, "lastClaimAt", [hotkey]));
+      const claimGasRequired = (await r("bittensor", a.vault, REWARDS_VAULT, "claimGasRequired")) as bigint;
+      const now = await blockTime("bittensor");
+      const gasPriceWei = await gasPriceOf(ctx.rpc, "bittensor");
+      const walletWei = await balanceOf(ctx.rpc, "bittensor", WALLET);
+      const [usdcPerTao] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ROUTE_0.sellPath, 10n ** 18n])) as readonly [bigint];
+      return { hotkey, waitingWei, lastClaimAt, now, taoPriceUsd: Number(usdcPerTao) / 1e6, claimGasRequired, gasPriceWei, walletWei };
+    },
+    async deliveryCandidates() {
+      if (!isPlanV3(rec.plan)) return [];
+      const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), await startBlock(ctx, rec, "bittensor"));
+      return uniqueUsers(redeemed.map((l) => l.args.user as Address));
+    },
+    async readDelivery(user) {
+      if (!isPlanV3(rec.plan)) throw new Error("USDC delivery needs a v3 deployment");
+      const fd = a.frontDoor;
+      const claimable = (await r("base", fd, FRONT, "claimable", [user])) as bigint;
+      const out: DeliveryRead = { user, claimable, pref: null, quoteUsdc: 0n, twapUsdc: 0n, slippageBps: 0, now: 0 };
+      if (claimable === 0n) return out;
+      const [minUsdcPerTao, deadline, destination] = (await r("base", fd, DELIVERY_FRONT, "deliveryOf", [user])) as readonly [bigint, bigint, number];
+      out.pref = minUsdcPerTao === 0n ? null : { minUsdcPerTao, deadline: Number(deadline), destination: Number(destination) };
+      out.now = await blockTime("base");
+      if (preferenceProblem(out.pref, out.now)) return out;
+      // the front door's own oracle and swapper: what deliver will use
+      const oracle = (await r("base", fd, DELIVERY_FRONT, "oracle")) as Address;
+      try {
+        out.twapUsdc = (await r("base", oracle, ORACLE, "usdcValue", [claimable])) as bigint;
+      } catch (e) {
+        if (!reverted(e)) throw e;
+        out.twapUsdc = null;
+        return out;
+      }
+      out.slippageBps = Number(await r("base", fd, DELIVERY_FRONT, "maxDeliverySlippageBps"));
+      const staker = (await r("base", fd, DELIVERY_FRONT, "swapper")) as Address;
+      const routeId = Number(await r("base", staker, STAKER, "deliveryRouteId"));
+      const [kind, , , sellPath] = (await r("base", staker, STAKER, "routes", [routeId])) as readonly [number, Address, Hex, Hex, boolean];
+      if (kind !== UNISWAP_V3) {
+        out.quoteError = `the staker's delivery route ${routeId} is not a Uniswap v3 route, the only kind this tool can quote; it waits`;
+        return out;
+      }
+      const feeBps = Number(await r("base", staker, STAKER, "swapFeeBps"));
+      try {
+        const [gross] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [sellPath, claimable])) as readonly [bigint];
+        out.quoteUsdc = netOfFee(gross, feeBps);
+      } catch (e) {
+        if (!reverted(e)) throw e;
+        out.quoteError = `Uniswap could not quote the sale (${describeRevert(ctx, e)}); it waits`;
+      }
+      return out;
+    },
+    async simulateDeliver(user, keeperMinOut) {
+      const data = encodeFunctionData({ abi: DELIVER_ABI, functionName: "deliver", args: [user, keeperMinOut] });
+      try {
+        const out = (await ctx.rpc.request("base", "eth_call", [{ from: WALLET, to: a.frontDoor, data }, "latest"])) as Hex;
+        return { ok: true, usdcOut: decodeFunctionResult({ abi: DELIVER_ABI, functionName: "deliver", data: out }) };
+      } catch (e) {
+        if (!reverted(e)) throw e;
+        return { ok: false, reason: describeRevert(ctx, e) };
+      }
+    },
     log: ctx.log,
   };
+
+  async function blockTime(chain: ChainName): Promise<number> {
+    const block = (await ctx.rpc.request(chain, "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };
+    return hexToNumber(block.timestamp);
+  }
+
   return deps;
 }
 

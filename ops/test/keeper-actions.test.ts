@@ -77,6 +77,17 @@ function deps(
     quoteClose: async () => 619_000_000_000_000n,
     payoutLogs: async () => [],
     batchInfo: async () => ({ payoutsHash: payoutsHash([]), count: 0 }),
+    // v2: no deliveries, and the rewards read is not part of these tests
+    deliveryCandidates: async () => [],
+    readDelivery: async () => {
+      throw new Error("no deliveries in v2");
+    },
+    simulateDeliver: async () => {
+      throw new Error("no deliveries in v2");
+    },
+    readRewards: async () => {
+      throw new Error("not read in these tests");
+    },
     log: () => undefined,
     send,
   };

@@ -21,6 +21,8 @@ export interface CallRequest {
   functionName: string;
   args: unknown[];
   value?: bigint;
+  /** Send with exactly this gas limit (refused if the estimate is above it), instead of 1.25× the estimate. */
+  gasLimit?: bigint;
 }
 
 export type StepId =

@@ -1,10 +1,13 @@
-import { encodeEventTopics, type Hex, parseAbi } from "viem";
-import type { ChainName } from "../config.ts";
+import { type Address, encodeEventTopics, type Hex, parseAbi } from "viem";
+import { CLAIM_POLICY, type ChainName, type ClaimPolicy } from "../config.ts";
+import { isPlanV3, type PlanV3 } from "../plan.ts";
 import type { DeploymentRecord } from "../record.ts";
-import type { Sent } from "../send.ts";
+import { type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
+import { checkDelivery, type DeliveryCheck, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
 import { type Action, decideNext, type State } from "./due.ts";
 import { type Payout, type PayoutLog, payoutsHash, rebuildPayouts } from "./payouts.ts";
+import { claimGasLimit, claimRequest, decideClaim, type RewardsDeps, upfrontShortfall } from "./rewards.ts";
 import type { StatusDetail } from "./status.ts";
 
 export type KeeperState = State & { detail: StatusDetail };
@@ -14,7 +17,7 @@ export type Message = { id: Hex; direction: "Base → Bittensor" | "Bittensor �
 /** A keeper transaction, with the bridge message it sent (close, payouts). */
 export type Done = Sent & { messageId?: Hex };
 
-export interface KeeperDeps {
+export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   readState(): Promise<KeeperState>;
   sendCall(req: CallRequest): Promise<Sent>;
   nonce(chain: ChainName): Promise<number>;
@@ -139,7 +142,54 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
   return withMessage(deps, sent, rec.plan.addresses.bitAdapter, "Bittensor → Base");
 }
 
-export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Action): Promise<Done> {
+/** Claims the vault's rewards on its stake hotkey, only when the claim policy says so; otherwise refuses
+ * with the policy's reason. Sent with a fixed gas limit the wallet must cover up front. */
+export async function claim(deps: KeeperDeps, rec: DeploymentRecord, policy: ClaimPolicy): Promise<Done> {
+  requireReady(rec);
+  const r = await deps.readRewards();
+  const d = decideClaim(r, policy);
+  if (!d.claim) throw new Error(`not claiming: ${d.reason}; nothing sent`);
+  const short = upfrontShortfall(r);
+  if (short) throw new Error(short);
+  return deps.sendCall(claimRequest(rec, r.hotkey, claimGasLimit(r.claimGasRequired), await deps.nonce("bittensor")));
+}
+
+/** One user's delivery: sent, with the USDC from the front door's Delivered event, or skipped with why. */
+export type Delivery = { user: Address } & (({ delivered: true; usdcOut?: bigint } & Sent) | { delivered: false; reason: string });
+
+/** The record's v3 plan; a v2 deployment has no USDC delivery. */
+export function deliveryPlan(rec: DeploymentRecord): PlanV3 {
+  if (!isPlanV3(rec.plan)) throw new Error("USDC delivery needs a v3 deployment (OPS_DEPLOYMENT=v3-…); this record's front door has none");
+  return rec.plan;
+}
+
+/** Checks one user (decision, then simulation) and delivers when both pass. A revert in the simulation
+ * or in the send's own estimate is a skip for a later round, never retried here. */
+export async function deliver(deps: KeeperDeps, rec: DeploymentRecord, user: Address): Promise<Delivery> {
+  requireReady(rec);
+  const plan = deliveryPlan(rec);
+  const c = await checkDelivery(deps, user);
+  if (!c.deliver || c.keeperMinOut === undefined) return { user, delivered: false, reason: c.reason };
+  let sent: Sent;
+  try {
+    sent = await deps.sendCall(deliverRequest(plan, user, c.keeperMinOut, await deps.nonce("base")));
+  } catch (e) {
+    if (e instanceof SendRefused && e.reason === "estimate") return { user, delivered: false, reason: `${e.message}; it waits for a later round` };
+    throw e;
+  }
+  return { user, delivered: true, ...sent, usdcOut: deliveredFrom(sent.logs, plan.addresses.frontDoor, user)?.usdcOut };
+}
+
+/** `pnpm ops deliver`: each user once, in order. */
+export async function deliverAll(deps: KeeperDeps, rec: DeploymentRecord, users: readonly Address[]): Promise<Delivery[]> {
+  requireReady(rec);
+  deliveryPlan(rec);
+  const out: Delivery[] = [];
+  for (const user of users) out.push(await deliver(deps, rec, user));
+  return out;
+}
+
+export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, { kind: "deliver" }>): Promise<Done> {
   if (a.kind === "close") return close(deps, rec);
   if (a.kind === "stake") return stake(deps, rec);
   return payouts(deps, rec, a.key);
@@ -147,27 +197,77 @@ export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Action): Promise
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Logs whether a reward claim is due when that changes; run never claims, and a failed read only waits. */
+async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean, last: boolean | undefined): Promise<boolean | undefined> {
+  try {
+    const d = decideClaim(await deps.readRewards(), policy);
+    if (d.claim !== last) {
+      deps.log(
+        d.claim
+          ? `Rewards: a claim is due (${d.reason}). run never claims: claim by hand with pnpm ops claim${live ? " --live" : ""}`
+          : `Rewards: no claim due (${d.reason})`,
+      );
+    }
+    return d.claim;
+  } catch (e) {
+    deps.log(`Could not read the rewards (${(e as Error).message}); trying again later`);
+    return last;
+  }
+}
+
 /** Does the next due thing every `intervalMs` until stopped; stops at the first failure rather than
- * retrying it. */
-export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: { intervalMs: number; maxTicks?: number }) {
+ * retrying it. A delivery goes ahead only when its simulation passes; one that would revert waits (its
+ * reason logged once) without holding up anything else. Reward claims are only reported, every
+ * `rewardsEveryTicks` rounds. */
+export async function runLoop(
+  deps: KeeperDeps,
+  rec: DeploymentRecord,
+  opts: { intervalMs: number; maxTicks?: number; policy?: ClaimPolicy; rewardsEveryTicks?: number; live?: boolean },
+) {
+  const waiting = new Map<string, string>();
+  let claimDue: boolean | undefined;
   for (let tick = 1; ; tick++) {
     let next: ReturnType<typeof decideNext>;
     try {
-      next = decideNext(await deps.readState());
+      const s = await deps.readState();
+      const checks: DeliveryCheck[] = [];
+      for (const user of await deps.deliveryCandidates()) checks.push(await checkDelivery(deps, user));
+      for (const c of checks) {
+        const key = c.user.toLowerCase();
+        if (c.deliver || c.claimable === 0n) waiting.delete(key);
+        else if (waiting.get(key) !== c.reason) {
+          deps.log(`Delivery to ${c.user} waits: ${c.reason}`);
+          waiting.set(key, c.reason);
+        }
+      }
+      const deliveries = checks.flatMap((c) => (c.deliver && c.keeperMinOut !== undefined ? [{ user: c.user, keeperMinOut: c.keeperMinOut }] : []));
+      next = decideNext({ ...s, deliveries });
     } catch (e) {
       deps.log(`Stopped: could not read the chains (${(e as Error).message})`);
       return;
     }
-    if (!next.action) {
-      deps.log(next.reason);
-    } else {
-      try {
-        const done = await act(deps, rec, next.action);
+    if (tick === 1 || tick % (opts.rewardsEveryTicks ?? 30) === 0) {
+      claimDue = await reportClaim(deps, opts.policy ?? CLAIM_POLICY, opts.live ?? false, claimDue);
+    }
+    const action = next.action;
+    try {
+      if (!action) {
+        deps.log(next.reason);
+      } else if (action.kind === "deliver") {
+        const d = await deliver(deps, rec, action.user);
+        if (d.delivered) {
+          const got = d.usdcOut === undefined ? "" : `, ${Number(d.usdcOut) / 1e6} USDC`;
+          deps.log(`Done: ${next.reason} (transaction ${d.hash}${got})`);
+        } else {
+          deps.log(`Skipped the delivery to ${d.user}: ${d.reason}`);
+        }
+      } else {
+        const done = await act(deps, rec, action);
         deps.log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
-      } catch (e) {
-        deps.log(`Stopped: ${(e as Error).message}`);
-        return;
       }
+    } catch (e) {
+      deps.log(`Stopped: ${(e as Error).message}`);
+      return;
     }
     if (opts.maxTicks && tick >= opts.maxTicks) return;
     await sleep(opts.intervalMs);

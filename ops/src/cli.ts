@@ -1,18 +1,19 @@
 import { join } from "node:path";
-import { type Address, formatEther, type Hex } from "viem";
+import { type Address, formatEther, formatUnits, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
-import { isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
-import { deploy } from "./deploy.ts";
-import { close, payouts, runLoop, stake } from "./keeper/actions.ts";
+import { claimPolicy, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
+import { deployAndVerify } from "./deploy.ts";
+import { claim, close, deliverAll, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
+import { formatRewards } from "./keeper/rewards.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
 import { preflight } from "./preflight.ts";
-import { type DeploymentRecord, loadRecord, saveRecord } from "./record.ts";
+import { loadRecordFor, needRecord as needRecordAt } from "./record.ts";
 import { rehearse } from "./rehearse.ts";
 import { createRpc } from "./rpc.ts";
 import { type Ctx, execFileRunner, unit } from "./send.ts";
-import { verify } from "./verify.ts";
+import { verifyAndSave } from "./verify.ts";
 import { writeWebEnv } from "./webconfig.ts";
 import { sweep, windDown } from "./winddown.ts";
 
@@ -28,19 +29,8 @@ function ctxFor(live: boolean): Ctx {
 /** The record of the deployment OPS_DEPLOYMENT names (without it, the v2 test deployment's). */
 const recordPath = (live: boolean) => recordFor(env, live);
 
-function needRecord(live: boolean): DeploymentRecord {
-  const rec = loadRecord(recordPath(live));
-  if (!rec) throw new Error(`no ${live ? "live" : "rehearsal"} deployment record yet: run deploy${live ? " --live" : ""} first`);
-  return rec;
-}
-
-async function checkAndSave(ctx: Ctx, path: string, rec: DeploymentRecord) {
-  rec.verify = await verify(ctx, rec);
-  saveRecord(path, rec);
-  if (rec.verify.ok) log("Read-back check: everything matches the plan");
-  else log(`Read-back check FAILED:\n  ${rec.verify.failures.join("\n  ")}`);
-  return rec.verify.ok;
-}
+/** The record for a --live run or a rehearsal run; a record of the other kind is refused. */
+const needRecord = (live: boolean) => needRecordAt(recordPath(live), live);
 
 async function run(a: Args): Promise<number> {
   switch (a.cmd) {
@@ -49,32 +39,24 @@ async function run(a: Args): Promise<number> {
       return 0;
     case "preflight": {
       const ctx = ctxFor(true);
-      const rehearsal = loadRecord(recordPath(false));
+      const rehearsal = loadRecordFor(recordPath(false), false);
       const budget = rehearsal ? computeBudget(await gatherBudgetInputs(ctx, rehearsal)) : undefined;
-      const r = await preflight(ctx, loadRecord(recordPath(true)), budget);
+      const r = await preflight(ctx, loadRecordFor(recordPath(true), true), budget);
       for (const line of r.lines) log(line);
       log(r.ok ? "Pre-flight: all clear" : "Pre-flight: fix the problems above before deploying");
       return r.ok ? 0 : 1;
     }
     case "budget": {
-      const rehearsal = loadRecord(recordPath(false));
+      const rehearsal = loadRecordFor(recordPath(false), false);
       if (!rehearsal) throw new Error("run `pnpm ops rehearse` first: the budget uses its measured gas");
       for (const line of formatBudget(computeBudget(await gatherBudgetInputs(ctxFor(true), rehearsal)))) log(line);
       return 0;
     }
-    case "deploy": {
-      const v3 = isV3Deployment(env);
-      // the v2 plan's front door no longer matches the contracts build, and planning anew under the
-      // v2 name would archive the record that status, wind-down and sweep still read
-      if (!v3 && (a.newPlan || !loadRecord(recordPath(a.live)))) {
-        throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");
-      }
-      const ctx = ctxFor(a.live);
-      const rec = await deploy(ctx, recordPath(a.live), { newPlan: a.newPlan ?? false, v3 });
-      return (await checkAndSave(ctx, recordPath(a.live), rec)) ? 0 : 1;
-    }
+    case "deploy":
+      return (await deployAndVerify(ctxFor(a.live), recordPath(a.live), { newPlan: a.newPlan ?? false, v3: isV3Deployment(env) })) ? 0 : 1;
     case "verify":
-      return (await checkAndSave(ctxFor(a.live), recordPath(a.live), needRecord(a.live))) ? 0 : 1;
+      // refuses a v2 record before reading anything: its contracts no longer match the build
+      return (await verifyAndSave(ctxFor(a.live), recordPath(a.live), needRecord(a.live))) ? 0 : 1;
     case "status": {
       const deps = keeperDeps(ctxFor(a.live), needRecord(a.live), recordPath(a.live), a.users as Address[]);
       const s = await deps.readState();
@@ -103,11 +85,44 @@ async function run(a: Args): Promise<number> {
       }
       return 0;
     }
+    case "rewards": {
+      const rec = needRecord(a.live);
+      const deps = keeperDeps(ctxFor(a.live), rec, recordPath(a.live));
+      for (const line of formatRewards(await deps.readRewards(), claimPolicy(env))) log(line);
+      return 0;
+    }
+    case "claim": {
+      const rec = needRecord(a.live);
+      const done = await claim(keeperDeps(ctxFor(a.live), rec, recordPath(a.live)), rec, claimPolicy(env));
+      // Bittensor refunds the unused part of the large gas limit: this is what the claim cost
+      log(`Done (transaction ${done.hash}, cost ${formatEther(done.costWei)} TAO). Set OPS_CLAIM_COST_TAO to that cost for the next decisions.`);
+      return 0;
+    }
+    case "deliver": {
+      const rec = needRecord(a.live);
+      deliveryPlan(rec);
+      const deps = keeperDeps(ctxFor(a.live), rec, recordPath(a.live));
+      const users = a.users.length ? (a.users as Address[]) : await deps.deliveryCandidates();
+      if (!users.length) log("No user has redeemed through the vault yet: nothing to deliver.");
+      for (const d of await deliverAll(deps, rec, users)) {
+        if (d.delivered) {
+          const got = d.usdcOut === undefined ? "" : `${formatUnits(d.usdcOut, 6)} USDC, `;
+          log(`${d.user}: delivered (${got}transaction ${d.hash}, cost ${formatEther(d.costWei)} ETH)`);
+        } else {
+          log(`${d.user}: not delivered: ${d.reason}`);
+        }
+      }
+      return 0;
+    }
     case "track":
       return (await trackMessage(ctxFor(a.live), needRecord(a.live), a.messageId as Hex)) === "SUCCESS" ? 0 : 1;
     case "run": {
       const rec = needRecord(a.live);
-      await runLoop(keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]), rec, { intervalMs: 60_000 });
+      await runLoop(keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]), rec, {
+        intervalMs: 60_000,
+        policy: claimPolicy(env),
+        live: a.live,
+      });
       return 1;
     }
     case "wind-down": {

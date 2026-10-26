@@ -1,3 +1,5 @@
+import { isAddress } from "viem";
+
 export class UsageError extends Error {}
 
 export const COMMANDS = [
@@ -10,6 +12,9 @@ export const COMMANDS = [
   "close",
   "stake",
   "payouts",
+  "rewards",
+  "claim",
+  "deliver",
   "track",
   "run",
   "wind-down",
@@ -38,8 +43,11 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   verify                     read every setting back and compare it with the plan
   status [--user 0x…]        what is happening on both chains
   close | stake | payouts    do one keeper action now
+  rewards                    the rewards waiting, a claim's cost, and whether a claim is due
+  claim                      claim the rewards, only when the claim policy says so
+  deliver [--user 0x…]       sell redeemed users' TAO for USDC where their minimum allows
   track <messageId>          follow a bridge message to its destination
-  run                        do whatever is due, every minute, until stopped (Ctrl-C)
+  run                        do whatever is due, every minute, until stopped (Ctrl-C); never claims
   wind-down --user 0x…       pause the front door once everything is paid out
   sweep --tao-to <SS58> --eth-to <0x…>   send the test wallet's leftovers home
   web-config                 write web/.env.local with the deployment's addresses for the site
@@ -68,5 +76,8 @@ export function parseArgs(argv: readonly string[]): Args {
   if (cmd === "deploy" && out.newPlan === undefined) out.newPlan = false;
   if (cmd === "track" && !out.messageId) throw new UsageError("track needs a message id");
   if (cmd === "sweep" && (!out.taoTo || !out.ethTo)) throw new UsageError("sweep needs both --tao-to and --eth-to");
+  // deliver sends a transaction naming each user
+  const bad = cmd === "deliver" ? out.users.find((u) => !isAddress(u, { strict: false })) : undefined;
+  if (bad) throw new UsageError(`--user ${bad} is not an address`);
   return out;
 }

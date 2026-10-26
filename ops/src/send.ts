@@ -159,7 +159,7 @@ async function checkSigner(ctx: Ctx): Promise<void> {
 let errorAbi: Abi | undefined;
 
 /** The contracts' custom errors, so a failed estimate can say which one. */
-function contractErrors(ctx: Ctx): Abi {
+function contractErrors(ctx: Pick<Ctx, "paths">): Abi {
   if (!errorAbi) {
     const names = ["CascadeVault", "CascadeFrontDoor", "CcipBaseAdapter", "CcipBittensorAdapter", "CascadeStaker", "CascadeTwapOracle"];
     errorAbi = names.flatMap((n) => {
@@ -173,7 +173,9 @@ function contractErrors(ctx: Ctx): Abi {
   return errorAbi;
 }
 
-function describeRevert(ctx: Ctx, e: unknown): string {
+/** A failed call's reason: a Cascade contract's error by name, Error(string) with its text (e.g. the
+ * router's "Too little received"), else the node's message. */
+export function describeRevert(ctx: Pick<Ctx, "paths">, e: unknown): string {
   const raw = e instanceof RpcError ? e.data : undefined;
   const data = typeof raw === "string" ? raw : (raw as { data?: unknown } | undefined)?.data;
   if (typeof data === "string" && data.startsWith("0x") && data.length >= 10) {
@@ -196,10 +198,10 @@ async function estimate(ctx: Ctx, chain: ChainName, tx: { from: Address; to?: Ad
   }
 }
 
-async function prepare(ctx: Ctx, chain: ChainName, label: string, gas: bigint) {
+async function prepare(ctx: Ctx, chain: ChainName, label: string, gas: bigint, gasLimit?: bigint) {
   const price = await gasPriceOf(ctx.rpc, chain);
   ctx.log(`${chainLabel(chain)}: ${label} — est. ${gas.toLocaleString("en-US")} gas ≈ ${formatEther(gas * price)} ${unit(chain)}`);
-  const limit = (gas * 125n + 99n) / 100n;
+  const limit = gasLimit ?? (gas * 125n + 99n) / 100n;
   const t = ctx.targets[chain];
   return [
     "--rpc-url",
@@ -300,7 +302,13 @@ export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   await guard(ctx, req.chain, req.nonce);
   const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args } as never);
   const gas = await estimate(ctx, req.chain, { from: WALLET, to: req.to, data, value: numberToHex(req.value ?? 0n) }, req.label);
-  const common = await prepare(ctx, req.chain, req.label, gas);
+  if (req.gasLimit !== undefined && gas > req.gasLimit) {
+    throw new SendRefused(
+      "estimate",
+      `${chainLabel(req.chain)}: ${req.label} needs ${gas.toLocaleString("en-US")} gas, more than the ${req.gasLimit.toLocaleString("en-US")} it is sent with; nothing sent`,
+    );
+  }
+  const common = await prepare(ctx, req.chain, req.label, gas, req.gasLimit);
   const fn = req.abi.find((i) => i.type === "function" && i.name === req.functionName) as AbiFunction;
   const args = [
     "send",

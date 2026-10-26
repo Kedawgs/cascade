@@ -1,8 +1,9 @@
+import { basename } from "node:path";
 import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
-import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, WALLET } from "./config.ts";
+import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, V2_DEPLOYMENT, WALLET } from "./config.ts";
 import { isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
-import type { DeploymentRecord, VerifyResult } from "./record.ts";
+import { type DeploymentRecord, saveRecord, type VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
 import { type Ctx, chainLabel } from "./send.ts";
@@ -245,9 +246,20 @@ const VAULT_EXTRA = parseAbi([
   "function addressMapping(address addr) view returns (bytes32)",
 ]);
 
-/** Reads everything back on both chains and compares it with the plan; saves nothing itself. */
+export const V2_VERIFY_REFUSED = "v2 contracts were verified at deploy; the build has since moved to v3";
+
+/** A v2 record (its plan, or the v2 record's file) is never read back again: its contracts no longer
+ * match the build, so the code comparison would fail, and a failed read-back saved into the record
+ * would stop v2's keeper close, stake and payouts during the wind-down. */
+export function refuseV2Verify(path: string, rec: DeploymentRecord): void {
+  if (!isPlanV3(rec.plan) || basename(path) === `${V2_DEPLOYMENT}.json`) throw new Error(V2_VERIFY_REFUSED);
+}
+
+/** Reads everything back on both chains and compares it with the plan; saves nothing itself. Refuses a
+ * v2 plan before reading anything. */
 export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyResult> {
   const plan = rec.plan;
+  if (!isPlanV3(plan)) throw new Error(V2_VERIFY_REFUSED);
   const exp = expectations(plan);
   const artifacts = new Map<string, Artifact>();
   const art = (name: string) => artifacts.get(name) ?? artifacts.set(name, loadArtifact(ctx.paths.contractsDir, name)).get(name)!;
@@ -298,4 +310,15 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
     if (m) failures.push(m);
   }
   return { ok: failures.length === 0, failures, checkedAt: new Date().toISOString() };
+}
+
+/** Reads everything back and saves the result into the record at `path`; a v2 record is refused before
+ * anything is read or written. */
+export async function verifyAndSave(ctx: Ctx, path: string, rec: DeploymentRecord): Promise<boolean> {
+  refuseV2Verify(path, rec);
+  rec.verify = await verify(ctx, rec);
+  saveRecord(path, rec);
+  if (rec.verify.ok) ctx.log("Read-back check: everything matches the plan");
+  else ctx.log(`Read-back check FAILED:\n  ${rec.verify.failures.join("\n  ")}`);
+  return rec.verify.ok;
 }

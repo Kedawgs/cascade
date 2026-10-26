@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Address, Hex } from "viem";
+import { type Address, type Hex, parseEther } from "viem";
 
 export type ChainName = "base" | "bittensor";
 
@@ -63,6 +63,8 @@ export const BASE_V3 = {
   /** Uniswap v3 WETH/USDC, 0.05% */
   WETH_USDC_POOL: "0xd0b53D9277642d899DF5C87A3966A349A798F224",
   SWAP_ROUTER_02: "0x2626664c2603336E57B271c5C0b26F421741e481",
+  /** Uniswap's QuoterV2: prices a swap path with an eth_call */
+  QUOTER_V2: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
 } as const satisfies Record<string, Address>;
 
 /** What a deployment plan reads from its settings (v2 and v3 alike). */
@@ -122,7 +124,30 @@ export const SETTINGS_V3 = {
   deliveryRouteId: 0,
 } as const;
 
-const V2_DEPLOYMENT = "test-2026-10";
+/** When a reward claim is worth its cost (spec, keeper and reward policy): when what is waiting is at
+ * least `claimMultiple` times the cost, or monthly while one claim costs under `monthlyClaimMaxUsd`. */
+export interface ClaimPolicy {
+  /** One claim's cost, in TAO wei. */
+  claimCostTao: bigint;
+  claimMultiple: bigint;
+  monthlyClaimMaxUsd: number;
+}
+
+/** τ0.057 is the docs' figure for a full basket, until a real claim is measured. */
+export const CLAIM_POLICY = { claimCostTao: 57n * 10n ** 15n, claimMultiple: 25n, monthlyClaimMaxUsd: 20 } as const satisfies ClaimPolicy;
+
+/** The claim policy, with a measured claim cost from OPS_CLAIM_COST_TAO (in TAO, e.g. 0.045) when set. */
+export function claimPolicy(env: Env): ClaimPolicy {
+  const cost = env.OPS_CLAIM_COST_TAO?.trim();
+  if (!cost) return { ...CLAIM_POLICY };
+  if (!/^\d+(\.\d{1,18})?$/.test(cost) || parseEther(cost) === 0n) {
+    throw new Error(`OPS_CLAIM_COST_TAO "${cost}" is not an amount of TAO above 0 (e.g. 0.045)`);
+  }
+  return { ...CLAIM_POLICY, claimCostTao: parseEther(cost) };
+}
+
+/** The v2 test deployment: its record is deployments/test-2026-10.json. */
+export const V2_DEPLOYMENT = "test-2026-10";
 
 /** The deployment the CLI works on: OPS_DEPLOYMENT (e.g. v3-test), else the v2 test deployment. It
  * names the record file, so it holds only letters, digits, '.', '_' and '-', from a letter or digit. */

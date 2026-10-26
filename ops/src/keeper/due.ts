@@ -1,4 +1,10 @@
-import { formatEther, type Hex } from "viem";
+import { type Address, formatEther, type Hex } from "viem";
+
+/** A USDC delivery that cleared the decision and its simulation this round. */
+export interface DueDelivery {
+  user: Address;
+  keeperMinOut: bigint;
+}
 
 export interface State {
   now: number;
@@ -14,13 +20,20 @@ export interface State {
     batches: { key: Hex; queuedAt: number; cursor: number; count: number }[];
     payoutDelay: number;
   };
+  /** v3: deliveries ready to send (the run loop fills it; reward claims are never an action) */
+  deliveries?: DueDelivery[];
 }
 
-export type Action = { kind: "payouts"; key: Hex } | { kind: "stake" } | { kind: "close" };
+export type Action =
+  | { kind: "payouts"; key: Hex }
+  | { kind: "deliver"; user: Address; keeperMinOut: bigint }
+  | { kind: "stake" }
+  | { kind: "close" };
 
 const hhmm = (unix: number) => `${new Date(unix * 1000).toISOString().slice(11, 16)} UTC`;
 
-/** The next thing the keeper should do: a due payout, then staking, then closing the batch. */
+/** The next thing the keeper should do: a due payout, then a USDC delivery, then staking, then closing
+ * the batch. */
 export function decideNext(s: State): { action: Action | null; reason: string } {
   const open = s.vault.batches.filter((b) => b.cursor < b.count);
   const due = open.filter((b) => s.now >= b.queuedAt + s.vault.payoutDelay);
@@ -28,6 +41,11 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
 
   if (due.length && !s.vault.paused && s.alphaVault.healthy) {
     return { action: { kind: "payouts", key: due[0].key }, reason: "a payout batch is past its delay" };
+  }
+  const ready = s.deliveries ?? [];
+  if (ready.length && !s.frontDoor.paused) {
+    const d = ready[0];
+    return { action: { kind: "deliver", user: d.user, keeperMinOut: d.keeperMinOut }, reason: `${d.user}'s TAO is ready to deliver as USDC` };
   }
   const stakeable = s.vault.available >= s.vault.minStakeWei;
   const bigEnough = s.vault.rootStake + s.vault.available >= s.vault.nominatorMinWei;

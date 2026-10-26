@@ -53,7 +53,8 @@ const detail: StatusDetail = {
 function state(over: Partial<State> = {}): State & { detail: StatusDetail } {
   return {
     now: T,
-    frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false },
+    frontDoor: { canClose: true, nDeposits: 1, nRedeems: 0, paused: false, openStart: T - 600, batchInterval: 600, full: false },
+    closeMaxWaitS: 0,
     alphaVault: { healthy: true },
     vault: { paused: false, available: 0n, minStakeWei: 2n * 10n ** 15n, rootStake: 0n, nominatorMinWei: 2n * 10n ** 16n, batches: [], payoutDelay: 3600 },
     ...over,
@@ -115,7 +116,7 @@ describe("keeper actions", () => {
   });
 
   it("wind-down skips what is already done, so it can be run again", async () => {
-    const d = deps(state({ frontDoor: { canClose: false, nDeposits: 0, nRedeems: 0, paused: true } }));
+    const d = deps(state({ frontDoor: { canClose: false, nDeposits: 0, nRedeems: 0, paused: true, openStart: T, batchInterval: 600, full: false } }));
     await windDown(d, rec);
     expect(d.send.mock.calls.map((c) => c[0].functionName)).toEqual(["setCaps"]);
   });

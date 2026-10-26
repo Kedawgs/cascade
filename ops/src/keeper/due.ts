@@ -6,9 +6,31 @@ export interface DueDelivery {
   keeperMinOut: bigint;
 }
 
+/** What closing the open batch earns and costs, in USDC units (6 decimals). */
+export interface CloseEconomics {
+  /** The batch's estimated Cascade fees: its deposit fees, the swap fee on its TAO, and its fee pot */
+  feesUsdc: bigint;
+  /** The close's bridge (CCIP) fee */
+  bridgeFeeUsdc: bigint;
+}
+
 export interface State {
   now: number;
-  frontDoor: { canClose: boolean; nDeposits: number; nRedeems: number; paused: boolean };
+  frontDoor: {
+    canClose: boolean;
+    nDeposits: number;
+    nRedeems: number;
+    paused: boolean;
+    /** When the open batch started (Base time), and the front door's batch interval, in seconds */
+    openStart: number;
+    batchInterval: number;
+    /** At one of the front door's list or value limits: it can close before its interval */
+    full: boolean;
+    /** Read only when the fees decide the close; null = a price or fee could not be read */
+    closeEconomics?: CloseEconomics | null;
+  };
+  /** The longest the keeper holds a batch with entries that can close, counted from its start */
+  closeMaxWaitS: number;
   alphaVault: { healthy: boolean };
   vault: {
     paused: boolean;
@@ -31,13 +53,56 @@ export type Action =
   | { kind: "close" };
 
 const hhmm = (unix: number) => `${new Date(unix * 1000).toISOString().slice(11, 16)} UTC`;
+const usd = (units: bigint) => `$${(Number(units) / 1e6).toFixed(2)}`;
+
+/** A batch that can close needs no fee check when it is full or at least `closeMaxWaitS` old. A max wait
+ * no longer than the batch interval has always passed once the batch can close (canClose and not full
+ * means the interval has passed on Base's clock), so the test cadence closes as soon as the contract
+ * allows, whichever chain's clock `now` comes from. */
+export function closesWithoutFees(s: { now: number; closeMaxWaitS: number; frontDoor: Pick<State["frontDoor"], "full" | "openStart" | "batchInterval"> }): boolean {
+  const fd = s.frontDoor;
+  return fd.full || s.closeMaxWaitS <= fd.batchInterval || s.now >= fd.openStart + s.closeMaxWaitS;
+}
+
+/** The fee estimate for a batch, in USDC units: a deposit fee per deposit, the swap fee on its TAO at
+ * the oracle's price, and its fee pot at ETH's price; and the close's bridge fee at ETH's price. Prices
+ * are USDC units per 1e18 wei. */
+export function closeEconomicsOf(r: {
+  nDeposits: number;
+  depositFeeUsdc: bigint;
+  totalDeposits: bigint;
+  taoPriceUsdc: bigint;
+  swapFeeBps: number;
+  feePot: bigint;
+  ethPriceUsdc: bigint;
+  bridgeFeeWei: bigint;
+}): CloseEconomics {
+  const E18 = 10n ** 18n;
+  const feesUsdc =
+    BigInt(r.nDeposits) * r.depositFeeUsdc + (r.totalDeposits * r.taoPriceUsdc * BigInt(r.swapFeeBps)) / 10_000n / E18 + (r.feePot * r.ethPriceUsdc) / E18;
+  return { feesUsdc, bridgeFeeUsdc: (r.bridgeFeeWei * r.ethPriceUsdc) / E18 };
+}
+
+/** Why a batch that can close is held: what it waits for. */
+function holdReason(s: State): string {
+  const until = `the open batch waits until ${hhmm(s.frontDoor.openStart + s.closeMaxWaitS)}`;
+  const e = s.frontDoor.closeEconomics;
+  if (e) return `${until} or until its fees cover the bridge fee (${usd(e.feesUsdc)} of ${usd(e.bridgeFeeUsdc)})`;
+  if (e === null) return `${until}: its fees or the bridge fee could not be priced, so it does not close early`;
+  return until;
+}
 
 /** The next thing the keeper should do: a due payout, then a USDC delivery, then staking, then closing
- * the batch. */
+ * the batch. A batch with entries closes once the front door allows it and it is full, at least
+ * `closeMaxWaitS` old, or its fees cover the bridge fee; fees that could not be read never close it
+ * early. */
 export function decideNext(s: State): { action: Action | null; reason: string } {
   const open = s.vault.batches.filter((b) => b.cursor < b.count);
   const due = open.filter((b) => s.now >= b.queuedAt + s.vault.payoutDelay);
-  const closable = s.frontDoor.canClose && s.frontDoor.nDeposits + s.frontDoor.nRedeems > 0;
+  const e = s.frontDoor.closeEconomics;
+  const canCloseEntries = s.frontDoor.canClose && s.frontDoor.nDeposits + s.frontDoor.nRedeems > 0;
+  const closable = canCloseEntries && (closesWithoutFees(s) || (!!e && e.feesUsdc >= e.bridgeFeeUsdc));
+  const held = canCloseEntries && !closable;
 
   if (due.length && !s.vault.paused && s.alphaVault.healthy) {
     return { action: { kind: "payouts", key: due[0].key }, reason: "a payout batch is past its delay" };
@@ -61,10 +126,10 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   }
   if (s.vault.paused && due.length) return { action: null, reason: "the vault is paused — not paying out" };
   if (s.frontDoor.paused && closable) return { action: null, reason: "the front door is paused — not closing the batch" };
-  if (open.length) {
-    const next = Math.min(...open.map((b) => b.queuedAt + s.vault.payoutDelay));
-    return { action: null, reason: `nothing due: next payout at ${hhmm(next)}` };
-  }
+  const waits: string[] = [];
+  if (open.length) waits.push(`next payout at ${hhmm(Math.min(...open.map((b) => b.queuedAt + s.vault.payoutDelay)))}`);
+  if (held) waits.push(holdReason(s));
+  if (waits.length) return { action: null, reason: `nothing due: ${waits.join("; ")}` };
   if (stakeable && !bigEnough) {
     return {
       action: null,

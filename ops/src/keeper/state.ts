@@ -5,6 +5,7 @@ import {
   decodeFunctionResult,
   encodeEventTopics,
   encodeFunctionData,
+  encodePacked,
   type Hex,
   hexToBigInt,
   hexToNumber,
@@ -12,13 +13,14 @@ import {
   parseAbi,
 } from "viem";
 import { BASE_V3, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
-import { isPlanV3, ROUTE_0 } from "../plan.ts";
+import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, saveRecord } from "../record.ts";
 import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
+import { type CloseEconomics, closeEconomicsOf, closesWithoutFees, type State } from "./due.ts";
 import type { PayoutLog } from "./payouts.ts";
 import { vaultColdkey } from "./rewards.ts";
 
@@ -30,6 +32,12 @@ const FRONT = parseAbi([
   "function paused() view returns (bool)",
   "function claimable(address) view returns (uint256)",
   "function depositCap() view returns (uint256)",
+  "function openBatch() view returns (uint64 id, uint64 start, uint256 totalDeposits, uint256 feePot, uint256 nDeposits, uint256 nRedeems)",
+  "function batchInterval() view returns (uint64)",
+  "function maxDeposits() view returns (uint32)",
+  "function maxRedeems() view returns (uint32)",
+  "function maxBatchValue() view returns (uint256)",
+  "function minDeposit() view returns (uint256)",
   "event BatchClosed(uint64 indexed id, uint256 totalDeposits, uint256 nDeposits, uint256 nRedeems, uint256 fee, uint256 potUsed)",
 ]);
 const VAULT = parseAbi([
@@ -59,8 +67,6 @@ const OFFRAMP = parseAbi([
   "event ExecutionStateChanged(uint64 indexed sourceChainSelector, uint64 indexed sequenceNumber, bytes32 indexed messageId, uint8 state, bytes returnData)",
 ]);
 const STAKING = parseAbi(["function getNominatorMinRequiredStake() view returns (uint256)"]);
-/** Every view the keeper reads, by contract (tests answer them with a fake chain). */
-export const KEEPER_READ_ABIS = { FRONT, VAULT, ADAPTER, ALPHA, OFFRAMP, STAKING };
 
 const REWARDS_VAULT = parseAbi([
   "function stakeHotkey() view returns (bytes32)",
@@ -82,14 +88,21 @@ const STAKER = parseAbi([
   "function deliveryRouteId() view returns (uint8)",
   "function routes(uint8 id) view returns (uint8 kind, address router, bytes buyPath, bytes sellPath, bool active)",
   "function swapFeeBps() view returns (uint16)",
+  "function depositFeeUsdc() view returns (uint256)",
 ]);
 const ORACLE = parseAbi(["function usdcValue(uint256 taoWei) view returns (uint256)"]);
+/** Every view the keeper reads, by contract (tests answer them with a fake chain): the close's
+ * economics read the front door's oracle and staker and quote ETH on Uniswap. */
+export const KEEPER_READ_ABIS = { FRONT, VAULT, ADAPTER, ALPHA, OFFRAMP, STAKING, DELIVERY_FRONT, STAKER, ORACLE, QUOTER };
 /** The reads behind `rewards` and `claim`. */
 export const REWARD_READ_ABIS = { REWARDS_VAULT, UNCLAIMED, QUOTER };
 /** The reads (and the simulated deliver) behind `deliver`. */
 export const DELIVERY_READ_ABIS = { FRONT, DELIVERY_FRONT, STAKER, ORACLE, QUOTER, DELIVER: DELIVER_ABI, VAULT };
 /** The staker's RouterKind.UniswapV3: the only route kind QuoterV2 can price. */
 const UNISWAP_V3 = 0;
+/** WETH -0.05%-> USDC: the pool the staker's route and the oracle use, quoted for ETH's price. */
+const ETH_USDC_PATH = encodePacked(["address", "uint24", "address"], [BASE_V3.WETH, 500, BASE_V3.USDC]);
+const E18 = 10n ** 18n;
 
 /** The call really failed in the contract: JSON-RPC code 3, revert data, or a message that says so
  * (a revert, out of gas, an invalid opcode). A node that
@@ -216,9 +229,12 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const block = (await ctx.rpc.request("bittensor", "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;
       const rootStake = ((await r("bittensor", a.vault, VAULT, "rootStakeRao")) as bigint) * 10n ** 9n;
+      const now = hexToNumber(block.timestamp);
+      const { frontDoor, closeMaxWaitS } = await openBatchState(now, deposits, redeems, canClose, fdPaused);
       return {
-        now: hexToNumber(block.timestamp),
-        frontDoor: { canClose, nDeposits: deposits.length, nRedeems: redeems.length, paused: fdPaused },
+        now,
+        frontDoor,
+        closeMaxWaitS,
         alphaVault: { healthy },
         vault: {
           paused: (await r("bittensor", a.vault, VAULT, "paused")) as boolean,
@@ -247,12 +263,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     sendCall: (req) => sendCall(ctx, req),
     nonce: (chain) => nonceOf(ctx.rpc, chain, WALLET),
-    async quoteClose(s) {
-      // the batch id is a fixed-size word, so its value does not change the message size or the fee
-      const total = s.detail.openDeposits.reduce((t, e) => t + e.amount, 0n);
-      const message = encodeBatch(1n, s.detail.openDeposits, s.detail.openRedeems);
-      return (await r("base", a.baseAdapter, ADAPTER, "quoteFee", [BigInt(LIVE.bittensor.CHAIN_ID), a.vault, message, total])) as bigint;
-    },
+    quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
       const from = await startBlock(ctx, rec, "bittensor");
       const bounced = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "DepositBounced"), from);
@@ -355,6 +366,76 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     log: ctx.log,
   };
+
+  /** The close's bridge fee in ETH wei, as the adapter quotes it now. */
+  async function closeFeeWei(deposits: readonly Entry[], redeems: readonly Entry[]): Promise<bigint> {
+    // the batch id is a fixed-size word, so its value does not change the message size or the fee
+    const total = deposits.reduce((t, e) => t + e.amount, 0n);
+    const message = encodeBatch(1n, deposits, redeems);
+    return (await r("base", a.baseAdapter, ADAPTER, "quoteFee", [BigInt(LIVE.bittensor.CHAIN_ID), a.vault, message, total])) as bigint;
+  }
+
+  /** The open batch as the close rule sees it, with the record's max wait. Its limits are read only when
+   * it has entries and can close, and its prices only when they decide the close (it can close, is
+   * neither full nor past the max wait), so the test cadence never reads them. */
+  async function openBatchState(
+    now: number,
+    deposits: readonly Entry[],
+    redeems: readonly Entry[],
+    canClose: boolean,
+    paused: boolean,
+  ): Promise<{ frontDoor: State["frontDoor"]; closeMaxWaitS: number }> {
+    const fd = a.frontDoor;
+    const [, start, totalDeposits, feePot] = (await r("base", fd, FRONT, "openBatch")) as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+    const batchInterval = Number(await r("base", fd, FRONT, "batchInterval"));
+    const closeMaxWaitS = planMaxWait(rec.plan);
+    const entries = deposits.length + redeems.length > 0;
+    let full = false;
+    if (entries && canClose) {
+      // canClose's own limits, without its clock: full before or after the interval
+      const maxDeposits = Number(await r("base", fd, FRONT, "maxDeposits"));
+      const maxRedeems = Number(await r("base", fd, FRONT, "maxRedeems"));
+      const maxBatchValue = (await r("base", fd, FRONT, "maxBatchValue")) as bigint;
+      const minDeposit = (await r("base", fd, FRONT, "minDeposit")) as bigint;
+      full =
+        deposits.length >= maxDeposits ||
+        redeems.length >= maxRedeems ||
+        totalDeposits >= maxBatchValue ||
+        maxBatchValue - totalDeposits < minDeposit;
+    }
+    const frontDoor: State["frontDoor"] = {
+      canClose,
+      nDeposits: deposits.length,
+      nRedeems: redeems.length,
+      paused,
+      openStart: Number(start),
+      batchInterval,
+      full,
+    };
+    if (entries && canClose && !closesWithoutFees({ now, closeMaxWaitS, frontDoor })) {
+      frontDoor.closeEconomics = await closeEconomics(deposits, redeems, totalDeposits, feePot);
+    }
+    return { frontDoor, closeMaxWaitS };
+  }
+
+  /** The batch's estimated fees and its close's bridge fee, in USDC units, at the front door's oracle's
+   * TAO price and Uniswap's WETH/USDC price, with the front door's staker's fees. null when any of those
+   * reads fails (a revert or a node that didn't answer): the batch then waits for its max wait, never
+   * closing early on a guess. */
+  async function closeEconomics(deposits: readonly Entry[], redeems: readonly Entry[], totalDeposits: bigint, feePot: bigint): Promise<CloseEconomics | null> {
+    try {
+      const oracle = (await r("base", a.frontDoor, DELIVERY_FRONT, "oracle")) as Address;
+      const staker = (await r("base", a.frontDoor, DELIVERY_FRONT, "swapper")) as Address;
+      const taoPriceUsdc = (await r("base", oracle, ORACLE, "usdcValue", [E18])) as bigint;
+      const depositFeeUsdc = (await r("base", staker, STAKER, "depositFeeUsdc")) as bigint;
+      const swapFeeBps = Number(await r("base", staker, STAKER, "swapFeeBps"));
+      const [ethPriceUsdc] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ETH_USDC_PATH, E18])) as readonly [bigint];
+      const bridgeFeeWei = await closeFeeWei(deposits, redeems);
+      return closeEconomicsOf({ nDeposits: deposits.length, depositFeeUsdc, totalDeposits, taoPriceUsdc, swapFeeBps, feePot, ethPriceUsdc, bridgeFeeWei });
+    } catch {
+      return null;
+    }
+  }
 
   async function blockTime(chain: ChainName): Promise<number> {
     const block = (await ctx.rpc.request(chain, "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };

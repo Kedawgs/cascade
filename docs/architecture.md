@@ -173,13 +173,13 @@ vesting). The v3 test deployment stakes with tao.bot (`reports/Cascade v3 root v
 ## When a batch closes (launch cadence)
 
 A batch close costs about $1.40 of bridge fee whatever its size, and Cascade earns $0.05 plus 0.15%
-on each deposit (plus the roughly $0.23 unstake request fee, which goes into the pot). So about $900
-of deposits in one batch pays for its own crossing. Under the launch cadence the keeper closes a
+on each deposit (plus the roughly $0.23 unstake request fee, which goes into the pot). So about $800-900
+of deposits (less when unstake requests have paid into the pot) in one batch pays for its own crossing. Under the launch cadence the keeper closes a
 non-empty batch once the contract allows it (at least the 1-hour interval) and the batch is full, or
 24 hours old, or its estimated Cascade fees are at least its bridge fee. If a price or fee read
 fails it never closes early; the 24-hour rule still does. It also "rolls" an empty batch (a close
 with no value, which costs only a little Base gas) so the 24-hour wait counts from about the first
-deposit. Quiet days cost about one close a day. The contract caps the interval at 7 days
+deposit. A quiet day costs at most one bridge crossing (about $1.40, only if there was at least one deposit or unstake) plus up to about 24 tiny Base transactions to keep the batch clock fresh (pennies in total, no bridge fee). The contract caps the interval at 7 days
 (`MAX_BATCH_INTERVAL`). The site's "closes by about" estimates use the later of the interval and
 the keeper's maximum wait.
 

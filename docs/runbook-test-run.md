@@ -255,7 +255,7 @@ The test settings above (10-minute batches, close as soon as allowed) are the de
 deployment is chosen once, when a new v3 plan is made: set `$env:OPS_CADENCE = "launch"` before
 `--new-plan` (unset or `test` is the test cadence; any other value is refused). The choice is stored
 in the record, and existing records are `test` and behave exactly as before. Launch means a 1-hour
-minimum batch interval, a 24-hour payout delay and a keeper maximum wait of 24 hours. Treasury,
+minimum batch interval, a 24-hour payout delay and a keeper maximum wait of 24 hours. `deploy` also refuses an invalid `OPS_CADENCE` on an existing record; the value is only used when a new plan is made. Treasury,
 owner and caps are unchanged, so a real launch still needs its own treasury, a timelock owner and a
 caps decision.
 

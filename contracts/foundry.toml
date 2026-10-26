@@ -24,4 +24,4 @@ fail_on_revert = false
 
 [fmt]
 # Vendored Chainlink files must stay byte-identical to the package.
-ignore = ["src/vendor/**", "test/vendor/**"]
+ignore = ["src/vendor/**", "src/vendor/uniswap/**", "test/vendor/**"]

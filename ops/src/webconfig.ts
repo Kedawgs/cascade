@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Hex } from "viem";
-import { isPlanV3 } from "./plan.ts";
+import { cadenceOf, closeMaxWaitS, isPlanV3 } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { encodeSs58 } from "./ss58.ts";
 
@@ -24,6 +24,7 @@ export function webEnv(rec: DeploymentRecord): string {
     `NEXT_PUBLIC_CASCADE_BIT_BLOCK=${bit.block}`,
     `NEXT_PUBLIC_CASCADE_VAULT_SS58=${encodeSs58(coldkey)}`,
     `NEXT_PUBLIC_CASCADE_HOTKEY_SS58=${encodeSs58(hotkey)}`,
+    ...(cadenceOf(plan) === "launch" ? [`NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=${closeMaxWaitS(plan)}`] : []),
     "",
   ].join("\n");
 }

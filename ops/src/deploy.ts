@@ -1,5 +1,5 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
-import { type ChainName, PRECOMPILE, SETTINGS_V3, WALLET } from "./config.ts";
+import { type Cadence, type ChainName, PRECOMPILE, SETTINGS_V3, WALLET } from "./config.ts";
 import { buildPlan, buildPlanV3, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf } from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, loadRecordFor, saveRecord } from "./record.ts";
 import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
@@ -182,7 +182,7 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
  * existing record keeps its own plan. A record of the other version, or of the other kind of run (a
  * rehearsal record for a --live run, or a live one on the forks), is refused before anything else,
  * archiving included. */
-export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v3?: boolean }, deps: DeployDeps = realDeps) {
+export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v3?: boolean; cadence?: Cadence }, deps: DeployDeps = realDeps) {
   const v3 = opts.v3 ?? false;
   let rec = loadRecordFor(path, ctx.live);
   if (rec && isPlanV3(rec.plan) !== v3) {
@@ -203,7 +203,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
       target: ctx.live ? "live" : "rehearsal",
       wallet: WALLET,
       createdAt: new Date().toISOString(),
-      plan: v3 ? buildPlanV3(baseNonce, bitNonce, coldkey) : buildPlan(baseNonce, bitNonce, coldkey),
+      plan: v3 ? buildPlanV3(baseNonce, bitNonce, coldkey, opts.cadence) : buildPlan(baseNonce, bitNonce, coldkey),
       done: {},
     };
     saveRecord(path, rec);
@@ -268,7 +268,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
  * anew under the v2 name would archive the record that status, wind-down and sweep still read. An
  * existing v2 record is refused too, before anything is read or sent: resuming it would re-run the
  * read-back and save a failed code comparison into it. A record of the other kind of run is refused. */
-export async function deployAndVerify(ctx: Ctx, path: string, opts: { newPlan: boolean; v3: boolean }, deps: DeployDeps = realDeps) {
+export async function deployAndVerify(ctx: Ctx, path: string, opts: { newPlan: boolean; v3: boolean; cadence?: Cadence }, deps: DeployDeps = realDeps) {
   const existing = loadRecordFor(path, ctx.live);
   if (!opts.v3 && (opts.newPlan || !existing)) {
     throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");

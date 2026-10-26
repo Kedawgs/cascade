@@ -323,3 +323,20 @@ describe("effectPresent v3", () => {
     expect(await effectPresent(ctxWith(configured), plan, step("stakerSetDeliveryRoute"))).toBe(false);
   });
 });
+
+describe("deploy cadence", () => {
+  it("plans a new v3 record with the chosen cadence, and a resumed record keeps its own", async () => {
+    const w = world({ base: 4, bittensor: 9 });
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch" }, w.deps);
+    expect(rec.plan).toMatchObject({ version: 3, cadence: "launch" });
+    // a later run reads the record, not the option
+    const again = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "test" }, w.deps);
+    expect(again.plan).toMatchObject({ cadence: "launch" });
+  });
+
+  it("a new v3 record without a cadence has none stored", async () => {
+    const w = world({ base: 4, bittensor: 9 });
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    expect("cadence" in rec.plan).toBe(false);
+  });
+});

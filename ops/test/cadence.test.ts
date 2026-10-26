@@ -1,0 +1,76 @@
+import type { Hex } from "viem";
+import { describe, expect, it } from "vitest";
+import { CADENCE, cadenceFromEnv, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "../src/config.ts";
+import { buildPlan, buildPlanV3, cadenceOf, closeMaxWaitS, settingsOf } from "../src/plan.ts";
+import type { DeploymentRecord } from "../src/record.ts";
+import { expectations } from "../src/verify.ts";
+import { webEnv } from "../src/webconfig.ts";
+
+const COLDKEY: Hex = "0x9214633d20bb6247cb0475ea91ae10665a084404a04147ea48f673571263ad68";
+const field = (plan: ReturnType<typeof buildPlanV3>, contract: string, f: string) =>
+  expectations(plan).find((e) => e.contract === contract && e.field === f)?.expected;
+
+describe("cadence", () => {
+  it("reads the cadence from the environment: only OPS_CADENCE=launch means launch", () => {
+    expect(cadenceFromEnv({ OPS_CADENCE: "launch" })).toBe("launch");
+    expect(cadenceFromEnv({ OPS_CADENCE: " launch " })).toBe("launch");
+    for (const v of [undefined, "", "test", "Launch", "fast"]) expect(cadenceFromEnv({ OPS_CADENCE: v })).toBe("test");
+  });
+
+  it("launch settings change only the batch interval and the payout delay", () => {
+    expect(SETTINGS_V3_LAUNCH).toEqual({ ...SETTINGS_V3, batchInterval: 3_600, payoutDelay: 86_400 });
+    expect(CADENCE.launch.closeMaxWaitS).toBe(86_400);
+  });
+
+  it("a plan without a cadence is a test plan, v2 and v3 alike, and keeps SETTINGS_V3 exactly", () => {
+    const v3 = buildPlanV3(0, 40, COLDKEY);
+    expect("cadence" in v3).toBe(false);
+    expect(cadenceOf(v3)).toBe("test");
+    expect(cadenceOf(buildPlan(0, 0, COLDKEY))).toBe("test");
+    expect(settingsOf(v3)).toBe(SETTINGS_V3);
+    expect(settingsOf(buildPlan(0, 0, COLDKEY))).toBe(SETTINGS);
+    expect(buildPlanV3(0, 40, COLDKEY, "test")).toEqual(v3);
+    expect(field(v3, "CascadeFrontDoor", "batchInterval")).toBe(600n);
+    expect(field(v3, "CascadeVault", "payoutDelay")).toBe(3600n);
+  });
+
+  it("the keeper's close wait is the batch interval for test and a day for launch", () => {
+    expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY))).toBe(600);
+    expect(closeMaxWaitS(buildPlan(0, 0, COLDKEY))).toBe(600);
+    expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY, "launch"))).toBe(86_400);
+  });
+
+  it("a launch plan stores its cadence, builds its steps with the launch values and verifies against them", () => {
+    const plan = buildPlanV3(2, 40, COLDKEY, "launch");
+    expect(plan.cadence).toBe("launch");
+    expect(cadenceOf(plan)).toBe("launch");
+    expect(settingsOf(plan)).toBe(SETTINGS_V3_LAUNCH);
+    const fd = plan.steps.find((s) => s.id === "frontDoor")!;
+    expect(fd.args[6]).toBe(3_600n);
+    const delay = plan.steps.find((s) => s.id === "setPayoutDelay")!;
+    expect(delay.args).toEqual([86_400n]);
+    expect(delay.label).toBe("set the payout delay to 24 hours");
+    expect(field(plan, "CascadeFrontDoor", "batchInterval")).toBe(3_600n);
+    expect(field(plan, "CascadeVault", "payoutDelay")).toBe(86_400n);
+    // treasury and ownership are unchanged
+    expect(field(plan, "CascadeStaker", "treasury")).toBe(WALLET);
+    // nothing else differs from the test plan
+    const test = buildPlanV3(2, 40, COLDKEY);
+    expect(plan.steps.map((s) => s.id)).toEqual(test.steps.map((s) => s.id));
+    expect(plan.addresses).toEqual(test.addresses);
+  });
+
+  it("web-config adds the max-wait line for launch plans only", () => {
+    const rec = (plan: DeploymentRecord["plan"]): DeploymentRecord => ({
+      target: "live",
+      wallet: WALLET,
+      createdAt: "",
+      plan,
+      done: { bitAdapter: { hash: `0x${"ab".repeat(32)}` as Hex, block: 5, gasUsed: 1n, costWei: 1n } },
+      verify: { ok: true, failures: [], checkedAt: "" },
+    });
+    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch")))).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400\n");
+    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY)))).not.toContain("MAX_WAIT");
+    expect(webEnv(rec(buildPlan(0, 0, COLDKEY)))).not.toContain("MAX_WAIT");
+  });
+});

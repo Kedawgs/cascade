@@ -129,6 +129,21 @@ export const SETTINGS_V3 = {
   deliveryRouteId: 0,
 } as const;
 
+/** How fast a deployment runs: "test" is SETTINGS_V3 as is; "launch" batches hourly and pays out after a
+ * day, and the keeper may wait a day before closing a thin batch. Chosen when a v3 plan is made. */
+export type Cadence = "test" | "launch";
+
+export const SETTINGS_V3_LAUNCH = { ...SETTINGS_V3, batchInterval: 3_600, payoutDelay: 86_400 } as const;
+
+/** The keeper's longest wait before closing a batch: null = the plan's batch interval. */
+export const CADENCE = {
+  test: { closeMaxWaitS: null },
+  launch: { closeMaxWaitS: 86_400 },
+} as const satisfies Record<Cadence, { closeMaxWaitS: number | null }>;
+
+/** OPS_CADENCE=launch makes a new v3 plan a launch plan; anything else or unset is test. */
+export const cadenceFromEnv = (env: Env): Cadence => (env.OPS_CADENCE?.trim() === "launch" ? "launch" : "test");
+
 /** When a reward claim is worth its cost (spec, keeper and reward policy): when what is waiting is at
  * least `claimMultiple` times the cost, or monthly while one claim costs under `monthlyClaimMaxUsd`. */
 export interface ClaimPolicy {

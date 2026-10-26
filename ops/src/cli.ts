@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
-import { claimPolicy, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
+import { cadenceFromEnv, claimPolicy, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { formatRewards } from "./keeper/rewards.ts";
@@ -52,7 +52,7 @@ async function run(a: Args): Promise<number> {
       return 0;
     }
     case "deploy":
-      return (await deployAndVerify(ctxFor(a.live), recordPath(a.live), { newPlan: a.newPlan ?? false, v3: isV3Deployment(env) })) ? 0 : 1;
+      return (await deployAndVerify(ctxFor(a.live), recordPath(a.live), { newPlan: a.newPlan ?? false, v3: isV3Deployment(env), cadence: cadenceFromEnv(env) })) ? 0 : 1;
     case "verify":
       // refuses a v2 record before reading anything: its contracts no longer match the build
       return (await verifyAndSave(ctxFor(a.live), recordPath(a.live), needRecord(a.live))) ? 0 : 1;

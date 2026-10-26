@@ -1,5 +1,5 @@
 import { type Address, encodePacked, formatEther, getContractAddress, type Hex, parseAbi } from "viem";
-import { BASE_V3, type DeploySettings, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, WALLET } from "./config.ts";
+import { BASE_V3, type DeploySettings, CADENCE, type Cadence, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "./config.ts";
 import type { PlannedStep } from "./types.ts";
 
 export interface Plan {
@@ -13,13 +13,21 @@ export interface Plan {
  * oracle and the staker. A v2 record's plan has no `version`. */
 export interface PlanV3 extends Omit<Plan, "addresses"> {
   version: 3;
+  /** Absent = "test". Fixed when the plan is made; later commands read it from the record. */
+  cadence?: Cadence;
   addresses: Plan["addresses"] & { oracle: Address; staker: Address };
 }
 
 export const isPlanV3 = (plan: Plan | PlanV3): plan is PlanV3 => "version" in plan && plan.version === 3;
 
 /** The settings a plan was built with. */
-export const settingsOf = (plan: Plan | PlanV3): DeploySettings => (isPlanV3(plan) ? SETTINGS_V3 : SETTINGS);
+export const settingsOf = (plan: Plan | PlanV3): DeploySettings =>
+  isPlanV3(plan) ? (cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3) : SETTINGS;
+
+export const cadenceOf = (plan: Plan | PlanV3): Cadence => (isPlanV3(plan) && plan.cadence === "launch" ? "launch" : "test");
+
+/** The keeper's longest wait, in seconds, before closing a batch: the plan's batch interval for test. */
+export const closeMaxWaitS = (plan: Plan | PlanV3): number => CADENCE[cadenceOf(plan)].closeMaxWaitS ?? settingsOf(plan).batchInterval;
 
 export const CONFIG_ABI = {
   fundReserve: parseAbi(["function fundReserve() payable"]),
@@ -207,8 +215,8 @@ export function buildPlan(baseNonce: number, bitNonce: number, vaultColdkey: Hex
  * front door's keeper, swapper, oracle and batch value and the staker's route, delivery route and fees.
  * Then Bittensor as in v2, staking with tao.bot, and the vault's reward cut to the treasury. The test
  * wallet is owner, guardian, keeper and treasury. */
-export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: Hex): PlanV3 {
-  const s = SETTINGS_V3;
+export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: Hex, cadence: Cadence = "test"): PlanV3 {
+  const s = cadence === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
   const addresses = {
     baseAdapter: at(baseNonce),
     oracle: at(baseNonce + 1),
@@ -281,5 +289,5 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       args: [s.treasury, s.rewardCutBps],
     },
   ];
-  return { version: 3, baseNonce, bitNonce, addresses, steps };
+  return { version: 3, ...(cadence === "launch" ? { cadence } : {}), baseNonce, bitNonce, addresses, steps };
 }

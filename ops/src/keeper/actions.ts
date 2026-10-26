@@ -4,8 +4,8 @@ import { isPlanV3, type PlanV3 } from "../plan.ts";
 import type { DeploymentRecord } from "../record.ts";
 import { type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
-import { checkDelivery, type DeliveryCheck, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
-import { type Action, decideNext, type State } from "./due.ts";
+import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
+import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
 import { type Payout, type PayoutLog, payoutsHash, rebuildPayouts } from "./payouts.ts";
 import { claimGasLimit, claimRequest, decideClaim, type RewardsDeps, upfrontShortfall } from "./rewards.ts";
 import type { StatusDetail } from "./status.ts";
@@ -154,8 +154,9 @@ export async function claim(deps: KeeperDeps, rec: DeploymentRecord, policy: Cla
   return deps.sendCall(claimRequest(rec, r.hotkey, claimGasLimit(r.claimGasRequired), await deps.nonce("bittensor")));
 }
 
-/** One user's delivery: sent, with the USDC from the front door's Delivered event, or skipped with why. */
-export type Delivery = { user: Address } & (({ delivered: true; usdcOut?: bigint } & Sent) | { delivered: false; reason: string });
+/** One user's delivery: sent, with the USDC from the front door's Delivered event, or skipped with why
+ * (`refused`: the send's own estimate refused it after the simulation had passed, with its message). */
+export type Delivery = { user: Address } & (({ delivered: true; usdcOut?: bigint } & Sent) | { delivered: false; reason: string; refused?: string });
 
 /** The record's v3 plan; a v2 deployment has no USDC delivery. */
 export function deliveryPlan(rec: DeploymentRecord): PlanV3 {
@@ -174,7 +175,9 @@ export async function deliver(deps: KeeperDeps, rec: DeploymentRecord, user: Add
   try {
     sent = await deps.sendCall(deliverRequest(plan, user, c.keeperMinOut, await deps.nonce("base")));
   } catch (e) {
-    if (e instanceof SendRefused && e.reason === "estimate") return { user, delivered: false, reason: `${e.message}; it waits for a later round` };
+    if (e instanceof SendRefused && e.reason === "estimate") {
+      return { user, delivered: false, reason: `${e.message}; it waits for a later round`, refused: e.message };
+    }
     throw e;
   }
   return { user, delivered: true, ...sent, usdcOut: deliveredFrom(sent.logs, plan.addresses.frontDoor, user)?.usdcOut };
@@ -243,31 +246,46 @@ async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean,
 
 /** Does the next due thing every `intervalMs` until stopped; stops at the first failure rather than
  * retrying it. A delivery goes ahead only when its simulation passes; one that would revert waits (its
- * reason logged once) without holding up anything else. Reward claims are only reported, every
+ * reason logged once) without holding up anything else. A delivery that isn't sent (its re-check, its
+ * estimate or the wallet's guard refuses it) never ends the round: the round's payout, stake or close
+ * still goes ahead. One whose estimate refuses it is held, not retried, until the user's claimable
+ * amount, preference, or the quote against the floors changes. Reward claims are only reported, every
  * `rewardsEveryTicks` rounds. */
 export async function runLoop(
   deps: KeeperDeps,
   rec: DeploymentRecord,
   opts: { intervalMs: number; maxTicks?: number; policy?: ClaimPolicy; rewardsEveryTicks?: number; live?: boolean },
 ) {
+  /** The last wait logged for each user, so each reason is logged once. */
   const waiting = new Map<string, string>();
+  /** Deliveries whose send-time estimate refused them, with the facts they were refused on. */
+  const held = new Map<string, { facts: string; reason: string }>();
+  const waits = (user: Address, reason: string) => {
+    const key = user.toLowerCase();
+    if (waiting.get(key) === reason) return;
+    deps.log(`Delivery to ${user} waits: ${reason}`);
+    waiting.set(key, reason);
+  };
   let claimDue: boolean | undefined;
   for (let tick = 1; ; tick++) {
-    let next: ReturnType<typeof decideNext>;
+    let s: KeeperState;
+    let deliveries: DueDelivery[] = [];
+    const facts = new Map<string, string | undefined>();
     try {
-      const s = await deps.readState();
-      const checks: DeliveryCheck[] = [];
-      for (const user of await deps.deliveryCandidates()) checks.push(await checkDelivery(deps, user));
-      for (const c of checks) {
+      s = await deps.readState();
+      for (const user of await deps.deliveryCandidates()) {
+        const c = await checkDelivery(deps, user);
         const key = c.user.toLowerCase();
-        if (c.deliver || c.claimable === 0n) waiting.delete(key);
-        else if (waiting.get(key) !== c.reason) {
-          deps.log(`Delivery to ${c.user} waits: ${c.reason}`);
-          waiting.set(key, c.reason);
+        facts.set(key, c.facts);
+        if (c.facts !== undefined && held.get(key)?.facts !== c.facts) held.delete(key);
+        if (c.claimable === 0n) {
+          waiting.delete(key);
+          continue;
         }
+        const hold = held.get(key);
+        if (c.deliver && c.keeperMinOut !== undefined && !hold) deliveries.push({ user: c.user, keeperMinOut: c.keeperMinOut });
+        else waits(c.user, c.deliver && hold ? hold.reason : c.reason);
       }
-      const deliveries = checks.flatMap((c) => (c.deliver && c.keeperMinOut !== undefined ? [{ user: c.user, keeperMinOut: c.keeperMinOut }] : []));
-      next = decideNext({ ...s, deliveries });
     } catch (e) {
       deps.log(`Stopped: could not read the chains (${(e as Error).message})`);
       return;
@@ -275,21 +293,46 @@ export async function runLoop(
     if (tick === 1 || tick % (opts.rewardsEveryTicks ?? 30) === 0) {
       claimDue = await reportClaim(deps, opts.policy ?? CLAIM_POLICY, opts.live ?? false, claimDue);
     }
-    const action = next.action;
     try {
-      if (!action) {
-        deps.log(next.reason);
-      } else if (action.kind === "deliver") {
-        const d = await deliver(deps, rec, action.user);
+      for (;;) {
+        const next = decideNext({ ...s, deliveries });
+        const action = next.action;
+        if (!action) {
+          deps.log(next.reason);
+          break;
+        }
+        if (action.kind !== "deliver") {
+          const done = await act(deps, rec, action);
+          deps.log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
+          break;
+        }
+        // whatever becomes of this delivery, the round's next action comes after it, never instead
+        deliveries = deliveries.filter((d) => d.user !== action.user);
+        const key = action.user.toLowerCase();
+        let d: Delivery;
+        try {
+          d = await deliver(deps, rec, action.user);
+        } catch (e) {
+          // the wallet's guard (an earlier transaction pending, the nonce, the chain): not this user's
+          // facts, so tried again next round
+          if (!(e instanceof SendRefused)) throw e;
+          waits(action.user, `${e.message}; it is tried again next round`);
+          continue;
+        }
         if (d.delivered) {
+          waiting.delete(key);
           const got = d.usdcOut === undefined ? "" : `, ${Number(d.usdcOut) / 1e6} USDC`;
           deps.log(`Done: ${next.reason} (transaction ${d.hash}${got})`);
-        } else {
-          deps.log(`Skipped the delivery to ${d.user}: ${d.reason}`);
+          break;
         }
-      } else {
-        const done = await act(deps, rec, action);
-        deps.log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
+        const f = facts.get(key);
+        if (d.refused !== undefined && f !== undefined) {
+          const reason = `${d.refused}; not retried until the claimable amount, the preference or the quote against the floors changes`;
+          held.set(key, { facts: f, reason });
+          waits(action.user, reason);
+        } else {
+          waits(action.user, d.reason);
+        }
       }
     } catch (e) {
       deps.log(`Stopped: ${(e as Error).message}`);

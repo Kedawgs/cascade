@@ -97,6 +97,15 @@ export interface DeliveryCheck {
   deliver: boolean;
   keeperMinOut?: bigint;
   reason: string;
+  /** What a delivery held after a refused send waits on (see deliveryFacts); unset when the sale
+   * could not be quoted, which says nothing about whether those facts changed. */
+  facts?: string;
+}
+
+/** The facts a held delivery is retried on: the claimable amount, the preference, and whether the
+ * quote clears the floors. */
+export function deliveryFacts(r: DeliveryInput, clears: boolean): string {
+  return [r.claimable, r.pref?.minUsdcPerTao ?? 0n, r.pref?.deadline ?? 0, r.pref?.destination ?? 0, clears].join("|");
 }
 
 /** Reads, decides, and when the decision is to deliver, simulates: a delivery goes ahead only when the
@@ -106,13 +115,14 @@ export async function checkDelivery(deps: Pick<DeliveryDeps, "readDelivery" | "s
   const r = await deps.readDelivery(user);
   if (r.quoteError) return { user, claimable: r.claimable, deliver: false, reason: r.quoteError };
   const d = deliveryDecision(r);
-  if (!d.deliver || d.keeperMinOut === undefined) return { user, claimable: r.claimable, deliver: false, reason: d.reason };
+  const facts = deliveryFacts(r, d.deliver);
+  if (!d.deliver || d.keeperMinOut === undefined) return { user, claimable: r.claimable, deliver: false, reason: d.reason, facts };
   const sim = await deps.simulateDeliver(user, d.keeperMinOut);
   if (!sim.ok) {
     const reason = sim.unanswered ? NO_ANSWER : `deliver would revert now (${sim.reason}); it waits for a later round`;
-    return { user, claimable: r.claimable, deliver: false, reason };
+    return { user, claimable: r.claimable, deliver: false, reason, facts };
   }
-  return { user, claimable: r.claimable, deliver: true, keeperMinOut: d.keeperMinOut, reason: d.reason };
+  return { user, claimable: r.claimable, deliver: true, keeperMinOut: d.keeperMinOut, reason: d.reason, facts };
 }
 
 export const DELIVER_ABI = parseAbi([

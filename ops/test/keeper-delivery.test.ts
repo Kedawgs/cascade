@@ -392,7 +392,12 @@ describe("deliver", () => {
       throw new SendRefused("estimate", "Base: deliver would fail, nothing sent (BelowMinimum())");
     });
     const deps = stubDeps({ readDelivery: async () => ready(), simulateDeliver: async () => ({ ok: true, usdcOut: 1n }), sendCall });
-    expect(await deliver(deps, rec, alice)).toEqual({ user: alice, delivered: false, reason: expect.stringContaining("BelowMinimum") });
+    expect(await deliver(deps, rec, alice)).toEqual({
+      user: alice,
+      delivered: false,
+      reason: expect.stringContaining("BelowMinimum"),
+      refused: "Base: deliver would fail, nothing sent (BelowMinimum())",
+    });
   });
 
   it("tries each user once, and needs a complete, verified v3 deployment", async () => {
@@ -514,6 +519,66 @@ describe("run with deliveries and rewards", () => {
     expect(lines.filter((l) => l.includes("Too little received"))).toHaveLength(1);
     expect(lines.filter((l) => /claim/i.test(l) && l.includes("pnpm ops claim"))).toHaveLength(1);
     expect(lines.some((l) => l.startsWith("Stopped"))).toBe(false);
+  });
+
+  /** A due close and nothing else (no payout due, nothing to stake), alice's delivery passing its
+   * simulation, and a Base estimate for deliver that refuses while `refuse()` says so. */
+  function closeDue(over: { read?: (tick: number) => Partial<DeliveryRead>; refuse?: (tick: number) => SendRefused | undefined } = {}) {
+    const lines: string[] = [];
+    let tick = 0;
+    const sendCall = vi.fn(async (r: CallRequest): Promise<Sent> => {
+      if (r.functionName === "deliver") {
+        const e = (over.refuse ?? (() => new SendRefused("estimate", "Base: deliver would fail, nothing sent (out of gas)")))(tick);
+        if (e) throw e;
+        return { ...SENT, logs: [deliveredLog(alice, 251_000_000n)] };
+      }
+      return { ...SENT, logs: [] };
+    });
+    const deps = stubDeps({
+      readState: async () => ({ ...state, vault: { ...state.vault, available: 0n } }),
+      quoteClose: async () => 1n,
+      deliveryCandidates: async () => {
+        tick++;
+        return [alice];
+      },
+      readDelivery: async () => ready(over.read?.(tick)),
+      simulateDeliver: async () => ({ ok: true, usdcOut: 251_000_000n }),
+      readRewards: rewards,
+      sendCall,
+      log: (l) => lines.push(l),
+    });
+    return { deps, lines, sends: () => sendCall.mock.calls.map((c) => c[0].functionName) };
+  }
+
+  it("a delivery whose send-time estimate fails still lets the same round close, and isn't retried unchanged", async () => {
+    const w = closeDue();
+    await runLoop(w.deps, rec, { intervalMs: 0, maxTicks: 3, policy: CLAIM_POLICY });
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch", "closeBatch"]);
+    // the reason is logged once, with what it waits on
+    const held = w.lines.filter((l) => l.includes("out of gas"));
+    expect(held).toEqual([expect.stringMatching(new RegExp(`^Delivery to ${alice} waits: .*out of gas.*claimable amount, the preference or the quote`))]);
+    expect(w.lines.some((l) => l.startsWith("Stopped"))).toBe(false);
+  });
+
+  it("retries a held delivery once its facts change: the quote crossing the floor, or the claimable amount", async () => {
+    // tick 1 refused; 2 held; 3 the quote dips below the TWAP floor; 4 back above: retried (refused again);
+    // 5 held; 6 more TAO is claimable: retried, and delivered
+    const quote = (t: number) => (t === 3 ? 240_000_000n : 252_000_000n);
+    const w = closeDue({
+      read: (t) => (t >= 6 ? { claimable: 2n * TAO, quoteUsdc: 504_000_000n, twapUsdc: 500_000_000n } : { quoteUsdc: quote(t) }),
+      refuse: (t) => (t < 6 ? new SendRefused("estimate", "Base: deliver would fail, nothing sent (out of gas)") : undefined),
+    });
+    await runLoop(w.deps, rec, { intervalMs: 0, maxTicks: 6, policy: CLAIM_POLICY });
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch", "closeBatch", "deliver", "closeBatch", "closeBatch", "deliver"]);
+  });
+
+  it("a send the wallet's guard refuses (an earlier transaction still pending) skips the delivery this round only", async () => {
+    const pending = new SendRefused("waiting", "Base: an earlier transaction from the test wallet (nonce 3) is still waiting to be mined; nothing sent — try again once it is");
+    const w = closeDue({ refuse: (t) => (t === 1 ? pending : undefined) });
+    await runLoop(w.deps, rec, { intervalMs: 0, maxTicks: 2, policy: CLAIM_POLICY });
+    // the close still goes in round 1, and round 2 delivers
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "deliver"]);
+    expect(w.lines.filter((l) => l.includes("still waiting to be mined"))).toHaveLength(1);
   });
 
   it("delivers when the simulation passes, before staking", async () => {

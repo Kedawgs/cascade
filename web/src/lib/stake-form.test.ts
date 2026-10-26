@@ -11,6 +11,7 @@ import {
   maxStakeInput,
   offerClaim,
   stakeAmountText,
+  stakeFootText,
   maxUnstakeInput,
   maxUnstakeInputIn,
   stakeButtonLabel,
@@ -240,6 +241,11 @@ describe("v3 stake form", () => {
     expect(stakeAmountText(q, true)).toBe("about 0.0792 TAO (at least 0.0788 TAO)");
     // the least is never rounded up past what the stake accepts
     expect(stakeAmountText({ ...q, minTaoOut: 78_899_999_000_000_000n }, true)).toBe("about 0.0792 TAO (at least 0.0788 TAO)");
+  });
+
+  it("the line under the form says nothing on v3 about how many wallet prompts to expect", () => {
+    expect(stakeFootText(true)).toBe("No Bittensor wallet needed.");
+    expect(stakeFootText(false)).toBe("Your wallet asks you to confirm each step, or just once with a smart account. No Bittensor wallet needed.");
   });
 
   it("v2: the exact figure, as before", () => {

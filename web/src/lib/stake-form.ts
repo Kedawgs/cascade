@@ -101,6 +101,12 @@ export function stakeAmountText(q: Pick<DepositQuote, "estTao" | "minTaoOut">, v
   return `about ${formatTao(q.estTao, 4)} TAO (at least ${formatTao(least, 4)} TAO)`;
 }
 
+/** The line under the stake form. v3 says nothing about how many wallet prompts to expect (that
+ * depends on the wallet); v2 keeps its wording. */
+export function stakeFootText(v3: boolean): string {
+  return v3 ? "No Bittensor wallet needed." : "Your wallet asks you to confirm each step, or just once with a smart account. No Bittensor wallet needed.";
+}
+
 export function breakEvenText(days: number): string {
   return `Covers its fees in about ${days} day${days === 1 ? "" : "s"} at today's yield.`;
 }

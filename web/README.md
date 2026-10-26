@@ -66,8 +66,9 @@ A deployment with a staker and price oracle in `.env.local` runs the v3 flows; o
   the amount, valid 30 minutes) and the site sends `CascadeStaker.stakeWithPermit`, which swaps the
   USDC to TAO and deposits it. An account with code (a smart account), a wallet that can't sign a
   permit, or a permit USDC refuses instead approves exactly that USDC to the staker, then `stake`.
-- **Unstake (v3):** `requestRedeem(shares)` with a delivery preference: a minimum USDC per TAO of
-  today's price less 2%, valid 7 days. When the TAO is back on Base the keeper sells it and sends the
+- **Unstake (v3):** `requestRedeemWithDelivery(shares, minUsdcPerTao, deadline, destination)`: the
+  request and a delivery preference in one call, a minimum USDC per TAO of today's price less 2%,
+  valid 7 days. When the TAO is back on Base the keeper sells it and sends the
   USDC to the wallet (the form shows the floor). The request fee is only for the first request in the
   open batch. At least 0.005 TAO, and never leaving less than that behind.
 - **Claim by hand:** `claim()`, then (unless the user keeps TAO) `exactInput` back to USDC. On v3 the

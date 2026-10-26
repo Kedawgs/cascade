@@ -16,6 +16,7 @@ import {
   POOL_FEES_TEXT,
   stakeAmountText,
   stakeButtonLabel,
+  stakeFootText,
   validateStakeAmount,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
@@ -185,9 +186,7 @@ export function StakeForm({
         </div>
       </dl>
       {breakEven !== null && <p className={styles.breakEven}>{breakEvenText(breakEven)}</p>}
-      <p className={styles.foot}>
-        Your wallet asks you to confirm each step, or just once with a smart account. No Bittensor wallet needed.
-      </p>
+      <p className={styles.foot}>{stakeFootText(v3)}</p>
     </form>
   );
 }

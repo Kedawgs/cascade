@@ -161,13 +161,19 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   }
 
   async function getLimits(): Promise<Limits> {
-    const [fd, price] = await Promise.all([deps.readFrontDoor(c, d), deps.taoPriceUsd(c)]);
+    const [fd, price, fees] = await Promise.all([deps.readFrontDoor(c, d), deps.taoPriceUsd(c), isV3(d) ? deps.readStakerFees(c, d) : undefined]);
     const maxTao = floorRao(capFree({ depositCap: fd.depositCap, netForwarded: fd.netForwarded, openTotal: fd.openTotal }));
     const kept = (1 - POOL_FEE) * (1 - SLIPPAGE);
+    const minTaoUsd = toDisplay(fd.minDeposit, 18) * price * (1 + LIMIT_MARGIN);
+    // v3: the stake's floor (0.5% under the quote) must still reach minDeposit after Cascade's fees come
+    // off the USDC; the price read is what selling pays, so buying costs the pools' fees once more
+    const minUsd = fees
+      ? minTaoUsd / kept / (1 - POOL_FEE) / (1 - Number(fees.swapFeeBps) / 10_000) + toDisplay(fees.depositFeeUsdc, 6)
+      : minTaoUsd / kept;
     return {
       minTao: fd.minDeposit,
       maxTao,
-      minUsd: Math.ceil(((toDisplay(fd.minDeposit, 18) * price) / kept) * (1 + LIMIT_MARGIN) * 100) / 100,
+      minUsd: Math.ceil(minUsd * 100) / 100,
       maxUsd: Math.floor(toDisplay(maxTao, 18) * price * (1 - LIMIT_MARGIN) * 100) / 100,
     };
   }

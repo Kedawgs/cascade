@@ -157,6 +157,26 @@ describe("live data", () => {
     expect(l.maxUsd).toBeLessThan(17.5);
   });
 
+  it("v2's minimum stays as it was: the pools' fees, the 0.5% slippage and a 2% margin", async () => {
+    // 0.01 TAO at $250 / (0.9965015 x 0.995) x 1.02, up to the cent
+    expect((await createLiveCascadeData(D, deps()).getLimits()).minUsd).toBe(2.58);
+  });
+
+  it("v3's minimum also covers Cascade's fees, so a stake of the amount shown clears the front door's minimum", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    const units = (usd: number) => BigInt(Math.round(usd * 1e6));
+    const l = await createLiveCascadeData(D3, deps()).getLimits();
+    // the least the stake accepts (its 0.5% floor) is what the front door is sure to get
+    const floor = (await createLiveCascadeData(D3, deps()).quoteDeposit(units(l.minUsd))).minTaoOut;
+    expect(floor).toBeGreaterThanOrEqual(l.minTao);
+    // with room for the price to move against it before the stake goes through
+    const worse = deps({ quoteBuy: async (_c, usdc) => (usdc * 10n ** 12n * 100n) / (252n * 101n) });
+    expect((await createLiveCascadeData(D3, worse).quoteDeposit(units(l.minUsd))).minTaoOut).toBeGreaterThanOrEqual(l.minTao);
+    // the flat fee and the percentage are counted: $0.05 + 0.15% more than without them
+    const free = await createLiveCascadeData(D3, deps({ readStakerFees: async () => ({ swapFeeBps: 0n, depositFeeUsdc: 0n }) })).getLimits();
+    expect(l.minUsd - free.minUsd).toBeGreaterThanOrEqual(0.05 - 1e-9);
+  });
+
   it("shows total staked and the price, and hides APR and stakers", async () => {
     const s = await createLiveCascadeData(D, deps()).getProtocolStats();
     expect(s).toEqual({ totalStakedTao: 0.08, taoPriceUsd: 250 });

@@ -6,6 +6,7 @@ import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useBalances, useDeposit, useDeposits, useIsV3, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { parseActivityParams } from "@/lib/activity-params";
+import { offersClaim } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { DepositList, WithdrawalList } from "../ActivityList";
@@ -143,7 +144,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   // a claim whose swap failed (with a batching wallet both roll back): offer the TAO without the swap
   const [claimFailed, setClaimFailed] = useState(false);
   // one claim pays everything back on Base, so it settles every unstake that is ready
-  const ready = (all.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
+  const ready = (all.data ?? []).filter(offersClaim).map((w) => w.id);
   const claimIds = ready.includes(id) ? ready : [...ready, id];
   if (isError) return <LoadError what="this unstake" onRetry={() => void refetch()} />;
   if (isPending) return <Loading label="Loading your unstake…" />;
@@ -200,9 +201,9 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
             </Link>
           </Actions>
         )}
-        {(withdrawal.status === "ready" || withdrawal.cancellableShares !== undefined) && (
+        {(offersClaim(withdrawal) || withdrawal.cancellableShares !== undefined) && (
           <Actions>
-            {withdrawal.status === "ready" && (
+            {offersClaim(withdrawal) && (
               <>
                 <button
                   type="button"

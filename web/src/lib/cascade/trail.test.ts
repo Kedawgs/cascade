@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DepositOp, WithdrawalOp } from "./oplog";
-import { chainOnlyDeposit, type DepositFacts, depositRecord, offersClaim, type WithdrawalFacts, withdrawalRecord } from "./trail";
+import { chainOnlyDeposit, type DepositFacts, depositRecord, isDelivering, offersClaim, type WithdrawalFacts, withdrawalRecord } from "./trail";
 
 const ME = "0x000000000000000000000000000000000000A11c" as const;
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
@@ -439,6 +439,15 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(r.received).toBeUndefined();
     // the preference couldn't be read: the one this unstake asked for stands in
     expect(withdrawalRecord(wop3, { ...back, preference: undefined }).steps[3].status).toBe("active");
+  });
+
+  it("tells the screens when an unstake's USDC is on its way by itself", () => {
+    expect(isDelivering(withdrawalRecord(wop3, back))).toBe(true);
+    // taking longer than usual: the claim is offered, so it no longer counts as delivering
+    expect(isDelivering(withdrawalRecord(wop3, { ...back, now: new Date("2026-10-25T12:46:00Z") }))).toBe(false);
+    expect(isDelivering(withdrawalRecord(wop3, { ...back, preference: null }))).toBe(false);
+    expect(isDelivering(withdrawalRecord(wop3, { ...back, payout: { ...payout, state: 1 }, credited: undefined }))).toBe(false);
+    expect(isDelivering(withdrawalRecord(wop3, { ...back, claimable: 0n, usdcDelivered: receipt }))).toBe(false);
   });
 
   it("offers the claim as well once delivery is taking longer than usual: an hour after the payout landed", () => {

@@ -195,11 +195,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   async function listWithdrawals(account: string): Promise<WithdrawalRecord[]> {
     const a = account as Address;
-    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
     const ops = deps.opLog.list(a);
+    const withdrawals = ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal").map(live);
+    // unstakes are listed from this browser's own records: with none there is nothing to scan Bittensor for
+    if (withdrawals.length === 0) return [];
+    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
     const claims = ops.filter((o): o is ClaimOp => o.kind === "claim").map(live);
     const out: WithdrawalRecord[] = [];
-    for (const op of ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal").map(live)) {
+    for (const op of withdrawals) {
       const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       out.push(withdrawalRecord({ ...op, batchId: batchId ?? op.batchId }, facts));

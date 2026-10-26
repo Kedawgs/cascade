@@ -419,6 +419,14 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
  * the screens use to show the claim button or banner. */
 export const offersClaim = (r: Pick<WithdrawalRecord, "status">): boolean => r.status === "ready";
 
+/** v3: what the last step says while the USDC is on its way to the wallet by itself. */
+const DELIVERING = "USDC is being delivered to your wallet automatically";
+
+/** v3: the record's USDC is being delivered automatically and the claim by hand isn't offered (yet).
+ * Delivery sells everything waiting on Base, so the screens offer no claim meanwhile. */
+export const isDelivering = (r: Pick<WithdrawalRecord, "status" | "steps">): boolean =>
+  !offersClaim(r) && r.steps.some((s) => s.key === "claim" && s.status === "active" && s.detail === DELIVERING);
+
 /** v3's last step once the payout is back on Base and no claim from this browser has settled it. */
 function deliveryStep(
   op: WithdrawalOp,
@@ -466,7 +474,7 @@ function deliveryStep(
     // after an hour back on Base the claim by hand is offered too
     const landedAt = f.credited?.at ?? (f.payout ? new Date(f.payout.at.getTime() + RETURN_MS) : undefined);
     const slow = landedAt !== undefined && f.now.getTime() - landedAt.getTime() > DELIVERY_PATIENCE_MS;
-    const detail = "USDC is being delivered to your wallet automatically";
+    const detail = DELIVERING;
     if (slow) return { step: { ...step, status: "action", detail: `${detail}. It's taking longer than usual. You can keep waiting, or claim it as USDC now.` }, settled: false, offered: true };
     return { step: { ...step, status: "active", detail }, ...waiting };
   }

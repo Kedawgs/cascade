@@ -99,8 +99,8 @@ export const DESTINATION_BASE = 6;
 /** USDC's EIP-712 domain for permits (chainId 8453, verifyingContract TOKENS.usdc). */
 export const USDC_PERMIT = { name: "USD Coin", version: "2" } as const;
 
-/** The yield, in percent a year, that the stake form's break-even line assumes until the vault has
- * measured its own from reward claims: tao.bot's 30-day root yield, October 2026. */
+/** The yield, in percent a year and before Cascade's reward cut, that the stake form's break-even
+ * line assumes: tao.bot's 30-day root yield, October 2026. */
 export const ROOT_YIELD_PCT = 5.9;
 
 export const SLIPPAGE_BPS = 50n;

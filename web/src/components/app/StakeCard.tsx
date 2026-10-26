@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useBalances, useIsV3, useLimits, usePosition, useProtocolStats, useWithdrawals } from "@/lib/cascade/hooks";
+import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
@@ -73,8 +74,8 @@ function WalletTao({ account }: { account: string }) {
 }
 
 /** Money waiting on Base to be claimed (an unstake's payout, or a deposit the vault sent back), with
- * one button that claims it all as USDC. Hidden when there is none, and on v3 unless an unstake's
- * trail offers the claim by hand (otherwise its USDC is on its way to the wallet by itself). */
+ * one button that claims it all as USDC. Hidden when there is none, and on v3 while an unstake's USDC
+ * is being delivered automatically and none offers the claim by hand (see offerClaim). */
 function ClaimReady({ account }: { account: string }) {
   const v3 = useIsV3();
   const balances = useBalances(account);
@@ -82,9 +83,9 @@ function ClaimReady({ account }: { account: string }) {
   const withdrawals = useWithdrawals(account);
   const flows = useFlows(account);
   const claimable = balances.data?.claimable ?? 0n;
-  if (!offerClaim(claimable, v3, withdrawals.data)) return null;
+  if (!offerClaim(claimable, v3, withdrawals.data, withdrawals.isError)) return null;
   const price = stats.data?.taoPriceUsd;
-  const ready = (withdrawals.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
+  const ready = (withdrawals.data ?? []).filter(offersClaim).map((w) => w.id);
   return (
     <div className={styles.walletTao}>
       <p>
@@ -92,8 +93,14 @@ function ClaimReady({ account }: { account: string }) {
         back on Base and ready to claim.
       </p>
       <div className={styles.walletTaoActions}>
-        {/* the claim names the unstakes it pays, so it waits until they have loaded */}
-        <button type="button" className="pill" disabled={flows.busy !== null || !withdrawals.data} onClick={() => void flows.claim(ready, false).catch(() => undefined)}>
+        {/* the claim names the unstakes it pays, so it waits until they have loaded; if they can't be read
+            it claims without naming them (the chain needs no names) */}
+        <button
+          type="button"
+          className="pill"
+          disabled={flows.busy !== null || (!withdrawals.data && !withdrawals.isError)}
+          onClick={() => void flows.claim(ready, false).catch(() => undefined)}
+        >
           {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
         </button>
       </div>

@@ -84,7 +84,10 @@ export function StakeForm({
   // v3: what leaving costs, read apart from the quote so it never holds up the button; to the 0.001
   // TAO, so the quote's refreshes don't each ask Bittensor again (the bridge fee barely moves with size)
   const roundTrip = useRoundTrip(v3 && quote ? (quote.targetTao / 10n ** 15n) * 10n ** 15n : null);
-  // the root yield is before Cascade's cut, which breakEvenDays takes off
+  // the root yield is before Cascade's cut, which breakEvenDays takes off.
+  // TODO: a vault rate measured from reward claims can replace ROOT_YIELD_PCT here only as the rate
+  // before the cut: one measured from the share price is already net of it, so gross it back up (or
+  // pass a zero cut) rather than taking the cut twice.
   const breakEven = v3 && quote && roundTrip.data ? breakEvenDays(quote, roundTrip.data, ROOT_YIELD_PCT) : null;
 
   function onSubmit(e: FormEvent) {

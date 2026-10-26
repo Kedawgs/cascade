@@ -207,17 +207,18 @@ describe("v3 stake form", () => {
   const exit = { exitFixedUsd: 0.0001 * 4000 + 0.00105 * 250, rewardCutBps: 1000 };
 
   it("counts the days of yield, after Cascade's cut, that pay for the way in and the way out", () => {
-    // ($0.15 in + 0.5% of $19.85 out + $0.66 request and bridge fees) / ($20 x 5.9% x 0.9 / 365) = 313.2
-    expect(breakEvenDays(q20, exit, 5.9)).toBe(313);
-    // ($5.04 in + 0.5% of $994.96 out + $0.66) / ($1,000 x 5.9% x 0.9 / 365) = 73.4
-    expect(breakEvenDays(q1000, exit, 5.9)).toBe(73);
+    // the yield is earned on what was staked, after the fees in:
+    // ($0.15 in + 0.5% of $19.85 out + $0.66 request and bridge fees) / ($19.85 x 5.9% x 0.9 / 365) = 315.6
+    expect(breakEvenDays(q20, exit, 5.9)).toBe(316);
+    // ($5.04 in + 0.5% of $994.96 out + $0.66) / ($994.96 x 5.9% x 0.9 / 365) = 73.8
+    expect(breakEvenDays(q1000, exit, 5.9)).toBe(74);
   });
 
   it("follows the fixed exit fees and the reward cut", () => {
-    // without them: ($0.15 + $0.10) / ($20 x 5.9% / 365) = 76.98
-    expect(breakEvenDays(q20, { exitFixedUsd: 0, rewardCutBps: 0 }, 5.9)).toBe(77);
-    // a 20% cut: 0.911367 / ($20 x 5.9% x 0.8 / 365) = 352.4
-    expect(breakEvenDays(q20, { ...exit, rewardCutBps: 2000 }, 5.9)).toBe(352);
+    // without them: ($0.15 + $0.10) / ($19.85 x 5.9% / 365) = 77.6
+    expect(breakEvenDays(q20, { exitFixedUsd: 0, rewardCutBps: 0 }, 5.9)).toBe(78);
+    // a 20% cut: 0.911367 / ($19.85 x 5.9% x 0.8 / 365) = 355.0
+    expect(breakEvenDays(q20, { ...exit, rewardCutBps: 2000 }, 5.9)).toBe(355);
   });
 
   it("has no break-even without a yield or an amount", () => {
@@ -234,9 +235,11 @@ describe("v3 stake form", () => {
 
 describe("v3 unstake delivery", () => {
   it("is at least the TAO that comes back at the minimum price, floored to the cent", () => {
-    // 0.079 TAO after the bridge fee, at $246.00 a TAO: $19.434
-    expect(deliveryFloorUsd({ taoWei: 80_000_000_000_000_000n, bridgeFeeWei: 1_000_000_000_000_000n, minUsdcPerTao: 246_000_000n })).toBe(19.43);
-    expect(deliveryFloorUsd({ taoWei: 1n, bridgeFeeWei: 2n, minUsdcPerTao: 246_000_000n })).toBe(0);
+    // the bridge fee is padded by a quarter in case it is higher at payout: 0.08 - 0.00125 = 0.07875 TAO
+    // at $246.00 a TAO is $19.3725
+    expect(deliveryFloorUsd({ taoWei: 80_000_000_000_000_000n, bridgeFeeWei: 1_000_000_000_000_000n, minUsdcPerTao: 246_000_000n })).toBe(19.37);
+    expect(deliveryFloorUsd({ taoWei: 80_000_000_000_000_000n, bridgeFeeWei: 0n, minUsdcPerTao: 246_000_000n })).toBe(19.68);
+    expect(deliveryFloorUsd({ taoWei: 9n, bridgeFeeWei: 8n, minUsdcPerTao: 246_000_000n })).toBe(0);
   });
 
   it("says USDC arrives on its own, and the floor once it is known", () => {
@@ -304,7 +307,16 @@ describe("offerClaim", () => {
     expect(offerClaim(waiting, true, [settling])).toBe(true);
   });
 
-  it("v3: not before the unstakes have loaded", () => {
+  it("v3: not while the unstakes are still loading", () => {
     expect(offerClaim(waiting, true, undefined)).toBe(false);
+  });
+
+  it("v3: offered when the unstakes can't be read, since claiming needs only Base", () => {
+    expect(offerClaim(waiting, true, undefined, true)).toBe(true);
+    expect(offerClaim(0n, true, undefined, true)).toBe(false);
+  });
+
+  it("v3: offered whenever any unstake offers the claim by hand, even beside one still being delivered", () => {
+    expect(offerClaim(waiting, true, [unstake("in_progress", "active"), unstake("ready", "action")])).toBe(true);
   });
 });

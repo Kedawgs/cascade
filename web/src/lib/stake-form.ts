@@ -1,7 +1,7 @@
 import { formatUnits, parseUnits } from "viem";
 import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
 import type { DepositQuote, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
-import { offersClaim } from "./cascade/trail";
+import { isDelivering, offersClaim } from "./cascade/trail";
 import { floorRao, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 
@@ -79,16 +79,17 @@ const EXIT_POOL_FEE = 0.0035;
 
 /** v3: about how many days of yield pay for a round trip: this stake's Cascade and pool fees, plus an
  * estimated way out (Cascade's percentage fee and the pools' again on what was staked, the unstake
- * request fee and the bridge fee back), earned at the yield less Cascade's cut of rewards. Null
- * without an amount or a yield. */
+ * request fee and the bridge fee back), earned on what was staked at the yield less Cascade's cut
+ * of rewards. Null without an amount or a yield. */
 export function breakEvenDays(
   q: Pick<DepositQuote, "usdcIn" | "amountUsd" | "feesUsd" | "depositFeeUsdc" | "swapFeeUsdc">,
   exit: RoundTripCosts,
   yieldPct: number,
 ): number | null {
-  const perDay = (q.amountUsd * yieldPct * (1 - exit.rewardCutBps / 10_000)) / 100 / 365;
+  const staked = Math.max(0, q.amountUsd - q.feesUsd);
+  const perDay = (staked * yieldPct * (1 - exit.rewardCutBps / 10_000)) / 100 / 365;
   if (!(perDay > 0)) return null;
-  const out = Math.max(0, q.amountUsd - q.feesUsd) * (swapFeeRate(q) + EXIT_POOL_FEE) + exit.exitFixedUsd;
+  const out = staked * (swapFeeRate(q) + EXIT_POOL_FEE) + exit.exitFixedUsd;
   return Math.max(1, Math.round((q.feesUsd + out) / perDay));
 }
 
@@ -96,10 +97,12 @@ export function breakEvenText(days: number): string {
   return `Covers its fees in about ${days} day${days === 1 ? "" : "s"} at today's yield.`;
 }
 
-/** v3: the least USDC an unstake's automatic delivery pays: the TAO that comes back (after the bridge
- * fee) at the minimum price, floored to the cent. */
+/** v3: the least USDC an unstake's automatic delivery pays, as the line under the button says it: the
+ * TAO that comes back at the minimum price, floored to the cent. The bridge fee is only known when the
+ * payout is sent, so today's is padded by a quarter; this is the figure shown, not the one sent. */
 export function deliveryFloorUsd(q: Pick<WithdrawalQuote, "taoWei" | "bridgeFeeWei" | "minUsdcPerTao">): number {
-  const tao = q.taoWei > q.bridgeFeeWei ? q.taoWei - q.bridgeFeeWei : 0n;
+  const bridgeFee = (q.bridgeFeeWei * 5n) / 4n;
+  const tao = q.taoWei > bridgeFee ? q.taoWei - bridgeFee : 0n;
   const units = (tao * q.minUsdcPerTao) / 10n ** 18n;
   return toDisplay((units / 10_000n) * 10_000n, 6);
 }
@@ -110,20 +113,21 @@ export function deliveryNote(floorUsd: number | null): string {
   return `USDC arrives in your wallet automatically, at least ${formatUsd(floorUsd)} (today's price less ${DELIVERY_TOLERANCE_BPS / 100}%). If the price falls further, you can claim by hand.`;
 }
 
-/** The trail's words for an unstake whose USDC is on its way to the wallet by itself. */
-const DELIVERING = "USDC is being delivered to your wallet automatically";
-
 /** Whether the Stake page offers "Claim as USDC" for what is waiting on Base: whenever something is,
- * except on v3 while an unstake's USDC is being delivered automatically and its trail doesn't offer the
- * claim by hand yet (delivery sells everything waiting at once). Until the unstakes load that isn't
- * known, so v3 waits. */
-export function offerClaim(claimable: bigint, v3: boolean, withdrawals: readonly WithdrawalRecord[] | undefined): boolean {
+ * except on v3 while an unstake's USDC is being delivered automatically (delivery sells everything
+ * waiting at once) and no unstake offers the claim by hand. While the unstakes load that isn't known,
+ * so v3 waits; if they can't be read it offers the claim, which needs only Base. */
+export function offerClaim(
+  claimable: bigint,
+  v3: boolean,
+  withdrawals: readonly WithdrawalRecord[] | undefined,
+  unreadable = false,
+): boolean {
   if (claimable === 0n) return false;
   if (!v3) return true;
-  if (!withdrawals) return false;
-  const delivering = (w: WithdrawalRecord) =>
-    !offersClaim(w) && w.steps.some((s) => s.key === "claim" && s.status === "active" && s.detail?.startsWith(DELIVERING));
-  return !withdrawals.some(delivering);
+  if (!withdrawals) return unreadable;
+  if (withdrawals.some(offersClaim)) return true;
+  return !withdrawals.some(isDelivering);
 }
 
 /** What MAX types into the TAO field: the exact available amount, floored to six decimals. */

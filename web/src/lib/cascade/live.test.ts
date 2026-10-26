@@ -94,6 +94,16 @@ describe("rewards waiting", () => {
   });
 });
 
+describe("unstakes", () => {
+  it("are none, without reading either chain, when this browser has made none", async () => {
+    let reads = 0;
+    const count = async () => (reads++, Promise.reject(new Error("no read expected")));
+    const data = createLiveCascadeData(D, deps({ scan: count, readFrontDoor: count, readVault: count }));
+    expect(await data.listWithdrawals(ME)).toEqual([]);
+    expect(reads).toBe(0);
+  });
+});
+
 describe("round trip", () => {
   const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
 

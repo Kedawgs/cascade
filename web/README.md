@@ -10,6 +10,9 @@ Designs: `docs/superpowers/specs/2026-10-23-cascade-web-redesign-design.md` (loo
 
 ## Run
 
+Pick the deployment first (PowerShell): `$env:OPS_DEPLOYMENT = "v3-test"`. Without it `web-config`
+writes the old v2 deployment (`test-2026-10.json`) and the site is pointed at that.
+
 ```
 pnpm --dir ../ops ops web-config --live   # writes .env.local with the live deployment's addresses
 pnpm install

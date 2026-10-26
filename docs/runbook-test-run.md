@@ -150,9 +150,9 @@ putting the contracts on the real chains; the **keeper** is the program that doe
 site cannot (closing batches, staking, paying out); **gas** is the network fee on each transaction.
 
 Where you type: commands starting `pnpm ops` run in `E:\projects\cascade\ops`. Commands that send real
-money (`deploy --live`, `stake --live`) are blocked for Claude by a safety check, so you run them
-yourself by typing `! ` in front of the command in the Claude Code prompt, for example
-`! pnpm ops deploy --live`. Never paste a private key or the password anywhere: the tools take the
+money. If Claude's safety check blocks any `--live` command, type it yourself with `! ` in front, in
+the Claude Code prompt, for example `! pnpm ops deploy --live` or `! pnpm ops stake --live`. The
+variable below is per terminal: set it again in any new terminal before running an ops command. Never paste a private key or the password anywhere: the tools take the
 password file by its path only.
 
 Set the name once per shell. It picks which record every command reads and writes:
@@ -197,15 +197,17 @@ refuses the old v2 record (`test-2026-10.json`).
    and price oracle addresses switches the site to the v3 flows by itself. Good: the Stake tab shows
    live limits and a price. Bad: "isn't connected to a deployment" means `.env.local` is missing or
    was not reloaded.
-8. **Stake a small amount from the site.** Connect MetaMask on Base (it needs a few dollars of USDC
-   and a little ETH for fees). Enter about $3. A normal MetaMask account signs one message (a USDC
+8. **Stake a small amount from the site.** Connect MetaMask on Base (it needs about $20 of USDC
+   and a little ETH for fees). The v3 front door refuses deposits under 0.04 TAO (about $10 at
+   $250 per TAO; the contract error is BelowMinDeposit), so stake at least what the form's
+   "From $X" shows. Enter $15 to $20 so fees and price moves cannot push it under. A normal MetaMask account signs one message (a USDC
    permit, which allows exactly this amount once, for 30 minutes) and then sends one transaction. A
    smart account asks for approve, then stake. Good: Activity shows a receipt for the deposit. If
    you stop midway, **Continue this deposit** on the receipt picks up where it left off.
 9. **Hand-run the keeper.** One step at a time: `pnpm ops close --live` (closes the batch once its
    10 minutes are up and prints a bridge message id; `pnpm ops track <id> --live` follows it until
    SUCCESS), then `! pnpm ops stake --live` (stakes the TAO on Bittensor; the vault must hold at
-   least 0.02 TAO, so if it says too little, deposit a bit more). Or all in one: `pnpm ops run
+   least 0.02 TAO, which a deposit of the size above already meets). Or all in one: `pnpm ops run
    --live`, which checks every minute, does whatever is due, prints each message id and never claims
    rewards. On a problem with stake, close or payouts it stops and says why. A delivery it cannot
    send does not stop it: it logs the reason once, holds that user until their facts change, and
@@ -226,7 +228,11 @@ refuses the old v2 record (`test-2026-10.json`).
     says "taking longer than usual" and offers **Claim as USDC**; it also offers it at once if the
     price is below your floor. Claiming by hand is safe and always available. To retry a held
     delivery from the keeper side: `pnpm ops deliver --live --user <your address>`, or restart `run`.
-13. **Wind down** as in section 7 (`wind-down`, `sweep`, then delete the password file).
+13. **Wind down.** Check everything is paid out, then run
+    `pnpm ops wind-down --live --user <your Base address>` (it refuses and lists what is left unless
+    the open batch is empty and nothing is queued or waiting to be claimed), then
+    `pnpm ops sweep --live --tao-to <your Tangem SS58> --eth-to <your Base wallet>` (full addresses),
+    and only then delete the password file (section 7).
 
 Rewards are not part of tomorrow. `pnpm ops rewards --live` shows what is waiting and a claim's
 cost; `pnpm ops claim --live` claims only when the policy allows (at least 25 times the cost, or

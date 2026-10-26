@@ -42,6 +42,8 @@ export interface WithdrawalOp extends OpBase {
   taoEstimate: bigint;
   usdcEstimate: bigint;
   fee: bigint;
+  /** v3: the USDC delivery preference sent with the request. */
+  delivery?: { minUsdcPerTao: bigint; deadline: number };
   hash?: Hex;
   batchId?: bigint;
   cancelled?: { hash: Hex; at: number };

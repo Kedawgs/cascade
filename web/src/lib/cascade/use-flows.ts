@@ -37,6 +37,7 @@ import {
   stakeCalls,
   stillToSend,
   unstakeCall,
+  unstakeV3Call,
   type WalletPort,
 } from "./flows";
 import { cascadeKeys } from "./hooks";
@@ -280,6 +281,7 @@ export function useFlows(account: string | null) {
 
     unstake: (q: WithdrawalQuote, onStart?: (id: string) => void) =>
       flow("unstake", async () => {
+        const v3 = isV3(d());
         const op: WithdrawalOp = {
           id: newOpId(),
           kind: "withdrawal",
@@ -289,13 +291,16 @@ export function useFlows(account: string | null) {
           taoEstimate: q.taoWei,
           usdcEstimate: BigInt(Math.floor(q.usdcAmount * 1e6)),
           fee: q.fee,
+          ...(v3 ? { delivery: { minUsdcPerTao: q.minUsdcPerTao, deadline: q.deliveryDeadline } } : {}),
           state: "running",
         };
         data.opLog.put(op);
         onStart?.(op.id);
         await send(op.id, async () => {
           const fd = await readFrontDoor(data.clients, d(), a);
-          const c = unstakeCall(q.shares, fd.redeemOf, fd.redeemRequestFee, d());
+          const c = v3
+            ? unstakeV3Call(q.shares, fd.redeemOf, fd.redeemRequestFee, q, d())
+            : unstakeCall(q.shares, fd.redeemOf, fd.redeemRequestFee, d());
           data.opLog.update(a, op.id, { fee: c.value ?? 0n });
           return [c];
         });

@@ -1,9 +1,9 @@
 import { type Abi, type Address, type Hex, maxUint256, parseSignature, size } from "viem";
 import { base } from "viem/chains";
 import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
-import { type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
+import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
 import type { DepositOp, OpState } from "./oplog";
-import type { Balances, DepositQuote } from "./types";
+import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao } from "./units";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
@@ -245,6 +245,18 @@ export function sellTaoCalls(taoWei: bigint, minUsdc: bigint, w: Balances, accou
 /** The redeem request fee is due once per open batch: a second request in it must send 0. */
 export function unstakeCall(shares: bigint, redeemOf: bigint, redeemRequestFee: bigint, d: Deployment): FlowCall {
   return call("request", d.frontDoor, FRONT_DOOR, "requestRedeem", [shares], redeemOf === 0n ? redeemRequestFee : 0n);
+}
+
+/** v3: the unstake request and the USDC delivery preference in one call, under the same fee rule. */
+export function unstakeV3Call(shares: bigint, redeemOf: bigint, fee: bigint, q: Pick<WithdrawalQuote, "minUsdcPerTao" | "deliveryDeadline">, d: Deployment): FlowCall {
+  return call(
+    "request",
+    d.frontDoor,
+    FRONT_DOOR,
+    "requestRedeemWithDelivery",
+    [shares, q.minUsdcPerTao, BigInt(q.deliveryDeadline), DESTINATION_BASE],
+    redeemOf === 0n ? fee : 0n,
+  );
 }
 
 export function claimCalls(claimable: bigint, minUsdc: bigint, w: Balances, d: Deployment, account: Address, keepTao: boolean): FlowCall[] {

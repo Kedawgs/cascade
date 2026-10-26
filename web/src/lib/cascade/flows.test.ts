@@ -36,10 +36,11 @@ import {
   stakeCalls,
   stillToSend,
   unstakeCall,
+  unstakeV3Call,
   userMessage,
   type WalletPort,
 } from "./flows";
-import type { Balances, DepositQuote } from "./types";
+import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -87,6 +88,18 @@ describe("call builders", () => {
   it("sends the redeem fee only with the first request in the open batch", () => {
     expect(unstakeCall(10n ** 22n, 0n, 10n ** 14n, D).value).toBe(10n ** 14n);
     expect(unstakeCall(10n ** 22n, 5n, 10n ** 14n, D).value).toBe(0n);
+  });
+
+  it("v3 unstake sets the USDC delivery preference in the same call, fee only on the first request", () => {
+    const q = { minUsdcPerTao: 123_456n, deliveryDeadline: 1_800_000_000 } as WithdrawalQuote;
+    const first = unstakeV3Call(10n ** 22n, 0n, 10n ** 14n, q, D);
+    expect(first).toMatchObject({
+      to: D.frontDoor,
+      functionName: "requestRedeemWithDelivery",
+      args: [10n ** 22n, 123_456n, 1_800_000_000n, 6],
+      value: 10n ** 14n,
+    });
+    expect(unstakeV3Call(10n ** 22n, 5n, 10n ** 14n, q, D).value).toBe(0n);
   });
 
   it("claims, then swaps back to USDC unless asked to keep TAO", () => {

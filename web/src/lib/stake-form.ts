@@ -93,6 +93,14 @@ export function breakEvenDays(
   return Math.max(1, Math.round((q.feesUsd + out) / perDay));
 }
 
+/** "You will stake": on v3 the quote's estimate and the least the stake accepts (its 0.5% floor,
+ * rounded down to the 0.0001 TAO shown); on v2 the exact amount the swap buys. */
+export function stakeAmountText(q: Pick<DepositQuote, "estTao" | "minTaoOut">, v3: boolean): string {
+  if (!v3) return `${formatTao(q.estTao, 4)} TAO`;
+  const least = Number(q.minTaoOut / 10n ** 14n) / 1e4;
+  return `about ${formatTao(q.estTao, 4)} TAO (at least ${formatTao(least, 4)} TAO)`;
+}
+
 export function breakEvenText(days: number): string {
   return `Covers its fees in about ${days} day${days === 1 ? "" : "s"} at today's yield.`;
 }

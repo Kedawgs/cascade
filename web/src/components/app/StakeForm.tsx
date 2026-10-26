@@ -7,13 +7,14 @@ import { parseUnits } from "viem";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
 import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
-import { formatTao, formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
+import { formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
 import {
   breakEvenDays,
   breakEvenText,
   cascadeFeesText,
   maxStakeInput,
   POOL_FEES_TEXT,
+  stakeAmountText,
   stakeButtonLabel,
   validateStakeAmount,
 } from "@/lib/stake-form";
@@ -153,7 +154,7 @@ export function StakeForm({
       <dl className={styles.details} aria-live="polite">
         <div>
           <dt>You will stake</dt>
-          <dd>{quote ? `${formatTao(quote.estTao, 4)} TAO` : "–"}</dd>
+          <dd>{quote ? stakeAmountText(quote, v3) : "–"}</dd>
         </div>
         {v3 ? (
           <>

@@ -8,6 +8,7 @@ import {
   deliveryNote,
   maxStakeInput,
   offerClaim,
+  stakeAmountText,
   maxUnstakeInput,
   maxUnstakeInputIn,
   stakeButtonLabel,
@@ -230,6 +231,17 @@ describe("v3 stake form", () => {
   it("says the break-even in plain words", () => {
     expect(breakEvenText(62)).toBe("Covers its fees in about 62 days at today's yield.");
     expect(breakEvenText(1)).toBe("Covers its fees in about 1 day at today's yield.");
+  });
+
+  it("states what will be staked as an estimate with the least it can be (the stake may get up to 0.5% less)", () => {
+    const q = { estTao: 0.079_234_5, minTaoOut: 78_838_000_000_000_000n };
+    expect(stakeAmountText(q, true)).toBe("about 0.0792 TAO (at least 0.0788 TAO)");
+    // the least is never rounded up past what the stake accepts
+    expect(stakeAmountText({ ...q, minTaoOut: 78_899_999_000_000_000n }, true)).toBe("about 0.0792 TAO (at least 0.0788 TAO)");
+  });
+
+  it("v2: the exact figure, as before", () => {
+    expect(stakeAmountText({ estTao: 0.079_234_5, minTaoOut: 79_234_500_000_000_000n }, false)).toBe("0.0792 TAO");
   });
 });
 

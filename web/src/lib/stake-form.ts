@@ -1,5 +1,6 @@
 import { formatUnits, parseUnits } from "viem";
-import { MIN_UNSTAKE_WEI } from "./cascade/config";
+import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
+import type { DepositQuote, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
 import { floorRao, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 
@@ -18,6 +19,8 @@ export type StakeState = {
   amount: number | null;
   /** An unstake typed as a USDC value: the button names the dollars. */
   usd?: number;
+  /** v3: the stake button names the amount in dollars ("Stake $20"). */
+  dollars?: boolean;
   error: string | null;
   pending: boolean;
 };
@@ -47,8 +50,70 @@ export function maxStakeInput(balance: number): string {
 export function stakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";
-  if (s.amount !== null && s.amount > 0 && s.error === null) return `Stake ${formatUsdc(s.amount)} USDC`;
+  if (s.amount !== null && s.amount > 0 && s.error === null) {
+    return s.dollars ? `Stake ${formatUsdShort(s.amount)}` : `Stake ${formatUsdc(s.amount)} USDC`;
+  }
   return "Stake";
+}
+
+/** v3: Cascade's fees on a stake, "$0.05 + 0.15%": the flat fee, and the percentage read back from the
+ * quote (the chain floors the swap fee, so it is rounded to hundredths of a percent). */
+export function cascadeFeesText(q: Pick<DepositQuote, "usdcIn" | "depositFeeUsdc" | "swapFeeUsdc">): string {
+  const parts: string[] = [];
+  if (q.depositFeeUsdc > 0n) parts.push(formatUsdShort(toDisplay(q.depositFeeUsdc, 6)));
+  const rate = swapFeeRate(q);
+  if (rate > 0) parts.push(`${Number((rate * 100).toFixed(2))}%`);
+  return parts.length > 0 ? parts.join(" + ") : "None";
+}
+
+/** Cascade's percentage fee as a fraction of what it is taken from (the USDC after the flat fee). */
+function swapFeeRate(q: Pick<DepositQuote, "usdcIn" | "depositFeeUsdc" | "swapFeeUsdc">): number {
+  const base = q.usdcIn - q.depositFeeUsdc;
+  return base > 0n ? toDisplay(q.swapFeeUsdc, 6) / toDisplay(base, 6) : 0;
+}
+
+/** The pools' fees on the way in (and out): USDC –0.05%→ WETH –0.3%→ TAO. */
+export const POOL_FEES_TEXT = "about 0.35%";
+const EXIT_POOL_FEE = 0.0035;
+
+/** v3: about how many days of yield pay for a round trip: this stake's Cascade and pool fees, plus an
+ * estimated way out (Cascade's percentage fee and the pools' again, on what was staked). Null without
+ * an amount or a yield. */
+export function breakEvenDays(
+  q: Pick<DepositQuote, "usdcIn" | "amountUsd" | "feesUsd" | "depositFeeUsdc" | "swapFeeUsdc">,
+  yieldPct: number,
+): number | null {
+  const perDay = (q.amountUsd * yieldPct) / 100 / 365;
+  if (!(perDay > 0)) return null;
+  const out = Math.max(0, q.amountUsd - q.feesUsd) * (swapFeeRate(q) + EXIT_POOL_FEE);
+  return Math.max(1, Math.round((q.feesUsd + out) / perDay));
+}
+
+export function breakEvenText(days: number): string {
+  return `Covers its fees in about ${days} day${days === 1 ? "" : "s"} at today's yield.`;
+}
+
+/** v3: the least USDC an unstake's automatic delivery pays: the TAO that comes back (after the bridge
+ * fee) at the minimum price, floored to the cent. */
+export function deliveryFloorUsd(q: Pick<WithdrawalQuote, "taoWei" | "bridgeFeeWei" | "minUsdcPerTao">): number {
+  const tao = q.taoWei > q.bridgeFeeWei ? q.taoWei - q.bridgeFeeWei : 0n;
+  const units = (tao * q.minUsdcPerTao) / 10n ** 18n;
+  return toDisplay((units / 10_000n) * 10_000n, 6);
+}
+
+/** v3: the line under the unstake button; the floor once a quote has named it. */
+export function deliveryNote(floorUsd: number | null): string {
+  if (floorUsd === null) return "USDC arrives in your wallet automatically.";
+  return `USDC arrives in your wallet automatically, at least ${formatUsd(floorUsd)} (today's price less ${DELIVERY_TOLERANCE_BPS / 100}%). If the price falls further, you can claim by hand.`;
+}
+
+/** Whether the Stake page offers "Claim as USDC" for what is waiting on Base. v2: whenever something
+ * is. v3: only when an unstake's trail offers the claim by hand; while its USDC is being delivered
+ * automatically there is nothing to do, and until the unstakes load it isn't known. */
+export function offerClaim(claimable: bigint, v3: boolean, withdrawals: readonly WithdrawalRecord[] | undefined): boolean {
+  if (claimable === 0n) return false;
+  if (!v3) return true;
+  return (withdrawals ?? []).some((w) => w.status === "ready" && w.steps.some((s) => s.key === "claim" && s.status === "action"));
 }
 
 /** What MAX types into the TAO field: the exact available amount, floored to six decimals. */

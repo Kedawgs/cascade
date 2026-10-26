@@ -1,10 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useBalances, useLimits, usePosition, useProtocolStats, useWithdrawals } from "@/lib/cascade/hooks";
+import { useBalances, useIsV3, useLimits, usePosition, useProtocolStats, useWithdrawals } from "@/lib/cascade/hooks";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
+import { offerClaim } from "@/lib/stake-form";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
 import app from "./App.module.css";
@@ -72,14 +73,16 @@ function WalletTao({ account }: { account: string }) {
 }
 
 /** Money waiting on Base to be claimed (an unstake's payout, or a deposit the vault sent back), with
- * one button that claims it all as USDC. Hidden when there is none. */
+ * one button that claims it all as USDC. Hidden when there is none, and on v3 unless an unstake's
+ * trail offers the claim by hand (otherwise its USDC is on its way to the wallet by itself). */
 function ClaimReady({ account }: { account: string }) {
+  const v3 = useIsV3();
   const balances = useBalances(account);
   const stats = useProtocolStats();
   const withdrawals = useWithdrawals(account);
   const flows = useFlows(account);
   const claimable = balances.data?.claimable ?? 0n;
-  if (claimable === 0n) return null;
+  if (!offerClaim(claimable, v3, withdrawals.data)) return null;
   const price = stats.data?.taoPriceUsd;
   const ready = (withdrawals.data ?? []).filter((w) => w.status === "ready").map((w) => w.id);
   return (
@@ -99,8 +102,23 @@ function ClaimReady({ account }: { account: string }) {
   );
 }
 
+/** v3: the TAO price under the balances, and what it means for them. */
+function PriceStrip() {
+  const stats = useProtocolStats();
+  const price = stats.data?.taoPriceUsd;
+  return (
+    <div className={styles.priceStrip}>
+      <p className={styles.price}>
+        TAO <b>{price !== undefined ? formatUsd(price) : "–"}</b>
+      </p>
+      <p className={styles.priceNote}>Your balance is TAO: its dollar value moves with TAO&apos;s price.</p>
+    </div>
+  );
+}
+
 /** The main card on the stake page: account summary on top, the stake form below. */
 export function StakeCard({ account }: { account: string | null }) {
+  const v3 = useIsV3();
   const balance = useUsdcBalance();
   const avail = availableToStake(balance);
 
@@ -122,6 +140,7 @@ export function StakeCard({ account }: { account: string | null }) {
             <p className={styles.v}>–</p>
           </div>
         )}
+        {v3 && <PriceStrip />}
       </div>
       {account && <ClaimReady account={account} />}
       {account && <WalletTao account={account} />}

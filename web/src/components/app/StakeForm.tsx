@@ -4,10 +4,19 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
-import { useBalances, useDepositQuote, useLimits } from "@/lib/cascade/hooks";
+import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
+import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
-import { maxStakeInput, stakeButtonLabel, validateStakeAmount } from "@/lib/stake-form";
+import {
+  breakEvenDays,
+  breakEvenText,
+  cascadeFeesText,
+  maxStakeInput,
+  POOL_FEES_TEXT,
+  stakeButtonLabel,
+  validateStakeAmount,
+} from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
 import { AmountField } from "./AmountField";
 import styles from "./StakeForm.module.css";
@@ -39,7 +48,9 @@ export function StakeForm({
   maxUsdc?: number | null;
 }) {
   const router = useRouter();
+  const v3 = useIsV3();
   const limits = useLimits();
+  const stats = useProtocolStats();
   const balances = useBalances(account);
   const flows = useFlows(account);
   const [raw, setRaw] = useState(initialAmount);
@@ -56,7 +67,9 @@ export function StakeForm({
   const quote = units !== null && quoteQuery.data?.usdcIn === units ? quoteQuery.data : undefined;
   const pending = flows.busy === "stake";
   const lowEth = account !== null && balances.data !== undefined && balances.data.eth < LOW_ETH_WEI;
-  const label = stakeButtonLabel({ account, amount, error, pending });
+  const label = stakeButtonLabel({ account, amount, error, pending, dollars: v3 });
+  // v3: the vault's own measured yield once it has one, until then the dated root yield
+  const breakEven = v3 && quote ? breakEvenDays(quote, stats.data?.aprPercent ?? ROOT_YIELD_PCT) : null;
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -122,19 +135,35 @@ export function StakeForm({
           <dt>You will stake</dt>
           <dd>{quote ? `${formatTao(quote.estTao, 4)} TAO` : "–"}</dd>
         </div>
-        <div>
-          <dt>Price per TAO (incl. swap fees)</dt>
-          <dd>{quote ? formatUsd(quote.taoPriceUsd) : "–"}</dd>
-        </div>
-        <div>
-          <dt>Swap fees</dt>
-          <dd>{quote ? `${formatUsd(quote.feesUsd)} + Base network fee` : "–"}</dd>
-        </div>
+        {v3 ? (
+          <>
+            <div>
+              <dt>Cascade fees</dt>
+              <dd>{quote ? cascadeFeesText(quote) : "–"}</dd>
+            </div>
+            <div>
+              <dt>Pool fees</dt>
+              <dd>{quote ? POOL_FEES_TEXT : "–"}</dd>
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <dt>Price per TAO (incl. swap fees)</dt>
+              <dd>{quote ? formatUsd(quote.taoPriceUsd) : "–"}</dd>
+            </div>
+            <div>
+              <dt>Swap fees</dt>
+              <dd>{quote ? `${formatUsd(quote.feesUsd)} + Base network fee` : "–"}</dd>
+            </div>
+          </>
+        )}
         <div>
           <dt>Staked in</dt>
           <dd>{quote ? `about ${quote.etaMinutes} minutes` : "–"}</dd>
         </div>
       </dl>
+      {breakEven !== null && <p className={styles.breakEven}>{breakEvenText(breakEven)}</p>}
       <p className={styles.foot}>
         Your wallet asks you to confirm each step, or just once with a smart account. No Bittensor wallet needed.
       </p>

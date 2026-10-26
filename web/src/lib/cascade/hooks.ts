@@ -1,6 +1,7 @@
 "use client";
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { isV3 } from "./config";
 import { useCascadeData } from "./context";
 
 /** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
@@ -25,6 +26,16 @@ export const cascadeKeys = {
   depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
   withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
 };
+
+/** Whether the site talks to a v3 deployment; false when none is configured (its reads all fail). */
+export function useIsV3(): boolean {
+  const data = useCascadeData();
+  try {
+    return isV3(data.deployment);
+  } catch {
+    return false;
+  }
+}
 
 export function useProtocolStats() {
   const data = useCascadeData();

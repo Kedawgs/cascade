@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { WithdrawalRecord } from "./cascade/types";
 import {
+  breakEvenDays,
+  breakEvenText,
+  cascadeFeesText,
+  deliveryFloorUsd,
+  deliveryNote,
   maxStakeInput,
+  offerClaim,
   maxUnstakeInput,
   maxUnstakeInputIn,
   stakeButtonLabel,
@@ -173,5 +180,95 @@ describe("balance checks", () => {
     expect(maxStakeInput(2.999999)).toBe("2.99");
     expect(maxStakeInput(12.345678)).toBe("12.34");
     expect(maxStakeInput(2400)).toBe("2400.00");
+  });
+});
+
+describe("v3 stake form", () => {
+  it("names the stake in dollars", () => {
+    expect(stakeButtonLabel({ account: "0xa", amount: 20, error: null, pending: false, dollars: true })).toBe("Stake $20");
+    expect(stakeButtonLabel({ account: "0xa", amount: 1234.5, error: null, pending: false, dollars: true })).toBe("Stake $1,234.50");
+    expect(stakeButtonLabel({ account: "0xa", amount: 5, error: "too small", pending: false, dollars: true })).toBe("Stake");
+  });
+
+  it("states Cascade's fees as the flat fee plus the percentage, read back from the quote", () => {
+    expect(cascadeFeesText({ usdcIn: 1_000_000_000n, depositFeeUsdc: 50_000n, swapFeeUsdc: 1_499_925n })).toBe("$0.05 + 0.15%");
+    // the swap fee is floored on chain, so odd amounts land a hair under 15 bps
+    expect(cascadeFeesText({ usdcIn: 12_345_678n, depositFeeUsdc: 50_000n, swapFeeUsdc: 18_443n })).toBe("$0.05 + 0.15%");
+    expect(cascadeFeesText({ usdcIn: 1_000_000_000n, depositFeeUsdc: 250_000n, swapFeeUsdc: 4_998_750n })).toBe("$0.25 + 0.5%");
+    expect(cascadeFeesText({ usdcIn: 1_000_000_000n, depositFeeUsdc: 0n, swapFeeUsdc: 1_500_000n })).toBe("0.15%");
+    expect(cascadeFeesText({ usdcIn: 1_000_000_000n, depositFeeUsdc: 0n, swapFeeUsdc: 0n })).toBe("None");
+  });
+
+  // fees as live.ts quotes them: Cascade's, plus the pools' 0.34985% on the rest
+  const q1000 = { usdcIn: 1_000_000_000n, amountUsd: 1000, depositFeeUsdc: 50_000n, swapFeeUsdc: 1_499_925n, feesUsd: 1.549925 + 998.450075 * 0.0034985 };
+  const q20 = { usdcIn: 20_000_000n, amountUsd: 20, depositFeeUsdc: 50_000n, swapFeeUsdc: 29_925n, feesUsd: 0.079925 + 19.920075 * 0.0034985 };
+
+  it("counts the days of yield that pay for the way in and an estimated way out", () => {
+    // ($5.04 in + 0.5% of $994.96 out) / ($1,000 x 5.9% / 365) = 61.97
+    expect(breakEvenDays(q1000, 5.9)).toBe(62);
+    // ($0.15 in + 0.5% of $19.85 out) / ($20 x 5.9% / 365) = 76.98
+    expect(breakEvenDays(q20, 5.9)).toBe(77);
+    expect(breakEvenDays(q1000, 11.8)).toBe(31);
+  });
+
+  it("has no break-even without a yield or an amount", () => {
+    expect(breakEvenDays(q1000, 0)).toBeNull();
+    expect(breakEvenDays({ ...q1000, amountUsd: 0 }, 5.9)).toBeNull();
+  });
+
+  it("says the break-even in plain words", () => {
+    expect(breakEvenText(62)).toBe("Covers its fees in about 62 days at today's yield.");
+    expect(breakEvenText(1)).toBe("Covers its fees in about 1 day at today's yield.");
+  });
+});
+
+describe("v3 unstake delivery", () => {
+  it("is at least the TAO that comes back at the minimum price, floored to the cent", () => {
+    // 0.079 TAO after the bridge fee, at $246.00 a TAO: $19.434
+    expect(deliveryFloorUsd({ taoWei: 80_000_000_000_000_000n, bridgeFeeWei: 1_000_000_000_000_000n, minUsdcPerTao: 246_000_000n })).toBe(19.43);
+    expect(deliveryFloorUsd({ taoWei: 1n, bridgeFeeWei: 2n, minUsdcPerTao: 246_000_000n })).toBe(0);
+  });
+
+  it("says USDC arrives on its own, and the floor once it is known", () => {
+    expect(deliveryNote(19.43)).toBe(
+      "USDC arrives in your wallet automatically, at least $19.43 (today's price less 2%). If the price falls further, you can claim by hand.",
+    );
+    expect(deliveryNote(null)).toBe("USDC arrives in your wallet automatically.");
+  });
+});
+
+describe("offerClaim", () => {
+  const unstake = (status: WithdrawalRecord["status"], claim: "pending" | "active" | "action" | "done"): WithdrawalRecord => ({
+    id: "w1",
+    createdAt: new Date(0),
+    status,
+    steps: [
+      { key: "request", title: "Request your unstake", status: "done" },
+      { key: "unstake", title: "Unstake on Bittensor", status: "done" },
+      { key: "return", title: "Return to Base", status: "done" },
+      { key: "claim", title: claim === "action" ? "Claim as USDC" : "USDC to your wallet", status: claim },
+    ],
+    shares: 1n,
+    taoAmount: 0.08,
+    claimable: 10n ** 16n,
+  });
+
+  it("v2: offers it whenever something is waiting", () => {
+    expect(offerClaim(10n ** 16n, false, undefined)).toBe(true);
+    expect(offerClaim(10n ** 16n, false, [unstake("in_progress", "active")])).toBe(true);
+    expect(offerClaim(0n, false, undefined)).toBe(false);
+  });
+
+  it("v3: not while the USDC is being delivered automatically", () => {
+    expect(offerClaim(10n ** 16n, true, [unstake("in_progress", "active")])).toBe(false);
+  });
+
+  it("v3: when the trail offers the claim by hand", () => {
+    expect(offerClaim(10n ** 16n, true, [unstake("paid", "done"), unstake("ready", "action")])).toBe(true);
+    expect(offerClaim(0n, true, [unstake("ready", "action")])).toBe(false);
+  });
+
+  it("v3: not before the unstakes have loaded", () => {
+    expect(offerClaim(10n ** 16n, true, undefined)).toBe(false);
   });
 });

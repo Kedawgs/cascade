@@ -219,6 +219,23 @@
   text-align: right;
 }
 
+/* v3: the break-even line under the estimate rows */
+.breakEven {
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+/* v3: what happens after the unstake button, right under it */
+.under {
+  margin: -6px 0 16px;
+  font-size: 13px;
+  color: var(--ink-2);
+  text-align: center;
+}
+
 .yield {
   color: var(--water-deep) !important;
 }

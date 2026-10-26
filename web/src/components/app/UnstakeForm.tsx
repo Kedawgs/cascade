@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { formatEther } from "viem";
-import { useBalances, usePosition, useWithdrawalQuote } from "@/lib/cascade/hooks";
+import { useBalances, useIsV3, usePosition, useWithdrawalQuote } from "@/lib/cascade/hooks";
 import type { Position } from "@/lib/cascade/types";
 import { checkUnstake, toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdcCents } from "@/lib/format";
 import {
+  deliveryFloorUsd,
+  deliveryNote,
   maxUnstakeInputIn,
   switchUnstakeUnit,
   unstakeButtonLabel,
@@ -60,6 +62,7 @@ function UnstakeWithBalance({ account }: { account: string }) {
 
 function UnstakeFormBody({ account, position }: { account: string | null; position: Position | null }) {
   const router = useRouter();
+  const v3 = useIsV3();
   const flows = useFlows(account);
   const balances = useBalances(account);
   const [raw, setRaw] = useState("");
@@ -167,6 +170,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
           <ConnectWallet variant="pill-block" />
         </div>
       )}
+      {v3 && <p className={styles.under}>{deliveryNote(quote ? deliveryFloorUsd(quote) : null)}</p>}
       {lowEth && quote && (
         <p className={styles.error}>
           This unstake needs about {formatEther(quote.fee + GAS_WEI)} ETH on Base for the request fee and network fees, and this
@@ -207,7 +211,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
           <dd>{quote ? hoursText(quote.etaMinutes) : "–"}</dd>
         </div>
       </dl>
-      <p className={styles.foot}>Your TAO comes back to Base, then you claim it as USDC in the same wallet.</p>
+      {!v3 && <p className={styles.foot}>Your TAO comes back to Base, then you claim it as USDC in the same wallet.</p>}
     </form>
   );
 }

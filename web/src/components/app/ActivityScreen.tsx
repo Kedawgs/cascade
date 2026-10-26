@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
-import { useBalances, useDeposit, useDeposits, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
+import { useBalances, useDeposit, useDeposits, useIsV3, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { parseActivityParams } from "@/lib/activity-params";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
@@ -41,6 +41,7 @@ function Actions({ children }: { children: ReactNode }) {
 
 function DepositDetail({ account, id }: { account: string; id: string }) {
   const { data: deposit, isPending, isError, refetch } = useDeposit(account, id);
+  const v3 = useIsV3();
   const { data: position } = usePosition(account);
   const wallet = useBalances(account);
   const flows = useFlows(account);
@@ -73,7 +74,8 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
           </div>
           {deposit.feesUsd !== undefined && (
             <div>
-              <dt>Swap fees</dt>
+              {/* v3's figure is Cascade's fees and the pools' together */}
+              <dt>{v3 ? "Fees" : "Swap fees"}</dt>
               <dd>{formatUsd(deposit.feesUsd)}</dd>
             </div>
           )}

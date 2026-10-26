@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import { type Address, formatEther, formatUnits, type Hex } from "viem";
+import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
 import { claimPolicy, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
-import { claim, close, deliverAll, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
+import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { formatRewards } from "./keeper/rewards.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
@@ -100,17 +100,8 @@ async function run(a: Args): Promise<number> {
     case "deliver": {
       const rec = needRecord(a.live);
       deliveryPlan(rec);
-      const deps = keeperDeps(ctxFor(a.live), rec, recordPath(a.live));
-      const users = a.users.length ? (a.users as Address[]) : await deps.deliveryCandidates();
-      if (!users.length) log("No user has redeemed through the vault yet: nothing to deliver.");
-      for (const d of await deliverAll(deps, rec, users)) {
-        if (d.delivered) {
-          const got = d.usdcOut === undefined ? "" : `${formatUnits(d.usdcOut, 6)} USDC, `;
-          log(`${d.user}: delivered (${got}transaction ${d.hash}, cost ${formatEther(d.costWei)} ETH)`);
-        } else {
-          log(`${d.user}: not delivered: ${d.reason}`);
-        }
-      }
+      // each result is printed as it happens; a failure then exits non-zero through main
+      await deliverCommand(keeperDeps(ctxFor(a.live), rec, recordPath(a.live)), rec, a.users as Address[], log);
       return 0;
     }
     case "track":

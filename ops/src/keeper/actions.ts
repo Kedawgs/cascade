@@ -1,4 +1,4 @@
-import { type Address, encodeEventTopics, type Hex, parseAbi } from "viem";
+import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, parseAbi } from "viem";
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy } from "../config.ts";
 import { isPlanV3, type PlanV3 } from "../plan.ts";
 import type { DeploymentRecord } from "../record.ts";
@@ -180,13 +180,39 @@ export async function deliver(deps: KeeperDeps, rec: DeploymentRecord, user: Add
   return { user, delivered: true, ...sent, usdcOut: deliveredFrom(sent.logs, plan.addresses.frontDoor, user)?.usdcOut };
 }
 
-/** `pnpm ops deliver`: each user once, in order. */
-export async function deliverAll(deps: KeeperDeps, rec: DeploymentRecord, users: readonly Address[]): Promise<Delivery[]> {
+/** Each user once, in order, each result handed to `report` as soon as it is known: a later user's
+ * failure (which stops the loop) never hides a transaction already sent. */
+export async function deliverAll(
+  deps: KeeperDeps,
+  rec: DeploymentRecord,
+  users: readonly Address[],
+  report: (d: Delivery) => void = () => undefined,
+): Promise<Delivery[]> {
   requireReady(rec);
   deliveryPlan(rec);
   const out: Delivery[] = [];
-  for (const user of users) out.push(await deliver(deps, rec, user));
+  for (const user of users) {
+    const d = await deliver(deps, rec, user);
+    out.push(d);
+    report(d);
+  }
   return out;
+}
+
+/** One user's result as `pnpm ops deliver` prints it. */
+export function deliveryLine(d: Delivery): string {
+  if (!d.delivered) return `${d.user}: not delivered: ${d.reason}`;
+  const got = d.usdcOut === undefined ? "" : `${formatUnits(d.usdcOut, 6)} USDC, `;
+  return `${d.user}: delivered (${got}transaction ${d.hash}, cost ${formatEther(d.costWei)} ETH)`;
+}
+
+/** `pnpm ops deliver`: the named users, or every user who has redeemed, each delivered once with its
+ * result printed as it happens. A failure stops the command (non-zero) after what was done is printed. */
+export async function deliverCommand(deps: KeeperDeps, rec: DeploymentRecord, users: readonly Address[], log: (line: string) => void): Promise<Delivery[]> {
+  deliveryPlan(rec);
+  const list = users.length ? users : await deps.deliveryCandidates();
+  if (!list.length) log("No user has redeemed through the vault yet: nothing to deliver.");
+  return deliverAll(deps, rec, list, (d) => log(deliveryLine(d)));
 }
 
 export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, { kind: "deliver" }>): Promise<Done> {

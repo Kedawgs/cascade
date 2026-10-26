@@ -1,7 +1,7 @@
 import { type Address, encodeAbiParameters, encodeEventTopics, type Hex, numberToHex, parseAbiParameters } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import { BASE_V3, CLAIM_POLICY, WALLET } from "../src/config.ts";
-import { deliver, deliverAll, runLoop } from "../src/keeper/actions.ts";
+import { deliver, deliverAll, deliverCommand, runLoop } from "../src/keeper/actions.ts";
 import {
   checkDelivery,
   DELIVER_ABI,
@@ -407,6 +407,41 @@ describe("deliver", () => {
     await expect(deliverAll(deps, { ...rec, verify: undefined }, [alice])).rejects.toThrow(/not complete and verified/);
     const v2 = { ...rec, plan: { ...plan, version: undefined } } as never;
     await expect(deliverAll(deps, v2, [alice])).rejects.toThrow(/v3 deployment/);
+  });
+
+  it("pnpm ops deliver prints each user's result as it happens, so a failure on a later user never hides an earlier hash", async () => {
+    const carol: Address = "0x000000000000000000000000000000000000ca01";
+    const first: Hex = `0x${"d1".repeat(32)}`;
+    let sends = 0;
+    const sendCall = vi.fn(async (_r: CallRequest): Promise<Sent> => {
+      sends++;
+      if (sends === 2) throw new Error("Base: no receipt yet for nonce 5; nothing more will be sent until it is mined or dropped");
+      return { ...SENT, hash: first, logs: [deliveredLog(alice, 251_000_000n)] };
+    });
+    const lines: string[] = [];
+    const deps = stubDeps({
+      readDelivery: async (user) => ready({ user, ...(user === bob ? { pref: null } : {}) }),
+      simulateDeliver: async () => ({ ok: true, usdcOut: 251_000_000n }),
+      sendCall,
+    });
+    // alice is delivered, bob waits (no preference), carol's send fails: the command stops (non-zero)
+    await expect(deliverCommand(deps, rec, [alice, bob, carol], (l) => lines.push(l))).rejects.toThrow(/no receipt yet/);
+    expect(lines).toEqual([
+      `${alice}: delivered (251 USDC, transaction ${first}, cost 0.000000000000000001 ETH)`,
+      `${bob}: not delivered: no USDC delivery preference: the TAO stays claimable`,
+    ]);
+    expect(sendCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("pnpm ops deliver without --user reads the candidates, and says when there are none", async () => {
+    const lines: string[] = [];
+    const none = stubDeps({ deliveryCandidates: async () => [] });
+    expect(await deliverCommand(none, rec, [], (l) => lines.push(l))).toEqual([]);
+    expect(lines).toEqual(["No user has redeemed through the vault yet: nothing to deliver."]);
+    lines.length = 0;
+    const deps = stubDeps({ deliveryCandidates: async () => [bob], readDelivery: async (user) => ready({ user, pref: null }) });
+    await deliverCommand(deps, rec, [], (l) => lines.push(l));
+    expect(lines).toEqual([`${bob}: not delivered: no USDC delivery preference: the TAO stays claimable`]);
   });
 
   it("checkDelivery passes the decision's minimum to the simulation", async () => {

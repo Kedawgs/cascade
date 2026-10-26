@@ -311,7 +311,10 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       const taoWei = taoFor(shares, v.totalAssets, v.totalSupply);
       const bridgeFeeWei = await deps.quotePayoutFee(c, d, a, taoWei);
       const net = taoWei > bridgeFeeWei ? taoWei - bridgeFeeWei : 0n;
-      const usdc = await deps.quoteSell(c, net);
+      const gross = await deps.quoteSell(c, net);
+      // v3 delivery pays the sale less the staker's swap fee (as sellFor takes it); v2 stays gross
+      const deliveryFee = isV3(d) ? (gross * (await deps.readStakerFees(c, d)).swapFeeBps) / 10_000n : 0n;
+      const usdc = gross - deliveryFee;
       const fee = fd.redeemOf === 0n ? fd.redeemRequestFee : 0n;
       const usdcAmount = toDisplay(usdc, 6);
       const at = closesAt(fd);
@@ -322,7 +325,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         usdcAmount,
         fee,
         bridgeFeeWei,
-        feesUsd: toDisplay(bridgeFeeWei, 18) * price + toDisplay(fee, 18) * ethPrice + (usdcAmount * POOL_FEE) / (1 - POOL_FEE),
+        feesUsd: toDisplay(bridgeFeeWei, 18) * price + toDisplay(fee, 18) * ethPrice + (toDisplay(gross, 6) * POOL_FEE) / (1 - POOL_FEE) + toDisplay(deliveryFee, 6),
         taoPriceUsd: price,
         closesAt: at,
         etaMinutes: minutesUntil(at, deps.now()) + 2 * BRIDGE_MINUTES + Math.round(v.payoutDelay / 60),

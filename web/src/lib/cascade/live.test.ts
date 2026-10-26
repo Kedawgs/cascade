@@ -153,6 +153,13 @@ describe("live data", () => {
     const net = gross - (gross * 15n) / 10_000n;
     expect(q.minUsdcPerTao).toBe((net * 9_800n) / 10_000n);
     expect(q.deliveryDeadline).toBe(1_800_000_100 + 604_800);
+    // 0.04 TAO less the bridge fee, sold at the mocked price; the user gets that less 15 bps
+    const sold = ((4n * 10n ** 16n - 105n * 10n ** 13n) * 250n) / 10n ** 12n;
+    const fee = (sold * 15n) / 10_000n;
+    expect(q.usdcAmount).toBeCloseTo(Number(sold - fee) / 1e6, 6);
+    const v2 = await createLiveCascadeData(D, deps()).quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(v2.usdcAmount).toBeCloseTo(Number(sold) / 1e6, 6);
+    expect(q.feesUsd - v2.feesUsd).toBeCloseTo(Number(fee) / 1e6, 6);
   });
 
   it("v2 quotes carry no v3 fees or limits", async () => {

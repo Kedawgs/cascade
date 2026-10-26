@@ -485,6 +485,23 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(over.steps[3].status).toBe("active");
   });
 
+  it("while the price is under the minimum, gives what the payout would sell for today, not the estimate from the request", () => {
+    const under = withdrawalRecord(wop3, { ...back, saleNowUsdc: 2_400_000n });
+    expect(under.belowMinimum).toEqual({ usdcNow: 2.4 });
+    // two payouts waiting, sold together: this one's share of the sale
+    const two = withdrawalRecord(wop3, { ...back, claimable: 2n * CREDIT, saleNowUsdc: 4_800_000n });
+    expect(two.steps[3].detail).toMatch(/below your minimum/);
+    expect(two.belowMinimum).toEqual({ usdcNow: 2.4 });
+    // what this payout was credited can't be read: no figure rather than one that may be shared
+    const unknown = withdrawalRecord(wop3, { ...back, credited: undefined, traceFailed: true, saleNowUsdc: 2_400_000n });
+    expect(unknown.steps[3].detail).toMatch(/below your minimum/);
+    expect(unknown.belowMinimum).toEqual({});
+    // at or over the minimum, and on v2, there is no such state
+    expect(withdrawalRecord(wop3, { ...back, saleNowUsdc: 2_425_500n }).belowMinimum).toBeUndefined();
+    expect(withdrawalRecord(wop3, back).belowMinimum).toBeUndefined();
+    expect(withdrawalRecord(wop, { ...back, saleNowUsdc: 2_400_000n }).belowMinimum).toBeUndefined();
+  });
+
   it("stays 'Claim as USDC' in progress while a claim from this browser settles, whatever is claimable", () => {
     for (const claimable of [0n, CREDIT]) {
       const r = withdrawalRecord(wop3, { ...back, claimable, preference: null, claimPending: true });

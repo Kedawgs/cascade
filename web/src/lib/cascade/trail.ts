@@ -335,6 +335,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   let settled = false;
   /** v3: delivery can't happen, so the claim by hand is offered. */
   let offered = false;
+  /** v3: today's price is under the unstake's minimum, so it hasn't been sold for it. */
+  let belowMinimum: WithdrawalRecord["belowMinimum"];
   const c = f.claimed;
   // v3: a claim from this browser shows its amount only when it took exactly this payout's credit
   const ownClaim = !auto || (c !== undefined && f.credited !== undefined && c.taoClaimed === f.credited.taoWei);
@@ -374,6 +376,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     claim = v3.step;
     settled = v3.settled;
     offered = v3.offered;
+    belowMinimum = v3.belowMinimum;
   } else if (landed && f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your money is back on Base. Claim it as USDC" };
 
   const steps = [request, unstake, ret, claim];
@@ -410,6 +413,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     ...(usdcAmount !== undefined ? { usdcAmount } : {}),
     claimable: f.claimable,
     ...(received ? { received } : {}),
+    ...(belowMinimum ? { belowMinimum } : {}),
     ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" ? { cancellableShares: op.shares } : {}),
   };
 }
@@ -432,7 +436,7 @@ function deliveryStep(
   op: WithdrawalOp,
   f: WithdrawalFacts,
   step: TrailStep<WithdrawalStepKey>,
-): { step: TrailStep<WithdrawalStepKey>; settled: boolean; offered: boolean } {
+): { step: TrailStep<WithdrawalStepKey>; settled: boolean; offered: boolean; belowMinimum?: WithdrawalRecord["belowMinimum"] } {
   const waiting = { settled: false, offered: false };
   // a claim this browser sent hasn't settled: it is what takes this payout, whatever else is claimable
   if (f.claimPending) return { step: { ...step, title: "Claim as USDC", status: "active" }, ...waiting };
@@ -484,5 +488,11 @@ function deliveryStep(
     : pref
       ? `Automatic delivery ended on ${until}. Your money is back on Base. Claim it as USDC`
       : "Your money is back on Base. Claim it as USDC";
-  return { step: { ...step, title: "Claim as USDC", status: "action", detail }, settled: false, offered: true };
+  const offer = { step: { ...step, title: "Claim as USDC", status: "action" as const, detail }, settled: false, offered: true };
+  if (!under || f.saleNowUsdc === undefined) return offer;
+  // what the sale would pay today, after the staker's fee: this payout's share when others wait with it,
+  // and no figure when its own credit can't be read (never one that may be shared)
+  const credit = f.credited?.taoWei;
+  const usdcNow = credit === undefined ? undefined : credit >= f.claimable ? f.saleNowUsdc : (f.saleNowUsdc * credit) / f.claimable;
+  return { ...offer, belowMinimum: usdcNow !== undefined ? { usdcNow: toDisplay(usdcNow, 6) } : {} };
 }

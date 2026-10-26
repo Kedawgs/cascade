@@ -176,6 +176,14 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
                   : `${formatTao(withdrawal.received.keptTao ?? 0, 4)} TAO on Base`}
               </dd>
             </div>
+          ) : withdrawal.belowMinimum ? (
+            // v3, the price under the minimum: what it would fetch now, not the estimate from the request
+            withdrawal.belowMinimum.usdcNow !== undefined && (
+              <div>
+                <dt>You will receive</dt>
+                <dd>about {formatUsd(withdrawal.belowMinimum.usdcNow)} at today&apos;s price</dd>
+              </div>
+            )
           ) : (
             !paid &&
             withdrawal.status !== "cancelled" &&

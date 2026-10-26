@@ -55,6 +55,9 @@ export interface WithdrawalRecord {
   /** What was actually paid: a claim's receipts, or on v3 the front door's Delivered event. Absent when
    * it can't be read; never estimated. */
   received?: { usdc?: number; keptTao?: number };
+  /** v3: today's price is under the unstake's minimum, so its USDC hasn't been sold for it: what its
+   * payout would sell for at today's price, in USDC (absent when its share of what waits isn't known). */
+  belowMinimum?: { usdcNow?: number };
   /** Shares still in the open batch that can be taken back. */
   cancellableShares?: bigint;
   /** Nothing was taken when it arrived (balance too small, or the daily limit): unstake again. */

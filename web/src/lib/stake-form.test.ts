@@ -203,17 +203,27 @@ describe("v3 stake form", () => {
   const q1000 = { usdcIn: 1_000_000_000n, amountUsd: 1000, depositFeeUsdc: 50_000n, swapFeeUsdc: 1_499_925n, feesUsd: 1.549925 + 998.450075 * 0.0034985 };
   const q20 = { usdcIn: 20_000_000n, amountUsd: 20, depositFeeUsdc: 50_000n, swapFeeUsdc: 29_925n, feesUsd: 0.079925 + 19.920075 * 0.0034985 };
 
-  it("counts the days of yield that pay for the way in and an estimated way out", () => {
-    // ($5.04 in + 0.5% of $994.96 out) / ($1,000 x 5.9% / 365) = 61.97
-    expect(breakEvenDays(q1000, 5.9)).toBe(62);
-    // ($0.15 in + 0.5% of $19.85 out) / ($20 x 5.9% / 365) = 76.98
-    expect(breakEvenDays(q20, 5.9)).toBe(77);
-    expect(breakEvenDays(q1000, 11.8)).toBe(31);
+  // leaving also costs the 0.0001 ETH request fee at $4,000 an ETH and a 0.00105 TAO bridge fee at $250 a TAO
+  const exit = { exitFixedUsd: 0.0001 * 4000 + 0.00105 * 250, rewardCutBps: 1000 };
+
+  it("counts the days of yield, after Cascade's cut, that pay for the way in and the way out", () => {
+    // ($0.15 in + 0.5% of $19.85 out + $0.66 request and bridge fees) / ($20 x 5.9% x 0.9 / 365) = 313.2
+    expect(breakEvenDays(q20, exit, 5.9)).toBe(313);
+    // ($5.04 in + 0.5% of $994.96 out + $0.66) / ($1,000 x 5.9% x 0.9 / 365) = 73.4
+    expect(breakEvenDays(q1000, exit, 5.9)).toBe(73);
+  });
+
+  it("follows the fixed exit fees and the reward cut", () => {
+    // without them: ($0.15 + $0.10) / ($20 x 5.9% / 365) = 76.98
+    expect(breakEvenDays(q20, { exitFixedUsd: 0, rewardCutBps: 0 }, 5.9)).toBe(77);
+    // a 20% cut: 0.911367 / ($20 x 5.9% x 0.8 / 365) = 352.4
+    expect(breakEvenDays(q20, { ...exit, rewardCutBps: 2000 }, 5.9)).toBe(352);
   });
 
   it("has no break-even without a yield or an amount", () => {
-    expect(breakEvenDays(q1000, 0)).toBeNull();
-    expect(breakEvenDays({ ...q1000, amountUsd: 0 }, 5.9)).toBeNull();
+    expect(breakEvenDays(q1000, exit, 0)).toBeNull();
+    expect(breakEvenDays({ ...q1000, amountUsd: 0 }, exit, 5.9)).toBeNull();
+    expect(breakEvenDays(q1000, { ...exit, rewardCutBps: 10_000 }, 5.9)).toBeNull();
   });
 
   it("says the break-even in plain words", () => {
@@ -245,30 +255,56 @@ describe("offerClaim", () => {
     steps: [
       { key: "request", title: "Request your unstake", status: "done" },
       { key: "unstake", title: "Unstake on Bittensor", status: "done" },
-      { key: "return", title: "Return to Base", status: "done" },
-      { key: "claim", title: claim === "action" ? "Claim as USDC" : "USDC to your wallet", status: claim },
+      { key: "return", title: "Return to Base", status: claim === "pending" ? "active" : "done" },
+      {
+        key: "claim",
+        title: claim === "action" ? "Claim as USDC" : "USDC to your wallet",
+        status: claim,
+        ...(claim === "active" ? { detail: "USDC is being delivered to your wallet automatically" } : {}),
+      },
     ],
     shares: 1n,
     taoAmount: 0.08,
     claimable: 10n ** 16n,
   });
+  const waiting = 10n ** 16n;
 
-  it("v2: offers it whenever something is waiting", () => {
-    expect(offerClaim(10n ** 16n, false, undefined)).toBe(true);
-    expect(offerClaim(10n ** 16n, false, [unstake("in_progress", "active")])).toBe(true);
+  it("is hidden when nothing is waiting", () => {
     expect(offerClaim(0n, false, undefined)).toBe(false);
-  });
-
-  it("v3: not while the USDC is being delivered automatically", () => {
-    expect(offerClaim(10n ** 16n, true, [unstake("in_progress", "active")])).toBe(false);
-  });
-
-  it("v3: when the trail offers the claim by hand", () => {
-    expect(offerClaim(10n ** 16n, true, [unstake("paid", "done"), unstake("ready", "action")])).toBe(true);
+    expect(offerClaim(0n, true, [])).toBe(false);
     expect(offerClaim(0n, true, [unstake("ready", "action")])).toBe(false);
   });
 
+  it("v2: offers it whenever something is waiting", () => {
+    expect(offerClaim(waiting, false, undefined)).toBe(true);
+    expect(offerClaim(waiting, false, [unstake("in_progress", "active")])).toBe(true);
+  });
+
+  it("v3: offers what no unstake explains (a deposit sent back, an unstake made elsewhere)", () => {
+    expect(offerClaim(waiting, true, [])).toBe(true);
+    expect(offerClaim(waiting, true, [unstake("paid", "done"), unstake("in_progress", "pending")])).toBe(true);
+  });
+
+  it("v3: hidden while an unstake's USDC is being delivered automatically, since delivery sells all of it", () => {
+    expect(offerClaim(waiting, true, [unstake("in_progress", "active")])).toBe(false);
+    expect(offerClaim(waiting, true, [unstake("paid", "done"), unstake("in_progress", "active")])).toBe(false);
+  });
+
+  it("v3: back once that unstake offers the claim by hand", () => {
+    expect(offerClaim(waiting, true, [unstake("ready", "action")])).toBe(true);
+    // delivery taking longer than usual: the trail offers the claim too
+    const slow = unstake("ready", "action");
+    slow.steps[3] = { ...slow.steps[3], title: "USDC to your wallet", detail: "USDC is being delivered to your wallet automatically. It's taking longer than usual. You can keep waiting, or claim it as USDC now." };
+    expect(offerClaim(waiting, true, [slow])).toBe(true);
+  });
+
+  it("v3: shown while some other last step is under way (a claim from this browser settling)", () => {
+    const settling = unstake("in_progress", "active");
+    settling.steps[3] = { key: "claim", title: "Claim as USDC", status: "active" };
+    expect(offerClaim(waiting, true, [settling])).toBe(true);
+  });
+
   it("v3: not before the unstakes have loaded", () => {
-    expect(offerClaim(10n ** 16n, true, undefined)).toBe(false);
+    expect(offerClaim(waiting, true, undefined)).toBe(false);
   });
 });

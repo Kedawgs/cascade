@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
-import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats } from "@/lib/cascade/hooks";
+import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
 import {
@@ -32,6 +32,20 @@ function usdcUnits(raw: string): bigint | null {
   }
 }
 
+/** v3: the TAO price, and what it means for a balance held in TAO. */
+function PriceStrip() {
+  const stats = useProtocolStats();
+  const price = stats.data?.taoPriceUsd;
+  return (
+    <div className={styles.priceStrip}>
+      <p className={styles.price}>
+        TAO <b>{price !== undefined ? formatUsd(price) : "–"}</b>
+      </p>
+      <p className={styles.priceNote}>Your balance is TAO: its dollar value moves with TAO&apos;s price.</p>
+    </div>
+  );
+}
+
 /**
  * The stake form used on the stake page and the landing page. With no account it
  * still quotes, but the button becomes the wallet chooser.
@@ -50,7 +64,6 @@ export function StakeForm({
   const router = useRouter();
   const v3 = useIsV3();
   const limits = useLimits();
-  const stats = useProtocolStats();
   const balances = useBalances(account);
   const flows = useFlows(account);
   const [raw, setRaw] = useState(initialAmount);
@@ -68,8 +81,11 @@ export function StakeForm({
   const pending = flows.busy === "stake";
   const lowEth = account !== null && balances.data !== undefined && balances.data.eth < LOW_ETH_WEI;
   const label = stakeButtonLabel({ account, amount, error, pending, dollars: v3 });
-  // v3: the vault's own measured yield once it has one, until then the dated root yield
-  const breakEven = v3 && quote ? breakEvenDays(quote, stats.data?.aprPercent ?? ROOT_YIELD_PCT) : null;
+  // v3: what leaving costs, read apart from the quote so it never holds up the button; to the 0.001
+  // TAO, so the quote's refreshes don't each ask Bittensor again (the bridge fee barely moves with size)
+  const roundTrip = useRoundTrip(v3 && quote ? (quote.targetTao / 10n ** 15n) * 10n ** 15n : null);
+  // the root yield is before Cascade's cut, which breakEvenDays takes off
+  const breakEven = v3 && quote && roundTrip.data ? breakEvenDays(quote, roundTrip.data, ROOT_YIELD_PCT) : null;
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -85,6 +101,7 @@ export function StakeForm({
 
   return (
     <form className={styles.form} onSubmit={onSubmit} noValidate>
+      {v3 && <PriceStrip />}
       <label htmlFor={inputId} className={styles.lbl}>
         Amount
       </label>

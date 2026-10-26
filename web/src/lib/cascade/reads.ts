@@ -237,6 +237,12 @@ export async function quotePayoutFee(c: Pick<Clients, "bittensor">, d: Deploymen
   })) as bigint;
 }
 
+/** The share of rewards Cascade keeps, in basis points; v2 has no cut, so nothing is asked. */
+export async function readRewardCutBps(c: Pick<Clients, "bittensor">, d: Deployment): Promise<number> {
+  if (!isV3(d)) return 0;
+  return Number(await c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "rewardCutBps" }));
+}
+
 export interface StakerFees {
   swapFeeBps: bigint;
   depositFeeUsdc: bigint;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
-import { readFrontDoor, readPendingRewards, readVault, readWallet, taoPriceUsd } from "./reads";
+import { readFrontDoor, readPendingRewards, readRewardCutBps, readVault, readWallet, taoPriceUsd } from "./reads";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -131,5 +131,19 @@ describe("readPendingRewards", () => {
   it("is undefined when a read fails", async () => {
     const bit = fake({ coldkey: `0x${"11".repeat(32)}`, rewardCutBps: 1000, totalSupply: 0n, getUnclaimedRootTaoByHotkey: () => { throw new Error("boom"); } });
     expect(await readPendingRewards({ bittensor: bit.client }, D, hotkey)).toBeUndefined();
+  });
+});
+
+describe("readRewardCutBps", () => {
+  it("reads the v3 vault's cut", async () => {
+    const bit = fake({ rewardCutBps: () => 1000 });
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    expect(await readRewardCutBps({ bittensor: bit.client }, D3)).toBe(1000);
+    expect(bit.asked).toEqual(["rewardCutBps"]);
+  });
+  it("is zero on v2, which has no cut, without asking", async () => {
+    const bit = fake({});
+    expect(await readRewardCutBps({ bittensor: bit.client }, D)).toBe(0);
+    expect(bit.asked).toEqual([]);
   });
 });

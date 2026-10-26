@@ -102,23 +102,8 @@ function ClaimReady({ account }: { account: string }) {
   );
 }
 
-/** v3: the TAO price under the balances, and what it means for them. */
-function PriceStrip() {
-  const stats = useProtocolStats();
-  const price = stats.data?.taoPriceUsd;
-  return (
-    <div className={styles.priceStrip}>
-      <p className={styles.price}>
-        TAO <b>{price !== undefined ? formatUsd(price) : "–"}</b>
-      </p>
-      <p className={styles.priceNote}>Your balance is TAO: its dollar value moves with TAO&apos;s price.</p>
-    </div>
-  );
-}
-
 /** The main card on the stake page: account summary on top, the stake form below. */
 export function StakeCard({ account }: { account: string | null }) {
-  const v3 = useIsV3();
   const balance = useUsdcBalance();
   const avail = availableToStake(balance);
 
@@ -140,7 +125,6 @@ export function StakeCard({ account }: { account: string | null }) {
             <p className={styles.v}>–</p>
           </div>
         )}
-        {v3 && <PriceStrip />}
       </div>
       {account && <ClaimReady account={account} />}
       {account && <WalletTao account={account} />}

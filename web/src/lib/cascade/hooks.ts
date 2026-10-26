@@ -25,6 +25,7 @@ export const cascadeKeys = {
   withdrawal: (account: string, id: string) => ["cascade", account, "withdrawal", id] as const,
   depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
   withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
+  roundTrip: (taoWei: bigint) => ["quote", "round-trip", taoWei.toString()] as const,
 };
 
 /** Whether the site talks to a v3 deployment; false when none is configured (its reads all fail). */
@@ -135,5 +136,19 @@ export function useWithdrawalQuote(account: string | null, shares: bigint | null
     enabled: account !== null && amount > 0n,
     placeholderData: keepPreviousData,
     refetchInterval: 15_000,
+  });
+}
+
+/** v3: what a later unstake of `taoWei` costs, for the break-even line. Kept apart from the deposit
+ * quote so its Bittensor read never holds up the stake button. */
+export function useRoundTrip(taoWei: bigint | null) {
+  const data = useCascadeData();
+  const amount = taoWei ?? 0n;
+  return useQuery({
+    queryKey: cascadeKeys.roundTrip(amount),
+    queryFn: () => data.quoteRoundTrip(amount),
+    enabled: amount > 0n,
+    placeholderData: keepPreviousData,
+    refetchInterval: 60_000,
   });
 }

@@ -102,6 +102,15 @@ export interface WithdrawalQuote {
   deliveryDeadline: number;
 }
 
+/** v3, for the stake form's break-even line: what leaving costs beyond the percentage fees, and the
+ * share of rewards Cascade keeps. */
+export interface RoundTripCosts {
+  /** The unstake request fee (ETH, at today's ETH price) and the bridge fee back to Base (TAO, at
+   * today's TAO price), in dollars. */
+  exitFixedUsd: number;
+  rewardCutBps: number;
+}
+
 export interface Limits {
   minTao: bigint;
   maxTao: bigint;
@@ -138,4 +147,6 @@ export interface CascadeData {
   getWithdrawal(account: string, id: string): Promise<WithdrawalRecord | null>;
   quoteDeposit(usdcUnits: bigint): Promise<DepositQuote>;
   quoteWithdrawal(account: string, shares: bigint): Promise<WithdrawalQuote>;
+  /** The costs of a later unstake of `taoWei`, and Cascade's reward cut. */
+  quoteRoundTrip(taoWei: bigint): Promise<RoundTripCosts>;
 }

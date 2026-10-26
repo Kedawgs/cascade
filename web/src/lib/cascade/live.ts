@@ -28,9 +28,13 @@ export interface LiveDeps {
   quoteBuy: typeof reads.quoteBuy;
   quoteSell: typeof reads.quoteSell;
   quotePayoutFee: typeof reads.quotePayoutFee;
+  readRewardCutBps: typeof reads.readRewardCutBps;
   scan(c: Clients, d: Deployment, scan: VaultScan, account?: Address): Promise<void>;
   now(): number;
 }
+
+/** A stand-in payee for quoting the bridge fee before there is an unstake. */
+const ANY_ACCOUNT: Address = "0x0000000000000000000000000000000000000001";
 
 /** Uniswap's pool fees on USDC –0.05%→ WETH –0.3%→ TAO (the same both ways). */
 const POOL_FEE = 1 - (1 - 0.0005) * (1 - 0.003);
@@ -74,6 +78,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     quoteBuy: reads.quoteBuy,
     quoteSell: reads.quoteSell,
     quotePayoutFee: reads.quotePayoutFee,
+    readRewardCutBps: reads.readRewardCutBps,
     scan: scanVault,
     now: Date.now,
     ...given,
@@ -341,6 +346,21 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         ...(await deliveryTerms()),
       };
     },
+
+    async quoteRoundTrip(taoWei) {
+      const [fd, ethPrice, taoPrice, bridgeFeeWei, rewardCutBps] = await Promise.all([
+        deps.readFrontDoor(c, d),
+        deps.ethPriceUsd(c),
+        deps.taoPriceUsd(c),
+        // who it is paid to doesn't change the bridge's fee
+        deps.quotePayoutFee(c, d, ANY_ACCOUNT, taoWei),
+        deps.readRewardCutBps(c, d),
+      ]);
+      return {
+        exitFixedUsd: toDisplay(fd.redeemRequestFee, 18) * ethPrice + toDisplay(bridgeFeeWei, 18) * taoPrice,
+        rewardCutBps,
+      };
+    },
   };
 }
 
@@ -374,5 +394,6 @@ export function notConfiguredData(): CascadeData {
     getWithdrawal: fail,
     quoteDeposit: fail,
     quoteWithdrawal: fail,
+    quoteRoundTrip: fail,
   };
 }

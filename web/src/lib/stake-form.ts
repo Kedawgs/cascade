@@ -1,6 +1,7 @@
 import { formatUnits, parseUnits } from "viem";
 import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
-import type { DepositQuote, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
+import type { DepositQuote, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
+import { offersClaim } from "./cascade/trail";
 import { floorRao, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 
@@ -77,15 +78,17 @@ export const POOL_FEES_TEXT = "about 0.35%";
 const EXIT_POOL_FEE = 0.0035;
 
 /** v3: about how many days of yield pay for a round trip: this stake's Cascade and pool fees, plus an
- * estimated way out (Cascade's percentage fee and the pools' again, on what was staked). Null without
- * an amount or a yield. */
+ * estimated way out (Cascade's percentage fee and the pools' again on what was staked, the unstake
+ * request fee and the bridge fee back), earned at the yield less Cascade's cut of rewards. Null
+ * without an amount or a yield. */
 export function breakEvenDays(
   q: Pick<DepositQuote, "usdcIn" | "amountUsd" | "feesUsd" | "depositFeeUsdc" | "swapFeeUsdc">,
+  exit: RoundTripCosts,
   yieldPct: number,
 ): number | null {
-  const perDay = (q.amountUsd * yieldPct) / 100 / 365;
+  const perDay = (q.amountUsd * yieldPct * (1 - exit.rewardCutBps / 10_000)) / 100 / 365;
   if (!(perDay > 0)) return null;
-  const out = Math.max(0, q.amountUsd - q.feesUsd) * (swapFeeRate(q) + EXIT_POOL_FEE);
+  const out = Math.max(0, q.amountUsd - q.feesUsd) * (swapFeeRate(q) + EXIT_POOL_FEE) + exit.exitFixedUsd;
   return Math.max(1, Math.round((q.feesUsd + out) / perDay));
 }
 
@@ -107,13 +110,20 @@ export function deliveryNote(floorUsd: number | null): string {
   return `USDC arrives in your wallet automatically, at least ${formatUsd(floorUsd)} (today's price less ${DELIVERY_TOLERANCE_BPS / 100}%). If the price falls further, you can claim by hand.`;
 }
 
-/** Whether the Stake page offers "Claim as USDC" for what is waiting on Base. v2: whenever something
- * is. v3: only when an unstake's trail offers the claim by hand; while its USDC is being delivered
- * automatically there is nothing to do, and until the unstakes load it isn't known. */
+/** The trail's words for an unstake whose USDC is on its way to the wallet by itself. */
+const DELIVERING = "USDC is being delivered to your wallet automatically";
+
+/** Whether the Stake page offers "Claim as USDC" for what is waiting on Base: whenever something is,
+ * except on v3 while an unstake's USDC is being delivered automatically and its trail doesn't offer the
+ * claim by hand yet (delivery sells everything waiting at once). Until the unstakes load that isn't
+ * known, so v3 waits. */
 export function offerClaim(claimable: bigint, v3: boolean, withdrawals: readonly WithdrawalRecord[] | undefined): boolean {
   if (claimable === 0n) return false;
   if (!v3) return true;
-  return (withdrawals ?? []).some((w) => w.status === "ready" && w.steps.some((s) => s.key === "claim" && s.status === "action"));
+  if (!withdrawals) return false;
+  const delivering = (w: WithdrawalRecord) =>
+    !offersClaim(w) && w.steps.some((s) => s.key === "claim" && s.status === "active" && s.detail?.startsWith(DELIVERING));
+  return !withdrawals.some(delivering);
 }
 
 /** What MAX types into the TAO field: the exact available amount, floored to six decimals. */

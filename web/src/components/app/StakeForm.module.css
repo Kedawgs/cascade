@@ -219,6 +219,40 @@
   text-align: right;
 }
 
+/* v3: the TAO price, and what it means for a balance held in TAO, above the amount */
+.priceStrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 12px;
+  row-gap: 2px;
+  margin: 0 0 16px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.price {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.price b {
+  margin-left: 2px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.priceNote {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
 /* v3: the break-even line under the estimate rows */
 .breakEven {
   margin: 0;

@@ -63,6 +63,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     quoteBuy: async (_c, usdc) => (usdc * 10n ** 12n) / 252n,
     quoteSell: async (_c, tao) => (tao * 250n) / 10n ** 12n,
     quotePayoutFee: async () => 105n * 10n ** 13n,
+    readRewardCutBps: async () => 1000,
     scan: async () => undefined,
     now: () => 1_800_000_100_000,
     ...over,
@@ -90,6 +91,28 @@ describe("rewards waiting", () => {
   it("is zero, not unknown, when the chain says nothing is waiting", async () => {
     const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => ({ wei: 0n, cutBps: 1000 }) }));
     expect((await data.getPosition(ME)).pendingRewardsTao).toBe(0);
+  });
+});
+
+describe("round trip", () => {
+  const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+
+  it("prices the way out's request and bridge fees live, and reads Cascade's reward cut", async () => {
+    const asked: bigint[] = [];
+    const r = await createLiveCascadeData(
+      D3,
+      deps({ quotePayoutFee: async (_c, _d, _a, tao) => (asked.push(tao), 105n * 10n ** 13n), readRewardCutBps: async () => 1200 }),
+    ).quoteRoundTrip(79n * 10n ** 15n);
+    // the bridge fee for this stake's TAO coming back
+    expect(asked).toEqual([79n * 10n ** 15n]);
+    // 0.0001 ETH at $4,000 + 0.00105 TAO at $250
+    expect(r.exitFixedUsd).toBeCloseTo(0.6625, 9);
+    expect(r.rewardCutBps).toBe(1200);
+  });
+
+  it("fails rather than guessing when a read fails", async () => {
+    const data = createLiveCascadeData(D3, deps({ ethPriceUsd: async () => Promise.reject(new Error("down")) }));
+    await expect(data.quoteRoundTrip(79n * 10n ** 15n)).rejects.toThrow("down");
   });
 });
 

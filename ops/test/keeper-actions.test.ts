@@ -1,7 +1,7 @@
 import { encodeEventTopics, encodeAbiParameters, type Hex, parseAbi, parseAbiParameters } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import { WALLET } from "../src/config.ts";
-import { close, closeValue, type KeeperDeps, payouts, payoutsRequest, runLoop, stake } from "../src/keeper/actions.ts";
+import { close, closeValue, type KeeperDeps, payouts, payoutsRequest, roll, runLoop, stake } from "../src/keeper/actions.ts";
 import type { State } from "../src/keeper/due.ts";
 import { payoutsHash } from "../src/keeper/payouts.ts";
 import { formatStatus, type StatusDetail } from "../src/keeper/status.ts";
@@ -148,6 +148,70 @@ describe("keeper actions", () => {
     await runLoop(d, rec, { intervalMs: 0 });
     expect(send).toHaveBeenCalledOnce();
     expect(lines.at(-1)).toMatch(/^Stopped: .*nothing sent/);
+  });
+
+  describe("roll", () => {
+    /** A launch batch with no entries that the front door would let close. */
+    const empty = () =>
+      state({ frontDoor: { canClose: true, nDeposits: 0, nRedeems: 0, paused: false, openStart: T - 7200, batchInterval: 3600, full: false }, closeMaxWaitS: 86_400 });
+
+    it("calls closeBatch on Base with no value", async () => {
+      const d = deps(empty());
+      const r = await roll(d, rec);
+      expect(d.send).toHaveBeenCalledOnce();
+      const req = d.send.mock.calls[0][0];
+      expect(req).toMatchObject({ chain: "base", to: plan.addresses.frontDoor, functionName: "closeBatch", args: [], nonce: 4 });
+      expect(req.value ?? 0n).toBe(0n);
+      expect(r).toMatchObject({ rolled: true, hash: KEY });
+    });
+
+    it("re-reads first and sends nothing unless the batch is still empty, can close, and the front door is open, under a max wait", async () => {
+      const s = empty();
+      for (const over of [
+        { frontDoor: { ...s.frontDoor, nDeposits: 1 } },
+        { frontDoor: { ...s.frontDoor, nRedeems: 1 } },
+        { frontDoor: { ...s.frontDoor, canClose: false } },
+        { frontDoor: { ...s.frontDoor, paused: true } },
+        { closeMaxWaitS: 0 },
+      ]) {
+        const d = deps({ ...s, ...over });
+        expect(await roll(d, rec)).toMatchObject({ rolled: false });
+        expect(d.send).not.toHaveBeenCalled();
+      }
+      await expect(roll(deps(empty()), unverified)).rejects.toThrow(/not complete and verified/);
+    });
+
+    it("an entry that lands first makes the estimate refuse: a skip, not a failure; other refusals still stop", async () => {
+      const refused = vi.fn(async (): Promise<Sent> => {
+        throw new SendRefused("estimate", "Base: roll the empty open batch would fail, nothing sent (InsufficientFee())");
+      });
+      expect(await roll(deps(empty(), refused), rec)).toEqual({ rolled: false, reason: expect.stringMatching(/InsufficientFee/) });
+      const waiting = vi.fn(async (): Promise<Sent> => {
+        throw new SendRefused("waiting", "Base: an earlier transaction is still waiting");
+      });
+      await expect(roll(deps(empty(), waiting), rec)).rejects.toThrow(/still waiting/);
+    });
+
+    it("records the bridge message when a redeem landed first and its fee closed the batch", async () => {
+      const d = deps(empty());
+      const r = await roll(d, rec);
+      expect(r).toMatchObject({ rolled: true, messageId: MESSAGE });
+      expect(d.recorded).toEqual([{ id: MESSAGE, direction: "Base → Bittensor", hash: KEY }]);
+    });
+
+    it("run logs a roll, and a refused roll waits for the next round instead of stopping", async () => {
+      const lines: string[] = [];
+      await runLoop({ ...deps(empty()), log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+      expect(lines.at(-1)).toMatch(/^Done: rolling the empty batch so its 24-hour wait starts from the next deposit \(transaction 0x/);
+      const refused = vi.fn(async (): Promise<Sent> => {
+        throw new SendRefused("estimate", "Base: roll the empty open batch would fail, nothing sent (InsufficientFee())");
+      });
+      const more: string[] = [];
+      await runLoop({ ...deps(empty(), refused), log: (l: string) => more.push(l) }, rec, { intervalMs: 0, maxTicks: 2, rewardsEveryTicks: 3 });
+      expect(refused).toHaveBeenCalledTimes(2);
+      expect(more.filter((l) => l.startsWith("Not rolled:"))).toHaveLength(2);
+      expect(more.some((l) => l.startsWith("Stopped"))).toBe(false);
+    });
   });
 
   it("formatStatus prints the open batch in TAO, when a payout is due and full message ids", () => {

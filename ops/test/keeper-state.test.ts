@@ -15,11 +15,12 @@ import {
 } from "viem";
 import { describe, expect, it } from "vitest";
 import { BASE_V3, type ChainName, paths, targets, WALLET } from "../src/config.ts";
+import { roll } from "../src/keeper/actions.ts";
 import { KEEPER_READ_ABIS, keeperDeps, scanLogs } from "../src/keeper/state.ts";
 import { buildPlan, buildPlanV3, closeMaxWaitS } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { type Rpc, RpcError } from "../src/rpc.ts";
-import type { Ctx } from "../src/send.ts";
+import { type Ctx, SendRefused } from "../src/send.ts";
 import { type Answer, COLDKEY, fakeChain, revert, v3Record } from "./fake-keeper.ts";
 
 const ZERO32: Hex = `0x${"00".repeat(32)}`;
@@ -207,5 +208,70 @@ describe("the open batch and its close's economics", () => {
     expect((await read(chain({ maxBatchValue: () => 4n * 10n ** 17n + 10n ** 16n - 1n }))).frontDoor.full).toBe(true);
     const young = chain({ maxRedeems: () => 0, openBatch: () => [7n, BigInt(T - 60), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] });
     expect((await read(young)).frontDoor.full).toBe(true);
+  });
+});
+
+describe("a roll goes through the same send guards as close", () => {
+  const T = 1_800_000_000;
+  const launch: DeploymentRecord = { ...v3Record(), plan: buildPlanV3(0, 0, COLDKEY, "launch") };
+  const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-roll-")), "rec.json");
+
+  /** An empty launch batch two hours old that the front door would let close; the wallet's next nonce
+   * is 4. `chain` overrides the node's answers. */
+  function chain(methods: Record<string, (chain: ChainName, params: unknown[]) => unknown> = {}) {
+    const estimates: unknown[] = [];
+    const zero = () => 0n;
+    const f = fakeChain(
+      Object.values(KEEPER_READ_ABIS),
+      {
+        openDeposits: () => [],
+        openRedeems: () => [],
+        canClose: () => true,
+        paused: () => false,
+        claimable: zero,
+        depositCap: zero,
+        openBatch: () => [7n, BigInt(T - 7200), 0n, 0n, 0n, 0n],
+        batchInterval: () => 3600n,
+        isPaused: () => false,
+        migrationReadyAt: zero,
+        migrationFinished: () => false,
+        pendingPayouts: zero,
+        payoutDelay: () => 86_400n,
+        rootStakeRao: zero,
+        minStakeRao: zero,
+        getNominatorMinRequiredStake: zero,
+        totalAssets: zero,
+      },
+      {
+        eth_getBalance: () => "0x0",
+        eth_blockNumber: () => numberToHex(1_000),
+        eth_getLogs: () => [],
+        eth_chainId: (c) => numberToHex(f.ctx.targets[c].chainId),
+        eth_getTransactionCount: () => numberToHex(4),
+        eth_estimateGas: (_c, params) => {
+          estimates.push(params[0]);
+          throw revert("InsufficientFee");
+        },
+        ...methods,
+      },
+    );
+    return { ...f, estimates };
+  }
+
+  it("refuses without --live, on the wrong chain, and behind a pending transaction, before any estimate", async () => {
+    const f = chain();
+    await expect(roll(keeperDeps({ ...f.ctx, live: false }, launch, recordPath()), launch)).rejects.toThrow(SendRefused);
+    await expect(roll(keeperDeps({ ...f.ctx, live: false }, launch, recordPath()), launch)).rejects.toThrow(/--live/);
+    await expect(roll(keeperDeps(chain({ eth_chainId: () => "0x1" }).ctx, launch, recordPath()), launch)).rejects.toThrow(/chain id 1/);
+    const pending = chain({ eth_getTransactionCount: (_c, p) => numberToHex(p[1] === "pending" ? 5 : 4) });
+    await expect(roll(keeperDeps(pending.ctx, launch, recordPath()), launch)).rejects.toThrow(/still waiting to be mined/);
+    expect([...f.estimates, ...pending.estimates]).toEqual([]);
+  });
+
+  it("is simulated with no value before anything is signed; a refusal is a skip", async () => {
+    const f = chain();
+    const r = await roll(keeperDeps(f.ctx, launch, recordPath()), launch);
+    expect(r).toMatchObject({ rolled: false, reason: expect.stringMatching(/would fail/) });
+    expect(f.estimates).toEqual([{ from: WALLET, to: launch.plan.addresses.frontDoor, data: toFunctionSelector("closeBatch()"), value: "0x0" }]);
   });
 });

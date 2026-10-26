@@ -204,8 +204,9 @@ describe("the close rule", () => {
   it("never closes an empty batch", () => {
     const covered = { feesUsdc: 10n ** 9n, bridgeFeeUsdc: 1n };
     const empty = { ...fd({ nDeposits: 0, closeEconomics: covered }), now: START + 7 * 86_400 };
-    expect(decideNext(empty)).toEqual({ action: null, reason: "nothing due: the open batch is empty" });
-    expect(decideNext({ ...empty, closeMaxWaitS: HOUR }).action).toBeNull();
+    // the launch cadence only rolls it (no value, no bridge fee); the test cadence leaves it
+    expect(decideNext(empty).action).toEqual({ kind: "roll" });
+    expect(decideNext({ ...empty, closeMaxWaitS: 0 })).toEqual({ action: null, reason: "nothing due: the open batch is empty" });
   });
 
   it("names a waiting batch alongside the next payout", () => {
@@ -213,6 +214,39 @@ describe("the close rule", () => {
     expect(decideNext(s).reason).toBe(
       `nothing due: next payout at ${hhmm(T - HOUR + 86_400)}; the open batch waits until ${hhmm(START + 86_400)} or until its fees cover the bridge fee ($0.31 of $1.42)`,
     );
+  });
+
+  describe("an empty batch under a max wait is rolled", () => {
+    const empty = fd({ nDeposits: 0, closeEconomics: undefined });
+    const ROLL = { action: { kind: "roll" }, reason: "rolling the empty batch so its 24-hour wait starts from the next deposit" };
+
+    it("rolls an empty batch the front door would let close", () => {
+      expect(decideNext(empty)).toEqual(ROLL);
+    });
+
+    it("leaves it while the front door won't close it", () => {
+      expect(decideNext(fd({ canClose: false }, empty))).toEqual({ action: null, reason: "nothing due: the open batch is not ready to close yet" });
+    });
+
+    it("the test cadence never touches an empty batch", () => {
+      expect(decideNext({ ...empty, closeMaxWaitS: 0 })).toEqual({ action: null, reason: "nothing due: the open batch is empty" });
+    });
+
+    it("not while the front door is paused", () => {
+      expect(decideNext(fd({ paused: true }, empty))).toEqual({ action: null, reason: "the front door is paused — not rolling the empty batch" });
+    });
+
+    it("at most once an interval: not with no interval, nor before the interval has passed", () => {
+      expect(decideNext(fd({ batchInterval: 0 }, empty)).action).toBeNull();
+      // canClose through a limit (a maxBatchValue below minDeposit), a minute after the last roll
+      expect(decideNext(fd({ openStart: T - 60 }, empty)).action).toBeNull();
+    });
+
+    it("comes after a due payout and staking, like a close", () => {
+      const due = { ...empty, vault: { ...empty.vault, batches: [{ key: KEY, queuedAt: T - 86_400, cursor: 0, count: 1 }] } };
+      expect(decideNext(due).action).toEqual({ kind: "payouts", key: KEY });
+      expect(decideNext({ ...empty, vault: { ...empty.vault, available: 10n ** 16n } }).action).toEqual({ kind: "stake" });
+    });
   });
 
   it("a held batch is not reported as blocked by a pause", () => {

@@ -77,6 +77,17 @@ export const closeRequest = (rec: DeploymentRecord, quote: bigint, nonce: number
   value: closeValue(quote),
 });
 
+/** closeBatch with no value: on an empty batch the front door restarts its timer and refunds nothing. */
+export const rollRequest = (rec: DeploymentRecord, nonce: number): CallRequest => ({
+  chain: "base",
+  nonce,
+  label: "roll the empty open batch (restart its timer)",
+  to: rec.plan.addresses.frontDoor,
+  abi: KEEPER_ABI,
+  functionName: "closeBatch",
+  args: [],
+});
+
 export const stakeRequest = (rec: DeploymentRecord, nonce: number): CallRequest => ({
   chain: "bittensor",
   nonce,
@@ -120,6 +131,34 @@ export async function close(deps: KeeperDeps, rec: DeploymentRecord): Promise<Do
   if (!s.frontDoor.canClose) throw new Error("the open batch is not ready to close yet");
   const sent = await deps.sendCall(closeRequest(rec, await deps.quoteClose(s), await deps.nonce("base")));
   return withMessage(deps, sent, rec.plan.addresses.baseAdapter, "Base → Bittensor");
+}
+
+/** A roll sent, or skipped with why. */
+export type Rolled = ({ rolled: true } & Done) | { rolled: false; reason: string };
+
+/** Rolls the empty open batch (see decideNext), through the same send path as close: the wallet's
+ * guards, then a simulation with no value. It re-reads first and sends only while the batch is still
+ * empty and can close, the front door is open, and the record has a max wait. A roll is never needed,
+ * so anything that would stop it (an entry arriving, or a simulation that would revert because one did)
+ * is a skip for a later round. If a redeem lands between the simulation and the transaction, its fee pot
+ * may pay for a real close; its bridge message is then recorded like a close's. */
+export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rolled> {
+  requireReady(rec);
+  const s = await deps.readState();
+  const fd = s.frontDoor;
+  const skip = (reason: string): Rolled => ({ rolled: false, reason });
+  if (s.closeMaxWaitS === 0) return skip("the deployment has no max wait: an empty batch is left as it is");
+  if (fd.paused) return skip("the front door is paused");
+  if (fd.nDeposits + fd.nRedeems > 0) return skip("the open batch has entries now; the close rule decides it");
+  if (!fd.canClose) return skip("the open batch can't close yet");
+  let sent: Sent;
+  try {
+    sent = await deps.sendCall(rollRequest(rec, await deps.nonce("base")));
+  } catch (e) {
+    if (e instanceof SendRefused && e.reason === "estimate") return skip(`${e.message}; tried again next round`);
+    throw e;
+  }
+  return { rolled: true, ...(await withMessage(deps, sent, rec.plan.addresses.baseAdapter, "Base → Bittensor")) };
 }
 
 export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
@@ -218,7 +257,7 @@ export async function deliverCommand(deps: KeeperDeps, rec: DeploymentRecord, us
   return deliverAll(deps, rec, list, (d) => log(deliveryLine(d)));
 }
 
-export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, { kind: "deliver" }>): Promise<Done> {
+export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, { kind: "deliver" } | { kind: "roll" }>): Promise<Done> {
   if (a.kind === "close") return close(deps, rec);
   if (a.kind === "stake") return stake(deps, rec);
   return payouts(deps, rec, a.key);
@@ -299,6 +338,12 @@ export async function runLoop(
         const action = next.action;
         if (!action) {
           deps.log(next.reason);
+          break;
+        }
+        if (action.kind === "roll") {
+          // a roll that can't go ahead now is only a skip: the round ends, the next one decides again
+          const r = await roll(deps, rec);
+          deps.log(r.rolled ? `Done: ${next.reason} (transaction ${r.hash}${r.messageId ? `, bridge message ${r.messageId}` : ""})` : `Not rolled: ${r.reason}`);
           break;
         }
         if (action.kind !== "deliver") {

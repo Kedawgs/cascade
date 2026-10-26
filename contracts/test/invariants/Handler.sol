@@ -8,20 +8,43 @@ import {Vm} from "forge-std/Vm.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
+import {CascadeStaker} from "../../src/CascadeStaker.sol";
 import {ISTAKING_ADDRESS} from "../../src/interfaces/IStaking.sol";
 import {CascadeMath} from "../../src/libraries/CascadeMath.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {MockBridge} from "../mocks/MockBridge.sol";
 import {MockStaking} from "../mocks/MockStaking.sol";
+import {MockSwapRouter} from "../mocks/MockSwapRouter.sol";
+import {MockSwapper} from "../mocks/MockSwapper.sol";
 import {MockTAO} from "../mocks/MockTAO.sol";
+import {MockTwap} from "../mocks/MockTwap.sol";
+import {MockUSDC} from "../mocks/MockUSDC.sol";
 
 /// @notice Bounded user, keeper and owner actions for the Cascade invariant suite, over three actors.
 /// Each actor holds 10_000 bridged TAO on Base, and 10_000 native TAO plus 10 ether of fee money as one
 /// native balance (both chains share one EVM here). Every action wraps its call in try/catch and
-/// updates the ghosts only when it succeeds. The handler is the vault's keeper, pays every close's
-/// bridge fee, and acts as the owner (by prank) to cancel queued payouts. No donations; rarely, a
-/// simulated loss takes TAO out of the vault (see simulateLoss), which can make it insolvent.
+/// updates the ghosts only when it succeeds. The handler is the vault's keeper and the front door's,
+/// pays every close's bridge fee, and acts as the owner (by prank) to cancel queued payouts, set the
+/// reward cut and swap the front door's swapper. No donations; rarely, a simulated loss takes TAO out of
+/// the vault (see simulateLoss), which can make it insolvent.
 contract Handler is CommonBase, StdCheats, StdUtils {
+    /// The v3 fixture: the front door's USDC, its swapper (the staker, selling through `router`), the
+    /// TWAP it floors deliveries on, a swapper that pays short, and the vault's treasury.
+    struct V3 {
+        MockUSDC usdc;
+        CascadeStaker staker;
+        MockSwapRouter router;
+        MockTwap twap;
+        MockSwapper shortPayer;
+        address treasury;
+    }
+
+    /// A delivery preference the handler left for an actor: USDC units per 1e18 TAO, and its deadline.
+    struct Preference {
+        uint128 floor;
+        uint64 deadline;
+    }
+
     uint256 internal constant RAO = 1e9;
     uint256 internal constant ED = 1e12;
     uint256 internal constant MAX_DEPOSIT = 100e18;
@@ -33,6 +56,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint32 internal constant CHUNK_ENTRIES = 3;
     /// simulateLoss acts on at most this many calls per run.
     uint256 internal constant MAX_LOSSES = 2;
+    /// The front door's default discount to the TWAP's value, which the fixture keeps.
+    uint256 internal constant SLIPPAGE_BPS = 150;
+    uint32 internal constant DESTINATION_BASE = 6;
 
     CascadeVault public immutable vault;
     CascadeFrontDoor public immutable fd;
@@ -43,8 +69,15 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     bytes32 public immutable hotkey;
     /// The front door's peer id at the vault.
     bytes32 public immutable peer;
+    MockUSDC public immutable usdc;
+    CascadeStaker public immutable staker;
+    MockSwapRouter public immutable router;
+    MockTwap public immutable twap;
+    MockSwapper public immutable shortPayer;
+    address public immutable treasury;
 
     address[3] public actors;
+    mapping(address => Preference) public preferences;
 
     // ---- ghosts ----
 
@@ -58,6 +91,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostPayoutsReceived;
     /// Bridged TAO actors received from `claim`.
     uint256 public ghostClaimed;
+    /// Bridged TAO credits the front door sold for USDC in successful deliveries.
+    uint256 public ghostDelivered;
     /// Native TAO taken out of the vault by simulateLoss.
     uint256 public ghostLoss;
     /// Highest price seen; a cancel resets it to the post-cancel price, at most the cancelled batch's
@@ -74,6 +109,17 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     bytes32[] public queuedKeys;
     mapping(bytes32 => uint256) public deliveryPrice;
     mapping(bytes32 => CascadeMessages.Payout[]) internal lists;
+    /// The share price right before and right after each successful reward claim, cut or not, and
+    /// right after it as if one more share had been minted.
+    uint256[] public claimPriceBefore;
+    uint256[] public claimPriceAfter;
+    uint256[] public claimPriceOneMoreShare;
+    /// Each successful USDC delivery's floor, as the handler computed it (the user's floor rounded up,
+    /// the keeper's, the TWAP's value less SLIPPAGE_BPS), and what the actor's USDC balance rose by.
+    uint256[] public deliveryFloor;
+    uint256[] public deliveryReceived;
+    /// Successful deliveries after their preference's deadline.
+    uint256 public lateDeliveries;
 
     // ---- reachability counters (successful calls) ----
 
@@ -109,6 +155,21 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// Exits refused UnstakeShort because the only stake sat below the minimum stake, which the
     /// vault's unstake walk skips.
     uint256 public dustBlocked;
+    /// Claims that minted a cut: in all, while an earlier claim was still vesting, and while payouts
+    /// were pending; claims whose cut was skipped (below half the launch price).
+    uint256 public cutsMinted;
+    uint256 public cutsWhileVesting;
+    uint256 public cutsWithPending;
+    uint256 public cutsSkipped;
+    /// Successful USDC deliveries: in all, while other actors held credits and while the open batch held
+    /// deposits (TAO the front door holds but must not sell), and paying exactly the floor; then the
+    /// deliveries refused as the handler expected (expired, the market below the floor, or a swapper
+    /// paying short).
+    uint256 public usdcDeliveries;
+    uint256 public deliveriesBesideOtherCredits;
+    uint256 public deliveriesBesideOpenDeposits;
+    uint256 public deliveriesAtFloor;
+    uint256 public deliveriesRefused;
 
     constructor(
         CascadeVault vault_,
@@ -117,7 +178,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         MockBridge bridge_,
         address owner_,
         bytes32 hotkey_,
-        uint64 chain
+        uint64 chain,
+        V3 memory v3
     ) {
         vault = vault_;
         fd = fd_;
@@ -126,6 +188,12 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         owner = owner_;
         hotkey = hotkey_;
         peer = vault_.peerId(chain, address(fd_));
+        usdc = v3.usdc;
+        staker = v3.staker;
+        router = v3.router;
+        twap = v3.twap;
+        shortPayer = v3.shortPayer;
+        treasury = v3.treasury;
 
         actors = [makeAddr("alice"), makeAddr("bob"), makeAddr("carol")];
         for (uint256 i; i < actors.length; ++i) {
@@ -212,6 +280,7 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         }
     }
 
+    /// @dev A claim also clears the actor's delivery preference.
     function claim(uint256 actorSeed) external {
         (address actor, uint256 owed) = _actorWith(actorSeed, _claimable);
         if (owed == 0) return;
@@ -219,6 +288,7 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         vm.prank(actor);
         try fd.claim() {
             ghostClaimed += tao.balanceOf(actor) - before;
+            delete preferences[actor];
             ++claims;
             _raiseFloor();
         } catch {
@@ -247,12 +317,51 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         }
     }
 
+    /// @dev Sells an actor's whole credit for USDC as the front door's keeper. The actor first leaves a
+    /// preference (200 to 260 USDC per TAO, for 1 hour to 7 days) if it has none, or replaces an expired
+    /// one on an even `floorSeed`; on an odd one the expired preference stays, and the delivery must be
+    /// refused. The market is drawn per call: the TWAP at 240 to 260 USDC per TAO and, by `marketSeed`
+    /// mod 4, the staker selling through an honest router (0, 1) or a lying one that pays its rate
+    /// whatever the minimum (2), both at 225 to 275, or (3) the front door's swapper swapped for one
+    /// that pays the front door's minimum less 0 to 100 bps, restored afterwards. The keeper's floor is
+    /// 0, the staker's expected output, or one unit more. As the keeper does, when no actor holds a credit
+    /// it first sends a queued batch's next payout chunk (as processPayouts does), then delivers what that
+    /// credited. It runs from whatever state the run reached: other actors' credits and open deposits
+    /// in the front door (TAO it must not sell), a credit grown over several chunks, more payouts still
+    /// queued at the vault.
+    function deliver(uint256 actorSeed, uint256 floorSeed, uint256 marketSeed, uint256 keeperSeed) external {
+        (address actor, uint256 owed) = _actorWith(actorSeed, _claimable);
+        if (owed == 0) {
+            _processPayouts(actorSeed);
+            (actor, owed) = _actorWith(actorSeed, _claimable);
+            if (owed == 0) return;
+        }
+        Preference memory p = _prefer(actor, floorSeed);
+        if (p.floor == 0) return;
+        twap.setPrice(bound(keeperSeed >> 8, 240e6, 260e6));
+        (bool viaShortPayer, uint256 expected, bool paysInFull) = _drawMarket(owed, marketSeed);
+        uint256 keeperMinOut = keeperSeed % 3 == 0 ? 0 : expected + keeperSeed % 3 - 1;
+        uint256 floor = _deliveryFloor(owed, p.floor, keeperMinOut);
+        // test-controlled time
+        // forge-lint: disable-next-line(block-timestamp)
+        bool live = block.timestamp <= p.deadline;
+        _deliver(actor, owed, keeperMinOut, floor, live, live && (viaShortPayer ? paysInFull : expected >= floor));
+        if (viaShortPayer) {
+            vm.prank(owner);
+            fd.setSwapper(address(staker));
+        }
+    }
+
     // ---- vault: keeper and permissionless ----
 
     /// @dev Warps 24 hours past the payout delay of a queued batch (preferring one with 2 or more entries
     /// left, which can go out in several chunks) and sends its next chunk of 1 to CHUNK_ENTRIES entries
     /// (from the seed) from the stored list.
     function processPayouts(uint256 keySeed) external {
+        _processPayouts(keySeed);
+    }
+
+    function _processPayouts(uint256 keySeed) internal {
         uint256 n = queuedKeys.length;
         if (n == 0) return;
         bytes32 key = _keyWith(keySeed, _entriesLeft, 2);
@@ -290,24 +399,23 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         }
     }
 
-    /// @dev Accrues `rao` of root rewards on the hotkey and claims them as the keeper.
+    /// @dev Accrues `rao` of root rewards on the hotkey and claims them as the keeper, under whatever
+    /// reward cut is set (none until claimWithCut sets one).
     function accrueAndClaim(uint256 rao) external {
-        rao = bound(rao, 1e6, 1e9);
-        staking.setUnclaimed(vault.coldkey(), hotkey, rao);
-        vm.recordLogs();
-        // claimRewards needs claimGasRequired (55M) left before the claim
-        try vault.claimRewards{gas: 60_000_000}(hotkey) {
-            Vm.Log[] memory logs = vm.getRecordedLogs();
-            for (uint256 i; i < logs.length; ++i) {
-                if (_isVaultLog(logs[i], CascadeVault.RewardsClaimed.selector)) {
-                    ghostRewards += abi.decode(logs[i].data, (uint256)) * RAO;
-                }
-            }
-            ++rewardClaims;
-            _raiseFloor();
-        } catch {
-            ++unexpectedReverts;
-        }
+        _claim(rao);
+    }
+
+    /// @dev As the owner, sets the reward cut to `bps` (0 to MAX_REWARD_CUT_BPS; 0 turns it off), which
+    /// stays set for later claims, then accrues and claims `rao` as accrueAndClaim does. It runs from
+    /// whatever state the run reached: a schedule still vesting, payouts pending, a vault below half
+    /// the launch price (where the cut is skipped).
+    function claimWithCut(uint256 bps, uint256 rao) external {
+        // casting to 'uint16' is safe because bps is bounded to MAX_REWARD_CUT_BPS
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint16 cut = uint16(bound(bps, 0, vault.MAX_REWARD_CUT_BPS()));
+        vm.prank(owner);
+        vault.setRewardCut(treasury, cut);
+        _claim(rao);
     }
 
     // ---- vault: direct users ----
@@ -417,7 +525,129 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         return queuedKeys.length;
     }
 
+    function claimCount() external view returns (uint256) {
+        return claimPriceBefore.length;
+    }
+
+    function deliveryCount() external view returns (uint256) {
+        return deliveryFloor.length;
+    }
+
     // ---- internal ----
+
+    /// Claims `rao` of accrued root rewards as the keeper, recording the share price right before and
+    /// right after (and after with one more share), the reward (from RewardsClaimed) and whether a cut
+    /// was minted, skipped, or minted while a schedule was vesting or payouts were pending.
+    function _claim(uint256 rao) internal {
+        rao = bound(rao, 1e6, 1e9);
+        staking.setUnclaimed(vault.coldkey(), hotkey, rao);
+        bool vesting = vault.unvestedRewards() != 0;
+        bool pending = vault.pendingPayouts() != 0;
+        uint256 priceBefore = vault.price();
+        vm.recordLogs();
+        // claimRewards needs claimGasRequired (55M) left before the claim
+        try vault.claimRewards{gas: 60_000_000}(hotkey) {
+            claimPriceBefore.push(priceBefore);
+            claimPriceAfter.push(vault.price());
+            claimPriceOneMoreShare.push(CascadeMath.price(vault.totalAssets(), vault.totalSupply() + 1));
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+            uint256 delta;
+            bool minted;
+            for (uint256 i; i < logs.length; ++i) {
+                if (_isVaultLog(logs[i], CascadeVault.RewardsClaimed.selector)) {
+                    delta = abi.decode(logs[i].data, (uint256)) * RAO;
+                } else if (_isVaultLog(logs[i], CascadeVault.RewardCutMinted.selector)) {
+                    minted = true;
+                }
+            }
+            ghostRewards += delta;
+            if (minted) {
+                ++cutsMinted;
+                if (vesting) ++cutsWhileVesting;
+                if (pending) ++cutsWithPending;
+            } else if (delta * vault.rewardCutBps() / 10_000 != 0) {
+                ++cutsSkipped;
+            }
+            ++rewardClaims;
+            _raiseFloor();
+        } catch {
+            ++unexpectedReverts;
+        }
+    }
+
+    /// The actor's live preference, or a fresh one (see deliver); a zero floor if setDelivery failed.
+    function _prefer(address actor, uint256 seed) internal returns (Preference memory p) {
+        p = preferences[actor];
+        // test-controlled time
+        // forge-lint: disable-next-line(block-timestamp)
+        if (p.floor != 0 && (block.timestamp <= p.deadline || seed % 2 == 1)) return p;
+        uint256 perTao = bound(seed, 200e6, 260e6);
+        uint256 until = block.timestamp + bound(seed >> 128, 1 hours, 7 days);
+        // casting to 'uint128' and 'uint64' is safe because both values are bounded far below their maxima
+        // forge-lint: disable-next-line(unsafe-typecast)
+        p = Preference(uint128(perTao), uint64(until));
+        vm.prank(actor);
+        try fd.setDelivery(p.floor, p.deadline, DESTINATION_BASE) {
+            preferences[actor] = p;
+        } catch {
+            ++unexpectedReverts;
+            p.floor = 0;
+        }
+    }
+
+    /// Sets this call's market (see deliver). Returns whether the short-paying swapper sells, what the
+    /// staker would pay the front door (its router's rate less the swap fee), and whether the short
+    /// payer pays the front door's whole minimum.
+    function _drawMarket(uint256 owed, uint256 seed)
+        internal
+        returns (bool viaShortPayer, uint256 expected, bool paysInFull)
+    {
+        uint256 rate = bound(seed >> 8, 225e6, 275e6);
+        router.setRate(address(tao), rate);
+        router.setLies(seed % 4 == 2);
+        uint256 gross = owed * rate / 1e18;
+        expected = gross - gross * staker.swapFeeBps() / 10_000;
+        if (seed % 4 == 3) {
+            viaShortPayer = true;
+            uint256 shortBps = (seed >> 128) % 2 == 0 ? 0 : 1 + (seed >> 129) % 100;
+            paysInFull = shortBps == 0;
+            shortPayer.setMode(MockSwapper.Mode.PaysLess, shortBps);
+            vm.prank(owner);
+            fd.setSwapper(address(shortPayer));
+        }
+    }
+
+    /// The delivery's floor, computed here: the largest of the user's floor (USDC units per 1e18 TAO)
+    /// rounded up, the keeper's, and the TWAP's value less SLIPPAGE_BPS.
+    function _deliveryFloor(uint256 owed, uint256 perTao, uint256 keeperMinOut) internal view returns (uint256) {
+        uint256 market = owed * twap.usdcPerTao() / 1e18 * (10_000 - SLIPPAGE_BPS) / 10_000;
+        return Math.max(Math.ceilDiv(owed * perTao, 1e18), Math.max(keeperMinOut, market));
+    }
+
+    /// Calls deliver. A success records its floor and what the actor's USDC rose by; a refusal the
+    /// handler did not expect (`ready`) counts as an unexpected revert.
+    function _deliver(address actor, uint256 owed, uint256 keeperMinOut, uint256 floor, bool live, bool ready)
+        internal
+    {
+        uint256 before = usdc.balanceOf(actor);
+        bool otherCredits = fd.totalClaimable() > owed;
+        (,, uint256 openDeposits,,,) = fd.openBatch();
+        try fd.deliver(actor, keeperMinOut) {
+            uint256 received = usdc.balanceOf(actor) - before;
+            deliveryFloor.push(floor);
+            deliveryReceived.push(received);
+            ghostDelivered += owed;
+            ++usdcDeliveries;
+            if (!live) ++lateDeliveries;
+            if (otherCredits) ++deliveriesBesideOtherCredits;
+            if (openDeposits != 0) ++deliveriesBesideOpenDeposits;
+            if (received == floor) ++deliveriesAtFloor;
+            _raiseFloor();
+        } catch {
+            if (ready) ++unexpectedReverts;
+            else ++deliveriesRefused;
+        }
+    }
 
     /// Reads one auto-delivered batch: its amount, its payout list and delivery price if it queued
     /// payouts, and the burn window it wrote. A delivery the bridge filed as failed counts as an
@@ -448,21 +678,22 @@ contract Handler is CommonBase, StdCheats, StdUtils {
                 // forge-lint: disable-next-line(unsafe-typecast)
                 address user = address(uint160(uint256(log.topics[2])));
                 lists[log.topics[1]].push(CascadeMessages.Payout(user, shares, assets));
+                burned = true;
             } else if (_isVaultLog(log, CascadeVault.PayoutBatchQueued.selector)) {
                 (,,, uint256 price) = abi.decode(log.data, (uint64, uint32, uint256, uint256));
                 deliveryPrice[log.topics[1]] = price;
                 queuedKeys.push(log.topics[1]);
                 maxQueueDepth = Math.max(maxQueueDepth, queuedKeys.length);
-                burned = true;
             } else if (_isVaultLog(log, CascadeVault.RedeemDeferred.selector)) {
                 ++redeemDeferred;
             } else if (_isVaultLog(log, CascadeVault.RedeemSkipped.selector)) {
                 ++redeemSkipped;
             }
         }
-        // The window is written only by a delivery that burns; checked then, against the gross the
-        // vault measured its allowance on: the gross before this delivery's deposits (nothing else has
-        // changed it since, inside the same close).
+        // The window is written only by a delivery that burns (a Redeemed event; bounced deposits alone
+        // queue payouts without burning); checked then, against the gross the vault measured its
+        // allowance on: the gross before this delivery's deposits (nothing else has changed it since,
+        // inside the same close).
         if (burned) {
             (, uint256 windowBurned) = vault.burnWindows(peer);
             uint256 grossBefore = _sub0(vault.grossAssets(), delivered);

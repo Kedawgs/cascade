@@ -4,15 +4,20 @@ pragma solidity 0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeVault} from "../src/CascadeVault.sol";
 import {CascadeFrontDoor} from "../src/CascadeFrontDoor.sol";
+import {CascadeStaker} from "../src/CascadeStaker.sol";
 import {ISTAKING_ADDRESS} from "../src/interfaces/IStaking.sol";
 import {ADDRESS_MAPPING_ADDRESS} from "../src/interfaces/IAddressMapping.sol";
+import {CascadeMath} from "../src/libraries/CascadeMath.sol";
 import {CascadeMessages} from "../src/libraries/CascadeMessages.sol";
 import {MockStaking} from "./mocks/MockStaking.sol";
 import {MockAddressMapping} from "./mocks/MockAddressMapping.sol";
 import {MockBridge} from "./mocks/MockBridge.sol";
+import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockTAO} from "./mocks/MockTAO.sol";
+import {MockTwap} from "./mocks/MockTwap.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {mirror} from "./mocks/Mirror.sol";
 
@@ -34,6 +39,9 @@ contract EndToEndTest is Test {
     address keeper = makeAddr("keeper");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
+    /// v3: a USDC-only user, and one treasury for the staker's USDC fees and the vault's reward cut.
+    address carol = makeAddr("carol");
+    address treasury = makeAddr("treasury");
 
     MockStaking staking = MockStaking(ISTAKING_ADDRESS);
     MockTAO tao;
@@ -214,6 +222,43 @@ contract EndToEndTest is Test {
         assertEq(list[0].user, user, "user");
         assertEq(list[0].shares, shares, "shares");
         assertEq(list[0].assets, assets, "assets");
+    }
+
+    /// The v3 pieces at their launch settings: a staker on fd with fees 15 bps and 50_000 ($0.05) to the
+    /// treasury, route 0 (also the delivery route) a two-hop Uniswap path through a mock router buying at
+    /// 4e9 TAO wei per USDC unit ($250/TAO) and selling at 250 USDC per TAO; fd's keeper, the staker as
+    /// its swapper and a TWAP at 250 USDC per TAO; a 10% reward cut to the treasury.
+    function wireV3() internal returns (CascadeStaker staker, MockSwapRouter router) {
+        address weth = makeAddr("weth");
+        router = new MockSwapRouter();
+        router.setRate(address(usdc), 4e9 * 1e18);
+        router.setRate(address(tao), 250e6);
+        staker = new CascadeStaker(usdc, tao, fd, owner, treasury);
+        MockTwap twap = new MockTwap(250e6);
+
+        vm.startPrank(owner);
+        staker.setRoute(
+            0,
+            CascadeStaker.Route(
+                CascadeStaker.RouterKind.UniswapV3,
+                address(router),
+                abi.encodePacked(address(usdc), uint24(500), weth, uint24(3000), address(tao)),
+                abi.encodePacked(address(tao), uint24(3000), weth, uint24(500), address(usdc)),
+                true
+            )
+        );
+        staker.setDeliveryRoute(0);
+        staker.setFees(15, 50_000);
+        fd.setKeeper(keeper);
+        fd.setSwapper(address(staker));
+        fd.setOracle(twap);
+        vault.setRewardCut(treasury, 1_000);
+        vm.stopPrank();
+    }
+
+    /// What `who`'s shares would redeem for now.
+    function valueOf(address who) internal view returns (uint256) {
+        return CascadeMath.assetsForRedeem(vault.balanceOf(who), vault.totalAssets(), vault.totalSupply());
     }
 
     // ---- flows ----
@@ -613,5 +658,109 @@ contract EndToEndTest is Test {
         assertEq(fd.netForwarded(), 30e18);
         assertEq(tao.balanceOf(address(fd)), 0);
         assertEq(address(bridge).balance, 2 * FEE);
+    }
+
+    /// v3, USDC in and USDC out: carol stakes 1_000.05 USDC through the staker, the vault stakes her TAO
+    /// and claims 0.5 TAO of rewards with a 10% cut, and she redeems everything with a USDC delivery
+    /// preference (240 USDC per TAO for 7 days), which the keeper delivers once the payout lands.
+    function test_v3RoundTrip() public {
+        (CascadeStaker staker, MockSwapRouter router) = wireV3();
+
+        // Base: 50_000 deposit fee, then 15 bps of 1_000_000_000 = 1_500_000 swap fee to the treasury;
+        // 998_500_000 to the router at 4e9 wei per unit = 3_994e15 TAO (whole rao), deposited for carol
+        usdc.mint(carol, 1_000_050_000);
+        vm.startPrank(carol);
+        usdc.approve(address(staker), 1_000_050_000);
+        assertEq(staker.stake(carol, 1_000_050_000, 3.9e18, 0, block.timestamp), 3_994e15);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(carol), 0);
+        assertEq(usdc.balanceOf(treasury), 1_550_000);
+        assertEq(fd.depositOf(carol), 3_994e15);
+
+        // the batch delivers to the vault. A = 0, S = 0: 3_994e15 * 1e6 = 3_994e21 shares; the keeper stakes it
+        close(fd);
+        assertEq(vault.balanceOf(carol), 3_994e21);
+        vm.prank(keeper);
+        vault.stakeIdle();
+        assertEq(vault.rootStakeRao(), 3_994_000_000);
+
+        // 0.5 TAO of rewards with a 10% cut: 5e16 minted at the pre-claim price.
+        // A = 3_994e15, S = 3_994e21: 5e16 * (3_994e21 + 1e6) / (3_994e15 + 1) = 5e22 shares
+        staking.setUnclaimed(vault.coldkey(), HK1, 500_000_000);
+        uint256 priceBefore = vault.price();
+        vm.prank(keeper);
+        vault.claimRewards{gas: 60_000_000}(HK1);
+        assertEq(vault.balanceOf(treasury), 5e22);
+        assertEq(vault.vestingAmount(), 4.5e17);
+        // the price is unchanged: (3_994e15 + 5e16 + 1) * 1e18 / (3_994e21 + 5e22 + 1e6) = 1e12
+        assertEq(vault.price(), priceBefore);
+        assertEq(vault.price(), 1e12);
+        // right after the claim the treasury's shares are worth exactly 10% of the claimed 5e17:
+        // 5e22 * (4_044e15 + 1) / (4_044e21 + 1e6) = 5e16
+        assertEq(valueOf(treasury), 5e16);
+
+        // the rest vests over 7 days; the treasury's fresh shares share in it, so they end up worth
+        // a little more than the cut: 5e22 * (4_494e15 + 1) / (4_044e21 + 1e6)
+        vm.warp(block.timestamp + 7 days);
+        assertEq(vault.totalAssets(), 4_494e15);
+        assertEq(valueOf(treasury), 55_563_798_219_584_569);
+
+        // carol redeems everything and asks for USDC in the same call
+        vm.deal(carol, 1 ether);
+        uint64 deadline = uint64(block.timestamp + 7 days);
+        vm.prank(carol);
+        fd.requestRedeemWithDelivery{value: REQUEST_FEE}(3_994e21, 240e6, deadline, 6);
+        // A = 4_494e15, S = 4_044e21: 3_994e21 * (4_494e15 + 1) / (4_044e21 + 1e6)
+        // = 4_438_436_201_780_415_430, floored to rao
+        bytes32 key = keyOf(BASE, address(fd), 2, noEntries(), entries1(carol, 3_994e21));
+        vm.recordLogs();
+        close(fd);
+        CascadeMessages.Payout[] memory list = redeemedList(vm.getRecordedLogs(), key);
+        assertPayout(list, carol, 3_994e21, 4_438_436_201_000_000_000);
+
+        // after the payout delay: 4_438_436_201_000_000_000 - 1e15 fee credited to carol on Base
+        vm.warp(block.timestamp + 24 hours);
+        vm.prank(keeper);
+        vault.processPayouts(key, list, 50);
+        uint256 owed = 4_437_436_201_000_000_000;
+        assertEq(fd.claimable(carol), owed);
+
+        // The floor is the largest of carol's 240 USDC/TAO (1_064_984_688.24, rounded up), the TWAP's
+        // 1_109_359_050 less 1.5% (1_092_718_664) and the keeper's 1_100_000_000. The router sells at
+        // 250: 1_109_359_050, less the 15 bps swap fee 1_664_038 = 1_107_695_012.
+        uint256 floor = 1_100_000_000;
+        assertEq(Math.mulDiv(owed, 240e6, 1e18, Math.Rounding.Ceil), 1_064_984_689);
+        assertEq(owed * 250e6 / 1e18 * 9_850 / 10_000, 1_092_718_664);
+        vm.prank(keeper);
+        uint256 received = fd.deliver(carol, floor);
+        assertEq(received, 1_107_695_012);
+        assertEq(usdc.balanceOf(carol), 1_107_695_012);
+        assertGe(usdc.balanceOf(carol), floor);
+        // stake fees 1_550_000 + the sell's 1_664_038
+        assertEq(usdc.balanceOf(treasury), 3_214_038);
+        assertEq(router.lastAmountOutMinimum(), floor);
+        assertEq(tao.balanceOf(address(router)), owed);
+
+        // Base: nothing owed, nothing held; the preference survives the delivery
+        assertEq(fd.claimable(carol), 0);
+        assertEq(fd.totalClaimable(), 0);
+        assertEq(tao.balanceOf(address(fd)), 0);
+        assertEq(usdc.balanceOf(address(fd)), 0);
+        assertEq(usdc.balanceOf(address(staker)), 0);
+        assertEq(tao.balanceOf(address(staker)), 0);
+        // 3_994e15 forwarded - 4_437_436_201e9 received, floored at 0
+        assertEq(fd.netForwarded(), 0);
+        (uint128 minUsdcPerTao, uint64 until, uint32 destination) = fd.deliveryOf(carol);
+        assertEq(minUsdcPerTao, 240e6);
+        assertEq(until, deadline);
+        assertEq(destination, 6);
+        // Bittensor: 4_438_436_201 rao unstaked from 4_494_000_000; the treasury holds every share left
+        assertEq(vault.pendingPayouts(), 0);
+        assertEq(vault.rootStakeRao(), 55_563_799);
+        assertEq(address(vault).balance, ED);
+        assertEq(vault.balanceOf(carol), 0);
+        assertEq(vault.totalSupply(), 5e22);
+        assertEq(bridge.pendingCount(), 0);
+        assertEq(bridge.failedCount(), 0);
     }
 }

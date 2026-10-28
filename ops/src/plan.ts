@@ -13,12 +13,29 @@ export interface Plan {
  * oracle and the staker. A v2 record's plan has no `version`. */
 export interface PlanV3 extends Omit<Plan, "addresses"> {
   version: 3;
+  /** The contracts build the plan is deployed from, so verify compares its code with that build. Absent =
+   * "a2b4412" (plans made before the launch cadence, e.g. the v3-test record; see builds.ts). */
+  build?: string;
   /** Absent = "test". Fixed when the plan is made; later commands read it from the record. */
   cadence?: Cadence;
   addresses: Plan["addresses"] & { oracle: Address; staker: Address };
 }
 
 export const isPlanV3 = (plan: Plan | PlanV3): plan is PlanV3 => "version" in plan && plan.version === 3;
+
+/** The contracts build in contracts/out, which new v3 plans record and are deployed from. */
+export const CONTRACTS_BUILD = "launch-cadence";
+/** The build v3 was first deployed from: a v3 plan without a `build` was made by it. */
+export const A2B4412_BUILD = "a2b4412";
+export type ContractsBuild = typeof CONTRACTS_BUILD | typeof A2B4412_BUILD;
+
+/** The contracts build a v3 plan was deployed from: absent is a2b4412; anything unrecognised is refused. */
+export function buildOf(plan: PlanV3): ContractsBuild {
+  const b = plan.build;
+  if (b === undefined) return A2B4412_BUILD;
+  if (b === CONTRACTS_BUILD) return CONTRACTS_BUILD;
+  throw new Error(`the record's plan was deployed from a contracts build "${String(b)}" this tool does not know; nothing read or sent`);
+}
 
 /** The settings a plan was built with. */
 export const settingsOf = (plan: Plan | PlanV3): DeploySettings => (isPlanV3(plan) ? settingsV3Of(plan) : SETTINGS);
@@ -301,5 +318,5 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       args: [s.treasury, s.rewardCutBps],
     },
   ];
-  return { version: 3, ...(cadence === "launch" ? { cadence } : {}), baseNonce, bitNonce, addresses, steps };
+  return { version: 3, build: CONTRACTS_BUILD, ...(cadence === "launch" ? { cadence } : {}), baseNonce, bitNonce, addresses, steps };
 }

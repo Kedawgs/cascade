@@ -1,8 +1,9 @@
 import { basename } from "node:path";
 import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
+import { codeFor } from "./builds.ts";
 import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
-import { isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
+import { buildOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
 import { type DeploymentRecord, saveRecord, type VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
@@ -255,11 +256,13 @@ export function refuseV2Verify(path: string, rec: DeploymentRecord): void {
   if (!isPlanV3(rec.plan) || basename(path) === `${V2_DEPLOYMENT}.json`) throw new Error(V2_VERIFY_REFUSED);
 }
 
-/** Reads everything back on both chains and compares it with the plan; saves nothing itself. Refuses a
- * v2 plan before reading anything. */
+/** Reads everything back on both chains and compares it with the plan; saves nothing itself. Each
+ * contract's code is compared with the build the plan was deployed from (see builds.ts). Refuses a v2
+ * plan, or a plan from a build this tool does not know, before reading anything. */
 export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyResult> {
   const plan = rec.plan;
   if (!isPlanV3(plan)) throw new Error(V2_VERIFY_REFUSED);
+  buildOf(plan);
   const exp = expectations(plan);
   const artifacts = new Map<string, Artifact>();
   const art = (name: string) => artifacts.get(name) ?? artifacts.set(name, loadArtifact(ctx.paths.contractsDir, name)).get(name)!;
@@ -306,7 +309,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
       : []),
   ];
   for (const [c, name, addr] of contracts) {
-    const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), art(name));
+    const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), codeFor(plan, name, art));
     if (m) failures.push(m);
   }
   return { ok: failures.length === 0, failures, checkedAt: new Date().toISOString() };

@@ -1,6 +1,18 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
 import { type Cadence, type ChainName, PRECOMPILE, WALLET } from "./config.ts";
-import { buildPlan, buildPlanV3, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
+import {
+  buildOf,
+  buildPlan,
+  buildPlanV3,
+  CONTRACTS_BUILD,
+  cadenceOf,
+  isPlanV3,
+  type Plan,
+  type PlanV3,
+  ROUTE_0,
+  settingsOf,
+  settingsV3Of,
+} from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, loadRecordFor, saveRecord } from "./record.ts";
 import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
@@ -178,11 +190,15 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
   saveRecord(path, rec);
 }
 
+/** Every step landed and nothing pending. */
+const finished = (rec: DeploymentRecord) => !rec.pending && rec.plan.steps.every((s) => rec.done[s.id]);
+
 /** Deploys and configures everything, resuming after any stop; saves the record after every step.
  * A new record gets the v3 plan when `v3` is set (a deployment named v3…), else the v2 plan; an
  * existing record keeps its own plan. A record of the other version, or of the other kind of run (a
  * rehearsal record for a --live run, or a live one on the forks), is refused before anything else,
- * archiving included. */
+ * archiving included. An unfinished v3 plan from another contracts build is refused before anything is
+ * read or sent (a finished one goes on to the read-back, against its own build). */
 export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v3?: boolean; cadence?: Cadence }, deps: DeployDeps = realDeps) {
   const v3 = opts.v3 ?? false;
   let rec = loadRecordFor(path, ctx.live);
@@ -193,6 +209,11 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
   if (rec && opts.newPlan) {
     ctx.log(`Archived the old plan to ${archiveRecord(path)}`);
     rec = null;
+  }
+  if (rec && isPlanV3(rec.plan) && buildOf(rec.plan) !== CONTRACTS_BUILD && !finished(rec)) {
+    throw new Error(
+      `${path} holds an unfinished v3 plan from an earlier contracts build (${buildOf(rec.plan)}); this build's front door and staker differ, so resuming it would mix the two: run deploy --new-plan to plan anew; nothing sent`,
+    );
   }
   if (!rec) {
     const baseNonce = await nonceOf(ctx.rpc, "base", WALLET);

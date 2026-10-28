@@ -190,6 +190,10 @@ refuses the old v2 record (`test-2026-10.json`).
    no code on either chain (so it is a plain wallet), the price oracle's two pool addresses, and
    the front door's delivery slippage of 150 basis points (1.5%). Good: all checks pass. If
    anything fails, stop and do not stake.
+   A record's code is checked against the contracts build it was deployed from: one whose plan has no
+   `build` (the existing `v3-test.json`) against the a2b4412 build kept in `ops/builds/a2b4412.json`
+   for the front door and staker, a newer one (`"build": "launch-cadence"`) against `contracts/out`;
+   `deploy` will not resume an unfinished plan from the older build (`--new-plan` starts a new one).
 7. **Point the site at v3.** `pnpm ops web-config --live` writes `web/.env.local` with the
    deployment's public addresses (never a key). Then in `web/` run `pnpm dev` and open
    http://localhost:3000. The site reads `.env.local` only when it starts, so restart `pnpm dev` if

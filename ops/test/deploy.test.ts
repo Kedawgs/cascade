@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeFunctionData, encodeFunctionResult, type Hex, numberToHex } from "viem";
@@ -364,5 +364,60 @@ describe("deploy cadence", () => {
     const w = world({ base: 4, bittensor: 9 });
     const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
     expect("cadence" in rec.plan).toBe(false);
+  });
+});
+
+describe("deploy and the contracts build a plan was made with", () => {
+  const SENT_STEP: Sent = { hash: HASH, block: 1, gasUsed: 21_000n, costWei: 1n };
+  /** A v3 record as the a2b4412 build planned it (no `build`), with `done` steps landed. */
+  function a2b4412Record(done: StepId[], extra: Partial<DeploymentRecord> = {}): DeploymentRecord {
+    const { build: _, ...plan } = buildPlanV3(4, 9, COLDKEY) as ReturnType<typeof buildPlanV3> & { build?: string };
+    return { target: "rehearsal", wallet: WALLET, createdAt: "", plan, done: Object.fromEntries(done.map((id) => [id, SENT_STEP])), ...extra };
+  }
+  const REFUSED = /unfinished v3 plan from an earlier contracts build \(a2b4412\).*deploy --new-plan.*nothing sent/;
+
+  it("a new v3 plan records this build", async () => {
+    const w = world({ base: 4, bittensor: 9 });
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    expect(rec.plan).toMatchObject({ version: 3, build: "launch-cadence" });
+    expect(loadRecord(w.recordPath)!.plan).toMatchObject({ build: "launch-cadence" });
+  });
+
+  it("refuses to resume an unfinished plan from the a2b4412 build: it would mix two builds' contracts", async () => {
+    for (const rec of [
+      a2b4412Record(["baseAdapter", "oracle"]),
+      a2b4412Record([]),
+      // every step landed but one still pending
+      a2b4412Record(V3.slice(0, -1), { pending: { step: "setRewardCut", chain: "bittensor", nonce: 15, hash: HASH } }),
+    ]) {
+      const w = world({ base: 6, bittensor: 9 });
+      saveRecord(w.recordPath, rec);
+      const before = readFileSync(w.recordPath, "utf8");
+      await expect(deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps)).rejects.toThrow(REFUSED);
+      expect(w.sent).toEqual([]);
+      expect(readFileSync(w.recordPath, "utf8")).toBe(before);
+    }
+  });
+
+  it("a finished one has nothing to send; --new-plan archives it and plans anew with this build", async () => {
+    const w = world({ base: 15, bittensor: 16 });
+    saveRecord(w.recordPath, a2b4412Record(V3));
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    expect(w.sent).toEqual([]);
+    expect("build" in rec.plan).toBe(false);
+
+    saveRecord(w.recordPath, a2b4412Record(["baseAdapter"]));
+    const fresh = await deploy(w.ctx, w.recordPath, { newPlan: true, v3: true }, w.deps);
+    expect(readdirSync(w.dir).some((n) => /^rec\.abandoned-.*\.json$/.test(n))).toBe(true);
+    expect(fresh.plan).toMatchObject({ version: 3, build: "launch-cadence", baseNonce: 15, bitNonce: 16 });
+    expect(w.sent).toEqual(V3);
+  });
+
+  it("refuses to resume a plan from a build this tool does not know", async () => {
+    const w = world({ base: 4, bittensor: 9 });
+    const rec = a2b4412Record([]);
+    saveRecord(w.recordPath, { ...rec, plan: { ...rec.plan, build: "someday" } as DeploymentRecord["plan"] });
+    await expect(deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps)).rejects.toThrow(/contracts build "someday" this tool does not know/);
+    expect(w.sent).toEqual([]);
   });
 });

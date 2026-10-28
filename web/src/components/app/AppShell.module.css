@@ -4,14 +4,17 @@
   padding: 0 20px 64px;
 }
 
+/* The home navbar's sizes (SiteNav's .nav): as tall, with its content edges on the same lines as the
+   home page's .wrap (at most 1280px with 40px sides; the app's own 20px sides count towards them). */
 .bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   max-width: 1240px;
-  min-height: 74px;
+  min-height: 100px;
   margin: 0 auto;
+  padding: 0 20px;
 }
 
 .left,
@@ -35,22 +38,23 @@
   gap: 4px;
 }
 
+/* the home navbar's links: 18px, medium weight, ink */
 .tab {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 38px;
-  padding: 0 14px;
+  gap: 10px;
+  height: 48px;
+  padding: 0 16px;
   border-radius: var(--r-pill);
-  color: var(--ink-2);
-  font-size: 14px;
-  font-weight: 700;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
 }
 
 .tab:hover {
-  color: var(--ink);
+  color: var(--water-deep);
 }
 
 .tab.on {
@@ -59,23 +63,24 @@
   box-shadow: 0 1px 2px rgba(16, 33, 43, 0.08);
 }
 
+/* the network and wallet pills are as tall as the home navbar's button (.navCta) */
 .net {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 38px;
-  padding: 0 13px 0 10px;
+  gap: 10px;
+  height: 52px;
+  padding: 0 20px 0 16px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
   background: var(--paper);
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 600;
   white-space: nowrap;
 }
 
 .netDot {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #0052ff;
 }
@@ -83,14 +88,14 @@
 .wallet {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  height: 40px;
-  padding: 0 4px 0 14px;
+  gap: 12px;
+  height: 52px;
+  padding: 0 5px 0 20px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
   background: var(--paper);
   font: inherit;
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 700;
   cursor: pointer;
   anchor-name: --wallet-pill;
@@ -107,9 +112,9 @@
 .walletAddr {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 4px 0 12px;
+  gap: 10px;
+  height: 40px;
+  padding: 0 5px 0 14px;
   border-radius: var(--r-pill);
   background: var(--mist);
   font-weight: 600;
@@ -117,8 +122,8 @@
 }
 
 .avatar {
-  width: 22px;
-  height: 22px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--water), var(--proof));
 }
@@ -127,8 +132,9 @@
 .menu {
   position: fixed;
   inset: auto;
-  top: 84px;
-  right: max(20px, calc((100vw - 1240px) / 2));
+  /* where browsers without anchor positioning put it: under the bar, at its content's right edge */
+  top: 108px;
+  right: max(40px, calc((100vw - 1200px) / 2));
   width: min(280px, calc(100vw - 40px));
   margin: 0;
   padding: 14px;
@@ -162,14 +168,36 @@
   padding-top: 26px;
 }
 
-@media (max-width: 900px) {
+@media (min-width: 1800px) {
+  .bar {
+    max-width: 1400px;
+  }
+
+  .menu {
+    right: calc((100vw - 1360px) / 2);
+  }
+}
+
+/* Below 1280px the logo, four tabs and a connected wallet's pill don't fit one row: the logo and the
+   wallet share the first row, the tabs take the whole second row. */
+@media (max-width: 1279px) {
   .bar {
     flex-wrap: wrap;
-    padding: 12px 0;
+    padding: 12px 20px;
+  }
+
+  .left {
+    display: contents;
   }
 
   .home {
+    order: 1;
     margin-right: 12px;
+  }
+
+  .right {
+    order: 2;
+    margin-left: auto;
   }
 
   .tabs {
@@ -180,26 +208,72 @@
     scrollbar-width: none;
   }
 
-  /* the logo and the wallet share the first row; the tabs take the whole second row */
-  .left {
-    display: contents;
+  .menu {
+    top: 72px;
+  }
+}
+
+/* as the home navbar's: a shorter bar, and the button-sized pills at 44px */
+@media (max-width: 999px) {
+  .bar {
+    min-height: 84px;
   }
 
-  .home {
-    order: 1;
+  .net,
+  .wallet {
+    height: 44px;
+    font-size: 15px;
   }
 
-  .right {
-    order: 2;
-    margin-left: auto;
+  .net {
+    gap: 8px;
+    padding: 0 16px 0 12px;
   }
 
+  .netDot {
+    width: 16px;
+    height: 16px;
+  }
+
+  .wallet {
+    gap: 10px;
+    padding: 0 4px 0 16px;
+  }
+
+  .walletAddr {
+    gap: 8px;
+    height: 34px;
+    padding: 0 4px 0 12px;
+  }
+
+  .avatar {
+    width: 26px;
+    height: 26px;
+  }
+
+  .menu {
+    top: 64px;
+  }
+}
+
+@media (max-width: 900px) {
   .walletBalance {
     display: none;
   }
 
   .wallet {
     padding-left: 4px;
+  }
+}
+
+@media (max-width: 700px) {
+  .bar {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .menu {
+    right: 20px;
   }
 }
 
@@ -219,12 +293,12 @@
 
   .tab {
     justify-content: center;
+    height: 44px;
     padding: 0 6px;
-    font-size: 13.5px;
+    font-size: 15px;
   }
 
   .tab svg {
     display: none;
   }
 }
-

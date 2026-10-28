@@ -13,9 +13,19 @@
   font-size: 16px;
 }
 
+/* in the app bar: the home navbar's button (.navCta) */
 .inline .button {
-  min-height: 46px;
-  font-size: 15px;
+  min-height: 52px;
+  padding: 0 28px;
+  font-size: 17px;
+}
+
+@media (max-width: 999px) {
+  .inline .button {
+    min-height: 44px;
+    padding: 0 18px;
+    font-size: 15px;
+  }
 }
 
 /* ConnectWalletGhost: the same box, no text, no hover */

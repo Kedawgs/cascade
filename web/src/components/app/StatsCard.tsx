@@ -1,7 +1,7 @@
 "use client";
 
-import { useApy, useProof, useProtocolStats } from "@/lib/cascade/hooks";
-import { APY_FOOTNOTE, APY_KEEP_MS, shownFigure, statRows, STATS_KEEP_MS } from "@/lib/stats";
+import { useApy, useProof, useProtocolStats, useTaoPrice } from "@/lib/cascade/hooks";
+import { APY_FOOTNOTE, APY_KEEP_MS, shownFigure, type StatRow, statRows, STATS_KEEP_MS } from "@/lib/stats";
 import { Dash } from "../Dash";
 import { ReceiptLink } from "../ReceiptLink";
 import styles from "./App.module.css";
@@ -11,7 +11,11 @@ import styles from "./App.module.css";
 export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
   const stats = useProtocolStats();
   const apy = useApy();
-  const rows = statRows(shownFigure(stats, STATS_KEEP_MS), shownFigure(apy, APY_KEEP_MS));
+  const shown = shownFigure(stats, STATS_KEEP_MS);
+  // the total may still be the server's snapshot; the TAO price only ever a live read's (see useTaoPrice)
+  const price = useTaoPrice();
+  const rows = statRows(shown && { ...shown, taoPriceUsd: price }, shownFigure(apy, APY_KEEP_MS));
+  const loading = (key: StatRow["key"]) => (key === "apy" ? apy.isPending : key === "price" ? !stats.isError : stats.isPending);
 
   return (
     <section aria-labelledby="stats-heading" className={styles.section}>
@@ -28,7 +32,7 @@ export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
           <div key={row.key}>
             <span>{row.label}</span>
             <span className={row.accent ? styles.accent : undefined}>
-              {row.value ?? <Dash loading={row.key === "apy" ? apy.isPending : stats.isPending} />}
+              {row.value ?? <Dash loading={loading(row.key)} />}
             </span>
           </div>
         ))}

@@ -1,9 +1,9 @@
 "use client";
 
-import { useIsV3, usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
+import { useIsV3, usePosition, useProtocolStats, useRewards, useTaoPrice } from "@/lib/cascade/hooks";
 import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
-import { shownFigure, STATS_KEEP_MS } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
+import { Dash } from "../Dash";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
 import app from "./App.module.css";
@@ -13,13 +13,14 @@ import styles from "./RewardsCard.module.css";
 const EMPTY = "Your rewards show here once the first ones are collected. Cascade collects them for everyone and adds them to your balance.";
 const SHOW_DAYS = 14;
 
-/** The TAO price, live. */
+/** The TAO price, live (a live read's only). */
 function Price() {
-  const price = shownFigure(useProtocolStats(), STATS_KEEP_MS)?.taoPriceUsd;
+  const stats = useProtocolStats();
+  const price = useTaoPrice();
   return (
     <div>
       <p className={card.k}>TAO price</p>
-      <p className={card.v}>{price !== undefined ? formatUsd(price) : "–"}</p>
+      <p className={card.v}>{price !== undefined ? formatUsd(price) : <Dash loading={!stats.isError} />}</p>
     </div>
   );
 }

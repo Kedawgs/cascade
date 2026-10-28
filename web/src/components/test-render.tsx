@@ -3,7 +3,7 @@
 import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { renderToString } from "react-dom/server";
-import { CascadeDataProvider } from "@/lib/cascade/context";
+import { CascadeDataProvider, SnapshotAtProvider } from "@/lib/cascade/context";
 import { notConfiguredData } from "@/lib/cascade/live";
 
 /** A cached query: a value (dated `at`), and whether its last read failed. */
@@ -14,7 +14,8 @@ export interface Cached {
   failed?: boolean;
 }
 
-export function renderWithCache(element: ReactElement, cached: Cached[] = []): string {
+/** `seededAt`: when the server's snapshot was read, as `Providers` passes it on (none by default). */
+export function renderWithCache(element: ReactElement, cached: Cached[] = [], { seededAt = 0 }: { seededAt?: number } = {}): string {
   const client = new QueryClient();
   for (const c of cached) {
     const query = client.getQueryCache().build(client, { queryKey: c.key });
@@ -23,7 +24,9 @@ export function renderWithCache(element: ReactElement, cached: Cached[] = []): s
   }
   return renderToString(
     <QueryClientProvider client={client}>
-      <CascadeDataProvider value={notConfiguredData()}>{element}</CascadeDataProvider>
+      <SnapshotAtProvider at={seededAt}>
+        <CascadeDataProvider value={notConfiguredData()}>{element}</CascadeDataProvider>
+      </SnapshotAtProvider>
     </QueryClientProvider>,
   );
 }

@@ -1,8 +1,9 @@
 "use client";
 
 import { keepPreviousData, type QueryClient, useQuery } from "@tanstack/react-query";
+import { shownFigure, STATS_KEEP_MS } from "../stats";
 import { isV3 } from "./config";
-import { useCascadeData } from "./context";
+import { useCascadeData, useSnapshotAt } from "./context";
 import type { Snapshot } from "./snapshot";
 
 /** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
@@ -51,6 +52,19 @@ export function useIsV3(): boolean {
 export function useProtocolStats() {
   const data = useCascadeData();
   return useQuery({ queryKey: cascadeKeys.stats(), queryFn: () => data.getProtocolStats(), refetchInterval: IDLE_MS });
+}
+
+/** The TAO price to show, wherever one is shown: a live read's, kept through failed reads for an hour
+ * (see shownFigure), and none while the figures are still the server's snapshot. That one is as old as
+ * the last deploy, and mustn't pass for today's price on a page where people decide to deposit, so the
+ * first paint has "–" in its place. (Totals may show the snapshot's.) A figure is the snapshot's when it
+ * is dated exactly when the snapshot was read: "no later than" would also catch the browser's own reads
+ * when its clock is behind the build machine's. */
+export function useTaoPrice(): number | undefined {
+  const stats = useProtocolStats();
+  const snapshotAt = useSnapshotAt();
+  if (snapshotAt !== 0 && stats.dataUpdatedAt === snapshotAt) return undefined;
+  return shownFigure(stats, STATS_KEEP_MS)?.taoPriceUsd;
 }
 
 /** A 30-day figure moves slowly: read it every half hour, and keep the last good one through a failed read. */

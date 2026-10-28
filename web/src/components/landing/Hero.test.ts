@@ -6,7 +6,7 @@ import { type Cached, plainText, renderWithCache } from "../test-render";
 import { Hero } from "./Hero";
 
 const DAY = 86_400_000;
-const hero = (cached: Cached[] = []) => plainText(renderWithCache(createElement(Hero), cached));
+const hero = (cached: Cached[] = [], seededAt?: number) => plainText(renderWithCache(createElement(Hero), cached, { seededAt }));
 const apy = (data?: number, over: Partial<Cached> = {}): Cached => ({ key: cascadeKeys.apy(), data, ...over });
 const stats = (totalStakedTao: number, over: Partial<Cached> = {}): Cached => ({
   key: cascadeKeys.stats(),
@@ -41,6 +41,11 @@ describe("Hero", () => {
     expect(hero([apy(5.4), stats(0)])).not.toContain("Total staked");
     expect(hero([apy(5.4), stats(0.003)])).not.toContain("Total staked");
     expect(hero([apy(5.4), stats(10)])).toContain("$2.6KTotal staked");
+  });
+
+  it("shows the snapshot's total at first paint: a total, not a price anyone acts on", () => {
+    const seeded = Date.now() - 60_000;
+    expect(hero([apy(5.4, { at: seeded }), stats(10, { at: seeded })], seeded)).toContain("$2.6KTotal staked");
   });
 
   it("keeps the total's place, with a dash, once a failed read leaves only an old value", () => {

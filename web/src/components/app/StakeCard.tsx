@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useBalances, useIsV3, useLimits, usePosition, useProtocolStats, useWithdrawals } from "@/lib/cascade/hooks";
+import { useBalances, useIsV3, useLimits, usePosition, useProtocolStats, useTaoPrice, useWithdrawals } from "@/lib/cascade/hooks";
 import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
@@ -79,12 +79,11 @@ function WalletTao({ account }: { account: string }) {
 function ClaimReady({ account }: { account: string }) {
   const v3 = useIsV3();
   const balances = useBalances(account);
-  const stats = useProtocolStats();
+  const price = useTaoPrice();
   const withdrawals = useWithdrawals(account);
   const flows = useFlows(account);
   const claimable = balances.data?.claimable ?? 0n;
   if (!offerClaim(claimable, v3, withdrawals.data, withdrawals.isError)) return null;
-  const price = stats.data?.taoPriceUsd;
   const ready = (withdrawals.data ?? []).filter(offersClaim).map((w) => w.id);
   return (
     <div className={styles.walletTao}>

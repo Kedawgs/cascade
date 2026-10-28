@@ -5,10 +5,9 @@ import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
-import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip } from "@/lib/cascade/hooks";
+import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
-import { shownFigure, STATS_KEEP_MS } from "@/lib/stats";
 import {
   breakEvenDays,
   breakEvenText,
@@ -22,6 +21,7 @@ import {
   validateStakeAmount,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
+import { Dash } from "../Dash";
 import { AmountField } from "./AmountField";
 import styles from "./StakeForm.module.css";
 
@@ -36,14 +36,14 @@ function usdcUnits(raw: string): bigint | null {
   }
 }
 
-/** v3: the TAO price, and what it means for a balance held in TAO. */
-function PriceStrip() {
+/** v3: the TAO price (a live read's only), and what it means for a balance held in TAO. */
+export function PriceStrip() {
   const stats = useProtocolStats();
-  const price = shownFigure(stats, STATS_KEEP_MS)?.taoPriceUsd;
+  const price = useTaoPrice();
   return (
     <div className={styles.priceStrip}>
       <p className={styles.price}>
-        TAO <b>{price !== undefined ? formatUsd(price) : "–"}</b>
+        TAO <b>{price !== undefined ? formatUsd(price) : <Dash loading={!stats.isError} />}</b>
       </p>
       <p className={styles.priceNote}>Your balance is TAO: its dollar value moves with TAO&apos;s price.</p>
     </div>

@@ -23,3 +23,15 @@ export function useCascadeData(): CascadeData {
   if (!data) throw new Error("useCascadeData must be used inside <CascadeDataProvider>");
   return data;
 }
+
+/** When the server's snapshot was read (snapshot.ts), or 0 with none. A cached figure dated exactly
+ * then is still the snapshot's: no live read has replaced it yet. */
+const SnapshotAtContext = createContext(0);
+
+export function SnapshotAtProvider({ at, children }: { at: number; children: ReactNode }) {
+  return <SnapshotAtContext.Provider value={at}>{children}</SnapshotAtContext.Provider>;
+}
+
+export function useSnapshotAt(): number {
+  return useContext(SnapshotAtContext);
+}

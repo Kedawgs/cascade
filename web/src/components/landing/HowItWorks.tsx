@@ -9,7 +9,7 @@ export function HowItWorks() {
   return (
     <section id="how" className={`wrap ${styles.section}`} aria-labelledby="how-heading">
       <h2 id="how-heading" className={styles.h2}>
-        You confirm in your wallet. <b>We handle the rest.</b>
+        Deposit USDC. <b>We handle the rest.</b>
       </h2>
       <p className={styles.lede}>
         No Bittensor wallet, no seed phrase to write down, nothing new to learn. You can follow every

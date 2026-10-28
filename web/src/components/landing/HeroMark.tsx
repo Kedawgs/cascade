@@ -1,6 +1,7 @@
 "use client";
 
-import { useId } from "react";
+import { useEffect, useId, useRef } from "react";
+import { pauseWhenHidden } from "@/lib/pause-when-hidden";
 import styles from "./HeroMark.module.css";
 
 interface Box {
@@ -91,10 +92,16 @@ function morph(tau: Box, mark: Box) {
   ));
 }
 
-/** τ becoming the cascade mark, on a loop. */
+/** τ becoming the cascade mark, on a loop. It pauses while off screen or in a hidden tab. */
 function MorphingMark({ id }: { id: string }) {
+  const ref = useRef<SVGSVGElement>(null);
+  useEffect(() => {
+    const svg = ref.current;
+    if (!svg) return;
+    return pauseWhenHidden(svg, { document, IntersectionObserver: window.IntersectionObserver });
+  }, []);
   return (
-    <svg className={`${styles.mark} ${styles.moving}`} viewBox="0 0 306 272" fill="none" aria-hidden="true" focusable="false">
+    <svg ref={ref} className={`${styles.mark} ${styles.moving}`} viewBox="0 0 306 272" fill="none" aria-hidden="true" focusable="false">
       <defs>
         <Gradients id={id} />
         {BARS.map(({ tone, tau, mark }, i) => {

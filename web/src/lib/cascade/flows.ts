@@ -268,10 +268,11 @@ export function depositTaoCalls(taoWei: bigint, w: Balances, d: Deployment): Flo
   return out;
 }
 
-/** TAO in the wallet back to USDC (TAO –0.3%→ WETH –0.05%→ USDC) with a minimum. */
+/** TAO in the wallet back to USDC (TAO –0.3%→ WETH –0.05%→ USDC) with a minimum. When the router's
+ * allowance falls short it is approved for exactly this sale, never an open amount. */
 export function sellTaoCalls(taoWei: bigint, minUsdc: bigint, w: Balances, account: Address): FlowCall[] {
   const out: FlowCall[] = [];
-  if (w.taoRouterAllowance < taoWei) out.push(call("approveTao", TOKENS.tao, ERC20, "approve", [UNISWAP.router, maxUint256]));
+  if (w.taoRouterAllowance < taoWei) out.push(call("approveTao", TOKENS.tao, ERC20, "approve", [UNISWAP.router, taoWei]));
   out.push(
     call("swap", UNISWAP.router, ROUTER, "exactInput", [
       { path: PATH_TAO_TO_USDC, recipient: account, amountIn: taoWei, amountOutMinimum: minUsdc },

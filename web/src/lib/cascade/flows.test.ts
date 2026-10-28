@@ -286,6 +286,12 @@ describe("TAO already in the wallet", () => {
     expect(c.map((x) => x.key)).toEqual(["approveTao", "swap"]);
     expect(c[1]).toMatchObject({ functionName: "exactInput", args: [{ amountIn: 10n ** 16n, amountOutMinimum: 2_400_000n, recipient: ME }] });
   });
+
+  it("lets Uniswap's router spend exactly the TAO it sells, and asks only when the allowance falls short", () => {
+    const c = sellTaoCalls(10n ** 16n, 2_400_000n, { ...none, taoRouterAllowance: 10n ** 15n }, ME);
+    expect(c[0]).toMatchObject({ key: "approveTao", to: TOKENS.tao, functionName: "approve", args: [UNISWAP.router, 10n ** 16n] });
+    expect(sellTaoCalls(10n ** 16n, 2_400_000n, { ...none, taoRouterAllowance: 10n ** 16n }, ME).map((x) => x.key)).toEqual(["swap"]);
+  });
 });
 
 describe("userMessage", () => {

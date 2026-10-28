@@ -564,8 +564,11 @@ html:has(.navBar) {
     border-left: 0;
   }
 
-  /* stacked under the copy, the animation is only more to scroll past (and it pauses while hidden) */
-  .art {
+  /* stacked under the copy, the animation is only more to scroll past (and it pauses while hidden);
+     the glows that sit behind it and beside the stake form would only tint the text */
+  .art,
+  .hero::before,
+  .stakeWrap::after {
     display: none;
   }
 

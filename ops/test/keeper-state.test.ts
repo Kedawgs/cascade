@@ -186,6 +186,15 @@ describe("the open batch and its close's economics", () => {
     expect((await read(chain({ quoteFee: () => { throw revert("fee"); } }))).frontDoor.closeEconomics).toBeNull();
   });
 
+  it("a zero ETH price, TAO price or bridge fee is not a price: the economics are unknown (null), never 'covered'", async () => {
+    // a zero ETH price or bridge fee would make the bridge fee $0, so any batch would count as covered
+    expect((await read(chain({ quoteExactInput: () => [0n, [], [], 0n] }))).frontDoor.closeEconomics).toBeNull();
+    expect((await read(chain({ quoteFee: () => 0n }))).frontDoor.closeEconomics).toBeNull();
+    expect((await read(chain({ usdcValue: () => 0n }))).frontDoor.closeEconomics).toBeNull();
+    // a zero fee setting is still a reading: it only lowers the estimate
+    expect((await read(chain({ depositFeeUsdc: () => 0n, swapFeeBps: () => 0 }))).frontDoor.closeEconomics).toEqual({ feesUsdc: 230_000n, bridgeFeeUsdc: 1_380_000n });
+  });
+
   it("reads no prices when the fees can't change the decision", async () => {
     // test cadence: the record's max wait (none), so a young batch closes as soon as it can
     const test = chain({ batchInterval: () => 60n, openBatch: () => [7n, BigInt(T - 61), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] });

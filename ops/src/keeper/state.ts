@@ -424,8 +424,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
 
   /** The batch's estimated fees and its close's bridge fee, in USDC units, at the front door's oracle's
    * TAO price and Uniswap's WETH/USDC price, with the front door's staker's fees. null when any of those
-   * reads fails (a revert or a node that didn't answer): the batch then waits for its max wait, never
-   * closing early on a guess. */
+   * reads fails (a revert or a node that didn't answer), or a price or the bridge fee reads 0 (a $0 bridge
+   * fee would count any batch as covered): the batch then waits for its max wait, never closing early on a
+   * guess. */
   async function closeEconomics(deposits: readonly Entry[], redeems: readonly Entry[], totalDeposits: bigint, feePot: bigint): Promise<CloseEconomics | null> {
     try {
       const oracle = (await r("base", a.frontDoor, DELIVERY_FRONT, "oracle")) as Address;
@@ -435,6 +436,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const swapFeeBps = Number(await r("base", staker, STAKER, "swapFeeBps"));
       const [ethPriceUsdc] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ETH_USDC_PATH, E18])) as readonly [bigint];
       const bridgeFeeWei = await closeFeeWei(deposits, redeems);
+      if (taoPriceUsdc === 0n || ethPriceUsdc === 0n || bridgeFeeWei === 0n) return null;
       return closeEconomicsOf({ nDeposits: deposits.length, depositFeeUsdc, totalDeposits, taoPriceUsdc, swapFeeBps, feePot, ethPriceUsdc, bridgeFeeWei });
     } catch {
       return null;

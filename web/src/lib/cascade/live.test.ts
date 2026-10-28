@@ -189,18 +189,21 @@ describe("live data", () => {
     expect(l.minUsd - free.minUsd).toBeGreaterThanOrEqual(0.05 - 1e-9);
   });
 
-  it("shows the APY, total staked and the price, and hides stakers", async () => {
-    const s = await createLiveCascadeData(D, deps()).getProtocolStats();
-    expect(s).toEqual({ apyPercent: 5.36, totalStakedTao: 0.08, taoPriceUsd: 250 });
-  });
-
-  it("still shows total staked and the price when the APY can't be read", async () => {
+  it("shows total staked and the price, and hides stakers, without waiting on the APY", async () => {
+    let asked = false;
     const readApyPercent = async () => {
-      throw new Error("archive node unreachable");
+      asked = true;
+      return 5.36;
     };
     const s = await createLiveCascadeData(D, deps({ readApyPercent })).getProtocolStats();
     expect(s).toEqual({ totalStakedTao: 0.08, taoPriceUsd: 250 });
-    expect("apyPercent" in s && s.apyPercent !== undefined).toBe(false);
+    expect(asked).toBe(false);
+  });
+
+  it("reads the APY on its own, and refuses rather than inventing one", async () => {
+    expect(await createLiveCascadeData(D, deps()).getApy()).toBe(5.36);
+    const none = createLiveCascadeData(D, deps({ readApyPercent: async () => undefined }));
+    await expect(none.getApy()).rejects.toThrow();
   });
 
   it("calls the vault fully staked when what is idle is too small to stake", async () => {

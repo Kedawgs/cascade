@@ -10,6 +10,12 @@
   display: none;
 }
 
+@media (max-width: 999px) {
+  .mark {
+    width: min(70%, 280px);
+  }
+}
+
 /* Without motion, the finished mark stands still. */
 @media (prefers-reduced-motion: reduce) {
   .moving {

@@ -468,6 +468,11 @@
   color: var(--ink);
 }
 
+/* ---------- questions ---------- */
+.faqMore {
+  margin: 32px 0 0;
+}
+
 /* ---------- wide and narrow ---------- */
 @media (min-width: 1800px) {
   .heroGrid {
@@ -533,10 +538,6 @@
     padding: 8px 0 0;
   }
 
-  .art svg {
-    width: min(70%, 280px);
-  }
-
   .statV {
     font-size: 34px;
   }
@@ -556,10 +557,6 @@
 
   .vr {
     display: none;
-  }
-
-  .heroCta {
-    margin-left: 0;
   }
 
   .section {

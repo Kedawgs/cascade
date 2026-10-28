@@ -4,9 +4,9 @@ import { formatApy, statRows } from "./stats";
 describe("statRows", () => {
   it("formats the four rows in order", () => {
     expect(
-      statRows({ apyPercent: 11.4, totalStakedTao: 12480, stakers: 1204, taoPriceUsd: 286 }),
+      statRows({ totalStakedTao: 12480, stakers: 1204, taoPriceUsd: 286 }, 11.4),
     ).toEqual([
-      { label: "Annual percentage yield*", value: "11.4%", accent: true },
+      { label: "Annual percentage yield, in TAO*", value: "11.4%", accent: true },
       { label: "Total staked through Cascade", value: "12,480 TAO" },
       { label: "Stakers", value: "1,204" },
       { label: "TAO price", value: "$286.00" },
@@ -14,7 +14,7 @@ describe("statRows", () => {
   });
 
   it("omits rows whose value is missing", () => {
-    expect(statRows({ apyPercent: 9.05 }).map((r) => r.label)).toEqual(["Annual percentage yield*"]);
+    expect(statRows({}, 9.05).map((r) => r.label)).toEqual(["Annual percentage yield, in TAO*"]);
     expect(statRows({})).toEqual([]);
   });
 

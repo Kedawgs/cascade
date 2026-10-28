@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APY_WINDOW_BLOCKS, BASKET_TWR_PREFIX, basketTwrKey, decodeTwr, netApyPercent } from "./apy";
+import { BASKET_TWR_PREFIX, basketTwrKey, decodeTwr, netApyPercent } from "./apy";
 
 const ONE = 2n ** 64n;
 const DAY = 86_400;
@@ -12,15 +12,16 @@ describe("BasketTwr storage", () => {
     expect(basketTwrKey(taoBot)).toBe(`${BASKET_TWR_PREFIX}6c1664b37fae67165907bd92805ee938${taoBot.slice(2)}`);
   });
 
-  it("reads 30 days of 12-second blocks", () => {
-    expect(APY_WINDOW_BLOCKS).toBe(216_000n);
-  });
-
   it("decodes U64F64 little-endian bits, and an empty answer as no series", () => {
     expect(decodeTwr(le(ONE))).toBe(ONE);
     expect(decodeTwr(le(3n * 2n ** 63n))).toBe(3n * 2n ** 63n);
     expect(decodeTwr("0x")).toBeNull();
     expect(decodeTwr(undefined)).toBeNull();
+  });
+
+  it("refuses an answer that isn't exactly 16 bytes", () => {
+    expect(decodeTwr("0x0102")).toBeNull();
+    expect(decodeTwr(`${le(ONE)}00`)).toBeNull();
   });
 });
 
@@ -50,5 +51,13 @@ describe("netApyPercent", () => {
     expect(netApyPercent({ ...base, twrNow: (ONE * 999n) / 1000n })).toBeUndefined();
     expect(netApyPercent({ ...base, seconds: 0 })).toBeUndefined();
     expect(netApyPercent({ ...base, twrNow: (ONE * 1020n) / 1000n })).toBeUndefined();
+  });
+
+  it("is labelled a 30-day figure, so a window far from 30 days isn't shown", () => {
+    const base = { twrNow: (ONE * 1004n) / 1000n, twrThen: ONE, rewardCutBps: 1000 };
+    expect(netApyPercent({ ...base, seconds: 26 * DAY })).toBeUndefined();
+    expect(netApyPercent({ ...base, seconds: 34 * DAY })).toBeUndefined();
+    expect(netApyPercent({ ...base, seconds: 27 * DAY })).toBeDefined();
+    expect(netApyPercent({ ...base, seconds: 33 * DAY })).toBeDefined();
   });
 });

@@ -245,23 +245,24 @@ export async function readRewardCutBps(c: Pick<Clients, "bittensor">, d: Deploym
 }
 
 /**
- * Depositors' APY over the last 30 days, from the validator's on-chain return series (BasketTwr)
- * read through the storage-query precompile now and 30 days back, less Cascade's cut.
- * Needs an archive node (the site's Bittensor RPC is one). Undefined when there's no figure to show.
+ * The APY of root staking with the vault's validator over the last 30 days: its on-chain return
+ * series (BasketTwr) read through the storage-query precompile now and 30 days back, less Cascade's
+ * cut. Needs an archive node (the site's Bittensor RPC is one). Undefined when there's no figure to show.
  */
-export async function readApyPercent(c: Pick<Clients, "bittensor">, d: Deployment): Promise<number | undefined> {
+export async function readApyPercent(c: Pick<Clients, "bittensorHistory">, d: Deployment): Promise<number | undefined> {
+  const chain = c.bittensorHistory;
   const [hotkey, rewardCutBps, head] = await Promise.all([
-    c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "stakeHotkey" }),
-    readRewardCutBps(c, d),
-    c.bittensor.getBlock(),
+    chain.readContract({ address: d.vault, abi: VAULT, functionName: "stakeHotkey" }),
+    readRewardCutBps({ bittensor: chain }, d),
+    chain.getBlock(),
   ]);
   if (head.number <= APY_WINDOW_BLOCKS) return undefined;
   const key = basketTwrKey(hotkey);
   const thenNumber = head.number - APY_WINDOW_BLOCKS;
   const [now, then, thenBlock] = await Promise.all([
-    c.bittensor.call({ to: STORAGE_QUERY, data: key, blockNumber: head.number }),
-    c.bittensor.call({ to: STORAGE_QUERY, data: key, blockNumber: thenNumber }),
-    c.bittensor.getBlock({ blockNumber: thenNumber }),
+    chain.call({ to: STORAGE_QUERY, data: key, blockNumber: head.number }),
+    chain.call({ to: STORAGE_QUERY, data: key, blockNumber: thenNumber }),
+    chain.getBlock({ blockNumber: thenNumber }),
   ]);
   return netApyPercent({
     twrNow: decodeTwr(now.data),

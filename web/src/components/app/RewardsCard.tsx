@@ -12,7 +12,7 @@ import styles from "./RewardsCard.module.css";
 const EMPTY = "Your rewards show here once the first ones are collected. Cascade collects them for everyone and adds them to your balance automatically.";
 const SHOW_DAYS = 14;
 
-/** The TAO price, live; an APR appears only once rewards have been measured on-chain. */
+/** The TAO price, live. */
 function Price() {
   const stats = useProtocolStats();
   return (
@@ -86,7 +86,7 @@ function RewardsForAccount({ account }: { account: string }) {
   );
 }
 
-/** One card: what has been earned, the current APR, and the last two weeks of rewards. */
+/** One card: what has been earned, and the last two weeks of rewards. */
 export function RewardsCard({ account }: { account: string | null }) {
   return (
     <div className={app.card}>

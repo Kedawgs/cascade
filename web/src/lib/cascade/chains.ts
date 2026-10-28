@@ -27,6 +27,7 @@ export function liveChains(): SourceChainInfo[] {
 /** "Available on Base. More chains soon.": where you can deposit today, for the landing page. */
 export function availabilityText(chains: readonly SourceChainInfo[] = SOURCE_CHAINS): string {
   const live = chains.filter((c) => c.status === "live").map((c) => c.label);
+  if (live.length === 0) return "More chains soon.";
   const names = live.length > 1 ? `${live.slice(0, -1).join(", ")} and ${live[live.length - 1]}` : live[0];
   const soon = chains.some((c) => c.status === "soon");
   return `Available on ${names}.${soon ? " More chains soon." : ""}`;

@@ -2,16 +2,18 @@
 
 import Link from "next/link";
 import { SOURCE_CHAINS, availabilityText } from "@/lib/cascade/chains";
-import { useProtocolStats } from "@/lib/cascade/hooks";
+import { useApy, useProtocolStats } from "@/lib/cascade/hooks";
 import { formatUsdShort } from "@/lib/format";
-import { formatApy } from "@/lib/stats";
-import { APY_FOOTNOTE } from "../app/StatsCard";
+import { APY_FOOTNOTE, formatApy } from "@/lib/stats";
 import { Mark } from "../Logo";
 import { HeroMark } from "./HeroMark";
 import styles from "./Landing.module.css";
 
 export function Hero() {
   const stats = useProtocolStats();
+  const apy = useApy();
+  // the APY's place is kept while it loads, so the Stake button doesn't jump when it arrives
+  const showApy = apy.isPending || apy.data !== undefined;
 
   const s = stats.data;
   const totalUsd =
@@ -31,11 +33,11 @@ export function Hero() {
           </h1>
           <p className={styles.lead}>Deposit USDC from the wallet you already have.</p>
           <div className={styles.stats}>
-            {s?.apyPercent !== undefined && (
+            {showApy && (
               <>
                 <div>
-                  <p className={`${styles.statV} ${styles.statAccent}`}>{formatApy(s.apyPercent)}</p>
-                  <p className={styles.statK}>APY*</p>
+                  <p className={`${styles.statV} ${styles.statAccent}`}>{apy.data !== undefined ? formatApy(apy.data) : "–"}</p>
+                  <p className={styles.statK}>APY in TAO*</p>
                 </div>
                 <span className={styles.vr} aria-hidden="true" />
               </>
@@ -68,7 +70,7 @@ export function Hero() {
             </span>
             {availabilityText()}
           </p>
-          {s?.apyPercent !== undefined && <p className={styles.fine}>{APY_FOOTNOTE}</p>}
+          {apy.data !== undefined && <p className={styles.fine}>{APY_FOOTNOTE}</p>}
         </div>
       </div>
     </header>

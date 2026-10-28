@@ -27,5 +27,6 @@ describe("source chains", () => {
       "Available on Base, Arbitrum and Ethereum.",
     );
     expect(availabilityText([live("base"), chainInfo("polygon")])).toBe("Available on Base. More chains soon.");
+    expect(availabilityText([chainInfo("polygon")])).toBe("More chains soon.");
   });
 });

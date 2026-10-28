@@ -264,14 +264,15 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     opLog: deps.opLog,
 
     async getProtocolStats() {
-      const [v, price, apyPercent] = await Promise.all([
-        deps.readVault(c, d),
-        deps.taoPriceUsd(c),
-        // the yield is a nice-to-have: a failed read hides it rather than the other figures
-        deps.readApyPercent(c, d).catch(() => undefined),
-      ]);
+      const [v, price] = await Promise.all([deps.readVault(c, d), deps.taoPriceUsd(c)]);
       // The number of stakers is hidden: no indexer.
-      return { apyPercent, totalStakedTao: toDisplay(v.totalAssets, 18), taoPriceUsd: price };
+      return { totalStakedTao: toDisplay(v.totalAssets, 18), taoPriceUsd: price };
+    },
+
+    async getApy() {
+      const apy = await deps.readApyPercent(c, d);
+      if (apy === undefined) throw new Error("There is no APY to show yet");
+      return apy;
     },
 
     getPosition,
@@ -400,6 +401,7 @@ export function notConfiguredData(): CascadeData {
       return missing();
     },
     getProtocolStats: fail,
+    getApy: fail,
     getPosition: fail,
     getProof: fail,
     getLimits: fail,

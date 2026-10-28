@@ -52,8 +52,6 @@ export interface StakeProof {
 
 /** Protocol-wide figures. Missing values are hidden. */
 export interface ProtocolStats {
-  /** Depositors' yield in TAO over the last 30 days, after Cascade's cut. */
-  apyPercent?: number;
   totalStakedTao?: number;
   stakers?: number;
   taoPriceUsd?: number;
@@ -137,6 +135,9 @@ export interface CascadeData {
   readonly clients: Clients;
   readonly opLog: OpLog;
   getProtocolStats(): Promise<ProtocolStats>;
+  /** The yield in TAO of root staking with the vault's validator over the last 30 days, after its take
+   * and Cascade's cut, as a percent. Rejects when there is no figure that can be stood behind. */
+  getApy(): Promise<number>;
   getPosition(account: string): Promise<Position>;
   getProof(): Promise<StakeProof>;
   getLimits(): Promise<Limits>;

@@ -13,6 +13,7 @@ const IDLE_MS = 30_000;
 export const cascadeKeys = {
   all: () => ["cascade"] as const,
   stats: () => ["cascade", "stats"] as const,
+  apy: () => ["cascade", "apy"] as const,
   limits: () => ["cascade", "limits"] as const,
   proof: () => ["cascade", "proof"] as const,
   account: (account: string) => ["cascade", account] as const,
@@ -41,6 +42,21 @@ export function useIsV3(): boolean {
 export function useProtocolStats() {
   const data = useCascadeData();
   return useQuery({ queryKey: cascadeKeys.stats(), queryFn: () => data.getProtocolStats(), refetchInterval: IDLE_MS });
+}
+
+/** A 30-day figure moves slowly: read it every half hour, and keep the last good one through a failed read. */
+const APY_MS = 30 * 60_000;
+
+export function useApy() {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.apy(),
+    queryFn: () => data.getApy(),
+    staleTime: APY_MS,
+    refetchInterval: APY_MS,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
 }
 
 export function useLimits() {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
-import { readFrontDoor, readPendingRewards, readRewardCutBps, readVault, readWallet, taoPriceUsd } from "./reads";
+import { basketTwrKey, STORAGE_QUERY } from "./apy";
+import { readApyPercent, readFrontDoor, readPendingRewards, readRewardCutBps, readVault, readWallet, taoPriceUsd } from "./reads";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -145,5 +146,47 @@ describe("readRewardCutBps", () => {
     const bit = fake({});
     expect(await readRewardCutBps({ bittensor: bit.client }, D)).toBe(0);
     expect(bit.asked).toEqual([]);
+  });
+});
+
+describe("readApyPercent", () => {
+  const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+  const HOTKEY = `0x${"56".repeat(32)}` as const;
+  const ONE = 2n ** 64n;
+  const le = (bits: bigint) => `0x${Array.from({ length: 16 }, (_, k) => ((bits >> BigInt(8 * k)) & 0xffn).toString(16).padStart(2, "0")).join("")}`;
+
+  /** An archive node: 12-second blocks, a BasketTwr value per block number. */
+  function archive(twr: Record<string, string>, head = 9_400_000n) {
+    const calls: { to: string; data: string; blockNumber: bigint }[] = [];
+    const client = {
+      async readContract({ functionName }: { functionName: string }) {
+        return functionName === "stakeHotkey" ? HOTKEY : 1000;
+      },
+      async getBlock(args: { blockNumber?: bigint } = {}) {
+        const number = args.blockNumber ?? head;
+        return { number, timestamp: 1_800_000_000n - (head - number) * 12n };
+      },
+      async call(a: { to: string; data: string; blockNumber: bigint }) {
+        calls.push(a);
+        return { data: twr[a.blockNumber.toString()] };
+      },
+    };
+    return { client: client as never, calls };
+  }
+
+  it("reads the vault validator's series now and 216,000 blocks back, timed by the blocks' clocks", async () => {
+    const { client, calls } = archive({ "9400000": le((ONE * 1004n) / 1000n), "9184000": le(ONE) });
+    const apy = await readApyPercent({ bittensorHistory: client }, D3);
+    expect(calls.map((c) => c.blockNumber)).toEqual([9_400_000n, 9_184_000n]);
+    expect(calls.every((c) => c.to === STORAGE_QUERY && c.data === basketTwrKey(HOTKEY))).toBe(true);
+    expect(apy).toBeCloseTo(4.469, 3);
+  });
+
+  it("has nothing to show before there are 30 days of chain, or without a series", async () => {
+    const young = archive({}, 100_000n);
+    expect(await readApyPercent({ bittensorHistory: young.client }, D3)).toBeUndefined();
+    expect(young.calls).toEqual([]);
+    const none = archive({ "9400000": le(ONE) });
+    expect(await readApyPercent({ bittensorHistory: none.client }, D3)).toBeUndefined();
   });
 });

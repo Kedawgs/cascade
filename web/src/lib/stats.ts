@@ -10,16 +10,20 @@ export interface StatRow {
 
 const count = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
+/** What the APY figure is, wherever it's shown. */
+export const APY_FOOTNOTE =
+  "*Yield in TAO from root staking with Cascade's validator over the last 30 days, after the validator's take and Cascade's cut, compounded monthly. Before deposit and withdrawal costs; its dollar value moves with TAO's price. It changes and isn't guaranteed.";
+
 /** 5.3649 -> "5.4%" */
 export function formatApy(apyPercent: number): string {
   return `${apyPercent.toFixed(1)}%`;
 }
 
 /** Rows for the statistics card, in display order. A missing value drops its row. */
-export function statRows(stats: ProtocolStats): StatRow[] {
+export function statRows(stats: ProtocolStats, apyPercent?: number): StatRow[] {
   const rows: StatRow[] = [];
-  if (stats.apyPercent !== undefined) {
-    rows.push({ label: "Annual percentage yield*", value: formatApy(stats.apyPercent), accent: true });
+  if (apyPercent !== undefined) {
+    rows.push({ label: "Annual percentage yield, in TAO*", value: formatApy(apyPercent), accent: true });
   }
   if (stats.totalStakedTao !== undefined) {
     rows.push({ label: "Total staked through Cascade", value: `${formatTao(stats.totalStakedTao, stats.totalStakedTao < 10 ? 4 : 0)} TAO` });

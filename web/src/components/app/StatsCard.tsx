@@ -1,17 +1,15 @@
 "use client";
 
-import { useProof, useProtocolStats } from "@/lib/cascade/hooks";
-import { statRows } from "@/lib/stats";
+import { useApy, useProof, useProtocolStats } from "@/lib/cascade/hooks";
+import { APY_FOOTNOTE, statRows } from "@/lib/stats";
 import { ReceiptLink } from "../ReceiptLink";
 import styles from "./App.module.css";
-
-export const APY_FOOTNOTE =
-  "*Bittensor's staking yield over the last 30 days, in TAO, after Cascade's cut of rewards. It changes and isn't guaranteed.";
 
 /** Protocol-wide figures, read from the chains. Rows with no value are left out. */
 export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
   const stats = useProtocolStats();
-  const rows = stats.data ? statRows(stats.data) : [];
+  const apy = useApy();
+  const rows = stats.data ? statRows(stats.data, apy.data) : [];
   if (stats.data && rows.length === 0) return null;
 
   return (
@@ -46,7 +44,7 @@ export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
           ))
         )}
       </div>
-      {stats.data?.apyPercent !== undefined && <p className={styles.footnote}>{APY_FOOTNOTE}</p>}
+      {stats.data && apy.data !== undefined && <p className={styles.footnote}>{APY_FOOTNOTE}</p>}
     </section>
   );
 }

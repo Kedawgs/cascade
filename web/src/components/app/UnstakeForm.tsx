@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { formatEther } from "viem";
+import { liveChains } from "@/lib/cascade/chains";
 import { useBalances, useIsV3, usePosition, useWithdrawalQuote } from "@/lib/cascade/hooks";
 import type { Position } from "@/lib/cascade/types";
 import { checkUnstake, toDisplay } from "@/lib/cascade/units";
@@ -137,6 +138,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
           setPinned(null);
         }}
         unit={unit}
+        chain={liveChains()[0]}
         decimals={unit === "TAO" ? 6 : 2}
         onMax={account && position ? fillAll : undefined}
         invalid={error !== null}

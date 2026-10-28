@@ -1,10 +1,12 @@
 "use client";
 
+import type { SourceChainInfo } from "@/lib/cascade/chains";
 import { sanitizeAmountInput } from "@/lib/format";
 import styles from "./StakeForm.module.css";
 
 /** Token on the left, the number in the middle, MAX on the right (when there is a max). With
- * `onToggleUnit` the token is a button that switches the unit. */
+ * `onToggleUnit` the token is a button that switches the unit. With `chain`, a USDC amount says which
+ * chain it's on (a badge on the coin and "on Base" under the name). */
 export function AmountField({
   id,
   value,
@@ -17,6 +19,7 @@ export function AmountField({
   describedBy,
   onToggleUnit,
   toggleLabel,
+  chain,
 }: {
   id: string;
   value: string;
@@ -29,13 +32,23 @@ export function AmountField({
   describedBy?: string;
   onToggleUnit?: () => void;
   toggleLabel?: string;
+  chain?: SourceChainInfo;
 }) {
+  const on = unit === "USDC" ? chain : undefined;
   const token = (
     <>
       <span className={`${styles.coin} ${unit === "USDC" ? styles.usdc : styles.tao}`} aria-hidden="true">
         {unit === "USDC" ? "$" : "τ"}
+        {on && <span className={styles.chainBadge} style={{ background: on.color }} />}
       </span>
-      {unit}
+      {on ? (
+        <span className={styles.tokName}>
+          {unit}
+          <small>on {on.label}</small>
+        </span>
+      ) : (
+        unit
+      )}
     </>
   );
   return (

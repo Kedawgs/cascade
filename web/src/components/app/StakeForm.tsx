@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
+import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
 import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
@@ -117,6 +118,7 @@ export function StakeForm({
         value={raw}
         onChange={setRaw}
         unit="USDC"
+        chain={liveChains()[0]}
         decimals={2}
         onMax={account ? () => setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc)) : undefined}
         maxDisabled={maxUsdc === null}

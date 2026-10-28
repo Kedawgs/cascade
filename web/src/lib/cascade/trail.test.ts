@@ -272,6 +272,19 @@ const wbase: WithdrawalFacts = {
   payoutDelay: 3600,
 };
 
+describe("withdrawal trail with a max wait", () => {
+  it("words the close time as an upper bound, with the day when it is not today", () => {
+    const same = withdrawalRecord(wop, { ...wbase, closesBy: true });
+    expect(same.steps[1].detail).toBe("Waits for the batch to close, by about 10:10 AM, then the bridge");
+    const next = withdrawalRecord(wop, { ...wbase, closesBy: true, now: new Date(2026, 9, 25, 10, 5), closesAt: new Date(2026, 9, 26, 14, 5) });
+    expect(next.steps[1].detail).toBe("Waits for the batch to close, by about 2:05 PM tomorrow, then the bridge");
+    // without a max wait: the close time itself, as before
+    expect(withdrawalRecord(wop, wbase).steps[1].detail).toBe("Waits for the batch to close at 10:10 AM, then the bridge");
+    // past the time: it can close now, either way
+    expect(withdrawalRecord(wop, { ...wbase, closesBy: true, now: new Date("2026-10-25T10:20:00Z") }).steps[1].detail).toMatch(/^The batch can close now/);
+  });
+});
+
 describe("withdrawal trail", () => {
   it("goes from requested to unstaked to returning", () => {
     expect(statuses(withdrawalRecord(wop, wbase))).toEqual(["done", "active", "pending", "pending"]);

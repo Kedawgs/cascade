@@ -215,6 +215,17 @@ describe("facts", () => {
     expect(L.facts.closesBy).toBe(true);
   });
 
+  it("an unstake's batch closes the same way: at the interval, or by the max wait (flagged as an upper bound)", async () => {
+    const c = chains({ baseReceipts: { [H(3)]: { status: "success", logs: [] } } });
+    const op: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 1n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, hash: H(3), state: "sent" };
+    const plain = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [] });
+    expect(plain.facts.closesAt.getTime()).toBe((fd.openStart + fd.batchInterval) * 1000);
+    expect(plain.facts.closesBy).toBeUndefined();
+    const L = await withdrawalFacts(c.clients, { ...D, batchMaxWaitS: 86_400 }, op, { fd, vault, scan: newScan(D), claims: [] });
+    expect(L.facts.closesAt.getTime()).toBe((fd.openStart + 86_400) * 1000);
+    expect(L.facts.closesBy).toBe(true);
+  });
+
   it("reads a payout's bridge state from the Base OffRamp, without Base logs", async () => {
     const redeemedLog = log(
       D.vault,

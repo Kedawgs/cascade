@@ -310,6 +310,12 @@ describe("TAO already in the wallet", () => {
     expect(await at(async () => 0)).not.toHaveProperty("priceUsd");
   });
 
+  it("doesn't keep the wallet waiting on a slow price read: past the wait, it goes unpriced", async () => {
+    const op = await walletTaoDepositOp({ id: "w1", account: ME, taoWei: 10n ** 16n, now: 1_000, price: () => new Promise<number>(() => {}), priceWaitMs: 20 });
+    expect(op).not.toHaveProperty("priceUsd");
+    expect(op).toMatchObject({ kind: "deposit", targetTao: 10n ** 16n, state: "running" });
+  });
+
   it("swaps it back to USDC with a minimum", () => {
     const c = sellTaoCalls(10n ** 16n, 2_400_000n, none, ME);
     expect(c.map((x) => x.key)).toEqual(["approveTao", "swap"]);

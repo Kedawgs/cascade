@@ -268,22 +268,33 @@ export function depositTaoCalls(taoWei: bigint, w: Balances, d: Deployment): Flo
   return out;
 }
 
+/** How long a wallet-TAO deposit waits for its price before it goes ahead unpriced (the price only feeds
+ * the Activity line). */
+const PRICE_WAIT_MS = 3_000;
+
 /** A deposit of TAO already in the wallet, as recorded before anything is sent: priced at what selling
- * TAO pays at the click (`price`, read then). A price that can't be read leaves it unpriced; it never
- * holds up the deposit, and never records $0. */
+ * TAO pays at the click (`price`, read then). A price that can't be read, or isn't back within
+ * `priceWaitMs`, leaves it unpriced; it never holds up the deposit for long, and never records $0. */
 export async function walletTaoDepositOp(x: {
   id: string;
   account: Address;
   taoWei: bigint;
   now: number;
   price: () => Promise<number>;
+  priceWaitMs?: number;
 }): Promise<DepositOp> {
-  const priceUsd = await Promise.resolve()
-    .then(x.price)
-    .then(
-      (p) => (p > 0 ? p : undefined),
-      () => undefined,
-    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const priceUsd = await Promise.race([
+    Promise.resolve()
+      .then(x.price)
+      .then(
+        (p) => (p > 0 ? p : undefined),
+        () => undefined,
+      ),
+    new Promise<undefined>((resolve) => {
+      timer = setTimeout(resolve, x.priceWaitMs ?? PRICE_WAIT_MS, undefined);
+    }),
+  ]).finally(() => clearTimeout(timer));
   return {
     id: x.id,
     kind: "deposit",

@@ -116,6 +116,56 @@ html:has(.navBar) {
   padding: 48px 56px 48px 0;
 }
 
+/* Narrow screens' stand-in for the animation (shown below 1000px): the mark's three steps, in its
+   colours and with its sheen, sliding in once and running off the right edge. */
+.heroSteps {
+  display: none;
+  position: relative;
+  height: 76px;
+}
+
+.heroSteps span {
+  position: absolute;
+  right: -24px;
+  height: 20px;
+  border-radius: var(--r-pill);
+  box-shadow: 0 12px 20px -10px rgba(32, 111, 128, 0.45);
+  animation: stepIn 0.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.heroSteps span:nth-child(1) {
+  top: 0;
+  left: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 55%), linear-gradient(135deg, #3b5869, #10212b);
+}
+
+.heroSteps span:nth-child(2) {
+  top: 28px;
+  left: 63%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 55%), linear-gradient(135deg, #79cad8, #206f80);
+  animation-delay: 0.1s;
+}
+
+.heroSteps span:nth-child(3) {
+  top: 56px;
+  left: 76%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 55%), linear-gradient(135deg, #7dd9a9, #1e8a5a);
+  animation-delay: 0.2s;
+}
+
+@keyframes stepIn {
+  from {
+    opacity: 0;
+    transform: translateX(48px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .heroSteps span {
+    animation: none;
+  }
+}
+
 .copy {
   display: flex;
   flex-direction: column;
@@ -556,6 +606,16 @@ html:has(.navBar) {
     grid-template-columns: 1fr;
     gap: 24px;
     min-height: 0;
+    padding-bottom: 20px;
+  }
+
+  .heroSteps {
+    display: block;
+  }
+
+  /* the steps already part the hero from what follows */
+  .hero + .section {
+    padding-top: 48px;
   }
 
   .copy {

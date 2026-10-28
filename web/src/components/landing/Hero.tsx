@@ -74,6 +74,12 @@ export function Hero() {
           </p>
         </div>
       </div>
+      {/* narrow screens only, where the animation is hidden: the mark's three steps running off the edge */}
+      <div className={styles.heroSteps} aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
     </header>
   );
 }

@@ -52,6 +52,16 @@ describe("readDeployment", () => {
     }
   });
 
+  it("reads the vault's payout delay when it is a whole number of seconds (0 included), else leaves it out", () => {
+    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "86400" })?.payoutDelayS).toBe(86_400);
+    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "3600" })?.payoutDelayS).toBe(3_600);
+    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "0" })?.payoutDelayS).toBe(0);
+    expect(readDeployment(ENV)).not.toHaveProperty("payoutDelayS");
+    for (const bad of ["", "-5", "1.5", "abc", "0x10", "007", " 3600", "1e5"]) {
+      expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: bad }), bad).not.toHaveProperty("payoutDelayS");
+    }
+  });
+
   it("routes swaps USDC → WETH (0.05%) → TAO (0.3%) and back", () => {
     expect(PATH_USDC_TO_TAO).toBe(
       "0x833589fcd6edb6e08f4c7c32d4f71b54bda029130001f44200000000000000000000000000000000000006000bb8f3081494b87e8d5fb7960f066e931d1d0e6e3d67",

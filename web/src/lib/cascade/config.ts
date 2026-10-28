@@ -15,6 +15,8 @@ export interface Deployment {
   oracle?: Address;
   /** Launch cadence only: the longest a batch waits before it can close, in seconds. Absent = batchInterval alone. */
   batchMaxWaitS?: number;
+  /** v3: the vault's payout delay, in seconds (written by `pnpm ops web-config`). Absent = not known here. */
+  payoutDelayS?: number;
 }
 
 /** When the open batch can be expected to close, by the latest: its interval, or the deployment's max wait if longer. */
@@ -43,6 +45,9 @@ export function readDeployment(env: Env): Deployment | null {
   const oracle = address(env.NEXT_PUBLIC_CASCADE_ORACLE);
   const maxWait = env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S;
   const batchMaxWaitS = maxWait && /^[1-9]\d*$/.test(maxWait) ? Number(maxWait) : undefined;
+  // 0 is a real setting (no delay), so it is kept; anything but plain digits is left out
+  const delay = env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S;
+  const payoutDelayS = delay && /^(0|[1-9]\d*)$/.test(delay) ? Number(delay) : undefined;
   return {
     frontDoor,
     baseAdapter,
@@ -54,6 +59,7 @@ export function readDeployment(env: Env): Deployment | null {
     ...(staker ? { staker } : {}),
     ...(oracle ? { oracle } : {}),
     ...(batchMaxWaitS ? { batchMaxWaitS } : {}),
+    ...(payoutDelayS !== undefined ? { payoutDelayS } : {}),
   };
 }
 
@@ -69,6 +75,7 @@ export const DEPLOYMENT = readDeployment({
   NEXT_PUBLIC_CASCADE_STAKER: process.env.NEXT_PUBLIC_CASCADE_STAKER,
   NEXT_PUBLIC_CASCADE_ORACLE: process.env.NEXT_PUBLIC_CASCADE_ORACLE,
   NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: process.env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S,
+  NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: process.env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S,
 });
 
 export const TOKENS = {

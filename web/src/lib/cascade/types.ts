@@ -52,7 +52,8 @@ export interface StakeProof {
 
 /** Protocol-wide figures. Missing values are hidden. */
 export interface ProtocolStats {
-  aprPercent?: number;
+  /** Depositors' yield in TAO over the last 30 days, after Cascade's cut. */
+  apyPercent?: number;
   totalStakedTao?: number;
   stakers?: number;
   taoPriceUsd?: number;

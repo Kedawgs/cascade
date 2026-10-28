@@ -6,7 +6,7 @@ import { Loading } from "../Loading";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import { RewardsCard } from "./RewardsCard";
-import { APR_FOOTNOTE } from "./StatsCard";
+import { APY_FOOTNOTE } from "./StatsCard";
 
 /** `/rewards`: what the staked TAO has earned. */
 export function RewardsScreen() {
@@ -24,7 +24,7 @@ export function RewardsScreen() {
       ) : (
         <>
           <RewardsCard account={account} />
-          {stats.data?.aprPercent !== undefined && <p className={app.footnote}>{APR_FOOTNOTE}</p>}
+          {stats.data?.apyPercent !== undefined && <p className={app.footnote}>{APY_FOOTNOTE}</p>}
         </>
       )}
     </AppShell>

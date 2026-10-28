@@ -1,6 +1,7 @@
 import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters } from "viem";
 import { freshTip } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
+import { APY_WINDOW_BLOCKS, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
 import type { Clients } from "./chain";
 import { type Deployment, isV3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import { RAO, toDisplay } from "./units";
@@ -241,6 +242,33 @@ export async function quotePayoutFee(c: Pick<Clients, "bittensor">, d: Deploymen
 export async function readRewardCutBps(c: Pick<Clients, "bittensor">, d: Deployment): Promise<number> {
   if (!isV3(d)) return 0;
   return Number(await c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "rewardCutBps" }));
+}
+
+/**
+ * Depositors' APY over the last 30 days, from the validator's on-chain return series (BasketTwr)
+ * read through the storage-query precompile now and 30 days back, less Cascade's cut.
+ * Needs an archive node (the site's Bittensor RPC is one). Undefined when there's no figure to show.
+ */
+export async function readApyPercent(c: Pick<Clients, "bittensor">, d: Deployment): Promise<number | undefined> {
+  const [hotkey, rewardCutBps, head] = await Promise.all([
+    c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "stakeHotkey" }),
+    readRewardCutBps(c, d),
+    c.bittensor.getBlock(),
+  ]);
+  if (head.number <= APY_WINDOW_BLOCKS) return undefined;
+  const key = basketTwrKey(hotkey);
+  const thenNumber = head.number - APY_WINDOW_BLOCKS;
+  const [now, then, thenBlock] = await Promise.all([
+    c.bittensor.call({ to: STORAGE_QUERY, data: key, blockNumber: head.number }),
+    c.bittensor.call({ to: STORAGE_QUERY, data: key, blockNumber: thenNumber }),
+    c.bittensor.getBlock({ blockNumber: thenNumber }),
+  ]);
+  return netApyPercent({
+    twrNow: decodeTwr(now.data),
+    twrThen: decodeTwr(then.data),
+    seconds: Number(head.timestamp - thenBlock.timestamp),
+    rewardCutBps,
+  });
 }
 
 export interface StakerFees {

@@ -29,6 +29,7 @@ export interface LiveDeps {
   quoteSell: typeof reads.quoteSell;
   quotePayoutFee: typeof reads.quotePayoutFee;
   readRewardCutBps: typeof reads.readRewardCutBps;
+  readApyPercent: typeof reads.readApyPercent;
   scan(c: Clients, d: Deployment, scan: VaultScan, account?: Address): Promise<void>;
   now(): number;
 }
@@ -79,6 +80,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     quoteSell: reads.quoteSell,
     quotePayoutFee: reads.quotePayoutFee,
     readRewardCutBps: reads.readRewardCutBps,
+    readApyPercent: reads.readApyPercent,
     scan: scanVault,
     now: Date.now,
     ...given,
@@ -262,9 +264,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     opLog: deps.opLog,
 
     async getProtocolStats() {
-      const [v, price] = await Promise.all([deps.readVault(c, d), deps.taoPriceUsd(c)]);
-      // APR and the number of stakers are hidden: no reward claims yet, no indexer.
-      return { totalStakedTao: toDisplay(v.totalAssets, 18), taoPriceUsd: price };
+      const [v, price, apyPercent] = await Promise.all([
+        deps.readVault(c, d),
+        deps.taoPriceUsd(c),
+        // the yield is a nice-to-have: a failed read hides it rather than the other figures
+        deps.readApyPercent(c, d).catch(() => undefined),
+      ]);
+      // The number of stakers is hidden: no indexer.
+      return { apyPercent, totalStakedTao: toDisplay(v.totalAssets, 18), taoPriceUsd: price };
     },
 
     getPosition,

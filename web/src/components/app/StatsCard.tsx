@@ -5,8 +5,8 @@ import { statRows } from "@/lib/stats";
 import { ReceiptLink } from "../ReceiptLink";
 import styles from "./App.module.css";
 
-export const APR_FOOTNOTE =
-  "*APR is an estimate based on recent rewards. It is not guaranteed and changes with network conditions.";
+export const APY_FOOTNOTE =
+  "*Bittensor's staking yield over the last 30 days, in TAO, after Cascade's cut of rewards. It changes and isn't guaranteed.";
 
 /** Protocol-wide figures, read from the chains. Rows with no value are left out. */
 export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
@@ -46,7 +46,7 @@ export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
           ))
         )}
       </div>
-      {stats.data?.aprPercent !== undefined && <p className={styles.footnote}>{APR_FOOTNOTE}</p>}
+      {stats.data?.apyPercent !== undefined && <p className={styles.footnote}>{APY_FOOTNOTE}</p>}
     </section>
   );
 }

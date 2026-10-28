@@ -4,7 +4,8 @@ import Link from "next/link";
 import { SOURCE_CHAINS, availabilityText } from "@/lib/cascade/chains";
 import { useProtocolStats } from "@/lib/cascade/hooks";
 import { formatUsdShort } from "@/lib/format";
-import { formatApr } from "@/lib/stats";
+import { formatApy } from "@/lib/stats";
+import { APY_FOOTNOTE } from "../app/StatsCard";
 import { Mark } from "../Logo";
 import { HeroMark } from "./HeroMark";
 import styles from "./Landing.module.css";
@@ -30,11 +31,11 @@ export function Hero() {
           </h1>
           <p className={styles.lead}>Deposit USDC from the wallet you already have.</p>
           <div className={styles.stats}>
-            {s?.aprPercent !== undefined && (
+            {s?.apyPercent !== undefined && (
               <>
                 <div>
-                  <p className={`${styles.statV} ${styles.statAccent}`}>{formatApr(s.aprPercent)}</p>
-                  <p className={styles.statK}>APR*</p>
+                  <p className={`${styles.statV} ${styles.statAccent}`}>{formatApy(s.apyPercent)}</p>
+                  <p className={styles.statK}>APY*</p>
                 </div>
                 <span className={styles.vr} aria-hidden="true" />
               </>
@@ -67,9 +68,7 @@ export function Hero() {
             </span>
             {availabilityText()}
           </p>
-          {s?.aprPercent !== undefined && (
-            <p className={styles.fine}>*Average over the last 7 days. Changes with the network and is not guaranteed.</p>
-          )}
+          {s?.apyPercent !== undefined && <p className={styles.fine}>{APY_FOOTNOTE}</p>}
         </div>
       </div>
     </header>

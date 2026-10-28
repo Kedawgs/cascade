@@ -10,16 +10,16 @@ export interface StatRow {
 
 const count = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
-/** 11.4 -> "11.4%" */
-export function formatApr(aprPercent: number): string {
-  return `${aprPercent.toFixed(1)}%`;
+/** 5.3649 -> "5.4%" */
+export function formatApy(apyPercent: number): string {
+  return `${apyPercent.toFixed(1)}%`;
 }
 
 /** Rows for the statistics card, in display order. A missing value drops its row. */
 export function statRows(stats: ProtocolStats): StatRow[] {
   const rows: StatRow[] = [];
-  if (stats.aprPercent !== undefined) {
-    rows.push({ label: "Annual percentage rate*", value: formatApr(stats.aprPercent), accent: true });
+  if (stats.apyPercent !== undefined) {
+    rows.push({ label: "Annual percentage yield*", value: formatApy(stats.apyPercent), accent: true });
   }
   if (stats.totalStakedTao !== undefined) {
     rows.push({ label: "Total staked through Cascade", value: `${formatTao(stats.totalStakedTao, stats.totalStakedTao < 10 ? 4 : 0)} TAO` });

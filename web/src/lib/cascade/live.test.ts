@@ -64,6 +64,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     quoteSell: async (_c, tao) => (tao * 250n) / 10n ** 12n,
     quotePayoutFee: async () => 105n * 10n ** 13n,
     readRewardCutBps: async () => 1000,
+    readApyPercent: async () => 5.36,
     scan: async () => undefined,
     now: () => 1_800_000_100_000,
     ...over,
@@ -188,9 +189,18 @@ describe("live data", () => {
     expect(l.minUsd - free.minUsd).toBeGreaterThanOrEqual(0.05 - 1e-9);
   });
 
-  it("shows total staked and the price, and hides APR and stakers", async () => {
+  it("shows the APY, total staked and the price, and hides stakers", async () => {
     const s = await createLiveCascadeData(D, deps()).getProtocolStats();
+    expect(s).toEqual({ apyPercent: 5.36, totalStakedTao: 0.08, taoPriceUsd: 250 });
+  });
+
+  it("still shows total staked and the price when the APY can't be read", async () => {
+    const readApyPercent = async () => {
+      throw new Error("archive node unreachable");
+    };
+    const s = await createLiveCascadeData(D, deps({ readApyPercent })).getProtocolStats();
     expect(s).toEqual({ totalStakedTao: 0.08, taoPriceUsd: 250 });
+    expect("apyPercent" in s && s.apyPercent !== undefined).toBe(false);
   });
 
   it("calls the vault fully staked when what is idle is too small to stake", async () => {

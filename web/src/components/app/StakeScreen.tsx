@@ -16,8 +16,8 @@ export function StakeScreen() {
 
   return (
     <AppShell active="stake">
-      <h1 className={app.title}>Stake TAO</h1>
-      <p className={app.sub}>Deposit USDC and earn TAO staking rewards</p>
+      <h1 className={app.title}>Stake with USDC</h1>
+      <p className={app.sub}>We swap your USDC to TAO and stake it for you. Rewards are paid in TAO.</p>
       {state.status === "loading" ? (
         <Loading />
       ) : (

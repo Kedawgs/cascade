@@ -42,8 +42,8 @@ export function UnstakeScreen() {
 
   return (
     <AppShell active="unstake">
-      <h1 className={app.title}>Unstake TAO</h1>
-      <p className={app.sub}>Get USDC back in the same wallet on Base</p>
+      <h1 className={app.title}>Unstake to USDC</h1>
+      <p className={app.sub}>We sell your staked TAO and send the USDC back to the same wallet.</p>
       {state.status === "loading" ? (
         <Loading />
       ) : (

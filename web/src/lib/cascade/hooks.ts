@@ -1,8 +1,9 @@
 "use client";
 
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, type QueryClient, useQuery } from "@tanstack/react-query";
 import { isV3 } from "./config";
 import { useCascadeData } from "./context";
+import type { Snapshot } from "./snapshot";
 
 /** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
  * public nodes rate-limit), every 30 s otherwise. */
@@ -28,6 +29,14 @@ export const cascadeKeys = {
   withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
   roundTrip: (taoWei: bigint) => ["quote", "round-trip", taoWei.toString()] as const,
 };
+
+/** Puts the server's snapshot into a new cache, dated when it was read, so the first render (on the
+ * server, and in the browser while it hydrates) shows the same figures. The live reads refresh them in
+ * place as they come due. */
+export function seedSnapshot(client: QueryClient, s: Snapshot): void {
+  if (s.apyPercent !== undefined) client.setQueryData(cascadeKeys.apy(), s.apyPercent, { updatedAt: s.at });
+  if (s.stats !== undefined) client.setQueryData(cascadeKeys.stats(), s.stats, { updatedAt: s.at });
+}
 
 /** Whether the site talks to a v3 deployment; false when none is configured (its reads all fail). */
 export function useIsV3(): boolean {

@@ -527,8 +527,9 @@
     border-left: 0;
   }
 
+  /* stacked under the copy, the animation is only more to scroll past (and it pauses while hidden) */
   .art {
-    padding: 8px 0 0;
+    display: none;
   }
 
   .statV {

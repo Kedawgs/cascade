@@ -98,18 +98,31 @@ describe("loadSnapshot", () => {
     }
   });
 
-  it("reads once per process, then again once the snapshot is ten minutes old", async () => {
+  it("reads once per process: callers share the first read, and wait for it", async () => {
     const l = loader();
     const first = l.load();
     expect(l.load()).toBe(first);
-    await first;
+    expect(await first).toEqual({ at: 1_000, apyPercent: 5.4, stats: STATS });
     l.tick(9 * 60_000);
     expect(l.load()).toBe(first);
     expect(l.made()).toBe(1);
-    l.tick(60_000);
+  });
+
+  it("once the snapshot is ten minutes old, reads again but serves the last one until the new one is in", async () => {
+    let apy = 5.4;
+    let reads = 0;
+    const l = loader({ createData: () => (reads++, source(async () => apy, async () => STATS)) });
+    const first = l.load();
+    await first;
+    apy = 6.1;
+    l.tick(10 * 60_000);
+    // no request waits on the chain: this one gets the last snapshot while the next is read
+    expect(l.load()).toBe(first);
+    expect(reads).toBe(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const second = l.load();
     expect(second).not.toBe(first);
-    expect((await second).at).toBe(1_000 + 10 * 60_000);
-    expect(l.made()).toBe(2);
+    expect(await second).toEqual({ at: 1_000 + 10 * 60_000, apyPercent: 6.1, stats: STATS });
+    expect(reads).toBe(2);
   });
 });

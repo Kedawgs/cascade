@@ -48,7 +48,8 @@ for display only (`units.ts`).
 - **First paint:** the APY and the protocol figures are also read once on the server (`snapshot.ts`,
   at `pnpm build`; under `pnpm dev` at most every ten minutes) and seeded into react-query, so the
   first HTML has them and nothing moves when the browser's own reads replace them. A figure the build
-  couldn't read is left to the browser.
+  couldn't read is left to the browser. The TAO price is the exception: it is shown only from the
+  browser's own read (`useTaoPrice`), never the build's, so its place shows "–" until then.
 - **Base logs** come from a separate public RPC, `https://base-rpc.publicnode.com` (`baseLogs` in
   `config.ts`), because `https://mainnet.base.org` refuses `eth_getLogs`. Everything else on Base is
   read by `eth_call` and by transaction hash.

@@ -1,0 +1,30 @@
+.mark {
+  display: block;
+  width: min(100%, 420px);
+  height: auto;
+  overflow: visible;
+  filter: drop-shadow(0 28px 36px rgba(32, 111, 128, 0.2));
+}
+
+/* Light runs across each step in turn, top to bottom, then rests. */
+.shine {
+  animation: shine 7s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+
+@keyframes shine {
+  0% {
+    transform: translateX(0);
+  }
+
+  24%,
+  100% {
+    transform: translateX(340px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shine {
+    animation: none;
+    opacity: 0;
+  }
+}

@@ -26,7 +26,7 @@ export function SiteNav() {
         </div>
         <div className={styles.navRight}>
           <Link href="/stake" className={`pill ${styles.navCta}`}>
-            Stake TAO
+            Stake &amp; Earn
           </Link>
           <button
             type="button"

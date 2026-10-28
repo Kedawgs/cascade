@@ -24,6 +24,14 @@ export function liveChains(): SourceChainInfo[] {
   return SOURCE_CHAINS.filter((c) => c.status === "live");
 }
 
+/** "Available on Base. More chains soon.": where you can deposit today, for the landing page. */
+export function availabilityText(chains: readonly SourceChainInfo[] = SOURCE_CHAINS): string {
+  const live = chains.filter((c) => c.status === "live").map((c) => c.label);
+  const names = live.length > 1 ? `${live.slice(0, -1).join(", ")} and ${live[live.length - 1]}` : live[0];
+  const soon = chains.some((c) => c.status === "soon");
+  return `Available on ${names}.${soon ? " More chains soon." : ""}`;
+}
+
 export function chainInfo(id: SourceChain): SourceChainInfo {
   const info = SOURCE_CHAINS.find((c) => c.id === id);
   if (!info) throw new Error(`Unknown chain: ${id}`);

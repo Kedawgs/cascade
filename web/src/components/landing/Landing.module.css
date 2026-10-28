@@ -20,9 +20,9 @@
 .links {
   display: flex;
   gap: 40px;
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 500;
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 .links a {
@@ -30,7 +30,7 @@
 }
 
 .links a:hover {
-  color: var(--ink);
+  color: var(--water-deep);
 }
 
 .navRight {
@@ -40,9 +40,9 @@
 }
 
 .navCta {
-  min-height: 50px;
-  padding: 0 26px;
-  font-size: 16px;
+  min-height: 52px;
+  padding: 0 28px;
+  font-size: 17px;
 }
 
 .menuBtn {
@@ -80,16 +80,25 @@
 .heroGrid {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
-  gap: 40px;
-  align-items: center;
-  min-height: 640px;
-  padding-top: 24px;
-  padding-bottom: 48px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  min-height: 680px;
+  padding-top: 8px;
+  padding-bottom: 56px;
+}
+
+.art {
+  display: grid;
+  place-items: center;
+  padding: 48px 56px 48px 0;
 }
 
 .copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   min-width: 0;
+  padding: 48px 0 48px clamp(40px, 6vw, 104px);
+  border-left: 1px solid var(--line);
 }
 
 .h1 {
@@ -112,7 +121,8 @@
 
 .lead {
   max-width: 40ch;
-  margin: 0 0 30px;
+  margin: 0 0 36px;
+  text-wrap: pretty;
   font-size: 20px;
   color: var(--ink-2);
 }
@@ -120,14 +130,14 @@
 .stats {
   display: flex;
   align-items: center;
-  gap: 28px;
-  margin-bottom: 22px;
+  gap: 32px;
+  margin-bottom: 28px;
 }
 
 .statV {
   margin: 0;
-  font-size: 36px;
-  font-weight: 600;
+  font-size: 40px;
+  font-weight: 500;
   letter-spacing: -0.03em;
   line-height: 1;
 }
@@ -137,8 +147,8 @@
 }
 
 .statK {
-  margin: 6px 0 0;
-  font-size: 13.5px;
+  margin: 8px 0 0;
+  font-size: 15px;
   color: var(--ink-3);
 }
 
@@ -149,23 +159,54 @@
 }
 
 .heroCta {
-  min-height: 52px;
-  margin-left: 6px;
-  padding: 0 26px;
-  font-size: 16px;
+  gap: 12px;
+  min-height: 58px;
+  padding: 0 30px 0 8px;
+  font-size: 18px;
+}
+
+.ctaIcon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: #fff;
 }
 
 .chainsRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  margin: 0;
+  font-size: 16px;
+  color: var(--ink-2);
 }
 
-.chainsLabel {
-  margin-right: 2px;
-  font-size: 14px;
-  color: var(--ink-2);
+.chainStack {
+  display: inline-flex;
+}
+
+.chainDot {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-left: -6px;
+  border: 2px solid var(--paper);
+  border-radius: 50%;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chainDot:first-child {
+  margin-left: 0;
+}
+
+.chainSoon {
+  opacity: 0.55;
 }
 
 .fine {
@@ -478,12 +519,26 @@
 
   .heroGrid {
     grid-template-columns: 1fr;
-    gap: 36px;
+    gap: 24px;
     min-height: 0;
   }
 
   .copy {
     order: -1;
+    padding: 24px 0 0;
+    border-left: 0;
+  }
+
+  .art {
+    padding: 8px 0 0;
+  }
+
+  .art svg {
+    width: min(70%, 280px);
+  }
+
+  .statV {
+    font-size: 34px;
   }
 
   .h1 {

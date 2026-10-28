@@ -21,6 +21,12 @@ export function Hero() {
 
   return (
     <header className={styles.hero}>
+      {/* narrow screens only, where the animation is hidden: the mark's three steps behind the copy */}
+      <div className={styles.heroSteps} aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
       <div className={`wrap ${styles.heroGrid}`}>
         <div className={styles.art}>
           <HeroMark />
@@ -73,12 +79,6 @@ export function Hero() {
             {APY_NOTE_SHORT} <Link href="/faq/#apy">How it&apos;s worked out</Link>
           </p>
         </div>
-      </div>
-      {/* narrow screens only, where the animation is hidden: the mark's three steps running off the edge */}
-      <div className={styles.heroSteps} aria-hidden="true">
-        <span />
-        <span />
-        <span />
       </div>
     </header>
   );

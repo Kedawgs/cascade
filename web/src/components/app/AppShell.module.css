@@ -4,6 +4,12 @@
   padding: 0 20px 64px;
 }
 
+/* the scrollbar's room kept beside a page shorter than the window (globals.css) shows the page's
+   background, not a white strip */
+html:has(.app) {
+  background: var(--mist);
+}
+
 /* The home navbar's sizes (SiteNav's .nav): as tall, with its content edges on the same lines as the
    home page's .wrap (at most 1280px with 40px sides; the app's own 20px sides count towards them). */
 .bar {

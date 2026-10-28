@@ -11,6 +11,15 @@ function Inline({ text }: { text: string }) {
   return parseInlineLinks(text).map((p, i) => {
     if (!p.href) return p.text;
     if (p.href.startsWith("/")) {
+      // A link to a question (/faq/#who-controls) stays a plain link: the router changes the hash
+      // without a hashchange event, so on the FAQ page itself the answer wouldn't open.
+      if (p.href.includes("#")) {
+        return (
+          <a key={i} href={p.href}>
+            {p.text}
+          </a>
+        );
+      }
       return (
         <Link key={i} href={p.href}>
           {p.text}

@@ -12,7 +12,7 @@ const count = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
 /** What the APY figure is, wherever it's shown. */
 export const APY_FOOTNOTE =
-  "*Yield in TAO from root staking with Cascade's validator over the last 30 days, after the validator's take and Cascade's cut, compounded monthly. Before deposit and withdrawal costs; its dollar value moves with TAO's price. It changes and isn't guaranteed.";
+  "*Yield in TAO from root staking with Cascade's validator over the last 30 days, after the validator's take and Cascade's cut, assuming rewards are collected and restaked monthly (they may be collected less often). Before deposit and withdrawal costs; its dollar value moves with TAO's price, and it isn't guaranteed.";
 
 /** 5.3649 -> "5.4%" */
 export function formatApy(apyPercent: number): string {

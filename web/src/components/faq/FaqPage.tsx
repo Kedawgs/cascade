@@ -14,8 +14,8 @@ export function FaqPage() {
         <header className={styles.head}>
           <h1 className={styles.h1}>Questions and answers</h1>
           <p className={styles.lede}>
-            How TAO staking works, what Cascade charges, and when rewards are collected. When something
-            changes, this page changes with it.
+            How TAO staking works, what Cascade charges, and when rewards are collected. We update this
+            page when something changes.
           </p>
           <ul className={styles.jump} aria-label="Topics">
             {FAQ_SECTIONS.map((s) => (

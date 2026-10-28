@@ -73,9 +73,12 @@ function swapFeeRate(q: Pick<DepositQuote, "usdcIn" | "depositFeeUsdc" | "swapFe
   return base > 0n ? toDisplay(q.swapFeeUsdc, 6) / toDisplay(base, 6) : 0;
 }
 
-/** The pools' fees on the way in (and out): USDC –0.05%→ WETH –0.3%→ TAO. */
-export const POOL_FEES_TEXT = "about 0.35%";
-const EXIT_POOL_FEE = 0.0035;
+/** The pools' fees on the way in (and out), in percent: USDC –0.05%→ WETH –0.3%→ TAO keeps
+ * 0.9995 × 0.997, so about 0.35% goes to the pools. The stake form, the break-even line and the FAQ
+ * all read it from here. */
+export const POOL_FEE_PCT = 0.35;
+export const POOL_FEES_TEXT = `about ${POOL_FEE_PCT}%`;
+const EXIT_POOL_FEE = POOL_FEE_PCT / 100;
 
 /** v3: about how many days of yield pay for a round trip: this stake's Cascade and pool fees, plus an
  * estimated way out (Cascade's percentage fee and the pools' again on what was staked, the unstake

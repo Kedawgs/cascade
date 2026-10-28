@@ -111,7 +111,11 @@ html:has(.app) {
   border-color: var(--ink-3);
 }
 
+/* room for "9,999.99 USDC" (every digit is one width, by body's tabular-nums), so the balance arriving
+   in place of "–" doesn't push the Base chip; a bigger balance may still grow the pill */
 .walletBalance {
+  min-width: 7.5em;
+  text-align: right;
   white-space: nowrap;
 }
 

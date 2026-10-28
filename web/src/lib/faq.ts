@@ -9,8 +9,6 @@ export interface FaqItem {
   id: string;
   q: string;
   a: readonly string[];
-  /** Also shown on the landing page. */
-  featured?: boolean;
   /** Also shown under the Stake and Unstake forms. */
   inApp?: boolean;
 }
@@ -158,7 +156,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "what-is-cascade",
           q: "What does Cascade do?",
-          featured: true,
           inApp: true,
           a: [
             `Cascade gets you TAO staking from the wallet you already use. You deposit USDC${onLive}; Cascade swaps it to TAO, carries it to Bittensor over [Chainlink CCIP](${DOCS.ccip}) and stakes it for you. Unstaking does the reverse and sends USDC back to your wallet.`,
@@ -175,7 +172,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "tao-or-dollars",
           q: "Is my balance in TAO or dollars?",
-          featured: true,
           a: [
             "TAO. Your USDC becomes TAO, so your balance grows with staking rewards and its dollar value rises and falls with TAO's price. If TAO falls, you can get back less USDC than you put in.",
           ],
@@ -212,7 +208,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "apy",
           q: "Where does the APY come from?",
-          featured: true,
           a: [
             `It's what root staking with ${validatorName} earned over the last 30 days, read straight from the validator's on-chain record on Bittensor, after its own fee and Cascade's ${F.rewardCutPct}% cut, assuming rewards are collected and restaked monthly (they may be collected less often).`,
             "It's a yield in TAO, before deposit and withdrawal costs, and it changes with the network. Past yield isn't a promise.",
@@ -251,7 +246,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "cascade-fees",
           q: "What does Cascade charge?",
-          featured: true,
           inApp: true,
           a: [
             `$${F.depositFeeUsd.toFixed(2)} plus ${F.swapFeePct}% when you stake, ${F.swapFeePct}% when your TAO is sold back to USDC, and ${F.rewardCutPct}% of staking rewards when they're collected. To unstake there's also a ${F.requestFeeEth} ETH request fee, which goes toward the bridge fee.`,
@@ -283,7 +277,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "how-long-to-stake",
           q: "How long until my deposit is staked?",
-          featured: true,
           inApp: true,
           a: [
             launch
@@ -338,7 +331,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "audited",
           q: "Has Cascade been audited?",
-          featured: true,
           a:
             audit === "done"
               ? [`Yes, by an independent firm. Our [security policy](${SITE_LINKS.security}) has the details.`]
@@ -369,7 +361,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
         {
           id: "risks",
           q: "What are the risks?",
-          featured: true,
           a: [
             "TAO's price: your balance is TAO, so its dollar value can fall.",
             "Smart contracts: a bug could lose funds, and the contracts aren't independently audited yet.",
@@ -433,11 +424,6 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
 }
 
 export const FAQ_SECTIONS: readonly FaqSection[] = faqSections();
-
-/** The landing page's short list, in page order. */
-export function featuredFaq(sections: readonly FaqSection[] = FAQ_SECTIONS): FaqItem[] {
-  return sections.flatMap((s) => s.items.filter((i) => i.featured));
-}
 
 /** The short list under the Stake and Unstake forms, in page order. */
 export function appFaq(sections: readonly FaqSection[] = FAQ_SECTIONS): FaqItem[] {

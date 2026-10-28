@@ -3,7 +3,7 @@ import { formatUnits } from "viem";
 import { describe, expect, it } from "vitest";
 import type { SourceChainInfo } from "./cascade/chains";
 import { type Deployment, MIN_UNSTAKE_WEI, PATH_USDC_TO_TAO, readDeployment } from "./cascade/config";
-import { appFaq, FAQ_FACTS, type FaqOptions, faqSections, featuredFaq, VALIDATORS } from "./faq";
+import { appFaq, FAQ_FACTS, type FaqOptions, faqSections, VALIDATORS } from "./faq";
 import { parseInlineLinks } from "./inline-links";
 import { POOL_FEE_PCT, POOL_FEES_TEXT } from "./stake-form";
 import { APY_FOOTNOTE } from "./stats";
@@ -65,9 +65,7 @@ describe("the FAQ", () => {
     }
   });
 
-  it("shows a short list on the landing page and in the app", () => {
-    expect(featuredFaq(faqSections(TEST)).length).toBeGreaterThanOrEqual(4);
-    expect(featuredFaq(faqSections(TEST)).length).toBeLessThanOrEqual(7);
+  it("shows a short list in the app", () => {
     expect(appFaq(faqSections(TEST)).length).toBeGreaterThanOrEqual(4);
     expect(appFaq(faqSections(TEST)).length).toBeLessThanOrEqual(7);
   });

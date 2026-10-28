@@ -1,6 +1,5 @@
 "use client";
 
-import { FaqSection } from "./FaqSection";
 import { Hero } from "./Hero";
 import { HowItWorks } from "./HowItWorks";
 import { SecureByDesign } from "./SecureByDesign";
@@ -18,7 +17,6 @@ export function LandingPage() {
       <HowItWorks />
       <StakeSection />
       <SecureByDesign />
-      <FaqSection />
       <SiteFooter />
     </div>
   );

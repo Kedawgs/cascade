@@ -3,6 +3,38 @@
 }
 
 /* ---------- nav ---------- */
+/* The bar stays on screen while the page scrolls (SiteNav). A hairline under it fades in once the page
+   has moved, where the browser can tie an animation to scrolling. */
+.navBar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--paper);
+}
+
+@supports (animation-timeline: scroll()) {
+  .navBar {
+    animation: navEdge linear both;
+    animation-timeline: scroll();
+    animation-range: 0 64px;
+  }
+}
+
+@keyframes navEdge {
+  from {
+    box-shadow: 0 1px 0 transparent;
+  }
+
+  to {
+    box-shadow: 0 1px 0 var(--line);
+  }
+}
+
+/* a link to a place on the page lands below the bar, not under it */
+html:has(.navBar) {
+  scroll-padding-top: 100px;
+}
+
 .nav {
   display: flex;
   align-items: center;
@@ -31,6 +63,11 @@
 
 .links a:hover {
   color: var(--water-deep);
+}
+
+/* the links row under the bar, for narrow screens */
+.rowLinks {
+  display: none;
 }
 
 .navRight {
@@ -469,11 +506,6 @@
   color: var(--ink);
 }
 
-/* ---------- questions ---------- */
-.faqMore {
-  margin: 32px 0 0;
-}
-
 /* ---------- wide and narrow ---------- */
 @media (min-width: 1800px) {
   .heroGrid {
@@ -494,23 +526,24 @@
 }
 
 @media (max-width: 999px) {
+  /* only the logo and Stake & Earn stay on screen; the links take their own row underneath */
   .nav {
-    flex-wrap: wrap;
-    row-gap: 14px;
-    min-height: 0;
-    padding: 20px 0 6px;
+    min-height: 76px;
   }
 
-  /* the links take the second row; the Stake & Earn button stands in for "Stake" */
-  .links {
-    order: 3;
-    width: 100%;
-    gap: 32px;
-    font-size: 16px;
+  html:has(.navBar) {
+    scroll-padding-top: 76px;
   }
 
-  .linkStake {
+  .barLinks {
     display: none;
+  }
+
+  .rowLinks {
+    display: flex;
+    gap: 32px;
+    padding-bottom: 6px;
+    font-size: 16px;
   }
 
   .navCta {

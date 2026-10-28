@@ -4,7 +4,7 @@ import Link from "next/link";
 import { SOURCE_CHAINS, availabilityText } from "@/lib/cascade/chains";
 import { useApy, useProtocolStats } from "@/lib/cascade/hooks";
 import { formatUsdCompact } from "@/lib/format";
-import { APY_FOOTNOTE, APY_KEEP_MS, formatApy, shownFigure, STATS_KEEP_MS, totalStakedUsd } from "@/lib/stats";
+import { APY_KEEP_MS, APY_NOTE_SHORT, formatApy, shownFigure, STATS_KEEP_MS, totalStakedUsd } from "@/lib/stats";
 import { Dash } from "../Dash";
 import { Mark } from "../Logo";
 import { HeroMark } from "./HeroMark";
@@ -69,7 +69,9 @@ export function Hero() {
             </span>
             {availabilityText()}
           </p>
-          <p className={styles.fine}>{APY_FOOTNOTE}</p>
+          <p className={styles.fine}>
+            {APY_NOTE_SHORT} <Link href="/faq/#apy">How it&apos;s worked out</Link>
+          </p>
         </div>
       </div>
     </header>

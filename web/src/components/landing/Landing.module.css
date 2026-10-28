@@ -212,6 +212,10 @@
   color: var(--ink-3);
 }
 
+.fine a {
+  color: var(--ink-2);
+}
+
 
 /* ---------- sections ---------- */
 .section {

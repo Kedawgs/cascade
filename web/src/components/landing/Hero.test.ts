@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { cascadeKeys } from "@/lib/cascade/hooks";
-import { APY_FOOTNOTE } from "@/lib/stats";
+import { APY_FOOTNOTE, APY_NOTE_SHORT } from "@/lib/stats";
 import { type Cached, plainText, renderWithCache } from "../test-render";
 import { Hero } from "./Hero";
 
@@ -18,13 +18,20 @@ describe("Hero", () => {
   it("has the snapshot's APY and its footnote in the first HTML", () => {
     const text = hero([apy(5.362), stats(0)]);
     expect(text).toContain("5.4%APY in TAO*");
-    expect(text).toContain(APY_FOOTNOTE);
+    expect(text).toContain(APY_NOTE_SHORT);
   });
 
   it("keeps the APY's place and the footnote while the APY loads", () => {
     const text = hero();
     expect(text).toContain("–LoadingAPY in TAO*");
-    expect(text).toContain(APY_FOOTNOTE);
+    expect(text).toContain(APY_NOTE_SHORT);
+  });
+
+  it("keeps its footnote short, with the full account a link away in the FAQ", () => {
+    const html = renderWithCache(createElement(Hero), [apy(5.4)]);
+    expect(plainText(html)).toContain(`${APY_NOTE_SHORT} How it's worked out`);
+    expect(plainText(html)).not.toContain(APY_FOOTNOTE);
+    expect(html).toMatch(/href="\/faq\/?#apy"/);
   });
 
   it("keeps showing the APY through a failed read, for up to 14 days", () => {
@@ -34,7 +41,7 @@ describe("Hero", () => {
   it("shows a dash in the APY's place once a failed read leaves only an older value", () => {
     const text = hero([apy(5.4, { at: Date.now() - 15 * DAY, failed: true })]);
     expect(text).toContain("–Not availableAPY in TAO*");
-    expect(text).toContain(APY_FOOTNOTE);
+    expect(text).toContain(APY_NOTE_SHORT);
   });
 
   it("shows the total staked from a dollar up", () => {

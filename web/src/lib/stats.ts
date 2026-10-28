@@ -22,6 +22,10 @@ export const STATS_KEEP_MS = 60 * 60_000;
 export const APY_FOOTNOTE =
   "*Yield in TAO from root staking with Cascade's validator over the last 30 days, after the validator's take and Cascade's cut, assuming rewards are collected and restaked monthly (they may be collected less often). Before deposit and withdrawal costs; its dollar value moves with TAO's price, and it isn't guaranteed.";
 
+/** The home page's short version: the rest (monthly collection, deposit and withdrawal costs, the
+ * dollar value) is in the FAQ's answer it links to, and under the figure on the stake page. */
+export const APY_NOTE_SHORT = "*Last 30 days' yield in TAO, after staking fees. Not guaranteed.";
+
 /** 5.3649 -> "5.4%" */
 export function formatApy(apyPercent: number): string {
   return `${apyPercent.toFixed(1)}%`;

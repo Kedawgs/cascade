@@ -36,7 +36,16 @@ export function Hero() {
             {showApy && (
               <>
                 <div>
-                  <p className={`${styles.statV} ${styles.statAccent}`}>{apy.data !== undefined ? formatApy(apy.data) : "–"}</p>
+                  <p className={`${styles.statV} ${styles.statAccent}`}>
+                    {apy.data !== undefined ? (
+                      formatApy(apy.data)
+                    ) : (
+                      <>
+                        <span aria-hidden="true">–</span>
+                        <span className="sr-only">Loading</span>
+                      </>
+                    )}
+                  </p>
                   <p className={styles.statK}>APY in TAO*</p>
                 </div>
                 <span className={styles.vr} aria-hidden="true" />

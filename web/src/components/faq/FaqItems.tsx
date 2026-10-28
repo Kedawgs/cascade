@@ -29,6 +29,7 @@ function Inline({ text }: { text: string }) {
     return (
       <a key={i} href={p.href} target="_blank" rel="noopener noreferrer">
         {p.text}
+        <span className="sr-only"> (opens in a new tab)</span>
       </a>
     );
   });

@@ -24,4 +24,10 @@ describe("parseInlineLinks", () => {
     ]);
     expect(parseInlineLinks("no links")).toEqual([{ text: "no links" }]);
   });
+
+  it("refuses a protocol-relative //host link, which would leave the site", () => {
+    expect(parseInlineLinks("[x](//evil.example/path)")).toEqual([{ text: "[x](//evil.example/path)" }]);
+    expect(parseInlineLinks("[home](/)")).toEqual([{ text: "home", href: "/" }]);
+    expect(parseInlineLinks("[q](/faq/#who-controls)")).toEqual([{ text: "q", href: "/faq/#who-controls" }]);
+  });
 });

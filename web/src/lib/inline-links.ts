@@ -1,7 +1,8 @@
 export type InlinePart = { text: string; href?: undefined } | { text: string; href: string };
 
-/** `[label](https://…)` or `[label](/page/)`: the only markup an FAQ answer may carry. */
-const LINK = /\[([^\]]+)\]\((https:\/\/[^\s)]+|\/[^\s)]*)\)/g;
+/** `[label](https://…)` or `[label](/page/)`: the only markup an FAQ answer may carry. A site link may
+ * not start `//`, which a browser reads as another host. */
+const LINK = /\[([^\]]+)\]\((https:\/\/[^\s)]+|\/(?!\/)[^\s)]*)\)/g;
 
 /** Text with `[label](url)` links, as plain runs and links. Anything else stays plain text. */
 export function parseInlineLinks(text: string): InlinePart[] {

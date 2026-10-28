@@ -17,13 +17,15 @@ export function FaqPage() {
             How TAO staking works, what Cascade charges, and when rewards are collected. We update this
             page when something changes.
           </p>
-          <ul className={styles.jump} aria-label="Topics">
-            {FAQ_SECTIONS.map((s) => (
-              <li key={s.id}>
-                <a href={`#${s.id}`}>{s.title}</a>
-              </li>
-            ))}
-          </ul>
+          <nav aria-label="Topics">
+            <ul className={styles.jump}>
+              {FAQ_SECTIONS.map((s) => (
+                <li key={s.id}>
+                  <a href={`#${s.id}`}>{s.title}</a>
+                </li>
+              ))}
+            </ul>
+          </nav>
         </header>
         {FAQ_SECTIONS.map((s) => (
           <section key={s.id} id={s.id} className={styles.group} aria-labelledby={`${s.id}-title`}>

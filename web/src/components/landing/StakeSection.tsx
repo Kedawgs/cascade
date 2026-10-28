@@ -38,8 +38,7 @@ export function StakeSection() {
             Stake in <b>a few clicks</b>
           </h2>
           <p className={styles.lede}>
-            Pick the chain your USDC is on, type an amount and confirm in your wallet. Base is live today and more
-            chains are on the way.
+            Type an amount of USDC on Base and confirm in your wallet. More chains are on the way.
           </p>
           <ul className={styles.points}>
             {POINTS.map((p) => (

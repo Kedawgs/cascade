@@ -199,6 +199,11 @@ html:has(.app) {
   .walletBalance {
     display: none;
   }
+
+  /* only the address chip is left inside: an even band around it */
+  .wallet {
+    padding-left: 5px;
+  }
 }
 
 /* Below 1000px, where the home navbar folds its links away: the logo and the wallet share the first

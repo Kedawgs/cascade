@@ -67,9 +67,12 @@ export function createSnapshotLoader(given: Partial<SnapshotDeps> = {}): () => P
     if (!reading || now - reading.startedAt >= deps.refreshMs) {
       const snapshot = readSnapshot(deps);
       reading = { startedAt: now, snapshot };
-      void snapshot.then(() => {
-        finished = snapshot;
-      });
+      void snapshot.then(
+        () => {
+          finished = snapshot;
+        },
+        () => undefined,
+      );
     }
     return finished ?? reading.snapshot;
   };

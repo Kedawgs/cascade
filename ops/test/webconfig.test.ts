@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { WALLET, WALLET_SS58 } from "../src/config.ts";
-import { buildPlan, buildPlanV3 } from "../src/plan.ts";
+import { buildPlan, buildPlanV3, settingsV3Of } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { decodeSs58, encodeSs58 } from "../src/ss58.ts";
 import { webEnv } from "../src/webconfig.ts";
@@ -55,8 +55,20 @@ describe("web-config", () => {
       "NEXT_PUBLIC_CASCADE_BIT_BLOCK=9357492",
       "NEXT_PUBLIC_CASCADE_VAULT_SS58=5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu",
       "NEXT_PUBLIC_CASCADE_HOTKEY_SS58=5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u",
+      "NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=3600",
       "",
     ]);
+  });
+
+  it("writes the vault's payout delay for every v3 plan, from the plan's own cadence", () => {
+    const test3 = buildPlanV3(0, 40, COLDKEY);
+    const launch3 = buildPlanV3(0, 40, COLDKEY, "launch");
+    expect(webEnv({ ...rec, plan: test3 })).toContain(`\nNEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=${settingsV3Of(test3).payoutDelay}\n`);
+    expect(settingsV3Of(test3).payoutDelay).toBe(3_600);
+    const launch = webEnv({ ...rec, plan: launch3 }).split("\n");
+    expect(launch).toContain("NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=86400");
+    expect(launch).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400");
+    expect(webEnv(rec)).not.toContain("PAYOUT_DELAY");
   });
 
   it("refuses a deployment whose read-back has not passed", () => {

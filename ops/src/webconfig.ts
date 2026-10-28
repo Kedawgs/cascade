@@ -1,12 +1,13 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Hex } from "viem";
-import { cadenceOf, closeMaxWaitS, isPlanV3 } from "./plan.ts";
+import { cadenceOf, closeMaxWaitS, isPlanV3, settingsV3Of } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { encodeSs58 } from "./ss58.ts";
 
 /** The site's settings for a verified deployment, as `web/.env.local` lines (all public values). A v3
- * deployment adds the staker and the oracle; the validator is the one the vault was deployed with. */
+ * deployment adds the staker, the oracle and the vault's payout delay (from the plan's cadence); the
+ * validator is the one the vault was deployed with. */
 export function webEnv(rec: DeploymentRecord): string {
   if (!rec.verify?.ok) throw new Error("the deployment's read-back has not passed: run verify first");
   const plan = rec.plan;
@@ -24,6 +25,7 @@ export function webEnv(rec: DeploymentRecord): string {
     `NEXT_PUBLIC_CASCADE_BIT_BLOCK=${bit.block}`,
     `NEXT_PUBLIC_CASCADE_VAULT_SS58=${encodeSs58(coldkey)}`,
     `NEXT_PUBLIC_CASCADE_HOTKEY_SS58=${encodeSs58(hotkey)}`,
+    ...(isPlanV3(plan) ? [`NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=${settingsV3Of(plan).payoutDelay}`] : []),
     ...(cadenceOf(plan) === "launch" ? [`NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=${closeMaxWaitS(plan)}`] : []),
     "",
   ].join("\n");

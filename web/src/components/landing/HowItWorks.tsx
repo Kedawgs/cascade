@@ -1,19 +1,9 @@
+import { DEPLOYMENT } from "@/lib/cascade/config";
+import { howItWorksSteps } from "@/lib/landing";
 import styles from "./Landing.module.css";
 
-const STEPS = [
-  {
-    title: "Deposit USDC",
-    body: "Straight from MetaMask, Coinbase Wallet, Rabby or any wallet on Base.",
-  },
-  {
-    title: "We swap and stake",
-    body: "Your USDC becomes TAO, crosses to Bittensor over Chainlink CCIP and is staked. Usually within the hour.",
-  },
-  {
-    title: "Earn, and leave any time",
-    body: "Staking rewards are added to your balance automatically. Unstake back to USDC whenever you like.",
-  },
-];
+/** Worded from the deployment's batch max wait: a launch deployment stakes within a day, not the hour. */
+const STEPS = howItWorksSteps(DEPLOYMENT);
 
 export function HowItWorks() {
   return (

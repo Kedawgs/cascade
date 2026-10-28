@@ -5,8 +5,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useBalances, useDeposit, useDeposits, useIsV3, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
-import { parseActivityParams } from "@/lib/activity-params";
-import { offersClaim } from "@/lib/cascade/trail";
+import { type ActivityTab, parseActivityParams } from "@/lib/activity-params";
+import { needsYou, offersClaim } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { DepositList, WithdrawalList } from "../ActivityList";
@@ -18,9 +18,9 @@ import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import styles from "./ActivityScreen.module.css";
 
-function BackLink() {
+function BackLink({ href = "/activity" }: { href?: string }) {
   return (
-    <Link href="/activity" className={styles.back}>
+    <Link href={href} className={styles.back}>
       Back to activity
     </Link>
   );
@@ -161,7 +161,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
         : `Your unstake of ${formatTao(withdrawal.taoAmount, 4)} TAO`;
   return (
     <>
-      <BackLink />
+      <BackLink href="/activity?tab=unstakes" />
       <div className={`${app.card} ${styles.panel}`}>
         <p className={styles.kicker}>{formatDay(withdrawal.createdAt)} unstake</p>
         <h2 className={styles.panelTitle}>{title}</h2>
@@ -250,35 +250,64 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   );
 }
 
-function Lists({ account }: { account: string }) {
+const TABS: { key: ActivityTab; label: string; href: string }[] = [
+  { key: "deposits", label: "Deposits", href: "/activity" },
+  { key: "unstakes", label: "Unstakes", href: "/activity?tab=unstakes" },
+];
+
+/** Deposits or unstakes, one at a time. Each tab shows its count once known, and a dot when something
+ * in it waits on you, so a claim can't hide behind the other tab. */
+export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   const deposits = useDeposits(account);
   const withdrawals = useWithdrawals(account);
-  if (deposits.isError || withdrawals.isError) {
-    return (
-      <LoadError
-        what="your activity"
-        onRetry={() => {
-          void deposits.refetch();
-          void withdrawals.refetch();
-        }}
-      />
-    );
-  }
-  if (!deposits.data || !withdrawals.data) return <Loading />;
+  const lists = { deposits: deposits.data, unstakes: withdrawals.data };
+  const failed = deposits.isError || withdrawals.isError;
   return (
     <>
-      <section className={styles.section} aria-labelledby="deposits-heading">
-        <h2 id="deposits-heading" className={styles.heading}>
-          Your deposits
-        </h2>
-        <DepositList deposits={deposits.data} />
-      </section>
-      {withdrawals.data.length > 0 && (
-        <section className={styles.section} aria-labelledby="unstakes-heading">
-          <h2 id="unstakes-heading" className={styles.heading}>
-            Your unstakes
-          </h2>
-          <WithdrawalList withdrawals={withdrawals.data} />
+      <nav className={styles.switch} aria-label="Activity">
+        {TABS.map((t) => {
+          const items = lists[t.key];
+          return (
+            <Link
+              key={t.key}
+              href={t.href}
+              replace
+              scroll={false}
+              className={`${styles.switchTab} ${t.key === tab ? styles.switchOn : ""}`}
+              aria-current={t.key === tab ? "page" : undefined}
+            >
+              {t.label}
+              <span className={styles.count}>{items ? items.length : ""}</span>
+              {items?.some(needsYou) && (
+                <span className={styles.attention}>
+                  <span className="sr-only">, needs you</span>
+                </span>
+              )}
+            </Link>
+          );
+        })}
+      </nav>
+      {failed ? (
+        <LoadError
+          what="your activity"
+          onRetry={() => {
+            void deposits.refetch();
+            void withdrawals.refetch();
+          }}
+        />
+      ) : !deposits.data || !withdrawals.data ? (
+        <Loading />
+      ) : (
+        <section className={styles.section} aria-label={tab === "deposits" ? "Your deposits" : "Your unstakes"}>
+          {tab === "deposits" ? (
+            <DepositList deposits={deposits.data} />
+          ) : withdrawals.data.length > 0 ? (
+            <WithdrawalList withdrawals={withdrawals.data} />
+          ) : (
+            <p className={styles.empty}>
+              No unstakes yet. When you <Link href="/unstake">unstake</Link>, it shows up here with a receipt for every step.
+            </p>
+          )}
         </section>
       )}
     </>
@@ -290,7 +319,7 @@ function ActivityBody({ account }: { account: string }) {
   const view = parseActivityParams(params);
   if (view.kind === "deposit") return <DepositDetail account={account} id={view.id} />;
   if (view.kind === "withdrawal") return <WithdrawalDetail account={account} id={view.id} />;
-  return <Lists account={account} />;
+  return <Lists account={account} tab={view.tab} />;
 }
 
 /** `/activity`: the lists, or one receipt trail when the query string names a deposit or unstake. */

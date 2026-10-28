@@ -188,11 +188,25 @@ html:has(.app) {
   }
 }
 
-/* Below 1280px the logo, four tabs and a connected wallet's pill don't fit one row: the logo and the
-   wallet share the first row, the tabs take the whole second row. */
+/* Below 1280px the logo, the four tabs and a connected wallet's pill fit one row only without the tabs'
+   icons and the wallet's balance (the stake card shows it too), as the home navbar keeps one row down
+   to 1000px. */
 @media (max-width: 1279px) {
+  .tab svg {
+    display: none;
+  }
+
+  .walletBalance {
+    display: none;
+  }
+}
+
+/* Below 1000px, where the home navbar folds its links away: the logo and the wallet share the first
+   row, the tabs take the whole second row; the bar is shorter and the pills 44px, as there. */
+@media (max-width: 999px) {
   .bar {
     flex-wrap: wrap;
+    min-height: 84px;
     padding: 12px 20px;
   }
 
@@ -218,15 +232,8 @@ html:has(.app) {
     scrollbar-width: none;
   }
 
-  .menu {
-    top: 72px;
-  }
-}
-
-/* as the home navbar's: a shorter bar, and the button-sized pills at 44px */
-@media (max-width: 999px) {
-  .bar {
-    min-height: 84px;
+  .tab svg {
+    display: inline;
   }
 
   .net,
@@ -246,8 +253,7 @@ html:has(.app) {
   }
 
   .wallet {
-    gap: 10px;
-    padding: 0 4px 0 16px;
+    padding: 0 4px;
   }
 
   .walletAddr {
@@ -263,16 +269,6 @@ html:has(.app) {
 
   .menu {
     top: 64px;
-  }
-}
-
-@media (max-width: 900px) {
-  .walletBalance {
-    display: none;
-  }
-
-  .wallet {
-    padding-left: 4px;
   }
 }
 

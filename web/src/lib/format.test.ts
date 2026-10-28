@@ -9,6 +9,7 @@ import {
   formatTao,
   formatUsd,
   formatUsdc,
+  formatUsdCompact,
   formatUsdShort,
   parseAmount,
   round,
@@ -27,6 +28,15 @@ describe("money", () => {
     expect(formatUsdShort(500.5)).toBe("$500.50");
     expect(formatUsdc(1000)).toBe("1,000");
     expect(formatUsdc(285.14)).toBe("285.14");
+  });
+
+  it("shortens large USD amounts to a few characters", () => {
+    expect(formatUsdCompact(1)).toBe("$1");
+    expect(formatUsdCompact(999.4)).toBe("$999");
+    expect(formatUsdCompact(999.6)).toBe("$1K");
+    expect(formatUsdCompact(2549.9)).toBe("$2.5K");
+    expect(formatUsdCompact(10_149)).toBe("$10.1K");
+    expect(formatUsdCompact(1_234_567)).toBe("$1.2M");
   });
 
   it("shows TAO with 4 decimals", () => {

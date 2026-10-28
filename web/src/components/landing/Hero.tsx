@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { SOURCE_CHAINS, availabilityText } from "@/lib/cascade/chains";
 import { useApy, useProtocolStats } from "@/lib/cascade/hooks";
-import { formatUsdShort } from "@/lib/format";
-import { APY_FOOTNOTE, formatApy } from "@/lib/stats";
+import { formatUsdCompact } from "@/lib/format";
+import { APY_FOOTNOTE, APY_KEEP_MS, formatApy, shownFigure, STATS_KEEP_MS, totalStakedUsd } from "@/lib/stats";
+import { Dash } from "../Dash";
 import { Mark } from "../Logo";
 import { HeroMark } from "./HeroMark";
 import styles from "./Landing.module.css";
@@ -12,14 +13,11 @@ import styles from "./Landing.module.css";
 export function Hero() {
   const stats = useProtocolStats();
   const apy = useApy();
-  // the APY's place is kept while it loads, so the Stake button doesn't jump when it arrives
-  const showApy = apy.isPending || apy.data !== undefined;
-
-  const s = stats.data;
-  const totalUsd =
-    s?.totalStakedTao !== undefined && s.taoPriceUsd !== undefined
-      ? s.totalStakedTao * s.taoPriceUsd
-      : undefined;
+  const apyShown = shownFigure(apy, APY_KEEP_MS);
+  // the total has a place from a dollar up, decided by the first figures there are (the snapshot's, so
+  // at first paint) and kept through failed reads; its value is the one there is to show
+  const total = totalStakedUsd(stats.data);
+  const totalShown = totalStakedUsd(shownFigure(stats, STATS_KEEP_MS));
 
   return (
     <header className={styles.hero}>
@@ -33,27 +31,19 @@ export function Hero() {
           </h1>
           <p className={styles.lead}>Deposit USDC from the wallet you already have.</p>
           <div className={styles.stats}>
-            {showApy && (
-              <>
-                <div>
-                  <p className={`${styles.statV} ${styles.statAccent}`}>
-                    {apy.data !== undefined ? (
-                      formatApy(apy.data)
-                    ) : (
-                      <>
-                        <span aria-hidden="true">–</span>
-                        <span className="sr-only">Loading</span>
-                      </>
-                    )}
-                  </p>
-                  <p className={styles.statK}>APY in TAO*</p>
-                </div>
-                <span className={styles.vr} aria-hidden="true" />
-              </>
-            )}
-            {totalUsd !== undefined && totalUsd >= 1 && (
+            {/* every figure keeps its place (a dash until it is known), so the Stake button never moves */}
+            <div>
+              <p className={`${styles.statV} ${styles.statAccent} ${styles.statApy}`}>
+                {apyShown !== undefined ? formatApy(apyShown) : <Dash loading={apy.isPending} />}
+              </p>
+              <p className={styles.statK}>APY in TAO*</p>
+            </div>
+            <span className={styles.vr} aria-hidden="true" />
+            {total !== undefined && total >= 1 && (
               <div>
-                <p className={styles.statV}>{formatUsdShort(totalUsd)}</p>
+                <p className={`${styles.statV} ${styles.statTotal}`}>
+                  {totalShown !== undefined ? formatUsdCompact(totalShown) : <Dash loading={false} />}
+                </p>
                 <p className={styles.statK}>Total staked</p>
               </div>
             )}
@@ -79,7 +69,7 @@ export function Hero() {
             </span>
             {availabilityText()}
           </p>
-          {apy.data !== undefined && <p className={styles.fine}>{APY_FOOTNOTE}</p>}
+          <p className={styles.fine}>{APY_FOOTNOTE}</p>
         </div>
       </div>
     </header>

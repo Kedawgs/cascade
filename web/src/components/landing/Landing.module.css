@@ -138,8 +138,18 @@
   margin: 0;
   font-size: 40px;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
   line-height: 1;
+}
+
+/* room for the widest ordinary value ("12.3%", "$10.1K"), so a new figure never moves the Stake button */
+.statApy {
+  min-width: 2.9em;
+}
+
+.statTotal {
+  min-width: 3.2em;
 }
 
 .statAccent {

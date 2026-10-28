@@ -1,16 +1,17 @@
 "use client";
 
 import { useApy, useProof, useProtocolStats } from "@/lib/cascade/hooks";
-import { APY_FOOTNOTE, statRows } from "@/lib/stats";
+import { APY_FOOTNOTE, APY_KEEP_MS, shownFigure, statRows, STATS_KEEP_MS } from "@/lib/stats";
+import { Dash } from "../Dash";
 import { ReceiptLink } from "../ReceiptLink";
 import styles from "./App.module.css";
 
-/** Protocol-wide figures, read from the chains. Rows with no value are left out. */
+/** Protocol-wide figures, read from the chains. The same rows from the first render on (loading,
+ * loaded or failed), with "–" for a value there is none of, so the page below never moves. */
 export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
   const stats = useProtocolStats();
   const apy = useApy();
-  const rows = stats.data ? statRows(stats.data, apy.data) : [];
-  if (stats.data && rows.length === 0) return null;
+  const rows = statRows(shownFigure(stats, STATS_KEEP_MS), shownFigure(apy, APY_KEEP_MS));
 
   return (
     <section aria-labelledby="stats-heading" className={styles.section}>
@@ -23,28 +24,16 @@ export function StatsCard({ explorerUrl }: { explorerUrl?: string }) {
         )}
       </div>
       <div className={`${styles.card} ${styles.cardRows}`}>
-        {stats.isError ? (
-          <div>
-            <span>Statistics are unavailable right now.</span>
-            <span>–</span>
+        {rows.map((row) => (
+          <div key={row.key}>
+            <span>{row.label}</span>
+            <span className={row.accent ? styles.accent : undefined}>
+              {row.value ?? <Dash loading={row.key === "apy" ? apy.isPending : stats.isPending} />}
+            </span>
           </div>
-        ) : !stats.data ? (
-          <div>
-            <span>Loading statistics</span>
-            <span>–</span>
-          </div>
-        ) : (
-          rows.map((row) => (
-            <div key={row.label}>
-              <span>{row.label}</span>
-              <span className={row.accent ? styles.accent : undefined}>
-                {row.value}
-              </span>
-            </div>
-          ))
-        )}
+        ))}
       </div>
-      {stats.data && apy.data !== undefined && <p className={styles.footnote}>{APY_FOOTNOTE}</p>}
+      <p className={styles.footnote}>{APY_FOOTNOTE}</p>
     </section>
   );
 }

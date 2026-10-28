@@ -9,6 +9,12 @@ const usd0 = new Intl.NumberFormat("en-US", {
   currency: "USD",
   maximumFractionDigits: 0,
 });
+const usdCompact = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 const dayFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 const dateTimeFmt = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -32,6 +38,12 @@ export function formatUsd(n: number): string {
 export function formatUsdShort(n: number): string {
   const cents = Math.round(n * 100);
   return cents % 100 === 0 ? usd0.format(cents / 100) : usd2.format(n);
+}
+
+/** "$999", then "$2.5K", "$10.1K", "$1.2M": a headline figure that stays a few characters wide. */
+export function formatUsdCompact(n: number): string {
+  // from $999.50 up it rounds to "$1K" (compact notation alone would give "$999.5")
+  return n < 999.5 ? usd0.format(n) : usdCompact.format(Math.max(n, 1000));
 }
 
 /** USDC amounts to the cent: "0.99", "1.00", "1,234.50". */

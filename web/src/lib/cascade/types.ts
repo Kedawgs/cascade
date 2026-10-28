@@ -50,10 +50,9 @@ export interface StakeProof {
   explorerUrl: string;
 }
 
-/** Protocol-wide figures. Missing values are hidden. */
+/** Protocol-wide figures. A missing value shows as "–". (No count of stakers: there is no indexer.) */
 export interface ProtocolStats {
   totalStakedTao?: number;
-  stakers?: number;
   taoPriceUsd?: number;
 }
 

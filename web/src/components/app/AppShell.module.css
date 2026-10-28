@@ -116,14 +116,6 @@
   white-space: nowrap;
 }
 
-.walletGhost {
-  display: inline-block;
-  width: 180px;
-  height: 40px;
-  border-radius: var(--r-pill);
-  background: var(--line-soft);
-}
-
 .avatar {
   width: 22px;
   height: 22px;

@@ -47,6 +47,9 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  /* keep the scrollbar's room even on a short page, so content growing past the fold (a screen
+     swapping its placeholder for the real thing) doesn't shift everything sideways */
+  scrollbar-gutter: stable;
 }
 
 body {

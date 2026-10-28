@@ -2,6 +2,7 @@
 
 import { useIsV3, usePosition, useProtocolStats, useRewards } from "@/lib/cascade/hooks";
 import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
+import { shownFigure, STATS_KEEP_MS } from "@/lib/stats";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
@@ -14,11 +15,11 @@ const SHOW_DAYS = 14;
 
 /** The TAO price, live. */
 function Price() {
-  const stats = useProtocolStats();
+  const price = shownFigure(useProtocolStats(), STATS_KEEP_MS)?.taoPriceUsd;
   return (
     <div>
       <p className={card.k}>TAO price</p>
-      <p className={card.v}>{stats.data?.taoPriceUsd !== undefined ? formatUsd(stats.data.taoPriceUsd) : "–"}</p>
+      <p className={card.v}>{price !== undefined ? formatUsd(price) : "–"}</p>
     </div>
   );
 }

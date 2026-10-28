@@ -8,6 +8,7 @@ import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
 import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
+import { shownFigure, STATS_KEEP_MS } from "@/lib/stats";
 import {
   breakEvenDays,
   breakEvenText,
@@ -38,7 +39,7 @@ function usdcUnits(raw: string): bigint | null {
 /** v3: the TAO price, and what it means for a balance held in TAO. */
 function PriceStrip() {
   const stats = useProtocolStats();
-  const price = stats.data?.taoPriceUsd;
+  const price = shownFigure(stats, STATS_KEEP_MS)?.taoPriceUsd;
   return (
     <div className={styles.priceStrip}>
       <p className={styles.price}>

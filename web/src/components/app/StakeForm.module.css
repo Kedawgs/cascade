@@ -164,7 +164,10 @@
   white-space: nowrap;
 }
 
+/* room for "$999.99", so the note beside it stays put when the price arrives */
 .price b {
+  display: inline-block;
+  min-width: 4.2em;
   margin-left: 2px;
   font-size: 15px;
   font-weight: 700;

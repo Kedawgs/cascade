@@ -5,7 +5,7 @@ import { useCascadeAccount } from "@/lib/account";
 import { shortAddress } from "@/lib/format";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
-import { ConnectWallet } from "../ConnectWallet";
+import { ConnectWallet, ConnectWalletGhost } from "../ConnectWallet";
 import styles from "./AppShell.module.css";
 
 /** Balance plus short address, with a small menu to disconnect. */
@@ -14,7 +14,8 @@ export function WalletPill() {
   const balance = useUsdcBalance();
   const menuId = useId();
 
-  if (state.status === "loading") return <span className={styles.walletGhost} aria-hidden="true" />;
+  // the connect button's place, until it is known whether a wallet is connected
+  if (state.status === "loading") return <ConnectWalletGhost />;
   if (state.status === "none") return <ConnectWallet variant="pill" />;
 
   const name = shortAddress(state.account);

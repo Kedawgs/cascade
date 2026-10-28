@@ -18,6 +18,14 @@
   font-size: 15px;
 }
 
+/* ConnectWalletGhost: the same box, no text, no hover */
+.ghost {
+  background: var(--line-soft);
+  color: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
 .panel {
   margin-top: 10px;
 }

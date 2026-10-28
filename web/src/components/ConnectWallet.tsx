@@ -88,3 +88,13 @@ export function ConnectWallet({
     </div>
   );
 }
+
+/** The inline button's exact box, greyed and inert: it holds the button's place until the page knows
+ * whether a wallet is connected, so the button arriving moves nothing. */
+export function ConnectWalletGhost({ label = "Connect wallet" }: { label?: string }) {
+  return (
+    <div className={styles.inline} aria-hidden="true">
+      <span className={`pill ${styles.button} ${styles.ghost}`}>{label}</span>
+    </div>
+  );
+}

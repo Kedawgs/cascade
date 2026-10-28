@@ -1,6 +1,6 @@
 import type { Hex } from "viem";
 import { explorer } from "./config";
-import type { DepositOp, WithdrawalOp } from "./oplog";
+import { type DepositOp, entryPriceUsd, type WithdrawalOp } from "./oplog";
 import type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRecord, WithdrawalStepKey } from "./records";
 import { formatDay, formatTao, formatUsdc } from "../format";
 import { toDisplay } from "./units";
@@ -164,6 +164,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   const swapHash = op.v === 3 ? op.hashes.stake : op.hashes.swap;
   const depositHash = op.v === 3 ? op.hashes.stake : op.hashes.deposit;
   const taoWei = f.taoDeposited ?? op.targetTao;
+  const price = entryPriceUsd(op);
   const swapStatus = walletStep(f.swapMined, op, true);
   const swap: TrailStep<DepositStepKey> = {
     key: "swap",
@@ -236,7 +237,8 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     taoAmount: toDisplay(taoWei, 18),
     // a deposit of TAO already in the wallet spent no USDC
     ...(op.usdcIn > 0n ? { amountUsd: toDisplay(f.usdcSpent ?? op.usdcIn, 6) } : {}),
-    taoPriceUsd: op.priceUsd,
+    // "at $X" only for a deposit recorded with a price
+    ...(price !== undefined ? { taoPriceUsd: price } : {}),
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: taoWei } : {}),
     // the swap worked but the deposit failed: the deposit alone can be tried again (the TAO is in the wallet)

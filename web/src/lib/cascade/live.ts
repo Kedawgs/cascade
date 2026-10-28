@@ -2,7 +2,7 @@ import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
 import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
 import { chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
-import { type ClaimOp, createOpLog, type DepositOp, effectiveState, type OpLog, type WithdrawalOp } from "./oplog";
+import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { chainOnlyDeposit, depositRecord, withdrawalRecord } from "./trail";
 import type { CascadeData, DepositQuote, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
@@ -143,8 +143,12 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const putIn = sum(scan.deposited.map((e) => e.assets));
     const takenOut = sum(scan.redeemed.map((e) => e.assets));
     const earned = taoWei + takenOut - putIn;
-    const priced = deposits.filter((o) => o.batchId !== undefined && scan.delivered.has(String(o.batchId)));
-    const pricedTao = sum(priced.map((o) => o.targetTao));
+    // the deposits that reached the vault, each at the price it was made at (one without a price is left out)
+    const priced = deposits.flatMap((o) => {
+      const price = entryPriceUsd(o);
+      return price !== undefined && o.batchId !== undefined && scan.delivered.has(String(o.batchId)) ? [{ price, tao: o.targetTao }] : [];
+    });
+    const pricedTao = sum(priced.map((o) => o.tao));
     return {
       shares: v.shares,
       availableShares,
@@ -158,7 +162,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       ...(putIn > 0n ? { rewardsEarnedTao: toDisplay(earned > 0n ? earned : 0n, 18) } : {}),
       avgEntryPriceUsd:
         pricedTao > 0n
-          ? priced.reduce((acc, o) => acc + o.priceUsd * toDisplay(o.targetTao, 18), 0) / toDisplay(pricedTao, 18)
+          ? priced.reduce((acc, o) => acc + o.price * toDisplay(o.tao, 18), 0) / toDisplay(pricedTao, 18)
           : null,
     };
   }

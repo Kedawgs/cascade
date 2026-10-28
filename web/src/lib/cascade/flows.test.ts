@@ -43,6 +43,7 @@ import {
   unstakeCall,
   unstakeV3Call,
   userMessage,
+  walletTaoDepositOp,
   type WalletPort,
 } from "./flows";
 import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
@@ -279,6 +280,34 @@ describe("TAO already in the wallet", () => {
     expect(c.map((x) => x.key)).toEqual(["approveTao", "deposit"]);
     expect(c[1].args).toEqual([12_345_678_000_000_000n]);
     expect(c[0].args).toEqual([D.frontDoor, 12_345_678_000_000_000n]);
+  });
+
+  it("records the deposit at what selling TAO pays at the click", async () => {
+    const op = await walletTaoDepositOp({ id: "w1", account: ME, taoWei: 12_345_678_912_345_678n, now: 1_000, price: async () => 254.49 });
+    expect(op).toEqual({
+      id: "w1",
+      kind: "deposit",
+      account: ME,
+      createdAt: 1_000,
+      usdcIn: 0n,
+      targetTao: 12_345_678_000_000_000n,
+      priceUsd: 254.49,
+      hashes: {},
+      state: "running",
+    });
+  });
+
+  it("records it with no price, rather than holding it up or saying $0, when the price can't be read", async () => {
+    const at = (price: () => Promise<number>) => walletTaoDepositOp({ id: "w1", account: ME, taoWei: 10n ** 16n, now: 1_000, price });
+    const failed = await at(() => Promise.reject(new Error("Base RPC down")));
+    expect(failed).not.toHaveProperty("priceUsd");
+    expect(failed).toMatchObject({ kind: "deposit", usdcIn: 0n, targetTao: 10n ** 16n, state: "running" });
+    expect(
+      await at(() => {
+        throw new Error("sync");
+      }),
+    ).not.toHaveProperty("priceUsd");
+    expect(await at(async () => 0)).not.toHaveProperty("priceUsd");
   });
 
   it("swaps it back to USDC with a minimum", () => {

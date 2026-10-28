@@ -35,6 +35,7 @@ import {
   sellTaoCalls,
   splitSignature,
   userMessage,
+  walletTaoDepositOp,
   stakeCalls,
   stillToSend,
   unstakeCall,
@@ -44,9 +45,9 @@ import {
 import { cascadeKeys } from "./hooks";
 import { opStore } from "./op-store";
 import { type ClaimOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
-import { quoteSell, readFrontDoor, readPermitNonce } from "./reads";
+import { quoteSell, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
-import { floorRao, lessSlippage } from "./units";
+import { lessSlippage } from "./units";
 
 /** The wallet as a flow sees it, through wagmi (EIP-5792 batches when the wallet offers them); Base's
  * public RPC (`reader`) answers what the wallet doesn't need to: code at the account, and simulations. */
@@ -262,20 +263,11 @@ export function useFlows(account: string | null) {
         });
       }),
 
-    /** Deposits TAO already sitting in the wallet (left by a cancel, a claim kept as TAO, a failed step). */
-    depositWalletTao: (taoWei: bigint, priceUsd: number, onStart?: (id: string) => void) =>
+    /** Deposits TAO already sitting in the wallet (left by a cancel, a claim kept as TAO, a failed step),
+     * recorded at the TAO price read at the click (or none, when it can't be read). */
+    depositWalletTao: (taoWei: bigint, onStart?: (id: string) => void) =>
       flow("stake", async () => {
-        const op: DepositOp = {
-          id: newOpId(),
-          kind: "deposit",
-          account: a,
-          createdAt: Date.now(),
-          usdcIn: 0n,
-          targetTao: floorRao(taoWei),
-          priceUsd,
-          hashes: {},
-          state: "running",
-        };
+        const op = await walletTaoDepositOp({ id: newOpId(), account: a, taoWei, now: Date.now(), price: () => taoPriceUsd(data.clients) });
         data.opLog.put(op);
         onStart?.(op.id);
         await send(op.id, async () => depositTaoCalls(op.targetTao, await data.getBalances(a), d()));

@@ -268,6 +268,35 @@ export function depositTaoCalls(taoWei: bigint, w: Balances, d: Deployment): Flo
   return out;
 }
 
+/** A deposit of TAO already in the wallet, as recorded before anything is sent: priced at what selling
+ * TAO pays at the click (`price`, read then). A price that can't be read leaves it unpriced; it never
+ * holds up the deposit, and never records $0. */
+export async function walletTaoDepositOp(x: {
+  id: string;
+  account: Address;
+  taoWei: bigint;
+  now: number;
+  price: () => Promise<number>;
+}): Promise<DepositOp> {
+  const priceUsd = await Promise.resolve()
+    .then(x.price)
+    .then(
+      (p) => (p > 0 ? p : undefined),
+      () => undefined,
+    );
+  return {
+    id: x.id,
+    kind: "deposit",
+    account: x.account,
+    createdAt: x.now,
+    usdcIn: 0n,
+    targetTao: floorRao(x.taoWei),
+    ...(priceUsd !== undefined ? { priceUsd } : {}),
+    hashes: {},
+    state: "running",
+  };
+}
+
 /** TAO in the wallet back to USDC (TAO –0.3%→ WETH –0.05%→ USDC) with a minimum. When the router's
  * allowance falls short it is approved for exactly this sale, never an open amount. */
 export function sellTaoCalls(taoWei: bigint, minUsdc: bigint, w: Balances, account: Address): FlowCall[] {

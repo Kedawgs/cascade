@@ -26,7 +26,9 @@ export interface DepositOp extends OpBase {
   targetTao: bigint;
   /** v3: the least TAO the stake may deposit, as quoted; carrying the stake on later keeps this floor. */
   minTaoOut?: bigint;
-  priceUsd: number;
+  /** The TAO price it was made at, in dollars. None for a deposit of wallet TAO whose price couldn't be
+   * read at the click; read it through `entryPriceUsd`. */
+  priceUsd?: number;
   feesUsd?: number;
   hashes: Partial<Record<DepositCall, Hex>>;
   /** EIP-5792 batch id when the wallet sent everything at once. */
@@ -61,6 +63,12 @@ export interface ClaimOp extends OpBase {
 }
 
 export type Operation = DepositOp | WithdrawalOp | ClaimOp;
+
+/** The TAO price a deposit was made at, when it has one. Deposits of wallet TAO were once recorded at $0
+ * when no price was at hand: that is none too, never a price to show or average in. */
+export function entryPriceUsd(op: Pick<DepositOp, "priceUsd">): number | undefined {
+  return op.priceUsd !== undefined && op.priceUsd > 0 ? op.priceUsd : undefined;
+}
 
 type Storage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
 

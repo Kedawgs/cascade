@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
 import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredError } from "./live";
-import { createOpLog, type WithdrawalOp } from "./oplog";
+import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState, WalletState } from "./reads";
 
 const D: Deployment = {
@@ -103,6 +103,45 @@ describe("rewards waiting (v3)", () => {
     expect(asked).toBe(0);
     expect(p).not.toHaveProperty("pendingRewardsTao");
     expect(p.taoBalance).toBeCloseTo(0.08, 12);
+  });
+});
+
+describe("average entry price", () => {
+  const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
+  const TAO = 10n ** 18n;
+  const deposit = (id: string, targetTao: bigint, priceUsd: number | undefined, batchId = 3n): DepositOp => ({
+    id,
+    kind: "deposit",
+    account: ME,
+    createdAt: 1,
+    usdcIn: 0n,
+    targetTao,
+    ...(priceUsd !== undefined ? { priceUsd } : {}),
+    hashes: {},
+    batchId,
+    state: "sent",
+  });
+  /** A position whose batch 3 reached the vault, with these deposits in this browser's log. */
+  async function avg(...ops: DepositOp[]) {
+    const d = deps({ scan: async (_c, _d, s) => void s.delivered.set("3", { key: H(3), txHash: H(4), block: 1n }) });
+    for (const op of ops) d.opLog.put(op);
+    return (await createLiveCascadeData(D, d).getPosition(ME)).avgEntryPriceUsd;
+  }
+
+  it("weights each delivered deposit's price by its TAO", async () => {
+    expect(await avg(deposit("a", TAO, 200), deposit("b", 3n * TAO, 300))).toBeCloseTo(275, 9);
+  });
+
+  it("leaves out a deposit with no price, and one recorded at $0, rather than averaging in nothing", async () => {
+    expect(await avg(deposit("a", TAO, 200), deposit("b", 3n * TAO, 300), deposit("c", 2n * TAO, undefined), deposit("d", 5n * TAO, 0))).toBeCloseTo(
+      275,
+      9,
+    );
+  });
+
+  it("is unknown when no delivered deposit has a price", async () => {
+    expect(await avg(deposit("c", 2n * TAO, undefined), deposit("d", 5n * TAO, 0))).toBeNull();
+    expect(await avg(deposit("a", TAO, 200, 4n))).toBeNull();
   });
 });
 

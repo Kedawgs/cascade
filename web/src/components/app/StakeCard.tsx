@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useBalances, useIsV3, useLimits, usePosition, useProtocolStats, useTaoPrice, useWithdrawals } from "@/lib/cascade/hooks";
+import { useBalances, useIsV3, useLimits, usePosition, useTaoPrice, useWithdrawals } from "@/lib/cascade/hooks";
 import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
@@ -41,7 +41,6 @@ function WalletTao({ account }: { account: string }) {
   const router = useRouter();
   const balances = useBalances(account);
   const limits = useLimits();
-  const stats = useProtocolStats();
   const flows = useFlows(account);
   const tao = balances.data?.tao ?? 0n;
   if (tao === 0n) return null;
@@ -58,7 +57,7 @@ function WalletTao({ account }: { account: string }) {
             className="pill"
             disabled={flows.busy !== null}
             onClick={() =>
-              void flows.depositWalletTao(tao, stats.data?.taoPriceUsd ?? 0).then((id) => router.push(`/activity?deposit=${id}`), () => undefined)
+              void flows.depositWalletTao(tao).then((id) => router.push(`/activity?deposit=${id}`), () => undefined)
             }
           >
             Deposit it

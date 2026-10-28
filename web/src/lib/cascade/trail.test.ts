@@ -54,6 +54,15 @@ describe("deposit trail", () => {
     expect(r.status).toBe("in_progress");
   });
 
+  it("says at what price only for a deposit recorded with one", () => {
+    expect(depositRecord(op, base).taoPriceUsd).toBe(251.6);
+    const unpriced: DepositOp = { ...op };
+    delete unpriced.priceUsd;
+    expect(depositRecord(unpriced, base)).not.toHaveProperty("taoPriceUsd");
+    // wallet-TAO deposits were once recorded at $0 when no price was at hand
+    expect(depositRecord({ ...op, priceUsd: 0 }, base)).not.toHaveProperty("taoPriceUsd");
+  });
+
   it("marks a stopped deposit that never sent anything, so it can be removed", () => {
     const stopped = { ...op, state: "needs-you" as const, hashes: {} };
     const none = { ...base, swapMined: false, depositMined: false };

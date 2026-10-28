@@ -45,19 +45,6 @@
   font-size: 17px;
 }
 
-.menuBtn {
-  display: none;
-  min-height: 44px;
-  padding: 0 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-pill);
-  background: var(--paper);
-  font: inherit;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
 /* ---------- hero ---------- */
 .hero {
   position: relative;
@@ -505,25 +492,21 @@
 @media (max-width: 999px) {
   .nav {
     flex-wrap: wrap;
-    min-height: 84px;
+    row-gap: 14px;
+    min-height: 0;
+    padding: 20px 0 6px;
   }
 
+  /* the links take the second row; the Stake & Earn button stands in for "Stake" */
   .links {
-    display: none;
-  }
-
-  .linksOpen {
-    display: flex;
-    flex-direction: column;
     order: 3;
-    gap: 14px;
     width: 100%;
-    padding: 8px 0 18px;
+    gap: 32px;
+    font-size: 16px;
   }
 
-  .menuBtn {
-    display: inline-flex;
-    align-items: center;
+  .linkStake {
+    display: none;
   }
 
   .navCta {
@@ -600,8 +583,9 @@
     padding: 72px 0;
   }
 
+  /* minmax(0, …): the form's own width (its amount field) mustn't widen the column past the screen */
   .stakeGrid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 36px;
   }
 
@@ -623,5 +607,14 @@
 
   .widget {
     padding: 18px;
+  }
+}
+
+/* four links across a phone: spread over the row */
+@media (max-width: 480px) {
+  .links {
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 15px;
   }
 }

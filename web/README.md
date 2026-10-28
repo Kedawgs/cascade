@@ -49,7 +49,8 @@ for display only (`units.ts`).
   at `pnpm build`; under `pnpm dev` at most every ten minutes) and seeded into react-query, so the
   first HTML has them and nothing moves when the browser's own reads replace them. A figure the build
   couldn't read is left to the browser. The TAO price is the exception: it is shown only from the
-  browser's own read (`useTaoPrice`), never the build's, so its place shows "–" until then.
+  browser's own read (`useTaoPrice`), never the build's, so its place shows "–" until then (the
+  home page's dollar total staked still starts from the build's price).
 - **Base logs** come from a separate public RPC, `https://base-rpc.publicnode.com` (`baseLogs` in
   `config.ts`), because `https://mainnet.base.org` refuses `eth_getLogs`. Everything else on Base is
   read by `eth_call` and by transaction hash.

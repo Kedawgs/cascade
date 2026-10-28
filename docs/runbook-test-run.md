@@ -265,10 +265,13 @@ caps decision.
 
 How the keeper decides (launch): it closes a non-empty batch when the contract allows it and the
 batch is full, or 24 hours old, or its estimated Cascade fees are at least the bridge fee (about
-$1.40, which a batch of about $900 of deposits covers). If a price or fee read fails it does not
-close early; the 24-hour rule still closes it. It also rolls an empty batch (a close with no value,
-a little Base gas) so the 24 hours count from about the first deposit. The test cadence closes as
-soon as allowed and never touches an empty batch.
+$1.40, which a batch of about $900 of deposits covers). If a price or fee read fails (or reads
+zero) it does not close early; the 24-hour rule still closes it. Deposits made directly in TAO (not
+through the staker) pay no Cascade fee but are counted at the staker's fee rate, so such a batch can
+close early; the cost is bounded at one bridge fee per batch. It also rolls an empty batch (a close
+with no value, a little Base gas, and only while AlphaVault is healthy, as for a close) so the 24
+hours count from about the first deposit. The test cadence closes as soon as allowed and never
+touches an empty batch.
 
 Shortening later: as volume grows, the owner can shorten (or lengthen) the interval with
 `setBatchInterval`, never beyond 7 days. At launch the owner is meant to be a timelock, so the

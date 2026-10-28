@@ -716,7 +716,11 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
 9. **`batchInterval` has no lower bound, but it has an upper one.** A very short interval lets anyone
    close a batch before a user's cancel lands. Set it behind the timelock with care. The other way,
    `MAX_BATCH_INTERVAL` is 7 days: the constructor and `setBatchInterval` refuse more
-   (`InvalidParameter`), so even a captured owner cannot stretch the wait for deposits.
+   (`InvalidParameter`), so even a captured owner cannot set a longer `batchInterval`. The cap
+   bounds `batchInterval` only: the owner or guardian can still `pause()`, which stops closes for as
+   long as it lasts (deposits stay cancellable with `cancelDeposit`, and redeems with
+   `cancelRedeem`, while paused), and the keeper's 24-hour hold under the launch cadence is an
+   off-chain policy, not something the contract enforces.
 10. **The primary bridge is a single point of liveness.** Disabling a contract's primary bridge stops
     its outgoing messages (closes on Base, payouts on Bittensor) until the owner sets another enabled
     bridge as primary, and a new adapter takes 7 days to register. Keep a standby adapter registered.

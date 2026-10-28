@@ -96,15 +96,19 @@ export function closeEconomicsOf(r: {
   return { feesUsdc, bridgeFeeUsdc: (r.bridgeFeeWei * r.ethPriceUsdc) / E18 };
 }
 
-/** Under a max wait, an empty batch the front door would let close is rolled (closeBatch with no value
- * restarts its timer, for Base gas and no bridge fee), at most once an interval, so the wait counts from
- * about its first entry rather than from the last close. The test cadence (no max wait) never touches
- * an empty batch. */
-function rollable(s: State): boolean {
+/** Under a max wait, an empty batch the front door would let close is due a roll (closeBatch with no
+ * value restarts its timer, for Base gas and no bridge fee), at most once an interval, so the wait counts
+ * from about its first entry rather than from the last close. The test cadence (no max wait) never
+ * touches an empty batch. */
+function rollDue(s: State): boolean {
   const fd = s.frontDoor;
   const empty = fd.nDeposits + fd.nRedeems === 0;
   return s.closeMaxWaitS > 0 && empty && fd.canClose && fd.batchInterval > 0 && fd.now >= fd.openStart + fd.batchInterval;
 }
+
+/** A due roll goes ahead only while AlphaVault is healthy, the condition close() needs: a redeem that
+ * lands first can turn the roll into a real close. */
+const rollable = (s: State): boolean => rollDue(s) && s.alphaVault.healthy;
 
 const hours = (seconds: number) => `${Number((seconds / 3600).toFixed(2))}-hour`;
 
@@ -131,7 +135,7 @@ export const closeHold = (s: State): string | undefined => (isHeld(s) ? `the kee
 /** The next thing the keeper should do: a due payout, then a USDC delivery, then staking, then closing
  * (or rolling) the batch. A batch with entries closes once the front door allows it and it is full, at
  * least `closeMaxWaitS` old, or its fees cover the bridge fee; fees that could not be read never close it
- * early. An empty one is rolled under a max wait (see rollable). */
+ * early. An empty one is rolled under a max wait while AlphaVault is healthy (see rollable). */
 export function decideNext(s: State): { action: Action | null; reason: string } {
   const open = s.vault.batches.filter((b) => b.cursor < b.count);
   const due = open.filter((b) => s.now >= b.queuedAt + s.vault.payoutDelay);
@@ -154,8 +158,7 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   if (closable && !s.frontDoor.paused && s.alphaVault.healthy) {
     return { action: { kind: "close" }, reason: "the open batch is ready to close" };
   }
-  const roll = rollable(s);
-  if (roll && !s.frontDoor.paused) {
+  if (rollable(s) && !s.frontDoor.paused) {
     return { action: { kind: "roll" }, reason: `rolling the empty batch so its ${hours(s.closeMaxWaitS)} wait starts from the next deposit` };
   }
 
@@ -164,7 +167,8 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   }
   if (s.vault.paused && due.length) return { action: null, reason: "the vault is paused — not paying out" };
   if (s.frontDoor.paused && closable) return { action: null, reason: "the front door is paused — not closing the batch" };
-  if (s.frontDoor.paused && roll) return { action: null, reason: "the front door is paused — not rolling the empty batch" };
+  if (s.frontDoor.paused && rollDue(s)) return { action: null, reason: "the front door is paused — not rolling the empty batch" };
+  if (!s.alphaVault.healthy && rollDue(s)) return { action: null, reason: "AlphaVault is paused or migrating — not rolling the empty batch" };
   const waits: string[] = [];
   if (open.length) waits.push(`next payout at ${hhmm(Math.min(...open.map((b) => b.queuedAt + s.vault.payoutDelay)))}`);
   if (held) waits.push(`the open batch ${holdWait(s)}`);

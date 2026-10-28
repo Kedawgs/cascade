@@ -138,7 +138,8 @@ export type Rolled = ({ rolled: true } & Done) | { rolled: false; reason: string
 
 /** Rolls the empty open batch (see decideNext), through the same send path as close: the wallet's
  * guards, then a simulation with no value. It re-reads first and sends only while the batch is still
- * empty and can close, the front door is open, and the record has a max wait. A roll is never needed,
+ * empty and can close, the front door is open, AlphaVault is healthy (as close requires), and the record
+ * has a max wait. A roll is never needed,
  * so a race it loses is a skip for a later round: an entry arriving before the simulation (which then
  * would revert), or a deposit or another close landing before it is mined (it reverts on chain; the
  * front door is re-read to tell that from an unexplained revert, which still stops the keeper, as do a
@@ -150,6 +151,8 @@ export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rol
   const fd = s.frontDoor;
   const skip = (reason: string): Rolled => ({ rolled: false, reason });
   if (s.closeMaxWaitS === 0) return skip("the deployment has no max wait: an empty batch is left as it is");
+  // as close(): a redeem landing first can make this a real close
+  if (!s.alphaVault.healthy) return skip("AlphaVault is paused or migrating — not rolling the empty batch");
   if (fd.paused) return skip("the front door is paused");
   if (fd.nDeposits + fd.nRedeems > 0) return skip("the open batch has entries now; the close rule decides it");
   if (!fd.canClose) return skip("the open batch can't close yet");

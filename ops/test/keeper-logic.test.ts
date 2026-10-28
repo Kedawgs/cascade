@@ -252,6 +252,17 @@ describe("the close rule", () => {
       expect(decideNext(fd({ paused: true }, empty))).toEqual({ action: null, reason: "the front door is paused — not rolling the empty batch" });
     });
 
+    it("not while AlphaVault is paused or migrating: a roll that loses the race to a redeem is a real close", () => {
+      const sick = { ...empty, alphaVault: { healthy: false } };
+      expect(decideNext(sick)).toEqual({ action: null, reason: "AlphaVault is paused or migrating — not rolling the empty batch" });
+      // a due payout still waits for AlphaVault as before; staking still goes ahead
+      const due = { ...sick, vault: { ...sick.vault, batches: [{ key: KEY, queuedAt: T - 86_400, cursor: 0, count: 1 }] } };
+      expect(decideNext(due)).toEqual({ action: null, reason: "AlphaVault is paused or migrating — not paying out or closing batches" });
+      expect(decideNext({ ...sick, vault: { ...sick.vault, available: 10n ** 16n } }).action).toEqual({ kind: "stake" });
+      // the test cadence's decisions are unchanged: it never rolls, healthy or not
+      expect(decideNext({ ...sick, closeMaxWaitS: 0 })).toEqual({ action: null, reason: "nothing due: the open batch is empty" });
+    });
+
     it("at most once an interval: not with no interval, nor before the interval has passed", () => {
       expect(decideNext(fd({ batchInterval: 0 }, empty)).action).toBeNull();
       // canClose through a limit (a maxBatchValue below minDeposit), a minute after the last roll

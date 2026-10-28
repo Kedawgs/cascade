@@ -181,6 +181,12 @@ describe("keeper actions", () => {
       await expect(roll(deps(empty()), unverified)).rejects.toThrow(/not complete and verified/);
     });
 
+    it("re-checks AlphaVault's health as close does: a paused or migrating AlphaVault is a skip, nothing sent", async () => {
+      const d = deps({ ...empty(), alphaVault: { healthy: false } });
+      expect(await roll(d, rec)).toEqual({ rolled: false, reason: "AlphaVault is paused or migrating — not rolling the empty batch" });
+      expect(d.send).not.toHaveBeenCalled();
+    });
+
     it("an entry that lands first makes the estimate refuse: a skip, not a failure; other refusals still stop", async () => {
       const refused = vi.fn(async (): Promise<Sent> => {
         throw new SendRefused("estimate", "Base: roll the empty open batch would fail, nothing sent (InsufficientFee())");

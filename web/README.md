@@ -45,6 +45,10 @@ batching and Multicall3 on both; not the lite node, which keeps only minutes of 
 `hooks.ts` wraps it in react-query. Amounts that feed a transaction are exact `bigint`s; numbers are
 for display only (`units.ts`).
 
+- **First paint:** the APY and the protocol figures are also read once on the server (`snapshot.ts`,
+  at `pnpm build`; under `pnpm dev` at most every ten minutes) and seeded into react-query, so the
+  first HTML has them and nothing moves when the browser's own reads replace them. A figure the build
+  couldn't read is left to the browser.
 - **Base logs** come from a separate public RPC, `https://base-rpc.publicnode.com` (`baseLogs` in
   `config.ts`), because `https://mainnet.base.org` refuses `eth_getLogs`. Everything else on Base is
   read by `eth_call` and by transaction hash.

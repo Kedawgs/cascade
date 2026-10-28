@@ -247,6 +247,29 @@ describe("keeper actions", () => {
       await runLoop({ ...racing({ nDeposits: 1 }), log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
       expect(lines.at(-1)).toBe(`Not rolled: ${reason}`);
     });
+
+    it("a reverted roll whose re-read fails still stops the keeper with the revert and its transaction hash", async () => {
+      let mined = false;
+      const reverted = new RevertedOnChain("base", "roll the empty open batch (restart its timer)", SENT.hash);
+      const send = vi.fn(async (): Promise<Sent> => {
+        mined = true;
+        throw reverted;
+      });
+      const d = {
+        ...deps(empty(), send),
+        readState: async () => {
+          if (mined) throw new Error("base eth_call: header not found");
+          return empty();
+        },
+      };
+      const err = await roll(d, rec).catch((e: unknown) => e);
+      expect(err).toBe(reverted);
+      expect((err as Error).message).toContain(SENT.hash);
+      const lines: string[] = [];
+      mined = false;
+      await runLoop({ ...d, log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+      expect(lines.at(-1)).toBe(`Stopped: ${reverted.message}`);
+    });
   });
 
   it("formatStatus says when the keeper holds a batch the front door would let close", () => {

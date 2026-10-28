@@ -9,7 +9,7 @@ import app from "./App.module.css";
 import card from "./StakeCard.module.css";
 import styles from "./RewardsCard.module.css";
 
-const EMPTY = "Your rewards show here once the first ones are collected. Cascade collects them for everyone and adds them to your balance automatically.";
+const EMPTY = "Your rewards show here once the first ones are collected. Cascade collects them for everyone and adds them to your balance.";
 const SHOW_DAYS = 14;
 
 /** The TAO price, live. */
@@ -63,8 +63,8 @@ function RewardsForAccount({ account }: { account: string }) {
       </div>
       {v3 && waiting !== undefined && (
         <p className={styles.waiting}>
-          Earned, not yet collected: {formatTao(waiting, 6)} TAO ({formatUsd(waiting * position.data.taoPriceUsd)}). Cascade collects rewards for everyone, about
-          monthly once enough is waiting, and adds them to your balance.
+          Earned, not yet collected: {formatTao(waiting, 6)} TAO ({formatUsd(waiting * position.data.taoPriceUsd)}). Cascade collects rewards for everyone when
+          enough is waiting and adds them to your balance.
         </p>
       )}
       {recent.length === 0 ? (

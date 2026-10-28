@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { notConfiguredData } from "./live";
-import { createSnapshotLoader, type SnapshotDeps } from "./snapshot";
+import { createSnapshotLoader, type Snapshot, type SnapshotDeps } from "./snapshot";
 import type { CascadeData, ProtocolStats } from "./types";
 
 const STATS: ProtocolStats = { totalStakedTao: 12.5, taoPriceUsd: 255 };
@@ -81,17 +81,21 @@ describe("loadSnapshot", () => {
   });
 
   it("gives up on both under one deadline, not one each", async () => {
-    let clockAtEnd = 0;
-    const { load } = loader({
-      createData: () => source(never, never),
-      timeoutMs: 40,
-      now: () => (clockAtEnd = Date.now()),
-    });
-    const started = Date.now();
-    const s = await load();
-    expect(s.apyPercent).toBeUndefined();
-    expect(s.stats).toBeUndefined();
-    expect(clockAtEnd - started).toBeLessThan(500);
+    vi.useFakeTimers();
+    try {
+      // the APY arrives just before the deadline, the protocol figures never do
+      const late = () => new Promise<number>((resolve) => setTimeout(resolve, 160, 5.4));
+      const { load } = loader({ createData: () => source(late, never), timeoutMs: 200 });
+      let done: Snapshot | undefined;
+      void load().then((s) => (done = s));
+      await vi.advanceTimersByTimeAsync(199);
+      expect(done).toBeUndefined();
+      // done at 200 ms: a deadline each, one read after the other, would take 160 + 200 ms
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toEqual({ at: 1_000, apyPercent: 5.4 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads once per process, then again once the snapshot is ten minutes old", async () => {

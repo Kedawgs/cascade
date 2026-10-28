@@ -23,7 +23,7 @@ export function howItWorksSteps(d: Pick<Deployment, "batchMaxWaitS"> | null): { 
     },
     {
       title: "Earn, and leave any time",
-      body: "Staking rewards are added to your balance automatically. Unstake back to USDC whenever you like.",
+      body: "Rewards are collected for everyone and added to your balance. Unstake back to USDC whenever you like.",
     },
   ];
 }

@@ -1,0 +1,181 @@
+/* ---------- question list ---------- */
+.list {
+  border-top: 1px solid var(--line);
+}
+
+.item {
+  border-bottom: 1px solid var(--line);
+  scroll-margin-top: 24px;
+}
+
+.q {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 0;
+  list-style: none;
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.q::-webkit-details-marker {
+  display: none;
+}
+
+.q:hover {
+  color: var(--water-deep);
+}
+
+.q:focus-visible {
+  outline: 2px solid var(--water);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+/* a plus that turns into a minus */
+.sign {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.sign::before,
+.sign::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  transition: transform 0.2s ease;
+}
+
+.sign::after {
+  transform: rotate(90deg);
+}
+
+.item[open] .sign::after {
+  transform: rotate(0deg);
+}
+
+.a {
+  max-width: 68ch;
+  padding: 0 0 22px;
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.a p {
+  margin: 0 0 12px;
+}
+
+.a p:last-child {
+  margin-bottom: 0;
+}
+
+.a a {
+  color: var(--water-deep);
+  text-underline-offset: 3px;
+}
+
+/* the app's narrower column */
+.compact .q {
+  padding: 16px 0;
+  font-size: 16px;
+}
+
+.compact .a {
+  padding-bottom: 16px;
+  font-size: 15px;
+}
+
+/* ---------- the /faq page ---------- */
+.head {
+  padding-top: 40px;
+  padding-bottom: 8px;
+}
+
+.h1 {
+  margin: 0 0 14px;
+  font-size: clamp(40px, 5vw, 60px);
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.lede {
+  max-width: 52ch;
+  margin: 0 0 28px;
+  font-size: 19px;
+  color: var(--ink-2);
+}
+
+.jump {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.jump a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.jump a:hover {
+  background: var(--mist);
+}
+
+.group {
+  padding-top: 56px;
+  scroll-margin-top: 24px;
+}
+
+.groupTitle {
+  margin: 0 0 8px;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.updated {
+  margin: 56px 0 0;
+  font-size: 14px;
+  color: var(--ink-3);
+}
+
+.pageEnd {
+  padding-bottom: 96px;
+}
+
+@media (max-width: 999px) {
+  .q {
+    font-size: 17px;
+  }
+
+  .a {
+    font-size: 16px;
+  }
+
+  .group {
+    padding-top: 40px;
+  }
+}

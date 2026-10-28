@@ -368,11 +368,15 @@ describe("a roll that reverts on chain", () => {
     };
     return keeperDeps(ctx, launch, recordPath());
   }
-  const reason = `a deposit or another close landed first; the roll reverted (transaction ${HASH})`;
+  const reason = `an entry or another close landed first; the roll reverted (transaction ${HASH})`;
 
   it("is a skip when a deposit landed first", async () => {
     const deposited = racing({ openDeposits: () => [{ user: alice, amount: 10n ** 16n }], openBatch: () => [7n, BigInt(T - 7200), 10n ** 16n, 0n, 1n, 0n] });
     expect(await roll(deposited, launch)).toEqual({ rolled: false, reason });
+  });
+
+  it("is a skip when a redeem landed first", async () => {
+    expect(await roll(racing({ openRedeems: () => [{ user: alice, amount: 10n ** 22n }] }), launch)).toEqual({ rolled: false, reason });
   });
 
   it("is a skip when another roll or close landed first", async () => {

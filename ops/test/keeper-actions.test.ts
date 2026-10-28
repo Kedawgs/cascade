@@ -228,7 +228,7 @@ describe("keeper actions", () => {
       );
     });
 
-    it("a roll that reverts on chain because a deposit or another close landed first is a skip; otherwise it stops", async () => {
+    it("a roll that reverts on chain because an entry (a deposit or a redeem) or another close landed first is a skip; otherwise it stops", async () => {
       /** The chain as read before the roll is mined, then after: `after` changes the front door. */
       const racing = (after: Partial<State["frontDoor"]>) => {
         let mined = false;
@@ -239,7 +239,7 @@ describe("keeper actions", () => {
         });
         return { ...deps(before, send), readState: async () => (mined ? { ...before, frontDoor: { ...before.frontDoor, ...after } } : before) };
       };
-      const reason = `a deposit or another close landed first; the roll reverted (transaction ${SENT.hash})`;
+      const reason = `an entry or another close landed first; the roll reverted (transaction ${SENT.hash})`;
       expect(await roll(racing({ nDeposits: 1 }), rec)).toEqual({ rolled: false, reason });
       expect(await roll(racing({ canClose: false, openStart: T }), rec)).toEqual({ rolled: false, reason });
       await expect(roll(racing({}), rec)).rejects.toThrow(/reverted on chain/);

@@ -140,7 +140,7 @@ export type Rolled = ({ rolled: true } & Done) | { rolled: false; reason: string
  * guards, then a simulation with no value. It re-reads first and sends only while the batch is still
  * empty and can close, the front door is open, AlphaVault is healthy (as close requires), and the record
  * has a max wait. A roll is never needed, so a race it loses is a skip for a later round: an entry
- * arriving before the simulation (which then would revert), or a deposit or another close landing before
+ * arriving before the simulation (which then would revert), or an entry or another close landing before
  * it is mined (it reverts on chain; the front door is re-read to tell that from an unexplained revert,
  * which still stops the keeper, as do a re-read that fails, a missing receipt and the send guards'
  * refusals). If a redeem lands between the simulation and the transaction, its fee pot may pay for a
@@ -170,7 +170,7 @@ export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rol
         throw e;
       }
       if (after.nDeposits + after.nRedeems > 0 || !after.canClose) {
-        return skip(`a deposit or another close landed first; the roll reverted (transaction ${e.hash})`);
+        return skip(`an entry or another close landed first; the roll reverted (transaction ${e.hash})`);
       }
     }
     throw e;

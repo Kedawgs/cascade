@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import type { FaqItem } from "@/lib/faq";
+import { faqHashTarget } from "@/lib/faq-hash";
 import { parseInlineLinks } from "@/lib/inline-links";
 import styles from "./Faq.module.css";
 
@@ -27,15 +28,20 @@ function Inline({ text }: { text: string }) {
 /** Questions that open in place. A link to `#<id>` opens its answer. `compact` suits the app's narrower column. */
 export function FaqItems({ items, compact = false }: { items: readonly FaqItem[]; compact?: boolean }) {
   useEffect(() => {
+    const ids = items.map((i) => i.id);
     const open = () => {
-      const id = decodeURIComponent(window.location.hash.slice(1));
-      const el = id ? document.getElementById(id) : null;
-      if (el instanceof HTMLDetailsElement) el.open = true;
+      try {
+        const id = faqHashTarget(window.location.hash, ids);
+        const el = id ? document.getElementById(id) : null;
+        if (el instanceof HTMLDetailsElement) el.open = true;
+      } catch {
+        // a hash that can't be read leaves the answers closed; it never takes the page down
+      }
     };
     open();
     window.addEventListener("hashchange", open);
     return () => window.removeEventListener("hashchange", open);
-  }, []);
+  }, [items]);
 
   return (
     <div className={`${styles.list} ${compact ? styles.compact : ""}`}>

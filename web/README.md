@@ -47,11 +47,19 @@ out the week; an urgent fix can be let through by name with `minimumReleaseAgeEx
 
 The site is hosted as static files on Cloudflare Pages, which reads `out/_headers`. `public/_headers`
 sets, on every path, a Content-Security-Policy (only this site's scripts; connections only to the
-RPCs above and Base Account's `rpc.wallet.coinbase.com`; no framing, plugins, other `<base>` or form
-targets), HSTS, `nosniff`, a referrer policy and a minimal permissions policy. After `next build`,
-`scripts/csp-headers.mjs` adds each page's own policy, which allows only that page's inline scripts
-by their sha256 hashes (Next writes a few into every page, different in every build). Styles keep
-`'unsafe-inline'`: the pages have inline `style` attributes and Base Account injects a `<style>`.
+RPCs above and Base Account's wallet hosts, `*.wallet.coinbase.com`; no framing, plugins, other
+`<base>` or form targets), HSTS, `nosniff`, a referrer policy and a minimal permissions policy. After
+`next build`, `scripts/csp-headers.mjs` adds each page's own policy, which allows only that page's
+inline scripts by their sha256 hashes (Next writes a few into every page, different in every build).
+Styles keep `'unsafe-inline'`: the pages have inline `style` attributes and Base Account injects a
+`<style>`.
+
+Base Account asks `rpc.wallet.coinbase.com` for a batch's status before it connects. Once
+connected, it sends what it doesn't answer itself (a batch's status among them) to the RPC its popup
+names, which its own constants give as `chain-proxy.wallet.coinbase.com`: both are under
+`*.wallet.coinbase.com`. That can't be checked without signing in to a Base Account. **Before
+launch, test one real Base Account stake on a Pages preview**, with the browser console open for CSP
+errors.
 
 ## Routes
 

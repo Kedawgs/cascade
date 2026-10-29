@@ -6,12 +6,16 @@
 # comma, which the browser enforces as two policies at once, so on a page only its own inline
 # scripts run. A path with no page of its own (the 404 page) keeps this one alone.
 #
-# connect-src: the public RPCs in src/lib/cascade/config.ts (RPC), and Base Account's
-# rpc.wallet.coinbase.com, which it asks for the status of a batch of calls (its popup at
-# keys.coinbase.com is a window, not a connection). Browser wallets talk to the page through the
-# extension, not the network. The site has no WalletConnect connector.
+# connect-src: the public RPCs in src/lib/cascade/config.ts (RPC), and Base Account's wallet hosts
+# (*.wallet.coinbase.com). Before it connects, the Base Account SDK asks rpc.wallet.coinbase.com for
+# a batch's status. Once connected, it sends every request it doesn't answer itself (a batch's
+# status among them) to the RPC its popup names for the chain (the SDK's own constants give
+# chain-proxy.wallet.coinbase.com), falling back to viem's default for Base, mainnet.base.org. Its
+# popup at keys.coinbase.com is a window, not a connection, and its own check of the page's headers
+# fetches the page itself ('self'). Browser wallets talk to the page through the extension, not the
+# network. The site has no WalletConnect connector.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://mainnet.base.org https://base-rpc.publicnode.com https://archive.chain.opentensor.ai https://rpc.wallet.coinbase.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://mainnet.base.org https://base-rpc.publicnode.com https://archive.chain.opentensor.ai https://*.wallet.coinbase.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
   Strict-Transport-Security: max-age=31536000; includeSubDomains
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY

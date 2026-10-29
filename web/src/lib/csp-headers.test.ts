@@ -20,9 +20,11 @@ describe("the committed headers", () => {
     expect(policy.get("default-src")).toEqual(["'self'"]);
   });
 
-  it("let the page connect only to itself, the site's RPCs and Base Account's call-status endpoint", () => {
+  it("let the page connect only to itself, the site's RPCs and Base Account's wallet hosts", () => {
     const rpcs = [...new Set(Object.values(RPC).map((u) => new URL(u).origin))];
-    expect(new Set(policy.get("connect-src"))).toEqual(new Set(["'self'", ...rpcs, "https://rpc.wallet.coinbase.com"]));
+    // Base Account asks rpc.wallet.coinbase.com before it connects, and after it the RPC its popup
+    // names (chain-proxy.wallet.coinbase.com), for a batch's status among others
+    expect(new Set(policy.get("connect-src"))).toEqual(new Set(["'self'", ...rpcs, "https://*.wallet.coinbase.com"]));
   });
 
   it("set HSTS, nosniff, a referrer policy, a minimal permissions policy and no framing on every path", () => {

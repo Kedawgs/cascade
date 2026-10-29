@@ -66,6 +66,23 @@
   }
 }
 
+/* the narrowest phones: smaller figures, so "12,345.67 USDC" or "1,234.5678 TAO" fits its half; one still
+   wider is cut short at its end (its smaller part first) rather than running under the next column, and
+   stays one line, as its "–" does */
+@media (max-width: 360px) {
+  .v {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 15px;
+  }
+
+  .v small {
+    margin-left: 6px;
+    font-size: 12px;
+  }
+}
+
 .walletTao {
   margin: 0 24px 8px;
   padding: 12px 14px;

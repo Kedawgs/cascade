@@ -1,6 +1,6 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type AbiFunction, type Address, encodeFunctionData, getAddress, type Hex, numberToHex, parseAbi, toFunctionSignature, zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
 import { loadArtifact } from "../src/artifacts.ts";
@@ -224,6 +224,18 @@ describe("deploy plans a launch only with every role in place", () => {
     await expect(deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch" }, w.deps)).rejects.toThrow(/a launch plan needs its roles/);
     expect(w.asked).toEqual([]);
     expect(loadRecord(w.recordPath)).toBeNull();
+  });
+
+  it("deploy --new-plan without the roles refuses before archiving the old plan", async () => {
+    const w = world();
+    await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
+    const before = readFileSync(w.recordPath, "utf8");
+    const refuse = () => {
+      throw new Error("OPS_LAUNCH_TREASURY is not set");
+    };
+    await expect(deploy(w.ctx, w.recordPath, { newPlan: true, v3: true, cadence: "launch", roles: refuse }, w.deps)).rejects.toThrow(/OPS_LAUNCH_TREASURY/);
+    expect(readFileSync(w.recordPath, "utf8")).toBe(before);
+    expect(readdirSync(dirname(w.recordPath)).filter((n) => n.includes("abandoned"))).toEqual([]);
   });
 
   it("refuses a treasury with contract code on either chain before planning", async () => {

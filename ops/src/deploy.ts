@@ -323,6 +323,9 @@ export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: Dep
     const [has, wants] = v3 ? ["v2", "v3"] : ["v3", "v2"];
     throw new Error(`${path} holds a ${has} plan, not ${wants}: check OPS_DEPLOYMENT (a deployment named v3-… is v3); nothing sent`);
   }
+  // a new launch plan's roles, refused before anything else is read or the old plan archived: no plan
+  // without every role in place
+  const launchRoles = v3 && opts.cadence === "launch" && (!rec || opts.newPlan) ? await rolesForNewLaunch(ctx, opts) : undefined;
   if (rec && opts.newPlan) {
     ctx.log(`Archived the old plan to ${archiveRecord(path)}`);
     rec = null;
@@ -334,8 +337,7 @@ export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: Dep
   }
   if (!rec) {
     const launch = v3 && opts.cadence === "launch";
-    // refused before anything else is read: no plan without every role in place
-    const roles = launch ? await rolesForNewLaunch(ctx, opts) : undefined;
+    const roles = launchRoles;
     const baseNonce = await nonceOf(ctx.rpc, "base", WALLET);
     const bitNonce = await nonceOf(ctx.rpc, "bittensor", WALLET);
     // in both plans the vault is the second create on Bittensor

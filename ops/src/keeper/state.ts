@@ -183,18 +183,41 @@ export function startBlock(rec: DeploymentRecord): bigint {
 
 /** The keeper's reads and sends. Base is never scanned for logs here (its public RPC allows 200
  * blocks a query): bridge messages come from the record, which the keeper fills as it sends. The
- * delivery candidates are kept for the life of these deps (one `run` loop), so each round scans only
- * the blocks since the last, and a few before them (OVERLAP). */
+ * vault's payout events (and with them the delivery candidates) are kept for the life of these deps
+ * (one `run` loop), so each round scans only the blocks since the last, and a few before them (OVERLAP). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
-  let candidates: Address[] = [];
-  /** The last Bittensor block scanned for Redeemed events, once a scan has finished. */
-  let scannedTo: bigint | undefined;
   /** Each later scan starts this many blocks back, so a block a lagging (load-balanced) node hadn't
-   * indexed yet is read again rather than skipped for the whole run; the users are deduplicated. */
+   * indexed yet is read again rather than skipped for the whole run; a log read twice is kept once. */
   const OVERLAP = 10n;
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
+
+  /** One of the vault's events since the deploy block, kept as it is found: each call scans from the last
+   * block it finished (less OVERLAP) to the head, so a failed scan is retried from the same block. */
+  function vaultLogs(name: string): () => Promise<readonly ScannedLog[]> {
+    const found: ScannedLog[] = [];
+    const seen = new Set<string>();
+    let scannedTo: bigint | undefined;
+    return async () => {
+      const latest = hexToBigInt((await ctx.rpc.request("bittensor", "eth_blockNumber", [])) as Hex);
+      const start = startBlock(rec);
+      const from = scannedTo === undefined || scannedTo + 1n - OVERLAP < start ? start : scannedTo + 1n - OVERLAP;
+      if (from <= latest) {
+        for (const l of await scanLogs(ctx, "bittensor", a.vault, event(VAULT, name), from, [], latest)) {
+          const id = `${l.blockNumber}:${l.transactionHash}:${l.logIndex}`;
+          if (!seen.has(id)) found.push(l);
+          seen.add(id);
+        }
+      }
+      // only once the whole range is in
+      scannedTo = latest;
+      return found;
+    };
+  }
+  const queuedLogs = vaultLogs("PayoutBatchQueued");
+  const bouncedLogs = vaultLogs("DepositBounced");
+  const redeemedLogs = vaultLogs("Redeemed");
 
   async function messages(): Promise<KeeperState["detail"]["messages"]> {
     const out: KeeperState["detail"]["messages"] = [];
@@ -223,7 +246,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const pending = (await r("bittensor", a.vault, VAULT, "pendingPayouts")) as bigint;
       const balance = await balanceOf(ctx.rpc, "bittensor", a.vault);
       const payoutDelay = Number(await r("bittensor", a.vault, VAULT, "payoutDelay"));
-      const queued = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "PayoutBatchQueued"), startBlock(rec));
+      const queued = await queuedLogs();
       const batches = [];
       for (const q of queued) {
         const key = q.args.key as Hex;
@@ -269,9 +292,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     nonce: (chain) => nonceOf(ctx.rpc, chain, WALLET),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
-      const from = startBlock(rec);
-      const bounced = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "DepositBounced"), from);
-      const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), from);
+      const bounced = await bouncedLogs();
+      const redeemed = await redeemedLogs();
       const shape = (kind: PayoutLog["kind"]) => (l: ScannedLog): PayoutLog => ({
         kind,
         key: l.args.key as Hex,
@@ -309,16 +331,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     async deliveryCandidates() {
       if (!isPlanV3(rec.plan)) return [];
-      const latest = hexToBigInt((await ctx.rpc.request("bittensor", "eth_blockNumber", [])) as Hex);
-      const start = startBlock(rec);
-      const from = scannedTo === undefined || scannedTo + 1n - OVERLAP < start ? start : scannedTo + 1n - OVERLAP;
-      if (from <= latest) {
-        const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), from, [], latest);
-        candidates = uniqueUsers([...candidates, ...redeemed.map((l) => l.args.user as Address)]);
-      }
-      // only once the whole range is in: a failed scan is retried from the same block
-      scannedTo = latest;
-      return candidates;
+      return uniqueUsers((await redeemedLogs()).map((l) => l.args.user as Address));
     },
     async readDelivery(user) {
       if (!isPlanV3(rec.plan)) throw new Error("USDC delivery needs a v3 deployment");

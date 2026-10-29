@@ -5,17 +5,21 @@ import {
   type AbiFunction,
   type AbiParameter,
   type Address,
+  encodeAbiParameters,
+  encodeEventTopics,
   encodeFunctionResult,
   encodePacked,
   getAddress,
   type Hex,
   hexToBigInt,
   numberToHex,
+  parseAbiParameters,
   toFunctionSelector,
 } from "viem";
 import { describe, expect, it } from "vitest";
 import { BASE_V3, type ChainName, paths, targets, WALLET } from "../src/config.ts";
 import { roll } from "../src/keeper/actions.ts";
+import { rebuildPayouts } from "../src/keeper/payouts.ts";
 import { KEEPER_READ_ABIS, keeperDeps, scanLogs } from "../src/keeper/state.ts";
 import { buildPlan, buildPlanV3, closeMaxWaitS } from "../src/plan.ts";
 import { type DeploymentRecord, loadRecord, saveRecord } from "../src/record.ts";
@@ -38,10 +42,11 @@ function defaultFor(p: AbiParameter): unknown {
   return 0n;
 }
 
-/** Answers every view the keeper reads with zero values; getExecutionState answers SUCCESS. */
-function fakeChains(onLogs: (chain: ChainName, from: bigint, to: bigint) => unknown[] = () => []) {
+/** Answers every view the keeper reads with zero values; getExecutionState answers SUCCESS. eth_getLogs
+ * is answered by `onLogs`, with the query's topics; the head is `head()` on both chains. */
+function fakeChains(onLogs: (chain: ChainName, from: bigint, to: bigint, topics: (Hex | null)[]) => unknown[] = () => [], head = () => 1_000) {
   const fns = (Object.values(KEEPER_READ_ABIS).flat() as unknown as AbiFunction[]).filter((i) => i.type === "function");
-  const calls: { chain: ChainName; method: string }[] = [];
+  const calls: { chain: ChainName; method: string; fn?: string }[] = [];
   const rpc: Rpc = {
     async request(chain, method, params) {
       calls.push({ chain, method });
@@ -50,18 +55,19 @@ function fakeChains(onLogs: (chain: ChainName, from: bigint, to: bigint) => unkn
           const data = (params[0] as { data: Hex }).data;
           const fn = fns.find((f) => toFunctionSelector(f) === data.slice(0, 10));
           if (!fn) throw new Error(`unexpected call ${data.slice(0, 10)}`);
+          calls[calls.length - 1].fn = fn.name;
           const result = fn.name === "getExecutionState" ? 2 : fn.outputs.length === 1 ? defaultFor(fn.outputs[0]) : fn.outputs.map(defaultFor);
           return encodeFunctionResult({ abi: [fn], functionName: fn.name, result } as never);
         }
         case "eth_getBalance":
           return "0x0";
         case "eth_blockNumber":
-          return numberToHex(1_000);
+          return numberToHex(head());
         case "eth_getBlockByNumber":
           return { timestamp: "0x1" };
         case "eth_getLogs": {
-          const q = params[0] as { fromBlock: Hex; toBlock: Hex };
-          return onLogs(chain, hexToBigInt(q.fromBlock), hexToBigInt(q.toBlock));
+          const q = params[0] as { fromBlock: Hex; toBlock: Hex; topics: (Hex | null)[] };
+          return onLogs(chain, hexToBigInt(q.fromBlock), hexToBigInt(q.toBlock), q.topics);
         }
       }
       throw new Error(`unexpected ${method}`);
@@ -119,6 +125,53 @@ describe("keeper reads", () => {
     await expect(keeperDeps(g.ctx, unknown, recordPath).readState()).rejects.toThrow(refused);
     await expect(keeperDeps(g.ctx, unknown, recordPath).payoutLogs()).rejects.toThrow(refused);
     expect(g.calls.some((c) => c.method === "eth_getLogs")).toBe(false);
+  });
+
+  it("scans the vault's payout events incrementally: each later round reads only the new blocks, from 10 back, keeping each log once", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    const VAULT_EVENTS = KEEPER_READ_ABIS.VAULT.filter((i) => i.type === "event");
+    const KEY: Hex = `0x${"ab".repeat(32)}`;
+    const bob: Address = "0x000000000000000000000000000000000000b0b0";
+    const topics = (eventName: string, args?: Record<string, unknown>) => encodeEventTopics({ abi: VAULT_EVENTS, eventName, args } as never) as Hex[];
+    const at = (block: number, t: Hex[], data: Hex) => ({ address: plan.addresses.vault, topics: t, data, blockNumber: numberToHex(block), logIndex: "0x0", transactionHash: `0x${"bb".repeat(32)}` });
+    // one payout batch, queued with its one bounced deposit in block 2,595: inside the next round's overlap
+    const logs = [
+      at(2_595, topics("PayoutBatchQueued", { key: KEY, sourceChain: 8453n }), encodeAbiParameters(parseAbiParameters("uint64, uint32, uint256, uint256"), [7n, 1, 5n, 1n])),
+      at(2_595, topics("DepositBounced", { key: KEY, user: bob }), encodeAbiParameters(parseAbiParameters("uint256"), [5n])),
+    ];
+    const names = Object.fromEntries(["PayoutBatchQueued", "DepositBounced", "Redeemed"].map((n) => [topics(n)[0], n]));
+    let head = 2_600;
+    const scans: [string, bigint, bigint][] = [];
+    const f = fakeChains(
+      (_chain, from, to, t) => {
+        scans.push([names[t[0] as Hex], from, to]);
+        return logs.filter((l) => l.topics[0] === t[0] && BigInt(l.blockNumber) >= from && BigInt(l.blockNumber) <= to);
+      },
+      () => head,
+    );
+    const deps = keeperDeps(f.ctx, rec, recordPath);
+    await deps.readState();
+    const first = await deps.payoutLogs();
+    // the first round reads from the deploy block (10)
+    expect(scans.filter(([name]) => name === "PayoutBatchQueued")).toEqual([
+      ["PayoutBatchQueued", 10n, 1_009n],
+      ["PayoutBatchQueued", 1_010n, 2_009n],
+      ["PayoutBatchQueued", 2_010n, 2_600n],
+    ]);
+    scans.length = 0;
+    head = 2_650;
+    await deps.readState();
+    const second = await deps.payoutLogs();
+    expect(scans).toEqual([
+      ["PayoutBatchQueued", 2_591n, 2_650n],
+      ["DepositBounced", 2_591n, 2_650n],
+      ["Redeemed", 2_591n, 2_650n],
+    ]);
+    // read again in the overlap, the bounced deposit is listed once: twice, the rebuilt list would not match the vault's
+    expect(second).toEqual(first);
+    expect(rebuildPayouts(second, KEY)).toEqual([{ user: bob, shares: 0n, assets: 5n }]);
+    // and its batch is read once a round
+    expect(f.calls.filter((c) => c.fn === "getPayoutBatch")).toHaveLength(2);
   });
 
   it("adds a bridge message to the record as it is on disk now, never writing back the copy the command loaded", async () => {

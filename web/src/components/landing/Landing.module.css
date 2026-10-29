@@ -589,10 +589,11 @@ html:has(.navBar) {
     display: none;
   }
 
+  /* the row gap keeps wrapped lines' tap targets (below) from overlapping */
   .rowLinks {
     display: flex;
     flex-wrap: wrap;
-    gap: 0 32px;
+    gap: 20px 32px;
     padding-bottom: 6px;
     font-size: 16px;
   }
@@ -601,6 +602,11 @@ html:has(.navBar) {
   .rowLinks a {
     margin: -10px 0;
     padding: 10px 0;
+  }
+
+  /* drawn around the text, not the padding, so the sticky bar doesn't cover its top edge */
+  .rowLinks a:focus-visible {
+    outline-offset: -8px;
   }
 
   .navCta {
@@ -714,7 +720,7 @@ html:has(.navBar) {
 @media (max-width: 480px) {
   .links {
     justify-content: space-between;
-    gap: 12px;
+    gap: 20px 12px;
     font-size: 15px;
   }
 }

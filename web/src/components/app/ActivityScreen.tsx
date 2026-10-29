@@ -278,7 +278,7 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
               aria-current={t.key === tab ? "page" : undefined}
             >
               {t.label}
-              <span className="sr-only">: </span>
+              {items && <span className="sr-only">: </span>}
               <span className={styles.count}>{items ? items.length : ""}</span>
               {t.key === "unstakes" && withdrawals.data?.some(offersClaim) && (
                 <span className={styles.attention}>

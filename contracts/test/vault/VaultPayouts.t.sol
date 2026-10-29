@@ -347,25 +347,30 @@ contract VaultPayoutsTest is VaultTestBase {
         assertEq(vault.grossAssets(), grossBefore);
     }
 
+    /// An entry its share of the fee leaves with nothing is dust and stays in the vault, while the rest of
+    /// its chunk goes out. Every burned redeem is worth at least 0.01 TAO, so such an entry is a bounced
+    /// deposit: here bob's 1-rao deposit, bounced because a hotkey swap moved 600e18 of the stake outside
+    /// the set.
     function test_processPayouts_individualDustEntryDropped() public {
-        // A = 900e18, S = 9e26: 1e18 → 1e24 shares for bob, left liquid
-        depositVia(bob, 1e18);
-        // A = 901e18, S = 9.01e26: alice 5e24 → 5e18; bob 1e15 → 1e9 (one rao)
-        bytes32 k2 = redeemVia(entries2(alice, 5e24, bob, 1e15));
+        vm.prank(address(vault));
+        staking.moveStake(HK1, HK5, 0, 0, 600_000_000_000);
+        // A = 400e18 - 100e18 pending = 300e18 against S = 9e26, below half the launch price: bob's 1e9
+        // bounces; alice 5e24 * (300e18 + 1) / (9e26 + 1e6) = 1_666_666_666_666_666_666 → 1_666_666_666e9
+        bytes32 k2 = deliver(BASE, frontDoor, ++nextBatchId, entries1(bob, 1e9), entries1(alice, 5e24));
         vm.warp(block.timestamp + 24 hours);
 
-        // sum = 5_000_000_001_000_000_000. bob: ceil(1e9 * 1e15 / sum) = 200_000, 999_800_000 floors to 0 → dust.
-        // alice: ceil(5e33 / sum) = 999_999_999_800_001 (5e33 - sum * 999_999_999_800_000 = 2e14 > 0);
-        // 5e18 - 999_999_999_800_001 = 4_999_000_000_000_199_999 floors to 4_999e15.
+        // sum = 1_666_666_667e9. bob: ceil(1e9 * 1e15 / sum) = 600_000, 999_400_000 floors to 0 → dust.
+        // alice: ceil(1_666_666_666e9 * 1e15 / sum) = 999_999_999_400_001; 1_666_666_666e9 less that is
+        // 1_665_666_666_000_599_999, which floors to 1_665_666_666e9.
         vm.expectEmit(address(vault));
         emit CascadeVault.PayoutDust(k2, bob, 1e9);
         vm.expectEmit(address(vault));
-        emit CascadeVault.PayoutChunkSent(k2, 0, 2, 5_000_000_001_000_000_000, 4_999e15, 1e15);
-        process(k2, pay2(alice, 5e24, 5e18, bob, 1e15, 1e9), 10);
+        emit CascadeVault.PayoutChunkSent(k2, 0, 2, 1_666_666_667e9, 1_665_666_666e9, 1e15);
+        process(k2, pay2(bob, 0, 1e9, alice, 5e24, 1_666_666_666e9), 10);
 
-        assertEq(bridge.lastMessage(), CascadeMessages.encodePayouts(k2, 0, entries1(alice, 4_999e15)));
-        assertEq(bridge.lastAmount(), 4_999e15);
-        assertEq(bridge.lastValue(), 5e18);
+        assertEq(bridge.lastMessage(), CascadeMessages.encodePayouts(k2, 0, entries1(alice, 1_665_666_666e9)));
+        assertEq(bridge.lastAmount(), 1_665_666_666e9);
+        assertEq(bridge.lastValue(), 1_665_666_666e9 + 1e15);
         assertDeleted(k2);
         assertEq(vault.pendingPayouts(), 100e18);
     }

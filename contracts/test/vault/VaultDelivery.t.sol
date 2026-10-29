@@ -562,6 +562,50 @@ contract VaultDeliveryTest is VaultTestBase {
         redeemVia(alice, 1e27);
     }
 
+    /// A redeem worth less than 0.01 TAO is deferred, not burned: once it paid its share of the payout fee
+    /// it could fall below the bridge's conversion floor (0.002 TAO), and then processPayouts would revert
+    /// for its chunk every time. That holds however it got small: asked small, clipped to a small balance,
+    /// or clipped to the last sliver of the window's allowance. The price stays exactly 1e-6 TAO per share
+    /// throughout (A * 1e6 == S), so s shares are worth s / 1e6.
+    function test_delivery_redeemBelowMinimumDeferred() public {
+        depositVia(alice, 1_000e18);
+        // A = 1_000e18, S = 1e27: 0.005e18 * (1e27 + 1e6) / (1_000e18 + 1) = 5e21
+        depositVia(bob, 0.005e18);
+        assertEq(vault.balanceOf(bob), 5e21);
+
+        // asked small (9.999e21 shares, 0.009999 TAO), and clipped to bob's 5e21 (0.005 TAO)
+        bytes32 key = keyOf(BASE, frontDoor, 3, noEntries(), entries2(alice, 9.999e21, bob, 1e25));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemDeferred(key, alice, 9.999e21);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemDeferred(key, bob, 1e25);
+        deliver(BASE, frontDoor, 3, noEntries(), entries2(alice, 9.999e21, bob, 1e25));
+        assertEq(vault.getPayoutBatch(key).count, 0);
+        assertEq(vault.balanceOf(alice), 1e27);
+        assertEq(vault.balanceOf(bob), 5e21);
+        (uint64 start,) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(start, 0);
+
+        // exactly 0.01 TAO burns
+        key = keyOf(BASE, frontDoor, 4, noEntries(), entries1(alice, 1e22));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 1e22, 0.01e18);
+        deliver(BASE, frontDoor, 4, noEntries(), entries1(alice, 1e22));
+
+        // the allowance is the 100e18 floor (nothing staked): 99.985e18 more leaves 0.005e18 of it, and a
+        // 1-TAO request clipped to that sliver is deferred
+        deliver(BASE, frontDoor, 5, noEntries(), entries1(alice, 99.985e24));
+        key = keyOf(BASE, frontDoor, 6, noEntries(), entries1(alice, 1e24));
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemDeferred(key, alice, 1e24);
+        deliver(BASE, frontDoor, 6, noEntries(), entries1(alice, 1e24));
+
+        (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(burned, 99.995e18);
+        assertEq(vault.pendingPayouts(), 99.995e18);
+        assertEq(vault.balanceOf(alice), 1e27 - 99.995e24);
+    }
+
     function test_delivery_directOnlySkippedUntilOptIn() public {
         depositVia(alice, 10e18);
         // A = 10e18, S = 1e25: 10e18 * (1e25 + 1e6) / (10e18 + 1) = 1e25

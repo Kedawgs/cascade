@@ -38,6 +38,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint256 internal constant MAX_FEE_BPS = 500;
     uint256 internal constant MAX_FEE_ABS = 0.1e18;
     uint256 internal constant MAX_UNSTAKE_MARGIN_RAO = 1e9;
+    /// The smallest front-door redeem burned: anything smaller could, after its share of the payout fee,
+    /// fall below the bridge's conversion floor (0.002 TAO today) and never be sent.
+    uint256 internal constant MIN_REDEEM_VALUE = 0.01e18;
     IStaking public constant STAKING = IStaking(ISTAKING_ADDRESS);
     IAddressMapping public constant ADDRESS_MAPPING = IAddressMapping(ADDRESS_MAPPING_ADDRESS);
 
@@ -824,7 +827,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
     /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `base`, the
     /// ramped-in root stake, minDailyOutflow) per 24-hour window, and queues it in `b` after any bounced
-    /// deposits. Only burns count against the window. The caller fills in the rest of `b`.
+    /// deposits. A redeem worth less than MIN_REDEEM_VALUE after clipping is deferred, not burned. Only
+    /// burns count against the window. The caller fills in the rest of `b`.
     function _burnRedeems(
         bytes32 key,
         bytes32 peer,
@@ -852,8 +856,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
             s = Math.min(s, CascadeMath.sharesForDeposit(Math.min(maxEntry, allowance), A, S));
             uint256 out = CascadeMath.assetsForRedeem(s, A, S);
             out -= out % RAO;
-            if (out == 0) {
-                // nothing burned; the holder keeps the shares and may request again
+            if (out < MIN_REDEEM_VALUE) {
+                // nothing burned; the holder keeps the shares and may request again (redeemDirect pays
+                // any amount)
                 emit RedeemDeferred(key, user, redeems[i].amount);
                 continue;
             }

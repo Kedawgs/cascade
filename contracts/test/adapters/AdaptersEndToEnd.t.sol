@@ -57,6 +57,38 @@ contract AdaptersEndToEndTest is AdaptersFixture {
         assertEq(vault.totalSupply(), 0);
     }
 
+    /// A payout below the conversion floor could never be sent: the Bittensor adapter reverts
+    /// BelowConversionFloor for its chunk on every processPayouts, and only the owner's cancel frees it.
+    /// Here alice keeps 2.5e21 shares (0.0025 TAO) and asks for 1e22: the vault's clip to her balance
+    /// leaves 0.0025 TAO, which after the 0.001 TAO fee would net 0.0015 TAO, under the 0.002 TAO floor.
+    /// The vault defers it instead (below 0.01 TAO), so nothing unpayable is queued; her first payout,
+    /// queued before it, goes out as usual.
+    function test_redeemBelowConversionFloorIsDeferredNotQueued() public {
+        depositAndRelay(fd, alice, 10e18, 0);
+        // A = 10e18, S = 1e25: (1e25 - 2.5e21) * (10e18 + 1) / (1e25 + 1e6) = 9.9975e18
+        (bytes32 k1, CascadeMessages.Payout[] memory list) = redeemAndRelay(fd, alice, 1e25 - 2.5e21, 2, 1);
+        assertEq(list[0].assets, 9.9975e18);
+        assertEq(vault.balanceOf(alice), 2.5e21);
+
+        requestVia(fd, alice, 1e22);
+        bytes32 k2 = keyOf(BASE, address(fd), 3, noEntries(), entries1(alice, 1e22));
+        close(fd);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemDeferred(k2, alice, 1e22);
+        (bool ok,) = relayToBittensor(2);
+        assertTrue(ok);
+        assertTrue(vault.processed(k2));
+        assertEq(vault.getPayoutBatch(k2).count, 0);
+        assertEq(vault.balanceOf(alice), 2.5e21);
+        assertEq(vault.pendingPayouts(), 9.9975e18);
+
+        pay(k1, list);
+        assertEq(vault.pendingPayouts(), 0);
+        (ok,) = relayToBase(0);
+        assertTrue(ok);
+        assertEq(fd.claimable(alice), 9.9975e18 - FEE);
+    }
+
     function test_twoFrontDoorsThroughOneAdapter() public {
         CascadeFrontDoor fd2 = newFrontDoor();
         registerFrontDoor(BASE, address(fd2));

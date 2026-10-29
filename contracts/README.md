@@ -187,7 +187,7 @@ What remains, and who owns it:
 
 | Stall | What happens | Owner |
 |---|---|---|
-| A payout chunk whose net is below the live floor | `processPayouts` reverts `BelowConversionFloor` every time | The keeper groups it with neighbouring entries (`maxEntries`); if every remaining entry is tiny, the owner cancels the batch (`cancelPayoutBatch` re-mints the shares; nobody loses funds). The web app must refuse unstake requests worth less than 0.01 TAO (web-wiring spec). |
+| A payout chunk whose net is below the live floor | `processPayouts` reverts `BelowConversionFloor` every time | Rare now: the vault defers (does not burn) any front-door redeem worth less than 0.01 TAO after clipping (`RedeemDeferred`), so a chunk nets at least 0.01 TAO less its fee. It can still happen if the root key raises the floor, the fee approaches 0.008 TAO, or a tiny bounced deposit goes alone. The keeper groups it with neighbouring entries (`maxEntries`); if every remaining entry is tiny, the owner cancels the batch (`cancelPayoutBatch` re-mints the shares; nobody loses funds). The web app must still refuse unstake requests worth less than 0.01 TAO (web-wiring spec), or the user pays the request fee for a deferral. |
 | A deposit batch in flight when the root key raises the floor above its total | the delivery fails and waits in CCIP until the floor comes back down, then is re-executed | The keeper reads `getDefaultMinStake()` before `closeBatch` (keeper spec). At a 0.01 TAO minimum this needs a five-fold raise. |
 | `minDeposit` set below `minSendAmount` with `setCaps` | a batch whose total is below `minSendAmount` reverts `BelowSendMinimum` at `closeBatch` and stays open until more deposits arrive | The operator keeps `minDeposit >= minSendAmount` ([Operator notes](#operator-notes)). |
 
@@ -330,7 +330,9 @@ node: 1 TAO and exactly 0.002 TAO (the floor) delivered; `RESERVE=0` reverted `C
    the vault's `onBridgeMessage`. The vault fixes one price for the whole batch, mints shares for
    each deposit, then burns shares for each redeem request, clipped to what the user holds, to
    2,000 TAO per entry, and to the front door's daily allowance. Whatever is clipped is not burned:
-   the user keeps those shares and can request again. Each burn's payout is reserved and queued.
+   the user keeps those shares and can request again. A redeem worth less than 0.01 TAO after
+   clipping is not burned at all (`RedeemDeferred`): its payout, less its share of the fee, could
+   fall below the bridge's conversion floor and never be sent. Each burn's payout is reserved and queued.
    If the vault is insolvent (share price below half the launch price), deposits are not minted:
    each is bounced, queued ahead of the batch's redeems as a payout of its TAO with 0 shares
    (`DepositBounced`), and comes back to the user on Base like any payout. The vault stores only a
@@ -495,6 +497,10 @@ Soft spots:
   `minDailyOutflow` floor at worst) for up to a day. It costs them the capital for a keeper round and
   gas, takes nothing, and leaves exits open at the floor and through `redeemDirect`. A keeper that
   stakes less often (say daily) makes each cycle hold its capital longer.
+- **Dust cannot leave through a front door.** A holder whose shares are worth less than 0.01 TAO,
+  or whose request the window's last sliver of allowance would clip below 0.01 TAO, is deferred
+  (`RedeemDeferred`) and keeps the shares; `redeemDirect` pays any amount. The minimum is a
+  constant (`MIN_REDEEM_VALUE`) matching the Base adapter's 0.01 TAO `minSendAmount`.
 - **First come, first served.** A front door's allowance goes to redeems in delivery order, so one
   large holder can take a door's whole window. Deferred users must request again and pay the
   redeem-request fee again.
@@ -789,9 +795,12 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
     at `closeBatch` and stays open until more deposits arrive.
 17. **Staking-floor stalls.** A payout chunk whose net is below the live floor (0.002 TAO today)
     makes `processPayouts` revert `BelowConversionFloor` until the keeper groups it with
-    neighbouring entries (`maxEntries`). If every remaining entry is tiny, the owner cancels the
-    batch (`cancelPayoutBatch` re-mints the shares; nobody loses funds), unless it holds bounced
-    deposits (note 7). The web app must refuse unstake requests worth less than 0.01 TAO. Before
+    neighbouring entries (`maxEntries`). The vault no longer burns a redeem worth less than 0.01 TAO,
+    so this needs a raised floor, a fee near 0.008 TAO or a tiny bounced deposit. If every remaining
+    entry is tiny, the owner cancels the batch (`cancelPayoutBatch` re-mints the shares; nobody loses
+    funds), unless it holds bounced deposits (note 7). The web app must refuse unstake requests
+    worth less than 0.01 TAO (the vault would defer them, and the user would have paid the request
+    fee for nothing). Before
     `closeBatch`, the keeper reads `getDefaultMinStake()`: a deposit batch that arrives while the
     floor sits above its total waits in CCIP until the floor drops (at a 0.01 TAO minimum deposit
     that takes a five-fold raise). Next to that floor pre-check, a second keeper rule: do not

@@ -19,7 +19,7 @@ import { base } from "viem/chains";
 import { describe, expect, it, vi } from "vitest";
 import { ADAPTER, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import { type Deployment, EXPECTED_DEPLOYMENTS, readDeployment, TOKENS } from "./config";
-import { checkWiring, createWiringCheck, peerId, type Wiring } from "./wiring";
+import { checkWiring, createWiringCheck, peerId, type Wiring, wiringKey } from "./wiring";
 
 /** What viem gives for a call a contract reverted, as multicall reports it per call. */
 const reverted = (functionName: string) =>
@@ -230,34 +230,90 @@ describe("checkWiring", () => {
 });
 
 describe("createWiringCheck", () => {
+  const MIN = 60_000;
   const session = () => {
     const kept = new Map<string, string>();
-    return { get: (k: string) => kept.get(k) ?? null, set: (k: string, v: string) => void kept.set(k, v), kept };
+    return { get: (k: string) => kept.get(k) ?? null, set: (k: string, v: string) => void kept.set(k, v), remove: (k: string) => void kept.delete(k), kept };
+  };
+  /** A clock the test moves. */
+  const clock = () => {
+    let t = 1_800_000_000_000;
+    return { now: () => t, pass: (ms: number) => void (t += ms) };
   };
 
-  it("checks once a session: a pass is kept (also across reloads of the tab) and never read again", async () => {
+  it("keeps a pass for 15 minutes, in memory and in session storage (a reload of the tab), then checks again", async () => {
     const s = session();
+    const c = clock();
     const check = vi.fn(async (): Promise<Wiring> => "ok");
-    const wired = createWiringCheck({} as never, D3, check, s);
+    const wired = createWiringCheck({} as never, D3, check, s, c.now);
     expect(await Promise.all([wired(), wired()])).toEqual(["ok", "ok"]);
+    c.pass(14 * MIN);
     expect(await wired()).toBe("ok");
     expect(check).toHaveBeenCalledTimes(1);
-    // a reload in the same tab: the pass is in session storage
-    const again = vi.fn(async (): Promise<Wiring> => "mismatch");
-    expect(await createWiringCheck({} as never, D3, again, s)()).toBe("ok");
-    expect(again).not.toHaveBeenCalled();
-    // another deployment's pass is not this one's
-    expect(await createWiringCheck({} as never, D2, again, s)()).toBe("mismatch");
+    // a reload in the same tab: the pass is in session storage, dated
+    const reloaded = vi.fn(async (): Promise<Wiring> => "mismatch");
+    expect(await createWiringCheck({} as never, D3, reloaded, s, c.now)()).toBe("ok");
+    expect(reloaded).not.toHaveBeenCalled();
+    // 15 minutes on, both read the chain again
+    c.pass(MIN);
+    expect(await wired()).toBe("ok");
+    expect(check).toHaveBeenCalledTimes(2);
+    c.pass(15 * MIN);
+    expect(await createWiringCheck({} as never, D3, reloaded, s, c.now)()).toBe("mismatch");
   });
 
-  it("keeps a mismatch for the session too, but never stores it as a pass", async () => {
+  it("keys a pass by what was checked: another deployment's, or a pass of a check with other links, isn't this one's", async () => {
+    expect(wiringKey(D3)).toBe(wiringKey(deployment(e3)));
+    expect(wiringKey(D3)).not.toBe(wiringKey(D2));
+    expect(wiringKey(D3)).not.toBe(wiringKey({ ...D3, oracle: OTHER }));
+    // the key is a hash of the reads and their answers, so changing the check itself changes it too
+    expect(wiringKey(D3)).toMatch(/^cascade:wiring:0x[0-9a-f]{64}$/);
     const s = session();
+    s.set(wiringKey(D2), JSON.stringify({ okAt: 1_800_000_000_000 }));
     const check = vi.fn(async (): Promise<Wiring> => "mismatch");
-    const wired = createWiringCheck({} as never, D3, check, s);
+    expect(await createWiringCheck({} as never, D3, check, s, clock().now)()).toBe("mismatch");
+    // a pass stored before passes were dated (or anything else there) is no pass
+    s.set(wiringKey(D3), "ok");
+    expect(await createWiringCheck({} as never, D3, check, s, clock().now)()).toBe("mismatch");
+  });
+
+  it("checks again after forget(), as after each flow, and drops the stored pass", async () => {
+    const s = session();
+    const check = vi.fn(async (): Promise<Wiring> => "ok");
+    const wired = createWiringCheck({} as never, D3, check, s, clock().now);
+    await wired();
+    wired.forget();
+    expect(s.kept.has(wiringKey(D3))).toBe(false);
+    await wired();
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+
+  it("doesn't keep a check forget() came during: its answer may be from before", async () => {
+    let answer!: (w: Wiring) => void;
+    const check = vi.fn(() => new Promise<Wiring>((r) => (answer = r)));
+    const wired = createWiringCheck({} as never, D3, check, session(), clock().now);
+    const first = wired();
+    wired.forget();
+    answer("ok");
+    expect(await first).toBe("ok");
+    const second = wired();
+    expect(check).toHaveBeenCalledTimes(2);
+    answer("ok");
+    await second;
+  });
+
+  it("keeps a mismatch for 15 minutes too, never stored as a pass", async () => {
+    const s = session();
+    const c = clock();
+    const check = vi.fn(async (): Promise<Wiring> => "mismatch");
+    const wired = createWiringCheck({} as never, D3, check, s, c.now);
     expect(await wired()).toBe("mismatch");
     expect(await wired()).toBe("mismatch");
     expect(check).toHaveBeenCalledTimes(1);
-    expect([...s.kept.values()]).not.toContain("ok");
+    expect(s.kept.size).toBe(0);
+    c.pass(15 * MIN);
+    await wired();
+    expect(check).toHaveBeenCalledTimes(2);
   });
 
   it("keeps no failed read: the next call checks again", async () => {
@@ -265,7 +321,7 @@ describe("createWiringCheck", () => {
       .fn<() => Promise<Wiring>>()
       .mockRejectedValueOnce(new Error("archive node down"))
       .mockResolvedValueOnce("ok");
-    const wired = createWiringCheck({} as never, D3, check, session());
+    const wired = createWiringCheck({} as never, D3, check, session(), clock().now);
     await expect(wired()).rejects.toThrow("archive node down");
     expect(await wired()).toBe("ok");
     expect(check).toHaveBeenCalledTimes(2);
@@ -279,7 +335,13 @@ describe("createWiringCheck", () => {
       set: () => {
         throw new Error("SecurityError");
       },
+      remove: () => {
+        throw new Error("SecurityError");
+      },
     };
-    expect(await createWiringCheck({} as never, D3, async () => "ok", broken)()).toBe("ok");
+    const wired = createWiringCheck({} as never, D3, async () => "ok", broken);
+    expect(await wired()).toBe("ok");
+    wired.forget();
+    expect(await wired()).toBe("ok");
   });
 });

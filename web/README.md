@@ -29,7 +29,8 @@ into the site.
 The env must name one of the deployments committed in `src/lib/cascade/deployments.json`, every
 address, block and SS58 name alike; any other fails `pnpm build` (and `pnpm dev`). A new deployment
 is added there in a reviewed commit. Before any transaction, the browser also reads the contracts
-(`wiring.ts`, once a session) and checks they are wired to each other as the config says: the front
+(`wiring.ts`; an answer is kept 15 minutes, a pass also across reloads of the tab, and read again
+after each flow) and checks they are wired to each other as the config says: the front
 door to the vault, TAO and the Base adapter; the adapters to each other; on v3 the staker and the
 front door to each other and to the oracle; on Bittensor the vault to this front door and its
 adapter. A wrong answer, or a read the contract refuses (a revert, or no contract there), is a

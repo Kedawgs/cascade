@@ -167,6 +167,8 @@ export function useFlows(account: string | null) {
     } finally {
       void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
       void queryClient.invalidateQueries({ queryKey: ["quote"] });
+      // the contracts are read again after each flow, so the next one goes by a fresh answer
+      data.forgetWiring();
       void queryClient.invalidateQueries({ queryKey: ["wiring"] });
     }
   }

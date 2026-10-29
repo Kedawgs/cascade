@@ -122,6 +122,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   const c = deps.clients;
   /** The clients the history scan and its receipt checks use: Bittensor on its own connection. */
   const history: Clients = { ...c, bittensor: c.bittensorScan ?? c.bittensor };
+  /** Whether the contracts are wired as the build says, its answer kept 15 minutes (wiring.ts). */
+  const wiring = createWiringCheck(c, d, deps.checkWiring);
   const scans = new Map<string, VaultScan>();
   /** One scan of an account at a time: overlapping scans would read the same blocks twice and
    * double-count events. Callers arriving while one runs share it. */
@@ -473,7 +475,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     deployment: d,
     clients: c,
     opLog: deps.opLog,
-    checkWiring: createWiringCheck(c, d, deps.checkWiring),
+    checkWiring: () => wiring(),
+    forgetWiring: () => wiring.forget(),
 
     async getProtocolStats() {
       const [v, price] = await Promise.all([deps.readVault(c, d), deps.taoPriceUsd(c)]);
@@ -631,5 +634,6 @@ export function notConfiguredData(): CascadeData {
     quoteWithdrawal: fail,
     quoteRoundTrip: fail,
     checkWiring: fail,
+    forgetWiring: () => undefined,
   };
 }

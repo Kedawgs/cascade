@@ -5,6 +5,7 @@ import { shownFigure, STATS_KEEP_MS } from "../stats";
 import { isV3 } from "./config";
 import { useCascadeData, useSnapshotAt } from "./context";
 import type { Snapshot } from "./snapshot";
+import { WIRING_TTL_MS } from "./wiring";
 
 /** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
  * public nodes rate-limit), every 30 s otherwise. */
@@ -52,20 +53,20 @@ export function useIsV3(): boolean {
   }
 }
 
-/** Whether the contracts are wired as the build says (wiring.ts), asked once a session while a wallet is
- * connected; a check that failed is asked again every half minute. Outside the "cascade" keys, so the
- * refresh after every flow doesn't ask again. */
+/** Whether the contracts are wired as the build says (wiring.ts), asked while a wallet is connected: again
+ * once its answer is 15 minutes old, every half minute after a check that failed, and after each flow
+ * (useFlows forgets the answer, then asks). Outside the "cascade" keys, which every flow refreshes. */
 export function useWiring(enabled: boolean) {
   const data = useCascadeData();
   return useQuery({
     queryKey: ["wiring"],
     queryFn: () => data.checkWiring(),
     enabled,
-    staleTime: Infinity,
+    staleTime: WIRING_TTL_MS,
     gcTime: Infinity,
     refetchOnWindowFocus: false,
     retry: 2,
-    refetchInterval: (q) => (q.state.status === "error" ? IDLE_MS : false),
+    refetchInterval: (q) => (q.state.status === "error" ? IDLE_MS : WIRING_TTL_MS),
   });
 }
 

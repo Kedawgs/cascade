@@ -14,7 +14,7 @@ import {
 } from "viem";
 import { BASE_V3, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
-import { type DeploymentRecord, saveRecord } from "../record.ts";
+import { type DeploymentRecord, loadRecord, saveRecord } from "../record.ts";
 import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState } from "./actions.ts";
@@ -285,8 +285,12 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     readClaimable: async (user) => (await r("base", a.frontDoor, FRONT, "claimable", [user])) as bigint,
     recordMessage(m) {
-      rec.messages = [...(rec.messages ?? []), { ...m, at: new Date().toISOString() }];
-      saveRecord(recordPath, rec);
+      // another command may have saved the record since this one loaded it (a failed verify, a hand-run
+      // close): re-read it and add only this message, so nothing it saved is written over
+      const now = loadRecord(recordPath) ?? rec;
+      now.messages = [...(now.messages ?? []), { ...m, at: new Date().toISOString() }];
+      saveRecord(recordPath, now);
+      rec.messages = now.messages;
     },
     async readRewards() {
       const hotkey = (await r("bittensor", a.vault, REWARDS_VAULT, "stakeHotkey")) as Hex;

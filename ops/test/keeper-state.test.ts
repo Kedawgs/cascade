@@ -18,7 +18,7 @@ import { BASE_V3, type ChainName, paths, targets, WALLET } from "../src/config.t
 import { roll } from "../src/keeper/actions.ts";
 import { KEEPER_READ_ABIS, keeperDeps, scanLogs } from "../src/keeper/state.ts";
 import { buildPlan, buildPlanV3, closeMaxWaitS } from "../src/plan.ts";
-import type { DeploymentRecord } from "../src/record.ts";
+import { type DeploymentRecord, loadRecord, saveRecord } from "../src/record.ts";
 import { type Rpc, RpcError } from "../src/rpc.ts";
 import { type Ctx, ReceiptTimeout, RevertedOnChain, SendRefused } from "../src/send.ts";
 import { type Answer, COLDKEY, fakeChain, revert, v3Record } from "./fake-keeper.ts";
@@ -101,6 +101,24 @@ describe("keeper reads", () => {
     const s = await keeperDeps(f.ctx, rec, recordPath).readState();
     expect(f.calls.some((c) => c.chain === "base" && c.method === "eth_getLogs")).toBe(false);
     expect(s.detail.messages).toEqual([{ id: MSG, direction: "Base → Bittensor", state: "SUCCESS" }]);
+  });
+
+  it("adds a bridge message to the record as it is on disk now, never writing back the copy the command loaded", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    saveRecord(recordPath, { ...rec, verify: { ok: true, failures: [], checkedAt: "" } });
+    const loaded = loadRecord(recordPath)!;
+    const deps = keeperDeps(fakeChains().ctx, loaded, recordPath);
+    // while this command runs, a failed verify and a hand-run close save to the same record
+    const OTHER: Hex = `0x${"0d".repeat(32)}`;
+    const NEW: Hex = `0x${"0e".repeat(32)}`;
+    const failed = { ok: false, failures: ["Base CascadeFrontDoor.owner: expected …"], checkedAt: "later" };
+    saveRecord(recordPath, { ...loadRecord(recordPath)!, verify: failed, messages: [...(rec.messages ?? []), { id: OTHER, direction: "Base → Bittensor", hash: ZERO32, at: "" }] });
+    deps.recordMessage({ id: NEW, direction: "Bittensor → Base", hash: ZERO32 });
+    const after = loadRecord(recordPath)!;
+    expect(after.verify).toEqual(failed);
+    expect(after.messages?.map((m) => m.id)).toEqual([MSG, OTHER, NEW]);
+    // and the command's own copy lists the messages too, for its status
+    expect(loaded.messages?.map((m) => m.id)).toEqual([MSG, OTHER, NEW]);
   });
 });
 

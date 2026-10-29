@@ -25,6 +25,9 @@ const BARS = [
   { tone: "proof", from: "#7DD9A9", to: "#1E8A5A", mark: { x: 136, y: 217.6, w: W, h: H }, tau: { x: 125.8, y: 175.6, w: 120, h: H } },
 ] as const;
 
+/** One word on each step of the mark, read top to bottom. */
+const WORDS = ["Crypto", "Made", "Simple"] as const;
+
 /** One loop: τ rests, becomes the mark, the mark rests, folds back into τ. */
 const LOOP_S = 12;
 const KEY_TIMES = "0;0.1167;0.2083;0.85;0.9333;1";
@@ -32,6 +35,8 @@ const HOLD = "0 0 1 1";
 const EASE = "0.65 0 0.35 1";
 const KEY_SPLINES = [HOLD, EASE, HOLD, EASE, HOLD].join(";");
 const loop = (tau: string | number, mark: string | number) => [tau, tau, mark, mark, tau, tau].join(";");
+/** The words show only while the mark rests: in just after it forms, out just before it folds back. */
+const WORDS_KEY_TIMES = "0;0.2083;0.25;0.81;0.85;1";
 /** The light runs down each step once the mark has formed, 0.35 s apart. */
 const SHINE_AT_S = 3;
 const SHINE_FOR_S = 0.9;
@@ -60,6 +65,30 @@ function Gradients({ id }: { id: string }) {
   );
 }
 
+/** Each step's word, centred on the step where the mark rests. */
+function Words({ moving }: { moving: boolean }) {
+  return (
+    <g className={styles.words} opacity={moving ? 0 : 1}>
+      {moving && (
+        <animate
+          attributeName="opacity"
+          values="0;0;1;1;0;0"
+          keyTimes={WORDS_KEY_TIMES}
+          keySplines={[HOLD, EASE, HOLD, EASE, HOLD].join(";")}
+          calcMode="spline"
+          dur={`${LOOP_S}s`}
+          repeatCount="indefinite"
+        />
+      )}
+      {BARS.map(({ tone, mark: m }, i) => (
+        <text key={tone} x={m.x + m.w / 2} y={m.y + m.h / 2} textAnchor="middle" dominantBaseline="central">
+          {WORDS[i]}
+        </text>
+      ))}
+    </g>
+  );
+}
+
 /** The finished mark, still: for reduced motion. */
 function StillMark({ id }: { id: string }) {
   return (
@@ -73,6 +102,7 @@ function StillMark({ id }: { id: string }) {
           <rect x={m.x} y={m.y} width={m.w} height={m.h} rx={H / 2} fill={`url(#${id}-gloss)`} />
         </g>
       ))}
+      <Words moving={false} />
     </svg>
   );
 }
@@ -156,6 +186,7 @@ function MorphingMark({ id }: { id: string }) {
       {BARS.map(({ tone }) => (
         <use key={tone} href={`#${id}-bar-${tone}`} fill={`url(#${id}-shine-${tone})`} />
       ))}
+      <Words moving />
     </svg>
   );
 }

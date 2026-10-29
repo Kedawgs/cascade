@@ -10,6 +10,19 @@
   display: none;
 }
 
+/* the words on the steps: white, with a faint shadow so they hold on the light end of each gradient */
+.words {
+  fill: #fff;
+  font-family: inherit;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  paint-order: stroke;
+  stroke: rgba(16, 33, 43, 0.18);
+  stroke-width: 2px;
+  pointer-events: none;
+}
+
 @media (max-width: 999px) {
   .mark {
     width: min(70%, 280px);

@@ -39,6 +39,9 @@ CREATE INDEX logs_by_tx ON logs(chain, tx_hash, log_index);
 -- the stored uids in a chain's re-read range, loaded every tick (not in the spec's list: without it that
 -- query reads the whole table each tick)
 CREATE INDEX logs_by_block ON logs(chain, block);
+-- a user's claims and deliveries after a block, looked up for each recent payout user every tick (not in
+-- the spec's list: without it each lookup walks everyone's claims since that block)
+CREATE INDEX logs_by_topic1 ON logs(contract, event, topic1, block);
 
 CREATE TABLE blocks (chain TEXT NOT NULL, number INTEGER NOT NULL, time INTEGER NOT NULL,
                      PRIMARY KEY (chain, number));     -- times of blocks that hold stored logs

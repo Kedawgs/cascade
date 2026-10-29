@@ -57,7 +57,7 @@ describe("the migration", () => {
     const names = (await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>()).results.map((r) => r.name);
     for (const t of TABLES) expect(names).toContain(t);
     const indexes = (await db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all<{ name: string }>()).results.map((r) => r.name);
-    expect(indexes).toEqual(expect.arrayContaining(["logs_by_event", "logs_by_topic2", "logs_by_tx", "logs_by_block", "alerts_open", "batch_checks_by_key"]));
+    expect(indexes).toEqual(expect.arrayContaining(["logs_by_event", "logs_by_topic2", "logs_by_tx", "logs_by_block", "logs_by_topic1", "alerts_open", "batch_checks_by_key"]));
   });
 });
 
@@ -259,6 +259,40 @@ describe("loadTickState", () => {
     ]);
     const s = await loadTickState(db, 1_000_100);
     expect(s.payoutUsers).toEqual([USER]);
+  });
+});
+
+describe("the payout users' cost", () => {
+  it("reads about one row per user, however many claims others made since (the topic1 index)", async () => {
+    const addr = (i: number) => `0x${(0x1000 + i).toString(16).padStart(40, "0")}` as Hex;
+    const fd = (uid: string, event: string, block: bigint, user: Hex, topic: "topic1" | "topic2") =>
+      log({ uid: h(uid), chain: "base", contract: "frontDoor", event, block, [topic]: pad(user) });
+    const users = Array.from({ length: 50 }, (_, i) => fd(`payout${i}`, "PayoutReceived", BigInt(1000 + i), addr(i), "topic2"));
+    await db.batch([
+      ...upsertLogs(db, users),
+      ...upsertBlocks(db, users.map((u) => ({ chain: "base" as const, number: u.block, time: 1_000_000 }))),
+      setCursor(db, { chain: "base", fromBlock: 1n, scannedTo: 3000n, settledTo: 2990n, settledTime: 1_000_100, headTime: 1_000_100, nowS: 1_000_100 }),
+    ]);
+    const cost = async () => {
+      const c = countingDb(db);
+      const s = await loadTickState(c.db, 1_000_100);
+      expect(s.payoutUsers).toHaveLength(50);
+      return c.stats.rowsRead;
+    };
+    const before = await cost();
+    // 200 claims and deliveries by other people, all after every payout: a lookup by event and block alone
+    // would walk all of them for each user
+    const claims = Array.from({ length: 200 }, (_, i) => fd(`claim${i}`, i % 2 ? "Claimed" : "Delivered", BigInt(1100 + i), addr(500 + i), "topic1"));
+    await db.batch(upsertLogs(db, claims));
+    const after = await cost();
+    // others' claims cost nothing; each user costs a few rows (D1 counts an index entry and its row apiece:
+    // the payout, its block's time, the lookup), about 8, whatever the history (the whole load included)
+    expect(after - before).toBeLessThanOrEqual(2 * 50);
+    expect(after).toBeLessThanOrEqual(10 * 50);
+    // and a user who claimed after their payout is left out
+    await db.batch(upsertLogs(db, [fd("mine", "Claimed", 1400n, addr(0), "topic1")]));
+    const c = countingDb(db);
+    expect((await loadTickState(c.db, 1_000_100)).payoutUsers).toHaveLength(49);
   });
 });
 

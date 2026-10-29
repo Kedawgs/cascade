@@ -232,8 +232,10 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
          GROUP BY p.topic2
        ) r
        WHERE NOT EXISTS (
-         SELECT 1 FROM logs c WHERE c.chain = 'base' AND c.contract = 'frontDoor' AND c.event IN ('Claimed', 'Delivered')
-           AND c.block > r.last AND c.topic1 = r.user AND c.removed = 0
+         -- by the user's index: SQLite would otherwise pick logs_by_event and walk everyone's claims
+         SELECT 1 FROM logs c INDEXED BY logs_by_topic1
+         WHERE c.contract = 'frontDoor' AND c.event IN ('Claimed', 'Delivered') AND c.topic1 = r.user
+           AND c.block > r.last AND c.chain = 'base' AND c.removed = 0
        )
        ORDER BY r.last DESC LIMIT 50`,
     ).bind(PAYOUT_USERS_BLOCKS, nowS - 7 * 86400),

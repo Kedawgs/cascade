@@ -143,6 +143,55 @@ export const ADMIN_EVENTS: ReadonlySet<`${Role}:${string}`> = new Set([
   ...["RouteSet", "DeliveryRouteSet", "FeesSet", "TreasurySet", "Swept", "OwnershipTransferStarted", "OwnershipTransferred"].map((n) => `staker:${n}` as const),
 ]);
 
+// Views of the deployment's contracts, as the readings use them (contracts/src, tagged v3.1).
+
+/** Ownable2Step, Pausable and CascadeBase's guardian: the vault and front door have all, the staker the
+ * first two (owner, pendingOwner). */
+export const ADMIN_VIEWS = parseAbi([
+  "function owner() view returns (address)",
+  "function pendingOwner() view returns (address)",
+  "function guardian() view returns (address)",
+  "function pendingGuardian() view returns (address)",
+  "function paused() view returns (bool)",
+]);
+
+export const VAULT_VIEWS = parseAbi([
+  "struct PayoutBatch { uint64 sourceChain; address frontDoor; uint64 batchId; uint64 queuedAt; uint32 cursor; uint32 count; uint32 chunk; uint256 remaining; bytes32 payoutsHash; }",
+  "function price() view returns (uint256)",
+  "function totalAssets() view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function rootStakeRao() view returns (uint256)",
+  "function pendingPayouts() view returns (uint256)",
+  "function keeper() view returns (address)",
+  "function stakeHotkey() view returns (bytes32)",
+  "function hotkeys(uint256) view returns (bytes32)",
+  "function payoutDelay() view returns (uint64)",
+  "function maxDailyOutflowBps() view returns (uint256)",
+  "function minDailyOutflow() view returns (uint256)",
+  "function burnWindows(bytes32) view returns (uint64 start, uint256 burned)",
+  "function lastClaimAt(bytes32) view returns (uint64)",
+  "function minStakeRao() view returns (uint256)",
+  "function rewardCutBps() view returns (uint16)",
+  "function getPayoutBatch(bytes32 key) view returns (PayoutBatch)",
+]);
+
+export const FRONT_DOOR_VIEWS = parseAbi([
+  "function openBatch() view returns (uint64 id, uint64 start, uint256 totalDeposits, uint256 feePot, uint256 nDeposits, uint256 nRedeems)",
+  "function totalClaimable() view returns (uint256)",
+  "function totalFeeCredit() view returns (uint256)",
+  "function netForwarded() view returns (uint256)",
+  "function depositCap() view returns (uint256)",
+  "function maxBatchValue() view returns (uint256)",
+  "function maxDeposits() view returns (uint32)",
+  "function maxRedeems() view returns (uint32)",
+  "function batchInterval() view returns (uint64)",
+  "function keeper() view returns (address)",
+  "function oracle() view returns (address)",
+  "function claimable(address) view returns (uint256)",
+  "function deliveryOf(address) view returns (uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
+  "function delivered(address bridge, bytes32 messageHash) view returns (bool)",
+]);
+
 // Views of contracts the monitor reads but doesn't scan.
 
 export const ERC20 = parseAbi([

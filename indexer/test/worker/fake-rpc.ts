@@ -140,8 +140,9 @@ export const raw = (data: Hex) => ({ [RAW]: data });
 const RAW = Symbol("raw");
 
 type View = (args: readonly unknown[], at: bigint) => unknown;
+/** A contract answering by ABI, or (a precompile like Bittensor's storage query) raw bytes for raw input. */
 export interface FakeContracts {
-  [address: Hex]: { abi: Abi; fns: Record<string, View> };
+  [address: Hex]: { abi: Abi; fns: Record<string, View> } | { raw: (data: Hex, at: bigint) => Hex | typeof REVERT };
 }
 
 /** An eth_call handler for `fakeChains`' `calls`: views of the given contracts, called directly or
@@ -162,6 +163,10 @@ export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => nu
     }
     const c = byAddress.get(target.toLowerCase());
     if (!c) return "0x";
+    if ("raw" in c) {
+      const out = c.raw(data, at);
+      return out === REVERT ? null : out;
+    }
     let call: { functionName: string; args?: readonly unknown[] };
     try {
       call = decodeFunctionData({ abi: c.abi, data }) as typeof call;

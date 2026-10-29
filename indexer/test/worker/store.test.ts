@@ -12,6 +12,7 @@ import {
   leaseHolder,
   loadTickState,
   markRemoved,
+  payoutDoneStatements,
   pruneHours,
   pruneReadings,
   releaseLease,
@@ -263,6 +264,25 @@ describe("loadTickState", () => {
     ]);
     const s = await loadTickState(db, 1_000_100);
     expect(s.payoutUsers).toEqual([USER]);
+  });
+});
+
+describe("payouts done and landings awaiting a read", () => {
+  it("records a payout batch done once, the first time", async () => {
+    await db.batch([upsertBatchCheck(db, { batchId: 1n, deliveredKey: h("k"), deliveredUid: h("u"), deliveredTx: h("t"), status: "ok", queuedBlock: 100n })]);
+    await db.batch(payoutDoneStatements(db, [{ key: h("k"), block: 150n }]));
+    await db.batch(payoutDoneStatements(db, [{ key: h("k"), block: 160n }]));
+    expect(await db.prepare("SELECT payout_done_block FROM batch_checks").first("payout_done_block")).toBe(150);
+    expect((await loadTickState(db, 1)).pendingPayoutKeys).toEqual([]);
+  });
+
+  it("loads a landing awaiting its delivered() read with the bridge it came through", async () => {
+    const landing = log({ uid: h("landing"), chain: "base", contract: "frontDoor", event: "PayoutsDelivered", args: { batchKey: h("key"), chunk: 0, amount: "5", bridge: OTHER } });
+    await db.batch([
+      ...upsertLogs(db, [landing]),
+      upsertChunkCheck(db, { landedUid: h("landing"), batchKey: h("key"), chunk: 0, landedTx: h("t"), landedBlock: 5n, expectedHash: h("message"), status: "awaiting_read" }),
+    ]);
+    expect((await loadTickState(db, 1)).awaitingReads).toEqual([expect.objectContaining({ landedUid: h("landing"), bridge: OTHER, expectedHash: h("message") })]);
   });
 });
 

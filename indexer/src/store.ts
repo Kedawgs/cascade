@@ -96,6 +96,8 @@ export interface ChunkCheckRow {
   expectedHash: Hex | null;
   status: ChunkCheckStatus;
   detail: string | null;
+  /** the bridge the landing came through (loaded with the landings awaiting a delivered() read) */
+  bridge?: Hex;
 }
 
 /** The sender of a transaction behind an attributable event (spec 3.3): fetched (with `to`, selector and
@@ -205,6 +207,7 @@ const chunkCheckOf = (r: Row): ChunkCheckRow => ({
   expectedHash: (r.expected_hash as Hex | null) ?? null,
   status: r.status as ChunkCheckStatus,
   detail: (r.detail as string | null) ?? null,
+  ...(typeof r.bridge === "string" ? { bridge: r.bridge as Hex } : {}),
 });
 
 /** Seven days of Base's 2-second blocks: how far back a PayoutReceived makes its user worth reading. */
@@ -221,7 +224,11 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 25"),
     db.prepare("SELECT chain, address, roles, baseline, nonce, changed_at FROM nonces"),
     db.prepare("SELECT * FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' ORDER BY src_block LIMIT 100"),
-    db.prepare("SELECT * FROM chunk_checks WHERE status = 'awaiting_read'"),
+    // with the bridge the landing came through: delivered(bridge, hash) is read for it
+    db.prepare(
+      `SELECT c.*, json_extract(l.args, '$.bridge') AS bridge FROM chunk_checks c
+       LEFT JOIN logs l ON l.uid = c.landed_uid WHERE c.status = 'awaiting_read'`,
+    ),
     db.prepare(
       `SELECT r.user AS user FROM (
          SELECT p.topic2 AS user, MAX(p.block) AS last FROM logs p
@@ -404,6 +411,15 @@ export const pruneHours = (db: D1Database, nowS: number, days = 35): D1PreparedS
 
 export const setMeta = (db: D1Database, k: string, v: string): D1PreparedStatement =>
   db.prepare("INSERT INTO meta (k, v) VALUES (?1, ?2) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(k, v);
+
+/** Records each payout batch the reading shows done (snapshot.payoutsDone), once: the one completion
+ * source for okKeys and payout.overdue. */
+export function payoutDoneStatements(db: D1Database, done: readonly { key: Hex; block: bigint }[]): D1PreparedStatement[] {
+  const stmt = db.prepare(
+    "UPDATE batch_checks SET payout_done_block = ?1 WHERE delivered_key = ?2 AND queued_block IS NOT NULL AND payout_done_block IS NULL",
+  );
+  return done.map((x) => stmt.bind(int(x.block), x.key));
+}
 
 /** Marks the database as holding this deployment (its "<frontDoor>:<vault>" id): every commit includes
  * it, the first one writes it, and it is never changed after. */

@@ -6,8 +6,9 @@ import type { Rpc } from "./rpc.ts";
 /** Multicall3, at one address on both chains. */
 export const MULTICALL3_ADDRESS = "0xca11bde05977b3631167028862be2a173976ca11" as Hex;
 
-/** One view to read: a contract call, or an address's native balance. */
-export type Read = { address: Hex; abi: Abi; functionName: string; args?: readonly unknown[] } | { ethBalance: Hex };
+/** One view to read: a contract call, an address's native balance, or raw input to a precompile (its
+ * answer is the raw bytes). */
+export type Read = { address: Hex; abi: Abi; functionName: string; args?: readonly unknown[] } | { ethBalance: Hex } | { address: Hex; callData: Hex };
 export type ReadResult = { ok: true; value: unknown } | { ok: false };
 
 /** Every read in one eth_call to Multicall3's aggregate3 at the latest block, each allowed to fail on
@@ -31,7 +32,9 @@ export async function multicall(
     ...reads.map((r) =>
       "ethBalance" in r
         ? { target: multicall3, allowFailure: true, callData: encodeFunctionData({ abi: MULTICALL3, functionName: "getEthBalance", args: [r.ethBalance] }) }
-        : { target: r.address, allowFailure: true, callData: encodeFunctionData({ abi: r.abi, functionName: r.functionName, args: r.args } as never) },
+        : "callData" in r
+          ? { target: r.address, allowFailure: true, callData: r.callData }
+          : { target: r.address, allowFailure: true, callData: encodeFunctionData({ abi: r.abi, functionName: r.functionName, args: r.args } as never) },
     ),
   ];
   const data = encodeFunctionData({ abi: MULTICALL3, functionName: "aggregate3", args: [calls] });
@@ -43,6 +46,7 @@ export async function multicall(
   const results = reads.map((r, i): ReadResult => {
     const a = answers[i + 2];
     if (!a.success) return { ok: false };
+    if ("callData" in r) return { ok: true, value: a.returnData };
     try {
       const value =
         "ethBalance" in r

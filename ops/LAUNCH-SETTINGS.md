@@ -103,8 +103,11 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
   blocks (default 10,000). publicnode accepted 50,000-block ranges and answered 1M blocks deep
   (probed 2026-10-28), so verify's first registry scan of a month-old deployment takes about 130
   queries. Each later scan resumes from the last. If the logs server refuses part of a scan, verify
-  prints what is NOT CHECKED but still passes, so the keeper keeps running. Only something it finds
-  fails verify: an unexpected bridge, front door, route or proposal.
+  prints what is NOT CHECKED but still passes, so the keeper keeps running; `status` and `run` repeat
+  it. Once such a gap began more than 7 days ago (the registry delay), verify fails: a bridge or front
+  door proposed in it could be active by now. Otherwise only something it finds fails verify: an
+  unexpected bridge, front door, route or proposal, or an extra one it found before whose state it
+  can't read now.
 - **Expected extras.** If you register a standby adapter or a second route on purpose, list it in
   `OPS_VERIFY_ALLOW` (for example `0xAdapter, route:1`), or verify fails on it. Pending proposals
   always show as warnings.

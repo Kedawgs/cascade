@@ -509,6 +509,24 @@ describe("verify reads back the registries, the pending proposals and the state"
     expect(lines.join("\n")).toMatch(/NOT CHECKED — the read-back passes without these.*\n {2}Base: the front door's and the staker's registry events/);
   });
 
+  it("a gap older than the 7-day registry delay fails the read-back: a proposal made in it could be active", async () => {
+    const chains = chainsFor(recordOf(plan), THIS_CODE);
+    const request = chains.ctx.rpc.request;
+    const T = 1_800_000_000;
+    const rpc: Rpc = {
+      request: (c, m, p) => {
+        if (m === "eth_getLogs" && c === "base") return Promise.reject(new Error("range too large"));
+        // the gap's first block is 8 days old
+        if (m === "eth_getBlockByNumber") return Promise.resolve({ timestamp: numberToHex(p[0] === "latest" ? T : T - 8 * 86_400) });
+        return request(c, m, p);
+      },
+    };
+    const r = await verify({ ...chains.ctx, rpc }, recordOf(plan));
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([expect.stringMatching(/^Base: the front door's and the staker's registry events from block 1 .*; the gap began 8 days ago, beyond the 7-day registry delay/)]);
+    expect(r.unchecked).toBeUndefined();
+  });
+
   it("while the scan is refused, an extra bridge it found before still fails", async () => {
     const extra = getAddress("0x00000000000000000000000000000000000000e1");
     const prev = { base: { to: 50, bridges: [extra], routes: [0] }, bittensor: { to: 99, bridges: [], frontDoors: [] } };

@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
-import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, keccak256, numberToHex, parseAbi, parseUnits, zeroAddress } from "viem";
+import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, keccak256, numberToHex, parseAbi, parseUnits, toFunctionSelector, zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
 import { loadArtifact } from "../src/artifacts.ts";
 import { type ChainName, FRONT_DOOR_DEFAULTS, paths, SETTINGS_V3, VAULT_DEFAULTS } from "../src/config.ts";
 import { buildPlan, buildPlanV3, type PlanV3 } from "../src/plan.ts";
-import type { DeploymentRecord } from "../src/record.ts";
+import { type DeploymentRecord, uncheckedLines } from "../src/record.ts";
 import {
   baseStartBlock,
+  gapFindings,
   guardianChecks,
   REGISTRY_EVENTS,
   type RegistryScan,
@@ -185,7 +186,11 @@ describe("the registry scan finds every bridge, front door and route the contrac
     // the first window's bridge is kept; the next scan resumes at the refused window
     expect(scan.base).toEqual({ to: 1_099, bridges: [OTHER], routes: [] });
     expect(unchecked).toEqual([
-      "Base: the front door's and the staker's registry events from block 1100 (archive requests need a token) couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back",
+      {
+        chain: "base",
+        from: 1_100,
+        line: "Base: the front door's and the staker's registry events from block 1100 (archive requests need a token) couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back",
+      },
     ]);
     // Bittensor still scanned in full
     expect(scan.bittensor.to).toBe(2_090);
@@ -267,7 +272,7 @@ const allowing = (v: string) => verifyAllowFromEnv({ OPS_VERIFY_ALLOW: v });
 
 describe("registry checks", () => {
   it("passes the plan's own bridges, front door and route 0", async () => {
-    expect(await registryChecks(stateChain({}), plan, scanOf({ frontDoors: [`8453:${a.frontDoor}`] }), NONE)).toEqual({ failures: [], warnings: [] });
+    expect(await registryChecks(stateChain({}), plan, scanOf({ frontDoors: [`8453:${a.frontDoor}`] }), NONE)).toEqual({ failures: [], warnings: [], unchecked: [] });
   });
 
   it("fails when a plan's bridge is disabled", async () => {
@@ -280,10 +285,12 @@ describe("registry checks", () => {
     expect(await registryChecks(w, plan, scanOf({ bridges: [OTHER] }), NONE)).toEqual({
       failures: [`Base CascadeFrontDoor: an extra bridge ${OTHER} is enabled, beyond the plan's (if meant, add it to OPS_VERIFY_ALLOW)`],
       warnings: [],
+      unchecked: [],
     });
     expect(await registryChecks(w, plan, scanOf({ bridges: [OTHER] }), allowing(OTHER))).toEqual({
       failures: [],
       warnings: [`Base CascadeFrontDoor: an extra bridge ${OTHER} is enabled (allowed by OPS_VERIFY_ALLOW)`],
+      unchecked: [],
     });
   });
 
@@ -293,8 +300,9 @@ describe("registry checks", () => {
     expect(await registryChecks(w, plan, scanOf({ bitBridges: [OTHER] }), NONE)).toEqual({
       failures: [`${pending}, and nobody expects it (if meant, add it to OPS_VERIFY_ALLOW)`],
       warnings: [pending],
+      unchecked: [],
     });
-    expect(await registryChecks(w, plan, scanOf({ bitBridges: [OTHER] }), allowing(OTHER))).toEqual({ failures: [], warnings: [pending] });
+    expect(await registryChecks(w, plan, scanOf({ bitBridges: [OTHER] }), allowing(OTHER))).toEqual({ failures: [], warnings: [pending], unchecked: [] });
   });
 
   it("checks every front door the vault ever logged: another active one fails, a proposed one warns", async () => {
@@ -315,7 +323,71 @@ describe("registry checks", () => {
     expect(await registryChecks(w, plan, scanOf({ routes: [0, 2, 3] }), allowing("route:2"))).toEqual({
       failures: [],
       warnings: ["Base CascadeStaker: route 2 is active (allowed by OPS_VERIFY_ALLOW)"],
+      unchecked: [],
     });
+  });
+});
+
+describe("what the scan couldn't read", () => {
+  const DAY = 86_400;
+  const T = 1_800_000_000;
+  /** Chains whose block `n` was mined `age(n)` seconds before the head. */
+  const aged = (age: (block: number) => number, fail = false) =>
+    fakeChain([], {}, {
+      eth_getBlockByNumber: (_c, p) => {
+        if (fail) throw new Error("no such block");
+        return { timestamp: numberToHex(p[0] === "latest" ? T : T - age(Number(p[0]))) };
+      },
+    }).ctx;
+  const gap = (from?: number) => ({ chain: "base" as const, ...(from === undefined ? {} : { from }), line: "Base: a gap" });
+
+  it("stays unchecked while it is younger than the 7-day registry delay", async () => {
+    expect(await gapFindings(aged(() => 6 * DAY), rec, [gap(1_000)])).toEqual({ failures: [], unchecked: ["Base: a gap"] });
+  });
+
+  it("fails once it began more than 7 days ago: a proposal made in it could be active by now", async () => {
+    expect(await gapFindings(aged(() => 8 * DAY), rec, [gap(1_000)])).toEqual({
+      failures: [
+        "Base: a gap; the gap began 8 days ago, beyond the 7-day registry delay, so a bridge or front door proposed in it could be active now: point OPS_BASE_LOGS_RPC at a server that serves those logs and run verify again",
+      ],
+      unchecked: [],
+    });
+  });
+
+  it("dates a gap with no block from the record's creation, and leaves one it can't date unchecked", async () => {
+    const old = { ...rec, createdAt: new Date((T - 9 * DAY) * 1000).toISOString() };
+    expect((await gapFindings(aged(() => 0), old, [gap()])).failures).toHaveLength(1);
+    expect(await gapFindings(aged(() => 0, true), rec, [gap(1_000)])).toEqual({ failures: [], unchecked: ["Base: a gap"] });
+  });
+
+  it("an extra candidate already found whose state can't be read stays a failure; the plan's own bridge is unchecked", async () => {
+    const w = stateChain({});
+    const request = w.rpc.request;
+    const enabledOf = toFunctionSelector("bridgeEnabled(address)");
+    const failing = (who: Address) => ({
+      ...w,
+      rpc: {
+        request: (c: ChainName, m: string, p: unknown[]) => {
+          const data = (p[0] as { data?: Hex })?.data;
+          if (m === "eth_call" && data?.startsWith(enabledOf) && data.toLowerCase().endsWith(who.slice(2).toLowerCase())) return Promise.reject(new Error("node down"));
+          return request(c, m, p);
+        },
+      },
+    });
+    const extra = await registryChecks(failing(OTHER), plan, scanOf({ bridges: [OTHER] }), NONE);
+    expect(extra.failures).toEqual([`Base CascadeFrontDoor: couldn't read the state of the extra bridge ${OTHER} it found before (node down)`]);
+    expect(extra.unchecked).toEqual([]);
+    const own = await registryChecks(failing(a.baseAdapter), plan, scanOf(), NONE);
+    expect(own.failures).toEqual([]);
+    expect(own.unchecked).toEqual([`Base CascadeFrontDoor: couldn't read the state of the plan's bridge ${a.baseAdapter} (node down)`]);
+  });
+
+  it("status and run say what the last verify couldn't check", () => {
+    expect(uncheckedLines(rec)).toEqual([]);
+    expect(uncheckedLines({ ...rec, verify: { ok: true, failures: [], checkedAt: "2026-10-29T00:00:00Z", unchecked: ["Base: a gap"] } })).toEqual([
+      "NOT CHECKED at the last verify (2026-10-29T00:00:00Z):",
+      "  Base: a gap",
+    ]);
   });
 });
 

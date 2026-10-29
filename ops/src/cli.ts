@@ -14,7 +14,7 @@ import { keeperSigner, requireKeeperKey } from "./keeper/signer.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
 import { preflight } from "./preflight.ts";
-import { type DeploymentRecord, loadRecordFor, needRecord as needRecordAt } from "./record.ts";
+import { type DeploymentRecord, loadRecordFor, needRecord as needRecordAt, uncheckedLines } from "./record.ts";
 import { verifyAllowFromEnv } from "./registry.ts";
 import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
@@ -93,6 +93,7 @@ async function run(a: Args): Promise<number> {
       const deps = keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live), a.users as Address[]);
       const s = await deps.readState({ economics: true });
       for (const line of formatStatus(s.detail, { now: s.now, hold: closeHold(s) })) log(line);
+      for (const line of uncheckedLines(rec)) log(line);
       return 0;
     }
     case "close":
@@ -144,6 +145,7 @@ async function run(a: Args): Promise<number> {
       const ctx = keeperCtx(a.live, rec);
       // a wrong key stops the loop now, not at its first send
       await requireKeeperKey(ctx);
+      for (const line of uncheckedLines(rec)) log(line);
       await runLoop(keeperDeps(ctx, rec, recordPath(a.live), a.users as Address[]), rec, {
         intervalMs: 60_000,
         policy: claimPolicy(env),

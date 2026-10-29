@@ -7,6 +7,7 @@ import { BASE_V3, type ChainName, FRONT_DOOR_DEFAULTS, LIVE, PRECOMPILE, SETTING
 import { buildOf, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, rolesOf, settingsOf, settingsV3Of, vaultLimitsOf } from "./plan.ts";
 import {
   type Findings,
+  gapFindings,
   guardianChecks,
   NO_ALLOW,
   NO_CANDIDATES,
@@ -375,7 +376,10 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
     try {
       const r = await scanRegistry(ctx, rec, prev);
       registryScan = r.scan;
-      unchecked.push(...r.unchecked);
+      // a gap older than the registry delay fails: a proposal made in it could be active by now
+      const gaps = await gapFindings(ctx, rec, r.unchecked);
+      failures.push(...gaps.failures);
+      unchecked.push(...gaps.unchecked);
     } catch (e) {
       unchecked.push(`the registry scan couldn't run (${(e as Error).message.split("\n")[0]}), so bridges, front doors and routes beyond the plan's are NOT checked`);
     }
@@ -383,6 +387,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
       const f = await registryChecks(ctx, plan, registryScan ?? NO_CANDIDATES, allow);
       failures.push(...f.failures);
       warnings.push(...f.warnings);
+      unchecked.push(...f.unchecked);
     } catch (e) {
       unchecked.push(`the bridges', front doors' and routes' state couldn't be read (${(e as Error).message.split("\n")[0]}), so they are NOT checked`);
     }

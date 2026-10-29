@@ -82,14 +82,14 @@ async function scan(
   addresses: Address[],
   topics: Hex[],
   from: number,
-): Promise<{ logs: RawLog[]; to: number; error?: string }> {
+): Promise<{ logs: RawLog[]; to: number; error?: string; errorFrom?: number }> {
   const rpc = logsOf(ctx);
   const logs: RawLog[] = [];
   let head: number;
   try {
     head = Number(hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex));
   } catch (e) {
-    return { logs, to: from - 1, error: `from block ${from} (${firstLine(e)})` };
+    return { logs, to: from - 1, error: `from block ${from} (${firstLine(e)})`, errorFrom: from };
   }
   const settled = head - SETTLE[chain];
   const step = Number(windowOf(ctx, chain));
@@ -98,7 +98,7 @@ async function scan(
     try {
       logs.push(...((await rpc.request(chain, "eth_getLogs", [{ address: addresses, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topics] }])) as RawLog[]));
     } catch (e) {
-      return { logs, to: Math.max(from - 1, Math.min(start - 1, settled)), error: `from block ${start} (${firstLine(e)})` };
+      return { logs, to: Math.max(from - 1, Math.min(start - 1, settled)), error: `from block ${start} (${firstLine(e)})`, errorFrom: start };
     }
   }
   return { logs, to: Math.max(from - 1, settled) };
@@ -106,6 +106,43 @@ async function scan(
 
 const addressTopic = (t: Hex): Address => getAddress(`0x${t.slice(-40)}`);
 const union = <T>(a: readonly T[], b: readonly T[]) => [...new Set([...a, ...b])];
+
+/** A stretch of a chain's registry events the scan couldn't read, from block `from` (unknown when even
+ * the deployment's first block couldn't be found), and what to say of it. */
+export interface Gap {
+  chain: ChainName;
+  from?: number;
+  line: string;
+}
+
+/** A gap younger than the registry delay stays unchecked: nothing proposed in it can be active yet. Once
+ * it began more than REGISTRY_DELAY ago (dated by its first block, else by the record's creation), a
+ * bridge or front door proposed in it could be active now, unseen: a failure. One that can't be dated
+ * stays unchecked. */
+export async function gapFindings(ctx: Pick<Ctx, "rpc">, rec: DeploymentRecord, gaps: Gap[]): Promise<{ failures: string[]; unchecked: string[] }> {
+  const out = { failures: [] as string[], unchecked: [] as string[] };
+  const time = async (chain: ChainName, block: number | "latest") =>
+    Number(hexToBigInt(((await ctx.rpc.request(chain, "eth_getBlockByNumber", [block === "latest" ? block : numberToHex(block), false])) as { timestamp: Hex }).timestamp));
+  for (const g of gaps) {
+    let age: number;
+    try {
+      const now = await time(g.chain, "latest");
+      age = now - (g.from === undefined ? Math.floor(Date.parse(rec.createdAt) / 1000) : await time(g.chain, g.from));
+    } catch {
+      out.unchecked.push(g.line);
+      continue;
+    }
+    if (!Number.isFinite(age) || age <= Number(REGISTRY_DELAY)) {
+      out.unchecked.push(g.line);
+      continue;
+    }
+    const logs = g.chain === "base" ? "OPS_BASE_LOGS_RPC" : "OPS_BITTENSOR_RPC";
+    out.failures.push(
+      `${g.line}; the gap began ${Math.floor(age / 86_400)} days ago, beyond the 7-day registry delay, so a bridge or front door proposed in it could be active now: point ${logs} at a server that serves those logs and run verify again`,
+    );
+  }
+  return out;
+}
 
 /** No candidates beyond the plan's own: what the registry checks read when no scan has ever finished. */
 export const NO_CANDIDATES: RegistryScan = { base: { to: -1, bridges: [], routes: [] }, bittensor: { to: -1, bridges: [], frontDoors: [] } };
@@ -118,11 +155,11 @@ export async function scanRegistry(
   ctx: Pick<Ctx, "rpc" | "logs" | "logsWindow">,
   rec: DeploymentRecord,
   prev?: RegistryScan,
-): Promise<{ scan: RegistryScan; unchecked: string[] }> {
+): Promise<{ scan: RegistryScan; unchecked: Gap[] }> {
   const plan = rec.plan as PlanV3;
   const a = plan.addresses;
   const was = prev ?? NO_CANDIDATES;
-  const unchecked: string[] = [];
+  const unchecked: Gap[] = [];
   const empty = (to: number) => ({ logs: [] as RawLog[], to });
 
   let base = empty(was.base.to);
@@ -131,12 +168,14 @@ export async function scanRegistry(
     const s = await scan(ctx, "base", [a.frontDoor, a.staker], [...BRIDGE_TOPICS, ROUTE_TOPIC], from);
     base = s;
     if (s.error) {
-      unchecked.push(
-        `Base: the front door's and the staker's registry events ${s.error} couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back`,
-      );
+      unchecked.push({
+        chain: "base",
+        from: s.errorFrom,
+        line: `Base: the front door's and the staker's registry events ${s.error} couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back`,
+      });
     }
   } catch (e) {
-    unchecked.push(`Base: where the deployment starts couldn't be found (${firstLine(e)}), so its bridges and routes beyond the plan's are NOT checked`);
+    unchecked.push({ chain: "base", line: `Base: where the deployment starts couldn't be found (${firstLine(e)}), so its bridges and routes beyond the plan's are NOT checked` });
   }
 
   let bit = empty(was.bittensor.to);
@@ -145,12 +184,14 @@ export async function scanRegistry(
     const s = await scan(ctx, "bittensor", [a.vault], [...BRIDGE_TOPICS, ...FRONT_DOOR_TOPICS], from);
     bit = s;
     if (s.error) {
-      unchecked.push(
-        `Bittensor: the vault's registry events ${s.error} couldn't be read, so bridges and front doors proposed or enabled since then are NOT checked; the next verify resumes there`,
-      );
+      unchecked.push({
+        chain: "bittensor",
+        from: s.errorFrom,
+        line: `Bittensor: the vault's registry events ${s.error} couldn't be read, so bridges and front doors proposed or enabled since then are NOT checked; the next verify resumes there`,
+      });
     }
   } catch (e) {
-    unchecked.push(`Bittensor: where the deployment starts couldn't be found (${firstLine(e)}), so its bridges and front doors beyond the plan's are NOT checked`);
+    unchecked.push({ chain: "bittensor", line: `Bittensor: where the deployment starts couldn't be found (${firstLine(e)}), so its bridges and front doors beyond the plan's are NOT checked` });
   }
 
   const ours = (l: RawLog, x: Address) => l.address.toLowerCase() === x.toLowerCase();
@@ -200,14 +241,28 @@ const peerId = (chain: bigint, addr: Address) => keccak256(encodeAbiParameters([
  * door or staker route that is enabled or active fails unless allowed (then a warning); any pending
  * proposal is a warning, and a failure too unless allowed. Reads the current state of every candidate
  * the scan found. */
-export async function registryChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3, scan: RegistryScan, allow: VerifyAllow): Promise<Findings> {
+export async function registryChecks(
+  ctx: Pick<Ctx, "rpc">,
+  plan: PlanV3,
+  scan: RegistryScan,
+  allow: VerifyAllow,
+): Promise<Findings & { unchecked: string[] }> {
   const a = plan.addresses;
-  const out: Findings = { failures: [], warnings: [] };
+  const out = { failures: [] as string[], warnings: [] as string[], unchecked: [] as string[] };
   const v = (chain: ChainName, address: Address, functionName: string, args: unknown[] = []) => read(ctx.rpc, chain, { address, abi: VIEWS, functionName, args });
   const allowed = (x: string) => allow.addresses.has(x.toLowerCase());
   const pending = (what: string, x: string, at: string) => {
     out.warnings.push(`${what} is proposed, ready to activate from ${at}`);
     if (!allowed(x)) out.failures.push(`${what} is proposed, ready to activate from ${at}${NOT_EXPECTED}`);
+  };
+  /** Each candidate is read on its own: an extra one found before whose state can't be read fails (it was
+   * there, and nothing says it's gone); the plan's own bridge, unread, is unchecked. */
+  const each = async (extra: boolean, what: string, check: () => Promise<void>) => {
+    try {
+      await check();
+    } catch (e) {
+      (extra ? out.failures : out.unchecked).push(`${what} (${firstLine(e)})`);
+    }
   };
 
   for (const [chain, name, at, own, found] of [
@@ -217,14 +272,17 @@ export async function registryChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3, scan: 
     const where = `${chainLabel(chain)} ${name}`;
     for (const bridge of union([own as Address], found).filter((x, i, all) => all.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === i)) {
       const mine = bridge.toLowerCase() === own.toLowerCase();
-      const enabled = (await v(chain, at, "bridgeEnabled", [bridge])) as boolean;
-      if (mine && !enabled) out.failures.push(`${where}: the plan's bridge ${bridge} is disabled`);
-      if (!mine && enabled) {
-        if (allowed(bridge)) out.warnings.push(`${where}: an extra bridge ${bridge} is enabled (allowed by OPS_VERIFY_ALLOW)`);
-        else out.failures.push(`${where}: an extra bridge ${bridge} is enabled, beyond the plan's (if meant, add it to OPS_VERIFY_ALLOW)`);
-      }
-      const proposedAt = (await v(chain, at, "bridgeProposedAt", [bridge])) as bigint;
-      if (proposedAt !== 0n) pending(`${where}: bridge ${bridge}`, bridge, iso(proposedAt + REGISTRY_DELAY));
+      const unread = mine ? `${where}: couldn't read the state of the plan's bridge ${bridge}` : `${where}: couldn't read the state of the extra bridge ${bridge} it found before`;
+      await each(!mine, unread, async () => {
+        const enabled = (await v(chain, at, "bridgeEnabled", [bridge])) as boolean;
+        const proposedAt = (await v(chain, at, "bridgeProposedAt", [bridge])) as bigint;
+        if (mine && !enabled) out.failures.push(`${where}: the plan's bridge ${bridge} is disabled`);
+        if (!mine && enabled) {
+          if (allowed(bridge)) out.warnings.push(`${where}: an extra bridge ${bridge} is enabled (allowed by OPS_VERIFY_ALLOW)`);
+          else out.failures.push(`${where}: an extra bridge ${bridge} is enabled, beyond the plan's (if meant, add it to OPS_VERIFY_ALLOW)`);
+        }
+        if (proposedAt !== 0n) pending(`${where}: bridge ${bridge}`, bridge, iso(proposedAt + REGISTRY_DELAY));
+      });
     }
   }
 
@@ -234,19 +292,24 @@ export async function registryChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3, scan: 
     const [c, addr] = fd.split(":") as [string, Address];
     const id = peerId(BigInt(c), addr);
     const what = `Bittensor CascadeVault: front door (chain ${c}, ${addr})`;
-    if ((await v("bittensor", a.vault, "frontDoorActive", [id])) as boolean) {
-      if (allowed(addr)) out.warnings.push(`Bittensor CascadeVault: another front door (chain ${c}, ${addr}) is active (allowed by OPS_VERIFY_ALLOW)`);
-      else out.failures.push(`Bittensor CascadeVault: another front door (chain ${c}, ${addr}) is active, beyond the plan's (if meant, add it to OPS_VERIFY_ALLOW)`);
-    }
-    const proposedAt = (await v("bittensor", a.vault, "frontDoorProposedAt", [id])) as bigint;
-    if (proposedAt !== 0n) pending(what, addr, iso(proposedAt + REGISTRY_DELAY));
+    await each(true, `${what}: couldn't read the state of this front door it found before`, async () => {
+      const active = (await v("bittensor", a.vault, "frontDoorActive", [id])) as boolean;
+      const proposedAt = (await v("bittensor", a.vault, "frontDoorProposedAt", [id])) as bigint;
+      if (active) {
+        if (allowed(addr)) out.warnings.push(`Bittensor CascadeVault: another front door (chain ${c}, ${addr}) is active (allowed by OPS_VERIFY_ALLOW)`);
+        else out.failures.push(`Bittensor CascadeVault: another front door (chain ${c}, ${addr}) is active, beyond the plan's (if meant, add it to OPS_VERIFY_ALLOW)`);
+      }
+      if (proposedAt !== 0n) pending(what, addr, iso(proposedAt + REGISTRY_DELAY));
+    });
   }
 
   for (const id of scan.base.routes.filter((r) => r !== 0)) {
-    const active = ((await v("base", a.staker, "routes", [id])) as readonly unknown[])[4] as boolean;
-    if (!active) continue;
-    if (allow.routes.has(id)) out.warnings.push(`Base CascadeStaker: route ${id} is active (allowed by OPS_VERIFY_ALLOW)`);
-    else out.failures.push(`Base CascadeStaker: route ${id} is active beyond the plan's route 0 (if meant, add route:${id} to OPS_VERIFY_ALLOW)`);
+    await each(true, `Base CascadeStaker: couldn't read the state of route ${id} it found before`, async () => {
+      const active = ((await v("base", a.staker, "routes", [id])) as readonly unknown[])[4] as boolean;
+      if (!active) return;
+      if (allow.routes.has(id)) out.warnings.push(`Base CascadeStaker: route ${id} is active (allowed by OPS_VERIFY_ALLOW)`);
+      else out.failures.push(`Base CascadeStaker: route ${id} is active beyond the plan's route 0 (if meant, add route:${id} to OPS_VERIFY_ALLOW)`);
+    });
   }
   return out;
 }

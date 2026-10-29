@@ -61,6 +61,13 @@ export function requireHandoff(rec: DeploymentRecord): void {
   if (cadenceOf(rec.plan) === "launch" && rec.verify?.handoff !== "accepted") throw new Error(HANDOFF_NOT_ACCEPTED);
 }
 
+/** What the last saved read-back couldn't check, for status and run to say again: nothing when it checked
+ * everything. */
+export function uncheckedLines(rec: DeploymentRecord): string[] {
+  const u = rec.verify?.unchecked ?? [];
+  return u.length ? [`NOT CHECKED at the last verify (${rec.verify?.checkedAt}):`, ...u.map((l) => `  ${l}`)] : [];
+}
+
 export function loadRecord(path: string): DeploymentRecord | null {
   return existsSync(path) ? JSON.parse(readFileSync(path, "utf8"), reviver) : null;
 }

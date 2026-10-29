@@ -1,5 +1,7 @@
 import { handleHealth, handleScan, handleStatus } from "./api.ts";
 import { type Config, parseConfig } from "./config.ts";
+import { CRONS } from "./crons.ts";
+import { runSiteJob } from "./site-job.ts";
 
 /** Cascade's history indexer and monitor. `fetch` serves read-only routes; `scheduled` runs the jobs in
  * src/crons.ts (filled in by later steps: for now a cron does nothing). */
@@ -41,6 +43,15 @@ async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promis
   return new Response("Not found", { status: 404 });
 }
 
-async function scheduled(_controller: ScheduledController, _env: Env, _ctx: ExecutionContext): Promise<void> {}
+async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  const cfg = configOf(env);
+  if (!cfg) return;
+  const nowS = Math.floor(controller.scheduledTime / 1000);
+  if (controller.cron === CRONS.site) {
+    // its own invocation: its subrequests and CPU are its own, and it never touches the tick's lease
+    const r = await runSiteJob({ db: env.DB, cfg, fetch: (input, init) => globalThis.fetch(input, init), nowS });
+    console.log(`site check: ${JSON.stringify(r)}`);
+  }
+}
 
 export default { fetch, scheduled } satisfies ExportedHandler<Env>;

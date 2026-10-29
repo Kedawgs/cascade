@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { cascadeKeys } from "@/lib/cascade/hooks";
+import { faqSections } from "@/lib/faq";
 import { APY_FOOTNOTE, APY_NOTE_SHORT } from "@/lib/stats";
 import { type Cached, plainText, renderWithCache } from "../test-render";
 import { Hero } from "./Hero";
@@ -32,6 +33,8 @@ describe("Hero", () => {
     expect(plainText(html)).toContain(`${APY_NOTE_SHORT} How it's worked out`);
     expect(plainText(html)).not.toContain(APY_FOOTNOTE);
     expect(html).toMatch(/href="\/faq\/?#apy"/);
+    // the link lands on a real answer: renaming that question's id would break it
+    expect(faqSections(null).flatMap((x) => x.items.map((i) => i.id))).toContain("apy");
   });
 
   it("keeps showing the APY through a failed read, for up to 14 days", () => {

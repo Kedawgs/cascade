@@ -591,9 +591,16 @@ html:has(.navBar) {
 
   .rowLinks {
     display: flex;
-    gap: 32px;
+    flex-wrap: wrap;
+    gap: 0 32px;
     padding-bottom: 6px;
     font-size: 16px;
+  }
+
+  /* a taller target to tap, without taking more room */
+  .rowLinks a {
+    margin: -10px 0;
+    padding: 10px 0;
   }
 
   .navCta {
@@ -604,7 +611,6 @@ html:has(.navBar) {
 
   .heroGrid {
     grid-template-columns: 1fr;
-    gap: 24px;
     min-height: 0;
   }
 
@@ -613,7 +619,6 @@ html:has(.navBar) {
   }
 
   .copy {
-    order: -1;
     padding: 24px 0 0;
     border-left: 0;
   }

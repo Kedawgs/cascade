@@ -2,7 +2,18 @@ import { type Hex, numberToHex, pad } from "viem";
 import type { ChainName, Config, Role } from "../config.ts";
 import type { StoredLog } from "../logs.ts";
 import type { BaseState, BitState, ChainReading, HourAgg, Snapshot } from "../snapshot.ts";
-import { type BatchCheckRow, type BatchCheckWrite, batchCheckOf, type ChunkCheckRow, type ChunkCheckWrite, chunkCheckOf, logOf, type TxRow, txRowOf } from "../store.ts";
+import {
+  type BatchCheckRow,
+  type BatchCheckWrite,
+  batchCheckOf,
+  type ChunkCheckRow,
+  type ChunkCheckWrite,
+  chunkCheckOf,
+  type HoldRow,
+  logOf,
+  type TxRow,
+  txRowOf,
+} from "../store.ts";
 import type { Thresholds } from "../thresholds.ts";
 
 /** The logs the rules read, in memory: what the prefetch loaded and this tick's own. */
@@ -54,6 +65,10 @@ export interface RuleCtx {
   snap: Snapshot;
   /** the last readings kept before this tick's (older blocks) */
   previous: { base?: ChainReading<BaseState>; bittensor?: ChainReading<BitState> };
+  /** the last few readings kept before this tick's, newest first (previous is the first) */
+  history: { base: ChainReading<BaseState>[]; bittensor: ChainReading<BitState>[] };
+  /** every hold, cleared or not */
+  holds: HoldRow[];
   /** the last 25 hours' aggregates (170 for the weekly rules), newest first */
   hours: HourAgg[];
   /** how far each chain's logs are stored, and that block's time */

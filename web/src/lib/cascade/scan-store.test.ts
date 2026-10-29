@@ -139,6 +139,22 @@ describe("seedScan", () => {
     expect(fresh.next).toBe(D.bitBlock);
   });
 
+  it("counts an account event listed twice once", () => {
+    const state = scanState(scanned());
+    state.deposited = [...state.deposited, ...state.deposited];
+    state.redeemed = [...state.redeemed, { ...state.redeemed[0], assets: "1" }];
+    const scan = newScan(D);
+    seedScan(scan, state);
+    expect(scan.deposited).toHaveLength(1);
+    expect(scan.redeemed).toHaveLength(1);
+    // and one the scan already holds isn't added again
+    const again = newScan(D);
+    again.next = 4_500n;
+    again.redeemed.push({ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n });
+    seedScan(again, { ...scanState(scanned()), redeemed: [{ key: H(78), txHash: H(13), block: "4600", assets: "5000000000000000" }] });
+    expect(again.redeemed).toHaveLength(1);
+  });
+
   it("puts a starting point's events in block order, whatever order it lists them in", () => {
     const state = scanState(scanned());
     state.staked = [

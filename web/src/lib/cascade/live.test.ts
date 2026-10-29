@@ -1,4 +1,4 @@
-import { encodeAbiParameters, encodeEventTopics, parseAbiParameters } from "viem";
+import { encodeAbiParameters, encodeEventTopics, parseAbiParameters, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
 import { FRONT_DOOR, VAULT } from "./abi";
 import type { Deployment } from "./config";
@@ -294,27 +294,48 @@ describe("the vault's history", () => {
     expect(createScanStore(storage, D).load(ME).staked).toHaveLength(7);
   });
 
-  it("sums the account's saved amounts only as their receipts on Bittensor confirm them", async () => {
+  /** A saved scan that read to block 1,000, with one deposit of the account's at block 500 saved as `assets`. */
+  function savedDeposit(assets: bigint) {
     const storage = memory();
     const saved = createScanStore(storage, D);
     const s = saved.load(ME);
-    s.next = 10n;
-    // saved as 5 TAO in, but the receipt says 0.07
-    s.deposited.push({ key: H(3), txHash: H(4), block: 5n, assets: 5n * 10n ** 18n });
+    s.next = 1_000n;
+    s.deposited.push({ key: H(3), txHash: H(4), block: 500n, assets });
     saved.save(ME, s);
-    const depositedLog = {
-      address: D.vault,
-      topics: encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: H(3), user: ME } }),
-      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [7n * 10n ** 16n, 7n * 10n ** 22n]),
-      blockNumber: 5n,
-      transactionHash: H(4),
-      logIndex: 0,
-    };
-    const bittensor = { getTransactionReceipt: async () => ({ status: "success", logs: [depositedLog] }) };
-    const d = deps({ clients: { bittensor } as never, scanStore: createScanStore(storage, D) });
+    return storage;
+  }
+  /** Bittensor answering that deposit's receipt (it says 0.07 TAO went in), from a node at `head`. */
+  const bittensorAt = (head: bigint, found = true) => ({
+    request: async () => `0x${head.toString(16)}`,
+    getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+      if (!found) throw new TransactionReceiptNotFoundError({ hash });
+      const depositedLog = {
+        address: D.vault,
+        topics: encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: H(3), user: ME } }),
+        data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [7n * 10n ** 16n, 7n * 10n ** 22n]),
+        blockNumber: 500n,
+        transactionHash: H(4),
+        logIndex: 0,
+      };
+      return { status: "success", logs: [depositedLog] };
+    },
+  });
+
+  it("sums the account's saved amounts only as their receipts on Bittensor confirm them", async () => {
+    // saved as 5 TAO in, but the receipt says 0.07
+    const d = deps({ clients: { bittensor: bittensorAt(2_000n) } as never, scanStore: createScanStore(savedDeposit(5n * 10n ** 18n), D) });
     const h = await createLiveCascadeData(D, d).getPositionHistory(ME);
     // 0.08 now - 0.07 put in
     expect(h.rewardsEarnedTao).toBeCloseTo(0.01, 12);
+  });
+
+  it("keeps a saved amount through a visit whose node hasn't caught up to it, and shows it once one has", async () => {
+    const storage = savedDeposit(7n * 10n ** 16n);
+    const visit = (bittensor: unknown) => createLiveCascadeData(D, deps({ clients: { bittensor } as never, scanStore: createScanStore(storage, D) }));
+    // the node is at block 300, before the deposit: it can't say yet, so nothing is shown rather than a wrong figure
+    await expect(visit(bittensorAt(300n, false)).getPositionHistory(ME)).rejects.toThrow();
+    await expect(visit(bittensorAt(300n, false)).getPositionHistory(ME)).rejects.toThrow();
+    expect((await visit(bittensorAt(2_000n)).getPositionHistory(ME)).rewardsEarnedTao).toBeCloseTo(0.01, 12);
   });
 });
 

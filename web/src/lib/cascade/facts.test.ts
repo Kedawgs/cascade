@@ -171,7 +171,7 @@ describe("facts", () => {
     expect(behind.next).toBe(1_650n);
   });
 
-  it("takes the account's saved amounts only from their receipts: a wrong one is corrected, one its receipt doesn't show is dropped", async () => {
+  it("takes the account's saved amounts only from their receipts: a changed one is corrected", async () => {
     const redeemedLog = log(
       D.vault,
       encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user: ME } }) as Hex[],
@@ -180,17 +180,11 @@ describe("facts", () => {
       H(9),
       3,
     );
-    const c = chains({ bitReceipts: { [H(9)]: { status: "success", logs: [delivered, depositedLog, redeemedLog] }, [H(31)]: { status: "success", logs: [delivered] } } });
+    const c = chains({ bitReceipts: { [H(9)]: { status: "success", logs: [delivered, depositedLog, redeemedLog] } } });
     const scan = newScan(D);
     scan.next = 2_000n;
-    scan.deposited.push(
-      // the stored amount was changed: the receipt's stands
-      { key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 20n, unconfirmed: true },
-      // its receipt shows no deposit of the account's
-      { key: KEY, txHash: H(31), block: 1_700n, assets: 10n ** 16n, unconfirmed: true },
-      // no such transaction
-      { key: KEY, txHash: H(32), block: 1_800n, assets: 10n ** 16n, unconfirmed: true },
-    );
+    // the stored amount was changed: the receipt's stands
+    scan.deposited.push({ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 20n, unconfirmed: true });
     scan.redeemed.push({ key: KEY, txHash: H(9), block: 1_400n, assets: 1n, unconfirmed: true });
     await confirmAccountEvents(c.clients, D, scan, ME);
     expect(scan.deposited).toEqual([{ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 16n }]);
@@ -204,6 +198,38 @@ describe("facts", () => {
     };
     await expect(confirmAccountEvents(failing.clients, D, down, ME)).rejects.toThrow();
     expect(down.deposited[0].unconfirmed).toBe(true);
+  });
+
+  it("never drops a saved amount because a node that is behind hasn't seen its transaction", async () => {
+    // the node answering is at block 1,450, before the deposit's 1,500: it can't know the transaction yet
+    const behind = chains({ latest: 1_450n });
+    (behind.clients as unknown as { bittensor: { getTransactionReceipt: (q: { hash: Hex }) => Promise<never> } }).bittensor.getTransactionReceipt = async ({ hash }) => {
+      throw new TransactionReceiptNotFoundError({ hash });
+    };
+    const scan = newScan(D);
+    scan.next = 2_000n;
+    scan.deposited.push({ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true });
+    await expect(confirmAccountEvents(behind.clients, D, scan, ME)).rejects.toThrow();
+    expect(scan.deposited).toEqual([{ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true }]);
+    expect(scan.next).toBe(2_000n);
+  });
+
+  it("reads the history again, rather than dropping an amount, when a node past its block shows it isn't there", async () => {
+    const shown = (bitReceipts: Record<string, unknown>) => {
+      const scan = newScan(D);
+      scan.next = 2_000n;
+      scan.staked.push({ block: 1_600n, txHash: H(10) });
+      scan.deposited.push({ key: KEY, txHash: H(31), block: 1_700n, assets: 10n ** 16n, unconfirmed: true });
+      return { scan, run: confirmAccountEvents(chains({ latest: 2_500n, bitReceipts }).clients, D, scan, ME) };
+    };
+    // no such transaction on a node at block 2,500; and a transaction that has no deposit of the account's
+    for (const receipts of [{}, { [H(31)]: { status: "success", logs: [delivered] } }]) {
+      const { scan, run } = shown(receipts);
+      await expect(run).rejects.toThrow();
+      expect(scan.next).toBe(D.bitBlock);
+      expect(scan.deposited).toEqual([]);
+      expect(scan.staked).toEqual([]);
+    }
   });
 
   it("never takes a window of logs from a server that hasn't reached it", async () => {

@@ -121,39 +121,69 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
 /** How many receipts confirmAccountEvents asks Bittensor's public node for at once. */
 const CONFIRM_AT_ONCE = 8;
 
+/** Saved history that Bittensor shows to be wrong: one of its events isn't where it says. The scan was
+ * put back to the deploy block, to read it all again; this read shows nothing from it meanwhile. */
+export class HistoryMismatchError extends Error {
+  constructor() {
+    super("The history saved in this browser didn't match Bittensor, so it is being read again.");
+    this.name = "HistoryMismatchError";
+  }
+}
+
 /** Confirms the account's Deposited and Redeemed events that came from storage or a seed, by their
- * receipts on Bittensor: the amount (and block) is the receipt's, and an event its receipt doesn't show
- * is dropped. Throws when a receipt can't be read, so no amount that isn't confirmed is ever summed. */
+ * receipts on Bittensor: the amount (and block) is the receipt's. A receipt that can't be read, or a
+ * "not found" from a server that hasn't reached the event's block, throws and leaves the event as it
+ * was, so nothing unconfirmed is summed and nothing is lost to a node that is behind. Only a server
+ * that has reached the block, showing no such event there, makes the saved history wrong: then nothing
+ * is dropped quietly, the scan starts over from the deploy block (HistoryMismatchError). */
 export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account: Address): Promise<void> {
   const unconfirmed = [...scan.deposited, ...scan.redeemed].filter((e) => e.unconfirmed);
   if (unconfirmed.length === 0) return;
-  // each transaction's receipt once, a few at a time
+  // each transaction's receipt once, a few at a time, each from a server past its block
+  const blockOf = new Map<Hex, bigint>();
+  for (const e of unconfirmed) blockOf.set(e.txHash, e.block > (blockOf.get(e.txHash) ?? 0n) ? e.block : blockOf.get(e.txHash)!);
   const receipts = new Map<Hex, Receipt | null>();
-  const hashes = [...new Set(unconfirmed.map((e) => e.txHash))];
+  const hashes = [...blockOf.keys()];
   for (let i = 0; i < hashes.length; i += CONFIRM_AT_ONCE) {
-    await Promise.all(
-      hashes.slice(i, i + CONFIRM_AT_ONCE).map(async (hash) => {
-        try {
-          receipts.set(hash, await bitReceipt(c, scan, hash));
-        } catch (err) {
-          if ((err as { name?: string }).name !== "TransactionReceiptNotFoundError") throw err;
-          receipts.set(hash, null);
-        }
-      }),
-    );
+    await Promise.all(hashes.slice(i, i + CONFIRM_AT_ONCE).map(async (hash) => void receipts.set(hash, await receiptAt(c, scan, hash, blockOf.get(hash)!))));
   }
-  const check = (list: AccountEvent[], eventName: "Deposited" | "Redeemed"): AccountEvent[] =>
-    list.flatMap((e) => {
-      if (!e.unconfirmed) return [e];
-      const r = receipts.get(e.txHash) ?? null;
-      const log = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, eventName, strict: false }).find(
-        (l) => same(l.address, d.vault) && same(l.args.key as string, e.key) && !!l.args.user && same(l.args.user as string, account),
-      );
-      return mined(r) && log ? [{ key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint }] : [];
-    });
-  const [deposited, redeemed] = [check(scan.deposited, "Deposited"), check(scan.redeemed, "Redeemed")];
-  scan.deposited.splice(0, scan.deposited.length, ...deposited);
-  scan.redeemed.splice(0, scan.redeemed.length, ...redeemed);
+  const confirm = (e: AccountEvent, eventName: "Deposited" | "Redeemed"): AccountEvent | undefined => {
+    if (!e.unconfirmed) return e;
+    const r = receipts.get(e.txHash) ?? null;
+    const log = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, eventName, strict: false }).find(
+      (l) => same(l.address, d.vault) && same(l.args.key as string, e.key) && !!l.args.user && same(l.args.user as string, account),
+    );
+    return mined(r) && log ? { key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint } : undefined;
+  };
+  const deposited = scan.deposited.map((e) => confirm(e, "Deposited"));
+  const redeemed = scan.redeemed.map((e) => confirm(e, "Redeemed"));
+  if ([...deposited, ...redeemed].some((e) => e === undefined)) {
+    restart(scan);
+    throw new HistoryMismatchError();
+  }
+  scan.deposited.splice(0, scan.deposited.length, ...(deposited as AccountEvent[]));
+  scan.redeemed.splice(0, scan.redeemed.length, ...(redeemed as AccountEvent[]));
+}
+
+/** A Bittensor receipt, asked together with the server's head (one request to one server, as windowLogs
+ * asks): null only when that server has reached `block` and has no such transaction. Throws while it
+ * can't tell (no answer, or a server behind the block), which must never be taken for "not there". */
+async function receiptAt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: Hex, block: bigint): Promise<Receipt | null> {
+  const cached = scan.receipts.get(hash);
+  if (cached) return cached;
+  const [r, head] = await Promise.all([
+    (c.bittensor.getTransactionReceipt({ hash }) as Promise<unknown>).catch((e) => {
+      if ((e as { name?: string }).name === "TransactionReceiptNotFoundError") return null;
+      throw e;
+    }),
+    c.bittensor.request({ method: "eth_blockNumber" }),
+  ]);
+  if (r) {
+    scan.receipts.set(hash, r as Receipt);
+    return r as Receipt;
+  }
+  if (BigInt(head as string) >= block) return null;
+  throw new StaleChainError();
 }
 
 /** One window of the vault's logs, taken only from a server that has reached the window's end. The

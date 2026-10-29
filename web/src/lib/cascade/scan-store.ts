@@ -92,8 +92,17 @@ export function seedScan(scan: VaultScan, seed: unknown): boolean {
     const chunks: PayoutChunk[] = scan.payouts.get(key) ?? [];
     if (!chunks.some((c) => c.chunk === p.chunk)) scan.payouts.set(key, [...chunks, p]);
   }
-  scan.deposited.push(...unread(s.deposited));
-  scan.redeemed.push(...unread(s.redeemed));
+  // the account's events once each, by transaction and batch: listed twice, an amount would count twice
+  const once = (have: AccountEvent[], incoming: AccountEvent[]) => {
+    const seen = new Set(have.map((e) => `${e.txHash}:${e.key}`.toLowerCase()));
+    for (const e of incoming) {
+      const id = `${e.txHash}:${e.key}`.toLowerCase();
+      if (!seen.has(id)) have.push(e);
+      seen.add(id);
+    }
+  };
+  once(scan.deposited, unread(s.deposited));
+  once(scan.redeemed, unread(s.redeemed));
   scan.next = s.next;
   return true;
 }

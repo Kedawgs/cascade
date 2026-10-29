@@ -127,8 +127,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       .scan(c, d, scan, account, () => {
         if (deps.now() - saved >= SAVE_EVERY_MS) save();
       })
-      .finally(save)
       .then(() => confirmAccountEvents(c, d, scan, account))
+      // saved also when a read stops, and after a scan put back to the deploy block
+      .finally(save)
       .then(() => scan);
     inFlight.set(key, p);
     const clear = () => void inFlight.delete(key);

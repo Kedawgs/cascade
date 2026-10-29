@@ -21,8 +21,8 @@ export interface VaultScan {
   /** BatchDelivered from our front door, by batch id. */
   delivered: Map<string, { key: Hex; txHash: Hex; block: bigint }>;
   staked: { block: bigint; txHash: Hex }[];
-  /** PayoutChunkSent by batch key. */
-  payouts: Map<Hex, { txHash: Hex; block: bigint }[]>;
+  /** PayoutChunkSent by batch key: each chunk's number and how many of the batch's payout entries it took. */
+  payouts: Map<Hex, PayoutChunk[]>;
   /** The account's own Deposited events (to show deposits made from another browser). */
   deposited: { key: Hex; txHash: Hex; block: bigint; assets: bigint }[];
   /** The account's own Redeemed events (TAO it took out). */
@@ -31,6 +31,13 @@ export interface VaultScan {
   blockTimes: Map<bigint, Date>;
   /** v3: each payout's life on Base after it left the vault, by batch key (lowercase). */
   onBase: Map<string, BasePayout>;
+}
+
+export interface PayoutChunk {
+  txHash: Hex;
+  block: bigint;
+  chunk: number;
+  taken: number;
 }
 
 export const newScan = (d: Deployment): VaultScan => ({
@@ -62,7 +69,8 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
         scan.staked.push({ block, txHash });
       } else if (l.eventName === "PayoutChunkSent") {
         const key = l.args.key as Hex;
-        scan.payouts.set(key, [...(scan.payouts.get(key) ?? []), { txHash, block }]);
+        const chunk = { txHash, block, chunk: Number(l.args.chunk), taken: Number(l.args.taken) };
+        scan.payouts.set(key, [...(scan.payouts.get(key) ?? []), chunk]);
       } else if (l.eventName === "Deposited" && account && l.args.user && same(l.args.user, account)) {
         scan.deposited.push({ key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint });
       } else if (l.eventName === "Redeemed" && account && l.args.user && same(l.args.user, account)) {
@@ -228,7 +236,7 @@ export async function withdrawalFacts(
     else if (mine.some((l) => l.eventName === "RedeemDeferred")) facts.delivered = { at, txHash: hit.txHash, outcome: "deferred" };
     else if (mine.some((l) => l.eventName === "RedeemSkipped")) facts.delivered = { at, txHash: hit.txHash, outcome: "skipped" };
 
-    const sent = ctx.scan.payouts.get(hit.key)?.at(-1);
+    const sent = redeemed ? chunkOf(ctx.scan.payouts.get(hit.key) ?? [], entryIndex(r, d, hit.key, op.account)) : undefined;
     if (redeemed && sent) {
       const pr = await bitReceipt(c, ctx.scan, sent.txHash);
       const msg = parseEventLogs({ abi: ADAPTER, logs: (pr?.logs ?? []) as never, eventName: "Sent", strict: false }).find((l) =>
@@ -247,6 +255,27 @@ export async function withdrawalFacts(
   // v3: once the payout is back on Base, what took it, and how much of it was this payout's
   if (isV3(d) && hit && facts.payout?.state === 2) await deliveryFacts(c, d, op, ctx, hit.key, facts);
   return { batchId, facts };
+}
+
+/** Where the account's redeem sits in its batch's payout list: the vault lists a batch's bounced
+ * deposits and redeems in the order of their DepositBounced and Redeemed events in the delivery. */
+function entryIndex(r: Receipt | null, d: Deployment, key: Hex, account: Address): number {
+  const entries = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, strict: false }).filter(
+    (l) => same(l.address, d.vault) && (l.eventName === "DepositBounced" || l.eventName === "Redeemed") && same(l.args.key as string, key),
+  );
+  return entries.findIndex((l) => l.eventName === "Redeemed" && same(l.args.user as string, account));
+}
+
+/** The chunk that carried payout entry `index`, once it has left: the vault sends a batch's list in
+ * chunks, in turn, each taking the next `taken` entries. */
+function chunkOf(chunks: PayoutChunk[], index: number): PayoutChunk | undefined {
+  if (index < 0) return undefined;
+  let start = 0;
+  for (const c of [...chunks].sort((a, b) => a.chunk - b.chunk)) {
+    if (index < start + c.taken) return c;
+    start += c.taken;
+  }
+  return undefined;
 }
 
 /** A v3 payout back on Base: what it credited the account, then the delivery that sold it (its receipt

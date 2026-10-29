@@ -292,6 +292,59 @@ describe("facts", () => {
     expect(f.facts.payout).toMatchObject({ messageId: H(6), state: 1 });
   });
 
+  it("reads a payout's state from the chunk that carries the account's entry, not the latest one", async () => {
+    const OTHER = getAddress("0x000000000000000000000000000000000000b0b0");
+    const redeemedBy = (user: Hex, index: number) =>
+      log(
+        D.vault,
+        encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user } }) as Hex[],
+        encodeAbiParameters(parseAbiParameters("uint256, uint256"), [10n ** 22n, 10n ** 16n]),
+        1_500n,
+        H(9),
+        index,
+      );
+    // the payout list is the batch's entries in log order: someone else's, then the account's
+    const deliveryLogs = [delivered, redeemedBy(OTHER, 1), redeemedBy(ME, 2)];
+    const chunkLog = (chunk: number, block: bigint, tx: Hex) =>
+      log(
+        D.vault,
+        encodeEventTopics({ abi: VAULT, eventName: "PayoutChunkSent", args: { key: KEY } }) as Hex[],
+        encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256"), [chunk, 1, 10n ** 16n, 9n * 10n ** 15n, 10n ** 15n]),
+        block,
+        tx,
+      );
+    const sentLog = (messageId: Hex, block: bigint, tx: Hex) =>
+      log(
+        D.bitAdapter,
+        encodeEventTopics({ abi: ADAPTER, eventName: "Sent", args: { messageId, sender: D.vault, recipient: D.frontDoor } }) as Hex[],
+        encodeAbiParameters(parseAbiParameters("uint64, uint256, uint256, uint256"), [8453n, 9n * 10n ** 15n, 10n ** 15n, 1n]),
+        block,
+        tx,
+        1,
+      );
+    const first = chunkLog(0, 1_900n, H(10));
+    const second = chunkLog(1, 1_950n, H(11));
+    const receipts = {
+      [H(9)]: { status: "success", logs: deliveryLogs },
+      [H(10)]: { status: "success", logs: [first, sentLog(H(6), 1_900n, H(10))] },
+      [H(11)]: { status: "success", logs: [second, sentLog(H(7), 1_950n, H(11))] },
+    };
+    const op: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
+    const payoutOf = async (bitLogs: unknown[], bitReceipts: Record<string, unknown>) => {
+      const c = chains({ bitLogs, bitReceipts, executionState: 2 });
+      const scan = newScan(D);
+      await scanVault(c.clients, D, scan, ME);
+      return (await withdrawalFacts(c.clients, D, op, { fd, vault, scan, claims: [] })).facts.payout;
+    };
+    // only the first chunk (someone else's entry) has left: this payout hasn't
+    expect(await payoutOf([delivered, first], receipts)).toBeUndefined();
+    // both left: the account's is the second chunk's message
+    expect(await payoutOf([delivered, first, second], receipts)).toMatchObject({ txHash: H(11), messageId: H(7), state: 2 });
+    // the account's entry in the first chunk, and a later chunk that sent nothing (no message): still the first's
+    const mineFirst = { ...receipts, [H(9)]: { status: "success", logs: [delivered, redeemedBy(ME, 1), redeemedBy(OTHER, 2)] }, [H(11)]: { status: "success", logs: [second] } };
+    expect(await payoutOf([delivered, first, second], mineFirst)).toMatchObject({ txHash: H(10), messageId: H(6), state: 2 });
+  });
+
   it("reads what a claim paid from its receipts, for the unstakes it names", async () => {
     const claimedLog = log(
       D.frontDoor,
@@ -560,7 +613,7 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     // the vault's side as a scan would have found it: the batch arrived, and its payout left
     const scan = newScan(opts.d ?? D3);
     scan.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n });
-    scan.payouts.set(KEY, [{ txHash: H(10), block: 1_900n }]);
+    scan.payouts.set(KEY, [{ txHash: H(10), block: 1_900n, chunk: 0, taken: 1 }]);
     return { clients: c.clients, scan, windows, asked, reads };
   }
   const factsOf = (b: ReturnType<typeof backOnBase>, claimable = 0n, d = D3, claims: ClaimOp[] = []) =>

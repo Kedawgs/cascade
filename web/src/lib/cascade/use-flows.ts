@@ -43,7 +43,7 @@ import {
   type WalletPort,
 } from "./flows";
 import { cascadeKeys } from "./hooks";
-import { opStore } from "./op-store";
+import { cancelStore, opStore, scratchStore } from "./op-store";
 import { type ClaimOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
 import { quoteSell, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
@@ -112,21 +112,6 @@ export function wagmiPort(config: Config, account: Address, reader: PublicClient
         return { ok: false, ...(revert !== undefined ? { revert } : {}) };
       }
     },
-  };
-}
-
-function scratchStore(): FlowStore {
-  const hashes: Record<string, Hex | undefined> = {};
-  let mode: "batch" | "sequential" | undefined;
-  let callsId: string | undefined;
-  return {
-    hashes: () => hashes,
-    setHash: (k, h) => void (hashes[k] = h),
-    setState: () => undefined,
-    callsId: () => callsId,
-    setCallsId: (id) => void (callsId = id),
-    mode: () => mode,
-    setMode: (m) => void (mode = m),
   };
 }
 
@@ -359,13 +344,8 @@ export function useFlows(account: string | null) {
       return removed;
     },
 
-    /** Takes an entry back out of the open batch and records it on that entry. */
+    /** Takes an entry back out of the open batch, recorded on that entry as soon as the wallet sends it. */
     cancel: (kind: "deposit" | "withdrawal", id: string, amount: bigint) =>
-      flow("cancel", async () => {
-        const store = scratchStore();
-        await runFlow(port(), store, [cancelCall(kind, amount, d())]);
-        const hash = store.hashes().cancel;
-        if (hash) data.opLog.update(a, id, { cancelled: { hash, at: Date.now() } } as Partial<Operation>);
-      }),
+      flow("cancel", () => runFlow(port(), cancelStore(data.opLog, a, id), [cancelCall(kind, amount, d())])),
   };
 }

@@ -107,6 +107,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     ...given,
   };
   const c = deps.clients;
+  /** The clients the history scan and its receipt checks use: Bittensor on its own connection. */
+  const history: Clients = { ...c, bittensor: c.bittensorScan ?? c.bittensor };
   const scans = new Map<string, VaultScan>();
   /** One scan of an account at a time: overlapping scans would read the same blocks twice and
    * double-count events. Callers arriving while one runs share it. */
@@ -163,7 +165,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         saved = deps.now();
       };
       return deps
-        .scan(c, d, scan, account, () => {
+        .scan(history, d, scan, account, () => {
           if (deps.now() - saved >= SAVE_EVERY_MS) save();
         })
         .finally(save)
@@ -179,7 +181,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * anything that sums them needs. What can be unstaked needs only scanFor, so an old deposit's receipt
    * that can't be read never holds it up. */
   function historyFor(account: Address): Promise<VaultScan> {
-    return scanFor(account).then(() => serial(account, (scan) => confirming(account, scan, () => confirmAccountEvents(c, d, scan, account))));
+    return scanFor(account).then(() => serial(account, (scan) => confirming(account, scan, () => confirmAccountEvents(history, d, scan, account))));
   }
 
   /** Settled cancels never change: each answer is kept, so a read asks Base only about new ones. */
@@ -270,7 +272,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     let scan = known(a);
     // a saved delivery is relied on only once its receipt shows it
     const arrived = withdrawals.filter((w) => w.batchId !== undefined && w.batchId < fd.openBatchId && scan.delivered.get(String(w.batchId))?.unconfirmed);
-    for (const w of arrived) await serial(a, (s) => confirming(a, s, () => confirmDelivery(c, d, s, String(w.batchId))));
+    for (const w of arrived) await serial(a, (s) => confirming(a, s, () => confirmDelivery(history, d, s, String(w.batchId))));
     if (withdrawals.some((w) => onTheBridge(w, fd, scan))) {
       scan = await scanFor(a);
       // a delivery the scan found may have burned the shares since the first reads: read them again

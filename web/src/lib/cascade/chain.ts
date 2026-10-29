@@ -19,6 +19,9 @@ export interface Clients {
    * answer never holds up the reads the screens need: its own batches, a 10 s timeout, two quick retries
    * (the archive node turns bursts away). */
   bittensorHistory: PublicClient;
+  /** The vault's log scan (and its receipt checks) on their own connection: each window's log query and
+   * server head go together to one server, never in a batch with the balance reads nor holding them up. */
+  bittensorScan: PublicClient;
 }
 
 /** Public RPCs, JSON-RPC batching and Multicall3 on both chains, gentle retries (Base rate-limits bursts). */
@@ -35,6 +38,10 @@ export function createClients(): Clients {
     bittensorHistory: createPublicClient({
       chain: bittensor,
       transport: http(RPC.bittensor, { batch: true, timeout: 10_000, retryCount: 2, retryDelay: 1_000 }),
+    }) as PublicClient,
+    bittensorScan: createPublicClient({
+      chain: bittensor,
+      transport: http(RPC.bittensor, { batch: true, retryCount: 4, retryDelay: 1_500 }),
     }) as PublicClient,
   };
 }

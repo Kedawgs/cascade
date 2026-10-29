@@ -316,6 +316,15 @@ describe("the vault's history", () => {
     await expect(createLiveCascadeData(D, { ...d }).getPositionHistory(ME)).rejects.toThrow();
   });
 
+  it("reads the history on its own connection, so its log windows never share a batch with the balance reads", async () => {
+    const reads = { name: "balance reads" };
+    const history = { name: "history" };
+    let used: unknown;
+    const d = deps({ clients: { bittensor: reads, bittensorScan: history } as never, scan: async (c2) => void (used = c2.bittensor) });
+    await createLiveCascadeData(D, d).getPositionHistory(ME);
+    expect(used).toBe(history);
+  });
+
   it("works out TAO on its way and rewards earned once the scan has read the account's deposits and redeems", async () => {
     const d = deps({
       readFrontDoor: async () => ({ ...fd, depositOf: 10n ** 15n }),

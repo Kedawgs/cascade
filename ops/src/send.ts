@@ -149,6 +149,11 @@ export function redact(targets: Ctx["targets"], text: string): string {
   return out.replace(/((?:d|api_?)?key|token|secret)=[^&\s)"']+/gi, "$1=…");
 }
 
+/** Which server the live tools read Base's logs from: its origin only (a provider's key, in its path or
+ * query, never printed). */
+export const baseLogsLine = (target: ChainTarget) =>
+  `Reading Base's logs from ${redact({ base: target, bittensor: target }, target.rpcUrl)} (set OPS_BASE_LOGS_RPC to change it)`;
+
 const isLocal = (url: string) => ["127.0.0.1", "localhost"].includes(new URL(url).hostname);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const bin = (ctx: Ctx, name: string) => join(ctx.paths.foundryBin, process.platform === "win32" ? `${name}.exe` : name);

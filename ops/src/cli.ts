@@ -19,7 +19,7 @@ import { verifyAllowFromEnv } from "./registry.ts";
 import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { createRpc, logsRpc } from "./rpc.ts";
-import { type Ctx, execFileRunner, unit } from "./send.ts";
+import { baseLogsLine, type Ctx, execFileRunner, unit } from "./send.ts";
 import { verifyAndSave } from "./verify.ts";
 import { writeWebEnv } from "./webconfig.ts";
 import { sweep, windDown } from "./winddown.ts";
@@ -32,7 +32,8 @@ function ctxFor(live: boolean): Ctx {
   const rpc = createRpc(t, live ? {} : { minIntervalMs: { bittensor: 0 } });
   // the live tools read Base's logs from their own server (mainnet.base.org refuses eth_getLogs); the
   // forks serve their own
-  const logs = live ? logsRpc(rpc, createRpc({ ...t, base: baseLogsTarget(env) })) : undefined;
+  const logsAt = baseLogsTarget(env);
+  const logs = live ? logsRpc(rpc, createRpc({ ...t, base: logsAt }), { announce: () => log(baseLogsLine(logsAt)) }) : undefined;
   return {
     live,
     targets: t,

@@ -73,8 +73,9 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   unpause [front-door|vault|both]  the same, as the owner (OPS_OWNER_KEYSTORE, OPS_OWNER_PASSWORD_FILE)
 
 Without --live, deploy and the keeper commands use the local forks.
-Live, Base's logs are read from OPS_BASE_LOGS_RPC (default https://base-rpc.publicnode.com): the default
-OPS_BASE_RPC, mainnet.base.org, refuses eth_getLogs.
+Live, Base's logs are read from OPS_BASE_LOGS_RPC; without it from OPS_BASE_RPC, unless that is
+mainnet.base.org (which refuses eth_getLogs), else https://base-rpc.publicnode.com. OPS_BASE_LOGS_WINDOW
+sets the blocks a query asks for (default 10,000).
 The keeper commands (status, close, stake, payouts, rewards, claim, deliver, run) sign as the record's
 keeper with OPS_KEEPER_KEYSTORE and OPS_KEEPER_PASSWORD_FILE, else as the test wallet.
 A launch (OPS_CADENCE=launch) reads its roles from OPS_LAUNCH_OWNER_BASE, OPS_LAUNCH_OWNER_BITTENSOR,

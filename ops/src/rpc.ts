@@ -83,11 +83,18 @@ export function createRpc(targets: Record<ChainName, ChainTarget>, opts: RpcOpti
  * head here too, so a server that lags can't answer an older head's range as "no logs". Before Base's
  * first request it checks the logs server is Base: one on another chain would answer every query with
  * nothing. */
-export function logsRpc(main: Rpc, baseLogs: Rpc, baseChainId = 8453): Rpc {
+export function logsRpc(main: Rpc, baseLogs: Rpc, o: { baseChainId?: number; announce?: () => void } = {}): Rpc {
+  const baseChainId = o.baseChainId ?? 8453;
   let checked = false;
+  let announced = false;
   return {
     async request(chain, method, params) {
       if (chain !== "base") return main.request(chain, method, params);
+      // said once, when Base's logs are first read: which server they come from
+      if (!announced) {
+        announced = true;
+        o.announce?.();
+      }
       if (!checked) {
         const id = hexToNumber((await baseLogs.request("base", "eth_chainId", [])) as Hex);
         if (id !== baseChainId) {

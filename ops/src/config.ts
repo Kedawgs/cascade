@@ -302,12 +302,22 @@ export function targets(env: Env): { live: Record<ChainName, ChainTarget>; rehea
   };
 }
 
-/** Where the live tools read Base's logs: OPS_BASE_LOGS_RPC, by default publicnode. mainnet.base.org (the
- * default OPS_BASE_RPC) refuses eth_getLogs outright ("request limit reached", checked 2026-10-28), and
- * publicnode serves recent ranges but not archive depth without a token. The site reads Base's logs
- * the same way (web/src/lib/cascade/config.ts, baseLogs). */
+/** Where the live tools read Base's logs: OPS_BASE_LOGS_RPC; without it OPS_BASE_RPC (a keyed provider
+ * usually serves logs), unless that is mainnet.base.org, which refuses eth_getLogs outright ("request
+ * limit reached", checked 2026-10-28); else publicnode. The site reads Base's logs the same way
+ * (web/src/lib/cascade/config.ts, baseLogs). */
 export function baseLogsTarget(env: Env): ChainTarget {
-  return { name: "base", rpcUrl: env.OPS_BASE_LOGS_RPC ?? "https://base-rpc.publicnode.com", chainId: 8453, legacy: false };
+  const logs = env.OPS_BASE_LOGS_RPC?.trim();
+  const base = env.OPS_BASE_RPC?.trim();
+  const refuses = (url: string) => {
+    try {
+      return new URL(url).hostname === "mainnet.base.org";
+    } catch {
+      return false;
+    }
+  };
+  const rpcUrl = logs || (base && !refuses(base) ? base : "https://base-rpc.publicnode.com");
+  return { name: "base", rpcUrl, chainId: 8453, legacy: false };
 }
 
 /** The block range of one eth_getLogs to the Base logs server: OPS_BASE_LOGS_WINDOW, by default 10,000

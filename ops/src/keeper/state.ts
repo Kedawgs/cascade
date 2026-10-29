@@ -566,7 +566,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
           logsFailedFor = batch.id;
           const hours = planMaxWait(rec.plan) / 3600;
           ctx.log(
-            `Base logs: couldn't read batch ${batch.id}'s deposits (${(e as Error).message.split("\n")[0]}), so its deposit fees are unknown and it waits for its max wait (${hours} hours) instead of closing when they cover its bridge fee. Set OPS_BASE_LOGS_RPC to a Base RPC that serves eth_getLogs (default ${baseLogsTarget({}).rpcUrl}).`,
+            `Base logs: couldn't read batch ${batch.id}'s deposits (${(e as Error).message.split("\n")[0]}), so its deposit fees are unknown and it waits for its max wait (${hours} hours) instead of closing when they cover its bridge fee. Set OPS_BASE_LOGS_RPC to a Base RPC that serves eth_getLogs (without it, OPS_BASE_RPC unless that is mainnet.base.org, else ${baseLogsTarget({}).rpcUrl}).`,
           );
         }
         return null;

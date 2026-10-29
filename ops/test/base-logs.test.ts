@@ -9,6 +9,7 @@ import { buildPlanV3 } from "../src/plan.ts";
 import { logProbe } from "../src/preflight.ts";
 import { scanRegistry } from "../src/registry.ts";
 import { logsRpc, type Rpc, RpcError } from "../src/rpc.ts";
+import { baseLogsLine } from "../src/send.ts";
 import { type Answer, COLDKEY, fakeChain, v3Record } from "./fake-keeper.ts";
 import { ROLES } from "./launch-roles.ts";
 
@@ -38,9 +39,26 @@ function logsServer(head: number, logs: { blockNumber: Hex; topics: Hex[]; addre
 }
 
 describe("Base's log scans have their own RPC", () => {
-  it("OPS_BASE_LOGS_RPC, by default publicnode (mainnet.base.org refuses eth_getLogs)", () => {
+  it("OPS_BASE_LOGS_RPC, else OPS_BASE_RPC unless it is mainnet.base.org (which refuses eth_getLogs), else publicnode", () => {
     expect(baseLogsTarget({})).toEqual({ name: "base", rpcUrl: "https://base-rpc.publicnode.com", chainId: 8453, legacy: false });
-    expect(baseLogsTarget({ OPS_BASE_LOGS_RPC: "https://logs.example" }).rpcUrl).toBe("https://logs.example");
+    const keyed = "https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY";
+    expect(baseLogsTarget({ OPS_BASE_RPC: keyed }).rpcUrl).toBe(keyed);
+    expect(baseLogsTarget({ OPS_BASE_RPC: "https://mainnet.base.org" }).rpcUrl).toBe("https://base-rpc.publicnode.com");
+    expect(baseLogsTarget({ OPS_BASE_RPC: "https://mainnet.base.org/" }).rpcUrl).toBe("https://base-rpc.publicnode.com");
+    expect(baseLogsTarget({ OPS_BASE_RPC: keyed, OPS_BASE_LOGS_RPC: "https://logs.example" }).rpcUrl).toBe("https://logs.example");
+  });
+
+  it("says which host it reads Base's logs from, its origin only, once and only when Base's logs are read", async () => {
+    const line = baseLogsLine(baseLogsTarget({ OPS_BASE_RPC: "https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY" }));
+    expect(line).toBe("Reading Base's logs from https://lb.drpc.org/… (set OPS_BASE_LOGS_RPC to change it)");
+    expect(line).not.toContain("SECRET");
+    const said: string[] = [];
+    const logs = logsRpc(logsServer(1_000).rpc, logsServer(BASE_HEAD).rpc, { announce: () => said.push("base logs") });
+    await logs.request("bittensor", "eth_blockNumber", []);
+    expect(said).toEqual([]);
+    await logs.request("base", "eth_blockNumber", []);
+    await logs.request("base", "eth_getLogs", [{ fromBlock: "0x1", toBlock: "0x2" }]);
+    expect(said).toEqual(["base logs"]);
   });
 
   it("asks it for 10,000 blocks a query (OPS_BASE_LOGS_WINDOW): the 100-block window was mainnet.base.org's", async () => {
@@ -162,7 +180,7 @@ describe("the keeper's close economics read the batch's deposits from the logs s
     expect((await w.deps.readState({ economics: true })).frontDoor.closeEconomics).toBeNull();
     expect((await w.deps.readState({ economics: true })).frontDoor.closeEconomics).toBeNull();
     expect(w.lines).toEqual([
-      "Base logs: couldn't read batch 7's deposits (base eth_getLogs: request limit reached), so its deposit fees are unknown and it waits for its max wait (24 hours) instead of closing when they cover its bridge fee. Set OPS_BASE_LOGS_RPC to a Base RPC that serves eth_getLogs (default https://base-rpc.publicnode.com).",
+      "Base logs: couldn't read batch 7's deposits (base eth_getLogs: request limit reached), so its deposit fees are unknown and it waits for its max wait (24 hours) instead of closing when they cover its bridge fee. Set OPS_BASE_LOGS_RPC to a Base RPC that serves eth_getLogs (without it, OPS_BASE_RPC unless that is mainnet.base.org, else https://base-rpc.publicnode.com).",
     ]);
   });
 });

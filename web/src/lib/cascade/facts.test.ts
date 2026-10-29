@@ -381,6 +381,61 @@ describe("facts", () => {
     expect(none.facts.claimed).toBeUndefined();
   });
 
+  it("calls a record cancelled only when its cancel came out of the record's own batch, whatever that batch did after", async () => {
+    const cancelIn = (eventName: "DepositCancelled" | "RedeemCancelled", batchId: bigint, tx: Hex) => ({
+      status: "success",
+      logs: [
+        log(
+          D.frontDoor,
+          encodeEventTopics({ abi: FRONT_DOOR, eventName, args: { batchId, user: ME } }) as Hex[],
+          encodeAbiParameters(parseAbiParameters("uint256"), [10n ** 16n]),
+          60n,
+          tx,
+        ),
+      ],
+    });
+    const redeemedLog = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256, uint256"), [10n ** 22n, 10n ** 16n]),
+      1_500n,
+      H(9),
+      3,
+    );
+    // batch 3 was delivered, with a deposit and a redeem of the account's (other requests than the cancelled ones)
+    const c = chains({
+      bitLogs: [delivered],
+      bitReceipts: { [H(9)]: { status: "success", logs: [delivered, depositedLog, deliveredMsg, redeemedLog] } },
+      baseReceipts: {
+        [H(1)]: { status: "success", logs: [] },
+        [H(2)]: { status: "success", logs: [] },
+        [H(3)]: { status: "success", logs: [] },
+        [H(12)]: cancelIn("DepositCancelled", 3n, H(12)),
+        // mined after batch 3 closed: it came out of batch 4
+        [H(13)]: cancelIn("DepositCancelled", 4n, H(13)),
+        [H(14)]: { status: "reverted", logs: [] },
+        [H(15)]: cancelIn("RedeemCancelled", 3n, H(15)),
+      },
+    });
+    const scan = newScan(D);
+    await scanVault(c.clients, D, scan, ME);
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: { swap: H(1), deposit: H(2) }, batchId: 3n, state: "sent" };
+    const depositWith = (hash: Hex) => depositFacts(c.clients, D, { ...dep, cancelled: { hash, at: 1 } }, { fd, vault, scan }).then((r) => r.facts);
+    const took = await depositWith(H(12));
+    expect(took.cancelMined).toBe(true);
+    expect(took.delivered).toBeUndefined();
+    for (const notTaken of [H(13), H(14)]) {
+      const f = await depositWith(notTaken);
+      expect(f.cancelMined).toBe(false);
+      expect(f.delivered?.outcome).toBe("deposited");
+    }
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, hash: H(3), batchId: 3n, state: "sent" };
+    const cancelled = await withdrawalFacts(c.clients, D, { ...w, cancelled: { hash: H(15), at: 1 } }, { fd, vault, scan, claims: [] });
+    expect(cancelled.facts.cancelMined).toBe(true);
+    expect(cancelled.facts.delivered).toBeUndefined();
+    expect(cancelled.facts.payout).toBeUndefined();
+  });
+
   it("says a claim went through only when its receipt succeeded and shows the account's Claimed event", async () => {
     const claimedLog = log(
       D.frontDoor,

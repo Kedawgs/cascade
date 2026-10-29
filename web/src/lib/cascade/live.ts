@@ -1,10 +1,10 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
 import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
-import { chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
+import { cancelTook, chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
-import { chainOnlyDeposit, depositRecord, withdrawalRecord } from "./trail";
+import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { CascadeData, DepositQuote, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
 import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
 
@@ -111,6 +111,26 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     return p;
   }
 
+  /** Settled cancels never change: each answer is kept, so a read asks Base only about new ones. */
+  const settledCancels = new Map<string, boolean>();
+  /** The ids of `ops` whose cancel took them out of their batch (see cancelTook): they count nowhere. */
+  async function cancelledIn(ops: (DepositOp | WithdrawalOp)[]): Promise<Set<string>> {
+    const out = new Set<string>();
+    await Promise.all(
+      ops.map(async (o) => {
+        if (!o.cancelled) return;
+        const k = `${o.id}:${o.cancelled.hash}`;
+        let took = settledCancels.get(k);
+        if (took === undefined) {
+          took = await cancelTook(c, o);
+          if (took !== undefined) settledCancels.set(k, took);
+        }
+        if (took) out.add(o.id);
+      }),
+    );
+    return out;
+  }
+
   /** A record's state as this tab sees it: "running" with no flow running here means interrupted. */
   const live = <T extends DepositOp | WithdrawalOp | ClaimOp>(op: T): T & { interrupted: boolean } => {
     const seen: T = { ...op, state: effectiveState(op, deps.opLog) };
@@ -133,8 +153,10 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         ? toDisplay((waiting.wei * v.shares * BigInt(10_000 - waiting.cutBps)) / (v.totalSupply * 10_000n), 18)
         : undefined;
     const ops = deps.opLog.list(a);
-    const withdrawals = ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal" && o.state !== "failed");
-    const deposits = ops.filter((o): o is DepositOp => o.kind === "deposit");
+    // a request taken back out of a batch that has since closed is neither on the bridge nor delivered
+    const gone = await cancelledIn(ops.filter((o): o is DepositOp | WithdrawalOp => o.kind !== "claim" && o.batchId !== undefined && o.batchId < fd.openBatchId));
+    const withdrawals = ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal" && o.state !== "failed" && !gone.has(o.id));
+    const deposits = ops.filter((o): o is DepositOp => o.kind === "deposit" && !gone.has(o.id));
     const asked = fd.redeemOf + sum(withdrawals.filter((w) => onTheBridge(w, fd, scan)).map((w) => w.shares));
     const availableShares = v.shares > asked ? v.shares - asked : 0n;
     const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
@@ -208,7 +230,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     }
     // TAO this account deposited that hasn't reached the vault yet (open batch or bridge) counts toward the staking minimum
     const incomingWei = found
-      .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !(op.cancelled && facts.cancelMined))
+      .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !isCancelled(op, facts))
       .reduce((sum, { op }) => sum + op.targetTao, 0n);
     for (const { op, facts } of found) out.push(depositRecord(op, { ...facts, incomingWei }));
     for (const e of await chainDeposits(c, scan)) if (!seen.has(e.txHash.toLowerCase())) out.push(chainOnlyDeposit(e));

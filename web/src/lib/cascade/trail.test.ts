@@ -132,6 +132,18 @@ describe("deposit trail", () => {
     expect(r.steps[2].detail).toMatch(/back in your wallet/i);
   });
 
+  it("stays cancelled after its batch is delivered with other people's deposits", () => {
+    const delivered = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "deposited" as const };
+    const r = depositRecord(
+      { ...op, cancelled: { hash: H(12), at: T0.getTime() } },
+      { ...base, openBatchId: 4n, stillOpen: false, delivered, staked: { at: new Date(), txHash: H(7) }, cancelMined: true },
+    );
+    expect(r.status).toBe("cancelled");
+    expect(statuses(r)).toEqual(["done", "done", "failed", "pending"]);
+    expect(r.steps[2].detail).toMatch(/back in your wallet/i);
+    expect(r.cancellableWei).toBeUndefined();
+  });
+
   it("is on the bridge once the batch has closed, saying for how long and where to watch it", () => {
     const r = depositRecord(op, {
       ...base,
@@ -396,6 +408,20 @@ describe("withdrawal trail", () => {
     expect(r.status).toBe("cancelled");
     expect(r.cancellableShares).toBeUndefined();
     expect(r.steps[1].detail).toMatch(/fee/i);
+  });
+
+  it("stays cancelled when its batch is delivered with another request of the account's", () => {
+    const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+    const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date() };
+    const r = withdrawalRecord(
+      { ...wop, cancelled: { hash: H(13), at: T0.getTime() } },
+      { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 99n * 10n ** 14n, cancelMined: true },
+    );
+    expect(r.status).toBe("cancelled");
+    expect(statuses(r)).toEqual(["done", "failed", "pending", "pending"]);
+    expect(r.steps[1].detail).toMatch(/Cancelled/);
+    expect(r.taoAmount).toBe(0.01);
+    expect(offersClaim(r)).toBe(false);
   });
 
   it("marks a skipped redeem as failed (a payout the bridge hasn't delivered is delayed, tested above)", () => {

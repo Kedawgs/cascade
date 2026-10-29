@@ -1,4 +1,6 @@
+import { encodeAbiParameters, encodeEventTopics, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
+import { FRONT_DOOR } from "./abi";
 import type { Deployment } from "./config";
 import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredError } from "./live";
 import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
@@ -144,6 +146,66 @@ describe("average entry price", () => {
   it("is unknown when no delivered deposit has a price", async () => {
     expect(await avg(deposit("c", 2n * TAO, undefined), deposit("d", 5n * TAO, 0))).toBeNull();
     expect(await avg(deposit("a", TAO, 200, 4n))).toBeNull();
+  });
+});
+
+describe("cancelled requests", () => {
+  const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
+  const TAO = 10n ** 18n;
+  /** Base, answering each cancel's receipt: it came out of `batchId`. */
+  const base = (cancels: Record<string, { eventName: "DepositCancelled" | "RedeemCancelled"; batchId: bigint }>) => ({
+    base: {
+      getTransactionReceipt: async ({ hash }: { hash: string }) => {
+        const k = cancels[hash];
+        if (!k) throw new Error("receipt not found");
+        const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: k.eventName, args: { batchId: k.batchId, user: ME } });
+        return { status: "success", logs: [{ address: D.frontDoor, topics, data: encodeAbiParameters(parseAbiParameters("uint256"), [1n]), blockNumber: 1n, transactionHash: hash, logIndex: 0 }] };
+      },
+    },
+  });
+
+  it("aren't on the bridge, in shares or TAO, once their cancel went through, even after their batch closed with others", async () => {
+    const d = deps({ clients: base({ [H(12)]: { eventName: "RedeemCancelled", batchId: 3n }, [H(13)]: { eventName: "DepositCancelled", batchId: 3n } }) as never });
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 1, usdcIn: 0n, targetTao: TAO, hashes: {}, batchId: 3n, state: "sent" };
+    d.opLog.put({ ...w, cancelled: { hash: H(12), at: 2 } });
+    d.opLog.put({ ...dep, cancelled: { hash: H(13), at: 2 } });
+    const p = await createLiveCascadeData(D, d).getPosition(ME);
+    // only the open batch's request is asked back
+    expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    expect(p.pendingTao).toBe(0);
+  });
+
+  it("leave the average entry price, even though their batch reached the vault", async () => {
+    const d = deps({
+      clients: base({ [H(13)]: { eventName: "DepositCancelled", batchId: 3n } }) as never,
+      scan: async (_c, _d, s) => void s.delivered.set("3", { key: H(3), txHash: H(4), block: 1n }),
+    });
+    const dep = (id: string, priceUsd: number, cancelled?: boolean): DepositOp => ({
+      id,
+      kind: "deposit",
+      account: ME,
+      createdAt: 1,
+      usdcIn: 0n,
+      targetTao: TAO,
+      priceUsd,
+      hashes: {},
+      batchId: 3n,
+      state: "sent",
+      ...(cancelled ? { cancelled: { hash: H(13), at: 2 } } : {}),
+    });
+    d.opLog.put(dep("kept", 200));
+    d.opLog.put(dep("cancelled", 300, true));
+    expect((await createLiveCascadeData(D, d).getPosition(ME)).avgEntryPriceUsd).toBeCloseTo(200, 9);
+  });
+
+  it("still count while their cancel can't be read, or came out of a later batch", async () => {
+    const d = deps({ clients: base({ [H(14)]: { eventName: "RedeemCancelled", batchId: 4n } }) as never });
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
+    d.opLog.put({ ...w, cancelled: { hash: H(14), at: 2 } });
+    d.opLog.put({ ...w, id: "w2", cancelled: { hash: H(15), at: 2 } });
+    const p = await createLiveCascadeData(D, d).getPosition(ME);
+    expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 4n * 10n ** 21n);
   });
 });
 

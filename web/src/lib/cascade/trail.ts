@@ -151,6 +151,10 @@ function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "
   return steps.every((s) => s.status === "done") ? (doneStatus as "done") : "in_progress";
 }
 
+/** Taken back out of its batch (facts.ts's cancelTook): that wins over whatever the batch did after,
+ * wherever the record shows or counts. */
+export const isCancelled = (op: { cancelled?: unknown }, f: { cancelMined?: boolean }): boolean => op.cancelled !== undefined && f.cancelMined === true;
+
 /** The status of a wallet step: done once mined, otherwise whatever the operation says. */
 function walletStep(mined: boolean, op: { state: string }, started: boolean): StepStatus {
   if (mined) return "done";
@@ -186,8 +190,11 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     ...(depositStatus === "failed" ? { detail: `${op.error ?? "The deposit didn't go through."}${taoInWallet}` } : {}),
   };
 
+  const cancelled = isCancelled(op, f);
   let bridge: TrailStep<DepositStepKey> = { key: "bridge", title: "Cross to Bittensor", status: "pending" };
-  if (f.delivered) {
+  if (cancelled && op.cancelled) {
+    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Cancelled. Your TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
+  } else if (f.delivered) {
     const d = f.delivered;
     if (d.outcome === "deposited") {
       bridge = { ...bridge, status: "done", at: d.at, txUrl: explorer.bittensorTx(d.txHash), txLabel: "View on Bittensor" };
@@ -204,8 +211,6 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
             : "The vault skipped this deposit; the TAO stays in the vault",
       };
     }
-  } else if (op.cancelled && f.cancelMined) {
-    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Cancelled. Your TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.depositMined) {
     bridge = {
       ...bridge,
@@ -218,14 +223,13 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   }
 
   let stake: TrailStep<DepositStepKey> = { key: "stake", title: "Stake on Bittensor", status: "pending" };
-  if (f.delivered?.outcome === "deposited") {
+  if (!cancelled && f.delivered?.outcome === "deposited") {
     if (f.staked) stake = { ...stake, status: "done", at: f.staked.at, txUrl: explorer.bittensorTx(f.staked.txHash), txLabel: "View on Bittensor" };
     else if (f.waitingForMinimum) stake = { ...stake, ...waitingForMinimum(f) };
     else stake = { ...stake, status: "active", detail: "Staking shortly" };
   }
 
   const steps = [swap, deposit, bridge, stake];
-  const cancelled = op.cancelled !== undefined && f.cancelMined === true && !f.delivered;
   const state = overall(steps, "staked");
   return {
     id: op.id,
@@ -282,8 +286,18 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   };
 
   let unstake: TrailStep<WithdrawalStepKey> = { key: "unstake", title: "Unstake on Bittensor", status: "pending" };
-  const d = f.delivered;
-  if (d) {
+  const cancelled = isCancelled(op, f);
+  // taken back out of its batch: a delivery of that batch isn't this request's
+  const d = cancelled ? undefined : f.delivered;
+  if (cancelled && op.cancelled) {
+    unstake = {
+      ...unstake,
+      status: "failed",
+      at: new Date(op.cancelled.at),
+      txUrl: explorer.baseTx(op.cancelled.hash),
+      detail: "Cancelled before the batch closed. Your shares stay staked; the request fee isn't refunded",
+    };
+  } else if (d) {
     const link = { at: d.at, txUrl: explorer.bittensorTx(d.txHash), txLabel: "View on Bittensor" };
     if (d.outcome === "redeemed") unstake = { ...unstake, ...link, status: "done" };
     else if (d.outcome === "skipped") {
@@ -296,14 +310,6 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     } else {
       unstake = { ...unstake, ...link, status: "action", detail: "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow." };
     }
-  } else if (op.cancelled && f.cancelMined) {
-    unstake = {
-      ...unstake,
-      status: "failed",
-      at: new Date(op.cancelled.at),
-      txUrl: explorer.baseTx(op.cancelled.hash),
-      detail: "Cancelled before the batch closed. Your shares stay staked; the request fee isn't refunded",
-    };
   } else if (f.requestMined) {
     unstake = {
       ...unstake,
@@ -351,7 +357,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   let offered = false;
   /** v3: today's price is under the unstake's minimum, so it hasn't been sold for it. */
   let belowMinimum: WithdrawalRecord["belowMinimum"];
-  const c = f.claimed;
+  const c = cancelled ? undefined : f.claimed;
   // v3: a claim from this browser shows its amount only when it took exactly this payout's credit
   const ownClaim = !auto || (c !== undefined && f.credited !== undefined && c.taoClaimed === f.credited.taoWei);
   if (sold) {
@@ -395,7 +401,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
 
   const steps = [request, unstake, ret, claim];
   let status: WithdrawalRecord["status"];
-  if (op.cancelled && f.cancelMined && !d) status = "cancelled";
+  if (cancelled) status = "cancelled";
   else if ((c && !c.swapFailed) || settled) status = "paid";
   else if (steps.some((s) => s.status === "failed")) status = "failed";
   else if (landed && f.claimable > 0n && (!auto || offered)) status = "ready";

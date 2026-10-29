@@ -26,6 +26,8 @@ export const FRONT_DOOR = parseAbi([
   "function maxDeliverySlippageBps() view returns (uint16)",
   "event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)",
   "event RedeemRequested(uint64 indexed batchId, address indexed user, uint256 shares)",
+  "event DepositCancelled(uint64 indexed batchId, address indexed user, uint256 amount)",
+  "event RedeemCancelled(uint64 indexed batchId, address indexed user, uint256 shares)",
   "event Claimed(address indexed user, uint256 amount)",
   "event Delivered(address indexed user, uint256 taoIn, uint256 usdcOut)",
   "event PayoutReceived(bytes32 indexed batchKey, uint32 chunk, address indexed user, uint256 amount)",

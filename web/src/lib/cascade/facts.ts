@@ -137,6 +137,24 @@ const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemR
 
 const closesAt = (fd: FrontDoorState, d: Deployment) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
 
+/** Whether a record's cancel took it back out of its batch: the cancel went through on Base and came
+ * out of the record's own batch (its DepositCancelled or RedeemCancelled names it; a cancel mined after
+ * that batch closed came out of a later one). True wins over whatever the batch did after it: delivered
+ * with other people's entries, or with another request of the account's. False once Base shows it
+ * didn't (reverted, or another batch); undefined while that isn't known (no cancel, not mined yet, or
+ * the receipt can't be read). The one test of "cancelled", wherever a record is counted. */
+export async function cancelTook(c: Pick<Clients, "base">, op: DepositOp | WithdrawalOp, batchId = op.batchId): Promise<boolean | undefined> {
+  if (!op.cancelled) return undefined;
+  const r = await baseReceipt(c, op.cancelled.hash);
+  if (!r) return undefined;
+  if (!mined(r)) return false;
+  const eventName = op.kind === "deposit" ? "DepositCancelled" : "RedeemCancelled";
+  const cancel = parseEventLogs({ abi: FRONT_DOOR, logs: r.logs as never, eventName, strict: false }).find(
+    (l) => !!l.args.user && same(l.args.user as string, op.account),
+  );
+  return cancel !== undefined && (batchId === undefined || cancel.args.batchId === batchId);
+}
+
 export async function depositFacts(
   c: Pick<Clients, "base" | "bittensor">,
   d: Deployment,
@@ -163,7 +181,7 @@ export async function depositFacts(
     depositMined: mined(dep),
     ...(usdcSpent > 0n ? { usdcSpent } : {}),
     ...(taoDeposited !== undefined ? { taoDeposited } : {}),
-    cancelMined: op.cancelled ? mined(await baseReceipt(c, op.cancelled.hash)) : undefined,
+    cancelMined: op.cancelled ? (await cancelTook(c, op, batchId)) === true : undefined,
     now: new Date(),
     depositedAt: new Date(op.createdAt),
     watchUrl: explorer.ccipAddress(d.baseAdapter),
@@ -175,7 +193,8 @@ export async function depositFacts(
     // the batch before the open one left Base when the open one started
     ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
   };
-  const hit = batchId !== undefined ? ctx.scan.delivered.get(String(batchId)) : undefined;
+  // taken back out of its batch: what the batch did after isn't this deposit's
+  const hit = batchId !== undefined && !facts.cancelMined ? ctx.scan.delivered.get(String(batchId)) : undefined;
   if (hit) {
     const r = await bitReceipt(c, ctx.scan, hit.txHash);
     const mine = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, strict: false }).filter(
@@ -212,7 +231,7 @@ export async function withdrawalFacts(
   const batchId = op.batchId ?? batchIdFrom(req, "RedeemRequested", op.account);
   const facts: WithdrawalFacts = {
     requestMined: mined(req),
-    cancelMined: op.cancelled ? mined(await baseReceipt(c, op.cancelled.hash)) : undefined,
+    cancelMined: op.cancelled ? (await cancelTook(c, op, batchId)) === true : undefined,
     now: new Date(),
     requestedAt: new Date(op.createdAt),
     watchUrl: explorer.ccipAddress(d.baseAdapter),
@@ -224,6 +243,8 @@ export async function withdrawalFacts(
     claimable: ctx.fd.claimable,
     payoutDelay: ctx.vault.payoutDelay,
   };
+  // taken back out of its batch: a Redeemed there is another request of the account's, not this one
+  if (facts.cancelMined) return { batchId, facts };
   const hit = batchId !== undefined ? ctx.scan.delivered.get(String(batchId)) : undefined;
   if (hit) {
     const r = await bitReceipt(c, ctx.scan, hit.txHash);

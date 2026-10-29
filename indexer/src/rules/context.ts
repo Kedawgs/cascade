@@ -96,6 +96,12 @@ export interface RuleCtx {
   messages: MessageRow[];
   /** the reference TAO price, on the ticks that read it (every fifth minute) */
   reference?: Reference;
+  /** users with a PayoutReceived in the last 7 days not since claimed or delivered, and its time */
+  payoutUsers: { user: Hex; at: number }[];
+  /** delivery keys whose payouts are queued and not done (by payout_done_block) */
+  pendingPayoutKeys: Hex[];
+  /** stored logs this tick found missing from a re-read (marked removed) */
+  removed: { chain: ChainName; uid: Hex }[];
   /** the watched addresses' rows */
   nonces: NonceRow[];
   t: Thresholds;

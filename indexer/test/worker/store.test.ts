@@ -321,6 +321,7 @@ describe("loadTickState", () => {
     ]);
     const s = await loadTickState(db, 1_000_100);
     expect(s.payoutUsers).toEqual([USER]);
+    expect(s.lastPayouts).toEqual([{ user: USER, at: 1_000_000 }]);
   });
 });
 

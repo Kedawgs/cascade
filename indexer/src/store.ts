@@ -166,6 +166,8 @@ export interface TickState {
   openChecks: { batches: BatchCheckRow[]; chunks: ChunkCheckRow[] };
   /** at most 50 users with a PayoutReceived in the last 7 days, not since claimed or delivered */
   payoutUsers: Hex[];
+  /** the same users with the time of their last PayoutReceived */
+  lastPayouts: { user: Hex; at: number }[];
   /** deliveries whose payouts are queued and not yet done */
   pendingPayoutKeys: { key: Hex; queuedBlock: bigint }[];
   meta: Record<string, string>;
@@ -316,8 +318,8 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
        LEFT JOIN logs l ON l.uid = c.landed_uid WHERE c.status = 'awaiting_read'`,
     ),
     db.prepare(
-      `SELECT r.user AS user FROM (
-         SELECT p.topic2 AS user, MAX(p.block) AS last FROM logs p
+      `SELECT r.user AS user, r.at AS at FROM (
+         SELECT p.topic2 AS user, MAX(p.block) AS last, MAX(b.time) AS at FROM logs p
          JOIN blocks b ON b.chain = 'base' AND b.number = p.block
          WHERE p.chain = 'base' AND p.contract = 'frontDoor' AND p.event = 'PayoutReceived' AND p.removed = 0
            AND p.block >= COALESCE((SELECT settled_to FROM cursors WHERE chain = 'base'), 0) - ?1
@@ -363,6 +365,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     pendingMessages: rows(7).map(messageOf),
     awaitingReads: rows(8).map(chunkCheckOf),
     payoutUsers: rows(9).map((r) => `0x${(r.user as string).slice(-40)}` as Hex),
+    lastPayouts: rows(9).map((r) => ({ user: `0x${(r.user as string).slice(-40)}` as Hex, at: Number(r.at) })),
     pendingPayoutKeys: rows(10).map((r) => ({ key: r.delivered_key as Hex, queuedBlock: BigInt(r.queued_block as number) })),
     meta: Object.fromEntries(rows(11).map((r) => [r.k as string, r.v as string])),
     openChecks: { batches: rows(12).map(batchCheckOf), chunks: rows(13).map(chunkCheckOf) },

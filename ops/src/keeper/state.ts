@@ -252,6 +252,10 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   const queuedLogs = vaultLogs("PayoutBatchQueued");
   const bouncedLogs = vaultLogs("DepositBounced");
   const redeemedLogs = vaultLogs("Redeemed");
+  /** Payout batches the vault has deleted (paid out or cancelled), not read again for the life of these
+   * deps. A batch reads count 0 both once deleted and on a node not yet showing its queue, so it is taken
+   * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
+  const deleted = new Set<string>();
 
   async function messages(): Promise<KeeperState["detail"]["messages"]> {
     const out: KeeperState["detail"]["messages"] = [];
@@ -280,12 +284,14 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const pending = (await r("bittensor", a.vault, VAULT, "pendingPayouts")) as bigint;
       const balance = await balanceOf(ctx.rpc, "bittensor", a.vault);
       const payoutDelay = Number(await r("bittensor", a.vault, VAULT, "payoutDelay"));
-      const { logs: queued } = await queuedLogs();
+      const { logs: queued, head } = await queuedLogs();
       const batches = [];
       for (const q of queued) {
         const key = q.args.key as Hex;
+        if (deleted.has(key.toLowerCase())) continue;
         const b = (await r("bittensor", a.vault, VAULT, "getPayoutBatch", [key])) as { queuedAt: bigint; cursor: number; count: number };
         if (b.count > 0) batches.push({ key, queuedAt: Number(b.queuedAt), cursor: b.cursor, count: b.count });
+        else if (q.blockNumber + REREAD.bittensor <= head) deleted.add(key.toLowerCase());
       }
       const block = (await ctx.rpc.request("bittensor", "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;

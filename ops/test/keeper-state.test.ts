@@ -184,6 +184,31 @@ describe("keeper reads", () => {
     expect(f.calls.filter((c) => c.fn === "getPayoutBatch")).toHaveLength(2);
   });
 
+  it("stops reading a payout batch the vault has deleted, once its queue is 400 blocks deep, and never one queued since", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    const queued = (key: Hex, block: number) =>
+      at(block, topics("PayoutBatchQueued", { key, sourceChain: 8453n }), encodeAbiParameters(parseAbiParameters("uint64, uint32, uint256, uint256"), [7n, 1, 5n, 1n]), key);
+    // the fake vault answers every batch with count 0: deleted (paid out), or not yet visible to a lagging node
+    const logs = [queued(`0x${"01".repeat(32)}`, 1_000), queued(`0x${"02".repeat(32)}`, 2_500)];
+    let head = 2_600;
+    const f = fakeChains(
+      (_chain, from, to, t) => logs.filter((l) => l.topics[0] === t[0] && BigInt(l.blockNumber) >= from && BigInt(l.blockNumber) <= to),
+      () => head,
+    );
+    const deps = keeperDeps(f.ctx, rec, recordPath);
+    const reads = async () => {
+      const before = f.calls.filter((c) => c.fn === "getPayoutBatch").length;
+      await deps.readState();
+      return f.calls.filter((c) => c.fn === "getPayoutBatch").length - before;
+    };
+    // both read; the old one is done for good, the one queued 100 blocks ago may only not be visible yet
+    expect(await reads()).toBe(2);
+    expect(await reads()).toBe(1);
+    head = 2_950;
+    expect(await reads()).toBe(1);
+    expect(await reads()).toBe(0);
+  });
+
   it("finds a log a lagging node or a reorg hid, and never keeps one twice or from a dropped block", async () => {
     const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
     const [carol, dave]: Address[] = ["0x000000000000000000000000000000000000ca01", "0x000000000000000000000000000000000000dA0E"];

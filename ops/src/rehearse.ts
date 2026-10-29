@@ -26,7 +26,7 @@ import { deploy } from "./deploy.ts";
 import { close as keeperClose, deliver as keeperDeliver, payouts as keeperPayouts, stake as keeperStake } from "./keeper/actions.ts";
 import { checkDelivery, DESTINATION_BASE } from "./keeper/delivery.ts";
 import { keeperDeps } from "./keeper/state.ts";
-import { isPlanV3, ROUTE_0 } from "./plan.ts";
+import { cadenceOf, isPlanV3, ROUTE_0, rolesOf } from "./plan.ts";
 import { type DeploymentRecord, saveRecord } from "./record.ts";
 import {
   CCIP_ROUTER_ABI,
@@ -47,7 +47,8 @@ import { cardinalitySteps, cardinalityTxs, readPool } from "./cardinality.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { balanceOf, chainIdOf, createRpc, nonceOf, read, type Rpc } from "./rpc.ts";
 import { type Ctx, describeRevert, execFileRunner } from "./send.ts";
-import { verify } from "./verify.ts";
+import { ownedContracts, verify } from "./verify.ts";
+import { contractName } from "./handoff.ts";
 
 const BITTENSOR_ARCHIVE = "https://archive.chain.opentensor.ai";
 /** Forks always use the public Base RPC, so a keyed RPC from .env never lands in anvil's log. */
@@ -556,6 +557,23 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
   };
 }
 
+/** A launch on the forks: each chain's final owner, impersonated (as a Safe or timelock can't sign here),
+ * accepts the ownership the deploy offered, as the owners will on the live chains with the files from
+ * pnpm ops handoff. Until then the read-back records the hand-off as pending and the keeper refuses the
+ * round trip. A test plan has nothing to accept. */
+export async function acceptHandoffOnForks(ctx: Ctx, rec: DeploymentRecord, log: (l: string) => void): Promise<void> {
+  const plan = rec.plan;
+  if (!isPlanV3(plan) || cadenceOf(plan) !== "launch") return;
+  const roles = rolesOf(plan);
+  const accept = encodeFunctionData({ abi: parseAbi(["function acceptOwnership()"]), functionName: "acceptOwnership" });
+  for (const [chain, name, address] of ownedContracts(plan)) {
+    const owner = roles.owner[chain];
+    const what = contractName(name);
+    const r = await sendAs(ctx, chain, owner, address, accept, `acceptOwnership() on ${what} by ${owner}`);
+    log(`${chain === "base" ? "Base" : "Bittensor"}: ${owner} accepted ownership of ${what} (${hexToBigInt(r.gasUsed).toLocaleString("en-US")} gas)`);
+  }
+}
+
 /** `pnpm ops rehearse` with OPS_DEPLOYMENT=v3-…: the full v3 deployment and read-back on fresh local
  * forks, then the round trip from a fresh user key, each step's gas and fee printed and kept in the
  * record (rehearsal-<name>.json). The v2 contracts no longer match the build, so a v2 name is refused
@@ -579,6 +597,8 @@ export async function rehearse(env: Env, log: (l: string) => void): Promise<bool
         const grown = await sendAs(r.ctx, "base", WALLET, t.to, t.data, `increaseObservationCardinalityNext(${t.next}) on the TAO/WETH pool`);
         log(`Base: the TAO/WETH pool reserves ${t.next} observation slots (${hexToBigInt(grown.gasUsed).toLocaleString("en-US")} gas)`);
       }
+      // the hand-off, as the final owners will accept it: the keeper refuses a launch until they have
+      await acceptHandoffOnForks(r.ctx, rec, log);
     }
     rec.verify = await verify(r.ctx, rec);
     saveRecord(path, rec);

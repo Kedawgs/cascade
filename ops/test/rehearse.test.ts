@@ -1,7 +1,11 @@
-import { type Address, encodeAbiParameters, encodeEventTopics, encodeFunctionData, getAddress, type Hex, parseAbiParameters } from "viem";
+import { type Address, encodeAbiParameters, encodeEventTopics, encodeFunctionData, getAddress, type Hex, numberToHex, parseAbi, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
-import { LIVE } from "../src/config.ts";
-import { rehearse } from "../src/rehearse.ts";
+import { type ChainName, LIVE } from "../src/config.ts";
+import { buildPlanV3 } from "../src/plan.ts";
+import type { Rpc } from "../src/rpc.ts";
+import { fakeChain, v3Record } from "./fake-keeper.ts";
+import { ROLES } from "./launch-roles.ts";
+import { acceptHandoffOnForks, rehearse } from "../src/rehearse.ts";
 import {
   CCIP_ROUTER_ABI,
   type CallFrame,
@@ -264,5 +268,57 @@ describe("rehearse", () => {
     await expect(rehearse({ OPS_DEPLOYMENT: "v3-x", OPS_CADENCE: "fast" }, (l) => lines.push(l))).rejects.toThrow(/not a cadence.*nothing sent/);
     await expect(rehearse({}, (l) => lines.push(l))).rejects.toThrow(/set OPS_DEPLOYMENT=v3-rehearsal.*v2 rehearsal record is left as it is/);
     expect(lines).toEqual([]);
+  });
+});
+
+describe("a launch rehearsal accepts the hand-off on the forks", () => {
+  const plan = buildPlanV3(4, 9, `0x${"22".repeat(32)}`, "launch", ROLES);
+  const rec = v3Record("rehearsal", plan);
+  const ACCEPT = encodeFunctionData({ abi: parseAbi(["function acceptOwnership()"]), functionName: "acceptOwnership" });
+
+  /** Forks that answer what impersonation and a send need; every request is kept. */
+  function forks(status = "0x1") {
+    const asked: { chain: ChainName; method: string; params: unknown[] }[] = [];
+    const rpc: Rpc = {
+      async request(chain, method, params) {
+        asked.push({ chain, method, params });
+        if (method === "eth_getBalance") return numberToHex(5n);
+        if (method === "eth_sendTransaction") return `0x${"ab".repeat(32)}`;
+        if (method === "eth_getTransactionReceipt") return { status, gasUsed: "0x5208", effectiveGasPrice: "0x1", logs: [], transactionHash: `0x${"ab".repeat(32)}` };
+        if (method.startsWith("anvil_")) return null;
+        throw new Error(`unexpected ${method}`);
+      },
+    };
+    return { ctx: { ...fakeChain([], {}).ctx, rpc }, asked };
+  }
+
+  it("each chain's final owner, impersonated, accepts the front door, the staker and the vault", async () => {
+    const f = forks();
+    const lines: string[] = [];
+    await acceptHandoffOnForks(f.ctx, rec, (l) => lines.push(l));
+    const sends = f.asked.filter((a) => a.method === "eth_sendTransaction").map((a) => [a.chain, a.params[0]]);
+    expect(sends).toEqual([
+      ["base", { from: ROLES.owner.base, to: plan.addresses.frontDoor, data: ACCEPT }],
+      ["base", { from: ROLES.owner.base, to: plan.addresses.staker, data: ACCEPT }],
+      ["bittensor", { from: ROLES.owner.bittensor, to: plan.addresses.vault, data: ACCEPT }],
+    ]);
+    // impersonated for each send, with its balance topped up for the gas and put back
+    expect(f.asked.filter((a) => a.method === "anvil_impersonateAccount").map((a) => a.params[0])).toEqual([ROLES.owner.base, ROLES.owner.base, ROLES.owner.bittensor]);
+    expect(f.asked.filter((a) => a.method === "anvil_setBalance").map((a) => a.params[1]).filter((_, i) => i % 2 === 1)).toEqual([numberToHex(5n), numberToHex(5n), numberToHex(5n)]);
+    expect(lines).toEqual([
+      `Base: ${ROLES.owner.base} accepted ownership of the front door (21,000 gas)`,
+      `Base: ${ROLES.owner.base} accepted ownership of the staker (21,000 gas)`,
+      `Bittensor: ${ROLES.owner.bittensor} accepted ownership of the vault (21,000 gas)`,
+    ]);
+  });
+
+  it("an accept that reverts stops the rehearsal", async () => {
+    await expect(acceptHandoffOnForks(forks("0x0").ctx, rec, () => undefined)).rejects.toThrow(/acceptOwnership\(\) on the front door .* reverted/);
+  });
+
+  it("a test plan has nothing to accept", async () => {
+    const f = forks();
+    await acceptHandoffOnForks(f.ctx, v3Record("rehearsal"), () => undefined);
+    expect(f.asked).toEqual([]);
   });
 });

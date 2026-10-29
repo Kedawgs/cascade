@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { ConfigError, parseConfig, redact, rolesOf, VAR_NAMES } from "../../src/config.ts";
+import { ConfigError, parseConfig, redact, rolesOf, scanAddresses, VAR_NAMES } from "../../src/config.ts";
 import { DEFAULTS, lagLimitS } from "../../src/thresholds.ts";
 import deployment from "../fixtures/deployment.json";
 
@@ -128,7 +128,7 @@ describe("parseConfig", () => {
   });
 
   it("takes the bridges from BRIDGES when set", () => {
-    const second = "0x9788d195AecE108638d519bFa3a09004b3005E4D";
+    const second = "0x89ed499783Be6bD00724Cb268224E727B26731a5";
     const cfg = parseConfig(withVars({ BRIDGES: JSON.stringify({ base: [deployment.baseAdapter, second], bittensor: [deployment.bitAdapter] }) }));
     expect(cfg.bridges.base).toEqual([deployment.baseAdapter.toLowerCase(), second.toLowerCase()]);
   });
@@ -142,6 +142,37 @@ describe("parseConfig", () => {
     for (const origin of ["https://cascade.fi/", "https://", "https:", "cascade.fi", 7]) {
       expect(refused(withVars({ SITE_ORIGIN: origin })).message).toContain("SITE_ORIGIN");
     }
+  });
+});
+
+describe("every listed bridge", () => {
+  const second = "0x61b3a68cCEe0e11fCCC37c3795735d3012458240";
+  const third = "0x89ed499783Be6bD00724Cb268224E727B26731a5";
+  const bridged = () => parseConfig(withVars({ BRIDGES: JSON.stringify({ base: [deployment.baseAdapter, third], bittensor: [deployment.bitAdapter, second] }) }));
+
+  it("is roled as an adapter on its chain", () => {
+    const cfg = bridged();
+    const roleOf = rolesOf(cfg.deployment, cfg.bridges);
+    expect(roleOf("base", third.toLowerCase() as `0x${string}`)).toBe("baseAdapter");
+    expect(roleOf("bittensor", second.toLowerCase() as `0x${string}`)).toBe("bitAdapter");
+    expect(roleOf("base", second.toLowerCase() as `0x${string}`)).toBeUndefined();
+  });
+
+  it("is scanned with the deployment's contracts", () => {
+    const cfg = bridged();
+    expect(scanAddresses(cfg)).toEqual({
+      base: [cfg.deployment.frontDoor, cfg.deployment.baseAdapter, cfg.deployment.staker, third.toLowerCase()],
+      bittensor: [cfg.deployment.vault, cfg.deployment.bitAdapter, second.toLowerCase()],
+    });
+    expect(scanAddresses(parseConfig(vars()))).toEqual({
+      base: [cfg.deployment.frontDoor, cfg.deployment.baseAdapter, cfg.deployment.staker],
+      bittensor: [cfg.deployment.vault, cfg.deployment.bitAdapter],
+    });
+  });
+
+  it("can't be one of the deployment's other contracts on its chain", () => {
+    expect(refused(withVars({ BRIDGES: JSON.stringify({ base: [deployment.frontDoor], bittensor: [deployment.bitAdapter] }) })).message).toContain("BRIDGES");
+    expect(refused(withVars({ BRIDGES: JSON.stringify({ base: [deployment.baseAdapter], bittensor: [deployment.vault] }) })).message).toContain("BRIDGES");
   });
 });
 

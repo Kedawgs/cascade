@@ -191,7 +191,11 @@ function addressList(field: string, x: unknown): Hex[] {
 function parseBridges(raw: unknown, d: Deployment): Config["bridges"] {
   if (jsonSetting("BRIDGES", raw) === undefined) return { base: [d.baseAdapter], bittensor: [d.bitAdapter] };
   const x = object("BRIDGES", raw, ["base", "bittensor"]);
-  return { base: addressList("BRIDGES.base", x.base), bittensor: addressList("BRIDGES.bittensor", x.bittensor) };
+  const bridges = { base: addressList("BRIDGES.base", x.base), bittensor: addressList("BRIDGES.bittensor", x.bittensor) };
+  // a bridge is scanned and roled as an adapter: it can't be one of the deployment's other contracts there
+  if (bridges.base.some((b) => b === d.frontDoor || b === d.staker || b === d.oracle)) throw new ConfigError("BRIDGES.base", "lists another of the deployment's contracts");
+  if (bridges.bittensor.includes(d.vault)) throw new ConfigError("BRIDGES.bittensor", "lists the vault");
+  return bridges;
 }
 
 const TOKEN_KEYS = {
@@ -291,20 +295,35 @@ export function parseConfig(env: ConfigEnv): Config {
 }
 
 /** Which scanned contract `address` is on `chain`: Base holds the front door, its adapter and the
- * staker; Bittensor the vault and its adapter. One address can be two roles on two chains. */
-export function rolesOf(d: Deployment): RoleOf {
+ * staker; Bittensor the vault and its adapter. Every bridge listed in BRIDGES is an adapter on its chain
+ * (a second, legitimately activated bridge carries batches and payouts too). One address can be two
+ * roles on two chains. */
+export function rolesOf(d: Deployment, bridges: Config["bridges"] = { base: [d.baseAdapter], bittensor: [d.bitAdapter] }): RoleOf {
   const roles: Record<ChainName, Map<string, Role>> = {
     base: new Map<string, Role>([
+      ...bridges.base.map((b): [string, Role] => [b, "baseAdapter"]),
       [d.frontDoor, "frontDoor"],
       [d.baseAdapter, "baseAdapter"],
       [d.staker, "staker"],
     ]),
     bittensor: new Map<string, Role>([
+      ...bridges.bittensor.map((b): [string, Role] => [b, "bitAdapter"]),
       [d.vault, "vault"],
       [d.bitAdapter, "bitAdapter"],
     ]),
   };
   return (chain, a) => roles[chain].get(a.toLowerCase());
+}
+
+/** The addresses each chain's log scan reads: the deployment's contracts there, and every other bridge
+ * BRIDGES lists. */
+export function scanAddresses(cfg: Pick<Config, "deployment" | "bridges">): Record<ChainName, Hex[]> {
+  const d = cfg.deployment;
+  const plus = (own: Hex[], bridges: Hex[]) => [...own, ...bridges.filter((b) => !own.includes(b))];
+  return {
+    base: plus([d.frontDoor, d.baseAdapter, d.staker], cfg.bridges.base),
+    bittensor: plus([d.vault, d.bitAdapter], cfg.bridges.bittensor),
+  };
 }
 
 /** A URL's registrable domain, the last two labels of its host (drpc.org, publicnode.com): never a

@@ -30,6 +30,8 @@ export const RULES = {
   "bridge.batch_mismatch": critical("event", true),
   "bridge.payout_mismatch": critical("event", true),
   "bridge.duplicate": critical("event", true),
+  // a payout landing on Base left unchecked: its TAO is claimable already (Tasks 11-20 review)
+  "bridge.payout_unchecked": critical("condition"),
   "site.integrity": critical("condition"),
   "indexer.blind": critical("condition"),
   "checks.owner_approved": critical("event"),

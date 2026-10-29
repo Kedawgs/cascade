@@ -259,9 +259,9 @@ describe("bridge.payout_mismatch: no landing skips its check", () => {
   });
 });
 
-describe("bridge.check_stuck: no landing waits forever without a warning", () => {
+describe("bridge.payout_unchecked: no landing waits unchecked without a critical", () => {
   const p = () => payoutBatch({ key: KEY, list, chunks: [{ taken: 3, fee: FEE }] });
-  const stuckKey = (l: StoredLog) => `bridge.check_stuck:payout:${KEY}:0:${l.uid}`;
+  const stuckKey = (l: StoredLog) => `bridge.payout_unchecked:${KEY}:0:${l.uid}`;
 
   it("warns 60 minutes after a landing still waiting for Bittensor, timed from its block", () => {
     const x = p();
@@ -273,7 +273,7 @@ describe("bridge.check_stuck: no landing waits forever without a warning", () =>
     expect(bridgePayouts.run(tick(all(x), { rows, fresh: false, bitLag: -1, nowS: LANDED_AT + 3599 }))).toEqual([]);
     const late = tick(all(x), { rows, fresh: false, bitLag: -1, nowS: LANDED_AT + 3600 });
     const [f] = bridgePayouts.run(late);
-    expect(f).toMatchObject({ rule: "bridge.check_stuck", key: stuckKey(l), facts: { side: "base", key: KEY, chunk: "0" } });
+    expect(f).toMatchObject({ rule: "bridge.payout_unchecked", key: stuckKey(l), facts: { side: "base", key: KEY, chunk: "0" } });
     expect(late.writes.chunkChecks).toEqual([]);
   });
 

@@ -71,9 +71,9 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
   "vault.events": () => "Read the event in the email; usually a user-level edge case.",
   "indexer.lag": () => "The monitor is behind on a chain and the keeper is holding: check the logs RPC first (state reads may still work).",
   "bridge.check_stuck": (f) =>
-    f.side === "base"
-      ? "A payout landing on Base hasn't been checked, and its TAO is already claimable there. Find out why (usually Bittensor lag, or the front door's delivered() read not answering). If it can't be verified soon (the landing against the vault's PayoutChunkSent), guardian: pause() the front door."
-      : `The keeper won't pay this batch until its check is ok. Find out why (usually Base lag); if you have verified the batch by hand: pnpm checks:approve -- --env <env> --key ${or(f.key, "<delivered key>")} --note "…".`,
+    `The keeper won't pay this batch until its check is ok. Find out why (usually Base lag); if you have verified the batch by hand: pnpm checks:approve -- --env <env> --key ${or(f.key, "<delivered key>")} --note "…".`,
+  "bridge.payout_unchecked": () =>
+    "A payout landing on Base hasn't been checked, and its TAO is already claimable there. Find out why (usually Bittensor lag, or the front door's delivered() read not answering). Verify the landing against the vault's PayoutChunkSent by hand; if you can't soon, guardian: pause() the front door.",
   "indexer.reorg": () => "Usually harmless; if it was a Cascade transaction, re-check its effects.",
   "site.unreachable": () => "Check that the site is up (Pages, DNS).",
   "monitor.chain_unreadable": () => "Check the RPC URLs (the readings of this chain have failed or gone backwards five ticks in a row).",

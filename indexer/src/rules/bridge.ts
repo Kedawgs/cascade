@@ -206,13 +206,14 @@ export const bridgePayouts: Rule = {
     for (const r of ctx.checks.chunks) note(known, `${r.batchKey}:${r.chunk}`, r.landedUid);
     for (const l of candidates) note(known, `${lower(l.args.batchKey)}:${Number(l.args.chunk)}`, l.uid);
 
-    // bridge.check_stuck: a landing still waiting or awaiting its read 60 minutes after it landed (or,
-    // without its block time, after it was first seen). On Base a forged payout is claimable at once.
+    // bridge.payout_unchecked (critical, where the batch side's bridge.check_stuck is a warning: on Base a
+    // landing's TAO is claimable at once): a landing still waiting or awaiting its read checkStuckS after
+    // it landed (or, without its block time, after it was first seen)
     const stuck = (r: { batchKey: Hex; chunk: number; landedUid: Hex; landedTx: Hex }, status: string, since: number | undefined) => {
       if (since === undefined || ctx.nowS - since < ctx.t.checkStuckS) return;
       add({
-        rule: "bridge.check_stuck",
-        key: `bridge.check_stuck:payout:${r.batchKey}:${r.chunk}:${r.landedUid}`,
+        rule: "bridge.payout_unchecked",
+        key: `bridge.payout_unchecked:${r.batchKey}:${r.chunk}:${r.landedUid}`,
         subject: `A payout landing's check (chunk ${r.chunk}) has been ${status} for ${Math.floor((ctx.nowS - since) / 60)} minutes`,
         facts: { side: "base", key: r.batchKey, chunk: String(r.chunk), status, since: utc(since), landing: txLink("base", r.landedTx), "Bittensor settled to": utc(ctx.settled.bittensor.time) },
       });

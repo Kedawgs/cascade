@@ -1,0 +1,459 @@
+import type { Hex } from "viem";
+import type { ChainName } from "./config.ts";
+import type { StoredLog } from "./logs.ts";
+
+// D1 access: reads, and prepared statements a tick commits together in one db.batch(). Every query is a
+// fixed prepared statement with bound values: no SQL is ever built from data. Blocks are bigints in
+// code and INTEGERs in D1 (well under 2^53); amounts and hex are TEXT.
+
+export interface CursorRow {
+  chain: ChainName;
+  fromBlock: bigint;
+  scannedTo: bigint | null;
+  settledTo: bigint;
+  settledTime: number | null;
+  headTime: number | null;
+  updatedAt: number;
+}
+
+export interface Reading {
+  /** the tick's time, unix seconds */
+  at: number;
+  baseBlock: bigint | null;
+  bitBlock: bigint | null;
+  json: string;
+}
+
+/** One hour of running aggregates; `hour` is the unix time the hour starts at. */
+export interface HourRow {
+  hour: number;
+  json: string;
+}
+
+export interface AlertRow {
+  id: number;
+  alertKey: string;
+  rule: string;
+  tier: "critical" | "warning";
+  kind: "condition" | "event";
+  subject: string;
+  body: string;
+  runbook: string;
+  openedAt: number;
+  lastSeenAt: number;
+  resolvedAt: number | null;
+  notifiedAt: number | null;
+  notifyCount: number;
+  acknowledgedAt: number | null;
+}
+
+export interface HoldRow {
+  id: string;
+  publicId: string;
+  rule: string;
+  summary: string;
+  raisedAt: number;
+  clearedAt: number | null;
+  clearedNote: string | null;
+}
+
+export interface NonceRow {
+  chain: ChainName;
+  address: Hex;
+  roles: string[];
+  baseline: number;
+  nonce: number;
+  changedAt: number;
+}
+
+export interface MessageRow {
+  messageId: Hex;
+  direction: "base>bittensor" | "bittensor>base";
+  sender: Hex;
+  recipient: Hex;
+  amount: string;
+  srcTx: Hex;
+  srcBlock: bigint;
+  srcTime: number;
+  state: string;
+  stateAt: number | null;
+  dstTx: Hex | null;
+  dstBlock: bigint | null;
+}
+
+export type BatchCheckStatus = "waiting" | "ok" | "mismatch" | "ok_by_owner";
+export type ChunkCheckStatus = "waiting" | "awaiting_read" | "ok" | "mismatch";
+
+export interface ChunkCheckRow {
+  landedUid: Hex;
+  batchKey: Hex;
+  chunk: number;
+  landedTx: Hex;
+  landedBlock: bigint;
+  sentTx: Hex | null;
+  messageId: Hex | null;
+  expectedHash: Hex | null;
+  status: ChunkCheckStatus;
+  detail: string | null;
+}
+
+/** The sender of a transaction behind an attributable event (spec 3.3): fetched (with `to`, selector and
+ * nonce), or known from an event's arguments (`from` only). */
+export interface TxRow {
+  chain: ChainName;
+  hash: Hex;
+  from: Hex;
+  to?: Hex;
+  selector?: Hex;
+  nonce?: number;
+}
+
+/** Everything a tick needs from D1 before it reads the chains, loaded in one db.batch(). */
+export interface TickState {
+  cursors: Partial<Record<ChainName, CursorRow>>;
+  openAlerts: AlertRow[];
+  activeHolds: HoldRow[];
+  /** every hold id ever raised, cleared or not: a cleared id is never raised again */
+  holdIds: string[];
+  /** the last 2 readings with each chain's block, newest first */
+  lastReadings: Reading[];
+  /** the last 25 hour rows, newest first */
+  hours: HourRow[];
+  /** the watched addresses */
+  nonces: NonceRow[];
+  pendingMessages: MessageRow[];
+  /** payout landings waiting for a delivered(...) read */
+  awaitingReads: ChunkCheckRow[];
+  /** at most 50 users with a PayoutReceived in the last 7 days, not since claimed or delivered */
+  payoutUsers: Hex[];
+  /** deliveries whose payouts are queued and not yet done */
+  pendingPayoutKeys: { key: Hex; queuedBlock: bigint }[];
+  meta: Record<string, string>;
+}
+
+const big = (x: unknown): bigint | null => (x === null || x === undefined ? null : BigInt(x as number));
+const num = (x: unknown): number | null => (x === null || x === undefined ? null : Number(x));
+/** A block or count as D1 takes it. */
+const int = (x: bigint | number | null | undefined): number | null => (x === null || x === undefined ? null : Number(x));
+const opt = <T>(x: T | undefined): T | null => (x === undefined ? null : x);
+
+type Row = Record<string, unknown>;
+
+const cursorOf = (r: Row): CursorRow => ({
+  chain: r.chain as ChainName,
+  fromBlock: BigInt(r.from_block as number),
+  scannedTo: big(r.scanned_to),
+  settledTo: BigInt(r.settled_to as number),
+  settledTime: num(r.settled_time),
+  headTime: num(r.head_time),
+  updatedAt: Number(r.updated_at),
+});
+
+const alertOf = (r: Row): AlertRow => ({
+  id: Number(r.id),
+  alertKey: r.alert_key as string,
+  rule: r.rule as string,
+  tier: r.tier as AlertRow["tier"],
+  kind: r.kind as AlertRow["kind"],
+  subject: r.subject as string,
+  body: r.body as string,
+  runbook: r.runbook as string,
+  openedAt: Number(r.opened_at),
+  lastSeenAt: Number(r.last_seen_at),
+  resolvedAt: num(r.resolved_at),
+  notifiedAt: num(r.notified_at),
+  notifyCount: Number(r.notify_count),
+  acknowledgedAt: num(r.acknowledged_at),
+});
+
+const holdOf = (r: Row): HoldRow => ({
+  id: r.id as string,
+  publicId: r.public_id as string,
+  rule: r.rule as string,
+  summary: r.summary as string,
+  raisedAt: Number(r.raised_at),
+  clearedAt: num(r.cleared_at),
+  clearedNote: (r.cleared_note as string | null) ?? null,
+});
+
+const readingOf = (r: Row): Reading => ({ at: Number(r.at), baseBlock: big(r.base_block), bitBlock: big(r.bit_block), json: r.json as string });
+
+const messageOf = (r: Row): MessageRow => ({
+  messageId: r.message_id as Hex,
+  direction: r.direction as MessageRow["direction"],
+  sender: r.sender as Hex,
+  recipient: r.recipient as Hex,
+  amount: r.amount as string,
+  srcTx: r.src_tx as Hex,
+  srcBlock: BigInt(r.src_block as number),
+  srcTime: Number(r.src_time),
+  state: r.state as string,
+  stateAt: num(r.state_at),
+  dstTx: (r.dst_tx as Hex | null) ?? null,
+  dstBlock: big(r.dst_block),
+});
+
+const chunkCheckOf = (r: Row): ChunkCheckRow => ({
+  landedUid: r.landed_uid as Hex,
+  batchKey: r.batch_key as Hex,
+  chunk: Number(r.chunk),
+  landedTx: r.landed_tx as Hex,
+  landedBlock: BigInt(r.landed_block as number),
+  sentTx: (r.sent_tx as Hex | null) ?? null,
+  messageId: (r.message_id as Hex | null) ?? null,
+  expectedHash: (r.expected_hash as Hex | null) ?? null,
+  status: r.status as ChunkCheckStatus,
+  detail: (r.detail as string | null) ?? null,
+});
+
+/** Seven days of Base's 2-second blocks: how far back a PayoutReceived makes its user worth reading. */
+const PAYOUT_USERS_BLOCKS = 302_400;
+
+/** The tick's whole D1 load (spec section 1, step 2), as one query. */
+export async function loadTickState(db: D1Database, nowS: number): Promise<TickState> {
+  const rs = await db.batch<Row>([
+    db.prepare("SELECT chain, from_block, scanned_to, settled_to, settled_time, head_time, updated_at FROM cursors"),
+    db.prepare("SELECT * FROM alerts WHERE resolved_at IS NULL ORDER BY id"),
+    db.prepare("SELECT * FROM holds ORDER BY raised_at, id"),
+    db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 2"),
+    db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 2"),
+    db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 25"),
+    db.prepare("SELECT chain, address, roles, baseline, nonce, changed_at FROM nonces"),
+    db.prepare("SELECT * FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' ORDER BY src_block LIMIT 100"),
+    db.prepare("SELECT * FROM chunk_checks WHERE status = 'awaiting_read'"),
+    db.prepare(
+      `SELECT r.user AS user FROM (
+         SELECT p.topic2 AS user, MAX(p.block) AS last FROM logs p
+         JOIN blocks b ON b.chain = 'base' AND b.number = p.block
+         WHERE p.chain = 'base' AND p.contract = 'frontDoor' AND p.event = 'PayoutReceived' AND p.removed = 0
+           AND p.block >= COALESCE((SELECT settled_to FROM cursors WHERE chain = 'base'), 0) - ?1
+           AND b.time >= ?2
+         GROUP BY p.topic2
+       ) r
+       WHERE NOT EXISTS (
+         SELECT 1 FROM logs c WHERE c.chain = 'base' AND c.contract = 'frontDoor' AND c.event IN ('Claimed', 'Delivered')
+           AND c.block > r.last AND c.topic1 = r.user AND c.removed = 0
+       )
+       ORDER BY r.last DESC LIMIT 50`,
+    ).bind(PAYOUT_USERS_BLOCKS, nowS - 7 * 86400),
+    db.prepare("SELECT delivered_key, queued_block FROM batch_checks WHERE queued_block IS NOT NULL AND payout_done_block IS NULL"),
+    db.prepare("SELECT k, v FROM meta"),
+  ]);
+  const rows = (i: number) => rs[i].results;
+  const cursors: TickState["cursors"] = {};
+  for (const c of rows(0).map(cursorOf)) cursors[c.chain] = c;
+  const holds = rows(2).map(holdOf);
+  const readings = new Map<number, Reading>();
+  for (const r of [...rows(3), ...rows(4)].map(readingOf)) readings.set(r.at, r);
+  return {
+    cursors,
+    openAlerts: rows(1).map(alertOf),
+    activeHolds: holds.filter((h) => h.clearedAt === null),
+    holdIds: holds.map((h) => h.id),
+    lastReadings: [...readings.values()].sort((a, b) => b.at - a.at),
+    hours: rows(5).map((r) => ({ hour: Number(r.hour), json: r.json as string })),
+    nonces: rows(6).map((r) => ({
+      chain: r.chain as ChainName,
+      address: r.address as Hex,
+      roles: JSON.parse(r.roles as string) as string[],
+      baseline: Number(r.baseline),
+      nonce: Number(r.nonce),
+      changedAt: Number(r.changed_at),
+    })),
+    pendingMessages: rows(7).map(messageOf),
+    awaitingReads: rows(8).map(chunkCheckOf),
+    payoutUsers: rows(9).map((r) => `0x${(r.user as string).slice(-40)}` as Hex),
+    pendingPayoutKeys: rows(10).map((r) => ({ key: r.delivered_key as Hex, queuedBlock: BigInt(r.queued_block as number) })),
+    meta: Object.fromEntries(rows(11).map((r) => [r.k as string, r.v as string])),
+  };
+}
+
+/** The uids (and blocks) of the stored, not removed logs in each chain's re-read range, in one query:
+ * the only range a tick's windows read again, so the only place a stored log can go missing. */
+export async function storedUids(db: D1Database, ranges: readonly { chain: ChainName; from: bigint; to: bigint }[]): Promise<Map<ChainName, Map<Hex, bigint>>> {
+  const out = new Map<ChainName, Map<Hex, bigint>>();
+  if (ranges.length === 0) return out;
+  // a chain without a range gets an empty one (from 1 to 0)
+  const range = (chain: ChainName) => ranges.find((r) => r.chain === chain) ?? { from: 1n, to: 0n };
+  const base = range("base");
+  const bit = range("bittensor");
+  const { results } = await db
+    .prepare(
+      `SELECT chain, uid, block FROM logs WHERE removed = 0 AND (
+         (chain = 'base' AND block BETWEEN ?1 AND ?2) OR (chain = 'bittensor' AND block BETWEEN ?3 AND ?4))`,
+    )
+    .bind(int(base.from), int(base.to), int(bit.from), int(bit.to))
+    .all<{ chain: ChainName; uid: Hex; block: number }>();
+  for (const r of results) {
+    if (!out.has(r.chain)) out.set(r.chain, new Map());
+    out.get(r.chain)!.set(r.uid, BigInt(r.block));
+  }
+  return out;
+}
+
+/** Takes the tick's lease for `leaseS` under `holder` (random per tick) unless another holds it. */
+export async function takeLease(db: D1Database, holder: string, leaseS: number, nowS: number): Promise<boolean> {
+  const r = await db
+    .prepare(
+      `INSERT INTO lease (name, holder, until) VALUES ('tick', ?1, ?2)
+       ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, until = excluded.until WHERE lease.until < ?3`,
+    )
+    .bind(holder, nowS + leaseS, nowS)
+    .run();
+  return r.meta.changes === 1;
+}
+
+/** Who holds the lease: read once after a failed commit, to tell a lost lease from a D1 failure. */
+export async function leaseHolder(db: D1Database): Promise<{ holder: string; until: number } | null> {
+  const r = await db.prepare("SELECT holder, until FROM lease WHERE name = 'tick'").first<{ holder: string; until: number }>();
+  return r ? { holder: r.holder, until: Number(r.until) } : null;
+}
+
+/** A commit's first statement: fails the whole batch once another tick holds the lease. It checks the
+ * holder only, never `until`, so a slow tick nobody replaced still commits what it read. */
+export const guardStatement = (db: D1Database, holder: string): D1PreparedStatement =>
+  db.prepare("INSERT INTO guard (x) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM lease WHERE name = 'tick' AND holder = ?1)").bind(holder);
+
+export const releaseLease = (db: D1Database, holder: string): D1PreparedStatement =>
+  db.prepare("UPDATE lease SET until = 0 WHERE name = 'tick' AND holder = ?1").bind(holder);
+
+/** Upserts, so a log marked removed by a reorg and re-mined in a later block comes back at its new place. */
+export function upsertLogs(db: D1Database, logs: readonly StoredLog[]): D1PreparedStatement[] {
+  const stmt = db.prepare(
+    `INSERT INTO logs (uid, chain, contract, address, block, log_index, tx_hash, event, topic1, topic2, topic3, data, args, removed)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)
+     ON CONFLICT (uid) DO UPDATE SET removed = 0, block = excluded.block, log_index = excluded.log_index`,
+  );
+  return logs.map((l) =>
+    stmt.bind(l.uid, l.chain, l.contract, l.address, int(l.block), l.logIndex, l.txHash, l.event, opt(l.topic1), opt(l.topic2), opt(l.topic3), l.data, JSON.stringify(l.args)),
+  );
+}
+
+export function markRemoved(db: D1Database, uids: readonly Hex[]): D1PreparedStatement[] {
+  const stmt = db.prepare("UPDATE logs SET removed = 1 WHERE uid = ?1");
+  return uids.map((u) => stmt.bind(u));
+}
+
+/** A chain's cursor. `settled_to` and `scanned_to` only move forward (with `settled_time` following
+ * `settled_to`), and `head_time` only forward, written every tick. */
+export function setCursor(
+  db: D1Database,
+  c: { chain: ChainName; fromBlock: bigint; scannedTo: bigint | null; settledTo: bigint; settledTime: number | null; headTime: number | null; nowS: number },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO cursors (chain, from_block, scanned_to, settled_to, settled_time, head_time, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT (chain) DO UPDATE SET
+         scanned_to = CASE WHEN excluded.scanned_to IS NULL THEN cursors.scanned_to
+                           WHEN cursors.scanned_to IS NULL THEN excluded.scanned_to
+                           ELSE MAX(cursors.scanned_to, excluded.scanned_to) END,
+         settled_time = CASE WHEN excluded.settled_to > cursors.settled_to THEN excluded.settled_time
+                             ELSE COALESCE(cursors.settled_time, excluded.settled_time) END,
+         settled_to = MAX(cursors.settled_to, excluded.settled_to),
+         head_time = MAX(COALESCE(cursors.head_time, excluded.head_time), COALESCE(excluded.head_time, cursors.head_time)),
+         updated_at = excluded.updated_at`,
+    )
+    .bind(c.chain, int(c.fromBlock), int(c.scannedTo), int(c.settledTo), c.settledTime, c.headTime, c.nowS);
+}
+
+export function upsertBlocks(db: D1Database, rows: readonly { chain: ChainName; number: bigint; time: number }[]): D1PreparedStatement[] {
+  const stmt = db.prepare("INSERT INTO blocks (chain, number, time) VALUES (?1, ?2, ?3) ON CONFLICT (chain, number) DO UPDATE SET time = excluded.time");
+  return rows.map((r) => stmt.bind(r.chain, int(r.number), r.time));
+}
+
+/** A fetched transaction (with `to`, selector and nonce) fills in, and wins over, one known only from an
+ * event's arguments; one known from arguments never overwrites a fetched one. */
+export function insertTxs(db: D1Database, rows: readonly TxRow[]): D1PreparedStatement[] {
+  const stmt = db.prepare(
+    `INSERT INTO txs (chain, hash, from_addr, to_addr, selector, nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT (chain, hash) DO UPDATE SET
+       from_addr = CASE WHEN excluded.to_addr IS NOT NULL OR excluded.selector IS NOT NULL THEN excluded.from_addr ELSE txs.from_addr END,
+       to_addr = COALESCE(excluded.to_addr, txs.to_addr),
+       selector = COALESCE(excluded.selector, txs.selector),
+       nonce = COALESCE(excluded.nonce, txs.nonce)`,
+  );
+  return rows.map((r) => stmt.bind(r.chain, r.hash, r.from, opt(r.to), opt(r.selector), opt(r.nonce)));
+}
+
+export const insertReading = (db: D1Database, r: Reading): D1PreparedStatement =>
+  db.prepare("INSERT OR REPLACE INTO readings (at, base_block, bit_block, json) VALUES (?1, ?2, ?3, ?4)").bind(r.at, int(r.baseBlock), int(r.bitBlock), r.json);
+
+export const pruneReadings = (db: D1Database, keep = 120): D1PreparedStatement =>
+  db.prepare("DELETE FROM readings WHERE at NOT IN (SELECT at FROM readings ORDER BY at DESC LIMIT ?1)").bind(keep);
+
+export const upsertHour = (db: D1Database, hour: number, json: string): D1PreparedStatement =>
+  db.prepare("INSERT INTO hours (hour, json) VALUES (?1, ?2) ON CONFLICT (hour) DO UPDATE SET json = excluded.json").bind(hour, json);
+
+export const pruneHours = (db: D1Database, nowS: number, days = 35): D1PreparedStatement =>
+  db.prepare("DELETE FROM hours WHERE hour < ?1").bind(nowS - days * 86400);
+
+export const setMeta = (db: D1Database, k: string, v: string): D1PreparedStatement =>
+  db.prepare("INSERT INTO meta (k, v) VALUES (?1, ?2) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(k, v);
+
+/** One delivery's cross-check row (one per batch id and delivered key). An owner's approval is never
+ * overwritten by a later check. */
+export function upsertBatchCheck(
+  db: D1Database,
+  c: {
+    batchId: bigint;
+    deliveredKey: Hex;
+    deliveredUid: Hex;
+    deliveredTx: Hex;
+    closedTx?: Hex;
+    messageId?: Hex;
+    expectedKey?: Hex;
+    status: Exclude<BatchCheckStatus, "ok_by_owner">;
+    detail?: string;
+    queuedBlock?: bigint;
+  },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO batch_checks (batch_id, delivered_key, delivered_uid, delivered_tx, closed_tx, message_id, expected_key, status, detail, queued_block)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+       ON CONFLICT (batch_id, delivered_key) DO UPDATE SET
+         delivered_uid = excluded.delivered_uid,
+         delivered_tx = excluded.delivered_tx,
+         closed_tx = COALESCE(excluded.closed_tx, batch_checks.closed_tx),
+         message_id = COALESCE(excluded.message_id, batch_checks.message_id),
+         expected_key = COALESCE(excluded.expected_key, batch_checks.expected_key),
+         status = CASE WHEN batch_checks.status = 'ok_by_owner' THEN batch_checks.status ELSE excluded.status END,
+         detail = CASE WHEN batch_checks.status = 'ok_by_owner' THEN batch_checks.detail ELSE excluded.detail END,
+         queued_block = COALESCE(excluded.queued_block, batch_checks.queued_block)`,
+    )
+    .bind(int(c.batchId), c.deliveredKey, c.deliveredUid, c.deliveredTx, opt(c.closedTx), opt(c.messageId), opt(c.expectedKey), c.status, opt(c.detail), int(c.queuedBlock));
+}
+
+/** One payout landing's cross-check row, keyed by its PayoutsDelivered log: a forged duplicate landing
+ * gets its own row and never touches the honest one's. */
+export function upsertChunkCheck(
+  db: D1Database,
+  c: { landedUid: Hex; batchKey: Hex; chunk: number; landedTx: Hex; landedBlock: bigint; sentTx?: Hex; messageId?: Hex; expectedHash?: Hex; status: ChunkCheckStatus; detail?: string },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO chunk_checks (landed_uid, batch_key, chunk, landed_tx, landed_block, sent_tx, message_id, expected_hash, status, detail)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+       ON CONFLICT (landed_uid) DO UPDATE SET
+         sent_tx = COALESCE(excluded.sent_tx, chunk_checks.sent_tx),
+         message_id = COALESCE(excluded.message_id, chunk_checks.message_id),
+         expected_hash = COALESCE(excluded.expected_hash, chunk_checks.expected_hash),
+         status = excluded.status,
+         detail = excluded.detail`,
+    )
+    .bind(c.landedUid, c.batchKey, c.chunk, c.landedTx, int(c.landedBlock), opt(c.sentTx), opt(c.messageId), opt(c.expectedHash), c.status, opt(c.detail));
+}
+
+/** "h_" and 8 random hex digits: what the public status shows of a hold. */
+export function newPublicId(): string {
+  const b = crypto.getRandomValues(new Uint8Array(4));
+  return `h_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Raises a hold unless its id was ever raised (a cleared id isn't raised again). Holds are cleared only
+ * by the owner's script, never here. */
+export const insertHold = (db: D1Database, h: { id: string; rule: string; summary: string; raisedAt: number }, publicId = newPublicId()): D1PreparedStatement =>
+  db
+    .prepare("INSERT INTO holds (id, public_id, rule, summary, raised_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (id) DO NOTHING")
+    .bind(h.id, publicId, h.rule, h.summary, h.raisedAt);

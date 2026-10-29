@@ -1,8 +1,8 @@
-import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters } from "viem";
+import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
+import { claimWentThrough, depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
 
@@ -326,6 +326,40 @@ describe("facts", () => {
     expect(f.facts.claimed).toMatchObject({ hash: H(21), taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, keptTao: false, swapFailed: false });
     const none = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [other] });
     expect(none.facts.claimed).toBeUndefined();
+  });
+
+  it("says a claim went through only when its receipt succeeded and shows the account's Claimed event", async () => {
+    const claimedLog = log(
+      D.frontDoor,
+      encodeEventTopics({ abi: FRONT_DOOR, eventName: "Claimed", args: { user: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256"), [99n * 10n ** 14n]),
+      60n,
+      H(21),
+    );
+    const c = chains({
+      baseReceipts: {
+        [H(21)]: { status: "success", logs: [claimedLog] },
+        // a wallet batch that failed whole
+        [H(22)]: { status: "reverted", logs: [] },
+        // a smart account's transaction that was mined, but whose claim reverted inside it
+        [H(23)]: { status: "success", logs: [] },
+      },
+    });
+    const base = (c.clients as unknown as { base: { getTransactionReceipt: (q: { hash: Hex }) => Promise<unknown> } }).base;
+    const known = base.getTransactionReceipt;
+    base.getTransactionReceipt = async (q) => {
+      if (q.hash === H(24)) throw new TransactionReceiptNotFoundError({ hash: q.hash });
+      if (q.hash === H(25)) throw new Error("HTTP request failed. Status: 503");
+      return known(q);
+    };
+    const went = (hash: Hex) => claimWentThrough(c.clients, { account: ME, hashes: { claim: hash } });
+    expect(await went(H(21))).toBe(true);
+    expect(await went(H(22))).toBe(false);
+    expect(await went(H(23))).toBe(false);
+    // never mined (dropped) is not through; a receipt that can't be read is never taken for an answer
+    expect(await went(H(24))).toBe(false);
+    await expect(went(H(25))).rejects.toThrow();
+    expect(await claimWentThrough(c.clients, { account: ME, hashes: {} })).toBe(false);
   });
 
   it("reads the USDC the swap really spent from its receipt (an exact-output swap spends at most the quote)", async () => {

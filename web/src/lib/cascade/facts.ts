@@ -331,6 +331,26 @@ async function claimResult(c: Pick<Clients, "base">, k: ClaimOp): Promise<Withdr
   return k.state === "failed" || k.state === "needs-you" ? { ...base, keptTao: false, swapFailed: true } : undefined;
 }
 
+/** Whether a claim went through on Base: its receipt succeeded and shows the account's Claimed event (a
+ * smart account can mine a transaction in which the claim itself reverted). One never mined isn't;
+ * throws when the receipt can't be read, which must never be taken for "no". */
+export async function claimWentThrough(c: Pick<Clients, "base">, k: Pick<ClaimOp, "account" | "hashes">): Promise<boolean> {
+  if (!k.hashes.claim) return false;
+  let r: Receipt;
+  try {
+    r = (await c.base.getTransactionReceipt({ hash: k.hashes.claim })) as unknown as Receipt;
+  } catch (e) {
+    if ((e as { name?: string }).name === "TransactionReceiptNotFoundError") return false;
+    throw e;
+  }
+  return (
+    mined(r) &&
+    parseEventLogs({ abi: FRONT_DOOR, logs: r.logs as never, eventName: "Claimed", strict: false }).some(
+      (l) => !!l.args.user && same(l.args.user as string, k.account),
+    )
+  );
+}
+
 /** Base log windows on RPC.baseLogs: at most 2,000 blocks. */
 const BASE_LOG_WINDOW = 2_000n;
 /** Base makes a block every 2 seconds. */

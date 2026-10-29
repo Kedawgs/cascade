@@ -2,7 +2,7 @@ import { type Abi, type Address, type Hex, maxUint256, parseSignature, size } fr
 import { base } from "viem/chains";
 import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
 import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
-import type { DepositOp, OpState } from "./oplog";
+import type { ClaimOp, DepositOp, OpState } from "./oplog";
 import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao } from "./units";
 import { formatUsdShort } from "../format";
@@ -369,6 +369,21 @@ export function retryPatch(op: Pick<DepositOp, "state" | "hashes" | "callsId" | 
   const { approveUsdc, swap } = op.hashes;
   return {
     hashes: { ...(approveUsdc ? { approveUsdc } : {}), ...(swap ? { swap } : {}) },
+    callsId: undefined,
+    mode: "sequential",
+    state: "running",
+    error: undefined,
+  };
+}
+
+/** Carrying on a claim that stopped. The claim is kept only when Base shows it went through
+ * (`claimed`, from its receipt), so only the steps after it are sent again; anything else, like a
+ * wallet batch that failed whole (its hash recorded under every step), is forgotten with its batch id.
+ * Either way the rest goes one step at a time, as retryPatch does for a deposit. */
+export function claimRetryPatch(op: Pick<ClaimOp, "hashes">, claimed: boolean): Partial<ClaimOp> {
+  const { claim } = op.hashes;
+  return {
+    hashes: claimed && claim ? { claim } : {},
     callsId: undefined,
     mode: "sequential",
     state: "running",

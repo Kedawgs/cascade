@@ -19,6 +19,7 @@ import { STAKER } from "./abi";
 import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
 import {
   claimCalls,
+  claimRetryPatch,
   createFlowGuard,
   createSharedFlowGuard,
   depositTaoCalls,
@@ -370,6 +371,28 @@ describe("retryPatch", () => {
 
   it("leaves anything that isn't a failure alone", () => {
     expect(retryPatch({ state: "needs-you" as const, hashes: { swap: H(2) } })).toEqual({});
+  });
+});
+
+describe("claimRetryPatch", () => {
+  // a batching wallet sent [claim, approveTao, swap] as one batch, the swap reverted, and the batch failed whole
+  const failedBatch = { hashes: { claim: H(90), approveTao: H(90), swap: H(90) }, callsId: "0xabc", mode: "batch" as const, state: "failed" as const };
+
+  it("forgets a claim batch that failed whole, so carrying on sends the steps again one at a time", async () => {
+    const patch = claimRetryPatch(failedBatch, false);
+    expect(patch).toEqual({ hashes: {}, callsId: undefined, mode: "sequential", state: "running", error: undefined });
+    // carried on: nothing waits on the old batch, and every step is sent anew
+    const p = port({ canBatch: vi.fn(async () => true) });
+    const t = tracker(patch.hashes as Record<string, Hex>, { mode: patch.mode, callsId: patch.callsId });
+    await runFlow(p, t.store as never, claimCalls(10n ** 16n, 2_400_000n, none, D, ME, false));
+    expect(p.waitBatch).not.toHaveBeenCalled();
+    expect(vi.mocked(p.send).mock.calls.map((c) => c[0].key)).toEqual(["claim", "approveTao", "swap"]);
+    expect(t.states.at(-1)).toBe("sent");
+  });
+
+  it("keeps a claim that went through, so only what follows it is sent again", () => {
+    const sequential = { hashes: { claim: H(1), approveTao: H(2), swap: H(3) }, mode: "sequential" as const, state: "failed" as const };
+    expect(claimRetryPatch(sequential, true)).toEqual({ hashes: { claim: H(1) }, callsId: undefined, mode: "sequential", state: "running", error: undefined });
   });
 });
 

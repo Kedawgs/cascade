@@ -17,10 +17,11 @@ import {
 } from "wagmi/actions";
 import { isV3 } from "./config";
 import { useCascadeData } from "./context";
-import { findStakeTx } from "./facts";
+import { claimWentThrough, findStakeTx } from "./facts";
 import {
   cancelCall,
   claimCalls,
+  claimRetryPatch,
   createSharedFlowGuard,
   depositTaoCalls,
   type FlowCall,
@@ -316,22 +317,23 @@ export function useFlows(account: string | null) {
         await send(op.id, async () => claimCalls(fd.claimable, minUsdc, await data.getBalances(a), d(), a, keepTao));
       }),
 
-    /** Carries on a claim that stopped (usually the swap after the claim went through). */
+    /** Carries on a claim that stopped (usually the swap after the claim went through). A claim Base
+     * doesn't show going through (a wallet batch that failed whole) is sent again with the rest, one
+     * step at a time; the swap is priced again either way. */
     resumeClaim: (withdrawalId: string) =>
       flow("claim", async () => {
         const op = data.opLog
           .list(a)
           .find((o): o is ClaimOp => o.kind === "claim" && (o.withdrawalIds ?? []).includes(withdrawalId));
         if (!op) throw new FlowError("There is no claim to continue for this unstake", "needs-you");
+        data.opLog.update(a, op.id, claimRetryPatch(op, await claimWentThrough(data.clients, op)));
         await send(op.id, async () => {
           const w = await data.getBalances(a);
-          if (op.hashes.claim && !op.keepTao) {
-            // the claim went through: swap what it paid at today's price, forgetting a swap that failed
-            const minUsdc = lessSlippage(await quoteSell(data.clients, op.amount));
-            data.opLog.update(a, op.id, { minUsdc, hashes: { ...op.hashes, swap: undefined } });
-            return claimCalls(op.amount, minUsdc, w, d(), a, false);
-          }
-          return claimCalls(op.amount, op.minUsdc, w, d(), a, op.keepTao);
+          if (op.keepTao) return claimCalls(op.amount, 0n, w, d(), a, true);
+          // what the claim paid (or pays), swapped at today's price
+          const minUsdc = lessSlippage(await quoteSell(data.clients, op.amount));
+          data.opLog.update(a, op.id, { minUsdc });
+          return claimCalls(op.amount, minUsdc, w, d(), a, false);
         });
       }),
 

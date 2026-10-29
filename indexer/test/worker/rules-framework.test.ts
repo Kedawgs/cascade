@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { type Hex, keccak256, numberToHex, pad, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
-import { afterSettled, logQuery, prefetch, type PrefetchNeeds, twice } from "../../src/rules/context.ts";
+import { afterSettled, logQuery, prefetch, type PrefetchNeeds, twice, utc } from "../../src/rules/context.ts";
 import { type Rule, runRules } from "../../src/rules/index.ts";
 import { insertTxs, loadTickState, upsertBatchCheck, upsertBlocks, upsertChunkCheck, upsertLogs } from "../../src/store.ts";
 import { countingDb, wipe } from "./d1-count.ts";
@@ -28,6 +28,50 @@ describe("runRules", () => {
     const out = runRules(rules, ruleCtx());
     expect(out.map((f) => f.rule)).toEqual(["keeper.low_eth", "monitor.rule_failed", "keeper.low_tao"]);
     expect(out[1]).toMatchObject({ key: "monitor.rule_failed:boom", facts: { rule: "boom", error: "cannot read properties of undefined" } });
+  });
+
+  it("drops the writes of a rule that throws after making them, and keeps the others'", () => {
+    const row = { batchId: 1n, deliveredKey: h("k"), deliveredUid: h("u"), deliveredTx: h("t"), status: "mismatch" as const };
+    const rules: Rule[] = [
+      { name: "keeps", run: (c) => (c.writes.batchChecks.push({ ...row, batchId: 7n }), []) },
+      {
+        name: "half",
+        run: (c) => {
+          c.writes.batchChecks.push(row);
+          c.writes.chunkChecks.push({ landedUid: h("l"), batchKey: h("k"), chunk: 0, landedTx: h("t"), landedBlock: 1n, status: "mismatch" });
+          c.writes.nonces.push({ chain: "base", address: h("a").slice(0, 42) as Hex, roles: [], baseline: 0, seen: 0, nonce: 0, changedAt: 0 });
+          throw new Error("after the writes");
+        },
+      },
+    ];
+    const ctx = ruleCtx();
+    runRules(rules, ctx);
+    expect(ctx.writes).toEqual({ batchChecks: [{ ...row, batchId: 7n }], chunkChecks: [], nonces: [] });
+  });
+
+  it("raises a bridge rule's failure as the critical monitor.bridge_rule_failed: its checks stay waiting", () => {
+    const out = runRules(
+      [
+        {
+          name: "bridge.batches",
+          run: () => {
+            throw new Error("boom");
+          },
+        },
+      ],
+      ruleCtx(),
+    );
+    expect(out).toEqual([
+      { rule: "monitor.bridge_rule_failed", key: "monitor.bridge_rule_failed:bridge.batches", subject: "The bridge rule bridge.batches failed", facts: { rule: "bridge.batches", error: "boom" } },
+    ]);
+  });
+});
+
+describe("utc", () => {
+  it("formats a chain time, and says so when the time isn't a number", () => {
+    expect(utc(1_800_000_000)).toBe("2027-01-15 08:00 UTC");
+    expect(utc(Number.NaN)).toBe("unknown");
+    expect(utc(Number.POSITIVE_INFINITY)).toBe("unknown");
   });
 });
 

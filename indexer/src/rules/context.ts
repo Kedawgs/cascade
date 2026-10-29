@@ -74,9 +74,10 @@ export interface RuleCtx {
   hours: HourAgg[];
   /** how far each chain's logs are stored, and that block's time */
   settled: Record<ChainName, { block: bigint; time: number; headTime?: number }>;
-  /** the blocks this tick settled on each chain (none when from > to): an event rule reports a log once,
-   * on the tick its block settles */
-  fresh: Record<ChainName, { from: bigint; to: bigint }>;
+  /** the uids of the logs this tick stores for the first time (the scan's `fresh`), wherever their
+   * block: an event rule reports a log once, on the tick it is first stored, so a log a re-read finds
+   * late, below what was settled before, is still reported */
+  newUids: ReadonlySet<Hex>;
   payoutDelayS: number;
   lagLimitS: number;
   logs: LogQuery;
@@ -101,8 +102,9 @@ const EXPLORER: Record<ChainName, string> = { base: "https://basescan.org", bitt
 export const addressLink = (chain: ChainName, a: Hex): string => `${EXPLORER[chain]}/address/${a}`;
 export const txLink = (chain: ChainName, hash: Hex): string => `${EXPLORER[chain]}/tx/${hash}`;
 
-/** A chain time as an email shows it: "2026-10-29 14:05 UTC". */
-export const utc = (t: number): string => `${new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+/** A chain time as an email shows it: "2026-10-29 14:05 UTC"; "unknown" for a time that isn't a number
+ * (an email must never fail to render). */
+export const utc = (t: number): string => (Number.isFinite(t) ? `${new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC` : "unknown");
 
 /** How an email names a scanned contract. */
 export const CONTRACT_NAMES: Record<Role, string> = {
@@ -113,8 +115,8 @@ export const CONTRACT_NAMES: Record<Role, string> = {
   bitAdapter: "Bittensor adapter",
 };
 
-/** A log's block was settled by this tick. */
-export const isFresh = (ctx: RuleCtx, l: Pick<StoredLog, "chain" | "block">): boolean => l.block >= ctx.fresh[l.chain].from && l.block <= ctx.fresh[l.chain].to;
+/** This tick stores the log for the first time. */
+export const isNew = (ctx: RuleCtx, l: Pick<StoredLog, "uid">): boolean => ctx.newUids.has(l.uid);
 
 /** The condition held in this reading and in the previous one too, from an older block, on each chain it
  * reads: one bad answer can't trip a rule marked ×2. */

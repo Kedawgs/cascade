@@ -3,8 +3,8 @@ import { ADMIN_EVENTS } from "../abi.ts";
 import type { Finding } from "../alerts.ts";
 import type { ChainName } from "../config.ts";
 import type { Snapshot } from "../snapshot.ts";
-import type { NonceRow } from "../store.ts";
-import { addressLink, CONTRACT_NAMES, isFresh, type RuleCtx, txLink } from "./context.ts";
+import type { NonceRow, TxRow } from "../store.ts";
+import { addressLink, CONTRACT_NAMES, isNew, type RuleCtx, txLink } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.1: admin events and the admin keys' transactions.
@@ -13,13 +13,13 @@ const CHAINS: readonly ChainName[] = ["base", "bittensor"];
 const ZERO = "0x0000000000000000000000000000000000000000";
 const lower = (a: Hex) => a.toLowerCase() as Hex;
 
-/** admin.event: an admin event (spec Facts) settled this tick, after the deployment's baseline block. */
+/** admin.event: an admin event (spec Facts) first stored this tick, after the deployment's baseline block. */
 export const adminEvent: Rule = {
   name: "admin.event",
   run(ctx) {
     const out: Finding[] = [];
     for (const l of ctx.logs.all()) {
-      if (!ADMIN_EVENTS.has(`${l.contract}:${l.event}`) || !isFresh(ctx, l)) continue;
+      if (!ADMIN_EVENTS.has(`${l.contract}:${l.event}`) || !isNew(ctx, l)) continue;
       if (l.block <= ctx.cfg.deployment[l.chain].baselineBlock) continue;
       const name = `${CONTRACT_NAMES[l.contract]} ${l.event}`;
       const sender = ctx.txs.get(`${l.chain}:${l.txHash}`)?.from;
@@ -93,7 +93,11 @@ export const keys: Rule = {
           ctx.writes.nonces.push({ chain, address: h.address, roles: h.roles, baseline: count, seen: 0, nonce: count, changedAt: ctx.nowS });
           continue;
         }
-        const seenNow = ctx.newTxs.filter((t) => t.chain === chain && (lower(t.from) === h.address || (t.to !== undefined && lower(t.to) === h.address))).length;
+        // an account's count moves only for what it sends; a Safe's nonce for what it executes, which
+        // arrives as a transaction sent to it (or names it as the caller in an event's args)
+        const isSafe = safes[h.address] !== undefined;
+        const mine = (t: TxRow) => lower(t.from) === h.address || (isSafe && t.to !== undefined && lower(t.to) === h.address);
+        const seenNow = ctx.newTxs.filter((t) => t.chain === chain && mine(t)).length;
         const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + seenNow, nonce: count };
         let excess = count - next.baseline - next.seen;
         if (excess < 0) {

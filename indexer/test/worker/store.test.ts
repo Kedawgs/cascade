@@ -164,6 +164,44 @@ describe("cursors", () => {
   });
 });
 
+describe("check rows stored with their logs", () => {
+  const delivered = log({
+    uid: h("d"),
+    event: "BatchDelivered",
+    txHash: h("dtx"),
+    topic1: h("key"),
+    args: { key: h("key"), sourceChain: "8453", frontDoor: OTHER, batchId: "43", amount: "5" },
+  });
+  const landed = log({ uid: h("l"), chain: "base", contract: "frontDoor", event: "PayoutsDelivered", block: 37_000_100n, txHash: h("ltx"), args: { batchKey: h("key"), chunk: 2, amount: "5", bridge: OTHER } });
+
+  it("gives every stored BatchDelivered and PayoutsDelivered a waiting check row, whatever its block", async () => {
+    await db.batch(upsertLogs(db, [delivered, landed, log({ uid: h("o"), event: "Deposited" })]));
+    expect(await db.prepare("SELECT batch_id, delivered_key, delivered_uid, delivered_tx, status, source_chain, front_door, first_seen FROM batch_checks").all().then((r) => r.results)).toEqual([
+      { batch_id: 43, delivered_key: h("key"), delivered_uid: h("d"), delivered_tx: h("dtx"), status: "waiting", source_chain: 8453, front_door: OTHER, first_seen: null },
+    ]);
+    expect(await db.prepare("SELECT landed_uid, batch_key, chunk, landed_tx, landed_block, status FROM chunk_checks").all().then((r) => r.results)).toEqual([
+      { landed_uid: h("l"), batch_key: h("key"), chunk: 2, landed_tx: h("ltx"), landed_block: 37_000_100, status: "waiting" },
+    ]);
+    const s = await loadTickState(db, 1);
+    expect(s.openChecks.batches.map((r) => [r.deliveredUid, r.sourceChain, r.frontDoor, r.firstSeen])).toEqual([[h("d"), 8453, OTHER, null]]);
+    expect(s.openChecks.chunks.map((r) => r.landedUid)).toEqual([h("l")]);
+  });
+
+  it("never undoes a decided check when the log is stored again", async () => {
+    await db.batch(upsertLogs(db, [delivered, landed]));
+    await db.batch([
+      upsertBatchCheck(db, { batchId: 43n, deliveredKey: h("key"), deliveredUid: h("d"), deliveredTx: h("dtx"), status: "ok", firstSeen: 99 }),
+      upsertChunkCheck(db, { landedUid: h("l"), batchKey: h("key"), chunk: 2, landedTx: h("ltx"), landedBlock: 37_000_100n, status: "mismatch" }),
+    ]);
+    await db.batch(upsertLogs(db, [delivered, landed]));
+    expect(await db.prepare("SELECT status, first_seen, front_door FROM batch_checks").first()).toEqual({ status: "ok", first_seen: 99, front_door: OTHER });
+    expect(await db.prepare("SELECT status FROM chunk_checks").first("status")).toBe("mismatch");
+    // a later write keeps the first time seen
+    await upsertBatchCheck(db, { batchId: 43n, deliveredKey: h("key"), deliveredUid: h("d"), deliveredTx: h("dtx"), status: "ok", firstSeen: 500 }).run();
+    expect(await db.prepare("SELECT first_seen FROM batch_checks").first("first_seen")).toBe(99);
+  });
+});
+
 describe("checks and holds", () => {
   const delivery = (key: string) => ({ batchId: 42n, deliveredKey: h(key), deliveredUid: h(`uid-${key}`), deliveredTx: h(`tx-${key}`), status: "waiting" as const });
 

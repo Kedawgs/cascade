@@ -108,6 +108,11 @@ export interface BatchCheckRow {
   approvedAt: number | null;
   queuedBlock: bigint | null;
   payoutDoneBlock: bigint | null;
+  /** where the delivery came from (its BatchDelivered's sourceChain and frontDoor) */
+  sourceChain: number | null;
+  frontDoor: Hex | null;
+  /** the tick time the monitor first saw the check (null until a rule has looked at it) */
+  firstSeen: number | null;
 }
 export type ChunkCheckStatus = "waiting" | "awaiting_read" | "ok" | "mismatch";
 
@@ -240,6 +245,9 @@ export const batchCheckOf = (r: Row): BatchCheckRow => ({
   approvedAt: num(r.approved_at),
   queuedBlock: big(r.queued_block),
   payoutDoneBlock: big(r.payout_done_block),
+  sourceChain: num(r.source_chain),
+  frontDoor: (r.front_door as Hex | null | undefined) ?? null,
+  firstSeen: num(r.first_seen),
 });
 
 /** A stored log as read back. */
@@ -418,16 +426,36 @@ export const guardStatement = (db: D1Database, holder: string): D1PreparedStatem
 export const releaseLease = (db: D1Database, holder: string): D1PreparedStatement =>
   db.prepare("UPDATE lease SET until = 0 WHERE name = 'tick' AND holder = ?1").bind(holder);
 
-/** Upserts, so a log marked removed by a reorg and re-mined in a later block comes back at its new place. */
+/** Upserts, so a log marked removed by a reorg and re-mined in a later block comes back at its new place.
+ * A delivery (vault BatchDelivered) or a landing (front door PayoutsDelivered) gets its check row, waiting,
+ * in the same statements, whatever its block: no stored delivery can miss its cross-check, even when a rule
+ * fails on the tick that stores it. A row already there (decided or not) is left as it is. */
 export function upsertLogs(db: D1Database, logs: readonly StoredLog[]): D1PreparedStatement[] {
   const stmt = db.prepare(
     `INSERT INTO logs (uid, chain, contract, address, block, log_index, tx_hash, event, topic1, topic2, topic3, data, args, removed)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)
      ON CONFLICT (uid) DO UPDATE SET removed = 0, block = excluded.block, log_index = excluded.log_index`,
   );
-  return logs.map((l) =>
-    stmt.bind(l.uid, l.chain, l.contract, l.address, int(l.block), l.logIndex, l.txHash, l.event, opt(l.topic1), opt(l.topic2), opt(l.topic3), l.data, JSON.stringify(l.args)),
+  const delivery = db.prepare(
+    `INSERT INTO batch_checks (batch_id, delivered_key, delivered_uid, delivered_tx, status, source_chain, front_door)
+     VALUES (?1, ?2, ?3, ?4, 'waiting', ?5, ?6) ON CONFLICT DO NOTHING`,
   );
+  const landing = db.prepare(
+    `INSERT INTO chunk_checks (landed_uid, batch_key, chunk, landed_tx, landed_block, status)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'waiting') ON CONFLICT DO NOTHING`,
+  );
+  const text = (x: unknown) => String(x).toLowerCase();
+  return logs.flatMap((l) => {
+    const out = [stmt.bind(l.uid, l.chain, l.contract, l.address, int(l.block), l.logIndex, l.txHash, l.event, opt(l.topic1), opt(l.topic2), opt(l.topic3), l.data, JSON.stringify(l.args))];
+    const a = l.args;
+    // (a decoded log always has these args; the checks keep anything else out)
+    if (l.chain === "bittensor" && l.contract === "vault" && l.event === "BatchDelivered" && typeof a.key === "string") {
+      out.push(delivery.bind(Number(a.batchId), text(a.key), l.uid, l.txHash, Number(a.sourceChain), text(a.frontDoor)));
+    } else if (l.chain === "base" && l.contract === "frontDoor" && l.event === "PayoutsDelivered" && typeof a.batchKey === "string") {
+      out.push(landing.bind(l.uid, text(a.batchKey), Number(a.chunk), l.txHash, int(l.block)));
+    }
+    return out;
+  });
 }
 
 export function markRemoved(db: D1Database, uids: readonly Hex[]): D1PreparedStatement[] {
@@ -536,6 +564,10 @@ export interface BatchCheckWrite {
   status: Exclude<BatchCheckStatus, "ok_by_owner">;
   detail?: string;
   queuedBlock?: bigint;
+  sourceChain?: number;
+  frontDoor?: Hex;
+  /** kept from the first write that gives one */
+  firstSeen?: number;
 }
 
 export interface ChunkCheckWrite {
@@ -554,8 +586,9 @@ export interface ChunkCheckWrite {
 export function upsertBatchCheck(db: D1Database, c: BatchCheckWrite): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO batch_checks (batch_id, delivered_key, delivered_uid, delivered_tx, closed_tx, message_id, expected_key, status, detail, queued_block)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+      `INSERT INTO batch_checks (batch_id, delivered_key, delivered_uid, delivered_tx, closed_tx, message_id, expected_key, status, detail, queued_block,
+         source_chain, front_door, first_seen)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
        ON CONFLICT (batch_id, delivered_key) DO UPDATE SET
          delivered_uid = excluded.delivered_uid,
          delivered_tx = excluded.delivered_tx,
@@ -564,9 +597,26 @@ export function upsertBatchCheck(db: D1Database, c: BatchCheckWrite): D1Prepared
          expected_key = COALESCE(excluded.expected_key, batch_checks.expected_key),
          status = CASE WHEN batch_checks.status = 'ok_by_owner' THEN batch_checks.status ELSE excluded.status END,
          detail = CASE WHEN batch_checks.status = 'ok_by_owner' THEN batch_checks.detail ELSE excluded.detail END,
-         queued_block = COALESCE(excluded.queued_block, batch_checks.queued_block)`,
+         queued_block = COALESCE(excluded.queued_block, batch_checks.queued_block),
+         source_chain = COALESCE(excluded.source_chain, batch_checks.source_chain),
+         front_door = COALESCE(excluded.front_door, batch_checks.front_door),
+         first_seen = COALESCE(batch_checks.first_seen, excluded.first_seen)`,
     )
-    .bind(int(c.batchId), c.deliveredKey, c.deliveredUid, c.deliveredTx, opt(c.closedTx), opt(c.messageId), opt(c.expectedKey), c.status, opt(c.detail), int(c.queuedBlock));
+    .bind(
+      int(c.batchId),
+      c.deliveredKey,
+      c.deliveredUid,
+      c.deliveredTx,
+      opt(c.closedTx),
+      opt(c.messageId),
+      opt(c.expectedKey),
+      c.status,
+      opt(c.detail),
+      int(c.queuedBlock),
+      opt(c.sourceChain),
+      opt(c.frontDoor),
+      opt(c.firstSeen),
+    );
 }
 
 /** One payout landing's cross-check row, keyed by its PayoutsDelivered log: a forged duplicate landing

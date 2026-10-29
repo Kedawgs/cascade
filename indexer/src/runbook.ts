@@ -77,4 +77,6 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
   "monitor.chain_unreadable": () => "Check the RPC URLs (the readings of this chain have failed or gone backwards five ticks in a row).",
   "monitor.email_failing": () => "Check the email binding and the destination address (Email Routing).",
   "monitor.rule_failed": (f) => `A rule threw${f.error ? ` (${f.error})` : ""}: a bug to fix. The other rules still ran.`,
+  "monitor.bridge_rule_failed": (f) =>
+    `The bridge cross-check ${or(f.rule, "rule")} threw${f.error ? ` (${f.error})` : ""}. Nothing it would have decided this tick was written: new deliveries and payout landings stay waiting, so the keeper pays none of them out, and forged ones aren't being caught. Fix the bug and redeploy. Approve a delivery by hand (pnpm checks:approve) only after checking it yourself.`,
 };

@@ -46,15 +46,19 @@ const rowOf = (w: ChunkCheckWrite): ChunkCheckRow => ({
 
 /** A tick that settles Base blocks 37,000,000–37,001,000, with Bittensor settled `bitLag` seconds past
  * every landing. */
-function tick(logs: StoredLog[], o: { rows?: ChunkCheckRow[]; reads?: Snapshot["deliveredReads"]; cfg?: Config; bitLag?: number; fresh?: boolean } = {}): RuleCtx {
+function tick(
+  logs: StoredLog[],
+  o: { rows?: ChunkCheckRow[]; reads?: Snapshot["deliveredReads"]; cfg?: Config; bitLag?: number; fresh?: boolean; newUids?: Hex[] } = {},
+): RuleCtx {
   const base = ruleCtx();
   return ruleCtx({
     cfg: o.cfg ?? testConfig(),
     logs: logQuery(logs),
+    // every log given is first stored by this tick, unless `fresh` is false or `newUids` names them
+    newUids: new Set(o.newUids ?? (o.fresh === false ? [] : logs.map((l) => l.uid))),
     snap: { ...base.snap, deliveredReads: o.reads ?? [] },
     checks: { batches: [], chunks: o.rows ?? [] },
     settled: { base: base.settled.base, bittensor: { block: 10n ** 9n, time: LANDED_AT + (o.bitLag ?? 60) } },
-    fresh: { base: o.fresh === false ? { from: 1n, to: 0n } : { from: 37_000_000n, to: 37_001_000n }, bittensor: { from: 0n, to: 10n ** 9n } },
     blockTime: (chain) => (chain === "base" ? LANDED_AT : LANDED_AT - 900),
   });
 }
@@ -203,16 +207,17 @@ describe("bridge.duplicate and ccip.unexpected_source, Base side", () => {
     bridgePayouts.run(t2);
     const honest = t2.writes.chunkChecks.map(rowOf);
     expect(honest.map((r) => r.status)).toEqual(["ok"]);
-    // the same message replayed through the landing path, paying EVIL instead of B
+    // the same message replayed through the landing path, paying EVIL instead of B; a re-read finds it
+    // late, far below the blocks settled before
     const forgedTx = h("forged landing");
     const forged = x.base.map((l, i) => {
-      const copy = { ...l, uid: h(`forged ${i}`), txHash: forgedTx, block: l.block + 10n };
+      const copy = { ...l, uid: h(`forged ${i}`), txHash: forgedTx, block: 36_000_000n };
       return l.event === "PayoutReceived" && l.args.user === B ? withArgs(copy, { user: EVIL }) : copy;
     });
-    const t3 = tick([...all(x), ...forged], { rows: honest });
+    const t3 = tick([...all(x), ...forged], { rows: honest, newUids: forged.map((l) => l.uid) });
     const found = bridgePayouts.run(t3);
     const dup = found.find((f) => f.rule === "bridge.duplicate");
-    expect(dup?.key).toBe(`bridge.duplicate:payout:${KEY}:0:${forged[0].uid}`);
+    expect(dup?.key).toBe(`bridge.duplicate:payout:${KEY}:0:2`);
     expect(dup?.hold?.id).toBe(dup?.key);
     expect(dup?.facts.side).toBe("base");
     expect(found.filter((f) => f.rule === "bridge.payout_mismatch").map((f) => f.facts.step)).toEqual([expect.stringMatching(/^4/)]);
@@ -227,6 +232,28 @@ describe("bridge.duplicate and ccip.unexpected_source, Base side", () => {
     expect(u?.key).toBe(`ccip.unexpected_source:base:${x.chunks[0].landTx}`);
     expect(u?.hold?.id).toBe(u?.key);
     expect(u?.facts.sender).toBe(EVIL);
+    // found late, far below the blocks settled before: still reported; stored before: not again
+    const late = base.map((l) => ({ ...l, block: 36_000_000n }));
+    expect(bridgePayouts.run(tick([...x.bit, ...late])).map((f) => f.rule)).toContain("ccip.unexpected_source");
+    expect(bridgePayouts.run(tick([...x.bit, ...base], { fresh: false })).map((f) => f.rule)).not.toContain("ccip.unexpected_source");
+  });
+});
+
+describe("bridge.payout_mismatch: no landing skips its check", () => {
+  it("a landing a re-read found late, far below the blocks settled before, is checked", () => {
+    const x = payoutBatch({ key: KEY, list, chunks: [{ taken: 3, fee: FEE }], landBlock: 36_000_000n });
+    const c = tick(all(x));
+    bridgePayouts.run(c);
+    expect(c.writes.chunkChecks.map((w) => [w.landedUid, w.status])).toEqual([[x.chunks[0].landing!.uid, "awaiting_read"]]);
+  });
+
+  it("a landing whose row was stored with its log but never decided (a rule failed) is checked on a later tick", () => {
+    const x = payoutBatch({ key: KEY, list, chunks: [{ taken: 3, fee: FEE }] });
+    const l = x.chunks[0].landing!;
+    const stored = rowOf({ landedUid: l.uid, batchKey: KEY, chunk: 0, landedTx: l.txHash, landedBlock: l.block, status: "waiting" });
+    const c = tick(all(x), { rows: [stored], fresh: false });
+    bridgePayouts.run(c);
+    expect(c.writes.chunkChecks.map((w) => [w.landedUid, w.status])).toEqual([[l.uid, "awaiting_read"]]);
   });
 });
 

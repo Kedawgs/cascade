@@ -2,7 +2,7 @@ import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import type { StoredLog } from "../logs.ts";
 import type { BaseState, BitState } from "../snapshot.ts";
-import { CONTRACT_NAMES, isFresh, onset, type Readings, type RuleCtx, twice, txLink } from "./context.ts";
+import { CONTRACT_NAMES, isNew, onset, type Readings, type RuleCtx, twice, txLink } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.1 and 6.2: what the front door and vault hold against what they owe, and the vault's edge cases.
@@ -57,13 +57,13 @@ export const vaultSolvency: Rule = {
   run: (ctx) => shortfall(ctx, { chain: "bittensor", side: (r) => vaultSide(r.bittensor), rule: "vault.solvency", key: "vault.solvency", what: "vault", unit: "TAO" }),
 };
 
-const freshVault = (ctx: RuleCtx, events: readonly string[]) => ctx.logs.range("bittensor", "vault", events).filter((l) => isFresh(ctx, l));
+const newVault = (ctx: RuleCtx, events: readonly string[]) => ctx.logs.range("bittensor", "vault", events).filter((l) => isNew(ctx, l));
 
-/** deposits.bounced: each vault DepositBounced, on the tick it settles. */
+/** deposits.bounced: each vault DepositBounced, on the tick it is first stored. */
 export const depositsBounced: Rule = {
   name: "deposits.bounced",
   run: (ctx) =>
-    freshVault(ctx, ["DepositBounced"]).map((l) => ({
+    newVault(ctx, ["DepositBounced"]).map((l) => ({
       rule: "deposits.bounced",
       key: `deposits.bounced:${l.uid}`,
       subject: "The vault bounced a deposit",
@@ -74,12 +74,12 @@ export const depositsBounced: Rule = {
 const EDGE_CASES = ["RedeemDeferred", "PayoutDust", "DepositSkipped"];
 
 /** vault.events: each vault RedeemDeferred, PayoutDust or DepositSkipped, and each log that didn't decode,
- * on the tick it settles. */
+ * on the tick it is first stored. */
 export const vaultEvents: Rule = {
   name: "vault.events",
   run(ctx) {
-    const unknown = ctx.logs.all().filter((l) => l.event === "unknown" && isFresh(ctx, l));
-    const logs: StoredLog[] = [...freshVault(ctx, EDGE_CASES), ...unknown].sort((a, b) => (a.chain !== b.chain ? (a.chain < b.chain ? -1 : 1) : a.block < b.block ? -1 : a.block > b.block ? 1 : a.logIndex - b.logIndex));
+    const unknown = ctx.logs.all().filter((l) => l.event === "unknown" && isNew(ctx, l));
+    const logs: StoredLog[] = [...newVault(ctx, EDGE_CASES), ...unknown].sort((a, b) => (a.chain !== b.chain ? (a.chain < b.chain ? -1 : 1) : a.block < b.block ? -1 : a.block > b.block ? 1 : a.logIndex - b.logIndex));
     return logs.map((l) => {
       const name = `${CONTRACT_NAMES[l.contract]} ${l.event}`;
       const args = Object.fromEntries(Object.entries(l.args).map(([k, v]) => [k, String(v)]));

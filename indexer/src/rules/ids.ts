@@ -35,6 +35,8 @@ export const RULES = {
   "checks.owner_approved": critical("event"),
   "monitor.stalled": critical("condition"),
   "monitor.db_failing": critical("condition"),
+  // a bridge cross-check rule threw: its deliveries and landings stay waiting, unchecked (review C1)
+  "monitor.bridge_rule_failed": critical("condition"),
   // 6.4, proposed (switchable in THRESHOLDS rules.off)
   "rail.alpha_vault": critical("condition"),
   "fmtao.mint_surge": warning("event"),

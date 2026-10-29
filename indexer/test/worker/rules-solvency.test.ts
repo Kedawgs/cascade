@@ -69,15 +69,24 @@ describe("vault.solvency", () => {
 });
 
 describe("deposits.bounced and vault.events", () => {
-  const ctx = (logs: StoredLog[]) => ruleCtx({ logs: logQuery(logs), fresh: { base: { from: 0n, to: 0n }, bittensor: { from: 100n, to: 200n } } });
+  /** `logs` are first stored by this tick, `stored` on an earlier one. */
+  const ctx = (logs: StoredLog[], stored: StoredLog[] = []) => ruleCtx({ logs: logQuery([...stored, ...logs]), newUids: new Set(logs.map((l) => l.uid)) });
 
-  it("names the user and amount of a bounced deposit, once", () => {
+  it("names the user and amount of a bounced deposit, once: on the tick it is first stored", () => {
     const l = slog({ contract: "vault", event: "DepositBounced", block: 150n, args: { key: KEY, user: USER, assets: String(2n * E18) } });
     const [f] = depositsBounced.run(ctx([l]));
     expect(f).toMatchObject({ rule: "deposits.bounced", key: `deposits.bounced:${l.uid}` });
     expect(f.facts).toMatchObject({ user: USER, amount: "2 TAO (2000000000000000000 wei)", batch: KEY });
     expect(f.hold).toBeUndefined();
-    expect(depositsBounced.run(ctx([{ ...l, block: 99n }]))).toEqual([]);
+    expect(depositsBounced.run(ctx([], [l]))).toEqual([]);
+  });
+
+  it("reports a bounced deposit and a vault edge case a re-read found late, below the blocks settled before", () => {
+    const later = slog({ contract: "vault", event: "Staked", block: 9_000n });
+    const bounced = slog({ contract: "vault", event: "DepositBounced", block: 5n, args: { key: KEY, user: USER, assets: "1" } });
+    const deferred = slog({ contract: "vault", event: "RedeemDeferred", block: 6n, args: { key: KEY, user: USER, requested: "5" } });
+    expect(depositsBounced.run(ctx([bounced], [later])).map((f) => f.key)).toEqual([`deposits.bounced:${bounced.uid}`]);
+    expect(vaultEvents.run(ctx([deferred], [later])).map((f) => f.key)).toEqual([`vault.events:${deferred.uid}`]);
   });
 
   it("reports RedeemDeferred, PayoutDust, DepositSkipped and an unknown log, and not a csTAO Transfer", () => {

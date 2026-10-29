@@ -18,9 +18,10 @@ const SIGNER = "0x00000000000000000000000000000000000000a5" as Hex;
 const ZERO = "0x0000000000000000000000000000000000000000" as Hex;
 const FD = "0x8a825738d0287d0959957a0f6ec18ba1276d209d" as Hex;
 
-/** Blocks 37,000,100–37,000,200 newly settled on Base, 6,900,100–6,900,200 on Bittensor. */
+/** Every log given is first stored by this tick, unless `stored` lists it as stored before. */
 function ctx(o: {
   logs?: StoredLog[];
+  stored?: StoredLog[];
   txs?: TxRow[];
   newTxs?: TxRow[];
   base?: Partial<BaseState>;
@@ -41,11 +42,11 @@ function ctx(o: {
       messageStates: {},
       deliveredReads: [],
     },
-    logs: logQuery(o.logs ?? []),
+    logs: logQuery([...(o.stored ?? []), ...(o.logs ?? [])]),
+    newUids: new Set((o.logs ?? []).map((l) => l.uid)),
     txs: new Map((o.txs ?? []).map((t) => [`${t.chain}:${t.hash}`, t])),
     newTxs: o.newTxs ?? [],
     nonces: o.nonces ?? [],
-    fresh: { base: { from: 37_000_100n, to: 37_000_200n }, bittensor: { from: 6_900_100n, to: 6_900_200n } },
   });
   return c;
 }
@@ -64,11 +65,15 @@ describe("admin.event", () => {
     expect(found[0].facts.transaction).toBe(`https://basescan.org/tx/${tx(7)}`);
   });
 
-  it("ignores the deployment's own setup (at or before the baseline block) and events settled on an earlier tick", () => {
+  it("ignores the deployment's own setup (at or before the baseline block) and events stored on an earlier tick", () => {
     expect(adminEvent.run(ctx({ logs: [limitSet(37_000_050n)] }))).toEqual([]);
-    expect(adminEvent.run(ctx({ logs: [limitSet(37_000_099n)] }))).toEqual([]);
-    // not settled yet: found on the tick it settles
-    expect(adminEvent.run(ctx({ logs: [limitSet(37_000_201n)] }))).toEqual([]);
+    expect(adminEvent.run(ctx({ stored: [limitSet(37_000_150n)] }))).toEqual([]);
+  });
+
+  it("finds an admin event a re-read found late, below the blocks settled before", () => {
+    // stored for the first time this tick, though Base was settled far past its block long ago
+    const late = limitSet(37_000_051n);
+    expect(adminEvent.run(ctx({ logs: [late], stored: [limitSet(37_000_900n)] })).map((f) => f.key)).toEqual([`admin.event:${late.uid}`]);
   });
 
   it("finds vault Paused, with the sender unknown when its transaction isn't fetched yet", () => {
@@ -115,6 +120,13 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     const c = ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: [row({ address: ADMIN })], newTxs: [...sent(1, ADMIN, { nonce: 50 }), { chain: "base", hash: tx(5), from: ADMIN }] });
     expect(keys.run(c)).toEqual([]);
     expect(c.writes.nonces).toEqual([row({ address: ADMIN, seen: 2, nonce: 52 })]);
+  });
+
+  it("counts a transaction sent to an account as nothing: only a Safe's executions arrive that way", () => {
+    // the account's own count didn't move for a transaction someone sent it
+    const c = ctx({ base: admin, counts: { base: { [ADMIN]: 50n } }, nonces: [row({ address: ADMIN })], newTxs: sent(1, SIGNER, { to: ADMIN }) });
+    expect(keys.run(c)).toEqual([]);
+    expect(c.writes.nonces).toEqual([]);
   });
 
   it("finds one transaction more than seen only after 900 s, as a critical for an owner, then absorbs it", () => {

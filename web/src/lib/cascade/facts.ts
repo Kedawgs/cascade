@@ -118,33 +118,40 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
   }
 }
 
+/** How many receipts confirmAccountEvents asks Bittensor's public node for at once. */
+const CONFIRM_AT_ONCE = 8;
+
 /** Confirms the account's Deposited and Redeemed events that came from storage or a seed, by their
  * receipts on Bittensor: the amount (and block) is the receipt's, and an event its receipt doesn't show
  * is dropped. Throws when a receipt can't be read, so no amount that isn't confirmed is ever summed. */
 export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account: Address): Promise<void> {
-  const check = async (list: AccountEvent[], eventName: "Deposited" | "Redeemed"): Promise<AccountEvent[]> => {
-    const out: AccountEvent[] = [];
-    for (const e of list) {
-      if (!e.unconfirmed) {
-        out.push(e);
-        continue;
-      }
-      let r: Receipt | null;
-      try {
-        r = await bitReceipt(c, scan, e.txHash);
-      } catch (err) {
-        if ((err as { name?: string }).name !== "TransactionReceiptNotFoundError") throw err;
-        r = null;
-      }
+  const unconfirmed = [...scan.deposited, ...scan.redeemed].filter((e) => e.unconfirmed);
+  if (unconfirmed.length === 0) return;
+  // each transaction's receipt once, a few at a time
+  const receipts = new Map<Hex, Receipt | null>();
+  const hashes = [...new Set(unconfirmed.map((e) => e.txHash))];
+  for (let i = 0; i < hashes.length; i += CONFIRM_AT_ONCE) {
+    await Promise.all(
+      hashes.slice(i, i + CONFIRM_AT_ONCE).map(async (hash) => {
+        try {
+          receipts.set(hash, await bitReceipt(c, scan, hash));
+        } catch (err) {
+          if ((err as { name?: string }).name !== "TransactionReceiptNotFoundError") throw err;
+          receipts.set(hash, null);
+        }
+      }),
+    );
+  }
+  const check = (list: AccountEvent[], eventName: "Deposited" | "Redeemed"): AccountEvent[] =>
+    list.flatMap((e) => {
+      if (!e.unconfirmed) return [e];
+      const r = receipts.get(e.txHash) ?? null;
       const log = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, eventName, strict: false }).find(
         (l) => same(l.address, d.vault) && same(l.args.key as string, e.key) && !!l.args.user && same(l.args.user as string, account),
       );
-      if (mined(r) && log) out.push({ key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint });
-    }
-    return out;
-  };
-  if (![...scan.deposited, ...scan.redeemed].some((e) => e.unconfirmed)) return;
-  const [deposited, redeemed] = [await check(scan.deposited, "Deposited"), await check(scan.redeemed, "Redeemed")];
+      return mined(r) && log ? [{ key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint }] : [];
+    });
+  const [deposited, redeemed] = [check(scan.deposited, "Deposited"), check(scan.redeemed, "Redeemed")];
   scan.deposited.splice(0, scan.deposited.length, ...deposited);
   scan.redeemed.splice(0, scan.redeemed.length, ...redeemed);
 }

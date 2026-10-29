@@ -354,12 +354,14 @@ const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemR
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
 /** Where an unstake request stands on Base. `unsure` while its batch can't be known right now (it still
- * counts as asked); `dead` when its hash can't be mined as sent, so what took its place is still to be
- * searched for (requestReplacement); `replacedBy` the request a speed-up or replacement put in place of
- * its hash, with that one's batch; `dropped` when nothing took its place, so it asked for nothing. */
+ * counts as asked), with `searchFailed` when a search for its replacement was made and couldn't answer;
+ * `dead` when its hash can't be mined as sent, so what took its place is still to be searched for
+ * (requestReplacement); `replacedBy` the request a speed-up or replacement put in place of its hash,
+ * with that one's batch; `dropped` when nothing took its place, so it asked for nothing. */
 export interface RequestPlace {
   batchId?: bigint;
   unsure?: true;
+  searchFailed?: true;
   dead?: true;
   replacedBy?: Hex;
   dropped?: true;
@@ -379,25 +381,38 @@ export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp, n
   return (await requestHashDead(c, op, op.hash, now)) ? { dead: true } : { unsure: true };
 }
 
+/** How long after a search for a dead request's replacement couldn't answer it is tried again. */
+export const SEARCH_RETRY_MS = 5 * 60_000;
+/** How far back a search for a dead request's replacement looks at most: a day of Base blocks. */
+export const SEARCH_BACK_MS = 24 * 60 * 60_000;
+
 /** What took the place of a `dead` request: the front door's logs are searched for the same request
- * since it was sent (findRequestTx: a speed-up made while no tab of this site watched looks exactly like
- * a drop). Found, it is that one's batch; a search that finds nothing makes it `dropped`; one that can't
- * be completed leaves it `unsure`, still counted. `skip`: the hashes other records own, or have taken
- * for theirs (two dead records asking for the same shares are searched for one at a time, oldest first,
- * so they never take the same request). */
+ * since it was sent, or for the last day if that was longer ago (findRequestTx: a speed-up made while no
+ * tab of this site watched looks exactly like a drop). Found, it is that one's batch; a search since it
+ * was sent that finds nothing makes it `dropped`. One that can't be completed, or that couldn't look
+ * back to when it was sent (something earlier may have taken its place), leaves it `unsure`, still
+ * counted, and says so (`searchFailed`); within SEARCH_RETRY_MS of that (`searchFailedAt`) it isn't
+ * searched again. `skip`: the hashes other records own, or have taken for theirs (two dead records
+ * asking for the same shares are searched for one at a time, oldest first, so they never take the same
+ * request). */
 export async function requestReplacement(
   c: Pick<Clients, "base" | "baseLogs">,
   d: Deployment,
   op: WithdrawalOp,
-  ctx: { now: number; skip: ReadonlySet<string> },
+  ctx: { now: number; skip: ReadonlySet<string>; searchFailedAt?: number },
 ): Promise<RequestPlace> {
+  const failed = ctx.searchFailedAt;
+  if (failed !== undefined && ctx.now >= failed && ctx.now - failed < SEARCH_RETRY_MS) return { unsure: true };
+  const sent = op.sentAt ?? op.createdAt;
+  const since = Math.max(sent, ctx.now - SEARCH_BACK_MS);
   let found: { hash: Hex; batchId: bigint } | null;
   try {
-    found = await findRequestTx(c, d, { account: op.account, shares: op.shares, sinceMs: op.sentAt ?? op.createdAt, nowMs: ctx.now, skip: ctx.skip });
+    found = await findRequestTx(c, d, { account: op.account, shares: op.shares, sinceMs: since, nowMs: ctx.now, skip: ctx.skip });
   } catch {
-    return { unsure: true };
+    return { unsure: true, searchFailed: true };
   }
-  return found ? { batchId: found.batchId, replacedBy: found.hash } : { dropped: true };
+  if (found) return { batchId: found.batchId, replacedBy: found.hash };
+  return since > sent ? { unsure: true, searchFailed: true } : { dropped: true };
 }
 
 /** How long after it was sent a request Base has never heard of is left alone before the account's

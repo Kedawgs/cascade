@@ -1253,10 +1253,10 @@ describe("the batch an unstake request with no receipt joined", () => {
     return { clients: { base, baseLogs } as never, windows, asked, nonceAsks };
   }
   /** Where it stands, searched for (as live.ts does) once its hash is dead. */
-  const place = async (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set()) => {
+  const place = async (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set(), searchFailedAt?: number) => {
     const op = request({ shares: SHARES, ...over });
     const p = await requestBatch(b.clients, op, NOW);
-    return p.dead ? requestReplacement(b.clients, D, op, { now: NOW, skip }) : p;
+    return p.dead ? requestReplacement(b.clients, D, op, { now: NOW, skip, searchFailedAt }) : p;
   };
   /** The old hash can never be mined: pending, its nonce taken by another transaction. */
   const replaced = { tx: { nonce: 5, blockNumber: null }, nonce: 6 };
@@ -1336,9 +1336,34 @@ describe("the batch an unstake request with no receipt joined", () => {
     expect(await place(onBase({ logs }), { sentAt: NOW - 3 * HOUR }, new Set([H(90)]))).toEqual({ dropped: true });
   });
 
-  it("stays unsure when the search can't be completed: logs refused, or a logs server behind", async () => {
-    expect(await place(onBase({ ...replaced, logsDown: true }))).toEqual({ unsure: true });
-    expect(await place(onBase({ ...replaced, logsHead: HEAD - 500n }))).toEqual({ unsure: true });
+  it("stays unsure when the search can't be completed, and says so: logs refused, or a logs server behind", async () => {
+    expect(await place(onBase({ ...replaced, logsDown: true }))).toEqual({ unsure: true, searchFailed: true });
+    expect(await place(onBase({ ...replaced, logsHead: HEAD - 500n }))).toEqual({ unsure: true, searchFailed: true });
+  });
+
+  it("isn't searched for again within five minutes of a search that couldn't answer", async () => {
+    const logs = [redeemRequested(ME, SHARES, 7n, HEAD - 50n, H(88))];
+    const soon = onBase({ ...replaced, logs });
+    expect(await place(soon, {}, new Set(), NOW - 5 * MIN + 1)).toEqual({ unsure: true });
+    expect(soon.windows).toEqual([]);
+    expect(await place(onBase({ ...replaced, logs }), {}, new Set(), NOW - 5 * MIN)).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // a failure dated after now (the device clock moved back) doesn't hold it off
+    expect(await place(onBase({ ...replaced, logs }), {}, new Set(), NOW + 60 * MIN)).toEqual({ batchId: 7n, replacedBy: H(88) });
+  });
+
+  it("looks back at most a day, and a request sent before that with nothing found since stays unsure, never dropped", async () => {
+    const DAY = 24 * HOUR;
+    const old = { nonce: 5, sentAt: NOW - 3 * DAY };
+    // the replacement was mined two days ago: before the day the search looks at
+    const b = onBase({ nonce: 6, logs: [redeemRequested(ME, SHARES, 7n, HEAD - 86_400n, H(88))] });
+    expect(await place(b, old)).toEqual({ unsure: true, searchFailed: true });
+    // a day of 2-second blocks, and the margin for timing
+    expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 43_200n - 150n);
+    expect(b.windows.length).toBeLessThanOrEqual(22);
+    // one mined within the day is found
+    expect(await place(onBase({ nonce: 6, logs: [redeemRequested(ME, SHARES, 7n, HEAD - 50n, H(88))] }), old)).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // one sent within the day is searched for since it was sent, so finding nothing drops it
+    expect(await place(onBase({ nonce: 6 }), { nonce: 5, sentAt: NOW - DAY + HOUR })).toEqual({ dropped: true });
   });
 
   it("stays unsure, searching nothing, while Base can't be asked or shows it mined with a receipt not readable yet", async () => {

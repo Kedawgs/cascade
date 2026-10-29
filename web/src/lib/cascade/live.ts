@@ -264,6 +264,10 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     return deposits.filter((o) => !gone.has(o.id));
   }
 
+  /** When a search for a dead request's replacement last couldn't answer, by record and hash: it isn't
+   * made again on every read, only after SEARCH_RETRY_MS (facts.ts, requestReplacement). */
+  const failedSearches = new Map<string, number>();
+
   /** This browser's unstakes still counted in their batches (not failed, not taken back out by a cancel:
    * the one decision, cancelTook), each with its batch: as recorded, or from its request's receipt, which
    * is then recorded. One whose hash can never be mined is followed to the request in its place (whose
@@ -287,8 +291,12 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const adopted = new Set<string>();
     const byAge = (i: number, j: number) => open[i].createdAt - open[j].createdAt || (open[i].id < open[j].id ? -1 : 1);
     for (const i of open.flatMap((_, i) => (places[i].dead ? [i] : [])).sort(byAge)) {
-      const skip = new Set([...all.filter((x) => x.id !== open[i].id && x.hash).map((x) => x.hash as string), ...adopted]);
-      places[i] = await requestReplacement(c, d, open[i], { now: deps.now(), skip });
+      const o = open[i];
+      const skip = new Set([...all.filter((x) => x.id !== o.id && x.hash).map((x) => x.hash as string), ...adopted]);
+      const key = `${o.id}:${o.hash}`;
+      places[i] = await requestReplacement(c, d, o, { now: deps.now(), skip, searchFailedAt: failedSearches.get(key) });
+      if (places[i].searchFailed) failedSearches.set(key, deps.now());
+      else if (!places[i].unsure) failedSearches.delete(key);
       if (places[i].replacedBy) adopted.add(places[i].replacedBy);
     }
     const placed = open.map((o, i) => {

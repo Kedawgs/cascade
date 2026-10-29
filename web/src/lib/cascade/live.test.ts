@@ -612,8 +612,8 @@ describe("unstakes sharing a batch", () => {
     const all = 8n * 10n ** 22n - 10n ** 21n;
     /** Base for a request with no receipt: pending with `nonce` taken, or unknown; the logs the search
      * for its replacement reads, which counts the transaction lookups. */
-    function base(o: { pending?: { nonce: number; blockNumber: null }; nonce?: number; logs?: unknown[]; receipts?: Record<string, unknown> }) {
-      const seen = { lookups: 0 };
+    function base(o: { pending?: { nonce: number; blockNumber: null }; nonce?: number; logs?: unknown[]; receipts?: Record<string, unknown>; logsDown?: boolean }) {
+      const seen = { lookups: 0, logReads: 0 };
       const clients = {
         base: {
           getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
@@ -632,6 +632,8 @@ describe("unstakes sharing a batch", () => {
         baseLogs: {
           request: async ({ method, params }: { method: string; params?: { fromBlock: `0x${string}`; toBlock: `0x${string}` }[] }) => {
             if (method === "eth_blockNumber") return `0x${HEAD.toString(16)}`;
+            seen.logReads++;
+            if (o.logsDown) throw new Error("HTTP request failed. Status: 503");
             const [from, to] = [BigInt(params![0].fromBlock), BigInt(params![0].toBlock)];
             return (o.logs ?? []).filter((l) => (l as { blockNumber: bigint }).blockNumber >= from && (l as { blockNumber: bigint }).blockNumber <= to);
           },
@@ -691,6 +693,28 @@ describe("unstakes sharing a batch", () => {
       const before = b.seen.lookups;
       expect((await data.getAvailable(ME)).availableShares).toBe(all);
       expect(b.seen.lookups).toBe(before);
+    });
+
+    it("aren't searched for again on every read while the search can't answer: five minutes on, they are", async () => {
+      const opts: Parameters<typeof base>[0] = { nonce: 4, logsDown: true };
+      const b = base(opts);
+      let now = NOW;
+      const d = deps({ clients: b.clients as never, now: () => now });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: NOW - 20 * 60_000, nonce: 3, state: "sent" });
+      const data = createLiveCascadeData(D, d);
+      // the logs can't be read: still counted
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      const tried = b.seen.logReads;
+      expect(tried).toBeGreaterThan(0);
+      now += 4 * 60_000;
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(b.seen.logReads).toBe(tried);
+      // five minutes after it failed, it is searched for again: nothing in its place now, so it is dropped
+      now += 60_000;
+      opts.logsDown = false;
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(b.seen.logReads).toBeGreaterThan(tried);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
     });
 
     it("count again, put back as sent, if Base later shows the request itself mined", async () => {

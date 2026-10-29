@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
+import { cardinalityReport } from "./cardinality.ts";
 import { cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
 import { handoff, ownershipStatus } from "./handoff.ts";
@@ -151,6 +152,10 @@ async function run(a: Args): Promise<number> {
       for (const line of out.lines) log(line);
       return 0;
     }
+    case "cardinality":
+      // always the live Base pools: the transactions are for mainnet; reads only
+      for (const line of await cardinalityReport(ctxFor(true))) log(line);
+      return 0;
     case "ownership": {
       const r = await ownershipStatus(ctxFor(a.live), needRecord(a.live));
       for (const line of r.lines) log(line);

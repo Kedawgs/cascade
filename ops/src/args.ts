@@ -22,6 +22,7 @@ export const COMMANDS = [
   "web-config",
   "handoff",
   "ownership",
+  "cardinality",
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];
@@ -57,6 +58,8 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   handoff                    a launch: write the Safe Transaction Builder files (deployments/safe/) in
                              which each final owner accepts ownership; sends nothing
   ownership                  each contract's owner and pending owner, against the plan
+  cardinality                the oracle's pools' observation slots (reads Base), and the exact
+                             increaseObservationCardinalityNext transactions to send from any wallet
 
 Without --live, deploy and the keeper commands use the local forks.
 A launch (OPS_CADENCE=launch) reads its roles from OPS_LAUNCH_OWNER_BASE, OPS_LAUNCH_OWNER_BITTENSOR,

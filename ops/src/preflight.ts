@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { type Address, getContractAddress, parseAbi } from "viem";
 import type { Budget } from "./budget.ts";
+import { poolProblems } from "./cardinality.ts";
 import { type ChainName, LIVE, SETTINGS, WALLET } from "./config.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { WINDOW } from "./keeper/state.ts";
@@ -99,6 +100,9 @@ export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?:
       migrationFinished: (await alpha("migrationFinished")) as boolean,
     }),
   );
+
+  // the oracle's 30-minute TWAP needs that much history in both pools, or deliveries can revert
+  for (const [label, problem] of await poolProblems(ctx)) check(label, problem);
 
   const nonces = { base: await nonceOf(ctx.rpc, "base", WALLET), bittensor: await nonceOf(ctx.rpc, "bittensor", WALLET) };
   for (const chain of ["base", "bittensor"] as const) {

@@ -41,6 +41,7 @@ describe("cli arguments", () => {
     expect(parseArgs(["handoff", "--live"])).toEqual({ cmd: "handoff", live: true, users: [] });
     expect(parseArgs(["ownership"])).toEqual({ cmd: "ownership", live: false, users: [] });
     expect(() => parseArgs(["handoff", "--new-plan"])).toThrow(UsageError);
+    expect(parseArgs(["cardinality"])).toEqual({ cmd: "cardinality", live: false, users: [] });
   });
 
   it("parses rewards, claim and deliver", () => {

@@ -16,6 +16,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { ROLES } from "./launch-roles.ts";
 import { loadArtifact } from "../src/artifacts.ts";
+import { POOL_ABI } from "../src/cardinality.ts";
 import { type ChainName, paths, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3, type PlanV3 } from "../src/plan.ts";
 import { type DeploymentRecord, loadRecord, saveRecord } from "../src/record.ts";
@@ -304,8 +305,9 @@ const recordOf = (plan: PlanV3): DeploymentRecord => ({
 function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
   const plan = rec.plan as PlanV3;
   const exp = [...expectations(plan), ...limitExpectations(plan)];
-  const fns = [...CONTRACTS.flatMap((n) => loadArtifact(contractsDir, n).abi), ...VAULT_VIEWS].filter((i): i is AbiFunction => i.type === "function");
-  /** A clean deployment's state for the reads beyond the expectations: nothing pending, nothing extra, not paused. */
+  const fns = [...CONTRACTS.flatMap((n) => loadArtifact(contractsDir, n).abi), ...VAULT_VIEWS, ...POOL_ABI].filter((i): i is AbiFunction => i.type === "function");
+  /** A clean deployment's state for the reads beyond the expectations: nothing pending, nothing extra, not
+   * paused, and both of the oracle's pools at the target's 1,800 observation slots. */
   const clean: Record<string, unknown> = {
     pendingOwner: zeroAddress,
     guardianProposedAt: 0n,
@@ -313,6 +315,7 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
     bridgeProposedAt: 0n,
     paused: false,
     hotkeyCount: 1n,
+    slot0: [2n ** 96n, 0, 0, 1_800, 1_800, 0, true],
   };
   const a = plan.addresses;
   const name: Record<string, string> = Object.fromEntries(

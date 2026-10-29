@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi, zeroAddress } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
 import { codeFor } from "./builds.ts";
+import { cardinalityChecks } from "./cardinality.ts";
 import { BASE_V3, type ChainName, FRONT_DOOR_DEFAULTS, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
 import { buildOf, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, rolesOf, settingsOf, settingsV3Of, vaultLimitsOf } from "./plan.ts";
 import {
@@ -362,6 +363,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
       return registryChecks(ctx, plan, registryScan, allow);
     });
     await findings("the pause and hotkey state", async () => ({ failures: [], warnings: await stateWarnings(ctx, plan) }));
+    await findings("the oracle's pools", () => cardinalityChecks(ctx, plan));
     const treasuries = new Map<string, Address>();
     for (const t of [rolesOf(plan).treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
       if (anAddress(t)) treasuries.set(t.toLowerCase(), t);

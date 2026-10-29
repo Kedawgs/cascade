@@ -300,12 +300,20 @@ export function rolesOf(d: Deployment): RoleOf {
   return (chain, a) => roles[chain].get(a.toLowerCase());
 }
 
-/** A URL fit for a log line: scheme and host only (a keyed RPC URL carries its key in the path or query). */
-export function redact(url: string): string {
+/** A URL's registrable domain, the last two labels of its host (drpc.org, publicnode.com): never a
+ * subdomain, path or query, where a provider's key can sit (https://KEY.base-mainnet.quiknode.pro/…). An
+ * IP address or a one-label host as it is. No public-suffix list: a host under e.g. co.uk shows as co.uk,
+ * which says less but leaks nothing. (Ported from ops/src/send.ts.) */
+export function hostDomain(url: string): string {
+  let host: string;
   try {
-    const u = new URL(url);
-    return `${u.protocol}//${u.host}`;
+    host = new URL(url).hostname;
   } catch {
     return "(an invalid URL)";
   }
+  if (/^[\d.]+$/.test(host) || host.startsWith("[") || !host.includes(".")) return host;
+  return host.split(".").slice(-2).join(".");
 }
+
+/** A URL fit for a log line or an error: its registrable domain only. */
+export const redact = hostDomain;

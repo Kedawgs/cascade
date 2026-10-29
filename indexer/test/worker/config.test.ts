@@ -157,9 +157,15 @@ describe("rolesOf", () => {
 });
 
 describe("redact", () => {
-  it("keeps only the scheme and host", () => {
-    expect(redact("https://x.example/key/abc")).toBe("https://x.example");
-    expect(redact("https://user:pw@x.example:8443/k?key=1")).toBe("https://x.example:8443");
+  it("keeps only the host's registrable domain: never a subdomain, path or query, where a key can sit", () => {
+    expect(redact("https://x.example/key/abc")).toBe("x.example");
+    expect(redact("https://user:pw@x.example:8443/k?key=1")).toBe("x.example");
+    expect(redact("https://SECRETKEY.base-mainnet.quiknode.pro/x")).toBe("quiknode.pro");
+    expect(redact("https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY")).toBe("drpc.org");
+    expect(redact("https://base-rpc.publicnode.com")).toBe("publicnode.com");
+    expect(redact("http://127.0.0.1:8545")).toBe("127.0.0.1");
+    expect(redact("http://[::1]:8545/k")).toBe("[::1]");
+    expect(redact("http://localhost:8545/k")).toBe("localhost");
     expect(redact("not a url")).toBe("(an invalid URL)");
   });
 });

@@ -90,8 +90,26 @@ describe("createRpc", () => {
       expect(clock.slept).toEqual([2000, 4000, 8000]);
       expect(net.count()).toBe(4);
       expect(leaks(e.message)).toEqual([]);
-      expect(e.message).toContain(new URL(url).host);
+      // the registrable domain only, not the host's subdomain
+      expect(e.message).toContain("via rpc.test:");
+      expect(e.message).not.toContain(new URL(url).host);
     }
+  });
+
+  it("never prints a key that sits in the host's subdomain, even when the node echoes it", async () => {
+    const url = "https://SECRETKEY123.base-mainnet.quiknode.pro/x";
+    const echo = async () =>
+      Response.json({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: `rate limited for ${url} (host SECRETKEY123.base-mainnet.quiknode.pro, key SECRETKEY123)` } });
+    const rpc = createRpc({ urls: { ...TEST_URLS, base: url }, fetch: echo as typeof fetch, budget: new Budget(45), ...quiet });
+    const e = await rejection(rpc.call("base", "eth_blockNumber", []));
+    expect(e).toBeInstanceOf(RpcError);
+    expect(e.message).toContain("via quiknode.pro:");
+    expect(e.message).not.toMatch(/SECRETKEY123|base-mainnet/);
+
+    const failing = async () => new Response("no", { status: 403 });
+    const rpc2 = createRpc({ urls: { ...TEST_URLS, base: url }, fetch: failing as typeof fetch, budget: new Budget(45), ...quiet });
+    const e2 = await rejection(rpc2.call("base", "eth_blockNumber", []));
+    expect(e2.message).not.toMatch(/SECRETKEY123|base-mainnet/);
   });
 
   it("refuses to fetch once the budget is spent", async () => {
@@ -235,7 +253,7 @@ describe("getJson and getText", () => {
     const e = await rejection(getJson("https://prices.test/v2/key-abcdef/x?k=secret1", { fetch: f as typeof fetch, budget: new Budget(5), timeoutMs: 5000 }));
     expect(e).toBeInstanceOf(HttpError);
     expect((e as HttpError).status).toBe(404);
-    expect(e.message).toContain("https://prices.test");
+    expect(e.message).toContain("prices.test");
     expect(e.message).not.toMatch(/key-abcdef|secret1/);
     const bad = await rejection(getJson("https://prices.test/bad", { fetch: f as typeof fetch, budget: new Budget(5), timeoutMs: 5000 }));
     expect(bad).toBeInstanceOf(HttpError);

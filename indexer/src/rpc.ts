@@ -34,8 +34,9 @@ export class Budget {
   }
 }
 
-/** A failed JSON-RPC request. The message names the chain, the method and the node's host only: never
- * the URL's path or query, where a keyed URL holds its key (and some nodes echo it back). */
+/** A failed JSON-RPC request. The message names the chain, the method and the node's registrable domain
+ * only: never the URL's subdomain, path or query, where a keyed URL holds its key (and some nodes echo
+ * it back). */
 export class RpcError extends Error {
   readonly chain: ChainName;
   readonly method: string;
@@ -56,7 +57,8 @@ export class RpcError extends Error {
   }
 }
 
-/** `text` with every part of `url` past its host cut out. */
+/** `text` with every part of `url` but its registrable domain cut out: the host and its subdomain
+ * labels, the path, the query and any credentials. */
 export function scrub(text: string, url: string): string {
   let u: URL;
   try {
@@ -64,10 +66,30 @@ export function scrub(text: string, url: string): string {
   } catch {
     return text;
   }
-  const parts = [url, u.href, `${u.host}${u.pathname}${u.search}`, `${u.pathname}${u.search}`, u.pathname, u.search, ...u.pathname.split("/"), ...[...u.searchParams].flat(), u.username, u.password];
-  let out = text;
-  for (const p of [...new Set(parts)].filter((p) => p.length >= 4).sort((a, b) => b.length - a.length)) out = out.split(p).join("…");
-  return out;
+  const labels = u.hostname.split(".");
+  const subdomain = labels.length > 2 ? labels.slice(0, -2) : [];
+  const parts = [
+    url,
+    u.href,
+    `${u.host}${u.pathname}${u.search}`,
+    `${u.pathname}${u.search}`,
+    u.pathname,
+    u.search,
+    ...u.pathname.split("/"),
+    ...[...u.searchParams].flat(),
+    u.username,
+    u.password,
+    u.host,
+    u.hostname,
+    subdomain.join("."),
+    ...subdomain,
+  ];
+  // whatever case a node echoes it in (a URL's host comes back lowercased, the key may not)
+  const escaped = [...new Set(parts)]
+    .filter((p) => p.length >= 4)
+    .sort((a, b) => b.length - a.length)
+    .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return escaped.length === 0 ? text : text.replace(new RegExp(escaped.join("|"), "gi"), "…");
 }
 
 export interface Call {

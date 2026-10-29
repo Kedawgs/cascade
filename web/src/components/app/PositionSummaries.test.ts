@@ -5,6 +5,7 @@ import type { Available, Position, PositionHistory } from "@/lib/cascade/types";
 import { type Cached, plainText, renderWithCache } from "../test-render";
 import { RewardsCard } from "./RewardsCard";
 import { StakedSummary } from "./StakeCard";
+import { UnstakeForm } from "./UnstakeForm";
 import { UnstakeSummary } from "./UnstakeScreen";
 
 const ME = "0x1234567890abcdef1234567890abcdef12345678";
@@ -61,5 +62,15 @@ describe("Rewards card", () => {
     expect(
       text(createElement(RewardsCard, { account: ME }), [...ready, { key: cascadeKeys.history(ME), data: { pendingTao: 0, avgEntryPriceUsd: null } }]),
     ).toContain("Earned so far–TAO price");
+  });
+});
+
+describe("Unstake form", () => {
+  it("says which read failed: the balance, or what can be unstaked", () => {
+    const AVAILABLE: Cached = { key: cascadeKeys.available(ME), data: available };
+    expect(text(createElement(UnstakeForm, { account: ME }), [{ ...POSITION, failed: true }, AVAILABLE])).toContain("We couldn't load your balance just now.");
+    expect(text(createElement(UnstakeForm, { account: ME }), [POSITION, { ...AVAILABLE, failed: true }])).toContain(
+      "We couldn't load what you can unstake just now.",
+    );
   });
 });

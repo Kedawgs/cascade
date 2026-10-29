@@ -44,7 +44,7 @@ function UnstakeWithBalance({ account }: { account: string }) {
   if (position.isError || available.isError) {
     return (
       <LoadError
-        what="your balance"
+        what={position.isError ? "your balance" : "what you can unstake"}
         onRetry={() => {
           void position.refetch();
           void available.refetch();

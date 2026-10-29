@@ -71,8 +71,8 @@ describe("referencePrice and poolPriceUsd", () => {
   const cb = (usd: number) => ({ data: { amount: String(usd), base: "TAO", currency: "USD" } });
 
   it("takes the median of the sources that answer", async () => {
-    expect(await referencePrice({ getJson: answers(cg(400), cb(404)), sources: ["coingecko", "coinbase"] })).toEqual({ usd: 402 });
-    expect(await referencePrice({ getJson: answers(new Error("down"), cb(404)), sources: ["coingecko", "coinbase"] })).toEqual({ usd: 404 });
+    expect(await referencePrice({ getJson: answers(cg(400), cb(404)), sources: ["coingecko", "coinbase"] })).toEqual({ usd: 402, sources: 2 });
+    expect(await referencePrice({ getJson: answers(new Error("down"), cb(404)), sources: ["coingecko", "coinbase"] })).toEqual({ usd: 404, sources: 1 });
   });
 
   it("is unavailable when the sources disagree by more than 2%, none answers, or none is configured", async () => {
@@ -113,6 +113,49 @@ describe("fmtao.depeg and price.reference_unavailable", () => {
     // between price reads the last verdict stands, so the alert doesn't resolve
     const between = ctx({ base: base(12n, pools(400 * 1.051)), meta: { depeg: meta(second).depeg }, nowS: NOW + 360 });
     expect(fmtaoDepeg.run(between).map((x) => x.rule)).toEqual(["fmtao.depeg"]);
+  });
+
+  it("leaves the verdict alone on an unavailable read, and confirms on two available reads 4 to 30 minutes apart", () => {
+    const off = pools(400 * 1.051);
+    const first = ctx({ base: base(10n, off), reference: { usd: 400, sources: 2 } });
+    fmtaoDepeg.run(first);
+    // an unreliable source answers nothing in between: no reset
+    const gap = ctx({ base: base(11n, off), reference: { unavailable: "no price source answered" }, meta: { depeg: meta(first).depeg }, nowS: NOW + 300 });
+    expect(fmtaoDepeg.run(gap)).toEqual([]);
+    expect(gap.writes.meta.filter((w) => w.k === "depeg")).toEqual([]);
+    const second = ctx({ base: base(12n, off), reference: { usd: 400, sources: 2 }, meta: { depeg: meta(first).depeg }, nowS: NOW + 600 });
+    expect(fmtaoDepeg.run(second).map((f) => f.key)).toEqual(["fmtao.depeg"]);
+    // two reads 31 minutes apart are not a confirmation
+    const late = ctx({ base: base(12n, off), reference: { usd: 400, sources: 2 }, meta: { depeg: meta(first).depeg }, nowS: NOW + 31 * 60 });
+    expect(fmtaoDepeg.run(late)).toEqual([]);
+    // too close together either
+    const soon = ctx({ base: base(12n, off), reference: { usd: 400, sources: 2 }, meta: { depeg: meta(first).depeg }, nowS: NOW + 180 });
+    expect(fmtaoDepeg.run(soon)).toEqual([]);
+  });
+
+  it("needs a third read when only one source answered", () => {
+    const off = pools(400 * 1.051);
+    let state: string | undefined;
+    const read = (t: number) => {
+      const c = ctx({ base: base(10n, off), reference: { usd: 400, sources: 1 }, meta: state ? { depeg: state } : {}, nowS: NOW + t });
+      const found = fmtaoDepeg.run(c);
+      state = meta(c).depeg;
+      return found.map((f) => f.key);
+    };
+    expect(read(0)).toEqual([]);
+    expect(read(300)).toEqual([]);
+    expect(read(600)).toEqual(["fmtao.depeg"]);
+  });
+
+  it("warns on a low share of available reads over the last hour", () => {
+    // every other read unavailable never makes a full hour without a price, but half of an hour's reads is too few
+    const reads = JSON.stringify(Array.from({ length: 11 }, (_, i) => [NOW - 3300 + i * 300, i % 2 === 0 ? 0 : 1]));
+    const c = ctx({ base: base(10n), reference: { unavailable: "no price source answered" }, meta: { reference_reads: reads } });
+    const [f] = referenceUnavailable.run(c);
+    expect(f).toMatchObject({ rule: "price.reference_unavailable" });
+    expect(f.facts["available reads (last hour)"]).toBe("5 of 12");
+    const fine = JSON.stringify(Array.from({ length: 11 }, (_, i) => [NOW - 3300 + i * 300, i === 3 ? 0 : 1]));
+    expect(referenceUnavailable.run(ctx({ base: base(10n), reference: { usd: 400, sources: 2 }, meta: { reference_reads: fine } }))).toEqual([]);
   });
 
   it("finds no depeg while the reference is unavailable, and says so after 61 minutes", () => {

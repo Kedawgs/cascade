@@ -44,31 +44,48 @@ export const fmtaoUnbacked: Rule = {
 };
 
 interface DepegState {
+  /** the last available read */
   at: number;
   off: boolean;
+  /** off reads in a row, each within CONFIRM_MAX_GAP_S of the last */
+  streak: number;
+  /** when the streak began */
+  first: number;
+  /** a read in the streak came from a single source */
+  single: boolean;
   confirmed: boolean;
   spot?: number;
   ref?: number;
 }
 
-/** fmtao.depeg: the pool's TAO price differs from the reference by more than depegBps on two price reads
- * about 5 minutes apart (4 to 15). The verdict is kept in meta, so it stands between price reads. */
+/** Two off reads confirm a depeg when they are 4 to 30 minutes apart (unavailable reads in between don't
+ * count, and don't reset anything): one bad answer can't page, and an unreliable source can't hide a depeg. */
+const CONFIRM_MIN_S = 240;
+const CONFIRM_MAX_GAP_S = 1800;
+
+/** fmtao.depeg: the pool's TAO price differs from the reference by more than depegBps on two available price
+ * reads 4 to 30 minutes apart, or three when a read came from a single source. An unavailable read leaves the
+ * last verdict alone. The verdict is kept in meta, so it stands between price reads. */
 export const fmtaoDepeg: Rule = {
   name: "fmtao.depeg",
   run(ctx) {
     if (ctx.cfg.priceSources.length === 0) return [];
     const last = json<DepegState>(ctx.meta.depeg);
     let state = last;
-    if (ctx.reference) {
-      const spot = ctx.snap.base ? poolPriceUsd(ctx.snap.base.state, ctx.cfg.tokens) : undefined;
-      if ("unavailable" in ctx.reference || spot === undefined) {
-        state = { at: ctx.nowS, off: false, confirmed: false };
+    const spot = ctx.snap.base ? poolPriceUsd(ctx.snap.base.state, ctx.cfg.tokens) : undefined;
+    if (ctx.reference && "usd" in ctx.reference && spot !== undefined) {
+      const ref = ctx.reference.usd;
+      const single = ctx.reference.sources === 1;
+      const off = Math.abs(spot / ref - 1) * 10_000 > ctx.t.depegBps;
+      if (!off) {
+        state = { at: ctx.nowS, off, streak: 0, first: ctx.nowS, single: false, confirmed: false, spot, ref };
       } else {
-        const ref = ctx.reference.usd;
-        const off = Math.abs(spot / ref - 1) * 10_000 > ctx.t.depegBps;
-        const gap = ctx.nowS - (last?.at ?? 0);
-        const confirmed = off && last?.off === true && (last.confirmed || (gap >= 240 && gap <= 900));
-        state = { at: ctx.nowS, off, confirmed, spot, ref };
+        const goesOn = last?.off === true && ctx.nowS - last.at <= CONFIRM_MAX_GAP_S;
+        const streak = goesOn ? last.streak + 1 : 1;
+        const first = goesOn ? last.first : ctx.nowS;
+        const anySingle = (goesOn && last.single) || single;
+        const confirmed = streak >= (anySingle ? 3 : 2) && ctx.nowS - first >= CONFIRM_MIN_S;
+        state = { at: ctx.nowS, off, streak, first, single: anySingle, confirmed, spot, ref };
       }
       ctx.writes.meta.push({ k: "depeg", v: JSON.stringify(state) });
     }
@@ -85,27 +102,38 @@ export const fmtaoDepeg: Rule = {
   },
 };
 
-/** price.reference_unavailable: no reference price for more than referenceUnavailableS. */
+/** An hour of price reads before their share counts. */
+const MIN_READS = 6;
+
+/** price.reference_unavailable: no reference price for more than referenceUnavailableS, or fewer than
+ * referenceMinAvailablePct of the last hour's reads available (an unreliable source that answers now and
+ * then never makes a whole hour without a price, but can still keep fmtao.depeg from confirming). */
 export const referenceUnavailable: Rule = {
   name: "price.reference_unavailable",
   run(ctx) {
     if (ctx.cfg.priceSources.length === 0) return [];
     let since = num(ctx.meta.reference_unavailable_since);
+    let reads = (json<[number, number][]>(ctx.meta.reference_reads) ?? []).filter(([t]) => t > ctx.nowS - 3600 && t < ctx.nowS);
     if (ctx.reference) {
-      if ("unavailable" in ctx.reference) {
-        if (since === undefined) {
-          since = ctx.nowS;
-          ctx.writes.meta.push({ k: "reference_unavailable_since", v: String(since) });
-        }
-      } else {
-        if (since !== undefined) ctx.writes.meta.push({ k: "reference_unavailable_since", v: "" });
+      const available = "usd" in ctx.reference;
+      if (!available && since === undefined) {
+        since = ctx.nowS;
+        ctx.writes.meta.push({ k: "reference_unavailable_since", v: String(since) });
+      } else if (available && since !== undefined) {
+        ctx.writes.meta.push({ k: "reference_unavailable_since", v: "" });
         since = undefined;
       }
+      reads = [...reads, [ctx.nowS, available ? 1 : 0]];
+      ctx.writes.meta.push({ k: "reference_reads", v: JSON.stringify(reads) });
     }
-    if (since === undefined || ctx.nowS - since <= ctx.t.referenceUnavailableS) return [];
-    const facts: Record<string, string> = { since: utc(since) };
+    const ok = reads.filter(([, a]) => a === 1).length;
+    const lowShare = reads.length >= MIN_READS && ok * 100 < reads.length * ctx.t.referenceMinAvailablePct;
+    const longGap = since !== undefined && ctx.nowS - since > ctx.t.referenceUnavailableS;
+    if (!lowShare && !longGap) return [];
+    const facts: Record<string, string> = { "available reads (last hour)": `${ok} of ${reads.length}` };
+    if (since !== undefined) facts.since = utc(since);
     if (ctx.reference && "unavailable" in ctx.reference) facts.why = ctx.reference.unavailable;
-    return [{ rule: "price.reference_unavailable", key: "price.reference_unavailable", subject: "No reference TAO price: the depeg rule can't run", facts }];
+    return [{ rule: "price.reference_unavailable", key: "price.reference_unavailable", subject: "No reliable reference TAO price: the depeg rule can't confirm", facts }];
   },
 };
 

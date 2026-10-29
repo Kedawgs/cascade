@@ -18,6 +18,8 @@ export const DEFAULTS = {
   depegBps: 500,
   /** price.reference_unavailable: no reference price for this long */
   referenceUnavailableS: 3600,
+  /** price.reference_unavailable: also when fewer than this share of the last hour's price reads answered */
+  referenceMinAvailablePct: 50,
   /** ccip.undelivered: a message not arrived this long after its source block */
   undeliveredS: 3600,
   /** batch.past_max_wait: this long past the batch's due close */

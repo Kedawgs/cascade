@@ -20,7 +20,8 @@ const usdOf = (s: PriceSource, j: unknown): number | undefined => {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
 };
 
-export type Reference = { usd: number } | { unavailable: string };
+/** A reference price, with how many sources agreed on it (one alone needs a longer confirmation). */
+export type Reference = { usd: number; sources?: number } | { unavailable: string };
 
 /** The median of the configured sources that answer; unavailable when none is configured, none answers, or
  * they disagree by more than 2%. A source that fails is left out (it costs one subrequest). */
@@ -39,7 +40,7 @@ export async function referencePrice(o: { getJson: (url: string) => Promise<unkn
   if (ok.length === 0) return { unavailable: "no price source answered" };
   if (ok[ok.length - 1] / ok[0] - 1 > AGREE) return { unavailable: `the price sources disagree (${ok.map((x) => x.toFixed(2)).join(", ")} USD)` };
   const mid = Math.floor(ok.length / 2);
-  return { usd: ok.length % 2 ? ok[mid] : (ok[mid - 1] + ok[mid]) / 2 };
+  return { usd: ok.length % 2 ? ok[mid] : (ok[mid - 1] + ok[mid]) / 2, sources: ok.length };
 }
 
 const Q96 = 2 ** 96;

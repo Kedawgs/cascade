@@ -35,6 +35,7 @@ export function ruleCtx(over: Partial<RuleCtx> & { logs?: RuleCtx["logs"]; store
     txs: new Map(),
     newTxs: [],
     nonces: [],
+    messages: [],
     t: DEFAULTS,
     holdActive: false,
     meta: {},

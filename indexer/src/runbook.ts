@@ -22,7 +22,7 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
     "The front door holds less than it owes. Guardian: pause() the front door (claims and cancels still work); find the transfer that broke the identity.",
   "vault.solvency": () => "The vault can't cover its queued payouts. Guardian: pause the vault; do not process payouts.",
   "ccip.failure": (f) =>
-    `The message and its tokens wait in CCIP. Open it on ccip.chain.link${f.ccip ? ` (${f.ccip})` : ""} and note the reason; it can be executed again by hand once the cause is fixed. Don't pause anything else for this alone.`,
+    `The message and its tokens wait in CCIP. Open it on ccip.chain.link${f.ccip ? ` (${f.ccip})` : ""} and note the reason; it can be executed again by hand once the cause is fixed. Don't pause anything else for this alone, except: if an honest batch failed with DuplicateBatch, a byte-identical copy was delivered first, and this alert may be the only sign of it. Then treat it as bridge.batch_mismatch (guardian pause the vault, check the batch's deliveries).`,
   "ccip.unexpected_source": (f) =>
     `A Cascade contract accepted a message from an unexpected sender. Treat it as a forgery: follow the steps for ${f.side === "base" ? "bridge.payout_mismatch (guardian pause the front door; tell ForeverMoney and Chainlink)" : "bridge.batch_mismatch (guardian pause the vault; owner cancelPayoutBatch before the deadline)"}.`,
   "deposits.bounced": () =>

@@ -11,6 +11,7 @@ import {
   chunkCheckOf,
   type HoldRow,
   logOf,
+  type MessageRow,
   type NonceRow,
   type TxRow,
   txRowOf,
@@ -90,6 +91,8 @@ export interface RuleCtx {
   txs: Map<string, TxRow>;
   /** the transactions first stored this tick (fetched, or known from an event's args), one per hash */
   newTxs: TxRow[];
+  /** the bridge messages still pending (loaded), with this tick's new ones */
+  messages: MessageRow[];
   /** the watched addresses' rows */
   nonces: NonceRow[];
   t: Thresholds;

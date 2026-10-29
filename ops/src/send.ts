@@ -119,7 +119,8 @@ export function redact(targets: Ctx["targets"], text: string): string {
   let out = text;
   for (const t of Object.values(targets)) {
     const origin = new URL(t.rpcUrl).origin;
-    out = out.replace(new RegExp(`${escape(origin)}[^\s)"'\]]*`, "g"), `${origin}/…`);
+    // String.raw: in a plain template literal "\s" would lose its backslash and match only the letter s
+    out = out.replace(new RegExp(String.raw`${escape(origin)}[^\s)"'\]]*`, "g"), `${origin}/…`);
   }
   return out.replace(/((?:d|api_?)?key|token|secret)=[^&\s)"']+/gi, "$1=…");
 }

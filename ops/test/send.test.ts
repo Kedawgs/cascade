@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { paths, targets, WALLET } from "../src/config.ts";
 import { buildPlan } from "../src/plan.ts";
 import { RpcError, type Rpc } from "../src/rpc.ts";
-import { castArg, type Ctx, ReceiptTimeout, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
+import { castArg, type Ctx, ReceiptTimeout, redact, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
 import type { CallRequest, CreateRequest } from "../src/types.ts";
 
 const HASH = `0x${"ab".repeat(32)}` as Hex;
@@ -269,6 +269,18 @@ describe("send", () => {
     expect(err.message).toMatch(/failed/);
     expect(err.message).not.toContain("SECRETKEY");
     expect(f.logs.join(" ")).not.toContain("SECRETKEY");
+  });
+
+  it("never prints an API key carried in the RPC address's path", async () => {
+    const url = "http://127.0.0.1:8547/v2/sECRETKEY";
+    const f = fixture({ castErrors: `error sending request for url (${url}): connection refused` });
+    f.ctx.targets = { ...f.ctx.targets, bittensor: { ...f.ctx.targets.bittensor, rpcUrl: url } };
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err.message).toContain("(http://127.0.0.1:8547/…)");
+    expect(err.message).not.toContain("ECRETKEY");
+    // the address is cut at whitespace, a quote, a bracket or a parenthesis, so the text after it stays
+    const targets = { base: f.ctx.targets.base, bittensor: { ...f.ctx.targets.bittensor, rpcUrl: url } };
+    expect(redact(targets, `at "${url}" [${url}] ${url}\nnext`)).toBe('at "http://127.0.0.1:8547/…" [http://127.0.0.1:8547/…] http://127.0.0.1:8547/…\nnext');
   });
 
   it("returns the receipt's logs", async () => {

@@ -237,6 +237,30 @@ describe("facts", () => {
     expect(scan.staked).toHaveLength(1);
   });
 
+  it("keeps a delivery the re-read doesn't return, unconfirmed, so a just-delivered batch never flips back to the bridge", async () => {
+    const justDelivered = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "BatchDelivered", args: { key: KEY, sourceChain: 8453n, frontDoor: D.frontDoor } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint64, uint256"), [3n, 10n ** 16n]),
+      2_395n,
+      H(46),
+    );
+    const scan = newScan(D);
+    await scanVault(chains({ latest: 2_400n, bitLogs: [justDelivered] }).clients, D, scan, ME);
+    expect(scan.delivered.get("3")).toEqual({ key: KEY, txHash: H(46), block: 2_395n });
+    // the next read comes from a node that reports block 2,403 but whose logs stop at 2,100
+    const lagging = chains({ latest: 2_403n, bitLogs: [justDelivered] });
+    const node = lagging.clients as unknown as { bittensor: { getLogs: (q: { fromBlock: bigint; toBlock: bigint }) => Promise<unknown[]> } };
+    const real = node.bittensor.getLogs;
+    node.bittensor.getLogs = async (q) => (await real(q)).filter((l) => (l as { blockNumber: bigint }).blockNumber <= 2_100n);
+    await scanVault(lagging.clients, D, scan, ME);
+    // still there, waiting on its receipt (deliveryOf, checkDeliveries) rather than gone
+    expect(scan.delivered.get("3")).toEqual({ key: KEY, txHash: H(46), block: 2_395n, unconfirmed: true });
+    // a healthy node returns it: confirmed by the log again
+    await scanVault(chains({ latest: 2_406n, bitLogs: [justDelivered] }).clients, D, scan, ME);
+    expect(scan.delivered.get("3")).toEqual({ key: KEY, txHash: H(46), block: 2_395n });
+  });
+
   it("drops a log near the head whose block was then replaced", async () => {
     const logs = nearHead();
     const c = chains({ latest: 2_400n, bitLogs: logs });
@@ -583,6 +607,21 @@ describe("facts", () => {
     const right = await factsWith([delivered, redeemedIn(OTHER_KEY, 99n, 1), redeemedIn(KEY, 10n ** 16n, 2)]);
     expect(right.unstake.delivered).toMatchObject({ outcome: "redeemed", taoWei: 10n ** 16n });
     expect(right.deposit.delivered?.outcome).toBe("deposited");
+  });
+
+  it("shows no delivery, rather than failing the trail, while an unconfirmed one's receipt can't be read", async () => {
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
+    for (const failure of [new TransactionReceiptNotFoundError({ hash: H(9) }), new HttpRequestError({ url: "https://archive.chain.opentensor.ai", status: 503 })]) {
+      const c = chains();
+      (c.clients as unknown as { bittensor: { getTransactionReceipt: () => Promise<never> } }).bittensor.getTransactionReceipt = async () => {
+        throw failure;
+      };
+      // read in the last blocks, then not returned by a node that lags (or its block was replaced)
+      const scan = newScan(D);
+      scan.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n, unconfirmed: true });
+      const { facts } = await withdrawalFacts(c.clients, D, w, { fd, vault, scan, claims: [] });
+      expect(facts.delivered, failure.name).toBeUndefined();
+    }
   });
 
   it("knows when the account's entry was too small to send back after the bridge fee", async () => {

@@ -94,15 +94,17 @@ export const SETTLE = 10n;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** Before the read about to start reads blocks `from` to `to` again: drops the deliveries, stakes and
- * chunks found there (read again, or gone with a replaced block; they only move a trail's status, or make
- * what can be unstaked lower meanwhile), and marks the account's Deposited and Redeemed there
- * unconfirmed rather than dropping them. A node whose logs lag the head it reports returns too little,
- * and an amount must never vanish over that: one read again is confirmed by its log, and one that
- * isn't waits on its receipt (confirmAccountEvents), so the figure shows "–" until it is known. */
+/** Before the read about to start reads blocks `from` to `to` again: drops the stakes and chunks found
+ * there (read again, or gone with a replaced block; they only move a trail's status), and marks the
+ * deliveries and the account's Deposited and Redeemed there unconfirmed rather than dropping them. A
+ * node whose logs lag the head it reports returns too little, and neither an amount nor a delivery must
+ * vanish over that: one read again is confirmed by its log; an account event that isn't waits on its
+ * receipt (confirmAccountEvents), so the figure shows "–" until it is known, and a delivery that isn't
+ * counts only once its receipt shows it (deliveryOf for a trail, checkDeliveries for what can be
+ * unstaked), so a batch just delivered doesn't flip back to "on the bridge". */
 function forget(scan: VaultScan, from: bigint, to: bigint): void {
   const kept = (e: { block: bigint }) => e.block < from || e.block > to;
-  for (const [id, e] of scan.delivered) if (!kept(e)) scan.delivered.delete(id);
+  for (const [id, e] of scan.delivered) if (!kept(e)) scan.delivered.set(id, { ...e, unconfirmed: true });
   for (const [key, chunks] of scan.payouts) {
     const left = chunks.filter(kept);
     if (left.length > 0) scan.payouts.set(key, left);
@@ -444,11 +446,13 @@ async function cancelInFlight(c: Pick<Clients, "base">, account: Address, hash: 
 
 /** A batch's delivery as a trail may use it: the scan's, with its receipt (read in any case, for the
  * account's events), and only when that receipt delivered this batch from our front door. A saved entry
- * pointing anywhere else is no delivery, so no amount from it is ever shown. */
+ * pointing anywhere else is no delivery, so no amount from it is ever shown. An unconfirmed one whose
+ * receipt can't be read yet (a lagging node, or a block since replaced) isn't shown either, as
+ * checkDeliveries treats it, rather than failing the trail. */
 async function deliveryOf(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchId: bigint | undefined) {
   const saved = batchId !== undefined ? scan.delivered.get(String(batchId)) : undefined;
   if (!saved) return { hit: undefined, r: null };
-  const r = await bitReceipt(c, scan, saved.txHash);
+  const r = saved.unconfirmed ? await bitReceipt(c, scan, saved.txHash).catch(() => null) : await bitReceipt(c, scan, saved.txHash);
   return { hit: deliveryIn(r, d, String(batchId), saved.key) ? saved : undefined, r };
 }
 

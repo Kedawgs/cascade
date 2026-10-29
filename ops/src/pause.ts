@@ -1,10 +1,10 @@
-import { type Address, encodeFunctionData, type Hex, hexToBigInt, parseAbi } from "viem";
+import { type Address, encodeFunctionData, formatEther, type Hex, hexToBigInt, parseAbi } from "viem";
 import type { ChainName, Env, Paths } from "./config.ts";
 import { emitCalls } from "./handoff.ts";
 import type { DeploymentRecord } from "./record.ts";
-import { nonceOf, read } from "./rpc.ts";
+import { balanceOf, gasPriceOf, nonceOf, read } from "./rpc.ts";
 import { accountKind } from "./safe.ts";
-import { type Ctx, chainLabel, describeRevert, type Sent, type Signer, sendCall, signingAccount } from "./send.ts";
+import { type Ctx, chainLabel, describeRevert, type Sent, type Signer, sendCall, signingAccount, unit } from "./send.ts";
 
 export type PauseTarget = "front-door" | "vault" | "both";
 export const PAUSE_TARGETS: readonly PauseTarget[] = ["front-door", "vault", "both"];
@@ -117,6 +117,16 @@ export async function pauseCommand(
         lines.push(
           `${where}: dry run: ${call} from the ${role} ${who} would succeed (about ${gas.toLocaleString("en-US")} gas), and ${signer.keystore} signs as it. Add --live to send it.`,
         );
+        // the node takes a transaction only when the key can pay its whole gas limit (the send's 1.25×
+        // the estimate) at the going price; an empty guardian key can't pause
+        const limit = (gas * 125n + 99n) / 100n;
+        const need = limit * (await gasPriceOf(ctx.rpc, chain));
+        const holds = await balanceOf(ctx.rpc, chain, who);
+        if (holds < need) {
+          lines.push(
+            `WARNING — ${where}: the ${role} ${who} holds ${formatEther(holds)} ${unit(chain)}, but ${call} needs about ${formatEther(need)} ${unit(chain)} of gas (its ${limit.toLocaleString("en-US")} gas limit at today's price): fund it now, before you need it`,
+          );
+        }
         continue;
       }
       const done = await deps.sendCall(

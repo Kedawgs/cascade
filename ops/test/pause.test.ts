@@ -26,6 +26,8 @@ interface World {
   /** the account the keystore signs as */
   keystoreSigns?: Address;
   estimateFails?: ChainName;
+  /** each signer's balance (default 1 ETH or TAO, plenty) */
+  balance?: bigint;
 }
 
 function world(w: World = {}) {
@@ -54,6 +56,8 @@ function world(w: World = {}) {
         return numberToHex(30_000n);
       },
       eth_getTransactionCount: () => numberToHex(7),
+      eth_gasPrice: () => numberToHex(10n ** 9n),
+      eth_getBalance: () => numberToHex(w.balance ?? 10n ** 18n),
     },
   );
   const runs: string[][] = [];
@@ -120,6 +124,18 @@ describe("pause, the guardian a plain account", () => {
     );
     expect(r.ok).toBe(false);
     expect(w.calls.filter((c) => c.method === "eth_estimateGas")).toHaveLength(2);
+  });
+
+  it("a dry run warns when the key can't pay the gas: its balance below the gas limit at today's price", async () => {
+    // 30,000 estimated, sent with 37,500 at 1 gwei: 0.0000375 a chain
+    const short = world({ balance: 37_499n * 10n ** 9n, keystoreSigns: ROLES.guardian.base });
+    const r = await pauseCommand(short.ctx, rec, opts({ target: "front-door" }), short.deps);
+    expect(r.lines).toEqual([
+      `Base front door ${fd}: dry run: pause() from the guardian ${ROLES.guardian.base} would succeed (about 30,000 gas), and /keys/guardian.json signs as it. Add --live to send it.`,
+      `WARNING — Base front door ${fd}: the guardian ${ROLES.guardian.base} holds 0.000037499 ETH, but pause() needs about 0.0000375 ETH of gas (its 37,500 gas limit at today's price): fund it now, before you need it`,
+    ]);
+    const enough = world({ balance: 37_500n * 10n ** 9n, keystoreSigns: ROLES.guardian.base });
+    expect((await pauseCommand(enough.ctx, rec, opts({ target: "front-door" }), enough.deps)).lines).toHaveLength(1);
   });
 
   it("--live sends pause() as the guardian, with its keystore and nonce, on each chain", async () => {

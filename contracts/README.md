@@ -224,7 +224,7 @@ forge lint
 
 - **Suite:** 438 tests (unit, end-to-end, fuzz, and 10 invariants at 128 runs × 64 depth, set in
   `foundry.toml`), plus 18 fork tests that report as skipped unless `FORK` is set (below). The
-  invariants also held at 3,000 × 64 (before the pre-audit changes).
+  invariants also held at 3,000 × 64 (re-run on the pre-audit changes, 2026-10-29).
 - **Stale artifacts:** running `forge lint` right after an edit can leave test artifacts without
   bytecode, and `forge test` then reports "No tests found". `forge clean && forge build` fixes it.
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's

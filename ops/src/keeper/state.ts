@@ -17,7 +17,7 @@ import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, sendCall } from "../send.ts";
-import type { KeeperDeps, KeeperState } from "./actions.ts";
+import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
 import { type CloseEconomics, closeEconomicsOf, closesWithoutFees, type State } from "./due.ts";
@@ -257,13 +257,15 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
    * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
   const deleted = new Set<string>();
 
+  async function messageState(m: { id: Hex; direction: Message["direction"] }): Promise<string> {
+    const dst: ChainName = m.direction === "Base → Bittensor" ? "bittensor" : "base";
+    const state = Number(await r(dst, LIVE[dst].OFFRAMP, OFFRAMP, "getExecutionState", [m.id]));
+    return EXECUTION_STATES[state] ?? String(state);
+  }
+
   async function messages(): Promise<KeeperState["detail"]["messages"]> {
     const out: KeeperState["detail"]["messages"] = [];
-    for (const m of (rec.messages ?? []).slice(-6)) {
-      const dst: ChainName = m.direction === "Base → Bittensor" ? "bittensor" : "base";
-      const state = Number(await r(dst, LIVE[dst].OFFRAMP, OFFRAMP, "getExecutionState", [m.id]));
-      out.push({ id: m.id, direction: m.direction, state: EXECUTION_STATES[state] ?? String(state) });
-    }
+    for (const m of (rec.messages ?? []).slice(-6)) out.push({ id: m.id, direction: m.direction, state: await messageState(m) });
     return out;
   }
 
@@ -350,6 +352,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       return { payoutsHash: b.payoutsHash, count: b.count };
     },
     readClaimable: async (user) => (await r("base", a.frontDoor, FRONT, "claimable", [user])) as bigint,
+    readMinDeposit: async () => (await r("base", a.frontDoor, FRONT, "minDeposit")) as bigint,
+    messageState,
     recordMessage(m) {
       // another command may have saved the record since this one loaded it (a failed verify, a hand-run
       // close): re-read it and add only this message, so nothing it saved is written over

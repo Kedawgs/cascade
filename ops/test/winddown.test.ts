@@ -1,4 +1,4 @@
-import { type Address, numberToHex } from "viem";
+import { type Address, type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import { WALLET } from "../src/config.ts";
 import type { KeeperState } from "../src/keeper/actions.ts";
@@ -19,6 +19,7 @@ describe("wind-down", () => {
     frontDoor: { nDeposits: 0, nRedeems: 0 },
     batches: [] as { key: `0x${string}`; cursor: number; count: number }[],
     claimable: [{ user: WALLET, amount: 0n }],
+    inFlight: [] as { id: Hex; state: string }[],
   };
 
   it("lets a fully paid-out test wind down", () => {
@@ -45,18 +46,62 @@ describe("wind-down", () => {
       detail: { claimable: [{ user: WALLET, amount: 0n }], depositCap: 10n ** 21n },
     }) as unknown as KeeperState;
 
-  it("sets the cap to 0 and leaves the minimum deposit at the plan's own, v3's or v2's", async () => {
+  it("sets the cap to 0 and keeps the front door's minimum deposit as it is now, not the plan's", async () => {
     const v2: DeploymentRecord = { ...v3Record(), plan: buildPlan(0, 0, `0x${"11".repeat(32)}`) };
+    // the owner raised v3's minimum from 0.04 to 0.07 TAO since the deploy; v2's is still 0.01
     for (const [rec, minDeposit] of [
-      [v3Record(), 4n * 10n ** 16n],
+      [v3Record(), 7n * 10n ** 16n],
       [v2, 10n ** 16n],
     ] as const) {
       const sent: CallRequest[] = [];
-      const deps = stubDeps({ readState: async () => quiet(), payoutLogs: async () => [], sendCall: async (req) => (sent.push(req), SENT) });
+      const deps = stubDeps({
+        readState: async () => quiet(),
+        payoutLogs: async () => [],
+        readMinDeposit: async () => minDeposit,
+        sendCall: async (req) => (sent.push(req), SENT),
+      });
       await windDown(deps, rec);
       expect(sent.map((r) => r.functionName)).toEqual(["pause", "setCaps"]);
       expect(sent[1].args).toEqual([minDeposit, 0n]);
     }
+  });
+
+  it("refuses while a payout's bridge message to Base hasn't arrived, since its TAO isn't claimable yet", async () => {
+    const at = "";
+    const [A, B, C]: Hex[] = [`0x${"a1".repeat(32)}`, `0x${"b2".repeat(32)}`, `0x${"c3".repeat(32)}`];
+    const rec: DeploymentRecord = {
+      ...v3Record(),
+      messages: [
+        { id: A, direction: "Bittensor → Base", hash: A, at },
+        { id: B, direction: "Bittensor → Base", hash: B, at },
+        { id: C, direction: "Base → Bittensor", hash: C, at },
+      ],
+    };
+    const run = (states: Record<string, string>) => {
+      const sent: CallRequest[] = [];
+      const asked: Hex[] = [];
+      const deps = stubDeps({
+        readState: async () => quiet(),
+        payoutLogs: async () => [],
+        readMinDeposit: async () => 4n * 10n ** 16n,
+        messageState: async (m) => (asked.push(m.id), states[m.id]),
+        sendCall: async (req) => (sent.push(req), SENT),
+      });
+      return { done: windDown(deps, rec), sent, asked };
+    };
+    // B was sent by processPayouts and is still on its way; C, a close's, carries nothing to claim on Base
+    const flying = run({ [A]: "SUCCESS", [B]: "IN_PROGRESS", [C]: "UNTOUCHED" });
+    const err = await flying.done.catch((e) => e);
+    expect(err.message).toMatch(new RegExp(`the payout's bridge message ${B} to Base is IN_PROGRESS`));
+    expect(err.message).not.toContain(C);
+    expect(flying.sent).toEqual([]);
+    expect(flying.asked).toEqual([A, B]);
+    expect(windDownBlockers({ ...idle, inFlight: [{ id: B, state: "FAILURE" }] })).toEqual([
+      `the payout's bridge message ${B} to Base is FAILURE, not delivered yet: its TAO can't be claimed until it is (pnpm ops track ${B})`,
+    ]);
+    const arrived = run({ [A]: "SUCCESS", [B]: "SUCCESS" });
+    await arrived.done;
+    expect(arrived.sent.map((r) => r.functionName)).toEqual(["pause", "setCaps"]);
   });
 
   it("checks every account the vault paid out to, not only the ones named with --user", async () => {
@@ -71,6 +116,7 @@ describe("wind-down", () => {
         readState: async () => quiet(),
         payoutLogs: async () => logs,
         readClaimable: async (user) => (asked.push(user), owed[user] ?? 0n),
+        readMinDeposit: async () => 4n * 10n ** 16n,
         sendCall: async (req) => (sent.push(req), SENT),
       });
       return { done: windDown(deps, v3Record()), sent, asked };

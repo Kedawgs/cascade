@@ -3,7 +3,6 @@ import { read } from "./rpc.ts";
 import { PRECOMPILE, WALLET } from "./config.ts";
 import type { KeeperDeps } from "./keeper/actions.ts";
 import { uniqueUsers } from "./keeper/delivery.ts";
-import { settingsOf } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
 import { type Ctx, type Sent, sendCall, sendValue } from "./send.ts";
@@ -16,11 +15,13 @@ const ABI = parseAbi([
   "function paused() view returns (bool)",
 ]);
 
-/** What still has to finish before the front door can be paused for good. */
+/** What still has to finish before the front door can be paused for good. `inFlight`: payouts' bridge
+ * messages to Base not yet delivered there. */
 export function windDownBlockers(s: {
   frontDoor: { nDeposits: number; nRedeems: number };
   batches: { key: Hex; cursor: number; count: number }[];
   claimable: { user: Address; amount: bigint }[];
+  inFlight: { id: Hex; state: string }[];
 }): string[] {
   const out: string[] = [];
   if (s.frontDoor.nDeposits + s.frontDoor.nRedeems > 0) {
@@ -29,8 +30,22 @@ export function windDownBlockers(s: {
   for (const b of s.batches.filter((b) => b.cursor < b.count)) {
     out.push(`payout batch ${b.key.slice(0, 10)}… has ${b.count - b.cursor} entries left to pay out`);
   }
+  for (const m of s.inFlight) {
+    out.push(`the payout's bridge message ${m.id} to Base is ${m.state}, not delivered yet: its TAO can't be claimed until it is (pnpm ops track ${m.id})`);
+  }
   for (const c of s.claimable.filter((c) => c.amount > 0n)) {
     out.push(`${formatEther(c.amount)} TAO is still claimable on Base for ${c.user}`);
+  }
+  return out;
+}
+
+/** The record's payout messages (Bittensor → Base, sent by processPayouts) not yet at SUCCESS on Base:
+ * their TAO is not claimable until they are, so no claim check can see it. */
+async function payoutsInFlight(deps: KeeperDeps, rec: DeploymentRecord): Promise<{ id: Hex; state: string }[]> {
+  const out = [];
+  for (const m of (rec.messages ?? []).filter((m) => m.direction === "Bittensor → Base")) {
+    const state = await deps.messageState(m);
+    if (state !== "SUCCESS") out.push({ id: m.id, state });
   }
   return out;
 }
@@ -47,12 +62,14 @@ async function everyClaim(deps: KeeperDeps, named: readonly { user: Address; amo
   return out;
 }
 
-/** Pauses the front door and sets its cap to 0, once everything is paid out and claimed by everyone
- * the vault paid out to. Skips whichever is already done, so it can be run again after a stop. */
+/** Pauses the front door and sets its cap to 0, keeping its minimum deposit, once everything is paid
+ * out, delivered to Base and claimed by everyone the vault paid out to. Skips whichever is already done,
+ * so it can be run again after a stop. */
 export async function windDown(deps: KeeperDeps, rec: DeploymentRecord): Promise<Sent[]> {
   const s = await deps.readState();
   const claimable = await everyClaim(deps, s.detail.claimable);
-  const blockers = windDownBlockers({ frontDoor: s.frontDoor, batches: s.vault.batches, claimable });
+  const inFlight = await payoutsInFlight(deps, rec);
+  const blockers = windDownBlockers({ frontDoor: s.frontDoor, batches: s.vault.batches, claimable, inFlight });
   if (blockers.length) throw new Error(`not yet — finish these first:\n  ${blockers.join("\n  ")}`);
   const fd = rec.plan.addresses.frontDoor;
   const base = { chain: "base" as const, to: fd, abi: ABI };
@@ -67,8 +84,8 @@ export async function windDown(deps: KeeperDeps, rec: DeploymentRecord): Promise
         nonce: await deps.nonce("base"),
         label: "set the front door's deposit cap to 0",
         functionName: "setCaps",
-        // setCaps sets both: the minimum deposit stays the one the plan deployed (v3's is not v2's)
-        args: [settingsOf(rec.plan).minDeposit, 0n],
+        // setCaps sets both: the minimum deposit stays as it is now (the plan's, or the owner's since)
+        args: [await deps.readMinDeposit(), 0n],
       }),
     );
   }

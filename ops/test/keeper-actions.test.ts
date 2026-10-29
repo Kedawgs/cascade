@@ -79,6 +79,8 @@ function deps(
     payoutLogs: async () => [],
     batchInfo: async () => ({ payoutsHash: payoutsHash([]), count: 0 }),
     readClaimable: async () => 0n,
+    readMinDeposit: async () => 10n ** 16n,
+    messageState: async () => "SUCCESS",
     refresh: () => undefined,
     // v2: no deliveries, and the rewards read is not part of these tests
     deliveryCandidates: async () => [],

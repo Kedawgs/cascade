@@ -28,6 +28,10 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   batchInfo(key: Hex): Promise<{ payoutsHash: Hex; count: number }>;
   /** The TAO the front door holds for `user` to claim (or the keeper to deliver) */
   readClaimable(user: Address): Promise<bigint>;
+  /** The front door's minimum deposit as it is now */
+  readMinDeposit(): Promise<bigint>;
+  /** A bridge message's state on its destination's OffRamp: UNTOUCHED, IN_PROGRESS, SUCCESS or FAILURE */
+  messageState(m: Pick<Message, "id" | "direction">): Promise<string>;
   recordMessage(m: Message): void;
   /** Re-reads the deployment record from disk and takes its verify, done and messages onto the record
    * these deps hold (the one `run` passes to each action), so a read-back saved since the command started

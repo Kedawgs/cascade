@@ -4,7 +4,7 @@ import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
 import { codeFor } from "./builds.ts";
 import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
 import { buildOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
-import { type DeploymentRecord, saveRecord, type VerifyResult } from "./record.ts";
+import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord, type VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
 import { type Ctx, chainLabel } from "./send.ts";
@@ -316,11 +316,14 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
 }
 
 /** Reads everything back and saves the result into the record at `path`; a v2 record is refused before
- * anything is read or written. */
+ * anything is read or written. The read-back is slow, and a running keeper may save the record meanwhile,
+ * so only `verify` is set in the record as it is on disk after it, and never in another deployment's. */
 export async function verifyAndSave(ctx: Ctx, path: string, rec: DeploymentRecord): Promise<boolean> {
   refuseV2Verify(path, rec);
   rec.verify = await verify(ctx, rec);
-  saveRecord(path, rec);
+  const now = loadRecord(path);
+  if (now && !sameDeployment(now, rec)) throw new Error(`${path} now holds another deployment; the read-back was not saved`);
+  saveRecord(path, now ? { ...now, verify: rec.verify } : rec);
   if (rec.verify.ok) ctx.log("Read-back check: everything matches the plan");
   else ctx.log(`Read-back check FAILED:\n  ${rec.verify.failures.join("\n  ")}`);
   return rec.verify.ok;

@@ -31,6 +31,7 @@ import {
   treasuryCodeFailures,
   v3AddressFailures,
   verify,
+  verifyAndSave,
 } from "../src/verify.ts";
 import { fakeChain } from "./fake-keeper.ts";
 
@@ -407,6 +408,33 @@ describe("verify compares each contract with the build its plan was deployed fro
     const rec = loadRecord(path)!;
     expect(await verifyOn(rec, A2B4412_CODE)).toMatchObject({ ok: true, failures: [] });
     expect((await verifyOn(rec, THIS_CODE)).failures).toEqual(DIFFERS);
+  });
+
+  it("saves only the read-back, into the record as it is on disk after the slow reads, and never into another deployment's", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "ops-verify-")), "v3-test.json");
+    const rec = recordOf(marked);
+    const MSG: Hex = `0x${"5a".repeat(32)}`;
+    /** The chains, with `meanwhile` saved to the record by another command (a run's close) at the first read. */
+    const during = (meanwhile: () => DeploymentRecord) => {
+      const chains = chainsFor(rec, THIS_CODE);
+      let saved = false;
+      const request: Rpc["request"] = (chain, method, params) => {
+        if (!saved) saveRecord(path, meanwhile());
+        saved = true;
+        return chains.ctx.rpc.request(chain, method, params);
+      };
+      return { ...chains.ctx, rpc: { request } };
+    };
+    saveRecord(path, rec);
+    const withMessage = () => ({ ...loadRecord(path)!, messages: [{ id: MSG, direction: "Base → Bittensor" as const, hash: MSG, at: "" }] });
+    expect(await verifyAndSave(during(withMessage), path, rec)).toBe(true);
+    const after = loadRecord(path)!;
+    expect(after.verify).toMatchObject({ ok: true, failures: [] });
+    expect(after.messages?.map((m) => m.id)).toEqual([MSG]);
+    // the file now holds another deployment: nothing is saved into it
+    const other = recordOf(buildPlanV3(6, 9, V3_TEST_COLDKEY));
+    await expect(verifyAndSave(during(() => other), path, rec)).rejects.toThrow(`${path} now holds another deployment; the read-back was not saved`);
+    expect(loadRecord(path)).toEqual(other);
   });
 
   it("refuses a plan from a build this tool does not know, before reading anything", async () => {

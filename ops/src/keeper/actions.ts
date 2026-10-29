@@ -27,6 +27,10 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   /** The TAO the front door holds for `user` to claim (or the keeper to deliver) */
   readClaimable(user: Address): Promise<bigint>;
   recordMessage(m: Message): void;
+  /** Re-reads the deployment record from disk and takes its verify, done and messages onto the record
+   * these deps hold (the one `run` passes to each action), so a read-back saved since the command started
+   * is seen; throws when the file is gone or now holds another deployment */
+  refresh(): void;
   log(line: string): void;
 }
 
@@ -308,7 +312,8 @@ async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean,
  * estimate or the wallet's guard refuses it) never ends the round: the round's payout, stake or close
  * still goes ahead. One whose estimate refuses it is held, not retried, until the user's claimable
  * amount, preference, or the quote against the floors changes. Reward claims are only reported, every
- * `rewardsEveryTicks` rounds. */
+ * `rewardsEveryTicks` rounds. Each round starts by re-reading the record (`deps.refresh`, onto `rec`, the
+ * record the deps were made with), so a read-back that failed since the run started stops its sends. */
 export async function runLoop(
   deps: KeeperDeps,
   rec: DeploymentRecord,
@@ -326,6 +331,13 @@ export async function runLoop(
   };
   let claimDue: boolean | undefined;
   for (let tick = 1; ; tick++) {
+    // the record as it is now: a read-back that failed since the run started stops its sends
+    try {
+      deps.refresh();
+    } catch (e) {
+      deps.log(`Stopped: ${(e as Error).message}`);
+      return;
+    }
     let s: KeeperState;
     let deliveries: DueDelivery[] = [];
     const facts = new Map<string, string | undefined>();

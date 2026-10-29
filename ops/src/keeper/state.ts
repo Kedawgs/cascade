@@ -14,7 +14,7 @@ import {
 } from "viem";
 import { BASE_V3, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
-import { type DeploymentRecord, loadRecord, saveRecord } from "../record.ts";
+import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState } from "./actions.ts";
@@ -345,9 +345,23 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     recordMessage(m) {
       // another command may have saved the record since this one loaded it (a failed verify, a hand-run
       // close): re-read it and add only this message, so nothing it saved is written over
+      const entry = { ...m, at: new Date().toISOString() };
       const now = loadRecord(recordPath) ?? rec;
-      now.messages = [...(now.messages ?? []), { ...m, at: new Date().toISOString() }];
+      if (!sameDeployment(now, rec)) {
+        rec.messages = [...(rec.messages ?? []), entry];
+        ctx.log(`${recordPath} now holds another deployment: bridge message ${m.id} was not saved in it`);
+        return;
+      }
+      now.messages = [...(now.messages ?? []), entry];
       saveRecord(recordPath, now);
+      rec.messages = now.messages;
+    },
+    refresh() {
+      const now = loadRecord(recordPath);
+      if (!now) throw new Error(`${recordPath} is gone`);
+      if (!sameDeployment(now, rec)) throw new Error(`${recordPath} now holds another deployment`);
+      rec.verify = now.verify;
+      rec.done = now.done;
       rec.messages = now.messages;
     },
     async readRewards() {

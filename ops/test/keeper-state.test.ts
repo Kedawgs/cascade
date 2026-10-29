@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -233,6 +233,38 @@ describe("keeper reads", () => {
     expect(after.messages?.map((m) => m.id)).toEqual([MSG, OTHER, NEW]);
     // and the command's own copy lists the messages too, for its status
     expect(loaded.messages?.map((m) => m.id)).toEqual([MSG, OTHER, NEW]);
+  });
+
+  it("saves no bridge message into a record that now holds another deployment, and says so", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    const other: DeploymentRecord = { ...rec, plan: buildPlan(5, 5, ZERO32) };
+    saveRecord(recordPath, other);
+    const logs: string[] = [];
+    const deps = keeperDeps({ ...fakeChains().ctx, log: (l) => logs.push(l) }, structuredClone(rec), recordPath);
+    const NEW: Hex = `0x${"0e".repeat(32)}`;
+    deps.recordMessage({ id: NEW, direction: "Bittensor → Base", hash: ZERO32 });
+    expect(loadRecord(recordPath)).toEqual(other);
+    expect(logs).toEqual([`${recordPath} now holds another deployment: bridge message ${NEW} was not saved in it`]);
+  });
+
+  it("refresh takes verify, done and messages from the record on disk, and refuses another deployment or none", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    saveRecord(recordPath, { ...rec, verify: { ok: true, failures: [], checkedAt: "" } });
+    const loaded = loadRecord(recordPath)!;
+    const deps = keeperDeps(fakeChains().ctx, loaded, recordPath);
+    const failed = { ok: false, failures: ["x"], checkedAt: "later" };
+    const OTHER: Hex = `0x${"0d".repeat(32)}`;
+    const { setKeeper: _, ...done } = loaded.done;
+    saveRecord(recordPath, { ...loaded, verify: failed, done, messages: [...(loaded.messages ?? []), { id: OTHER, direction: "Base → Bittensor", hash: ZERO32, at: "" }] });
+    deps.refresh();
+    expect(loaded.verify).toEqual(failed);
+    expect(loaded.done.setKeeper).toBeUndefined();
+    expect(loaded.messages?.map((m) => m.id)).toEqual([MSG, OTHER]);
+    saveRecord(recordPath, { ...loaded, plan: buildPlan(5, 5, ZERO32) });
+    expect(() => deps.refresh()).toThrow(`${recordPath} now holds another deployment`);
+    rmSync(recordPath);
+    expect(() => deps.refresh()).toThrow(`${recordPath} is gone`);
+    expect(loaded.verify).toEqual(failed);
   });
 });
 

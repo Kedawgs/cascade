@@ -92,6 +92,7 @@ export function stubDeps(over: Partial<KeeperDeps>): KeeperDeps {
     batchInfo: missing("batchInfo"),
     readClaimable: missing("readClaimable"),
     recordMessage: () => undefined,
+    refresh: () => undefined,
     readRewards: missing("readRewards"),
     deliveryCandidates: async () => [],
     readDelivery: missing("readDelivery"),

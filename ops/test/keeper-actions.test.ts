@@ -79,6 +79,7 @@ function deps(
     payoutLogs: async () => [],
     batchInfo: async () => ({ payoutsHash: payoutsHash([]), count: 0 }),
     readClaimable: async () => 0n,
+    refresh: () => undefined,
     // v2: no deliveries, and the rewards read is not part of these tests
     deliveryCandidates: async () => [],
     readDelivery: async () => {
@@ -149,6 +150,31 @@ describe("keeper actions", () => {
     await runLoop(d, rec, { intervalMs: 0 });
     expect(send).toHaveBeenCalledOnce();
     expect(lines.at(-1)).toMatch(/^Stopped: .*nothing sent/);
+  });
+
+  it("run re-reads the record every round: a read-back that failed since it started stops its next send", async () => {
+    const mine: DeploymentRecord = structuredClone(rec);
+    const lines: string[] = [];
+    let round = 0;
+    const refresh = () => {
+      // between the rounds, `verify --live` saves a failed read-back
+      if (++round === 2) mine.verify = { ok: false, failures: ["Base CascadeFrontDoor.owner: expected …"], checkedAt: "later" };
+    };
+    const d = { ...deps(), refresh, log: (l: string) => lines.push(l) };
+    await runLoop(d, mine, { intervalMs: 0, maxTicks: 2, rewardsEveryTicks: 3 });
+    expect(d.send).toHaveBeenCalledOnce();
+    expect(lines.at(-1)).toMatch(/^Stopped: the deployment is not complete and verified yet \(the read-back has not passed\)/);
+  });
+
+  it("run stops, sending nothing, when the record can't be re-read as this deployment", async () => {
+    const lines: string[] = [];
+    const refresh = () => {
+      throw new Error("deployments/v3-test.json now holds another deployment");
+    };
+    const d = { ...deps(), refresh, log: (l: string) => lines.push(l) };
+    await runLoop(d, rec, { intervalMs: 0, maxTicks: 2 });
+    expect(d.send).not.toHaveBeenCalled();
+    expect(lines).toEqual(["Stopped: deployments/v3-test.json now holds another deployment"]);
   });
 
   describe("roll", () => {

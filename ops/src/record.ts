@@ -61,6 +61,15 @@ export function needRecord(path: string, live: boolean): DeploymentRecord {
   return rec;
 }
 
+/** Whether two records are of one deployment: the same kind of run and the same contract addresses. A
+ * command that saves into a record it loaded earlier checks this first, since the file may since have
+ * been planned anew (deploy --new-plan) or replaced. */
+export function sameDeployment(x: DeploymentRecord, y: DeploymentRecord): boolean {
+  const a = x.plan.addresses as Record<string, string | undefined>;
+  const b = y.plan.addresses as Record<string, string | undefined>;
+  return x.target === y.target && [...new Set([...Object.keys(a), ...Object.keys(b)])].every((k) => a[k]?.toLowerCase() === b[k]?.toLowerCase());
+}
+
 /** Writes a temp file and renames it over the record, so a crash never leaves half a record. */
 export function saveRecord(path: string, rec: DeploymentRecord): void {
   mkdirSync(dirname(path), { recursive: true });

@@ -15,6 +15,7 @@ import {
   settingsV3Of,
 } from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, type DoneStep, loadRecordFor, saveRecord } from "./record.ts";
+import type { VerifyAllow } from "./registry.ts";
 import { type Roles, rolesDiffer } from "./roles.ts";
 import { balanceOf, codeAt, firstBlockWithCode, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
@@ -399,12 +400,12 @@ export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: Dep
  * anew under the v2 name would archive the record that status, wind-down and sweep still read. An
  * existing v2 record is refused too, before anything is read or sent: resuming it would re-run the
  * read-back and save a failed code comparison into it. A record of the other kind of run is refused. */
-export async function deployAndVerify(ctx: Ctx, path: string, opts: DeployOpts & { v3: boolean }, deps: DeployDeps = realDeps) {
+export async function deployAndVerify(ctx: Ctx, path: string, opts: DeployOpts & { v3: boolean; allow?: VerifyAllow }, deps: DeployDeps = realDeps) {
   const existing = loadRecordFor(path, ctx.live);
   if (!opts.v3 && (opts.newPlan || !existing)) {
     throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");
   }
   // (a v3 run that finds a v2 record is refused by deploy itself, which names OPS_DEPLOYMENT)
   if (existing && !opts.v3) refuseV2Verify(path, existing);
-  return verifyAndSave(ctx, path, await deploy(ctx, path, opts, deps));
+  return verifyAndSave(ctx, path, await deploy(ctx, path, opts, deps), { allow: opts.allow });
 }

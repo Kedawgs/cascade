@@ -1,5 +1,17 @@
 import { type Address, encodePacked, formatEther, getContractAddress, type Hex, parseAbi } from "viem";
-import { BASE_V3, type DeploySettings, CADENCE, type Cadence, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "./config.ts";
+import {
+  BASE_V3,
+  CADENCE,
+  type Cadence,
+  type DeploySettings,
+  LIVE,
+  PRECOMPILE,
+  SETTINGS,
+  SETTINGS_V3,
+  SETTINGS_V3_LAUNCH,
+  VAULT_DEFAULTS,
+  WALLET,
+} from "./config.ts";
 import { roleProblems, type Roles, TEST_ROLES } from "./roles.ts";
 import type { PlannedStep } from "./types.ts";
 
@@ -49,6 +61,9 @@ export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS
   if (!isPlanV3(plan)) throw new Error("settingsV3Of: the plan is v2");
   return cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
 }
+
+/** The vault limits a v3 plan runs with: the contract's defaults. */
+export const vaultLimitsOf = (_plan: PlanV3): typeof VAULT_DEFAULTS => VAULT_DEFAULTS;
 
 /** Who holds each role: a launch plan's roles, else the test wallet in every one. */
 export const rolesOf = (plan: Plan | PlanV3): Roles => (isPlanV3(plan) && plan.roles ? plan.roles : TEST_ROLES);

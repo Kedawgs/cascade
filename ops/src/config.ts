@@ -129,6 +129,27 @@ export const SETTINGS_V3 = {
   deliveryRouteId: 0,
 } as const;
 
+/** The vault's limits as CascadeVault.sol's state defaults leave them (config.test checks them against the
+ * source): what a test deployment runs with, and what verify reads back. Amounts in wei, floors in rao. */
+export const VAULT_DEFAULTS = {
+  maxDailyOutflowBps: 2_000n,
+  minDailyOutflow: 100n * 10n ** 18n,
+  maxEntryValue: 2_000n * 10n ** 18n,
+  maxMessageValue: 4_000n * 10n ** 18n,
+  minChunk: 10,
+  maxFeeBps: 100n,
+  maxFeeAbs: 2n * 10n ** 16n,
+  maxTotalAssets: 1_000n * 10n ** 18n,
+  hotkeyDustRao: 1_000_000n,
+  claimGasRequired: 55_000_000n,
+  fallbackMinStakeRao: 2_000_000n,
+  fallbackMinRemainRao: 20_000_000n,
+  unstakeMarginRao: 0n,
+} as const;
+
+/** The front door's batch limits as its constructor sets them. */
+export const FRONT_DOOR_DEFAULTS = { maxDeposits: 50, maxRedeems: 50 } as const;
+
 /** How fast a deployment runs: "test" is SETTINGS_V3 as is; "launch" batches hourly and pays out after a
  * day, and the keeper may wait a day before closing a thin batch. Chosen when a v3 plan is made. */
 export type Cadence = "test" | "launch";

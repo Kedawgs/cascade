@@ -2,8 +2,18 @@ import { basename } from "node:path";
 import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi, zeroAddress } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
 import { codeFor } from "./builds.ts";
-import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
-import { buildOf, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, rolesOf, settingsOf, settingsV3Of } from "./plan.ts";
+import { BASE_V3, type ChainName, FRONT_DOOR_DEFAULTS, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
+import { buildOf, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, rolesOf, settingsOf, settingsV3Of, vaultLimitsOf } from "./plan.ts";
+import {
+  type Findings,
+  guardianChecks,
+  NO_ALLOW,
+  type RegistryScan,
+  registryChecks,
+  scanRegistry,
+  stateWarnings,
+  type VerifyAllow,
+} from "./registry.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord, type VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
@@ -129,6 +139,21 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
   return out;
 }
 
+/** The limits in force on a v3 deployment: every vault limit (the contract's defaults, unless the plan
+ * sets them), the direct-deposit minimum, and the front door's batch limits. Beyond `expectations`, which
+ * holds the wiring and the settings the spec's read-back lists. */
+export function limitExpectations(plan: Plan | PlanV3): Expectation[] {
+  if (!isPlanV3(plan)) return [];
+  const a = plan.addresses;
+  const out: Expectation[] = [];
+  const add = (chain: ChainName, contract: string, address: Address, fields: Record<string, unknown>) => {
+    for (const [field, expected] of Object.entries(fields)) out.push({ chain, contract, address, field, expected });
+  };
+  add("bittensor", "CascadeVault", a.vault, { ...vaultLimitsOf(plan), minDirectDeposit: settingsV3Of(plan).minDirectDeposit });
+  add("base", "CascadeFrontDoor", a.frontDoor, { ...FRONT_DOOR_DEFAULTS });
+  return out;
+}
+
 const OWNABLE = parseAbi(["function owner() view returns (address)", "function pendingOwner() view returns (address)"]);
 
 /** The contracts with an owner (Ownable2Step): the front door, the staker and the vault. The oracle and
@@ -142,11 +167,18 @@ export const ownedContracts = (plan: PlanV3): [ChainName, string, Address][] => 
 /** A launch's owners: each contract's ownership either accepted by its chain's final owner (nothing
  * pending), or offered to it and not yet accepted (the test wallet still the owner): a warning, since
  * the final owner accepts in its own time. Anything else fails. The final owner may be a contract (a
- * Safe or a timelock): no code is read. A test plan's owners are in its expectations. */
+ * Safe or a timelock): no code is read. A test plan's owners are in its expectations; here it must have
+ * no pending owner. */
 export async function ownershipChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3): Promise<{ failures: string[]; warnings: string[] }> {
   const failures: string[] = [];
   const warnings: string[] = [];
-  if (cadenceOf(plan) !== "launch") return { failures, warnings };
+  if (cadenceOf(plan) !== "launch") {
+    for (const [chain, name, address] of ownedContracts(plan)) {
+      const pending = (await read(ctx.rpc, chain, { address, abi: OWNABLE, functionName: "pendingOwner" })) as Address;
+      if (!same(pending, zeroAddress)) failures.push(`${chainLabel(chain)} ${name}: pendingOwner is ${pending}: an ownership transfer the plan doesn't make`);
+    }
+    return { failures, warnings };
+  }
   const roles = rolesOf(plan);
   for (const [chain, name, address] of ownedContracts(plan)) {
     const final = roles.owner[chain];
@@ -298,22 +330,38 @@ export function refuseV2Verify(path: string, rec: DeploymentRecord): void {
 /** Reads everything back on both chains and compares it with the plan; saves nothing itself. Each
  * contract's code is compared with the build the plan was deployed from (see builds.ts). Refuses a v2
  * plan, or a plan from a build this tool does not know, before reading anything. */
-export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyResult> {
+export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: VerifyAllow } = {}): Promise<VerifyResult> {
   const plan = rec.plan;
   if (!isPlanV3(plan)) throw new Error(V2_VERIFY_REFUSED);
   buildOf(plan);
-  const exp = expectations(plan);
+  const exp = [...expectations(plan), ...limitExpectations(plan)];
   const artifacts = new Map<string, Artifact>();
   const art = (name: string) => artifacts.get(name) ?? artifacts.set(name, loadArtifact(ctx.paths.contractsDir, name)).get(name)!;
   const actual = await readBack(ctx, exp, art);
   const failures = compare(exp, actual);
 
   const warnings: string[] = [];
+  /** A check whose reads fail is a failure that says so, as an unreadable expectation is. */
+  const findings = async (label: string, check: () => Promise<Findings>) => {
+    try {
+      const f = await check();
+      failures.push(...f.failures);
+      warnings.push(...f.warnings);
+    } catch (e) {
+      failures.push(`${label}: could not be read (${(e as Error).message.split("\n")[0]})`);
+    }
+  };
+  let registryScan: RegistryScan | undefined;
   if (isPlanV3(plan)) {
     failures.push(...v3AddressFailures(plan, actual));
-    const owners = await ownershipChecks(ctx, plan);
-    failures.push(...owners.failures);
-    warnings.push(...owners.warnings);
+    const allow = opts.allow ?? NO_ALLOW;
+    await findings("the owners", () => ownershipChecks(ctx, plan));
+    await findings("the guardian proposals", () => guardianChecks(ctx, plan, allow));
+    await findings("the bridge, front-door and route registries", async () => {
+      registryScan = await scanRegistry(ctx, rec, rec.verify?.registryScan);
+      return registryChecks(ctx, plan, registryScan, allow);
+    });
+    await findings("the pause and hotkey state", async () => ({ failures: [], warnings: await stateWarnings(ctx, plan) }));
     const treasuries = new Map<string, Address>();
     for (const t of [rolesOf(plan).treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
       if (anAddress(t)) treasuries.set(t.toLowerCase(), t);
@@ -355,15 +403,21 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
     const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), codeFor(plan, name, art));
     if (m) failures.push(m);
   }
-  return { ok: failures.length === 0, failures, ...(warnings.length ? { warnings } : {}), checkedAt: new Date().toISOString() };
+  return {
+    ok: failures.length === 0,
+    failures,
+    ...(warnings.length ? { warnings } : {}),
+    checkedAt: new Date().toISOString(),
+    ...(registryScan ? { registryScan } : {}),
+  };
 }
 
 /** Reads everything back and saves the result into the record at `path`; a v2 record is refused before
  * anything is read or written. The read-back is slow, and a running keeper may save the record meanwhile,
  * so only `verify` is set in the record as it is on disk after it, and never in another deployment's. */
-export async function verifyAndSave(ctx: Ctx, path: string, rec: DeploymentRecord): Promise<boolean> {
+export async function verifyAndSave(ctx: Ctx, path: string, rec: DeploymentRecord, opts: { allow?: VerifyAllow } = {}): Promise<boolean> {
   refuseV2Verify(path, rec);
-  rec.verify = await verify(ctx, rec);
+  rec.verify = await verify(ctx, rec, opts);
   const now = loadRecord(path);
   if (now && !sameDeployment(now, rec)) throw new Error(`${path} now holds another deployment; the read-back was not saved`);
   saveRecord(path, now ? { ...now, verify: rec.verify } : rec);

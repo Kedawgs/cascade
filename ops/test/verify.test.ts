@@ -11,6 +11,7 @@ import {
   numberToHex,
   parseAbi,
   toFunctionSelector,
+  zeroAddress,
 } from "viem";
 import { describe, expect, it } from "vitest";
 import { ROLES } from "./launch-roles.ts";
@@ -27,6 +28,7 @@ import {
   expectations,
   frontDoorActivationFailures,
   keyOf,
+  limitExpectations,
   readBack,
   reserveFailures,
   treasuryCodeFailures,
@@ -301,8 +303,17 @@ const recordOf = (plan: PlanV3): DeploymentRecord => ({
 /** Chains that hold exactly what the plan asks for, with `code` at each contract's address; every request is counted. */
 function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
   const plan = rec.plan as PlanV3;
-  const exp = expectations(plan);
+  const exp = [...expectations(plan), ...limitExpectations(plan)];
   const fns = [...CONTRACTS.flatMap((n) => loadArtifact(contractsDir, n).abi), ...VAULT_VIEWS].filter((i): i is AbiFunction => i.type === "function");
+  /** A clean deployment's state for the reads beyond the expectations: nothing pending, nothing extra, not paused. */
+  const clean: Record<string, unknown> = {
+    pendingOwner: zeroAddress,
+    guardianProposedAt: 0n,
+    bridgeEnabled: true,
+    bridgeProposedAt: 0n,
+    paused: false,
+    hotkeyCount: 1n,
+  };
   const a = plan.addresses;
   const name: Record<string, string> = Object.fromEntries(
     (
@@ -328,6 +339,9 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
       if (method === "eth_getCode") return code[name[`${chain}:${(params[0] as string).toLowerCase()}`]] ?? "0x";
       if (method === "eth_getBalance") return numberToHex(10n ** 20n);
       if (method === "eth_getTransactionReceipt") return { logs: [activated] };
+      // the registry scan: no registry events since the deployment
+      if (method === "eth_blockNumber") return numberToHex(100);
+      if (method === "eth_getLogs") return [];
       if (method !== "eth_call") throw new Error(`unexpected ${method}`);
       const { to, data } = params[0] as { to: Address; data: Hex };
       const fn = fns.find((f) => toFunctionSelector(f) === data.slice(0, 10));
@@ -336,6 +350,7 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
       if (fn.name === "coldkey" || fn.name === "addressMapping") result = `0x${"77".repeat(32)}`;
       else if (fn.name === "peerId") result = PEER;
       else if (fn.name === "frontDoorActive") result = true;
+      else if (fn.name in clean) result = clean[fn.name];
       else {
         const mine = exp.filter((e) => e.chain === chain && e.address.toLowerCase() === to.toLowerCase() && (e.fn ?? e.field) === fn.name);
         if (!mine.length) throw new Error(`nothing expected of ${fn.name} at ${to}`);
@@ -443,5 +458,47 @@ describe("verify compares each contract with the build its plan was deployed fro
     const chains = chainsFor(rec, THIS_CODE);
     await expect(verify(chains.ctx, rec)).rejects.toThrow(/contracts build "someday" this tool does not know/);
     expect(chains.calls).toEqual([]);
+  });
+});
+
+describe("verify reads back the registries, the pending proposals and the state", () => {
+  const plan = buildPlanV3(5, 8, V3_TEST_COLDKEY);
+
+  it("passes a clean deployment, keeping where the registry scan reached for the next read-back", async () => {
+    const r = await verifyOn(recordOf(plan), THIS_CODE);
+    expect(r).toMatchObject({ ok: true, failures: [] });
+    expect(r.warnings).toBeUndefined();
+    // the fake head is block 100: Base settles 30 blocks back, Bittensor 10
+    expect(r.registryScan).toEqual({ base: { to: 70, bridges: [], routes: [] }, bittensor: { to: 90, bridges: [], frontDoors: [] } });
+  });
+
+  it("the next read-back scans only from where the last settled", async () => {
+    const prev = { base: { to: 95, bridges: [], routes: [0] }, bittensor: { to: 99, bridges: [], frontDoors: [] } };
+    const rec = { ...recordOf(plan), verify: { ok: true, failures: [], checkedAt: "", registryScan: prev } };
+    const chains = chainsFor(rec, THIS_CODE);
+    const r = await verify(chains.ctx, rec);
+    expect(r.registryScan).toEqual(prev);
+    expect(chains.calls.filter((m) => m === "eth_getLogs")).toHaveLength(2);
+  });
+
+  it("a check it cannot read is a failure that says so, not a crash", async () => {
+    const chains = chainsFor(recordOf(plan), THIS_CODE);
+    const request = chains.ctx.rpc.request;
+    const rpc: Rpc = { request: (c, m, p) => (m === "eth_getLogs" ? Promise.reject(new Error("range too large")) : request(c, m, p)) };
+    const r = await verify({ ...chains.ctx, rpc }, recordOf(plan));
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual(["the bridge, front-door and route registries: could not be read (range too large)"]);
+  });
+
+  it("names a wrong limit like any other setting", async () => {
+    const chains = chainsFor(recordOf(plan), THIS_CODE);
+    const request = chains.ctx.rpc.request;
+    const minDaily = toFunctionSelector("minDailyOutflow()");
+    const rpc: Rpc = {
+      request: (c, m, p) =>
+        m === "eth_call" && (p[0] as { data: Hex }).data.startsWith(minDaily) ? Promise.resolve(numberToHex(5n * 10n ** 18n, { size: 32 })) : request(c, m, p),
+    };
+    const r = await verify({ ...chains.ctx, rpc }, recordOf(plan));
+    expect(r.failures).toEqual([`Bittensor CascadeVault.minDailyOutflow: expected ${100n * 10n ** 18n}, found ${5n * 10n ** 18n}`]);
   });
 });

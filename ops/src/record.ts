@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
 import type { ChainName } from "./config.ts";
 import type { Plan, PlanV3 } from "./plan.ts";
+import type { RegistryScan } from "./registry.ts";
 import type { StepReport } from "./roundtrip.ts";
 import type { Sent } from "./send.ts";
 import type { StepId } from "./types.ts";
@@ -14,6 +15,8 @@ export interface VerifyResult {
    * they don't fail the read-back. Absent in results saved before warnings existed. */
   warnings?: string[];
   checkedAt: string;
+  /** Where the registry scan reached and what it found, so the next read-back scans only newer blocks. */
+  registryScan?: RegistryScan;
 }
 
 /** A step found already done on-chain whose transaction was never recorded. The Bittensor adapter keeps

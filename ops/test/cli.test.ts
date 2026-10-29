@@ -37,6 +37,12 @@ describe("cli arguments", () => {
     expect(() => parseArgs(["status", "--force"])).toThrow(UsageError);
   });
 
+  it("parses handoff and ownership, which take only --live", () => {
+    expect(parseArgs(["handoff", "--live"])).toEqual({ cmd: "handoff", live: true, users: [] });
+    expect(parseArgs(["ownership"])).toEqual({ cmd: "ownership", live: false, users: [] });
+    expect(() => parseArgs(["handoff", "--new-plan"])).toThrow(UsageError);
+  });
+
   it("parses rewards, claim and deliver", () => {
     expect(parseArgs(["rewards"])).toEqual({ cmd: "rewards", live: false, users: [] });
     expect(parseArgs(["rewards", "--live"])).toEqual({ cmd: "rewards", live: true, users: [] });

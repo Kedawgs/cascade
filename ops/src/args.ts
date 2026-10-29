@@ -20,6 +20,8 @@ export const COMMANDS = [
   "wind-down",
   "sweep",
   "web-config",
+  "handoff",
+  "ownership",
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];
@@ -52,8 +54,13 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   wind-down [--user 0x…]     pause the front door once everything is paid out and claimed
   sweep --tao-to <SS58> --eth-to <0x…>   send the test wallet's leftovers home
   web-config                 write web/.env.local with the deployment's addresses for the site
+  handoff                    a launch: write the Safe Transaction Builder files (deployments/safe/) in
+                             which each final owner accepts ownership; sends nothing
+  ownership                  each contract's owner and pending owner, against the plan
 
-Without --live, deploy and the keeper commands use the local forks.`;
+Without --live, deploy and the keeper commands use the local forks.
+A launch (OPS_CADENCE=launch) reads its roles from OPS_LAUNCH_OWNER_BASE, OPS_LAUNCH_OWNER_BITTENSOR,
+OPS_LAUNCH_GUARDIAN_BASE, OPS_LAUNCH_GUARDIAN_BITTENSOR, OPS_LAUNCH_KEEPER and OPS_LAUNCH_TREASURY.`;
 
 export function parseArgs(argv: readonly string[]): Args {
   const [cmd, ...rest] = argv;

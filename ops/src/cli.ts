@@ -2,8 +2,9 @@ import { join } from "node:path";
 import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
-import { cadenceFromEnv, claimPolicy, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
+import { cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
+import { handoff, ownershipStatus } from "./handoff.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
@@ -139,6 +140,20 @@ async function run(a: Args): Promise<number> {
       await sweep(ctxFor(a.live), needRecord(a.live), a.taoTo as string, a.ethTo as string);
       log("Leftovers sent. You can now delete the password file.");
       return 0;
+    case "handoff": {
+      const out = await handoff(ctxFor(a.live), needRecord(a.live), {
+        outDir: join(paths(env).deploymentsDir, "safe"),
+        name: deploymentName(env),
+        now: Date.now(),
+      });
+      for (const line of out.lines) log(line);
+      return 0;
+    }
+    case "ownership": {
+      const r = await ownershipStatus(ctxFor(a.live), needRecord(a.live));
+      for (const line of r.lines) log(line);
+      return r.ok ? 0 : 1;
+    }
   }
 }
 

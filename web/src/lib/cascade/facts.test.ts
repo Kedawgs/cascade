@@ -184,6 +184,19 @@ describe("facts", () => {
     expect(scan.staked.map((s) => s.block)).toEqual([2_390n, 2_395n]);
   });
 
+  it("keeps the last blocks' logs when a server a little behind answers the next read, since it won't read them again", async () => {
+    const mine = log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: KEY, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [7n, 7n]), 995n + 1_000n, H(44));
+    const scan = newScan(D);
+    await scanVault(chains({ latest: 2_000n, bitLogs: [mine] }).clients, D, scan, ME);
+    expect(scan.deposited).toHaveLength(1);
+    // the next read is answered by a server 20 blocks behind (still within freshness): it reads to 1,978 only
+    const behind = chains({ latest: 1_980n, bitLogs: [mine] });
+    await scanVault(behind.clients, D, scan, ME);
+    expect(behind.windows.at(-1)![1]).toBe(1_978n);
+    expect(scan.deposited).toHaveLength(1);
+    expect(scan.next).toBe(1_999n);
+  });
+
   it("drops a log near the head whose block was then replaced", async () => {
     const logs = nearHead();
     const c = chains({ latest: 2_400n, bitLogs: logs });

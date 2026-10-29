@@ -94,18 +94,16 @@ export const SETTLE = 10n;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** Drops the events at or after `block`: the read about to start reads those blocks again. */
-function forget(scan: VaultScan, block: bigint): void {
-  for (const [id, e] of scan.delivered) if (e.block >= block) scan.delivered.delete(id);
+/** Drops the events in blocks `from` to `to`: the read about to start reads those blocks again. */
+function forget(scan: VaultScan, from: bigint, to: bigint): void {
+  const kept = (e: { block: bigint }) => e.block < from || e.block > to;
+  for (const [id, e] of scan.delivered) if (!kept(e)) scan.delivered.delete(id);
   for (const [key, chunks] of scan.payouts) {
-    const kept = chunks.filter((p) => p.block < block);
-    if (kept.length > 0) scan.payouts.set(key, kept);
+    const left = chunks.filter(kept);
+    if (left.length > 0) scan.payouts.set(key, left);
     else scan.payouts.delete(key);
   }
-  for (const list of [scan.staked, scan.deposited, scan.redeemed] as { block: bigint }[][]) {
-    const kept = list.filter((e) => e.block < block);
-    list.splice(0, list.length, ...kept);
-  }
+  for (const list of [scan.staked, scan.deposited, scan.redeemed] as { block: bigint }[][]) list.splice(0, list.length, ...list.filter(kept));
 }
 
 /** A log known by its transaction and content, numbered when one transaction has several alike: the
@@ -131,7 +129,8 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
   const latest = (await freshTip(c)) - 2n;
   // progress no chain could have reached yet can't be resumed: read it all again
   if (scan.next > latest + AHEAD) restart(scan);
-  forget(scan, scan.next - SETTLE);
+  // only blocks this read covers again: a server a little behind reads less far than the last one did
+  forget(scan, scan.next - SETTLE, latest);
   const have = new Set(
     numbered([...scan.staked.map((e) => staking(e.txHash)), ...scan.deposited.map((e) => accountEvent("deposited", e)), ...scan.redeemed.map((e) => accountEvent("redeemed", e))]),
   );

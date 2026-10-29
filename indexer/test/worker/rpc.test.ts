@@ -204,6 +204,50 @@ describe("createRpc", () => {
     expect(calls).toBe(1);
   });
 
+  it("never sleeps for a backoff that would end past the deadline", async () => {
+    const net = fakeChains({ base: { head: 10n, failNext: { count: 1, status: 429 } } });
+    const clock = fakeClock();
+    const deadline = clock.now() + 1500;
+    const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget: new Budget(45), sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 } });
+    const e = (await rejection(rpc.call("base", "eth_blockNumber", [], { deadlineMs: deadline }))) as RpcError;
+    expect(e).toBeInstanceOf(RpcError);
+    expect([e.deadline, e.status]).toEqual([true, 429]);
+    expect(clock.slept).toEqual([]);
+    expect(clock.now()).toBeLessThanOrEqual(deadline);
+  });
+
+  it("takes the deadline from the client unless a call gives its own", async () => {
+    const clock = fakeClock();
+    const net = fakeChains({ base: { head: 10n, failNext: { count: 1, status: 429 } } });
+    const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget: new Budget(45), sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 }, deadlineMs: clock.now() + 1000 });
+    expect(((await rejection(rpc.call("base", "eth_blockNumber", []))) as RpcError).deadline).toBe(true);
+    net.fetches.length = 0;
+    const net2 = fakeChains({ base: { head: 10n, failNext: { count: 1, status: 429 } } });
+    const rpc2 = createRpc({ urls: TEST_URLS, fetch: net2.fetch, budget: new Budget(45), sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 }, deadlineMs: clock.now() + 1000 });
+    expect(await rpc2.call("base", "eth_blockNumber", [], { deadlineMs: clock.now() + 60_000 })).toBe("0xa");
+  });
+
+  it("never waits out the spacing past the deadline, and spends nothing then", async () => {
+    const clock = fakeClock();
+    const net = fakeChains({ bittensor: { head: 10n } });
+    const budget = new Budget(45);
+    const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget, sleep: clock.sleep, now: clock.now });
+    await rpc.call("bittensor", "eth_blockNumber", []);
+    const e = (await rejection(rpc.call("bittensor", "eth_blockNumber", [], { deadlineMs: clock.now() + 100 }))) as RpcError;
+    expect(e.deadline).toBe(true);
+    expect([net.count(), budget.left]).toEqual([1, 44]);
+  });
+
+  it("cuts a request's timeout short at the deadline", async () => {
+    const hung = (_: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason)));
+    const rpc = createRpc({ urls: TEST_URLS, fetch: hung as typeof fetch, budget: new Budget(45), timeoutMs: 20_000, ...quiet });
+    const started = Date.now();
+    const e = (await rejection(rpc.call("bittensor", "eth_blockNumber", [], { deadlineMs: Date.now() + 150 }))) as RpcError;
+    expect(e.deadline).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
   it("turns a network failure into an RpcError that doesn't repeat the URL", async () => {
     const broken = async (input: RequestInfo | URL) => {
       throw new TypeError(`fetch failed: ${String(input)}`);

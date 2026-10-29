@@ -273,6 +273,53 @@ describe("scanChain on Bittensor", () => {
     expect(clock.slept).toContain(2000);
   });
 
+  it("can't run past the wall-time limit with a window started at 39 s", async () => {
+    const clock = fakeClock();
+    const deadline = clock.now() + 40_000;
+    const spec: ChainSpec = { head: 3600n };
+    let windows = 0;
+    const { scan } = setup(
+      { bittensor: spec },
+      {
+        clock,
+        onFetch: (f) => {
+          if (!f.methods.includes("eth_getLogs")) return;
+          // the re-read window takes 39 s; the next is refused with a 429 half a second later
+          if (++windows === 1) clock.advance(39_000);
+          else {
+            clock.advance(500);
+            spec.failNext = { count: 1, status: 429 };
+          }
+        },
+      },
+    );
+    const r = await scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { deadlineMs: deadline });
+    expect(r.stopped).toBe("wall");
+    expect(clock.slept).not.toContain(2000);
+    expect(clock.now()).toBeLessThanOrEqual(deadline);
+    expect(r.cursor.scannedTo).toBe(3500n);
+  });
+
+  it("asks a lagging node again only while there is time", async () => {
+    const clock = fakeClock();
+    const spec: ChainSpec = { head: 3600n };
+    const { net, scan } = setup(
+      { bittensor: spec },
+      {
+        clock,
+        onFetch: (f) => {
+          if (!windowsAsked([f]).some(([from]) => from === 3501n)) return;
+          clock.advance(2000);
+          spec.behindFor = { answers: 1, head: 3550n };
+        },
+      },
+    );
+    clock.advance(0);
+    const r = await scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { deadlineMs: clock.now() + 1000 });
+    expect(r.stopped).toBe("wall");
+    expect(windowsAsked(net.fetches).filter(([from]) => from === 3501n)).toHaveLength(1);
+  });
+
   it("stops at the last whole window when a request fails", async () => {
     const spec: ChainSpec = { head: 3500n };
     const { scan } = setup({ bittensor: spec }, { onFetch: (f) => void (windowsAsked([f]).some(([from]) => from === 2000n) && (spec.failNext = { count: 1, status: 403 })) });

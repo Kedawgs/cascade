@@ -1,7 +1,7 @@
 import { type Hex, hexToBigInt, hexToNumber } from "viem";
 import type { ChainName, RoleOf } from "./config.ts";
 import { decode, identityOf, type RawLog, type StoredLog, type StoredRef, sortByPosition, storedIdentity, uidFor } from "./logs.ts";
-import { type Budget, BudgetExhausted, type Rpc } from "./rpc.ts";
+import { type Budget, BudgetExhausted, type Rpc, RpcError } from "./rpc.ts";
 
 // The keeper's scan numbers (ops/src/keeper/state.ts; a test compares them), so the indexer and the
 // keeper never disagree about what "settled" means.
@@ -144,7 +144,12 @@ export async function scanChain(o: {
     }
     return undefined;
   }
-  const failed = (e: unknown) => stop(e instanceof BudgetExhausted ? "budget" : "error", e instanceof BudgetExhausted ? undefined : e);
+  const failed = (e: unknown) => {
+    if (e instanceof BudgetExhausted) stop("budget");
+    // a backoff, a spacing wait or a request that would have run past the wall-time limit
+    else if (e instanceof RpcError && e.deadline) stop("wall", e);
+    else stop("error", e);
+  };
 
   scan: {
     if (start > known) {
@@ -154,10 +159,14 @@ export async function scanChain(o: {
         break scan;
       }
       try {
-        const [h, block] = await rpc.batch(chain, [
-          { method: "eth_blockNumber", params: [] },
-          { method: "eth_getBlockByNumber", params: ["latest", false] },
-        ]);
+        const [h, block] = await rpc.batch(
+          chain,
+          [
+            { method: "eth_blockNumber", params: [] },
+            { method: "eth_getBlockByNumber", params: ["latest", false] },
+          ],
+          { deadlineMs: o.deadlineMs },
+        );
         head = hexToBigInt(h as Hex);
         known = max(known, head);
         const t = (block as { timestamp?: Hex } | null)?.timestamp;
@@ -180,9 +189,14 @@ export async function scanChain(o: {
       }
       const b = min(a + window - 1n, known);
       let answer: Awaited<ReturnType<Rpc["logsWithHead"]>> | undefined;
+      let outOfTime = false;
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
-          const r = await rpc.logsWithHead(chain, { address: o.addresses, fromBlock: a, toBlock: b }, { headTime: firstRequest });
+          if (attempt > 0 && o.now() >= o.deadlineMs) {
+            outOfTime = true;
+            break;
+          }
+          const r = await rpc.logsWithHead(chain, { address: o.addresses, fromBlock: a, toBlock: b }, { headTime: firstRequest, deadlineMs: o.deadlineMs });
           if (firstRequest && r.headTime !== undefined) result.headTime = r.headTime;
           firstRequest = false;
           if (r.head >= b) {
@@ -196,7 +210,7 @@ export async function scanChain(o: {
       }
       if (!answer) {
         // a node behind the window's end answers "no logs" for blocks it hasn't seen: never count that as none
-        stop("lagging");
+        stop(outOfTime ? "wall" : "lagging");
         break;
       }
       head = head === undefined ? answer.head : max(head, answer.head);

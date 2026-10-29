@@ -45,8 +45,10 @@ export class RpcError extends Error {
   /** the HTTP status, when the request itself failed */
   readonly status?: number;
   readonly data?: unknown;
+  /** it gave up at the caller's deadline (a wait or a request would have run past it) */
+  readonly deadline?: boolean;
 
-  constructor(chain: ChainName, method: string, url: string, detail: string, extra: { code?: number; status?: number; data?: unknown } = {}) {
+  constructor(chain: ChainName, method: string, url: string, detail: string, extra: { code?: number; status?: number; data?: unknown; deadline?: boolean } = {}) {
     super(`${chain} ${method} via ${redact(url)}: ${scrub(detail, url)}`);
     this.name = "RpcError";
     this.chain = chain;
@@ -54,6 +56,7 @@ export class RpcError extends Error {
     this.code = extra.code;
     this.status = extra.status;
     this.data = extra.data;
+    this.deadline = extra.deadline;
   }
 }
 
@@ -97,16 +100,21 @@ export interface Call {
   params: unknown[];
 }
 
+/** A call's deadline (ms on the client's clock): no wait and no request runs past it. */
+export interface CallOptions {
+  deadlineMs?: number;
+}
+
 export interface Rpc {
-  call(chain: ChainName, method: string, params: unknown[]): Promise<unknown>;
-  batch(chain: ChainName, calls: Call[]): Promise<unknown[]>;
+  call(chain: ChainName, method: string, params: unknown[], opts?: CallOptions): Promise<unknown>;
+  batch(chain: ChainName, calls: Call[], opts?: CallOptions): Promise<unknown[]>;
   /** One window of logs and the answering node's head, in one batched request to one node (Base's
    * goes to its logs URL), so a window is accepted only from a node that has reached its end.
    * `headTime` also asks for the latest block, for its time. */
   logsWithHead(
     chain: ChainName,
     filter: { address: Hex[]; fromBlock: bigint; toBlock: bigint },
-    opts?: { headTime?: boolean },
+    opts?: { headTime?: boolean } & CallOptions,
   ): Promise<{ logs: RawLog[]; head: bigint; headTime?: number }>;
 }
 
@@ -126,6 +134,9 @@ export interface RpcOptions {
   retries?: number;
   /** a request with no answer by then fails (and isn't retried): a hung node can't hold the tick */
   timeoutMs?: number;
+  /** every call's deadline unless it gives its own (ms on `now`'s clock): a spacing wait or a backoff
+   * that would end past it isn't started, and a request's timeout is cut short at it */
+  deadlineMs?: number;
 }
 
 const isObject = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
@@ -151,25 +162,36 @@ export function createRpc(o: RpcOptions): Rpc {
     return p;
   }
 
-  async function post(ep: Endpoint, chain: ChainName, label: string, body: unknown): Promise<unknown> {
+  async function post(ep: Endpoint, chain: ChainName, label: string, body: unknown, deadlineMs: number | undefined): Promise<unknown> {
     const url = o.urls[ep];
+    const late = (detail: string, status?: number) => new RpcError(chain, label, url, detail, { deadline: true, status });
+    const left = () => (deadlineMs === undefined ? Infinity : deadlineMs - now());
     for (let attempt = 0; ; attempt++) {
       const wait = last[ep] + spacingOf(ep) - now();
-      if (wait > 0) await sleep(wait);
+      if (wait > 0) {
+        if (wait >= left()) throw late("no time left before the deadline to space this request");
+        await sleep(wait);
+      }
+      if (left() <= 0) throw late("no time left before the deadline");
       o.budget.spend();
       last[ep] = now();
-      const signal = AbortSignal.timeout(timeoutMs);
+      // the request's own timeout, cut short at the caller's deadline
+      const cut = left() < timeoutMs;
+      const ms = cut ? Math.max(1, Math.floor(left())) : timeoutMs;
+      const signal = AbortSignal.timeout(ms);
       let res: Response;
       try {
         res = await o.fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
       } catch (e) {
-        if (signal.aborted) throw new RpcError(chain, label, url, `no answer within ${timeoutMs / 1000} s`);
+        if (signal.aborted) throw cut ? late("no answer before the deadline") : new RpcError(chain, label, url, `no answer within ${timeoutMs / 1000} s`);
         throw new RpcError(chain, label, url, `the request failed (${errorText(e)})`);
       }
       if (res.status === 429 || res.status >= 500) {
         await res.body?.cancel().catch(() => undefined);
         if (attempt >= retries) throw new RpcError(chain, label, url, `still answering HTTP ${res.status} after ${retries} retries`, { status: res.status });
-        await sleep(2000 * 2 ** attempt);
+        const backoff = 2000 * 2 ** attempt;
+        if (backoff >= left()) throw late(`answering HTTP ${res.status}, with no time left before the deadline to try again`, res.status);
+        await sleep(backoff);
         continue;
       }
       if (!res.ok) {
@@ -179,7 +201,7 @@ export function createRpc(o: RpcOptions): Rpc {
       try {
         return await res.json();
       } catch {
-        if (signal.aborted) throw new RpcError(chain, label, url, `no answer within ${timeoutMs / 1000} s`);
+        if (signal.aborted) throw cut ? late("no answer before the deadline") : new RpcError(chain, label, url, `no answer within ${timeoutMs / 1000} s`);
         throw new RpcError(chain, label, url, "answered with something that isn't JSON");
       }
     }
@@ -193,14 +215,16 @@ export function createRpc(o: RpcOptions): Rpc {
     });
   };
 
-  function batchAt(ep: Endpoint, chain: ChainName, calls: Call[]): Promise<unknown[]> {
+  const deadlineOf = (opts?: CallOptions) => opts?.deadlineMs ?? o.deadlineMs;
+
+  function batchAt(ep: Endpoint, chain: ChainName, calls: Call[], deadlineMs: number | undefined): Promise<unknown[]> {
     if (calls.length === 0) return Promise.resolve([]);
     const url = o.urls[ep];
     const label = calls.map((c) => c.method).join("+");
     return inTurn(ep, async () => {
       const first = nextId + 1;
       const body = calls.map((c) => ({ jsonrpc: "2.0", id: ++nextId, method: c.method, params: c.params }));
-      const answer = await post(ep, chain, label, body);
+      const answer = await post(ep, chain, label, body, deadlineMs);
       // a node that can't take the batch answers with one error object
       if (isObject(answer) && "error" in answer) throw memberError(chain, label, url, answer.error);
       if (!Array.isArray(answer)) throw new RpcError(chain, label, url, "answered a batch with something that isn't a list");
@@ -216,10 +240,10 @@ export function createRpc(o: RpcOptions): Rpc {
   }
 
   return {
-    call(chain, method, params) {
+    call(chain, method, params, opts) {
       const url = o.urls[chain];
       return inTurn(chain, async () => {
-        const answer = await post(chain, chain, method, { jsonrpc: "2.0", id: ++nextId, method, params });
+        const answer = await post(chain, chain, method, { jsonrpc: "2.0", id: ++nextId, method, params }, deadlineOf(opts));
         if (!isObject(answer)) throw new RpcError(chain, method, url, "answered with something that isn't a JSON-RPC answer");
         if ("error" in answer && answer.error !== undefined && answer.error !== null) throw memberError(chain, method, url, answer.error);
         if (!("result" in answer)) throw new RpcError(chain, method, url, "an answer with no result");
@@ -227,7 +251,7 @@ export function createRpc(o: RpcOptions): Rpc {
       });
     },
 
-    batch: (chain, calls) => batchAt(chain, chain, calls),
+    batch: (chain, calls, opts) => batchAt(chain, chain, calls, deadlineOf(opts)),
 
     async logsWithHead(chain, filter, opts = {}) {
       const ep: Endpoint = chain === "base" ? "baseLogs" : "bittensor";
@@ -236,7 +260,7 @@ export function createRpc(o: RpcOptions): Rpc {
         { method: "eth_blockNumber", params: [] },
       ];
       if (opts.headTime) calls.push({ method: "eth_getBlockByNumber", params: ["latest", false] });
-      const [logs, head, block] = await batchAt(ep, chain, calls);
+      const [logs, head, block] = await batchAt(ep, chain, calls, deadlineOf(opts));
       if (!Array.isArray(logs)) throw new RpcError(chain, "eth_getLogs", o.urls[ep], "answered with something that isn't a list of logs");
       if (typeof head !== "string") throw new RpcError(chain, "eth_blockNumber", o.urls[ep], "answered with something that isn't a block number");
       const time = isObject(block) && typeof block.timestamp === "string" ? hexToNumber(block.timestamp as Hex) : undefined;

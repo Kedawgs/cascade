@@ -32,6 +32,7 @@ import {
   isRevert,
   planResumeStakeV3,
   planStakeV3,
+  planUnstake,
   type Replacement,
   retryPatch,
   revertReason,
@@ -42,8 +43,6 @@ import {
   walletTaoDepositOp,
   stakeCalls,
   stillToSend,
-  unstakeCall,
-  unstakeV3Call,
   type WalletPort,
   wiringNotice,
 } from "./flows";
@@ -314,14 +313,16 @@ export function useFlows(account: string | null) {
         };
         data.opLog.put(op);
         onStart?.(op.id);
-        await send(op.id, async () => {
-          const fd = await readFrontDoor(data.clients, d(), a);
-          const c = v3
-            ? unstakeV3Call(q.shares, fd.redeemOf, fd.redeemRequestFee, q, d())
-            : unstakeCall(q.shares, fd.redeemOf, fd.redeemRequestFee, d());
-          data.opLog.update(a, op.id, { fee: c.value ?? 0n });
-          return [c];
-        });
+        await send(op.id, () =>
+          planUnstake({
+            q,
+            d: d(),
+            v3,
+            frontDoor: () => readFrontDoor(data.clients, d(), a),
+            pendingNonce: () => data.clients.base.getTransactionCount({ address: a, blockTag: "pending" }),
+            record: (patch) => data.opLog.update(a, op.id, patch),
+          }),
+        );
         return op.id;
       }),
 

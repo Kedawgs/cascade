@@ -612,11 +612,12 @@ describe("unstakes sharing a batch", () => {
     const all = 8n * 10n ** 22n - 10n ** 21n;
     /** Base for a request with no receipt: pending with `nonce` taken, or unknown; the logs the search
      * for its replacement reads, which counts the transaction lookups. */
-    function base(o: { pending?: { nonce: number; blockNumber: null }; nonce?: number; logs?: unknown[] }) {
+    function base(o: { pending?: { nonce: number; blockNumber: null }; nonce?: number; logs?: unknown[]; receipts?: Record<string, unknown> }) {
       const seen = { lookups: 0 };
       const clients = {
         base: {
           getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+            if (o.receipts?.[hash]) return o.receipts[hash];
             if (hash === H(88)) return { status: "success", logs: o.logs ?? [] };
             throw new TransactionReceiptNotFoundError({ hash });
           },
@@ -646,16 +647,31 @@ describe("unstakes sharing a batch", () => {
       transactionHash: H(88),
       logIndex: 0,
     });
-    const setUp = (b: ReturnType<typeof base>, sentAt: number) => {
+    const setUp = (b: ReturnType<typeof base>, sentAt: number, over: Partial<WithdrawalOp> = {}) => {
       const d = deps({ clients: b.clients as never });
-      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent" });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent", ...over });
       return { d, data: createLiveCascadeData(D, d) };
     };
+    const HOUR = 60 * 60_000;
 
     it("still count as asked while Base may yet take them", async () => {
       // just sent, Base doesn't know it yet; or waiting with its nonce free
       expect((await setUp(base({}), NOW - 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
       expect((await setUp(base({ pending: { nonce: 3, blockNumber: null }, nonce: 3 }), NOW - 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+    });
+
+    it("still count while Base doesn't know them and the account's nonce hasn't moved past the one read before they were sent, however long since", async () => {
+      // stuck under the base fee in a fee spike: Base's public node can't see it, and it can still be mined
+      const { d, data } = setUp(base({ nonce: 3 }), NOW - 6 * HOUR, { nonce: 3 });
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "sent" });
+    });
+
+    it("with no nonce recorded (older records), still count for three hours", async () => {
+      expect((await setUp(base({ nonce: 9 }), NOW - 3 * HOUR + 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      const { d, data } = setUp(base({ nonce: 9 }), NOW - 3 * HOUR);
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
     });
 
     it("are followed to the request a speed-up put in their place, its hash and batch recorded", async () => {
@@ -667,13 +683,38 @@ describe("unstakes sharing a batch", () => {
     });
 
     it("stop counting once a search finds nothing in their place, and are marked so it isn't asked again", async () => {
-      const b = base({});
-      const { d, data } = setUp(b, NOW - 10 * 60_000);
+      // Base doesn't know it, and the account's nonce is past the one read before it was sent
+      const b = base({ nonce: 4 });
+      const { d, data } = setUp(b, NOW - 10 * 60_000, { nonce: 3 });
       expect((await data.getAvailable(ME)).availableShares).toBe(all);
       expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
       const before = b.seen.lookups;
       expect((await data.getAvailable(ME)).availableShares).toBe(all);
       expect(b.seen.lookups).toBe(before);
+    });
+
+    it("count again, put back as sent, if Base later shows the request itself mined", async () => {
+      const receipts: Record<string, unknown> = {};
+      const { d, data } = setUp(base({ nonce: 4, receipts }), NOW - 10 * 60_000, { nonce: 3 });
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
+      // mined after all, in closed batch 3, which hasn't reached the vault
+      receipts[H(20)] = { status: "success", logs: [requested(3n)] };
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      const back = d.opLog.get(ME, "w") as WithdrawalOp;
+      expect(back).toMatchObject({ state: "sent", hash: H(20), batchId: 3n });
+      expect(back.error).toBeUndefined();
+    });
+
+    it("stay failed if the request itself turns up reverted, or with no request in it", async () => {
+      const receipts: Record<string, unknown> = {};
+      const { d, data } = setUp(base({ nonce: 4, receipts }), NOW - 10 * 60_000, { nonce: 3 });
+      await data.getAvailable(ME);
+      receipts[H(20)] = { status: "reverted", logs: [] };
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      receipts[H(20)] = { status: "success", logs: [] };
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
     });
   });
 

@@ -31,6 +31,7 @@ import {
   permitTypedData,
   planResumeStakeV3,
   planStakeV3,
+  planUnstake,
   resumeStakeV3Calls,
   revertReason,
   type Simulation,
@@ -144,6 +145,39 @@ describe("call builders", () => {
         expect(amount, name).toBe(spends(next));
       }
     }
+  });
+
+  it("records an unstake's fee and the account's pending nonce on Base, read last, just before the request is sent", async () => {
+    const q = { shares: 10n ** 22n, minUsdcPerTao: 123_456n, deliveryDeadline: 1_800_000_000 } as WithdrawalQuote;
+    const order: string[] = [];
+    const recorded: unknown[] = [];
+    const calls = await planUnstake({
+      q,
+      d: D,
+      v3: true,
+      frontDoor: async () => (order.push("frontDoor"), { redeemOf: 0n, redeemRequestFee: 10n ** 14n }),
+      pendingNonce: async () => (order.push("nonce"), 41),
+      record: (patch) => void recorded.push(patch),
+    });
+    expect(calls).toEqual([unstakeV3Call(q.shares, 0n, 10n ** 14n, q, D)]);
+    expect(order).toEqual(["frontDoor", "nonce"]);
+    expect(recorded).toEqual([{ fee: 10n ** 14n, nonce: 41 }]);
+  });
+
+  it("still sends an unstake when Base can't give the nonce, recording none", async () => {
+    const recorded: unknown[] = [];
+    const calls = await planUnstake({
+      q: { shares: 10n ** 22n } as WithdrawalQuote,
+      d: D,
+      v3: false,
+      frontDoor: async () => ({ redeemOf: 5n, redeemRequestFee: 10n ** 14n }),
+      pendingNonce: async () => {
+        throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
+      },
+      record: (patch) => void recorded.push(patch),
+    });
+    expect(calls).toEqual([unstakeCall(10n ** 22n, 5n, 10n ** 14n, D)]);
+    expect(recorded).toEqual([{ fee: 0n }]);
   });
 
   it("claims, then swaps back to USDC unless asked to keep TAO", () => {

@@ -1215,12 +1215,14 @@ describe("the batch an unstake request with no receipt joined", () => {
     tx?: { nonce: number; blockNumber: bigint | null };
     txDown?: boolean;
     nonce?: number;
+    nonceDown?: boolean;
     logs?: ReturnType<typeof redeemRequested>[];
     logsDown?: boolean;
     logsHead?: bigint;
   }) {
     const windows: [bigint, bigint][] = [];
     const asked: unknown[] = [];
+    const nonceAsks: unknown[] = [];
     const base = {
       getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
         throw new TransactionReceiptNotFoundError({ hash });
@@ -1230,7 +1232,11 @@ describe("the batch an unstake request with no receipt joined", () => {
         if (!o.tx) throw new TransactionNotFoundError({ hash });
         return o.tx;
       },
-      getTransactionCount: async () => o.nonce ?? 0,
+      getTransactionCount: async (q: unknown) => {
+        nonceAsks.push(q);
+        if (o.nonceDown) throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
+        return o.nonce ?? 0;
+      },
       getBlockNumber: async () => HEAD,
     };
     const baseLogs = {
@@ -1244,12 +1250,13 @@ describe("the batch an unstake request with no receipt joined", () => {
         return (o.logs ?? []).filter((l) => l.blockNumber >= from && l.blockNumber <= to);
       },
     };
-    return { clients: { base, baseLogs } as never, windows, asked };
+    return { clients: { base, baseLogs } as never, windows, asked, nonceAsks };
   }
   const place = (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set()) =>
     requestBatch(b.clients, D, request({ shares: SHARES, ...over }), { now: NOW, skip });
   /** The old hash can never be mined: pending, its nonce taken by another transaction. */
   const replaced = { tx: { nonce: 5, blockNumber: null }, nonce: 6 };
+  const HOUR = 60 * MIN;
 
   it("is still unsure while Base has it waiting with a nonce no other transaction has taken, and searches nothing", async () => {
     const b = onBase({ tx: { nonce: 5, blockNumber: null }, nonce: 5 });
@@ -1257,10 +1264,32 @@ describe("the batch an unstake request with no receipt joined", () => {
     expect(b.windows).toEqual([]);
   });
 
-  it("is still unsure while Base doesn't know it, until ten minutes after it was sent", async () => {
-    const b = onBase({});
-    expect(await place(b, { sentAt: NOW - 9 * MIN })).toEqual({ unsure: true });
-    expect(await place(b, { sentAt: undefined, createdAt: NOW - 2 * MIN })).toEqual({ unsure: true });
+  it("is still unsure while Base doesn't know it and the account's nonce hasn't moved past the one read before it was sent, however long since", async () => {
+    // a request under the base fee in a fee spike is invisible to Base's public node and can still be mined
+    const b = onBase({ nonce: 5 });
+    expect(await place(b, { nonce: 5, sentAt: NOW - 6 * HOUR })).toEqual({ unsure: true });
+    expect(await place(b, { nonce: 5, sentAt: undefined, createdAt: NOW - 30 * HOUR })).toEqual({ unsure: true });
+    expect(b.windows).toEqual([]);
+    // the account's mined nonce, not its pending one
+    expect(b.nonceAsks[0]).toEqual({ address: ME, blockTag: "latest" });
+  });
+
+  it("is still unsure for ten minutes after it was sent, even once the nonce has moved past", async () => {
+    const b = onBase({ nonce: 6 });
+    expect(await place(b, { nonce: 5, sentAt: NOW - 9 * MIN })).toEqual({ unsure: true });
+    expect(b.windows).toEqual([]);
+  });
+
+  it("is still unsure while the account's nonce can't be read", async () => {
+    const b = onBase({ nonceDown: true });
+    expect(await place(b, { nonce: 5, sentAt: NOW - 6 * HOUR })).toEqual({ unsure: true });
+    expect(b.windows).toEqual([]);
+  });
+
+  it("with no nonce recorded (an older record), is still unsure until three hours after it was sent", async () => {
+    const b = onBase({ nonce: 9 });
+    expect(await place(b, { sentAt: NOW - 3 * HOUR + MIN })).toEqual({ unsure: true });
+    expect(await place(b, { sentAt: undefined, createdAt: NOW - 3 * HOUR + MIN })).toEqual({ unsure: true });
     expect(b.windows).toEqual([]);
   });
 
@@ -1269,9 +1298,11 @@ describe("the batch an unstake request with no receipt joined", () => {
     // the account's nonce is past it
     const b = onBase({ ...replaced, logs });
     expect(await place(b)).toEqual({ batchId: 7n, replacedBy: H(88) });
-    // Base doesn't know it ten minutes on (recorded before sends were dated: from when it was made)
-    expect(await place(onBase({ logs }), { sentAt: NOW - 10 * MIN })).toEqual({ batchId: 7n, replacedBy: H(88) });
-    expect(await place(onBase({ logs }), { sentAt: undefined })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // Base doesn't know it ten minutes on, and the account's nonce is past the one read before it was sent
+    expect(await place(onBase({ logs, nonce: 6 }), { nonce: 5, sentAt: NOW - 10 * MIN })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // an older record with no nonce: three hours on (one recorded before sends were dated: from when it was made)
+    expect(await place(onBase({ logs }), { sentAt: NOW - 3 * HOUR })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    expect(await place(onBase({ logs }), { sentAt: undefined, createdAt: NOW - 3 * HOUR })).toEqual({ batchId: 7n, replacedBy: H(88) });
     // only the front door's requests by this account, from a little before it was sent, 2,000 blocks a query
     expect(b.asked[0]).toEqual({ address: D.frontDoor, topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { user: ME } }) });
     for (const [from, to] of b.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
@@ -1289,6 +1320,10 @@ describe("the batch an unstake request with no receipt joined", () => {
     ];
     expect(await place(onBase({ ...replaced, logs }), {}, new Set([H(90)]))).toEqual({ dropped: true });
     expect(await place(onBase({ ...replaced }))).toEqual({ dropped: true });
+    // Base doesn't know it, and the account's nonce is past the one read before it was sent
+    expect(await place(onBase({ nonce: 6, logs }), { nonce: 5, sentAt: NOW - 10 * MIN }, new Set([H(90)]))).toEqual({ dropped: true });
+    // an older record with no nonce, three hours on
+    expect(await place(onBase({ logs }), { sentAt: NOW - 3 * HOUR }, new Set([H(90)]))).toEqual({ dropped: true });
   });
 
   it("stays unsure when the search can't be completed: logs refused, or a logs server behind", async () => {

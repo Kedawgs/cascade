@@ -3,6 +3,7 @@ import { base } from "viem/chains";
 import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
 import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
 import type { ClaimOp, DepositOp, OpState } from "./oplog";
+import type { FrontDoorState } from "./reads";
 import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao } from "./units";
 import type { Wiring } from "./wiring";
@@ -343,6 +344,26 @@ export function unstakeV3Call(shares: bigint, redeemOf: bigint, fee: bigint, q: 
     [shares, q.minUsdcPerTao, BigInt(q.deliveryDeadline), DESTINATION_BASE],
     redeemOf === 0n ? fee : 0n,
   );
+}
+
+/** An unstake's request, with what its record keeps before it is sent: the fee it pays and the
+ * account's pending nonce on Base, read last so it is as close to the send as it can be (the request's
+ * own nonce is at least this; facts.ts tells a dropped request from one Base can't see by it). A nonce
+ * Base can't give is left out and the request still goes: its record just waits longer before a drop
+ * is believed. */
+export async function planUnstake(x: {
+  q: Pick<WithdrawalQuote, "shares" | "minUsdcPerTao" | "deliveryDeadline">;
+  d: Deployment;
+  v3: boolean;
+  frontDoor: () => Promise<Pick<FrontDoorState, "redeemOf" | "redeemRequestFee">>;
+  pendingNonce: () => Promise<number>;
+  record: (patch: { fee: bigint; nonce?: number }) => void;
+}): Promise<FlowCall[]> {
+  const fd = await x.frontDoor();
+  const c = x.v3 ? unstakeV3Call(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.q, x.d) : unstakeCall(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.d);
+  const nonce = await x.pendingNonce().catch(() => undefined);
+  x.record({ fee: c.value ?? 0n, ...(nonce !== undefined ? { nonce } : {}) });
+  return [c];
 }
 
 export function claimCalls(claimable: bigint, minUsdc: bigint, w: Balances, d: Deployment, account: Address, keepTao: boolean): FlowCall[] {

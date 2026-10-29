@@ -7,6 +7,7 @@ import {
   confirmAccountEvents,
   checkDeliveries,
   depositFacts,
+  droppedRequestMined,
   HistoryMismatchError,
   type Placed,
   requestBatch,
@@ -53,6 +54,9 @@ export interface LiveDeps {
 
 /** An unstake request Base never took, and nothing took the place of. */
 const REQUEST_DROPPED = "This unstake request never reached Base, so nothing was asked.";
+/** Marked failed as dropped (REQUEST_DROPPED): a judgement from the chain, not the wallet's own answer,
+ * so its hash is still looked at. */
+const takenForDropped = (o: WithdrawalOp) => o.state === "failed" && o.error === REQUEST_DROPPED && !!o.hash;
 
 /** A stand-in payee for quoting the bridge fee before there is an unstake. */
 const ANY_ACCOUNT: Address = "0x0000000000000000000000000000000000000001";
@@ -262,13 +266,21 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   /** This browser's unstakes still counted in their batches (not failed, not taken back out by a cancel:
    * the one decision, cancelTook), each with its batch: as recorded, or from its request's receipt, which
    * is then recorded. One whose hash can never be mined is followed to the request in its place (whose
-   * hash and batch are recorded), or, with none, marked failed: it asked for nothing, and isn't asked
-   * about again. */
+   * hash and batch are recorded), or, with none, marked failed: it asked for nothing, and isn't searched
+   * for again. Only its own hash is still looked at: if Base shows that mined after all, it is put back
+   * as sent and counts again. */
   async function placedWithdrawals(a: Address, withdrawals: WithdrawalOp[]): Promise<Placed[]> {
     const all = deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal");
+    const revived = await Promise.all(
+      withdrawals.filter(takenForDropped).map(async (o): Promise<WithdrawalOp | undefined> => {
+        const batchId = await droppedRequestMined(c, o);
+        if (batchId === undefined) return undefined;
+        deps.opLog.update(a, o.id, { state: "sent", error: undefined, batchId });
+        return { ...o, state: "sent", error: undefined, batchId };
+      }),
+    );
     const placed = await Promise.all(
-      withdrawals
-        .filter((o) => o.state !== "failed")
+      [...withdrawals.filter((o) => o.state !== "failed"), ...revived.filter((o) => o !== undefined)]
         .map(async (o) => {
           // a request another record already owns is never taken for this one's replacement
           const skip = new Set(all.filter((x) => x.id !== o.id && x.hash).map((x) => x.hash as string));

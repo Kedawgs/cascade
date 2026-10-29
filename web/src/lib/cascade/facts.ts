@@ -364,8 +364,8 @@ export interface RequestPlace {
 }
 
 /** The batch an unstake joined: as recorded, or from its request's receipt (one that shows no request,
- * as when it reverted, joined none). With no receipt it is `unsure` until its hash can never be mined
- * (requestHashDead); then the front door's logs are searched for the same request in its place
+ * as when it reverted, joined none). With no receipt it is `unsure` until its hash can't be mined as
+ * sent (requestHashDead); then the front door's logs are searched for the same request in its place
  * (findRequestTx: a speed-up made while no tab of this site watched looks exactly like a drop). Found,
  * it is that one's batch; a search that finds nothing makes it `dropped`; one that can't be completed
  * leaves it `unsure`, still counted. `skip`: the hashes other records own. */
@@ -392,25 +392,43 @@ export async function requestBatch(
   return found ? { batchId: found.batchId, replacedBy: found.hash } : { dropped: true };
 }
 
-/** How long after it was sent a request Base has never heard of may be taken for gone (Base mines in
- * seconds), and its replacement searched for. */
+/** How long after it was sent a request Base has never heard of is left alone before the account's
+ * nonce is asked about (Base mines in seconds). */
 export const DROPPED_AFTER_MS = 10 * 60_000;
+/** A record made before requests kept their nonce: how long Base must not know its hash before it is
+ * taken for gone. Base's nodes forget a transaction they can't take after about three hours. */
+export const UNNUMBERED_DROPPED_AFTER_MS = 3 * 60 * 60_000;
 
-/** Whether a request's hash with no receipt can never be mined: Base doesn't know it ten minutes after
- * it was sent, or the account's nonce is past it (another transaction took its place: a speed-up, a
- * cancel, or another request). False whenever that can't be told: Base not answering, or showing it
- * mined with a receipt that isn't readable yet. */
+/** Whether a request's hash with no receipt can't be mined as sent: the account's mined nonce is past
+ * the request's (another transaction took its place: a speed-up, a cancel, or another request). Base
+ * not knowing the hash isn't enough: in a fee spike a request under the base fee is invisible to Base's
+ * public node and can still be mined later. So a hash Base doesn't know is taken for dead only ten
+ * minutes after it was sent and once the account's nonce is past the one read before it was sent; a
+ * record with none (made before it was kept) waits three hours instead. False whenever that can't be
+ * told: Base not answering, or showing it mined with a receipt that isn't readable yet. */
 async function requestHashDead(c: Pick<Clients, "base">, op: WithdrawalOp, hash: Hex, now: number): Promise<boolean> {
+  const used = () => c.base.getTransactionCount({ address: op.account, blockTag: "latest" }).catch(() => undefined);
   let tx: { nonce: number; blockNumber: bigint | null };
   try {
     tx = (await c.base.getTransaction({ hash })) as unknown as { nonce: number; blockNumber: bigint | null };
   } catch (e) {
     if ((e as { name?: string })?.name !== "TransactionNotFoundError") return false;
-    return now - (op.sentAt ?? op.createdAt) >= DROPPED_AFTER_MS;
+    const since = now - (op.sentAt ?? op.createdAt);
+    if (op.nonce === undefined) return since >= UNNUMBERED_DROPPED_AFTER_MS;
+    if (since < DROPPED_AFTER_MS) return false;
+    const n = await used();
+    return n !== undefined && n > op.nonce;
   }
   if (tx.blockNumber !== null) return false;
-  const used = await c.base.getTransactionCount({ address: op.account, blockTag: "latest" }).catch(() => undefined);
-  return used !== undefined && used > tx.nonce;
+  const n = await used();
+  return n !== undefined && n > tx.nonce;
+}
+
+/** The batch a request taken for dropped joined after all: its own hash mined, with the account's
+ * request in it. Undefined while Base shows no such thing, or can't be read. */
+export async function droppedRequestMined(c: Pick<Clients, "base">, op: WithdrawalOp): Promise<bigint | undefined> {
+  const r = await baseReceipt(c, op.hash);
+  return mined(r) ? batchIdFrom(r, "RedeemRequested", op.account) : undefined;
 }
 
 /** An unstake still counted in its batch (not failed, not taken back out by a cancel), with that batch;

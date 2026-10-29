@@ -47,9 +47,12 @@ export interface WithdrawalOp extends OpBase {
   /** v3: the USDC delivery preference sent with the request. */
   delivery?: { minUsdcPerTao: bigint; deadline: number };
   hash?: Hex;
-  /** ms since the epoch when `hash` was recorded (a sped-up request's when its replacement was):
-   * a request Base still doesn't know ten minutes on was dropped (facts.ts, requestBatch). */
+  /** ms since the epoch when `hash` was recorded (a sped-up request's when its replacement was). */
   sentAt?: number;
+  /** The account's pending nonce on Base, read just before the request was sent: the request's own
+   * nonce is at least this. A request Base doesn't know is taken for dropped only once the account's
+   * mined nonce is past it (facts.ts, requestBatch); records made before it was kept have none. */
+  nonce?: number;
   batchId?: bigint;
   cancelled?: { hash: Hex; at: number };
 }

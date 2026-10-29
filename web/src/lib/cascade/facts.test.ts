@@ -521,6 +521,41 @@ describe("facts", () => {
     expect(await payoutOf([delivered, first, second], mineFirst)).toMatchObject({ txHash: H(10), messageId: H(6), state: 2 });
   });
 
+  it("takes a delivery for a trail only from a receipt that delivered this batch, and only this batch's events in it", async () => {
+    const OTHER_KEY = H(78);
+    const redeemedIn = (key: Hex, assets: bigint, index: number) =>
+      log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [10n ** 22n, assets]), 1_500n, H(9), index);
+    const depositedIn = (key: Hex, index: number) =>
+      log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [1n, 1n]), 1_500n, H(9), index);
+    const batch5 = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "BatchDelivered", args: { key: OTHER_KEY, sourceChain: 8453n, frontDoor: D.frontDoor } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint64, uint256"), [5n, 10n ** 16n]),
+      1_500n,
+      H(9),
+    );
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: {}, batchId: 3n, state: "sent" };
+    const factsWith = async (logs: unknown[]) => {
+      const c = chains({ bitReceipts: { [H(9)]: { status: "success", logs } } });
+      // the saved history says batch 3 arrived in transaction H(9)
+      const scan = newScan(D);
+      scan.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n, unconfirmed: true });
+      return {
+        unstake: (await withdrawalFacts(c.clients, D, w, { fd, vault, scan, claims: [] })).facts,
+        deposit: (await depositFacts(c.clients, D, dep, { fd, vault, scan })).facts,
+      };
+    };
+    // the transaction delivered batch 5, with the account's redeem there: not this batch's delivery
+    const wrong = await factsWith([batch5, redeemedIn(OTHER_KEY, 99n, 1), depositedIn(OTHER_KEY, 2)]);
+    expect(wrong.unstake.delivered).toBeUndefined();
+    expect(wrong.deposit.delivered).toBeUndefined();
+    // batch 3's delivery: of the account's redeems in the transaction, only batch 3's is this one's
+    const right = await factsWith([delivered, redeemedIn(OTHER_KEY, 99n, 1), redeemedIn(KEY, 10n ** 16n, 2)]);
+    expect(right.unstake.delivered).toMatchObject({ outcome: "redeemed", taoWei: 10n ** 16n });
+    expect(right.deposit.delivered?.outcome).toBe("deposited");
+  });
+
   it("knows when the account's entry was too small to send back after the bridge fee", async () => {
     const redeemedLog = log(
       D.vault,

@@ -382,6 +382,28 @@ async function cancelFacts(c: Pick<Clients, "base">, op: DepositOp | WithdrawalO
   return { cancelMined: took === true, ...(took === undefined ? { cancelPending: true as const } : {}) };
 }
 
+/** A batch's delivery as a trail may use it: the scan's, with its receipt (read in any case, for the
+ * account's events), and only when that receipt delivered this batch from our front door. A saved entry
+ * pointing anywhere else is no delivery, so no amount from it is ever shown. */
+async function deliveryOf(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchId: bigint | undefined) {
+  const saved = batchId !== undefined ? scan.delivered.get(String(batchId)) : undefined;
+  if (!saved) return { hit: undefined, r: null };
+  const r = await bitReceipt(c, scan, saved.txHash);
+  return { hit: deliveryIn(r, d, String(batchId), saved.key) ? saved : undefined, r };
+}
+
+/** The account's own vault events in a delivery's receipt, for this batch (`key`) only. */
+const accountEvents = (r: Receipt | null, d: Deployment, key: Hex, account: Address) =>
+  parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, strict: false }).filter(
+    (l) =>
+      same(l.address, d.vault) &&
+      "user" in l.args &&
+      !!l.args.user &&
+      same(l.args.user as string, account) &&
+      "key" in l.args &&
+      same(l.args.key as string, key),
+  );
+
 export async function depositFacts(
   c: Pick<Clients, "base" | "bittensor">,
   d: Deployment,
@@ -421,12 +443,9 @@ export async function depositFacts(
     ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
   };
   // taken back out of its batch: what the batch did after isn't this deposit's
-  const hit = batchId !== undefined && !facts.cancelMined ? ctx.scan.delivered.get(String(batchId)) : undefined;
+  const { hit, r } = !facts.cancelMined ? await deliveryOf(c, d, ctx.scan, batchId) : { hit: undefined, r: null };
   if (hit) {
-    const r = await bitReceipt(c, ctx.scan, hit.txHash);
-    const mine = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, strict: false }).filter(
-      (l) => "user" in l.args && l.args.user && same(l.args.user as string, op.account),
-    );
+    const mine = accountEvents(r, d, hit.key, op.account);
     const outcome = mine.some((l) => l.eventName === "DepositBounced")
       ? "bounced"
       : mine.some((l) => l.eventName === "DepositSkipped")
@@ -474,14 +493,11 @@ export async function withdrawalFacts(
   };
   // taken back out of its batch: a Redeemed there is another request of the account's, not this one
   if (facts.cancelMined) return { batchId, facts };
-  const hit = batchId !== undefined ? ctx.scan.delivered.get(String(batchId)) : undefined;
+  const { hit, r } = await deliveryOf(c, d, ctx.scan, batchId);
   /** This request's part of an amount paid on the account's entry in its batch. */
   let part = (amount: bigint) => amount;
   if (hit) {
-    const r = await bitReceipt(c, ctx.scan, hit.txHash);
-    const mine = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, strict: false }).filter(
-      (l) => "user" in l.args && l.args.user && same(l.args.user as string, op.account),
-    );
+    const mine = accountEvents(r, d, hit.key, op.account);
     const redeemed = mine.find((l) => l.eventName === "Redeemed");
     const entry = redeemed?.args as { shares: bigint; assets: bigint } | undefined;
     if (entry) part = partOf({ ...op, batchId }, entry.shares, ctx.siblings ?? []);

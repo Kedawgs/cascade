@@ -505,6 +505,12 @@ describe("unstakes sharing a batch", () => {
       H(9),
       1,
     );
+    const batchDelivered = evLog(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "BatchDelivered", args: { key: KEY, sourceChain: 8453n, frontDoor: D.frontDoor } }),
+      encodeAbiParameters(parseAbiParameters("uint64, uint256"), [3n, 6n * 10n ** 15n]),
+      H(9),
+    );
     const clients = {
       base: {
         getTransactionReceipt: async ({ hash }: { hash: string }) => {
@@ -513,7 +519,7 @@ describe("unstakes sharing a batch", () => {
         },
       },
       bittensor: {
-        getTransactionReceipt: async ({ hash }: { hash: string }) => (hash === H(9) ? { status: "success", logs: [redeemed] } : null),
+        getTransactionReceipt: async ({ hash }: { hash: string }) => (hash === H(9) ? { status: "success", logs: [batchDelivered, redeemed] } : null),
         getBlock: async () => ({ timestamp: 1_800_000_000n }),
       },
     };

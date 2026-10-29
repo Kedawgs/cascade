@@ -2,8 +2,9 @@ import type { Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import { checkBatch, STEPS } from "../crosscheck/batches.ts";
 import { groupDelivered } from "../crosscheck/pairing.ts";
+import { checkPayout, PAYOUT_STEPS } from "../crosscheck/payouts.ts";
 import type { StoredLog } from "../logs.ts";
-import type { BatchCheckWrite } from "../store.ts";
+import type { BatchCheckWrite, ChunkCheckWrite } from "../store.ts";
 import { afterSettled, isFresh, type RuleCtx, txLink, utc } from "./context.ts";
 import type { Rule } from "./index.ts";
 
@@ -129,4 +130,98 @@ export const bridgeBatches: Rule = {
   },
 };
 
-export const BRIDGE_RULES: Rule[] = [bridgeBatches];
+/** A failed payout landing: one alert and hold per landing. */
+const payoutMismatch = (key: Hex, chunk: number, landedUid: Hex, landedTx: Hex, step: string, detail: string): Finding => ({
+  rule: "bridge.payout_mismatch",
+  key: `bridge.payout:${key}:${chunk}:${landedUid}`,
+  subject: `A payout landing (chunk ${chunk}) failed the cross-check at step ${step}`,
+  facts: { side: "base", step, detail, key, chunk: String(chunk), landing: txLink("base", landedTx) },
+  hold: { id: `bridge.payout:${key}:${chunk}:${landedUid}`, summary: `a payout landing for chunk ${chunk} of ${key} failed the cross-check (${step})` },
+});
+
+/** bridge.payout_mismatch, bridge.duplicate (payout side) and ccip.unexpected_source (Base side). One
+ * chunk_checks row per landing (its PayoutsDelivered log), waiting → awaiting_read → ok | mismatch, so a
+ * forged duplicate landing is judged on its own row. */
+export const bridgePayouts: Rule = {
+  name: "bridge.payouts",
+  run(ctx) {
+    const d = ctx.cfg.deployment;
+    const found = new Map<string, Finding>();
+    const add = (f: Finding) => {
+      if (!found.has(f.key)) found.set(f.key, f);
+    };
+
+    // ccip.unexpected_source: a message into the front door from anyone but the vault
+    for (const l of ctx.logs.range("base", "baseAdapter", "Delivered")) {
+      if (isFresh(ctx, l) && same(l.args.recipient, d.frontDoor) && !same(l.args.sender, d.vault)) add(unexpected("base", l.txHash, l.args.sender, "the adapter delivered it from another sender"));
+    }
+
+    const landings = ctx.logs.range("base", "frontDoor", "PayoutsDelivered");
+    const rows = ctx.checks.chunks;
+    const checked = new Set(rows.map((r) => r.landedUid));
+    const fresh = landings.filter((l) => isFresh(ctx, l) && !checked.has(l.uid));
+
+    // bridge.duplicate: a second landing for one (key, chunk), found when it is first seen
+    const byChunk = new Map<string, Set<Hex>>();
+    for (const r of rows) {
+      const id = `${r.batchKey}:${r.chunk}`;
+      byChunk.set(id, (byChunk.get(id) ?? new Set<Hex>()).add(r.landedUid));
+    }
+    for (const l of fresh) {
+      const key = lower(l.args.batchKey);
+      const chunk = Number(l.args.chunk);
+      const before = byChunk.get(`${key}:${chunk}`) ?? new Set<Hex>();
+      if ([...before].some((u) => u !== l.uid)) {
+        add({
+          rule: "bridge.duplicate",
+          key: `bridge.duplicate:payout:${key}:${chunk}:${l.uid}`,
+          subject: `Payout chunk ${chunk} landed again on Base`,
+          facts: { side: "base", key, chunk: String(chunk), landing: txLink("base", l.txHash), landings: String(before.size + 1) },
+          hold: { id: `bridge.duplicate:payout:${key}:${chunk}:${l.uid}`, summary: `payout chunk ${chunk} of ${key} landed ${before.size + 1} times` },
+        });
+      }
+      byChunk.set(`${key}:${chunk}`, before.add(l.uid));
+    }
+
+    // step 5: the front door's delivered() read, from a reading at or after the landing's block
+    for (const r of rows.filter((x) => x.status === "awaiting_read")) {
+      const read = ctx.snap.deliveredReads.find((x) => x.landedUid === r.landedUid && x.block >= r.landedBlock);
+      if (!read) continue;
+      const row = { landedUid: r.landedUid, batchKey: r.batchKey, chunk: r.chunk, landedTx: r.landedTx, landedBlock: r.landedBlock };
+      if (read.value) {
+        ctx.writes.chunkChecks.push({ ...row, status: "ok" });
+      } else {
+        const detail = `delivered(bridge, ${r.expectedHash}) is false at block ${read.block}`;
+        ctx.writes.chunkChecks.push({ ...row, status: "mismatch", detail: `${PAYOUT_STEPS.delivered}: ${detail}` });
+        add(payoutMismatch(r.batchKey, r.chunk, r.landedUid, r.landedTx, PAYOUT_STEPS.delivered, detail));
+      }
+    }
+
+    // steps 1–4: this tick's new landings, and the ones still waiting for Bittensor
+    const waiting = rows.filter((r) => r.status === "waiting").flatMap((r) => landings.filter((l) => l.uid === r.landedUid));
+    const vaultLogs = ctx.logs.range("bittensor", "vault", ["PayoutChunkSent", "DepositBounced", "Redeemed"]);
+    for (const l of [...waiting, ...fresh]) {
+      const isNew = !checked.has(l.uid);
+      const key = lower(l.args.batchKey);
+      const chunk = Number(l.args.chunk);
+      const row: ChunkCheckWrite = { landedUid: l.uid, batchKey: key, chunk, landedTx: l.txHash, landedBlock: l.block, status: "waiting" };
+      const at = ctx.blockTime("base", l.block);
+      if (at === undefined || !afterSettled(ctx, "bittensor", at)) {
+        if (isNew) ctx.writes.chunkChecks.push(row);
+        continue;
+      }
+      const group = groupDelivered(ctx.logs.inTx("base", l.txHash), { opener: "frontDoor:PayoutsDelivered", adapter: "baseAdapter", recipient: d.frontDoor }).find((g) => g.opener.uid === l.uid);
+      const v = checkPayout({ d, bridges: ctx.cfg.bridges.base, landing: l, group, vaultLogs, bitTx: (hash) => ctx.logs.inTx("bittensor", hash) });
+      const decided: ChunkCheckWrite = { ...row, status: v.status };
+      if (v.sentTx) decided.sentTx = v.sentTx;
+      if (v.messageId) decided.messageId = v.messageId;
+      if (v.expectedHash) decided.expectedHash = v.expectedHash;
+      if (v.detail) decided.detail = `${v.step}: ${v.detail}`;
+      ctx.writes.chunkChecks.push(decided);
+      if (v.status === "mismatch") add(payoutMismatch(key, chunk, l.uid, l.txHash, v.step ?? PAYOUT_STEPS.bridge, v.detail ?? ""));
+    }
+    return [...found.values()];
+  },
+};
+
+export const BRIDGE_RULES: Rule[] = [bridgeBatches, bridgePayouts];

@@ -102,5 +102,122 @@ export function honestBatch(o: {
   return { id: o.id, deposits: o.deposits, redeems, key, messageId, closeTx, deliveryTx, base, bit, delivery };
 }
 
+export interface PayoutEntry {
+  user: Hex;
+  shares: bigint;
+  assets: bigint;
+}
+
+export interface LandedChunk {
+  chunk: number;
+  net: bigint;
+  entries: Entry[];
+  messageId: Hex;
+  chunkTx: Hex;
+  landTx: Hex;
+  /** the front door's PayoutsDelivered (absent when net = 0: nothing was sent) */
+  landing?: StoredLog;
+}
+
+export interface PayoutFixture {
+  key: Hex;
+  /** the delivery's outcomes and queue, and each chunk's transaction (the adapter's Sent, PayoutChunkSent) */
+  bit: StoredLog[];
+  /** each landing's transaction: PayoutsDelivered, its PayoutReceived, the adapter's Delivered */
+  base: StoredLog[];
+  chunks: LandedChunk[];
+}
+
+/** A payout batch for `key` (bounced entries have 0 shares, then redeemed ones), sent in chunks of
+ * `taken` entries, each paid assets − ceil(assets × fee / gross), floored to rao, zeros dropped, and
+ * landed on Base through `bridge` (the Base adapter by default). Positions can be shared with another
+ * fixture to put two chunks, or two landings, in one transaction. */
+export function payoutBatch(o: {
+  key: Hex;
+  list: PayoutEntry[];
+  chunks: { taken: number; fee: bigint }[];
+  deliveryBlock?: bigint;
+  chunkBlock?: bigint;
+  chunkTx?: Hex;
+  chunkAt?: number;
+  landBlock?: bigint;
+  landTx?: Hex;
+  landAt?: number;
+  bridge?: Hex;
+}): PayoutFixture {
+  const bridge = o.bridge ?? D.baseAdapter;
+  const deliveryTx = h(`payout delivery ${o.key}`);
+  const deliveryBlock = o.deliveryBlock ?? 6_900_300n;
+  let di = 0;
+  const vault = (event: string, args: StoredLog["args"], at: { block: bigint; txHash: Hex; logIndex: number }) =>
+    slog({ contract: "vault", chain: "bittensor", address: D.vault, event, args, topic1: o.key, ...at });
+  const bit: StoredLog[] = [vault("BatchDelivered", { key: o.key, sourceChain: "8453", frontDoor: D.frontDoor, batchId: "1", amount: "0" }, { block: deliveryBlock, txHash: deliveryTx, logIndex: di++ })];
+  for (const p of o.list.filter((x) => x.shares === 0n)) bit.push(vault("DepositBounced", { key: o.key, user: p.user, assets: String(p.assets) }, { block: deliveryBlock, txHash: deliveryTx, logIndex: di++ }));
+  for (const p of o.list.filter((x) => x.shares !== 0n)) bit.push(vault("Redeemed", { key: o.key, user: p.user, shares: String(p.shares), assets: String(p.assets) }, { block: deliveryBlock, txHash: deliveryTx, logIndex: di++ }));
+  bit.push(vault("PayoutBatchQueued", { key: o.key, sourceChain: "8453", batchId: "1", count: o.list.length, total: "1", price: "1" }, { block: deliveryBlock, txHash: deliveryTx, logIndex: di++ }));
+
+  const base: StoredLog[] = [];
+  const chunks: LandedChunk[] = [];
+  let cursor = 0;
+  let ci = o.chunkAt ?? 0;
+  let li = o.landAt ?? 0;
+  o.chunks.forEach(({ taken, fee }, n) => {
+    const part = o.list.slice(cursor, cursor + taken);
+    cursor += taken;
+    const gross = part.reduce((s, p) => s + p.assets, 0n);
+    const entries: Entry[] = [];
+    for (const p of part) {
+      let a = p.assets - (p.assets * fee + gross - 1n) / gross;
+      a -= a % RAO;
+      if (a > 0n) entries.push({ user: p.user, amount: a });
+    }
+    const net = entries.reduce((s, e) => s + e.amount, 0n);
+    const messageId = h(`payout message ${o.key} ${n}`);
+    const chunkTx = o.chunkTx ?? h(`chunk tx ${o.key} ${n}`);
+    const chunkBlock = (o.chunkBlock ?? 6_900_400n) + (o.chunkTx ? 0n : BigInt(n));
+    const landTx = o.landTx ?? h(`land tx ${o.key} ${n}`);
+    const landBlock = (o.landBlock ?? 37_000_700n) + (o.landTx ? 0n : BigInt(n));
+    if (net > 0n) {
+      bit.push(
+        slog({
+          contract: "bitAdapter",
+          chain: "bittensor",
+          address: D.bitAdapter,
+          event: "Sent",
+          block: chunkBlock,
+          txHash: chunkTx,
+          logIndex: ci++,
+          topic1: messageId,
+          args: { messageId, destChain: "8453", sender: D.vault, recipient: D.frontDoor, amount: String(net), fee: String(fee), gasLimit: "1" },
+        }),
+      );
+    }
+    bit.push(vault("PayoutChunkSent", { key: o.key, chunk: n, taken, gross: String(gross), net: String(net), fee: String(net === 0n ? 0n : fee) }, { block: chunkBlock, txHash: chunkTx, logIndex: ci++ }));
+    const c: LandedChunk = { chunk: n, net, entries, messageId, chunkTx, landTx };
+    if (net > 0n) {
+      const fd = (event: string, args: StoredLog["args"]) =>
+        slog({ contract: "frontDoor", chain: "base", address: D.frontDoor, event, args, block: landBlock, txHash: landTx, logIndex: li++, topic1: o.key });
+      c.landing = fd("PayoutsDelivered", { batchKey: o.key, chunk: n, amount: String(net), bridge });
+      base.push(c.landing);
+      for (const e of entries) base.push(fd("PayoutReceived", { batchKey: o.key, chunk: n, user: e.user, amount: String(e.amount) }));
+      base.push(
+        slog({
+          contract: "baseAdapter",
+          chain: "base",
+          address: bridge,
+          event: "Delivered",
+          block: landBlock,
+          txHash: landTx,
+          logIndex: li++,
+          topic1: messageId,
+          args: { messageId, sourceChain: "964", sender: D.vault, recipient: D.frontDoor, amount: String(net) },
+        }),
+      );
+    }
+    chunks.push(c);
+  });
+  return { key: o.key, bit, base, chunks };
+}
+
 /** A copy of a log with some args changed. */
 export const withArgs = (l: StoredLog, args: StoredLog["args"]): StoredLog => ({ ...l, args: { ...l.args, ...args } });

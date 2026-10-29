@@ -404,18 +404,35 @@ contract VaultCoreTest is VaultTestBase {
         assertEq(vault.fallbackMinRemainRao(), 20_000_000);
 
         vm.startPrank(owner);
+        // the exit protections have hard bounds: at most 50% of the base a day, a floor of at most 100 TAO
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
-        vault.setOutflowLimits(10_001, 100e18);
+        vault.setOutflowLimits(5_001, 100e18);
+        vm.expectRevert(CascadeVault.InvalidParameter.selector);
+        vault.setOutflowLimits(2000, 100e18 + 1);
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
         vault.setMessageLimits(4_000e18 + 1, 4_000e18, 10);
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
         vault.setMessageLimits(2_000e18, 4_000e18, 0);
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
         vault.setMessageLimits(2_000e18, 4_000e18, 101);
+        // a payout message above the lane's 5,000 TAO could never be sent
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
-        vault.setFeeLimits(10_001, 0.02e18);
+        vault.setMessageLimits(2_000e18, 5_000e18 + 1, 10);
+        // the fee ceiling: at most 5% of a chunk, or 0.1 TAO
+        vm.expectRevert(CascadeVault.InvalidParameter.selector);
+        vault.setFeeLimits(501, 0.02e18);
+        vm.expectRevert(CascadeVault.InvalidParameter.selector);
+        vault.setFeeLimits(100, 0.1e18 + 1);
+        // the payout delay: 1 hour to 7 days
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
         vault.setPayoutDelay(7 days + 1);
+        vm.expectRevert(CascadeVault.InvalidParameter.selector);
+        vault.setPayoutDelay(1 hours - 1);
+        vm.expectRevert(CascadeVault.InvalidParameter.selector);
+        vault.setPayoutDelay(0);
+        // the unstake margin: at most 1 TAO per removal
+        vm.expectRevert(CascadeVault.InvalidParameter.selector);
+        vault.setUnstakeMarginRao(1e9 + 1);
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
         vault.setFloorFallbacks(0, 1);
         vm.expectRevert(CascadeVault.InvalidParameter.selector);
@@ -425,20 +442,27 @@ contract VaultCoreTest is VaultTestBase {
 
         // the boundaries themselves are accepted, each with its event
         vm.expectEmit(address(vault));
-        emit CascadeVault.LimitSet("maxDailyOutflowBps", 10_000, 50e18);
-        vault.setOutflowLimits(10_000, 50e18);
+        emit CascadeVault.LimitSet("maxDailyOutflowBps", 5_000, 100e18);
+        vault.setOutflowLimits(5_000, 100e18);
+        vault.setOutflowLimits(0, 0);
         vm.expectEmit(address(vault));
-        emit CascadeVault.LimitSet("maxEntryValue", 4_000e18, 4_000e18);
+        emit CascadeVault.LimitSet("maxEntryValue", 5_000e18, 5_000e18);
         vm.expectEmit(address(vault));
         emit CascadeVault.LimitSet("minChunk", 100, 0);
-        vault.setMessageLimits(4_000e18, 4_000e18, 100);
+        vault.setMessageLimits(5_000e18, 5_000e18, 100);
         vault.setMessageLimits(1e18, 2e18, 1);
         vm.expectEmit(address(vault));
-        emit CascadeVault.LimitSet("maxFeeBps", 10_000, 1e18);
-        vault.setFeeLimits(10_000, 1e18);
+        emit CascadeVault.LimitSet("maxFeeBps", 500, 0.1e18);
+        vault.setFeeLimits(500, 0.1e18);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.LimitSet("payoutDelay", 1 hours, 0);
+        vault.setPayoutDelay(1 hours);
         vm.expectEmit(address(vault));
         emit CascadeVault.LimitSet("payoutDelay", 7 days, 0);
         vault.setPayoutDelay(7 days);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.LimitSet("unstakeMarginRao", 1e9, 0);
+        vault.setUnstakeMarginRao(1e9);
         vm.expectEmit(address(vault));
         emit CascadeVault.LimitSet("fallbackMinStakeRao", 1e9, 1e9);
         vault.setFloorFallbacks(1e9, 1e9);
@@ -451,14 +475,15 @@ contract VaultCoreTest is VaultTestBase {
         vault.setClaimGasRequired(70_000_000);
         vm.stopPrank();
 
-        assertEq(vault.maxDailyOutflowBps(), 10_000);
-        assertEq(vault.minDailyOutflow(), 50e18);
+        assertEq(vault.maxDailyOutflowBps(), 0);
+        assertEq(vault.minDailyOutflow(), 0);
         assertEq(vault.maxEntryValue(), 1e18);
         assertEq(vault.maxMessageValue(), 2e18);
         assertEq(vault.minChunk(), 1);
-        assertEq(vault.maxFeeBps(), 10_000);
-        assertEq(vault.maxFeeAbs(), 1e18);
+        assertEq(vault.maxFeeBps(), 500);
+        assertEq(vault.maxFeeAbs(), 0.1e18);
         assertEq(vault.payoutDelay(), 7 days);
+        assertEq(vault.unstakeMarginRao(), 1e9);
         assertEq(vault.fallbackMinStakeRao(), 1);
         assertEq(vault.fallbackMinRemainRao(), 1);
         assertEq(vault.hotkeyDustRao(), 5);

@@ -75,6 +75,12 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     // parameters
     /// @notice Upper bound on `batchInterval`, so a mistaken setting cannot strand a batch for long.
     uint64 public constant MAX_BATCH_INTERVAL = 7 days;
+    /// @notice Upper bound on `redeemRequestFee` (0.001 ETH, ten times the launch fee), so no setting
+    /// can price every exit out.
+    uint256 public constant MAX_REDEEM_REQUEST_FEE = 1e15;
+    /// @notice Upper bound on `maxBatchValue`: the lane's per-message limit. A batch above it could
+    /// never be sent, and its redeems would wait with it.
+    uint256 public constant MAX_BATCH_VALUE = 5_000e18;
     uint64 public batchInterval;
     uint32 public maxDeposits;
     uint32 public maxRedeems;
@@ -176,7 +182,9 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
         vaultChain = vaultChain_;
         vault = vault_;
         usdc = usdc_;
-        if (batchInterval_ > MAX_BATCH_INTERVAL) revert InvalidParameter();
+        if (batchInterval_ > MAX_BATCH_INTERVAL || redeemRequestFee_ > MAX_REDEEM_REQUEST_FEE) {
+            revert InvalidParameter();
+        }
         batchInterval = batchInterval_;
         minDeposit = minDeposit_;
         depositCap = depositCap_;
@@ -473,6 +481,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     }
 
     function setMaxBatchValue(uint256 value) external onlyOwner {
+        if (value > MAX_BATCH_VALUE) revert InvalidParameter();
         maxBatchValue = value;
         emit LimitSet("maxBatchValue", value, 0);
     }
@@ -484,6 +493,7 @@ contract CascadeFrontDoor is CascadeBase, ICascadeReceiver {
     }
 
     function setRedeemRequestFee(uint256 fee) external onlyOwner {
+        if (fee > MAX_REDEEM_REQUEST_FEE) revert InvalidParameter();
         redeemRequestFee = fee;
         emit LimitSet("redeemRequestFee", fee, 0);
     }

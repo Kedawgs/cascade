@@ -172,16 +172,18 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         fd.closeBatch{value: 1e15}();
         assertEq(fd.netForwarded(), 100e18);
 
-        vm.prank(owner);
-        fd.setMaxBatchValue(10_000e18);
-        // 100e18 forwarded + 9_901e18 = 10_001e18 > 10_000e18
+        vm.startPrank(owner);
+        fd.setCaps(1e18, 5_000e18);
+        fd.setMaxBatchValue(5_000e18);
+        vm.stopPrank();
+        // 100e18 forwarded + 4_901e18 = 5_001e18 > 5_000e18
         vm.prank(alice);
         vm.expectRevert(CascadeFrontDoor.CapExceeded.selector);
-        fd.deposit(9_901e18);
-        // 100e18 forwarded + 9_900e18 = 10_000e18, exactly the cap
-        dep(alice, 9_900e18);
-        assertEq(fd.depositOf(alice), 9_900e18);
-        assertEq(openTotal(), 9_900e18);
+        fd.deposit(4_901e18);
+        // 100e18 forwarded + 4_900e18 = 5_000e18, exactly the cap
+        dep(alice, 4_900e18);
+        assertEq(fd.depositOf(alice), 4_900e18);
+        assertEq(openTotal(), 4_900e18);
     }
 
     function test_depositBatchValueFull() public {
@@ -999,6 +1001,36 @@ contract FrontDoorBatchesTest is FrontDoorTestBase {
         fd.setBatchInterval(0);
         assertEq(fd.batchInterval(), 0);
         vm.stopPrank();
+    }
+
+    /// The redeem-request fee is capped at MAX_REDEEM_REQUEST_FEE (0.001 ETH), so no setting can price
+    /// every exit out; a batch's value at MAX_BATCH_VALUE (the lane's 5,000 TAO), above which no batch,
+    /// its redeems included, could ever be sent.
+    function test_redeemFeeAndBatchValueAreCapped() public {
+        assertEq(fd.MAX_REDEEM_REQUEST_FEE(), 1e15);
+        assertEq(fd.MAX_BATCH_VALUE(), 5_000e18);
+
+        vm.expectRevert(CascadeFrontDoor.InvalidParameter.selector);
+        new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e15 + 1, usdc);
+        CascadeFrontDoor ok =
+            new CascadeFrontDoor(tao, bridge, BITTENSOR, vault, owner, guardian, 12 hours, 1e18, 10_000e18, 1e15, usdc);
+        assertEq(ok.redeemRequestFee(), 1e15);
+
+        vm.startPrank(owner);
+        vm.expectRevert(CascadeFrontDoor.InvalidParameter.selector);
+        fd.setRedeemRequestFee(1e15 + 1);
+        vm.expectRevert(CascadeFrontDoor.InvalidParameter.selector);
+        fd.setMaxBatchValue(5_000e18 + 1);
+
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.LimitSet("redeemRequestFee", 1e15, 0);
+        fd.setRedeemRequestFee(1e15);
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.LimitSet("maxBatchValue", 5_000e18, 0);
+        fd.setMaxBatchValue(5_000e18);
+        vm.stopPrank();
+        assertEq(fd.redeemRequestFee(), 1e15);
+        assertEq(fd.maxBatchValue(), 5_000e18);
     }
 
     function test_constructorRejectsIntervalOverCap() public {

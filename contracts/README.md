@@ -523,12 +523,25 @@ Soft spots:
 - **The claim fallback is permissionless.** If the keeper lapses for 7 days, anyone may claim a
   hotkey's rewards and so choose when its validator basket is sold into root stake. Do not let the
   keeper lapse.
-- **The limits are owner parameters.** The outflow percentage (up to 100%) and its floor (no upper
-  bound), the payout delay (0 to 7 days) and the fee ceiling (up to 100%, with an absolute part
-  that has no upper bound) change without the 7-day registry delay, behind only the owner's
-  timelock (an operational setting, 48 hours in the beta). Set to their extremes, they remove the
-  bounds in layers 2 and 3. `maxMessageValue` (no upper bound) set above the lane's 5,000 TAO makes
-  chunks unsendable until it is lowered.
+- **The limits are owner parameters, within hard bounds.** They change without the 7-day registry
+  delay, behind only the owner's timelock (an operational setting, 48 hours in the beta), but the
+  code bounds each one, so even a captured owner cannot remove layers 2 and 3:
+
+  | Setter | Bound in the code | Why this bound |
+  |---|---|---|
+  | `setOutflowLimits` | at most 50% of the base a day; a floor of at most 100 TAO | A rogue front door takes at most half the base a window; the floor exists only so a small vault can exit, and 100 TAO is the spec's default. |
+  | `setPayoutDelay` | 1 hour to 7 days | The delay is the guardian's window to hold a rogue batch; 1 hour is what the test cadence uses (see open decisions). |
+  | `setFeeLimits` | at most 5% of a chunk, or 0.1 TAO | What the primary adapter can quote, and keep, per chunk; the live fee is about 0.001 TAO. |
+  | `setMessageLimits` | `maxMessageValue` at most 5,000 TAO | The lane's per-message limit (the adapters' `MAX_MESSAGE_VALUE`): above it chunks are unsendable. |
+  | `setUnstakeMarginRao` | at most 1 TAO per removal | A huge margin turns every exit into a full unstake and re-stake, which also ramps back into the allowance base. |
+  | `setRedeemRequestFee` (front door, and its constructor) | at most 0.001 ETH | Ten times the launch fee: no setting can price every exit out. |
+  | `setMaxBatchValue` (front door) | at most 5,000 TAO | A batch above the lane's limit can never be sent, and its redeems wait with it. |
+
+  Deliberately unbounded: `maxTotalAssets` and the front door's `depositCap` (beta caps that must
+  grow with the product, and since the allowance base counts only ramped-in stake, a direct deposit
+  no longer feeds it); `minDeposit`, `minDirectDeposit` and `hotkeyDustRao` (they gate deposits or
+  hotkey removal, not exits); `claimGasRequired` (it affects only when rewards are claimed, and the
+  right ceiling is the chain's block gas limit, still to be confirmed: checklist item 19).
 - **Retiring a front door fails its in-flight batches.** `removeFrontDoor` also makes that door's
   batches still crossing revert `UnknownPeer` at delivery; their deposits wait in the rail until the
   door is registered again (7 days). Drain a door before retiring it.
@@ -546,7 +559,7 @@ Soft spots:
   the guardian, then a 7-day registry re-proposal); direct deposits and redeems, which only a pause
   stops, for 8 days plus the timelock. It cannot cancel its own replacement. This bound holds only
   if the guardian key is NOT granted the timelock's canceller role. Without that role the guardian
-  cannot veto timelocked parameter changes (the outflow percentage, `payoutDelay`, the fee ceiling,
+  cannot veto timelocked parameter changes within their hard bounds (the outflow percentage, `payoutDelay`, the fee ceiling,
   `setStakeHotkey` / `moveStake`), which wait only for the timelock.
 - **An insolvent vault bounces deposits, not exits.** If the share price falls below half the
   launch price, a front-door batch still delivers: its deposits are not minted but bounced, queued
@@ -704,7 +717,8 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
 2. **Size the redeem-request fee to the bridge fee.** Keep `redeemRequestFee × maxRedeems` at or
    above the live Base-to-Bittensor bridge fee (beta values: 1e14 wei × 50 = 0.005 ETH). Otherwise a
    junk-filled batch cannot self-close: the `requestRedeem` that would close it reverts
-   `InsufficientFee`, and the keeper must close it with `closeBatch` and ETH attached.
+   `InsufficientFee`, and the keeper must close it with `closeBatch` and ETH attached. The fee is
+   capped at `MAX_REDEEM_REQUEST_FEE` (0.001 ETH; 0.05 ETH for a full 50-entry list).
 3. **Set the beta cap, in TAO.** Set the vault's `maxTotalAssets` (default 1,000 TAO; it caps direct
    deposits against the whole vault's assets) and each front door's `depositCap` (its deposits, net
    of payouts received) to the beta cap: about $250k, sized to the TAO liquidity on Base.
@@ -716,7 +730,8 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
 5. **Batch limits.** Keep 50 deposits + 50 redeems per batch until a fork measurement confirms that
    100 + 100 fits the lane's delivery gas (with as many hotkeys in the set as you use). The adapters
    size each delivery's gas to its entry count (unused gas is not refunded); check the pools'
-   rate-limit allowance before closing. Keep `maxMessageValue` at or below the lane's 5,000 TAO.
+   rate-limit allowance before closing. `maxMessageValue` cannot exceed the lane's 5,000 TAO (the
+   code refuses more).
 6. **ETH receivers.** `closeBatch` pays the rest of the budget to the caller with a plain call, and
    so does a `requestRedeem` that self-closes a full batch. A keeper, router or wallet contract that
    cannot receive ETH cannot close a batch whose pot exceeds the fee; give it a payable `receive`.
@@ -796,18 +811,18 @@ Defaults at deploy:
 | Parameter | Default | Contract |
 |---|---|---|
 | `maxDeposits` / `maxRedeems` | 50 / 50 per batch (ceiling 100) | front door |
-| `maxBatchValue` | 4,000 TAO | front door |
-| `batchInterval`, `minDeposit`, `depositCap`, `redeemRequestFee` | constructor arguments (beta: 12 hours; fee 1e14 wei); `batchInterval` is capped at `MAX_BATCH_INTERVAL` (7 days) | front door |
-| `maxDailyOutflowBps` / `minDailyOutflow` | 20% / 100 TAO per 24-hour window per front door | vault |
-| `maxEntryValue` / `maxMessageValue` / `minChunk` | 2,000 TAO / 4,000 TAO / 10 entries | vault |
-| `payoutDelay` | 24 hours (owner-settable, 0 to 7 days) | vault |
-| `maxFeeBps` / `maxFeeAbs` | 1% / 0.02 TAO | vault |
+| `maxBatchValue` | 4,000 TAO (at most `MAX_BATCH_VALUE`, 5,000 TAO) | front door |
+| `batchInterval`, `minDeposit`, `depositCap`, `redeemRequestFee` | constructor arguments (beta: 12 hours; fee 1e14 wei); `batchInterval` is capped at `MAX_BATCH_INTERVAL` (7 days), `redeemRequestFee` at `MAX_REDEEM_REQUEST_FEE` (0.001 ETH) | front door |
+| `maxDailyOutflowBps` / `minDailyOutflow` | 20% / 100 TAO per 24-hour window per front door (at most 50% / 100 TAO) | vault |
+| `maxEntryValue` / `maxMessageValue` / `minChunk` | 2,000 TAO / 4,000 TAO / 10 entries (`maxMessageValue` at most 5,000 TAO) | vault |
+| `payoutDelay` | 24 hours (owner-settable, 1 hour to 7 days) | vault |
+| `maxFeeBps` / `maxFeeAbs` | 1% / 0.02 TAO (at most 5% / 0.1 TAO) | vault |
 | `maxTotalAssets` | 1,000 TAO | vault |
 | `minDirectDeposit` | constructor argument | vault |
 | `claimGasRequired` | 55,000,000 | vault |
 | `hotkeyDustRao` | 1,000,000 rao (0.001 TAO) | vault |
 | `fallbackMinStakeRao` / `fallbackMinRemainRao` | 2,000,000 / 20,000,000 rao (0.002 / 0.02 TAO); the floors used are the larger of these and the live reads | vault |
-| `unstakeMarginRao` | 0 rao | vault |
+| `unstakeMarginRao` | 0 rao (at most 1 TAO) | vault |
 | `REGISTRY_DELAY`, `KEEPER_FALLBACK`, `REWARD_VESTING` | 7 days each (constants) | both / vault |
 | `GUARDIAN_DELAY` | 8 days (constant) | both |
 | `ED_RESERVE` | 1e12 wei (constant) | vault |

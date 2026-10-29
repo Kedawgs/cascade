@@ -28,6 +28,16 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint16 public constant MAX_REWARD_CUT_BPS = 2_000;
     /// Stake added by stakeIdle enters the outflow allowance's base linearly over this period.
     uint256 internal constant STAKE_RAMP = 1 days;
+    // Hard bounds on the owner's exit-safety parameters, so no setting removes the outflow cap, the
+    // payout delay or the fee ceiling, or makes payouts unsendable.
+    uint64 internal constant MIN_PAYOUT_DELAY = 1 hours;
+    uint256 internal constant MAX_OUTFLOW_BPS = 5_000;
+    uint256 internal constant MAX_MIN_DAILY_OUTFLOW = 100e18;
+    /// The lane's per-message limit (the adapters' MAX_MESSAGE_VALUE at most).
+    uint256 internal constant MAX_MESSAGE_VALUE = 5_000e18;
+    uint256 internal constant MAX_FEE_BPS = 500;
+    uint256 internal constant MAX_FEE_ABS = 0.1e18;
+    uint256 internal constant MAX_UNSTAKE_MARGIN_RAO = 1e9;
     IStaking public constant STAKING = IStaking(ISTAKING_ADDRESS);
     IAddressMapping public constant ADDRESS_MAPPING = IAddressMapping(ADDRESS_MAPPING_ADDRESS);
 
@@ -675,17 +685,21 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         emit LimitSet("maxTotalAssets", amount, 0);
     }
 
+    /// At most MAX_OUTFLOW_BPS (50%) of the base a day, and a floor of at most MAX_MIN_DAILY_OUTFLOW
+    /// (100 TAO).
     function setOutflowLimits(uint256 bps, uint256 minDaily) external onlyOwner {
-        if (bps > 10_000) revert InvalidParameter();
+        if (bps > MAX_OUTFLOW_BPS || minDaily > MAX_MIN_DAILY_OUTFLOW) revert InvalidParameter();
         maxDailyOutflowBps = bps;
         minDailyOutflow = minDaily;
         emit LimitSet("maxDailyOutflowBps", bps, minDaily);
     }
 
+    /// maxMessageValue at most MAX_MESSAGE_VALUE (the lane's 5,000 TAO).
     function setMessageLimits(uint256 maxEntryValue_, uint256 maxMessageValue_, uint32 minChunk_) external onlyOwner {
-        if (maxEntryValue_ > maxMessageValue_ || minChunk_ == 0 || minChunk_ > CascadeMessages.MAX_ENTRIES) {
-            revert InvalidParameter();
-        }
+        if (
+            maxEntryValue_ > maxMessageValue_ || maxMessageValue_ > MAX_MESSAGE_VALUE || minChunk_ == 0
+                || minChunk_ > CascadeMessages.MAX_ENTRIES
+        ) revert InvalidParameter();
         maxEntryValue = maxEntryValue_;
         maxMessageValue = maxMessageValue_;
         minChunk = minChunk_;
@@ -693,15 +707,17 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         emit LimitSet("minChunk", minChunk_, 0);
     }
 
+    /// The payout fee ceiling: at most MAX_FEE_BPS (5%) of a chunk, or MAX_FEE_ABS (0.1 TAO).
     function setFeeLimits(uint256 bps, uint256 abs_) external onlyOwner {
-        if (bps > 10_000) revert InvalidParameter();
+        if (bps > MAX_FEE_BPS || abs_ > MAX_FEE_ABS) revert InvalidParameter();
         maxFeeBps = bps;
         maxFeeAbs = abs_;
         emit LimitSet("maxFeeBps", bps, abs_);
     }
 
+    /// MIN_PAYOUT_DELAY (1 hour) to 7 days: the guardian's window to hold a rogue batch.
     function setPayoutDelay(uint64 delay) external onlyOwner {
-        if (delay > 7 days) revert InvalidParameter();
+        if (delay < MIN_PAYOUT_DELAY || delay > 7 days) revert InvalidParameter();
         payoutDelay = delay;
         emit LimitSet("payoutDelay", delay, 0);
     }
@@ -726,7 +742,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         emit LimitSet("hotkeyDustRao", rao, 0);
     }
 
+    /// At most MAX_UNSTAKE_MARGIN_RAO (1 TAO) per removal.
     function setUnstakeMarginRao(uint256 rao) external onlyOwner {
+        if (rao > MAX_UNSTAKE_MARGIN_RAO) revert InvalidParameter();
         unstakeMarginRao = rao;
         emit LimitSet("unstakeMarginRao", rao, 0);
     }

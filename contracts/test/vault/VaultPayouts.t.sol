@@ -123,7 +123,7 @@ contract VaultPayoutsTest is VaultTestBase {
         depositVia(bob, 100e18);
         depositVia(carol, 100e18);
         vm.prank(owner);
-        vault.setOutflowLimits(10_000, 100e18);
+        vault.setOutflowLimits(5_000, 100e18);
         key = redeemVia(entries3(alice, 6e25, bob, 6e25, carol, 6e25));
         list = new CascadeMessages.Payout[](3);
         list[0] = CascadeMessages.Payout(alice, 6e25, 60e18);

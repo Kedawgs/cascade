@@ -1,5 +1,6 @@
 import { type Address, encodePacked, formatEther, getContractAddress, type Hex, parseAbi } from "viem";
 import { BASE_V3, type DeploySettings, CADENCE, type Cadence, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "./config.ts";
+import { roleProblems, type Roles, TEST_ROLES } from "./roles.ts";
 import type { PlannedStep } from "./types.ts";
 
 export interface Plan {
@@ -18,6 +19,9 @@ export interface PlanV3 extends Omit<Plan, "addresses"> {
   build?: string;
   /** Absent = "test". Fixed when the plan is made; later commands read it from the record. */
   cadence?: Cadence;
+  /** A launch plan's owner, guardian, keeper and treasury. Absent = the test plan: the test wallet in
+   * every role (TEST_ROLES). */
+  roles?: Roles;
   addresses: Plan["addresses"] & { oracle: Address; staker: Address };
 }
 
@@ -46,6 +50,9 @@ export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS
   return cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
 }
 
+/** Who holds each role: a launch plan's roles, else the test wallet in every one. */
+export const rolesOf = (plan: Plan | PlanV3): Roles => (isPlanV3(plan) && plan.roles ? plan.roles : TEST_ROLES);
+
 /** A record's cadence: absent is test; anything unrecognised is refused. */
 export function cadenceOf(plan: Plan | PlanV3): Cadence {
   const c = isPlanV3(plan) ? plan.cadence : undefined;
@@ -73,6 +80,7 @@ export const CONFIG_ABI = {
   setDeliveryRoute: parseAbi(["function setDeliveryRoute(uint8 id)"]),
   setFees: parseAbi(["function setFees(uint16 swapFeeBps_, uint256 depositFeeUsdc_)"]),
   setRewardCut: parseAbi(["function setRewardCut(address treasury_, uint16 bps)"]),
+  transferOwnership: parseAbi(["function transferOwnership(address newOwner)"]),
 };
 
 /** A Uniswap v3 path: token | fee (3 bytes) | token | fee | token. */
@@ -118,14 +126,15 @@ function baseAdapterStep(nonce: number, a: Core, s: DeploySettings): PlannedStep
   };
 }
 
-/** The front door's v2 constructor arguments; v3 appends USDC. */
-const frontDoorArgs = (a: Core, s: DeploySettings): unknown[] => [
+/** The front door's v2 constructor arguments; v3 appends USDC. The test wallet deploys it and owns it
+ * while the deployment is configured; the guardian is the final one (a launch's own). */
+const frontDoorArgs = (a: Core, s: DeploySettings, guardian: Address = WALLET): unknown[] => [
   LIVE.base.TOKEN,
   a.baseAdapter,
   BigInt(LIVE.bittensor.CHAIN_ID),
   a.vault,
   WALLET,
-  WALLET,
+  guardian,
   BigInt(s.batchInterval),
   s.minDeposit,
   s.depositCap,
@@ -142,8 +151,12 @@ const frontDoorStep = (nonce: number, args: unknown[]): PlannedStep => ({
   args,
 });
 
-/** Bittensor's adapter, vault, reserves, keeper and payout delay, from `bitNonce` on. */
-function bittensorSteps(bitNonce: number, a: Core, vaultColdkey: Hex, s: DeploySettings): PlannedStep[] {
+/** How a step names the keeper: the test wallet, or a launch's keeper by address. */
+const keeperName = (roles: Roles) => (roles === TEST_ROLES ? "the test wallet" : roles.keeper);
+
+/** Bittensor's adapter, vault, reserves, keeper and payout delay, from `bitNonce` on. The test wallet
+ * deploys the vault and owns it while it is configured; its guardian and keeper are the roles'. */
+function bittensorSteps(bitNonce: number, a: Core, vaultColdkey: Hex, s: DeploySettings, roles: Roles = TEST_ROLES): PlannedStep[] {
   const base = LIVE.base;
   const bit = LIVE.bittensor;
   const hours = s.payoutDelay / 3600;
@@ -176,7 +189,7 @@ function bittensorSteps(bitNonce: number, a: Core, vaultColdkey: Hex, s: DeployS
       nonce: bitNonce + 1,
       label: "deploy the vault",
       contract: "src/CascadeVault.sol:CascadeVault",
-      args: [vaultColdkey, s.hotkey, a.bitAdapter, WALLET, WALLET, s.minDirectDeposit, BigInt(base.CHAIN_ID), a.frontDoor],
+      args: [vaultColdkey, s.hotkey, a.bitAdapter, WALLET, roles.guardian.bittensor, s.minDirectDeposit, BigInt(base.CHAIN_ID), a.frontDoor],
     },
     {
       id: "adapterReserve",
@@ -207,11 +220,11 @@ function bittensorSteps(bitNonce: number, a: Core, vaultColdkey: Hex, s: DeployS
       kind: "call",
       chain: "bittensor",
       nonce: bitNonce + 4,
-      label: "make the test wallet the vault's keeper",
+      label: `make ${keeperName(roles)} the vault's keeper`,
       to: a.vault,
       abi: CONFIG_ABI.setKeeper,
       functionName: "setKeeper",
-      args: [WALLET],
+      args: [roles.keeper],
     },
     {
       id: "setPayoutDelay",
@@ -239,13 +252,46 @@ export function buildPlan(baseNonce: number, bitNonce: number, vaultColdkey: Hex
   return { baseNonce, bitNonce, addresses, steps };
 }
 
+/** The roles a new plan is made with: a launch needs its own, which must pass roleProblems; the test
+ * plan takes none and keeps the test wallet in every role. */
+function planRoles(cadence: Cadence, roles: Roles | undefined): Roles {
+  if (cadence === "test") {
+    if (roles) throw new Error("the test plan keeps the test wallet in every role: roles are for a launch plan (OPS_CADENCE=launch)");
+    return TEST_ROLES;
+  }
+  if (!roles) throw new Error("a launch plan needs its roles: set OPS_LAUNCH_OWNER_BASE, OPS_LAUNCH_OWNER_BITTENSOR, OPS_LAUNCH_GUARDIAN_BASE, OPS_LAUNCH_GUARDIAN_BITTENSOR, OPS_LAUNCH_KEEPER and OPS_LAUNCH_TREASURY");
+  const problems = roleProblems(roles);
+  if (problems.length) throw new Error(`the launch's roles are not ready:\n  ${problems.join("\n  ")}`);
+  return roles;
+}
+
+/** A launch's last step on one contract: offer its ownership to that chain's final owner (Ownable2Step:
+ * the test wallet stays the owner until the final owner calls acceptOwnership, from pnpm ops handoff). */
+const handOff = (id: PlannedStep["id"], chain: "base" | "bittensor", nonce: number, what: string, to: Address, owner: Address): PlannedStep => ({
+  id,
+  kind: "call",
+  chain,
+  nonce,
+  label: `offer ${what}'s ownership to ${owner} (it accepts with the files from pnpm ops handoff)`,
+  to,
+  abi: CONFIG_ABI.transferOwnership,
+  functionName: "transferOwnership",
+  args: [owner],
+});
+
 /** The v3 deployment from the wallet's current nonces. Base first: the adapter, the oracle, the front
  * door (which takes USDC), the staker (which reads the front door's tokens, so after it), then the
  * front door's keeper, swapper, oracle and batch value and the staker's route, delivery route and fees.
  * Then Bittensor as in v2, staking with tao.bot, and the vault's reward cut to the treasury. The test
- * wallet is owner, guardian, keeper and treasury. */
-export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: Hex, cadence: Cadence = "test"): PlanV3 {
-  const s = cadence === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
+ * plan has the test wallet as owner, guardian, keeper and treasury. A launch plan takes its `roles`:
+ * the test wallet deploys and owns everything while it is configured, the guardians are the final ones
+ * from the constructors, the keeper and treasury are set to the roles', and each chain ends by offering
+ * ownership of the front door, the staker and the vault to that chain's owner (the oracle and the
+ * adapters have no owner). */
+export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: Hex, cadence: Cadence = "test", roles?: Roles): PlanV3 {
+  const r = planRoles(cadence, roles);
+  const launch = cadence === "launch";
+  const s = launch ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
   const addresses = {
     baseAdapter: at(baseNonce),
     oracle: at(baseNonce + 1),
@@ -274,7 +320,7 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       contract: "src/CascadeTwapOracle.sol:CascadeTwapOracle",
       args: [BASE_V3.TAO_WETH_POOL, BASE_V3.WETH_USDC_POOL, LIVE.base.TOKEN, BASE_V3.WETH, BASE_V3.USDC],
     },
-    frontDoorStep(n + 2, [...frontDoorArgs(addresses, s), BASE_V3.USDC]),
+    frontDoorStep(n + 2, [...frontDoorArgs(addresses, s, r.guardian.base), BASE_V3.USDC]),
     {
       id: "staker",
       kind: "create",
@@ -282,9 +328,9 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       nonce: n + 3,
       label: "deploy the staker",
       contract: "src/CascadeStaker.sol:CascadeStaker",
-      args: [BASE_V3.USDC, LIVE.base.TOKEN, addresses.frontDoor, WALLET, s.treasury],
+      args: [BASE_V3.USDC, LIVE.base.TOKEN, addresses.frontDoor, WALLET, r.treasury],
     },
-    call("fdSetKeeper", n + 4, "make the test wallet the front door's keeper", addresses.frontDoor, "setKeeper", [WALLET]),
+    call("fdSetKeeper", n + 4, `make ${keeperName(r)} the front door's keeper`, addresses.frontDoor, "setKeeper", [r.keeper]),
     call("fdSetSwapper", n + 5, "make the staker the front door's swapper", addresses.frontDoor, "setSwapper", [addresses.staker]),
     call("fdSetOracle", n + 6, "point the front door at the TWAP oracle", addresses.frontDoor, "setOracle", [addresses.oracle]),
     call(
@@ -305,7 +351,13 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       "setFees",
       [s.swapFeeBps, s.depositFeeUsdc],
     ),
-    ...bittensorSteps(bitNonce, addresses, vaultColdkey, s),
+    ...(launch
+      ? [
+          handOff("fdTransferOwnership", "base", n + 11, "the front door", addresses.frontDoor, r.owner.base),
+          handOff("stakerTransferOwnership", "base", n + 12, "the staker", addresses.staker, r.owner.base),
+        ]
+      : []),
+    ...bittensorSteps(bitNonce, addresses, vaultColdkey, s, r),
     {
       id: "setRewardCut",
       kind: "call",
@@ -315,8 +367,9 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       to: addresses.vault,
       abi: CONFIG_ABI.setRewardCut,
       functionName: "setRewardCut",
-      args: [s.treasury, s.rewardCutBps],
+      args: [r.treasury, s.rewardCutBps],
     },
+    ...(launch ? [handOff("vaultTransferOwnership", "bittensor", bitNonce + 7, "the vault", addresses.vault, r.owner.bittensor)] : []),
   ];
-  return { version: 3, build: CONTRACTS_BUILD, ...(cadence === "launch" ? { cadence } : {}), baseNonce, bitNonce, addresses, steps };
+  return { version: 3, build: CONTRACTS_BUILD, ...(launch ? { cadence, roles: r } : {}), baseNonce, bitNonce, addresses, steps };
 }

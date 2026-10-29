@@ -133,7 +133,11 @@ export const SETTINGS_V3 = {
  * day, and the keeper may wait a day before closing a thin batch. Chosen when a v3 plan is made. */
 export type Cadence = "test" | "launch";
 
-export const SETTINGS_V3_LAUNCH = { ...SETTINGS_V3, batchInterval: 3_600, payoutDelay: 86_400 } as const;
+const { treasury: _testTreasury, ...SETTINGS_V3_NO_TREASURY } = SETTINGS_V3;
+
+/** The launch: hourly batches and a day's payout delay. It has no treasury: a launch plan takes its
+ * treasury, like its owner, guardian and keeper, from its roles (roles.ts), never the test wallet. */
+export const SETTINGS_V3_LAUNCH = { ...SETTINGS_V3_NO_TREASURY, batchInterval: 3_600, payoutDelay: 86_400 } as const;
 
 /** The keeper's longest wait before closing a batch with entries: null = no extra wait, close as soon as
  * the contract allows (closeMaxWaitS returns 0). */

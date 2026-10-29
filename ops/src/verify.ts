@@ -1,9 +1,9 @@
 import { basename } from "node:path";
-import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi } from "viem";
+import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi, zeroAddress } from "viem";
 import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
 import { codeFor } from "./builds.ts";
 import { BASE_V3, type ChainName, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
-import { buildOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, settingsOf, settingsV3Of } from "./plan.ts";
+import { buildOf, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, rolesOf, settingsOf, settingsV3Of } from "./plan.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord, type VerifyResult } from "./record.ts";
 import { balanceOf, codeAt, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
@@ -39,10 +39,15 @@ const same = (a: unknown, b: unknown) => {
 const ROUTE_FIELDS = ["kind", "router", "buyPath", "sellPath", "active"] as const;
 
 /** Every setting the spec's read-back lists, from the plan; a v3 plan adds the staker, the oracle, the
- * front door's delivery settings and the vault's reward cut. */
+ * front door's delivery settings and the vault's reward cut. The guardians, keepers and treasury are the
+ * plan's roles (the test wallet in a test plan). A launch plan's owners are left to ownershipChecks: the
+ * test wallet until the final owner accepts, then the final owner. */
 export function expectations(plan: Plan | PlanV3): Expectation[] {
   const a = plan.addresses;
   const s = settingsOf(plan);
+  const roles = rolesOf(plan);
+  const launch = cadenceOf(plan) === "launch";
+  const owner = (chain: ChainName) => (launch ? {} : { owner: roles.owner[chain] });
   const out: Expectation[] = [];
   const add = (chain: ChainName, contract: string, address: Address, fields: Record<string, unknown>) => {
     for (const [field, expected] of Object.entries(fields)) out.push({ chain, contract, address, field, expected });
@@ -73,8 +78,8 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
     vaultChain: BigInt(LIVE.bittensor.CHAIN_ID),
     primaryBridge: a.baseAdapter,
     asset: LIVE.base.TOKEN,
-    owner: WALLET,
-    guardian: WALLET,
+    ...owner("base"),
+    guardian: roles.guardian.base,
     batchInterval: BigInt(s.batchInterval),
     minDeposit: s.minDeposit,
     depositCap: s.depositCap,
@@ -83,9 +88,9 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
   add("bittensor", "CascadeVault", a.vault, {
     stakeHotkey: s.hotkey,
     primaryBridge: a.bitAdapter,
-    owner: WALLET,
-    guardian: WALLET,
-    keeper: WALLET,
+    ...owner("bittensor"),
+    guardian: roles.guardian.bittensor,
+    keeper: roles.keeper,
     payoutDelay: BigInt(s.payoutDelay),
   });
   if (!isPlanV3(plan)) return out;
@@ -94,7 +99,7 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
   const a3 = plan.addresses;
   add("base", "CascadeFrontDoor", a3.frontDoor, {
     usdc: BASE_V3.USDC,
-    keeper: WALLET,
+    keeper: roles.keeper,
     swapper: a3.staker,
     oracle: a3.oracle,
     maxDeliverySlippageBps: v.maxDeliverySlippageBps,
@@ -104,8 +109,8 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
     usdc: BASE_V3.USDC,
     tao: LIVE.base.TOKEN,
     frontDoor: a3.frontDoor,
-    owner: WALLET,
-    treasury: v.treasury,
+    ...owner("base"),
+    treasury: roles.treasury,
     swapFeeBps: v.swapFeeBps,
     depositFeeUsdc: v.depositFeeUsdc,
   });
@@ -120,8 +125,42 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
     weth: BASE_V3.WETH,
     usdc: BASE_V3.USDC,
   });
-  add("bittensor", "CascadeVault", a3.vault, { treasury: v.treasury, rewardCutBps: v.rewardCutBps });
+  add("bittensor", "CascadeVault", a3.vault, { treasury: roles.treasury, rewardCutBps: v.rewardCutBps });
   return out;
+}
+
+const OWNABLE = parseAbi(["function owner() view returns (address)", "function pendingOwner() view returns (address)"]);
+
+/** The contracts with an owner (Ownable2Step): the front door, the staker and the vault. The oracle and
+ * the adapters have none. */
+export const ownedContracts = (plan: PlanV3): [ChainName, string, Address][] => [
+  ["base", "CascadeFrontDoor", plan.addresses.frontDoor],
+  ["base", "CascadeStaker", plan.addresses.staker],
+  ["bittensor", "CascadeVault", plan.addresses.vault],
+];
+
+/** A launch's owners: each contract's ownership either accepted by its chain's final owner (nothing
+ * pending), or offered to it and not yet accepted (the test wallet still the owner): a warning, since
+ * the final owner accepts in its own time. Anything else fails. The final owner may be a contract (a
+ * Safe or a timelock): no code is read. A test plan's owners are in its expectations. */
+export async function ownershipChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3): Promise<{ failures: string[]; warnings: string[] }> {
+  const failures: string[] = [];
+  const warnings: string[] = [];
+  if (cadenceOf(plan) !== "launch") return { failures, warnings };
+  const roles = rolesOf(plan);
+  for (const [chain, name, address] of ownedContracts(plan)) {
+    const final = roles.owner[chain];
+    const owner = (await read(ctx.rpc, chain, { address, abi: OWNABLE, functionName: "owner" })) as Address;
+    const pending = (await read(ctx.rpc, chain, { address, abi: OWNABLE, functionName: "pendingOwner" })) as Address;
+    const where = `${chainLabel(chain)} ${name}`;
+    if (same(owner, final) && same(pending, zeroAddress)) continue;
+    if (same(owner, WALLET) && same(pending, final)) {
+      warnings.push(`${where}: ownership offered to ${final} and not accepted yet (the owner is still the deployer ${WALLET}): accept it with the files from pnpm ops handoff`);
+      continue;
+    }
+    failures.push(`${where}: owner ${owner}, pendingOwner ${pending}; the plan hands it to ${final}`);
+  }
+  return { failures, warnings };
 }
 
 /** Reads each expectation's view into a map by `keyOf`, calling a view once per address and arguments.
@@ -269,10 +308,14 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
   const actual = await readBack(ctx, exp, art);
   const failures = compare(exp, actual);
 
+  const warnings: string[] = [];
   if (isPlanV3(plan)) {
     failures.push(...v3AddressFailures(plan, actual));
+    const owners = await ownershipChecks(ctx, plan);
+    failures.push(...owners.failures);
+    warnings.push(...owners.warnings);
     const treasuries = new Map<string, Address>();
-    for (const t of [settingsV3Of(plan).treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
+    for (const t of [rolesOf(plan).treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
       if (anAddress(t)) treasuries.set(t.toLowerCase(), t);
     }
     for (const t of treasuries.values()) {
@@ -312,7 +355,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord): Promise<VerifyRes
     const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), codeFor(plan, name, art));
     if (m) failures.push(m);
   }
-  return { ok: failures.length === 0, failures, checkedAt: new Date().toISOString() };
+  return { ok: failures.length === 0, failures, ...(warnings.length ? { warnings } : {}), checkedAt: new Date().toISOString() };
 }
 
 /** Reads everything back and saves the result into the record at `path`; a v2 record is refused before
@@ -326,5 +369,6 @@ export async function verifyAndSave(ctx: Ctx, path: string, rec: DeploymentRecor
   saveRecord(path, now ? { ...now, verify: rec.verify } : rec);
   if (rec.verify.ok) ctx.log("Read-back check: everything matches the plan");
   else ctx.log(`Read-back check FAILED:\n  ${rec.verify.failures.join("\n  ")}`);
+  if (rec.verify.warnings?.length) ctx.log(`Warnings (not failures):\n  ${rec.verify.warnings.join("\n  ")}`);
   return rec.verify.ok;
 }

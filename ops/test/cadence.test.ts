@@ -1,5 +1,6 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
+import { ROLES } from "./launch-roles.ts";
 import { CADENCE, cadenceFromEnv, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3, cadenceOf, closeMaxWaitS, settingsOf, settingsV3Of } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
@@ -28,7 +29,7 @@ describe("cadence", () => {
 
   it("settingsV3Of gives a plan's full v3 settings, and verify's expectations come from them", () => {
     const test = buildPlanV3(0, 40, COLDKEY);
-    const launch = buildPlanV3(0, 40, COLDKEY, "launch");
+    const launch = buildPlanV3(0, 40, COLDKEY, "launch", ROLES);
     expect(settingsV3Of(test)).toBe(SETTINGS_V3);
     expect(settingsV3Of(launch)).toBe(SETTINGS_V3_LAUNCH);
     expect(() => settingsV3Of(buildPlan(0, 0, COLDKEY) as never)).toThrow(/v2/);
@@ -39,8 +40,10 @@ describe("cadence", () => {
     expect(get("CascadeVault", "rewardCutBps")).toBe(SETTINGS_V3_LAUNCH.rewardCutBps);
   });
 
-  it("launch settings change only the batch interval and the payout delay", () => {
-    expect(SETTINGS_V3_LAUNCH).toEqual({ ...SETTINGS_V3, batchInterval: 3_600, payoutDelay: 86_400 });
+  it("launch settings change the batch interval and the payout delay, and take no treasury from the test settings", () => {
+    const { treasury: _, ...rest } = SETTINGS_V3;
+    expect(SETTINGS_V3_LAUNCH).toEqual({ ...rest, batchInterval: 3_600, payoutDelay: 86_400 });
+    expect("treasury" in SETTINGS_V3_LAUNCH).toBe(false);
     expect(CADENCE.launch.closeMaxWaitS).toBe(86_400);
   });
 
@@ -59,11 +62,11 @@ describe("cadence", () => {
   it("the keeper's extra close wait is none for test and a day for launch", () => {
     expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY))).toBe(0);
     expect(closeMaxWaitS(buildPlan(0, 0, COLDKEY))).toBe(0);
-    expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY, "launch"))).toBe(86_400);
+    expect(closeMaxWaitS(buildPlanV3(0, 40, COLDKEY, "launch", ROLES))).toBe(86_400);
   });
 
   it("a launch plan stores its cadence, builds its steps with the launch values and verifies against them", () => {
-    const plan = buildPlanV3(2, 40, COLDKEY, "launch");
+    const plan = buildPlanV3(2, 40, COLDKEY, "launch", ROLES);
     expect(plan.cadence).toBe("launch");
     expect(cadenceOf(plan)).toBe("launch");
     expect(settingsOf(plan)).toBe(SETTINGS_V3_LAUNCH);
@@ -74,11 +77,12 @@ describe("cadence", () => {
     expect(delay.label).toBe("set the payout delay to 24 hours");
     expect(field(plan, "CascadeFrontDoor", "batchInterval")).toBe(3_600n);
     expect(field(plan, "CascadeVault", "payoutDelay")).toBe(86_400n);
-    // treasury and ownership are unchanged
-    expect(field(plan, "CascadeStaker", "treasury")).toBe(WALLET);
-    // nothing else differs from the test plan
+    // the treasury is the launch's own (roles), not the test wallet
+    expect(field(plan, "CascadeStaker", "treasury")).toBe(ROLES.treasury);
+    expect(field(plan, "CascadeStaker", "treasury")).not.toBe(WALLET);
+    // the test plan's steps, in order, then each chain's hand-off of ownership; the same addresses
     const test = buildPlanV3(2, 40, COLDKEY);
-    expect(plan.steps.map((s) => s.id)).toEqual(test.steps.map((s) => s.id));
+    expect(plan.steps.map((s) => s.id).filter((id) => !id.endsWith("TransferOwnership"))).toEqual(test.steps.map((s) => s.id));
     expect(plan.addresses).toEqual(test.addresses);
   });
 
@@ -91,9 +95,9 @@ describe("cadence", () => {
       done: { bitAdapter: { hash: `0x${"ab".repeat(32)}` as Hex, block: 5, gasUsed: 1n, costWei: 1n } },
       verify: { ok: true, failures: [], checkedAt: "" },
     });
-    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch")))).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400\n");
+    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch", ROLES)))).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400\n");
     expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY)))).not.toContain("MAX_WAIT");
-    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch"))).split("\n")[0]).toBe(
+    expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch", ROLES))).split("\n")[0]).toBe(
       "# Written by `pnpm ops web-config`: the live launch deployment. Local only (git-ignored).",
     );
     expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY))).split("\n")[0]).toBe(

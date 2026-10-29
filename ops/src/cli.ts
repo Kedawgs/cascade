@@ -12,6 +12,7 @@ import { formatStatus } from "./keeper/status.ts";
 import { preflight } from "./preflight.ts";
 import { loadRecordFor, needRecord as needRecordAt } from "./record.ts";
 import { rehearse } from "./rehearse.ts";
+import { launchRolesFromEnv } from "./roles.ts";
 import { createRpc } from "./rpc.ts";
 import { type Ctx, execFileRunner, unit } from "./send.ts";
 import { verifyAndSave } from "./verify.ts";
@@ -53,7 +54,14 @@ async function run(a: Args): Promise<number> {
       return 0;
     }
     case "deploy":
-      return (await deployAndVerify(ctxFor(a.live), recordPath(a.live), { newPlan: a.newPlan ?? false, v3: isV3Deployment(env), cadence: cadenceFromEnv(env) })) ? 0 : 1;
+      return (await deployAndVerify(ctxFor(a.live), recordPath(a.live), {
+        newPlan: a.newPlan ?? false,
+        v3: isV3Deployment(env),
+        cadence: cadenceFromEnv(env),
+        roles: () => launchRolesFromEnv(env),
+      }))
+        ? 0
+        : 1;
     case "verify":
       // refuses a v2 record before reading anything: its contracts no longer match the build
       return (await verifyAndSave(ctxFor(a.live), recordPath(a.live), needRecord(a.live))) ? 0 : 1;

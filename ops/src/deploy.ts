@@ -10,10 +10,12 @@ import {
   type Plan,
   type PlanV3,
   ROUTE_0,
+  rolesOf,
   settingsOf,
   settingsV3Of,
 } from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, type DoneStep, loadRecordFor, saveRecord } from "./record.ts";
+import { type Roles, rolesDiffer } from "./roles.ts";
 import { balanceOf, codeAt, firstBlockWithCode, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
 import type { CallRequest, CreateRequest, PlannedStep, StepId } from "./types.ts";
@@ -40,6 +42,8 @@ const VIEWS = parseAbi([
   "function depositFeeUsdc() view returns (uint256)",
   "function treasury() view returns (address)",
   "function rewardCutBps() view returns (uint16)",
+  "function owner() view returns (address)",
+  "function pendingOwner() view returns (address)",
 ]);
 
 const eq = (x: unknown, y: unknown) => typeof x === "string" && typeof y === "string" && x.toLowerCase() === y.toLowerCase();
@@ -64,6 +68,12 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
     return plan.addresses;
   };
   const sv3 = () => (v3(), settingsV3Of(plan as PlanV3));
+  const roles = rolesOf(plan);
+  /** Ownable2Step: offered once the final owner is pending, and done for good once it has accepted. */
+  const offered = async (chain: ChainName, at: Address) => {
+    const final = roles.owner[chain];
+    return (await hasCode(chain, at)) && (eq(await view(chain, at, "pendingOwner"), final) || eq(await view(chain, at, "owner"), final));
+  };
   switch (step.id) {
     case "baseAdapter":
     case "frontDoor":
@@ -84,17 +94,17 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
         (await balanceOf(ctx.rpc, "bittensor", a.vault)) >= s.vaultReserve - 5n * 10n ** 11n
       );
     case "setKeeper":
-      return (await hasCode("bittensor", a.vault)) && (await view("bittensor", a.vault, "keeper")) === WALLET;
+      return (await hasCode("bittensor", a.vault)) && eq(await view("bittensor", a.vault, "keeper"), roles.keeper);
     case "setPayoutDelay":
       return (await hasCode("bittensor", a.vault)) && (await view("bittensor", a.vault, "payoutDelay")) === BigInt(s.payoutDelay);
     case "setRewardCut":
       return (
         (await hasCode("bittensor", a.vault)) &&
-        eq(await view("bittensor", a.vault, "treasury"), sv3().treasury) &&
+        eq(await view("bittensor", a.vault, "treasury"), (v3(), roles.treasury)) &&
         (await view("bittensor", a.vault, "rewardCutBps")) === sv3().rewardCutBps
       );
     case "fdSetKeeper":
-      return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "keeper"), WALLET);
+      return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "keeper"), roles.keeper);
     case "fdSetSwapper":
       return (await hasCode("base", a.frontDoor)) && eq(await view("base", a.frontDoor, "swapper"), v3().staker);
     case "fdSetOracle":
@@ -117,6 +127,12 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
         (await view("base", v3().staker, "swapFeeBps")) === sv3().swapFeeBps &&
         (await view("base", v3().staker, "depositFeeUsdc")) === sv3().depositFeeUsdc
       );
+    case "fdTransferOwnership":
+      return offered("base", a.frontDoor);
+    case "stakerTransferOwnership":
+      return offered("base", v3().staker);
+    case "vaultTransferOwnership":
+      return offered("bittensor", a.vault);
   }
 }
 
@@ -232,7 +248,50 @@ const finished = (rec: DeploymentRecord) => !rec.pending && rec.plan.steps.every
  * rehearsal record for a --live run, or a live one on the forks), is refused before anything else,
  * archiving included. An unfinished v3 plan from another contracts build is refused before anything is
  * read or sent (a finished one goes on to the read-back, against its own build). */
-export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v3?: boolean; cadence?: Cadence }, deps: DeployDeps = realDeps) {
+export interface DeployOpts {
+  newPlan: boolean;
+  v3?: boolean;
+  cadence?: Cadence;
+  /** A launch's roles (from the environment: launchRolesFromEnv), asked for only when a launch plan is made
+   * or resumed; it throws when they are missing or wrong. */
+  roles?: () => Roles;
+}
+
+/** A launch's roles before it is planned: every one given, and the treasury a plain account on both chains
+ * (verify checks it again after the deploy, but the staker and the vault would already name it). */
+async function rolesForNewLaunch(ctx: Ctx, opts: DeployOpts): Promise<Roles> {
+  if (!opts.roles) throw new Error("a launch plan needs its roles: set the OPS_LAUNCH_… variables (see ops/LAUNCH-SETTINGS.md); nothing read or sent");
+  const roles = opts.roles();
+  for (const chain of ["base", "bittensor"] as const) {
+    if ((await codeAt(ctx.rpc, chain, roles.treasury)) !== "0x") {
+      throw new Error(
+        `the treasury ${roles.treasury} has contract code on ${chainLabel(chain)}: it must be a plain account, the same owner on Base and Bittensor; nothing sent`,
+      );
+    }
+  }
+  return roles;
+}
+
+/** A resumed launch follows its record's roles; the environment naming others is refused (the operator
+ * may have meant the new ones). Roles the environment can't give leave the record's in force. */
+function checkResumedRoles(path: string, plan: Plan | PlanV3, opts: DeployOpts): void {
+  if (!isPlanV3(plan) || !plan.roles || !opts.roles) return;
+  let now: Roles;
+  try {
+    now = opts.roles();
+  } catch {
+    return;
+  }
+  const diff = rolesDiffer(plan.roles, now);
+  if (diff) {
+    throw new Error(`${path} plans ${diff}: deploy follows the record; put the record's roles back in .env, or plan anew with deploy --new-plan; nothing sent`);
+  }
+}
+
+const formatRoles = (r: Roles) =>
+  `owner ${r.owner.base} on Base and ${r.owner.bittensor} on Bittensor; guardian ${r.guardian.base} on Base and ${r.guardian.bittensor} on Bittensor; keeper ${r.keeper}; treasury ${r.treasury}`;
+
+export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: DeployDeps = realDeps) {
   const v3 = opts.v3 ?? false;
   let rec = loadRecordFor(path, ctx.live);
   if (rec && isPlanV3(rec.plan) !== v3) {
@@ -249,6 +308,9 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
     );
   }
   if (!rec) {
+    const launch = v3 && opts.cadence === "launch";
+    // refused before anything else is read: no plan without every role in place
+    const roles = launch ? await rolesForNewLaunch(ctx, opts) : undefined;
     const baseNonce = await nonceOf(ctx.rpc, "base", WALLET);
     const bitNonce = await nonceOf(ctx.rpc, "bittensor", WALLET);
     // in both plans the vault is the second create on Bittensor
@@ -258,15 +320,18 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
       target: ctx.live ? "live" : "rehearsal",
       wallet: WALLET,
       createdAt: new Date().toISOString(),
-      plan: v3 ? buildPlanV3(baseNonce, bitNonce, coldkey, opts.cadence) : buildPlan(baseNonce, bitNonce, coldkey),
+      plan: v3 ? buildPlanV3(baseNonce, bitNonce, coldkey, opts.cadence, roles) : buildPlan(baseNonce, bitNonce, coldkey),
       done: {},
     };
     saveRecord(path, rec);
-    const named = v3 && opts.cadence === "launch" ? " (launch cadence: 1-hour batches, 24-hour payout delay)" : "";
+    const named = launch ? " (launch cadence: 1-hour batches, 24-hour payout delay)" : "";
     ctx.log(`Planned the ${v3 ? "v3 " : ""}deployment${named} from the wallet's nonces: Base ${baseNonce}, Bittensor ${bitNonce}`);
+    if (roles) ctx.log(`Roles: ${formatRoles(roles)}. The test wallet deploys and owns everything until the final owners accept (pnpm ops handoff).`);
   }
   else if (opts.cadence === "launch" && cadenceOf(rec.plan) === "test") {
     ctx.log("OPS_CADENCE=launch ignored: the record's cadence is test; use --new-plan to plan anew");
+  } else {
+    checkResumedRoles(path, rec.plan, opts);
   }
   await settlePending(ctx, rec, path);
 
@@ -334,7 +399,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
  * anew under the v2 name would archive the record that status, wind-down and sweep still read. An
  * existing v2 record is refused too, before anything is read or sent: resuming it would re-run the
  * read-back and save a failed code comparison into it. A record of the other kind of run is refused. */
-export async function deployAndVerify(ctx: Ctx, path: string, opts: { newPlan: boolean; v3: boolean; cadence?: Cadence }, deps: DeployDeps = realDeps) {
+export async function deployAndVerify(ctx: Ctx, path: string, opts: DeployOpts & { v3: boolean }, deps: DeployDeps = realDeps) {
   const existing = loadRecordFor(path, ctx.live);
   if (!opts.v3 && (opts.newPlan || !existing)) {
     throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");

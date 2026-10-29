@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeFunctionData, encodeFunctionResult, type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
+import { ROLES } from "./launch-roles.ts";
 import { loadArtifact } from "../src/artifacts.ts";
 import { type ChainName, paths, targets, WALLET } from "../src/config.ts";
 import { type DeployDeps, deploy, effectPresent } from "../src/deploy.ts";
@@ -30,6 +31,8 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
         return numberToHex(params[1] === "latest" ? (opts.latest?.[chain] ?? nonce[chain]) : nonce[chain]);
       }
       if (method === "eth_getTransactionByHash") return opts.known?.has(params[0] as Hex) ? { hash: params[0] } : null;
+      // a launch plan first checks its treasury is a plain account on both chains
+      if (method === "eth_getCode") return "0x";
       if (method === "eth_getTransactionReceipt") return receipts.get(params[0] as Hex) ?? null;
       throw new Error(`unexpected ${method}`);
     },
@@ -404,7 +407,7 @@ describe("effectPresent v3", () => {
 describe("deploy cadence", () => {
   it("plans a new v3 record with the chosen cadence, and a resumed record keeps its own", async () => {
     const w = world({ base: 4, bittensor: 9 });
-    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch" }, w.deps);
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch", roles: () => ROLES }, w.deps);
     expect(rec.plan).toMatchObject({ version: 3, cadence: "launch" });
     // a later run reads the record, not the option
     const again = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "test" }, w.deps);
@@ -413,7 +416,7 @@ describe("deploy cadence", () => {
 
   it("names the cadence when planning a launch record, and leaves the test line as it was", async () => {
     const l = world({ base: 4, bittensor: 9 });
-    await deploy(l.ctx, l.recordPath, { newPlan: false, v3: true, cadence: "launch" }, l.deps);
+    await deploy(l.ctx, l.recordPath, { newPlan: false, v3: true, cadence: "launch", roles: () => ROLES }, l.deps);
     expect(l.logs).toContain(
       "Planned the v3 deployment (launch cadence: 1-hour batches, 24-hour payout delay) from the wallet's nonces: Base 4, Bittensor 9",
     );
@@ -426,13 +429,13 @@ describe("deploy cadence", () => {
     const w = world({ base: 4, bittensor: 9 });
     await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
     w.logs.length = 0;
-    await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch" }, w.deps);
+    await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true, cadence: "launch", roles: () => ROLES }, w.deps);
     const ignored = "OPS_CADENCE=launch ignored: the record's cadence is test; use --new-plan to plan anew";
     expect(w.logs.filter((x) => x === ignored)).toHaveLength(1);
     // a launch record resumed under launch, and a test record without it, say nothing
     const q = world({ base: 4, bittensor: 9 });
-    await deploy(q.ctx, q.recordPath, { newPlan: false, v3: true, cadence: "launch" }, q.deps);
-    await deploy(q.ctx, q.recordPath, { newPlan: false, v3: true, cadence: "launch" }, q.deps);
+    await deploy(q.ctx, q.recordPath, { newPlan: false, v3: true, cadence: "launch", roles: () => ROLES }, q.deps);
+    await deploy(q.ctx, q.recordPath, { newPlan: false, v3: true, cadence: "launch", roles: () => ROLES }, q.deps);
     expect(q.logs.some((x) => x.includes("ignored"))).toBe(false);
   });
 

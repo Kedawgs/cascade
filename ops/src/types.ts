@@ -44,6 +44,10 @@ export type StepId =
   | "stakerSetRoute0"
   | "stakerSetDeliveryRoute"
   | "stakerSetFees"
-  | "setRewardCut";
+  | "setRewardCut"
+  // a launch: offer ownership to the final owner, the last step on each contract
+  | "fdTransferOwnership"
+  | "stakerTransferOwnership"
+  | "vaultTransferOwnership";
 
 export type PlannedStep = { id: StepId } & (({ kind: "create" } & CreateRequest) | ({ kind: "call" } & CallRequest));

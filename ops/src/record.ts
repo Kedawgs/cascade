@@ -10,6 +10,9 @@ import type { StepId } from "./types.ts";
 export interface VerifyResult {
   ok: boolean;
   failures: string[];
+  /** Worth knowing but not wrong (a hand-off not yet accepted, a pause, a proposal the owner expects):
+   * they don't fail the read-back. Absent in results saved before warnings existed. */
+  warnings?: string[];
   checkedAt: string;
 }
 

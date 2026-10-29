@@ -43,6 +43,7 @@ import {
   type StepReport,
   standInDebits,
 } from "./roundtrip.ts";
+import { launchRolesFromEnv } from "./roles.ts";
 import { balanceOf, chainIdOf, createRpc, nonceOf, read, type Rpc } from "./rpc.ts";
 import { type Ctx, describeRevert, execFileRunner } from "./send.ts";
 import { verify } from "./verify.ts";
@@ -566,7 +567,9 @@ export async function rehearse(env: Env, log: (l: string) => void): Promise<bool
   const path = recordPath(env, false);
   const r = await startForks(env, log);
   try {
-    const rec = await deploy(r.ctx, path, { newPlan: true, v3: true, cadence });
+    // a launch rehearsal takes its roles from the environment like the real one; its round trip's keeper
+    // steps sign as the test wallet, so they need OPS_LAUNCH_KEEPER to be the test wallet
+    const rec = await deploy(r.ctx, path, { newPlan: true, v3: true, cadence, roles: () => launchRolesFromEnv(env) });
     rec.verify = await verify(r.ctx, rec);
     saveRecord(path, rec);
     if (!rec.verify.ok) {

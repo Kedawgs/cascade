@@ -13,6 +13,7 @@ import {
   toFunctionSelector,
 } from "viem";
 import { describe, expect, it } from "vitest";
+import { ROLES } from "./launch-roles.ts";
 import { loadArtifact } from "../src/artifacts.ts";
 import { type ChainName, paths, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3, type PlanV3 } from "../src/plan.ts";
@@ -362,7 +363,7 @@ describe("verify compares each contract with the build its plan was deployed fro
 
   it("a new v3 plan records the build it is deployed from", () => {
     expect((marked as PlanV3 & { build?: string }).build).toBe("launch-cadence");
-    expect((buildPlanV3(5, 8, V3_TEST_COLDKEY, "launch") as PlanV3 & { build?: string }).build).toBe("launch-cadence");
+    expect((buildPlanV3(5, 8, V3_TEST_COLDKEY, "launch", ROLES) as PlanV3 & { build?: string }).build).toBe("launch-cadence");
   });
 
   it("a plan with no build (deployed from a2b4412) verifies against a2b4412's front door and staker, with that build's immutable positions", async () => {

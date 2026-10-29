@@ -1,5 +1,6 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
+import { ROLES } from "./launch-roles.ts";
 import { WALLET, WALLET_SS58 } from "../src/config.ts";
 import { buildPlan, buildPlanV3, settingsV3Of } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
@@ -62,7 +63,7 @@ describe("web-config", () => {
 
   it("writes the vault's payout delay for every v3 plan, from the plan's own cadence", () => {
     const test3 = buildPlanV3(0, 40, COLDKEY);
-    const launch3 = buildPlanV3(0, 40, COLDKEY, "launch");
+    const launch3 = buildPlanV3(0, 40, COLDKEY, "launch", ROLES);
     expect(webEnv({ ...rec, plan: test3 })).toContain(`\nNEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=${settingsV3Of(test3).payoutDelay}\n`);
     expect(settingsV3Of(test3).payoutDelay).toBe(3_600);
     const launch = webEnv({ ...rec, plan: launch3 }).split("\n");

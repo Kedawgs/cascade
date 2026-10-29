@@ -18,6 +18,7 @@ import {
   toFunctionSelector,
 } from "viem";
 import { describe, expect, it } from "vitest";
+import { ROLES } from "./launch-roles.ts";
 import { BASE_V3, type ChainName, paths, targets, WALLET } from "../src/config.ts";
 import { roll } from "../src/keeper/actions.ts";
 import { rebuildPayouts } from "../src/keeper/payouts.ts";
@@ -300,7 +301,7 @@ describe("the open batch and its close's economics", () => {
   const STAKER_AT: Address = getAddress("0x00000000000000000000000000000000000000a2");
   const alice: Address = "0x000000000000000000000000000000000000a11c";
   const ETH_USDC = encodePacked(["address", "uint24", "address"], [BASE_V3.WETH, 500, BASE_V3.USDC]).toLowerCase();
-  const launch: DeploymentRecord = { ...v3Record(), plan: buildPlanV3(0, 0, COLDKEY, "launch") };
+  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
   const PRICE_READS = ["oracle", "swapper", "usdcValue", "depositFeeUsdc", "swapFeeBps", "quoteExactInput", "quoteFee"];
   const BASE_HEAD = 20_000_000;
   const DEPOSIT_REQUESTED = parseAbi(["event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)"]);
@@ -540,7 +541,7 @@ describe("the open batch and its close's economics", () => {
 
 describe("a roll goes through the same send guards as close", () => {
   const T = 1_800_000_000;
-  const launch: DeploymentRecord = { ...v3Record(), plan: buildPlanV3(0, 0, COLDKEY, "launch") };
+  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
   const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-roll-")), "rec.json");
 
   /** An empty launch batch two hours old that the front door would let close; the wallet's next nonce
@@ -612,7 +613,7 @@ describe("a roll that reverts on chain", () => {
   const T = 1_800_000_000;
   const HASH: Hex = `0x${"7e".repeat(32)}`;
   const alice: Address = "0x000000000000000000000000000000000000a11c";
-  const launch: DeploymentRecord = { ...v3Record(), plan: buildPlanV3(0, 0, COLDKEY, "launch") };
+  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
   const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-roll-")), "rec.json");
 
   /** An empty launch batch two hours old that the front door would let close. The roll passes every

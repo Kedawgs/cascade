@@ -59,6 +59,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     /// The front door's default discount to the TWAP's value, which the fixture keeps.
     uint256 internal constant SLIPPAGE_BPS = 150;
     uint32 internal constant DESTINATION_BASE = 6;
+    /// CascadeVault's rampingStake and bookedStake storage slots.
+    bytes32 internal constant RAMPING_SLOT = bytes32(uint256(18));
+    bytes32 internal constant BOOKED_SLOT = bytes32(uint256(19));
 
     CascadeVault public immutable vault;
     CascadeFrontDoor public immutable fd;
@@ -95,6 +98,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostDelivered;
     /// Native TAO taken out of the vault by simulateLoss.
     uint256 public ghostLoss;
+    /// Root stake moved onto the vault's hotkey from outside by gift, in wei.
+    uint256 public ghostGifts;
     /// Highest price seen; a cancel resets it to the post-cancel price, at most the cancelled batch's
     /// delivery price.
     uint256 public priceFloor;
@@ -150,6 +155,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public bouncesCancelled;
     /// simulateLoss calls that took TAO out of the vault.
     uint256 public losses;
+    /// Stake gifts, and deposit-stake-redeem cycles that went all the way round.
+    uint256 public gifts;
+    uint256 public cycles;
     /// High-water mark of queuedKeys.length.
     uint256 public maxQueueDepth;
     /// Exits refused UnstakeShort because the only stake sat below the minimum stake, which the
@@ -491,6 +499,60 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         }
     }
 
+    // ---- outsiders: gifts and cycles ----
+
+    /// @dev Moves 0.001 to 100 TAO of root stake onto the vault's stake hotkey from outside, as a
+    /// transferStake from another coldkey would. It raises the price at once, and the allowance base only
+    /// once a stake has booked it and it has ramped in.
+    function gift(uint256 rao) external {
+        rao = bound(rao, 1e6, 100e9);
+        staking.donateStake(hotkey, vault.coldkey(), rao);
+        ghostGifts += rao * RAO;
+        ++gifts;
+        _raiseFloor();
+    }
+
+    /// @dev Cycles capital through the keeper's stake loop, as a griefer would: a direct deposit, the
+    /// keeper's stake, then a direct redeem of the shares that deposit minted. It must leave the
+    /// allowance base where it was (the window check catches a base that grew).
+    function cycle(uint256 actorSeed, uint256 amount) external {
+        address actor = actors[actorSeed % actors.length];
+        uint256 maxRao = Math.min(MAX_DEPOSIT, _sub0(actor.balance, FEE_MONEY)) / RAO;
+        if (maxRao < 1e15 / RAO) return;
+        amount = bound(amount, 1e15 / RAO, maxRao) * RAO;
+        // within the cap, and not below half the launch price
+        uint256 assets = vault.totalAssets();
+        if (assets + amount > vault.maxTotalAssets() || assets * 2_000_000 < vault.totalSupply()) return;
+        uint256 before = vault.balanceOf(actor);
+        vm.prank(actor);
+        try vault.depositDirect{value: amount}() {
+            ghostIn += amount;
+        } catch {
+            ++unexpectedReverts;
+            return;
+        }
+        vm.prank(actor);
+        vault.allowFrontDoorRedeems();
+        if (_sub0(_sub0(address(vault).balance, ED), vault.pendingPayouts()) / RAO >= MIN_STAKE_RAO) {
+            try vault.stakeIdle() {
+                ++stakes;
+            } catch {
+                ++unexpectedReverts;
+            }
+        }
+        uint256 shares = vault.balanceOf(actor) - before;
+        uint256 out = CascadeMath.assetsForRedeem(shares, vault.totalAssets(), vault.totalSupply());
+        uint256 paid = actor.balance;
+        vm.prank(actor);
+        try vault.redeemDirect(shares) {
+            ghostOut += actor.balance - paid;
+            ++cycles;
+        } catch (bytes memory reason) {
+            if (out >= RAO && !_dustBlocked(reason)) ++unexpectedReverts;
+        }
+        _raiseFloor();
+    }
+
     // ---- losses ----
 
     /// @dev Rarely (seed % 7 == 0, on at most MAX_LOSSES calls a run) takes TAO out of the vault, as a
@@ -689,14 +751,34 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             }
         }
         // The window is written only by a delivery that burns (a Redeemed event; bounced deposits alone
-        // queue payouts without burning); checked then, against the most the vault's allowance base can
-        // be: its root stake (the base is the stake less what is still ramping in, and never counts
-        // liquid TAO, so neither this delivery's deposits nor any other; a delivery stakes nothing).
+        // queue payouts without burning); checked then, against the base the vault computed, rebuilt
+        // here from its storage (a delivery changes none of it, nor the stake or the time, so it is the
+        // same now as inside the close).
         if (burned) {
             (, uint256 windowBurned) = vault.burnWindows(peer);
-            uint256 stake = vault.rootStakeRao() * RAO;
-            if (windowBurned > Math.max(stake * 2000 / 10_000, 100e18)) ++burnViolations;
+            uint256 limit = Math.max(base() * vault.maxDailyOutflowBps() / 10_000, vault.minDailyOutflow());
+            if (windowBurned > limit) ++burnViolations;
         }
+    }
+
+    /// The vault's booked and ramping stake (internal; slots from `forge inspect CascadeVault
+    /// storageLayout`, checked by test_handlerReadsTheBaseFromStorage).
+    function booked() public view returns (uint256) {
+        return uint256(vm.load(address(vault), BOOKED_SLOT));
+    }
+
+    function ramping() public view returns (uint256) {
+        return uint256(vm.load(address(vault), RAMPING_SLOT));
+    }
+
+    /// The vault's allowance base, as it computes it: min(root stake, booked stake) less what is still
+    /// ramping in, linearly over a day from the last stake.
+    function base() public view returns (uint256) {
+        // test-controlled time
+        // forge-lint: disable-next-line(block-timestamp)
+        uint256 elapsed = block.timestamp - vault.lastStakeAt();
+        uint256 unspent = elapsed >= 1 days ? 0 : ramping() * (1 days - elapsed) / 1 days;
+        return _sub0(Math.min(vault.rootStakeRao() * RAO, booked()), unspent);
     }
 
     /// Adds batch `key`'s sent chunk to the outflow and to what the front door was paid. A payout

@@ -23,7 +23,8 @@ import {Handler} from "./Handler.sol";
 /// @dev Random sequences of front-door deposits, redeem requests and cancels, batch closes (delivered at
 /// once by MockBridge), payouts, claims, USDC deliveries, direct deposits and redeems, staking, root
 /// rewards with and without a reward cut, payout cancels, rare simulated losses (which can make the
-/// vault insolvent, so deliveries bounce deposits) and time jumps, over the EndToEnd fixture: the vault
+/// vault insolvent, so deliveries bounce deposits), stake gifts from outside, deposit-stake-redeem
+/// cycles through the keeper, and time jumps, over the EndToEnd fixture: the vault
 /// on BITTENSOR, one front door on BASE, exact stake reads, bridge fee 1e15, redeem-request fee 1e14.
 /// v3: the front door's keeper is the handler, its swapper a CascadeStaker (swap fee 15 bps) selling
 /// through a mock router, its oracle a mock TWAP; the vault's treasury takes the reward cut and never
@@ -88,7 +89,7 @@ contract CascadeInvariantTest is Test {
         // pays every close's bridge fee
         vm.deal(address(handler), 100 ether);
 
-        bytes4[] memory selectors = new bytes4[](16);
+        bytes4[] memory selectors = new bytes4[](18);
         selectors[0] = Handler.deposit.selector;
         selectors[1] = Handler.requestRedeem.selector;
         selectors[2] = Handler.cancelDeposit.selector;
@@ -105,6 +106,8 @@ contract CascadeInvariantTest is Test {
         selectors[13] = Handler.simulateLoss.selector;
         selectors[14] = Handler.claimWithCut.selector;
         selectors[15] = Handler.deliver.selector;
+        selectors[16] = Handler.gift.selector;
+        selectors[17] = Handler.cycle.selector;
         targetContract(address(handler));
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
@@ -150,12 +153,13 @@ contract CascadeInvariantTest is Test {
         assertEq(handler.cancelDustViolations(), 0);
     }
 
-    /// @dev Exact stake reads and no donations: the vault holds every wei delivered or deposited, less
-    /// every wei sent out, plus every claimed reward, less every simulated loss.
+    /// @dev Exact stake reads: the vault holds every wei delivered or deposited, less every wei sent out,
+    /// plus every claimed reward and every stake gift, less every simulated loss.
     function invariant_grossAssetsConserved() public view {
-        // ghostIn - ghostOut + ghostRewards - ghostLoss, ordered so nothing underflows
+        // ghostIn - ghostOut + ghostRewards + ghostGifts - ghostLoss, ordered so nothing underflows
         assertEq(
-            vault.grossAssets(), handler.ghostIn() + handler.ghostRewards() - handler.ghostOut() - handler.ghostLoss()
+            vault.grossAssets(),
+            handler.ghostIn() + handler.ghostRewards() + handler.ghostGifts() - handler.ghostOut() - handler.ghostLoss()
         );
     }
 
@@ -169,6 +173,8 @@ contract CascadeInvariantTest is Test {
         assertEq(sum, vault.pendingPayouts());
     }
 
+    /// @dev Checked on every burning delivery against the allowance base the vault computed (rebuilt from
+    /// its storage), with gifts and keeper cycles in the mix.
     function invariant_burnWindowsRespected() public view {
         assertEq(handler.burnViolations(), 0);
     }
@@ -244,6 +250,8 @@ contract CascadeInvariantTest is Test {
         emit log_named_uint("redeemDeferred", handler.redeemDeferred());
         emit log_named_uint("redeemSkipped", handler.redeemSkipped());
         emit log_named_uint("losses", handler.losses());
+        emit log_named_uint("gifts", handler.gifts());
+        emit log_named_uint("cycles", handler.cycles());
         emit log_named_uint("depositBounces", handler.depositBounces());
         emit log_named_uint("bouncesPaid", handler.bouncesPaid());
         emit log_named_uint("bouncesCancelled", handler.bouncesCancelled());
@@ -261,6 +269,23 @@ contract CascadeInvariantTest is Test {
     }
 
     // ---- regression ----
+
+    /// @dev The handler reads the vault's booked and ramping stake from fixed storage slots; this pins them.
+    function test_handlerReadsTheBaseFromStorage() public {
+        handler.depositDirect(0, 100_000_000_000);
+        handler.stakeIdle();
+        assertEq(handler.booked(), 100e18);
+        assertEq(handler.ramping(), 100e18);
+        assertEq(handler.base(), 0);
+        handler.warp(1 days);
+        assertEq(handler.base(), 100e18);
+        // a gift is not booked until the next stake
+        handler.gift(10e9);
+        assertEq(vault.rootStakeRao(), 110e9);
+        assertEq(handler.booked(), 100e18);
+        assertEq(handler.base(), 100e18);
+    }
+
 
     /// @dev The sequence that took a cancel more than one rao below its batch's delivery price: alice
     /// keeps part of her shares through a 3-entry batch, takes her part of its dust out by a direct

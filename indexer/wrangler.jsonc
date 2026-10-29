@@ -1,0 +1,45 @@
+// Cascade's history indexer and monitor: one Worker, one D1 database per environment.
+// Nothing here is a secret. Secrets (ALERT_TO, keyed RPC URLs, private THRESHOLDS) are set with
+// `wrangler secret put` at deploy time, or in a git-ignored .dev.vars for local runs.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cascade-indexer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-14",
+  // Wrangler sends no usage telemetry for this project: building and testing stay local.
+  "send_metrics": false,
+  "observability": { "enabled": true },
+  // Workers Cache serves the seed routes by their Cache-Control without running the Worker.
+  "cache": { "enabled": true },
+  // Four crons, the same in every environment (a test checks them against src/crons.ts):
+  // the tick every minute, the site check every two minutes, the hourly job and the daily digest.
+  // Workers Free allows five per account, so only one environment fits in a Free account.
+  "triggers": { "crons": ["* * * * *", "*/2 * * * *", "17 * * * *", "0 13 * * *"] },
+  "env": {
+    // The v3 test deployment.
+    "test": {
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "cascade-indexer-test",
+          // The owner replaces this with the id `wrangler d1 create` prints, at deploy (an id, not a secret).
+          "database_id": "local-only-test",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascade.fi"] }]
+    },
+    // The launch deployment, once it exists.
+    "production": {
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "cascade-indexer-production",
+          "database_id": "local-only-production",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascade.fi"] }]
+    }
+  }
+}

@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { formatEther } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
-import { useBalances, useIsV3, usePosition, useWithdrawalQuote } from "@/lib/cascade/hooks";
-import type { Position } from "@/lib/cascade/types";
+import { useAvailable, useBalances, useIsV3, usePosition, useWithdrawalQuote } from "@/lib/cascade/hooks";
+import type { Available, Position } from "@/lib/cascade/types";
 import { checkUnstake, toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdcCents } from "@/lib/format";
@@ -40,7 +40,18 @@ export function UnstakeForm({ account }: { account: string | null }) {
 
 function UnstakeWithBalance({ account }: { account: string }) {
   const position = usePosition(account);
-  if (position.isError) return <LoadError what="your balance" onRetry={() => void position.refetch()} />;
+  const available = useAvailable(account);
+  if (position.isError || available.isError) {
+    return (
+      <LoadError
+        what="your balance"
+        onRetry={() => {
+          void position.refetch();
+          void available.refetch();
+        }}
+      />
+    );
+  }
   if (!position.data) return <Loading />;
   if (position.data.shares === 0n) {
     return (
@@ -53,10 +64,11 @@ function UnstakeWithBalance({ account }: { account: string }) {
       </div>
     );
   }
-  return <UnstakeFormBody account={account} position={position.data} />;
+  if (!available.data) return <Loading />;
+  return <UnstakeFormBody account={account} position={{ ...position.data, ...available.data }} />;
 }
 
-function UnstakeFormBody({ account, position }: { account: string | null; position: Position | null }) {
+function UnstakeFormBody({ account, position }: { account: string | null; position: (Position & Available) | null }) {
   const router = useRouter();
   const v3 = useIsV3();
   const flows = useFlows(account);

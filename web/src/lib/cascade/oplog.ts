@@ -70,7 +70,8 @@ export function entryPriceUsd(op: Pick<DepositOp, "priceUsd">): number | undefin
   return op.priceUsd !== undefined && op.priceUsd > 0 ? op.priceUsd : undefined;
 }
 
-type Storage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
+/** Where the browser keeps text by key: localStorage, or memory where storage is blocked. */
+export type StringStorage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
 
 const replacer = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);
 const reviver = (_k: string, v: unknown) =>
@@ -78,7 +79,7 @@ const reviver = (_k: string, v: unknown) =>
 
 /** The transactions this site sent, per account and deployment, kept in the browser. There is no
  * indexer: the activity trails start from these and read the rest from the chain. */
-export function createOpLog(storage: Storage, frontDoor: Address) {
+export function createOpLog(storage: StringStorage, frontDoor: Address) {
   const memory = new Map<string, Operation[]>();
   /** Lists whose last write storage refused (full, or blocked): this tab's memory is newer than what is stored. */
   const unsaved = new Set<string>();

@@ -2,7 +2,7 @@ import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiP
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { claimWentThrough, depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
+import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
 
@@ -145,6 +145,65 @@ describe("facts", () => {
     const scan = newScan(D);
     await scanVault(c.clients, D, scan, ME);
     expect(scan.next).toBe(1_599n);
+  });
+
+  it("calls back after each window, so its progress can be saved as it goes", async () => {
+    const c = chains({ latest: 3_200n });
+    const scan = newScan(D);
+    const seen: bigint[] = [];
+    await scanVault(c.clients, D, scan, ME, () => seen.push(scan.next));
+    expect(seen).toEqual([2_000n, 3_000n, 3_199n]);
+  });
+
+  it("reads again from the deploy block when saved progress is past anything the chain has reached", async () => {
+    const c = chains({ latest: 1_600n, bitLogs: [delivered] });
+    const scan = newScan(D);
+    scan.next = 900_000n;
+    scan.staked.push({ block: 899_000n, txHash: H(99) });
+    await scanVault(c.clients, D, scan, ME);
+    expect(c.windows[0][0]).toBe(1_000n);
+    expect(scan.staked).toEqual([]);
+    expect(scan.delivered.get("3")?.txHash).toBe(H(9));
+    // a node a little behind the progress saved is only waited for
+    const behind = newScan(D);
+    behind.next = 1_650n;
+    await scanVault(chains({ latest: 1_600n }).clients, D, behind, ME);
+    expect(behind.next).toBe(1_650n);
+  });
+
+  it("takes the account's saved amounts only from their receipts: a wrong one is corrected, one its receipt doesn't show is dropped", async () => {
+    const redeemedLog = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256, uint256"), [10n ** 22n, 10n ** 16n]),
+      1_500n,
+      H(9),
+      3,
+    );
+    const c = chains({ bitReceipts: { [H(9)]: { status: "success", logs: [delivered, depositedLog, redeemedLog] }, [H(31)]: { status: "success", logs: [delivered] } } });
+    const scan = newScan(D);
+    scan.next = 2_000n;
+    scan.deposited.push(
+      // the stored amount was changed: the receipt's stands
+      { key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 20n, unconfirmed: true },
+      // its receipt shows no deposit of the account's
+      { key: KEY, txHash: H(31), block: 1_700n, assets: 10n ** 16n, unconfirmed: true },
+      // no such transaction
+      { key: KEY, txHash: H(32), block: 1_800n, assets: 10n ** 16n, unconfirmed: true },
+    );
+    scan.redeemed.push({ key: KEY, txHash: H(9), block: 1_400n, assets: 1n, unconfirmed: true });
+    await confirmAccountEvents(c.clients, D, scan, ME);
+    expect(scan.deposited).toEqual([{ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 16n }]);
+    expect(scan.redeemed).toEqual([{ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 16n }]);
+    // a receipt that can't be read leaves the amount unconfirmed and says so
+    const down = newScan(D);
+    down.deposited.push({ key: KEY, txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true });
+    const failing = chains();
+    (failing.clients as unknown as { bittensor: { getTransactionReceipt: () => Promise<never> } }).bittensor.getTransactionReceipt = async () => {
+      throw new Error("HTTP request failed. Status: 503");
+    };
+    await expect(confirmAccountEvents(failing.clients, D, down, ME)).rejects.toThrow();
+    expect(down.deposited[0].unconfirmed).toBe(true);
   });
 
   it("never takes a window of logs from a server that hasn't reached it", async () => {

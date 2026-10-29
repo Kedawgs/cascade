@@ -1,9 +1,10 @@
 "use client";
 
 import { useCascadeAccount } from "@/lib/account";
-import { usePosition } from "@/lib/cascade/hooks";
+import { useAvailable, usePosition } from "@/lib/cascade/hooks";
 import { toDisplay } from "@/lib/cascade/units";
 import { formatTao, formatUsd } from "@/lib/format";
+import { Dash } from "../Dash";
 import { Loading } from "../Loading";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
@@ -12,23 +13,39 @@ import card from "./StakeCard.module.css";
 import { StatsCardForAccount } from "./StatsCard";
 import { UnstakeForm } from "./UnstakeForm";
 
-function UnstakeSummary({ account }: { account: string }) {
+/** The balance and what can be unstaked. The balance is a contract read; what can be unstaked may wait
+ * for the vault's history, so it keeps "–" in its place meanwhile. */
+export function UnstakeSummary({ account }: { account: string }) {
   const position = usePosition(account);
-  const staked = position.data ? `${formatTao(position.data.taoBalance, 4)} TAO` : "–";
+  const available = useAvailable(account);
+  const p = position.data;
+  const free = p && available.data ? available.data.availableTaoWei : undefined;
   return (
     <>
       <div>
         <p className={card.k}>Staked</p>
         <p className={card.v}>
-          {staked}
-          {position.data && <small>{formatUsd(position.data.usdValue)}</small>}
+          {p ? (
+            <>
+              {formatTao(p.taoBalance, 4)} TAO
+              <small>{formatUsd(p.usdValue)}</small>
+            </>
+          ) : (
+            <Dash loading={!position.isError} />
+          )}
         </p>
       </div>
       <div>
         <p className={card.k}>Available to unstake</p>
         <p className={card.v}>
-          {position.data ? formatUsd(Math.floor(toDisplay(position.data.availableTaoWei, 18) * position.data.taoPriceUsd * 100) / 100) : "–"}
-          {position.data && <small>{formatTao(toDisplay(position.data.availableTaoWei, 18), 4)} TAO</small>}
+          {p && free !== undefined ? (
+            <>
+              {formatUsd(Math.floor(toDisplay(free, 18) * p.taoPriceUsd * 100) / 100)}
+              <small>{formatTao(toDisplay(free, 18), 4)} TAO</small>
+            </>
+          ) : (
+            <Dash loading={!position.isError && !available.isError} />
+          )}
         </p>
       </div>
     </>

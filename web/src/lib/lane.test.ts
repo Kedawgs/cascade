@@ -4,14 +4,10 @@ import type { DepositRecord, Position } from "./cascade/types";
 
 const position = (tao: number): Position => ({
   shares: 0n,
-  availableShares: 0n,
   taoWei: 0n,
-  availableTaoWei: 0n,
   taoBalance: tao,
   usdValue: tao * 250,
   taoPriceUsd: 250,
-  pendingTao: 0,
-  avgEntryPriceUsd: null,
 });
 
 const steps = (active: number) =>

@@ -9,11 +9,13 @@ import { formatTao, formatUsd } from "@/lib/format";
 import { CLAIM_ENDS_DELIVERY, claimEndsDelivery, offerClaim, walletTaoNote } from "@/lib/stake-form";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
+import { Dash } from "../Dash";
 import app from "./App.module.css";
 import { StakeForm } from "./StakeForm";
 import styles from "./StakeCard.module.css";
 
-function StakedSummary({ account }: { account: string }) {
+/** The balance: a contract read, never held up by the vault's history. */
+export function StakedSummary({ account }: { account: string }) {
   const position = usePosition(account);
   return (
     <div>
@@ -28,7 +30,7 @@ function StakedSummary({ account }: { account: string }) {
             <small>{formatUsd(position.data.usdValue)}</small>
           </>
         ) : (
-          "–"
+          <Dash loading={!position.isError} />
         )}
       </p>
     </div>

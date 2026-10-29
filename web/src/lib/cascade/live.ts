@@ -1,11 +1,12 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
 import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
-import { cancelTook, chainDeposits, depositFacts, newScan, scanVault, type VaultScan, withdrawalFacts } from "./facts";
+import { cancelTook, chainDeposits, confirmAccountEvents, depositFacts, scanVault, type VaultScan, withdrawalFacts } from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
+import { createScanStore, type ScanStore } from "./scan-store";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
-import type { CascadeData, DepositQuote, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
+import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
 import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
 
 export class NotConfiguredError extends Error {
@@ -30,7 +31,9 @@ export interface LiveDeps {
   quotePayoutFee: typeof reads.quotePayoutFee;
   readRewardCutBps: typeof reads.readRewardCutBps;
   readApyPercent: typeof reads.readApyPercent;
-  scan(c: Clients, d: Deployment, scan: VaultScan, account?: Address): Promise<void>;
+  scan(c: Clients, d: Deployment, scan: VaultScan, account?: Address, onWindow?: () => void): Promise<void>;
+  /** Where each account's scan is saved between visits. */
+  scanStore: ScanStore;
   now(): number;
 }
 
@@ -62,13 +65,18 @@ const browserStorage = () => {
   return memoryStorage();
 };
 
+/** How often a long scan saves its progress, so a visit cut short is resumed close to where it stopped. */
+const SAVE_EVERY_MS = 5_000;
+
 const minutesUntil = (at: Date, now: number) => Math.max(0, Math.ceil((at.getTime() - now) / 60_000));
 const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
 export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = {}): CascadeData {
+  const storage = browserStorage();
   const deps: LiveDeps = {
     clients: given.clients ?? createClients(),
-    opLog: given.opLog ?? createOpLog(browserStorage(), d.frontDoor),
+    opLog: given.opLog ?? createOpLog(storage, d.frontDoor),
+    scanStore: given.scanStore ?? createScanStore(storage, d),
     readFrontDoor: reads.readFrontDoor,
     readVault: reads.readVault,
     readWallet: reads.readWallet,
@@ -91,20 +99,37 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * double-count events. Callers arriving while one runs share it. */
   const inFlight = new Map<string, Promise<VaultScan>>();
 
-  function scanFor(account?: Address): Promise<VaultScan> {
-    const key = (account ?? "").toLowerCase();
-    const running = inFlight.get(key);
-    if (running) return running;
+  /** The account's scan as far as it has been read: this visit's, or the one saved by an earlier visit. */
+  function known(account: Address): VaultScan {
+    const key = account.toLowerCase();
     let s = scans.get(key);
     if (!s) {
-      s = newScan(d);
+      s = deps.scanStore.load(account);
       scans.set(key, s);
     }
-    const scan = s;
-    const p = deps.scan(c, d, scan, account).then(
-      () => scan,
-      (e) => Promise.reject(e),
-    );
+    return s;
+  }
+
+  /** The account's scan brought up to the chain's newest blocks, from where it stopped (this visit, or
+   * an earlier one: progress is saved every few seconds and when a read stops). Saved amounts are
+   * confirmed by their receipts before anything sums them. */
+  function scanFor(account: Address): Promise<VaultScan> {
+    const key = account.toLowerCase();
+    const running = inFlight.get(key);
+    if (running) return running;
+    const scan = known(account);
+    let saved = deps.now();
+    const save = () => {
+      deps.scanStore.save(account, scan);
+      saved = deps.now();
+    };
+    const p = deps
+      .scan(c, d, scan, account, () => {
+        if (deps.now() - saved >= SAVE_EVERY_MS) save();
+      })
+      .finally(save)
+      .then(() => confirmAccountEvents(c, d, scan, account))
+      .then(() => scan);
     inFlight.set(key, p);
     const clear = () => void inFlight.delete(key);
     p.then(clear, clear);
@@ -139,29 +164,63 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   /** When the open batch can be expected to close: a launch-cadence deployment may wait up to its max wait. */
   const closesAt = (fd: reads.FrontDoorState) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
-  /** Sent, its batch closed, not yet arrived in the vault. */
+  /** Sent, its batch closed, not yet arrived in the vault (as far as `scan` has read). */
   const onTheBridge = (op: { batchId?: bigint }, fd: reads.FrontDoorState, scan: VaultScan) =>
     op.batchId !== undefined && op.batchId < fd.openBatchId && !scan.delivered.has(String(op.batchId));
 
+  /** This browser's deposits and unstakes still counted: a request taken back out of a batch that has
+   * since closed is neither on the bridge nor delivered (see cancelTook). */
+  async function counted(a: Address, fd: reads.FrontDoorState) {
+    const ops = deps.opLog.list(a);
+    const gone = await cancelledIn(ops.filter((o): o is DepositOp | WithdrawalOp => o.kind !== "claim" && o.batchId !== undefined && o.batchId < fd.openBatchId));
+    return {
+      withdrawals: ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal" && o.state !== "failed" && !gone.has(o.id)),
+      deposits: ops.filter((o): o is DepositOp => o.kind === "deposit" && !gone.has(o.id)),
+    };
+  }
+
+  /** The stake itself, from contract reads alone: it never waits on the vault's history. */
   async function getPosition(account: string): Promise<Position> {
     const a = account as Address;
-    const [fd, v, price, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), deps.taoPriceUsd(c), scanFor(a)]);
+    const [v, price] = await Promise.all([deps.readVault(c, d, a), deps.taoPriceUsd(c)]);
     // v3 only (v2's Rewards page stays as it was); a failed read leaves it unknown, never zero
     const waiting = isV3(d) ? await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined) : undefined;
     const pendingRewardsTao =
       waiting && v.totalSupply > 0n
         ? toDisplay((waiting.wei * v.shares * BigInt(10_000 - waiting.cutBps)) / (v.totalSupply * 10_000n), 18)
         : undefined;
-    const ops = deps.opLog.list(a);
-    // a request taken back out of a batch that has since closed is neither on the bridge nor delivered
-    const gone = await cancelledIn(ops.filter((o): o is DepositOp | WithdrawalOp => o.kind !== "claim" && o.batchId !== undefined && o.batchId < fd.openBatchId));
-    const withdrawals = ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal" && o.state !== "failed" && !gone.has(o.id));
-    const deposits = ops.filter((o): o is DepositOp => o.kind === "deposit" && !gone.has(o.id));
+    const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
+    return {
+      shares: v.shares,
+      taoWei,
+      taoBalance: toDisplay(taoWei, 18),
+      usdValue: toDisplay(taoWei, 18) * price,
+      taoPriceUsd: price,
+      ...(pendingRewardsTao !== undefined ? { pendingRewardsTao } : {}),
+    };
+  }
+
+  /** Shares not already asked back: the open batch's request (the front door's own figure) and this
+   * browser's unstakes whose batch closed and hasn't reached the vault. The scan as far as it has been
+   * read places most of them; only one it hasn't seen arrive waits for the scan to catch up. */
+  async function getAvailable(account: string): Promise<Available> {
+    const a = account as Address;
+    const [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
+    const { withdrawals } = await counted(a, fd);
+    let scan = known(a);
+    if (withdrawals.some((w) => onTheBridge(w, fd, scan))) scan = await scanFor(a);
     const asked = fd.redeemOf + sum(withdrawals.filter((w) => onTheBridge(w, fd, scan)).map((w) => w.shares));
     const availableShares = v.shares > asked ? v.shares - asked : 0n;
+    return { availableShares, availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply) };
+  }
+
+  /** What needs the vault's history: TAO on its way in, rewards earned, the average entry price. */
+  async function getPositionHistory(account: string): Promise<PositionHistory> {
+    const a = account as Address;
+    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
+    const { deposits } = await counted(a, fd);
     const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
     const pendingWei = fd.depositOf + sum(deposits.filter((o) => onTheBridge(o, fd, scan)).map((o) => o.targetTao));
-
     const putIn = sum(scan.deposited.map((e) => e.assets));
     const takenOut = sum(scan.redeemed.map((e) => e.assets));
     const earned = taoWei + takenOut - putIn;
@@ -172,15 +231,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     });
     const pricedTao = sum(priced.map((o) => o.tao));
     return {
-      shares: v.shares,
-      availableShares,
-      taoWei,
-      availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply),
-      taoBalance: toDisplay(taoWei, 18),
-      usdValue: toDisplay(taoWei, 18) * price,
-      taoPriceUsd: price,
       pendingTao: toDisplay(pendingWei, 18),
-      ...(pendingRewardsTao !== undefined ? { pendingRewardsTao } : {}),
       ...(putIn > 0n ? { rewardsEarnedTao: toDisplay(earned > 0n ? earned : 0n, 18) } : {}),
       avgEntryPriceUsd:
         pricedTao > 0n
@@ -311,6 +362,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     },
 
     getPosition,
+    getAvailable,
+    getPositionHistory,
 
     async getProof() {
       const v = await deps.readVault(c, d);
@@ -438,6 +491,8 @@ export function notConfiguredData(): CascadeData {
     getProtocolStats: fail,
     getApy: fail,
     getPosition: fail,
+    getAvailable: fail,
+    getPositionHistory: fail,
     getProof: fail,
     getLimits: fail,
     getBalances: fail,

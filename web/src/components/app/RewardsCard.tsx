@@ -1,6 +1,6 @@
 "use client";
 
-import { useIsV3, usePosition, useProtocolStats, useRewards, useTaoPrice } from "@/lib/cascade/hooks";
+import { useIsV3, usePosition, usePositionHistory, useProtocolStats, useRewards, useTaoPrice } from "@/lib/cascade/hooks";
 import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
 import { ConnectWallet } from "../ConnectWallet";
 import { Dash } from "../Dash";
@@ -28,6 +28,8 @@ function Price() {
 function RewardsForAccount({ account }: { account: string }) {
   const v3 = useIsV3();
   const position = usePosition(account);
+  // what has been earned needs the vault's history: it follows the balance, with "–" in its place meanwhile
+  const history = usePositionHistory(account);
   const rewards = useRewards(account);
   if (position.isError || rewards.isError) {
     return (
@@ -42,7 +44,7 @@ function RewardsForAccount({ account }: { account: string }) {
   }
   if (!position.data || !rewards.data) return <Loading />;
 
-  const earned = position.data.rewardsEarnedTao;
+  const earned = history.data?.rewardsEarnedTao;
   const waiting = position.data.pendingRewardsTao;
   const recent = [...rewards.data].reverse().slice(0, SHOW_DAYS);
 
@@ -52,7 +54,9 @@ function RewardsForAccount({ account }: { account: string }) {
         <div>
           <p className={card.k}>Earned so far</p>
           <p className={card.v}>
-            {earned !== undefined ? (
+            {!history.data ? (
+              <Dash loading={!history.isError} />
+            ) : earned !== undefined ? (
               <>
                 {formatUsd(earned * position.data.taoPriceUsd)} <small>{formatTao(earned, 6)} TAO</small>
               </>

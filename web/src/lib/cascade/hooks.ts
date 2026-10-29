@@ -22,6 +22,8 @@ export const cascadeKeys = {
   balances: (account: string) => ["cascade", account, "balances"] as const,
   rewards: (account: string) => ["cascade", account, "rewards"] as const,
   position: (account: string) => ["cascade", account, "position"] as const,
+  available: (account: string) => ["cascade", account, "available"] as const,
+  history: (account: string) => ["cascade", account, "history"] as const,
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
   deposit: (account: string, id: string) => ["cascade", account, "deposit", id] as const,
   withdrawals: (account: string) => ["cascade", account, "withdrawals"] as const,
@@ -108,6 +110,29 @@ export function usePosition(account: string, live = false) {
     queryKey: cascadeKeys.position(account),
     queryFn: () => data.getPosition(account),
     refetchInterval: live ? LIVE_MS : IDLE_MS,
+  });
+}
+
+/** What can be unstaked. Usually as quick as the balance: it waits on the vault's history only while an
+ * unstake from this browser is on its way and its arrival isn't known yet. */
+export function useAvailable(account: string, live = false) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.available(account),
+    queryFn: () => data.getAvailable(account),
+    refetchInterval: live ? LIVE_MS : IDLE_MS,
+  });
+}
+
+/** Figures that need the vault's history (TAO on its way, rewards earned, the average entry price).
+ * They come after the balance, once the scan has caught up: on a first visit that is the whole history,
+ * later only what is new since the last. */
+export function usePositionHistory(account: string) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.history(account),
+    queryFn: () => data.getPositionHistory(account),
+    refetchInterval: IDLE_MS,
   });
 }
 

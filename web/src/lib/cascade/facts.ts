@@ -15,8 +15,13 @@ const ED_RESERVE = 10n ** 12n;
 type RawLog = { address: string; topics: readonly Hex[]; data: Hex; blockNumber: bigint | null; transactionHash: Hex | null; logIndex: number | null };
 type Receipt = { status: string; blockNumber?: bigint; logs: RawLog[] };
 
-/** What the vault has emitted since deployment, scanned once and then only forward. */
+/** What the vault has emitted since deployment, scanned once and then only forward. The events (not the
+ * caches) are saved in the browser and resumed from (scan-store.ts). */
 export interface VaultScan {
+  /** The vault read, and its deploy block: where the scan starts. */
+  vault: Address;
+  from: bigint;
+  /** The first block not read yet. */
   next: bigint;
   /** BatchDelivered from our front door, by batch id. */
   delivered: Map<string, { key: Hex; txHash: Hex; block: bigint }>;
@@ -24,9 +29,9 @@ export interface VaultScan {
   /** PayoutChunkSent by batch key: each chunk's number and how many of the batch's payout entries it took. */
   payouts: Map<Hex, PayoutChunk[]>;
   /** The account's own Deposited events (to show deposits made from another browser). */
-  deposited: { key: Hex; txHash: Hex; block: bigint; assets: bigint }[];
+  deposited: AccountEvent[];
   /** The account's own Redeemed events (TAO it took out). */
-  redeemed: { key: Hex; block: bigint; assets: bigint }[];
+  redeemed: AccountEvent[];
   receipts: Map<Hex, Receipt>;
   blockTimes: Map<bigint, Date>;
   /** v3: each payout's life on Base after it left the vault, by batch key (lowercase). */
@@ -40,7 +45,20 @@ export interface PayoutChunk {
   taken: number;
 }
 
+/** One of the account's Deposited or Redeemed events. `unconfirmed` when it came from the browser's
+ * storage (or a seed) rather than this session's reading of the chain: its amount isn't used until its
+ * receipt confirms it (confirmAccountEvents). */
+export interface AccountEvent {
+  key: Hex;
+  txHash: Hex;
+  block: bigint;
+  assets: bigint;
+  unconfirmed?: true;
+}
+
 export const newScan = (d: Deployment): VaultScan => ({
+  vault: d.vault,
+  from: d.bitBlock,
   next: d.bitBlock,
   delivered: new Map(),
   staked: [],
@@ -52,11 +70,29 @@ export const newScan = (d: Deployment): VaultScan => ({
   onBase: new Map(),
 });
 
+/** Forgets every event read, to read again from the deploy block. */
+function restart(scan: VaultScan): void {
+  scan.next = scan.from;
+  scan.delivered.clear();
+  scan.staked.length = 0;
+  scan.payouts.clear();
+  scan.deposited.length = 0;
+  scan.redeemed.length = 0;
+}
+
+/** How far past the chain's newest block saved progress may claim to be (an hour of 12-second blocks)
+ * before it is taken for a corrupt entry rather than a node a little behind. */
+const AHEAD = 300n;
+
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account?: Address): Promise<void> {
+/** Reads the vault's logs forward from `scan.next` to two blocks short of the newest, one window at a
+ * time, calling `onWindow` after each so the caller can save its progress. */
+export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account?: Address, onWindow?: () => void): Promise<void> {
   // two blocks short of the newest: a block still being imported or replaced is read next time
   const latest = (await freshTip(c)) - 2n;
+  // progress no chain could have reached yet can't be resumed: read it all again
+  if (scan.next > latest + AHEAD) restart(scan);
   for (let from = scan.next; from <= latest; from += WINDOW) {
     const to = from + WINDOW - 1n < latest ? from + WINDOW - 1n : latest;
     const raw = await windowLogs(c, d, from, to);
@@ -74,11 +110,43 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
       } else if (l.eventName === "Deposited" && account && l.args.user && same(l.args.user, account)) {
         scan.deposited.push({ key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint });
       } else if (l.eventName === "Redeemed" && account && l.args.user && same(l.args.user, account)) {
-        scan.redeemed.push({ key: l.args.key as Hex, block, assets: l.args.assets as bigint });
+        scan.redeemed.push({ key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint });
       }
     }
     scan.next = to + 1n;
+    onWindow?.();
   }
+}
+
+/** Confirms the account's Deposited and Redeemed events that came from storage or a seed, by their
+ * receipts on Bittensor: the amount (and block) is the receipt's, and an event its receipt doesn't show
+ * is dropped. Throws when a receipt can't be read, so no amount that isn't confirmed is ever summed. */
+export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account: Address): Promise<void> {
+  const check = async (list: AccountEvent[], eventName: "Deposited" | "Redeemed"): Promise<AccountEvent[]> => {
+    const out: AccountEvent[] = [];
+    for (const e of list) {
+      if (!e.unconfirmed) {
+        out.push(e);
+        continue;
+      }
+      let r: Receipt | null;
+      try {
+        r = await bitReceipt(c, scan, e.txHash);
+      } catch (err) {
+        if ((err as { name?: string }).name !== "TransactionReceiptNotFoundError") throw err;
+        r = null;
+      }
+      const log = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, eventName, strict: false }).find(
+        (l) => same(l.address, d.vault) && same(l.args.key as string, e.key) && !!l.args.user && same(l.args.user as string, account),
+      );
+      if (mined(r) && log) out.push({ key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint });
+    }
+    return out;
+  };
+  if (![...scan.deposited, ...scan.redeemed].some((e) => e.unconfirmed)) return;
+  const [deposited, redeemed] = [await check(scan.deposited, "Deposited"), await check(scan.redeemed, "Redeemed")];
+  scan.deposited.splice(0, scan.deposited.length, ...deposited);
+  scan.redeemed.splice(0, scan.redeemed.length, ...redeemed);
 }
 
 /** One window of the vault's logs, taken only from a server that has reached the window's end. The

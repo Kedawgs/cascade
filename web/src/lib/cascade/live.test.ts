@@ -1,10 +1,11 @@
 import { encodeAbiParameters, encodeEventTopics, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
-import { FRONT_DOOR } from "./abi";
+import { FRONT_DOOR, VAULT } from "./abi";
 import type { Deployment } from "./config";
 import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredError } from "./live";
 import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState, WalletState } from "./reads";
+import { createScanStore } from "./scan-store";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -70,6 +71,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     readRewardCutBps: async () => 1000,
     readApyPercent: async () => 5.36,
     scan: async () => undefined,
+    scanStore: createScanStore(memory(), D),
     now: () => 1_800_000_100_000,
     ...over,
   };
@@ -129,7 +131,7 @@ describe("average entry price", () => {
   async function avg(...ops: DepositOp[]) {
     const d = deps({ scan: async (_c, _d, s) => void s.delivered.set("3", { key: H(3), txHash: H(4), block: 1n }) });
     for (const op of ops) d.opLog.put(op);
-    return (await createLiveCascadeData(D, d).getPosition(ME)).avgEntryPriceUsd;
+    return (await createLiveCascadeData(D, d).getPositionHistory(ME)).avgEntryPriceUsd;
   }
 
   it("weights each delivered deposit's price by its TAO", async () => {
@@ -170,10 +172,10 @@ describe("cancelled requests", () => {
     const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 1, usdcIn: 0n, targetTao: TAO, hashes: {}, batchId: 3n, state: "sent" };
     d.opLog.put({ ...w, cancelled: { hash: H(12), at: 2 } });
     d.opLog.put({ ...dep, cancelled: { hash: H(13), at: 2 } });
-    const p = await createLiveCascadeData(D, d).getPosition(ME);
+    const data = createLiveCascadeData(D, d);
     // only the open batch's request is asked back
-    expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
-    expect(p.pendingTao).toBe(0);
+    expect((await data.getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    expect((await data.getPositionHistory(ME)).pendingTao).toBe(0);
   });
 
   it("leave the average entry price, even though their batch reached the vault", async () => {
@@ -196,7 +198,7 @@ describe("cancelled requests", () => {
     });
     d.opLog.put(dep("kept", 200));
     d.opLog.put(dep("cancelled", 300, true));
-    expect((await createLiveCascadeData(D, d).getPosition(ME)).avgEntryPriceUsd).toBeCloseTo(200, 9);
+    expect((await createLiveCascadeData(D, d).getPositionHistory(ME)).avgEntryPriceUsd).toBeCloseTo(200, 9);
   });
 
   it("still count while their cancel can't be read, or came out of a later batch", async () => {
@@ -204,8 +206,115 @@ describe("cancelled requests", () => {
     const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
     d.opLog.put({ ...w, cancelled: { hash: H(14), at: 2 } });
     d.opLog.put({ ...w, id: "w2", cancelled: { hash: H(15), at: 2 } });
-    const p = await createLiveCascadeData(D, d).getPosition(ME);
+    const p = await createLiveCascadeData(D, d).getAvailable(ME);
     expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 4n * 10n ** 21n);
+  });
+});
+
+describe("the vault's history", () => {
+  const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
+  const never = () => new Promise<void>(() => {});
+  const unstake = (batchId: bigint): WithdrawalOp => ({
+    id: `w${batchId}`,
+    kind: "withdrawal",
+    account: ME,
+    createdAt: 1,
+    shares: 2n * 10n ** 21n,
+    taoEstimate: 0n,
+    usdcEstimate: 0n,
+    fee: 0n,
+    batchId,
+    state: "sent",
+  });
+
+  it("never holds up the balance: shares, TAO and dollars come from the contracts alone", async () => {
+    const p = await createLiveCascadeData(D, deps({ scan: never })).getPosition(ME);
+    expect(p).toMatchObject({ shares: 8n * 10n ** 22n, taoWei: 8n * 10n ** 16n, taoPriceUsd: 250 });
+    expect(p.usdValue).toBeCloseTo(20, 6);
+    expect(p).not.toHaveProperty("pendingTao");
+    expect(p).not.toHaveProperty("rewardsEarnedTao");
+  });
+
+  it("holds up what is free to unstake only while an unstake's arrival isn't known", async () => {
+    // nothing of this browser's in a closed batch: the open batch's request is the front door's own figure
+    expect((await createLiveCascadeData(D, deps({ scan: never })).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    // a closed batch the saved scan already saw arrive
+    const storage = memory();
+    const saved = createScanStore(storage, D);
+    const s = saved.load(ME);
+    s.delivered.set("3", { key: H(3), txHash: H(4), block: 1n });
+    s.next = 2n;
+    saved.save(ME, s);
+    const known = deps({ scan: never, scanStore: createScanStore(storage, D) });
+    known.opLog.put(unstake(3n));
+    expect((await createLiveCascadeData(D, known).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    // one it hasn't: the scan says whether it is still on the bridge
+    let scans = 0;
+    const unknown = deps({ scan: async () => void scans++ });
+    unknown.opLog.put(unstake(3n));
+    expect((await createLiveCascadeData(D, unknown).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
+    expect(scans).toBe(1);
+  });
+
+  it("works out TAO on its way and rewards earned once the scan has read the account's deposits and redeems", async () => {
+    const d = deps({
+      readFrontDoor: async () => ({ ...fd, depositOf: 10n ** 15n }),
+      scan: async (_c, _d, s) => {
+        s.deposited.push({ key: H(3), txHash: H(4), block: 1n, assets: 7n * 10n ** 16n });
+        s.redeemed.push({ key: H(5), txHash: H(6), block: 2n, assets: 10n ** 16n });
+      },
+    });
+    const h = await createLiveCascadeData(D, d).getPositionHistory(ME);
+    expect(h.pendingTao).toBeCloseTo(0.001, 12);
+    // 0.08 now + 0.01 taken out - 0.07 put in
+    expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(h.avgEntryPriceUsd).toBeNull();
+  });
+
+  it("resumes where an earlier visit's scan stopped, saving as it goes and when a window fails", async () => {
+    const storage = memory();
+    let clock = 0;
+    const starts: bigint[] = [];
+    // each "window" moves on 1,000 blocks; the third read fails partway, after one window
+    const scan: LiveDeps["scan"] = async (_c, _d, s, _a, onWindow) => {
+      starts.push(s.next);
+      for (let i = 0; i < 3; i++) {
+        s.next += 1_000n;
+        s.staked.push({ block: s.next - 1n, txHash: H(Number(s.next)) });
+        clock += 2_000;
+        onWindow?.();
+        if (starts.length === 2 && i === 0) throw new Error("window failed");
+      }
+    };
+    const visit = () => createLiveCascadeData(D, deps({ scan, scanStore: createScanStore(storage, D), now: () => clock }));
+    await visit().getPositionHistory(ME);
+    await expect(visit().getPositionHistory(ME)).rejects.toThrow("window failed");
+    await visit().getPositionHistory(ME);
+    expect(starts).toEqual([1n, 3_001n, 4_001n]);
+    expect(createScanStore(storage, D).load(ME).staked).toHaveLength(7);
+  });
+
+  it("sums the account's saved amounts only as their receipts on Bittensor confirm them", async () => {
+    const storage = memory();
+    const saved = createScanStore(storage, D);
+    const s = saved.load(ME);
+    s.next = 10n;
+    // saved as 5 TAO in, but the receipt says 0.07
+    s.deposited.push({ key: H(3), txHash: H(4), block: 5n, assets: 5n * 10n ** 18n });
+    saved.save(ME, s);
+    const depositedLog = {
+      address: D.vault,
+      topics: encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: H(3), user: ME } }),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [7n * 10n ** 16n, 7n * 10n ** 22n]),
+      blockNumber: 5n,
+      transactionHash: H(4),
+      logIndex: 0,
+    };
+    const bittensor = { getTransactionReceipt: async () => ({ status: "success", logs: [depositedLog] }) };
+    const d = deps({ clients: { bittensor } as never, scanStore: createScanStore(storage, D) });
+    const h = await createLiveCascadeData(D, d).getPositionHistory(ME);
+    // 0.08 now - 0.07 put in
+    expect(h.rewardsEarnedTao).toBeCloseTo(0.01, 12);
   });
 });
 
@@ -253,15 +362,16 @@ describe("live data", () => {
     expect(p.taoWei).toBe(8n * 10n ** 16n);
     expect(p.taoBalance).toBeCloseTo(0.08, 10);
     expect(p.usdValue).toBeCloseTo(20, 6);
-    expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    expect((await data.getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
   });
 
   it("also subtracts a request whose batch closed but has not arrived", async () => {
     const d = deps();
     const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
     d.opLog.put(w);
-    const p = await createLiveCascadeData(D, d).getPosition(ME);
+    const p = await createLiveCascadeData(D, d).getAvailable(ME);
     expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
+    expect(p.availableTaoWei).toBe(8n * 10n ** 16n - 10n ** 15n - 2n * 10n ** 15n);
   });
 
   it("reads the limits from the cap still free and the minimum deposit", async () => {
@@ -462,7 +572,7 @@ describe("live data", () => {
       running--;
     };
     const data = createLiveCascadeData(D, deps({ scan }));
-    await Promise.all([data.getPosition(ME), data.getPosition(ME), data.getPosition(ME)]);
+    await Promise.all([data.getPositionHistory(ME), data.listDeposits(ME), data.getPositionHistory(ME)]);
     expect(overlapped).toBe(false);
     expect(calls).toBeLessThanOrEqual(1);
   });

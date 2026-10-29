@@ -16,22 +16,34 @@ export type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRe
 
 export type SourceChain = "base" | "ethereum" | "arbitrum" | "polygon" | "bnb";
 
+/** The account's stake, from contract reads alone: it never waits on the vault's history. */
 export interface Position {
-  /** csTAO the account holds on Bittensor, and the part not already asked back. */
+  /** csTAO the account holds on Bittensor. */
   shares: bigint;
-  availableShares: bigint;
   /** What those shares are worth in TAO now. */
   taoWei: bigint;
-  availableTaoWei: bigint;
   taoBalance: number;
   usdValue: number;
   taoPriceUsd: number;
+  /** Rewards earned but not yet collected, this account's share after Cascade's cut; undefined when unknown. */
+  pendingRewardsTao?: number;
+}
+
+/** What can be unstaked: the shares not already asked back (in the open batch, or on their way to the
+ * vault), and their TAO now. Waits on the vault's history only while one of this browser's unstakes is
+ * on its way and the scan hasn't seen it arrive. */
+export interface Available {
+  availableShares: bigint;
+  availableTaoWei: bigint;
+}
+
+/** Figures that need the vault's history (its logs since deployment, scanned from where this browser
+ * last stopped): "–" until it has been read. */
+export interface PositionHistory {
   /** TAO from deposits still on their way (open batch or on the bridge). */
   pendingTao: number;
   /** Value now + TAO taken out − TAO put in; undefined until there is a deposit. */
   rewardsEarnedTao?: number;
-  /** Rewards earned but not yet collected, this account's share after Cascade's cut; undefined when unknown. */
-  pendingRewardsTao?: number;
   /** Average price paid across this browser's deposits, or null. */
   avgEntryPriceUsd: number | null;
 }
@@ -141,6 +153,8 @@ export interface CascadeData {
    * and Cascade's cut, as a percent. Rejects when there is no figure that can be stood behind. */
   getApy(): Promise<number>;
   getPosition(account: string): Promise<Position>;
+  getAvailable(account: string): Promise<Available>;
+  getPositionHistory(account: string): Promise<PositionHistory>;
   getProof(): Promise<StakeProof>;
   getLimits(): Promise<Limits>;
   getBalances(account: string): Promise<Balances>;

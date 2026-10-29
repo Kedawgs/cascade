@@ -102,6 +102,8 @@ export interface RuleCtx {
   pendingPayoutKeys: Hex[];
   /** stored logs this tick found missing from a re-read (marked removed) */
   removed: { chain: ChainName; uid: Hex }[];
+  /** delivery checks the owner approved since the last tick saw (meta.approvals_seen) */
+  approvals: BatchCheckRow[];
   /** the watched addresses' rows */
   nonces: NonceRow[];
   t: Thresholds;

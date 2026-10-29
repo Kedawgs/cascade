@@ -39,6 +39,7 @@ export function ruleCtx(over: Partial<RuleCtx> & { logs?: RuleCtx["logs"]; store
     payoutUsers: [],
     pendingPayoutKeys: [],
     removed: [],
+    approvals: [],
     t: DEFAULTS,
     holdActive: false,
     meta: {},

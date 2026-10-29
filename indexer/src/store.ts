@@ -164,6 +164,8 @@ export interface TickState {
   awaitingReads: ChunkCheckRow[];
   /** the cross-checks still open: deliveries waiting, landings waiting or awaiting their read */
   openChecks: { batches: BatchCheckRow[]; chunks: ChunkCheckRow[] };
+  /** delivery checks the owner approved since the last tick saw (meta.approvals_seen) */
+  approvals: BatchCheckRow[];
   /** at most 50 users with a PayoutReceived in the last 7 days, not since claimed or delivered */
   payoutUsers: Hex[];
   /** the same users with the time of their last PayoutReceived */
@@ -338,6 +340,10 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     db.prepare("SELECT k, v FROM meta"),
     db.prepare("SELECT * FROM batch_checks WHERE status = 'waiting'"),
     db.prepare("SELECT * FROM chunk_checks WHERE status IN ('waiting', 'awaiting_read')"),
+    db.prepare(
+      `SELECT * FROM batch_checks INDEXED BY batch_checks_approved WHERE approved_at IS NOT NULL
+       AND approved_at > COALESCE((SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'approvals_seen'), 0) ORDER BY approved_at`,
+    ),
   ]);
   const rows = (i: number) => rs[i].results;
   const cursors: TickState["cursors"] = {};
@@ -369,6 +375,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     pendingPayoutKeys: rows(10).map((r) => ({ key: r.delivered_key as Hex, queuedBlock: BigInt(r.queued_block as number) })),
     meta: Object.fromEntries(rows(11).map((r) => [r.k as string, r.v as string])),
     openChecks: { batches: rows(12).map(batchCheckOf), chunks: rows(13).map(chunkCheckOf) },
+    approvals: rows(14).map(batchCheckOf),
   };
 }
 

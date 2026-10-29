@@ -14,9 +14,9 @@
     "fixtures": "node scripts/write-seed-fixtures.ts",
     "config:from-record": "node -e \"console.error('config:from-record: not built yet (plan Task 29)'); process.exit(1)\"",
     "site:approved": "node -e \"console.error('site:approved: not built yet (plan Task 27)'); process.exit(1)\"",
-    "hold:clear": "node -e \"console.error('hold:clear: not built yet (plan Task 24)'); process.exit(1)\"",
-    "alerts:ack": "node -e \"console.error('alerts:ack: not built yet (plan Task 24)'); process.exit(1)\"",
-    "checks:approve": "node -e \"console.error('checks:approve: not built yet (plan Task 24)'); process.exit(1)\""
+    "hold:clear": "node scripts/hold-clear.ts",
+    "alerts:ack": "node scripts/alerts-ack.ts",
+    "checks:approve": "node scripts/checks-approve.ts"
   },
   "dependencies": {
     "@noble/hashes": "1.8.0",

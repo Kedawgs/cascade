@@ -247,7 +247,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const claims = ops.filter((o): o is ClaimOp => o.kind === "claim").map(live);
     const out: WithdrawalRecord[] = [];
     for (const op of withdrawals) {
-      const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims });
+      const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims, siblings: withdrawals });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       out.push(withdrawalRecord({ ...op, batchId: batchId ?? op.batchId }, facts));
     }

@@ -57,8 +57,9 @@ export interface WithdrawalFacts {
   payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date };
   claimable: bigint;
   /** The claim's receipts: TAO claimed, the USDC the swap paid (if it ran), and whether it was kept as TAO
-   * or the swap failed after the claim (the TAO then sits in the wallet). */
-  claimed?: { hash: Hex; at: Date; taoClaimed: bigint; usdcOut?: bigint; keptTao: boolean; swapFailed: boolean };
+   * or the swap failed after the claim (the TAO then sits in the wallet). `shared` when the claim named
+   * other unstakes too: what it paid isn't this one's alone. */
+  claimed?: { hash: Hex; at: Date; taoClaimed: bigint; usdcOut?: bigint; keptTao: boolean; swapFailed: boolean; shared?: true };
   /** A claim from this browser names this unstake and hasn't settled yet. */
   claimPending?: true;
   payoutDelay: number;
@@ -358,8 +359,11 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   /** v3: today's price is under the unstake's minimum, so it hasn't been sold for it. */
   let belowMinimum: WithdrawalRecord["belowMinimum"];
   const c = cancelled ? undefined : f.claimed;
-  // v3: a claim from this browser shows its amount only when it took exactly this payout's credit
-  const ownClaim = !auto || (c !== undefined && f.credited !== undefined && c.taoClaimed === f.credited.taoWei);
+  // a claim from this browser shows its amount only when it was this payout's alone: on v3 when it took
+  // exactly this payout's credit; on v2, whose credits aren't read, when it named this unstake alone
+  const ownClaim = c !== undefined && (auto ? f.credited !== undefined && c.taoClaimed === f.credited.taoWei : !c.shared);
+  // and says it took more only when that is known (an unknown v3 credit says nothing)
+  const sharedClaim = c !== undefined && !ownClaim && (!auto || f.credited !== undefined);
   if (sold) {
     claim = {
       ...claim,
@@ -388,8 +392,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       status: "done",
       at: c.at,
       txUrl: explorer.baseTx(c.hash),
-      // it took more than this payout: the total, not a share of it (an unknown credit says nothing)
-      ...(!ownClaim && f.credited ? { detail: `Claimed together with your other payout: ${total} in all` } : {}),
+      // it took more than this payout: the total, not a share of it
+      ...(sharedClaim ? { detail: `Claimed together with your other payout: ${total} in all` } : {}),
     };
   } else if (auto && landed) {
     const v3 = deliveryStep(op, f, claim);

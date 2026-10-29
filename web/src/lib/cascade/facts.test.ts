@@ -379,6 +379,10 @@ describe("facts", () => {
     expect(f.facts.claimed).toMatchObject({ hash: H(21), taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, keptTao: false, swapFailed: false });
     const none = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [other] });
     expect(none.facts.claimed).toBeUndefined();
+    expect(f.facts.claimed?.shared).toBeUndefined();
+    // one claim that paid out several unstakes: what it paid isn't this one's alone
+    const both = await withdrawalFacts(c.clients, D, op, { fd, vault, scan: newScan(D), claims: [{ ...claim, withdrawalIds: ["w", "w2"] }] });
+    expect(both.facts.claimed).toMatchObject({ taoClaimed: 99n * 10n ** 14n, usdcOut: 2_450_000n, shared: true });
   });
 
   it("calls a record cancelled only when its cancel came out of the record's own batch, whatever that batch did after", async () => {
@@ -795,6 +799,28 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     expect(none.preference).toBeNull();
     expect(none.saleNowUsdc).toBeUndefined();
     expect(noneSet.reads).not.toContain("quoteExactInput");
+  });
+
+  it("splits the one entry the front door made of the account's requests in a batch between them, by their shares", async () => {
+    const half = { ...op, shares: 5n * 10n ** 21n };
+    const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62))] });
+    const factsFor = (w: WithdrawalOp, siblings: WithdrawalOp[]) =>
+      withdrawalFacts(b.clients, D3, w, { fd: { ...fd, claimable: 0n }, vault, scan: b.scan, claims: [], siblings }).then((r) => r.facts);
+    // two unstakes of this browser in batch 3, merged into one Redeemed of 1e22 shares for 0.01 TAO
+    const [first, second] = [{ ...half, id: "a" }, { ...half, id: "b" }];
+    for (const f of [await factsFor(first, [first, second]), await factsFor(second, [first, second])]) {
+      expect(f.delivered?.taoWei).toBe(5n * 10n ** 15n);
+      expect(f.credited?.taoWei).toBe(TAO_BACK / 2n);
+      // the delivery sold both halves: its USDC is shared
+      expect(f.usdcDelivered?.shared).toBe(true);
+    }
+    // the other half was asked for from another browser: the entry still says this one is half
+    expect((await factsFor(first, [first])).delivered?.taoWei).toBe(5n * 10n ** 15n);
+    // the whole entry was this request's
+    const whole = await factsFor(op, [op]);
+    expect(whole.delivered?.taoWei).toBe(10n ** 16n);
+    expect(whole.credited?.taoWei).toBe(TAO_BACK);
+    expect(whole.usdcDelivered?.shared).toBeUndefined();
   });
 
   it("knows a claim from this browser is still settling", async () => {

@@ -225,7 +225,9 @@ export async function withdrawalFacts(
   c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
   d: Deployment,
   op: WithdrawalOp,
-  ctx: { fd: FrontDoorState; vault: VaultState; scan: VaultScan; claims: ClaimOp[] },
+  /** `siblings`: the account's unstakes from this browser (this one among them), to share out an entry
+   * the front door made of several of them. */
+  ctx: { fd: FrontDoorState; vault: VaultState; scan: VaultScan; claims: ClaimOp[]; siblings?: WithdrawalOp[] },
 ): Promise<{ batchId?: bigint; facts: WithdrawalFacts }> {
   const req = await baseReceipt(c, op.hash);
   const batchId = op.batchId ?? batchIdFrom(req, "RedeemRequested", op.account);
@@ -246,14 +248,18 @@ export async function withdrawalFacts(
   // taken back out of its batch: a Redeemed there is another request of the account's, not this one
   if (facts.cancelMined) return { batchId, facts };
   const hit = batchId !== undefined ? ctx.scan.delivered.get(String(batchId)) : undefined;
+  /** This request's part of an amount paid on the account's entry in its batch. */
+  let part = (amount: bigint) => amount;
   if (hit) {
     const r = await bitReceipt(c, ctx.scan, hit.txHash);
     const mine = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, strict: false }).filter(
       (l) => "user" in l.args && l.args.user && same(l.args.user as string, op.account),
     );
     const redeemed = mine.find((l) => l.eventName === "Redeemed");
+    const entry = redeemed?.args as { shares: bigint; assets: bigint } | undefined;
+    if (entry) part = partOf({ ...op, batchId }, entry.shares, ctx.siblings ?? []);
     const at = await blockTime(c, ctx.scan, hit.block);
-    if (redeemed) facts.delivered = { at, txHash: hit.txHash, outcome: "redeemed", taoWei: (redeemed.args as { assets: bigint }).assets };
+    if (entry) facts.delivered = { at, txHash: hit.txHash, outcome: "redeemed", taoWei: part(entry.assets) };
     else if (mine.some((l) => l.eventName === "RedeemDeferred")) facts.delivered = { at, txHash: hit.txHash, outcome: "deferred" };
     else if (mine.some((l) => l.eventName === "RedeemSkipped")) facts.delivered = { at, txHash: hit.txHash, outcome: "skipped" };
 
@@ -274,8 +280,20 @@ export async function withdrawalFacts(
   if (claim) facts.claimed = await claimResult(c, claim);
   if (claim && !facts.claimed && (claim.state === "running" || claim.state === "sent")) facts.claimPending = true;
   // v3: once the payout is back on Base, what took it, and how much of it was this payout's
-  if (isV3(d) && hit && facts.payout?.state === 2) await deliveryFacts(c, d, op, ctx, hit.key, facts);
+  if (isV3(d) && hit && facts.payout?.state === 2) await deliveryFacts(c, d, op, ctx, hit.key, facts, part);
   return { batchId, facts };
+}
+
+/** This request's part of the account's entry in its batch. The front door adds up an account's
+ * requests in one batch into one entry, so each one's part is its shares over the larger of what the
+ * entry burned (all of them, from any browser) and what this browser's requests there asked for (more,
+ * when the vault couldn't burn the whole entry). An entry that was this request's alone is all its own. */
+function partOf(op: WithdrawalOp, burned: bigint, siblings: WithdrawalOp[]): (amount: bigint) => bigint {
+  const asked = siblings
+    .filter((o) => o.id !== op.id && o.batchId !== undefined && o.batchId === op.batchId && o.state !== "failed" && !o.cancelled)
+    .reduce((sum, o) => sum + o.shares, op.shares);
+  const whole = burned > asked ? burned : asked;
+  return (amount) => (op.shares >= whole ? amount : (amount * op.shares) / whole);
 }
 
 /** Where the account's redeem sits in its batch's payout list: the vault lists a batch's bounced
@@ -311,6 +329,8 @@ async function deliveryFacts(
   ctx: { fd: FrontDoorState; scan: VaultScan },
   key: Hex,
   facts: WithdrawalFacts,
+  /** This request's part of the account's credit (see partOf). */
+  part: (amount: bigint) => bigint,
 ): Promise<void> {
   // the batch's first chunk left Bittensor first: no part of the payout can land on Base before it
   const first = ctx.scan.payouts.get(key)?.[0];
@@ -327,8 +347,8 @@ async function deliveryFacts(
     // unreadable right now: no receipt and no amount, never a guessed one; what was read is kept
     if (!t.end) facts.traceFailed = true;
   }
-  const credit = t.landed?.amount;
-  if (t.landed) facts.credited = { at: t.landed.at, taoWei: t.landed.amount };
+  const credit = t.landed ? part(t.landed.amount) : undefined;
+  if (t.landed && credit !== undefined) facts.credited = { at: t.landed.at, taoWei: credit };
   if (t.end?.kind === "delivered") {
     const { hash, at, usdcOut, taoIn } = t.end;
     facts.usdcDelivered = { hash, at, usdcOut, ...(taoIn !== credit ? { shared: true as const } : {}) };
@@ -368,7 +388,8 @@ async function claimResult(c: Pick<Clients, "base">, k: ClaimOp): Promise<Withdr
     (l) => same(l.args.user as string, k.account),
   );
   const taoClaimed = (claimedLog?.args.amount as bigint | undefined) ?? k.amount;
-  const base = { hash: k.hashes.claim as Hex, at: new Date(k.createdAt), taoClaimed };
+  // one claim of several unstakes: what it paid isn't this one's alone
+  const base = { hash: k.hashes.claim as Hex, at: new Date(k.createdAt), taoClaimed, ...((k.withdrawalIds?.length ?? 0) > 1 ? { shared: true as const } : {}) };
   if (k.keepTao) return { ...base, keptTao: true, swapFailed: false };
   const swapReceipt = await baseReceipt(c, k.hashes.swap);
   if (mined(swapReceipt)) {

@@ -637,6 +637,17 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(both.steps[3].detail).toBe("Claimed together with your other payout: 0.0198 TAO in all");
   });
 
+  it("v2: shows one claim that paid out several unstakes without a per-unstake amount, and its total once", () => {
+    const shared = withdrawalRecord(wop, { ...back, claimable: 0n, credited: undefined, claimed: { ...claimed, taoClaimed: 2n * CREDIT, usdcOut: 4_900_000n, shared: true } });
+    expect(shared.status).toBe("paid");
+    expect(shared.steps[3]).toMatchObject({ status: "done", detail: "Claimed together with your other payout: 4.90 USDC in all" });
+    expect(shared.received).toBeUndefined();
+    // the claim named this unstake alone: its amount is this one's
+    const own = withdrawalRecord(wop, { ...back, claimable: 0n, credited: undefined, claimed });
+    expect(own.received).toEqual({ usdc: 2.45 });
+    expect(own.steps[3].detail).toBeUndefined();
+  });
+
   it("leaves a v2 unstake as it was, whatever the delivery facts say", () => {
     const r = withdrawalRecord(wop, { ...back, saleNowUsdc: 9_999_999n, now: new Date("2026-10-26T12:00:00Z") });
     expect(r.steps[3]).toMatchObject({ title: "Claim as USDC", status: "action", detail: "Your money is back on Base. Claim it as USDC" });

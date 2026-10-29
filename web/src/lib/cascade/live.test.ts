@@ -242,8 +242,8 @@ describe("the vault's history", () => {
     const storage = memory();
     const saved = createScanStore(storage, D);
     const s = saved.load(ME);
-    s.delivered.set("3", { key: H(3), txHash: H(4), block: 1n });
-    s.next = 2n;
+    s.delivered.set("3", { key: H(3), txHash: H(4), block: 500n });
+    s.next = 1_000n;
     saved.save(ME, s);
     const known = deps({ scan: never, scanStore: createScanStore(storage, D) });
     known.opLog.put(unstake(3n));
@@ -290,8 +290,9 @@ describe("the vault's history", () => {
     await visit().getPositionHistory(ME);
     await expect(visit().getPositionHistory(ME)).rejects.toThrow("window failed");
     await visit().getPositionHistory(ME);
-    expect(starts).toEqual([1n, 3_001n, 4_001n]);
-    expect(createScanStore(storage, D).load(ME).staked).toHaveLength(7);
+    // each visit resumes 10 blocks short of where the last stopped (those hadn't settled), and keeps what had
+    expect(starts).toEqual([1n, 2_991n, 3_981n]);
+    expect(createScanStore(storage, D).load(ME).staked.map((s) => s.block)).toEqual([1_000n, 2_000n, 4_980n, 5_980n]);
   });
 
   /** A saved scan that read to block 1,000, with one deposit of the account's at block 500 saved as `assets`. */

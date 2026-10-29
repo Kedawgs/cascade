@@ -83,40 +83,98 @@ function restart(scan: VaultScan): void {
 /** How far past the chain's newest block saved progress may claim to be (an hour of 12-second blocks)
  * before it is taken for a corrupt entry rather than a node a little behind. */
 const AHEAD = 300n;
+/** Each scan starts this many blocks before where the last one stopped, so a log that a lagging
+ * (load-balanced) node or a reorg hid is found on a later read; caught up, that is still one 1,000-block
+ * window a read. The keeper's numbers (ops/src/keeper/state.ts). */
+export const REREAD = 400n;
+/** Logs this close to where a scan stopped haven't settled: the next scan reads them again (one whose
+ * block was replaced is then gone), and they are never saved. */
+export const SETTLE = 10n;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** Reads the vault's logs forward from `scan.next` to two blocks short of the newest, one window at a
- * time, calling `onWindow` after each so the caller can save its progress. */
+/** Drops the events at or after `block`: the read about to start reads those blocks again. */
+function forget(scan: VaultScan, block: bigint): void {
+  for (const [id, e] of scan.delivered) if (e.block >= block) scan.delivered.delete(id);
+  for (const [key, chunks] of scan.payouts) {
+    const kept = chunks.filter((p) => p.block < block);
+    if (kept.length > 0) scan.payouts.set(key, kept);
+    else scan.payouts.delete(key);
+  }
+  for (const list of [scan.staked, scan.deposited, scan.redeemed] as { block: bigint }[][]) {
+    const kept = list.filter((e) => e.block < block);
+    list.splice(0, list.length, ...kept);
+  }
+}
+
+/** A log known by its transaction and content, numbered when one transaction has several alike: the
+ * same in every read of its block, and when a reorg mines the transaction again elsewhere, so a block
+ * read again adds nothing twice (as the keeper knows logs). Deliveries go by batch, chunks by number. */
+const staking = (txHash: Hex) => `staked:${txHash}`.toLowerCase();
+const accountEvent = (kind: "deposited" | "redeemed", e: { txHash: Hex; key: Hex }) => `${kind}:${e.txHash}:${e.key}`.toLowerCase();
+
+function numbered(ids: string[]): string[] {
+  const count = new Map<string, number>();
+  return ids.map((id) => {
+    const n = count.get(id) ?? 0;
+    count.set(id, n + 1);
+    return `${id}#${n}`;
+  });
+}
+
+/** Reads the vault's logs to two blocks short of the newest, one window at a time, calling `onWindow`
+ * after each so the caller can save its progress. It starts REREAD blocks before where it last stopped,
+ * after dropping what it found in the last SETTLE blocks then, and adds only logs it doesn't hold. */
 export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account?: Address, onWindow?: () => void): Promise<void> {
   // two blocks short of the newest: a block still being imported or replaced is read next time
   const latest = (await freshTip(c)) - 2n;
   // progress no chain could have reached yet can't be resumed: read it all again
   if (scan.next > latest + AHEAD) restart(scan);
-  for (let from = scan.next; from <= latest; from += WINDOW) {
+  forget(scan, scan.next - SETTLE);
+  const have = new Set(
+    numbered([...scan.staked.map((e) => staking(e.txHash)), ...scan.deposited.map((e) => accountEvent("deposited", e)), ...scan.redeemed.map((e) => accountEvent("redeemed", e))]),
+  );
+  const start = scan.next - REREAD > scan.from ? scan.next - REREAD : scan.from;
+  for (let from = start; from <= latest; from += WINDOW) {
     const to = from + WINDOW - 1n < latest ? from + WINDOW - 1n : latest;
     const raw = await windowLogs(c, d, from, to);
+    const seen = new Map<string, number>();
+    /** Whether a log is new to the scan, by its id (see numbered), counting it as held from now on. */
+    const fresh = (id: string) => {
+      const n = seen.get(id) ?? 0;
+      seen.set(id, n + 1);
+      if (have.has(`${id}#${n}`)) return false;
+      have.add(`${id}#${n}`);
+      return true;
+    };
     for (const l of parseEventLogs({ abi: VAULT, logs: raw as never, strict: false })) {
       const block = l.blockNumber as bigint;
       const txHash = l.transactionHash as Hex;
       if (l.eventName === "BatchDelivered" && l.args.sourceChain === BASE_CHAIN_ID && l.args.frontDoor && same(l.args.frontDoor, d.frontDoor)) {
         scan.delivered.set(String(l.args.batchId), { key: l.args.key as Hex, txHash, block });
       } else if (l.eventName === "Staked") {
-        scan.staked.push({ block, txHash });
+        if (fresh(staking(txHash))) scan.staked.push({ block, txHash });
       } else if (l.eventName === "PayoutChunkSent") {
         const key = l.args.key as Hex;
         const chunk = { txHash, block, chunk: Number(l.args.chunk), taken: Number(l.args.taken) };
-        scan.payouts.set(key, [...(scan.payouts.get(key) ?? []), chunk]);
+        const chunks = scan.payouts.get(key) ?? [];
+        if (!chunks.some((p) => p.chunk === chunk.chunk)) scan.payouts.set(key, [...chunks, chunk]);
       } else if (l.eventName === "Deposited" && account && l.args.user && same(l.args.user, account)) {
-        scan.deposited.push({ key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint });
+        const e = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint };
+        if (fresh(accountEvent("deposited", e))) scan.deposited.push(e);
       } else if (l.eventName === "Redeemed" && account && l.args.user && same(l.args.user, account)) {
-        scan.redeemed.push({ key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint });
+        const e = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint };
+        if (fresh(accountEvent("redeemed", e))) scan.redeemed.push(e);
       }
     }
-    scan.next = to + 1n;
+    // a log found on a read again goes in its block's place: "the first stake after" reads in order
+    if (seen.size > 0) for (const list of [scan.staked, scan.deposited, scan.redeemed] as { block: bigint }[][]) list.sort(byBlock);
+    if (to + 1n > scan.next) scan.next = to + 1n;
     onWindow?.();
   }
 }
+
+const byBlock = (a: { block: bigint }, b: { block: bigint }) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0);
 
 /** How many receipts confirmAccountEvents asks Bittensor's public node for at once. */
 const CONFIRM_AT_ONCE = 8;

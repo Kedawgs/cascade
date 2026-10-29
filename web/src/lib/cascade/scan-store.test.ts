@@ -42,12 +42,22 @@ describe("scan store", () => {
     const storage = memoryStorage();
     createScanStore(storage, D).save(ME, scanned());
     const back = createScanStore(storage, D).load(ME);
-    expect(back.next).toBe(5_000n);
+    expect(back.next).toBe(4_990n);
     expect(back.delivered.get("3")).toEqual({ key: H(77), txHash: H(9), block: 1_500n });
     expect(back.staked).toEqual([{ block: 1_600n, txHash: H(10) }]);
     expect(back.payouts.get(H(77))).toEqual(scanned().payouts.get(H(77)));
     expect(back.deposited).toEqual([{ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true }]);
     expect(back.redeemed).toEqual([{ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n, unconfirmed: true }]);
+  });
+
+  it("saves only what has settled: progress short of the last blocks read, and no event in them", () => {
+    const s = scanned();
+    s.staked.push({ block: 4_995n, txHash: H(30) });
+    const state = scanState(s);
+    expect(state.next).toBe("4990");
+    expect(state.staked).toEqual([{ block: "1600", txHash: H(10) }]);
+    // in memory, the scan keeps them
+    expect(s.staked).toHaveLength(2);
   });
 
   it("keeps each deployment and account apart", () => {
@@ -93,7 +103,7 @@ describe("scan store", () => {
     huge.next = 9_000_000n;
     for (let i = 0; i < 12_000; i++) huge.staked.push({ block: 5_000n + BigInt(i), txHash: H(i) });
     store.save(ME, huge);
-    expect(store.load(ME).next).toBe(5_000n);
+    expect(store.load(ME).next).toBe(4_990n);
   });
 
   it("keeps the scan in memory when storage is full or blocked", () => {
@@ -118,7 +128,7 @@ describe("seedScan", () => {
     scan.delivered.set("3", { key: H(77), txHash: H(9), block: 1_500n });
     scan.deposited.push({ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n });
     expect(seedScan(scan, scanState(scanned()))).toBe(true);
-    expect(scan.next).toBe(5_000n);
+    expect(scan.next).toBe(4_990n);
     // what the scan read stays as it read it, once
     expect(scan.delivered.size).toBe(1);
     expect(scan.deposited).toEqual([{ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n }]);
@@ -130,9 +140,9 @@ describe("seedScan", () => {
 
   it("changes nothing for a starting point that doesn't reach past the scan, or isn't valid for its vault", () => {
     const ahead = newScan(D);
-    ahead.next = 6_000n;
+    ahead.next = 4_990n;
     expect(seedScan(ahead, scanState(scanned()))).toBe(false);
-    expect(ahead.next).toBe(6_000n);
+    expect(ahead.next).toBe(4_990n);
     const fresh = newScan(D);
     expect(seedScan(fresh, { ...scanState(scanned()), vault: D.frontDoor.toLowerCase() })).toBe(false);
     expect(seedScan(fresh, null)).toBe(false);

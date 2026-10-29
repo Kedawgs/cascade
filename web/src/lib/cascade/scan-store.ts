@@ -1,6 +1,6 @@
 import type { Address, Hex } from "viem";
 import type { Deployment } from "./config";
-import { type AccountEvent, newScan, type PayoutChunk, type VaultScan } from "./facts";
+import { type AccountEvent, newScan, type PayoutChunk, SETTLE, type VaultScan } from "./facts";
 import type { StringStorage } from "./oplog";
 
 /** The saved form of a vault scan: how far it read and the events it found, bigints as decimal strings.
@@ -24,19 +24,24 @@ export interface ScanState {
   redeemed: { key: Hex; txHash: Hex; block: string; assets: string }[];
 }
 
-/** A scan's events in their saved form. */
+/** A scan's settled events in their saved form: its progress is saved SETTLE blocks short of where it
+ * stopped, without the events in those blocks (a later visit reads them again, and REREAD more). */
 export function scanState(scan: VaultScan): ScanState {
+  const next = scan.next - SETTLE > scan.from ? scan.next - SETTLE : scan.from;
+  const settled = (e: { block: bigint }) => e.block < next;
   const account = (e: AccountEvent) => ({ key: e.key, txHash: e.txHash, block: String(e.block), assets: String(e.assets) });
   return {
     v: SCAN_VERSION,
     vault: scan.vault.toLowerCase(),
     from: String(scan.from),
-    next: String(scan.next),
-    delivered: [...scan.delivered].map(([batchId, e]) => ({ batchId, key: e.key, txHash: e.txHash, block: String(e.block) })),
-    staked: scan.staked.map((e) => ({ block: String(e.block), txHash: e.txHash })),
-    payouts: [...scan.payouts].flatMap(([key, chunks]) => chunks.map((p) => ({ key, chunk: p.chunk, taken: p.taken, txHash: p.txHash, block: String(p.block) }))),
-    deposited: scan.deposited.map(account),
-    redeemed: scan.redeemed.map(account),
+    next: String(next),
+    delivered: [...scan.delivered].filter(([, e]) => settled(e)).map(([batchId, e]) => ({ batchId, key: e.key, txHash: e.txHash, block: String(e.block) })),
+    staked: scan.staked.filter(settled).map((e) => ({ block: String(e.block), txHash: e.txHash })),
+    payouts: [...scan.payouts].flatMap(([key, chunks]) =>
+      chunks.filter(settled).map((p) => ({ key, chunk: p.chunk, taken: p.taken, txHash: p.txHash, block: String(p.block) })),
+    ),
+    deposited: scan.deposited.filter(settled).map(account),
+    redeemed: scan.redeemed.filter(settled).map(account),
   };
 }
 

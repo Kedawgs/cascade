@@ -129,7 +129,7 @@ const vault: VaultState = {
 };
 
 describe("facts", () => {
-  it("scans Bittensor in windows of at most 1,000 blocks from the deploy block, and resumes", async () => {
+  it("scans Bittensor in windows of at most 1,000 blocks from the deploy block, and resumes with one window", async () => {
     const c = chains({ latest: 3_200n });
     const scan = newScan(D);
     await scanVault(c.clients, D, scan, ME);
@@ -137,7 +137,64 @@ describe("facts", () => {
     expect(c.windows[0][0]).toBe(1_000n);
     const before = c.windows.length;
     await scanVault(c.clients, D, scan, ME);
-    expect(c.windows.length).toBe(before);
+    // the last 400 blocks are read again: one window
+    expect(c.windows.slice(before)).toEqual([[3_199n - 400n, 3_198n]]);
+  });
+
+  /** A staked event, a payout chunk and a deposit of the account's, near the head at block 2,400. */
+  const nearHead = () => {
+    const staked = log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Staked", args: { hotkey: H(1) } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [1n, 1n]), 2_390n, H(40));
+    const chunk = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "PayoutChunkSent", args: { key: KEY } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256"), [0, 1, 1n, 1n, 0n]),
+      2_300n,
+      H(41),
+    );
+    const mine = log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: KEY, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [5n, 5n]), 2_200n, H(42));
+    return [staked, chunk, mine];
+  };
+
+  it("reads the last blocks again on every scan, adding nothing twice", async () => {
+    const c = chains({ latest: 2_500n, bitLogs: [delivered, ...nearHead()] });
+    const scan = newScan(D);
+    for (let i = 0; i < 3; i++) await scanVault(c.clients, D, scan, ME);
+    expect(scan.staked).toHaveLength(1);
+    expect(scan.payouts.get(KEY)).toHaveLength(1);
+    expect(scan.deposited).toHaveLength(1);
+    expect(scan.delivered.size).toBe(1);
+  });
+
+  it("finds on the next scan a log a lagging node left out, when it is in the blocks read again", async () => {
+    const later = log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Staked", args: { hotkey: H(1) } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [2n, 2n]), 2_395n, H(43));
+    const c = chains({ latest: 2_500n, bitLogs: [...nearHead(), later] });
+    const node = c.clients as unknown as { bittensor: { getLogs: (q: { fromBlock: bigint; toBlock: bigint }) => Promise<unknown[]> } };
+    const real = node.bittensor.getLogs;
+    // a load-balanced node that says it is at the head but serves logs from one behind: no payout chunk or first stake yet
+    const hidden = [H(40), H(41)];
+    node.bittensor.getLogs = async (q) => (await real(q)).filter((l) => !hidden.includes((l as { transactionHash: Hex }).transactionHash));
+    const scan = newScan(D);
+    await scanVault(c.clients, D, scan, ME);
+    expect(scan.payouts.size).toBe(0);
+    expect(scan.staked.map((s) => s.block)).toEqual([2_395n]);
+    node.bittensor.getLogs = real;
+    await scanVault(c.clients, D, scan, ME);
+    expect(scan.payouts.get(KEY)).toHaveLength(1);
+    // in its block's place, so "the first stake after" a delivery reads right
+    expect(scan.staked.map((s) => s.block)).toEqual([2_390n, 2_395n]);
+  });
+
+  it("drops a log near the head whose block was then replaced", async () => {
+    const logs = nearHead();
+    const c = chains({ latest: 2_400n, bitLogs: logs });
+    const scan = newScan(D);
+    await scanVault(c.clients, D, scan, ME);
+    expect(scan.staked).toHaveLength(1);
+    // block 2,390 was replaced: its stake isn't there any more
+    logs.splice(0, 1);
+    await scanVault(c.clients, D, scan, ME);
+    expect(scan.staked).toEqual([]);
+    expect(scan.deposited).toHaveLength(1);
   });
 
   it("stops two blocks short of the newest, so an event landing mid-read is never skipped", async () => {

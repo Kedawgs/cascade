@@ -78,6 +78,13 @@ describe("walletTaoNote", () => {
     expect(walletTaoNote(TAO, { ...l, maxTao: 10n ** 16n, full: "batch" })).toBe("The current batch is full. A new one opens once it leaves, so try again soon.");
     expect(walletTaoNote(TAO, { ...l, maxTao: 0n, full: "cap" })).toBe("Cascade is full for now. Try again later.");
   });
+
+  it("never rounds a limit the wrong way at 6 decimals: the most down, the least up", () => {
+    // 6.9999999 TAO fits at most: rounding would have said 7.00, which doesn't fit
+    expect(walletTaoNote(12n * TAO, { ...l, maxTao: 6_999_999_900_000_000_000n })).toBe("Deposits take at most 6.999999 TAO right now.");
+    // a minimum of 0.0400004 TAO: rounding would have said 0.04, which is under it
+    expect(walletTaoNote(10n ** 16n, { ...l, minTao: 40_000_400_000_000_000n })).toBe("Deposits start at 0.040001 TAO.");
+  });
 });
 
 describe("contractWalletNote", () => {

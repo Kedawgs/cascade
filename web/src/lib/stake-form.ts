@@ -71,12 +71,20 @@ export function stakeMaxInput(balance: number | null, limits: StakeLimits | unde
   return maxStakeInput(balance, limits.full ? undefined : limits.maxUsd);
 }
 
-/** Why TAO sitting in the wallet can't be deposited as it is, or null when it can. */
+/** 1e-6 TAO in wei: the finest step a TAO amount is shown in. */
+const MICRO_TAO = 10n ** 12n;
+
+/** Why TAO sitting in the wallet can't be deposited as it is, or null when it can. Its figures are cut
+ * to the 6 decimals shown the safe way, as the unstake button's are: the most rounded down, the least
+ * up, so neither names an amount that wouldn't go in. */
 export function walletTaoNote(tao: bigint, limits: Pick<Limits, "minTao" | "maxTao" | "full">): string | null {
-  if (tao < limits.minTao) return `Deposits start at ${taoLabel.format(toDisplay(limits.minTao, 18))} TAO.`;
+  if (tao < limits.minTao) {
+    const least = ((limits.minTao + MICRO_TAO - 1n) / MICRO_TAO) * MICRO_TAO;
+    return `Deposits start at ${taoLabel.format(toDisplay(least, 18))} TAO.`;
+  }
   if (tao <= limits.maxTao) return null;
   if (limits.maxTao < limits.minTao && limits.full) return FULL_TEXT[limits.full];
-  return `Deposits take at most ${taoLabel.format(toDisplay(limits.maxTao, 18))} TAO right now.`;
+  return `Deposits take at most ${taoLabel.format(floorTo(toDisplay(limits.maxTao, 18), 6))} TAO right now.`;
 }
 
 export const CONTRACT_WALLET_NOTE =

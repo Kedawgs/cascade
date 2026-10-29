@@ -316,6 +316,30 @@ describe("the vault's history", () => {
     await expect(createLiveCascadeData(D, { ...d }).getPositionHistory(ME)).rejects.toThrow();
   });
 
+  it("writes the saved history when a read found something new, and otherwise at most once a minute", async () => {
+    let clock = 0;
+    let found = false;
+    let saves = 0;
+    const store = createScanStore(memory(), D);
+    const d = deps({
+      now: () => clock,
+      scanStore: { load: store.load, save: (a, s) => (saves++, store.save(a, s)) },
+      scan: async (_c, _d, s) => {
+        s.next += 3n;
+        if (found) s.staked.push({ block: s.next - 1n, txHash: H(Number(s.next)) });
+      },
+    });
+    const data = createLiveCascadeData(D, d);
+    for (let i = 0; i < 4; i++) await data.getPositionHistory(ME);
+    expect(saves).toBe(1);
+    clock += 61_000;
+    await data.getPositionHistory(ME);
+    expect(saves).toBe(2);
+    found = true;
+    await data.getPositionHistory(ME);
+    expect(saves).toBe(3);
+  });
+
   it("reads the history on its own connection, so its log windows never share a batch with the balance reads", async () => {
     const reads = { name: "balance reads" };
     const history = { name: "history" };

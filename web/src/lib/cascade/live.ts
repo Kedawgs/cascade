@@ -79,6 +79,13 @@ const browserStorage = () => {
 
 /** How often a long scan saves its progress, so a visit cut short is resumed close to where it stopped. */
 const SAVE_EVERY_MS = 5_000;
+/** How often a scan that found nothing new is saved anyway, for its progress: a later visit reads the
+ * last 400 blocks (over an hour) again in any case. */
+const SAVE_IDLE_MS = 60_000;
+
+/** What a scan holds, by count: a read that changes none of it found nothing new to save. */
+const shapeOf = (s: VaultScan) =>
+  [s.delivered.size, s.staked.length, [...s.payouts.values()].reduce((n, p) => n + p.length, 0), s.deposited.length, s.redeemed.length].join(":");
 
 const minutesUntil = (at: Date, now: number) => Math.max(0, Math.ceil((at.getTime() - now) / 60_000));
 const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
@@ -127,13 +134,26 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     return p;
   }
 
+  /** When each account's scan was last saved, and what it held then. */
+  const lastSaved = new Map<string, { at: number; shape: string }>();
+  /** Saves the account's scan: always when `now`, otherwise when it holds something new since the last
+   * save or that was a minute ago (serialising a whole scan on every read is wasted work). */
+  function save(account: Address, scan: VaultScan, now = false): void {
+    const key = account.toLowerCase();
+    const shape = shapeOf(scan);
+    const last = lastSaved.get(key);
+    if (!now && last && last.shape === shape && deps.now() - last.at < SAVE_IDLE_MS) return;
+    deps.scanStore.save(account, scan);
+    lastSaved.set(key, { at: deps.now(), shape });
+  }
+
   /** A confirmation of saved history by the chain: when the chain shows it was wrong, the scan has gone
    * back to the deploy block, and that is saved at once. */
   async function confirming(account: Address, scan: VaultScan, confirm: () => Promise<void>): Promise<VaultScan> {
     try {
       await confirm();
     } catch (e) {
-      if (e instanceof HistoryMismatchError) deps.scanStore.save(account, scan);
+      if (e instanceof HistoryMismatchError) save(account, scan, true);
       throw e;
     }
     return scan;
@@ -160,15 +180,22 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     if (running) return running;
     const p = serial(account, (scan) => {
       let saved = deps.now();
-      const save = () => {
-        deps.scanStore.save(account, scan);
-        saved = deps.now();
-      };
       return deps
         .scan(history, d, scan, account, () => {
-          if (deps.now() - saved >= SAVE_EVERY_MS) save();
+          // a long first read saves as it goes
+          if (deps.now() - saved >= SAVE_EVERY_MS) {
+            save(account, scan, true);
+            saved = deps.now();
+          }
         })
-        .finally(save)
+        .then(
+          () => save(account, scan),
+          (e) => {
+            // a read that stopped keeps the progress it made
+            save(account, scan, true);
+            throw e;
+          },
+        )
         .then(() => scan);
     });
     inFlight.set(key, p);

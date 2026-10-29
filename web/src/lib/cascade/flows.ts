@@ -528,12 +528,15 @@ export const WIRING_MISMATCH =
 /** The wiring couldn't be read when a stake or unstake was clicked: nothing was sent. */
 export const WIRING_UNCHECKED = "We can't check Cascade's contracts right now, so nothing was sent. Try again in a moment.";
 
-/** Whether a flow (by its label in useFlows) waits for the contracts to check out: a stake (new, carried
- * on, or of wallet TAO), which approves and sends to the staker or the front door, and an unstake, which
- * pays the front door its fee. The ways out don't: a claim, a cancel and a swap of wallet TAO only touch
- * the listed front door and the fixed Uniswap router, send no ETH and approve only that router, and a
- * user should always be able to get their own money out. */
-export const needsWiring = (label: string): boolean => label === "stake" || label === "unstake";
+/** The flows (by their labels in useFlows) that don't wait for the contracts to check out: a claim, a
+ * cancel and a swap of wallet TAO only touch the listed front door and the fixed Uniswap router, send no
+ * ETH and approve only that router, and a user should always be able to get their own money out. */
+const EXITS: ReadonlySet<string> = new Set(["claim", "cancel", "swap"]);
+
+/** Whether a flow (by its label in useFlows) waits for the contracts to check out: every flow but the
+ * ways out (EXITS), so a stake (new, carried on, or of wallet TAO), an unstake, and any flow added later
+ * is held unless it is named there. */
+export const needsWiring = (label: string): boolean => !EXITS.has(label);
 
 /** Before any flow builds or sends anything: the contracts must check out (`check`, see wiring.ts). A
  * mismatch stops it for good; a check that can't be done stops it too, never failing open. */

@@ -12,6 +12,7 @@ import {
   recoverTypedDataAddress,
   serializeSignature,
 } from "viem";
+import { readFileSync } from "node:fs";
 import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it, vi } from "vitest";
 import type { Deployment } from "./config";
@@ -478,6 +479,17 @@ describe("the wiring gate before any flow", () => {
     expect(needsWiring("unstake")).toBe(true);
     // the ways out stay open: they only return the account's own funds
     for (const label of ["claim", "cancel", "swap"]) expect(needsWiring(label), label).toBe(false);
+  });
+
+  it("holds any other flow, including one added later: only the ways out are named to skip the check", () => {
+    for (const label of ["bridge", "restake", "", "Claim", "swap "]) expect(needsWiring(label), JSON.stringify(label)).toBe(true);
+  });
+
+  it("leaves open exactly the ways out, by the labels the app's flows run under", () => {
+    const src = readFileSync(new URL("./use-flows.ts", import.meta.url), "utf8");
+    const labels = [...new Set([...src.matchAll(/\bflow\("([^"]+)"/g)].map((m) => m[1]))];
+    expect(labels).toEqual(expect.arrayContaining(["stake", "unstake", "claim", "cancel", "swap"]));
+    expect(labels.filter((l) => !needsWiring(l)).sort()).toEqual(["cancel", "claim", "swap"]);
   });
 
   it("leaves open only ways out that touch the listed front door and the fixed router, send no ETH, and approve only the router", () => {

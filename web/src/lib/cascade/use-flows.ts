@@ -151,9 +151,9 @@ export function useFlows(account: string | null) {
   const wiring = useWiring(account !== null);
   const blocked = wiringNotice(wiring);
 
-  /** Runs `body` under the guard (claimed before any read), a stake or unstake only once the contracts
-   * check out (nothing is read for, recorded or sent before that; the ways out don't wait: needsWiring),
-   * records errors and refreshes the data. */
+  /** Runs `body` under the guard (claimed before any read), any flow but the ways out only once the
+   * contracts check out (nothing is read for, recorded or sent before that; needsWiring), records errors
+   * and refreshes the data. */
   async function flow<T>(label: string, body: () => Promise<T>): Promise<T> {
     if (!account) throw new Error("Connect a wallet first");
     setError(null);

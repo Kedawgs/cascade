@@ -193,8 +193,8 @@ not kept. Every Bittensor scan starts at the record's Bittensor adapter block.
 
 - **One Worker, `cascade-indexer`**, two handlers. `fetch` serves three read-only routes and nothing else
   (section 4). `scheduled` dispatches on `controller.cron`. *call*: three cron expressions (three of the free
-  plan's five per account): the **tick** every minute (scan both chains, read state, run the rules, raise or
-  clear the hold, send criticals and batched warnings), an **hourly** job at minute 17 (website integrity,
+  plan's five per account): the **tick** every minute (scan both chains, read state, run the rules, raise the
+  hold, send criticals and batched warnings), an **hourly** job at minute 17 (website integrity,
   pool-liquidity medians, pruning), and the **daily digest** at 13:00 UTC. Each runs in its own invocation, so
   each has its own subrequest and CPU budget.
 - **One D1 database** per deployment environment (`test` for the v3 test deployment, `production` later),
@@ -211,7 +211,8 @@ not kept. Every Bittensor scan starts at the record's Bittensor adapter block.
   6. run the rules on the stored logs, the readings and the previous readings (section 6);
   7. update alerts and holds, render and send due emails (section 7);
   8. commit everything (logs, cursors, seed pages, readings, alerts, holds, heartbeat) in one `db.batch()`, which
-     D1 runs as one transaction, so a tick that dies part-way leaves the database as it was before it.
+     D1 runs as one transaction, so a tick that dies part-way leaves the database as it was before it (at worst
+     an email sent in step 7 is sent again by the next tick).
   A failing rule or read is caught and recorded; it never stops the other rules. A chain whose reads fail for 5
   ticks in a row raises the `monitor.chain_unreadable` warning.
 
@@ -229,7 +230,7 @@ CREATE TABLE cursors (
   chain        TEXT PRIMARY KEY CHECK (chain IN ('base','bittensor')),
   from_block   INTEGER NOT NULL,   -- the deployment's first block on this chain
   scanned_to   INTEGER,            -- the last head fully read (null before the first window)
-  settled_to   INTEGER NOT NULL,   -- every log in [from_block, settled_to] is stored
+  settled_to   INTEGER NOT NULL,   -- every log in [from_block, settled_to] is stored (from_block − 1 at first)
   settled_time INTEGER,            -- block time of settled_to
   updated_at   INTEGER NOT NULL
 );
@@ -257,7 +258,7 @@ CREATE TABLE blocks (chain TEXT NOT NULL, number INTEGER NOT NULL, time INTEGER 
 
 CREATE TABLE txs (                                      -- senders of attributable transactions
   chain TEXT NOT NULL, hash TEXT NOT NULL, from_addr TEXT NOT NULL, to_addr TEXT,
-  selector TEXT, nonce INTEGER NOT NULL, status INTEGER, PRIMARY KEY (chain, hash));
+  selector TEXT, nonce INTEGER, PRIMARY KEY (chain, hash));  -- to/selector/nonce null when known from args
 CREATE INDEX txs_by_from ON txs(chain, from_addr, nonce);
 
 -- the deployment-wide part of the seed, pre-built: pages of up to 500 events in block order
@@ -381,7 +382,10 @@ on both chains) carries every `eth_call` of a tick in one `aggregate3` with `all
 are left, so the state reads, the rules and the emails always run. A steady tick needs about 10: one window per
 chain (logs and head together), one multicall per chain, one nonce batch per chain, one block-time batch per
 chain, the odd transaction lookup, and the price references every fifth minute. Backfill takes whatever is left.
-D1 work is shaped to stay under 10 queries per invocation (each `db.batch()` counts once).
+D1 work is shaped to stay under 10 queries per invocation (each `db.batch()` counts once): the tick prefetches,
+in one batch, every stored log the rules will read (this tick's new logs, the open batch's front door logs,
+unchecked deliveries and chunks with their related logs, the last 24 hours of request events), and the rules
+query that in memory.
 
 ### 4. The API
 
@@ -407,7 +411,8 @@ Three routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404
 - `vault` must be the configured vault (any case), else 404; `account` must be 40 hex digits, else 400.
 - `next = settled_to + 1` of Bittensor; every event has `from ≤ block < next` and comes from a stored, not
   removed log. The deployment-wide lists come from `seed_pages`; `deposited`/`redeemed` from `logs` by
-  `(event, topic2 = account)`, read in the same `db.batch()` as the cursor, so the snapshot is consistent.
+  `(event, topic2)` with `topic2` the account left-padded to 32 bytes (`user` is the second indexed argument of
+  both events), read in the same `db.batch()` as the cursor, so the snapshot is consistent.
 - Headers: `Content-Type: application/json`, `Cache-Control: public, max-age=30`,
   `Access-Control-Allow-Origin: <SITE_ORIGIN>` (one fixed origin, *call*: a constant header keeps cached
   responses valid for every caller; CORS here is not a security boundary, the data is public),
@@ -479,8 +484,11 @@ Conventions:
   until the other chain's settled time has passed the event's time (section 6.2).
 - **Debounce.** Rules over readings that a single bad RPC answer could trip need two consecutive ticks
   (marked "×2"); log-based rules fire at once.
-- **Alert keys.** Each finding has a stable key (rule plus its subject, e.g. `bridge.batch:42`), so a condition
-  that persists is one alert, not one per tick. It resolves when the condition clears.
+- **Alert keys and kinds.** Each finding has a stable key (rule plus its subject, e.g. `bridge.batch:42`), so a
+  condition that persists is one alert, not one per tick. A rule is either a *condition* (a state that holds or
+  not: solvency, lag, a low balance; the alert resolves when the state clears) or an *event* (something that
+  happened: an admin log, a bounced deposit, a price drop, a cross-check result; the alert stays open until it is
+  acknowledged, or closes quietly after 7 days, and never sends a "resolved" email).
 - **Baseline.** Events in the deployment's own setup transactions (blocks up to the record's last deploy step on
   each chain) are the baseline, not alerts.
 
@@ -581,7 +589,8 @@ within a few minutes of arriving: far inside the 24-hour payout delay that bound
 | `vault.events` | any `RedeemDeferred`, `PayoutDust`, `DepositSkipped` or an undecodable log | logs | — | Read the event in the email; usually a user-level edge case. |
 | `indexer.lag` | a chain's settled time more than 15 minutes behind its head (2 hours: raised to critical `indexer.blind`) | cursors | 15 min / 2 h | The monitor can't see a chain: check the RPC (quota, outage), switch URLs if needed. |
 | `indexer.reorg` | a stored log vanished from a later read | logs | — | Usually harmless; if it was a Cascade transaction, re-check its effects. |
-| `monitor.chain_unreadable` / `monitor.email_failing` | 5 ticks in a row without a chain's state, or emails failing for 30 min | tick | 5, 30 min | Check RPC URLs and the email binding. |
+| `site.unreachable` | the hourly integrity check couldn't fetch the site for 30 min | hourly fetch | 30 min | Check that the site is up (Pages, DNS). |
+| `monitor.chain_unreadable` / `monitor.email_failing` / `monitor.rule_failed` | 5 ticks in a row without a chain's state; emails failing for 30 min; a rule that threw | tick | 5, 30 min | Check RPC URLs and the email binding; a failing rule names its error (a bug to fix). |
 
 Warnings are emailed at most every 30 minutes, all new ones together (section 7).
 
@@ -623,7 +632,8 @@ dependencies or the deployment do, so the owner refreshes the list rarely and re
   plan, no quota); that needs Email Routing on the sending domain (open question 2).
 - **Tiers:**
   - Critical: sent in the tick that opens it, subject `[CASCADE CRITICAL] {summary}`; re-sent every 60 minutes
-    while open and not acknowledged, at most 6 times; a `[Cascade resolved] {summary}` when it clears.
+    while open and not acknowledged, at most 6 times; a `[Cascade resolved] {summary}` when a condition clears
+    (event alerts don't resolve by themselves: section 6 conventions).
   - Warning: collected and sent at most every 30 minutes as one email, subject `[Cascade warning] {n} new: {first
     summary}`; not re-sent; listed in the digest while open; resolved quietly (the digest says so).
   - Digest: daily, section 6.5.
@@ -715,8 +725,9 @@ spam).
 ### 10. Local development and testing (no deploy)
 
 - **Package:** `indexer/` with its own `package.json` (pnpm 11.23.0), TypeScript 5.9.3, vitest 5.0.5,
-  `@cloudflare/vitest-plugin` 1.4.2 (which pins wrangler 4.151.0), wrangler 4.151.0, viem 2.57.7; `wrangler
-  types` generates `worker-configuration.d.ts` (committed).
+  `@cloudflare/vitest-plugin` 1.4.2 (which pins wrangler 4.151.0), wrangler 4.151.0, viem 2.57.7 and
+  `@noble/hashes` 1.8.0 (the web app's versions); `wrangler types` generates `worker-configuration.d.ts`
+  (committed).
 - **Tests** (`pnpm test`): two vitest projects. `worker`: every `src/` module runs inside workerd through
   `cloudflareTest()`, with D1 migrations applied by `applyD1Migrations` in a setup file and a fake JSON-RPC server
   injected as the `fetch` the RPC client uses (scripted answers per method, a head that can lag, failures on

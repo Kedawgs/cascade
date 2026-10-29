@@ -206,12 +206,30 @@ export const bridgePayouts: Rule = {
     for (const r of ctx.checks.chunks) note(known, `${r.batchKey}:${r.chunk}`, r.landedUid);
     for (const l of candidates) note(known, `${lower(l.args.batchKey)}:${Number(l.args.chunk)}`, l.uid);
 
+    // bridge.check_stuck: a landing still waiting or awaiting its read 60 minutes after it landed (or,
+    // without its block time, after it was first seen). On Base a forged payout is claimable at once.
+    const stuck = (r: { batchKey: Hex; chunk: number; landedUid: Hex; landedTx: Hex }, status: string, since: number | undefined) => {
+      if (since === undefined || ctx.nowS - since < ctx.t.checkStuckS) return;
+      add({
+        rule: "bridge.check_stuck",
+        key: `bridge.check_stuck:payout:${r.batchKey}:${r.chunk}:${r.landedUid}`,
+        subject: `A payout landing's check (chunk ${r.chunk}) has been ${status} for ${Math.floor((ctx.nowS - since) / 60)} minutes`,
+        facts: { side: "base", key: r.batchKey, chunk: String(r.chunk), status, since: utc(since), landing: txLink("base", r.landedTx), "Bittensor settled to": utc(ctx.settled.bittensor.time) },
+      });
+    };
+    const decidedNow = new Set<Hex>();
+
     // step 5: the front door's delivered() read, from a reading at or after the landing's block
     for (const r of ctx.checks.chunks) {
       if (r.status !== "awaiting_read") continue;
-      const read = ctx.snap.deliveredReads.find((x) => x.landedUid === r.landedUid && x.block >= r.landedBlock);
-      if (!read) continue;
       const row = { landedUid: r.landedUid, batchKey: r.batchKey, chunk: r.chunk, landedTx: r.landedTx, landedBlock: r.landedBlock };
+      const read = ctx.snap.deliveredReads.find((x) => x.landedUid === r.landedUid && x.block >= r.landedBlock);
+      if (!read) {
+        if (r.firstSeen === null) ctx.writes.chunkChecks.push({ ...row, status: "awaiting_read", firstSeen: ctx.nowS });
+        stuck(r, "awaiting its delivered() read", ctx.blockTime("base", r.landedBlock) ?? r.firstSeen ?? ctx.nowS);
+        continue;
+      }
+      decidedNow.add(r.landedUid);
       if (read.value) {
         ctx.writes.chunkChecks.push({ ...row, status: "ok" });
       } else {
@@ -223,13 +241,18 @@ export const bridgePayouts: Rule = {
 
     // steps 1–4: the landings still waiting for Bittensor, and this tick's new ones
     const vaultLogs = ctx.logs.range("bittensor", "vault", ["PayoutChunkSent", "DepositBounced", "Redeemed"]);
+    const looked = new Set<Hex>();
     for (const l of candidates) {
+      looked.add(l.uid);
+      const r = rows.get(l.uid);
       const key = lower(l.args.batchKey);
       const chunk = Number(l.args.chunk);
-      const row: ChunkCheckWrite = { landedUid: l.uid, batchKey: key, chunk, landedTx: l.txHash, landedBlock: l.block, status: "waiting" };
+      const row: ChunkCheckWrite = { landedUid: l.uid, batchKey: key, chunk, landedTx: l.txHash, landedBlock: l.block, status: "waiting", firstSeen: r?.firstSeen ?? ctx.nowS };
       const at = ctx.blockTime("base", l.block);
       if (at === undefined || !afterSettled(ctx, "bittensor", at)) {
-        if (!rows.has(l.uid)) ctx.writes.chunkChecks.push(row);
+        // still waiting: written when new, or to give it a first-seen time
+        if (!r || r.firstSeen === null) ctx.writes.chunkChecks.push(row);
+        stuck(row, "waiting for Bittensor", at ?? row.firstSeen);
         continue;
       }
       const group = groupDelivered(ctx.logs.inTx("base", l.txHash), { opener: "frontDoor:PayoutsDelivered", adapter: "baseAdapter", recipient: d.frontDoor }).find((g) => g.opener.uid === l.uid);
@@ -251,6 +274,15 @@ export const bridgePayouts: Rule = {
       if (v.expectedHash) decided.expectedHash = v.expectedHash;
       if (v.detail) decided.detail = `${v.step}: ${v.detail}`;
       ctx.writes.chunkChecks.push(decided);
+    }
+
+    // waiting rows whose landing log isn't loaded: timed from when they were first seen
+    for (const r of ctx.checks.chunks) {
+      if (r.status !== "waiting" || looked.has(r.landedUid) || decidedNow.has(r.landedUid)) continue;
+      if (r.firstSeen === null) {
+        ctx.writes.chunkChecks.push({ landedUid: r.landedUid, batchKey: r.batchKey, chunk: r.chunk, landedTx: r.landedTx, landedBlock: r.landedBlock, status: "waiting", firstSeen: ctx.nowS });
+      }
+      stuck(r, "waiting for Bittensor", ctx.blockTime("base", r.landedBlock) ?? r.firstSeen ?? ctx.nowS);
     }
     return [...found.values()];
   },

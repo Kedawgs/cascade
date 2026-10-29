@@ -127,6 +127,8 @@ export interface ChunkCheckRow {
   expectedHash: Hex | null;
   status: ChunkCheckStatus;
   detail: string | null;
+  /** the tick time the monitor first saw the check (null until a rule has looked at it) */
+  firstSeen: number | null;
   /** the bridge the landing came through (loaded with the landings awaiting a delivered() read) */
   bridge?: Hex;
 }
@@ -290,6 +292,7 @@ export const chunkCheckOf = (r: Row): ChunkCheckRow => ({
   expectedHash: (r.expected_hash as Hex | null) ?? null,
   status: r.status as ChunkCheckStatus,
   detail: (r.detail as string | null) ?? null,
+  firstSeen: num(r.first_seen),
   ...(typeof r.bridge === "string" ? { bridge: r.bridge as Hex } : {}),
 });
 
@@ -581,6 +584,8 @@ export interface ChunkCheckWrite {
   expectedHash?: Hex;
   status: ChunkCheckStatus;
   detail?: string;
+  /** kept from the first write that gives one */
+  firstSeen?: number;
 }
 
 export function upsertBatchCheck(db: D1Database, c: BatchCheckWrite): D1PreparedStatement {
@@ -624,16 +629,17 @@ export function upsertBatchCheck(db: D1Database, c: BatchCheckWrite): D1Prepared
 export function upsertChunkCheck(db: D1Database, c: ChunkCheckWrite): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO chunk_checks (landed_uid, batch_key, chunk, landed_tx, landed_block, sent_tx, message_id, expected_hash, status, detail)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+      `INSERT INTO chunk_checks (landed_uid, batch_key, chunk, landed_tx, landed_block, sent_tx, message_id, expected_hash, status, detail, first_seen)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
        ON CONFLICT (landed_uid) DO UPDATE SET
          sent_tx = COALESCE(excluded.sent_tx, chunk_checks.sent_tx),
          message_id = COALESCE(excluded.message_id, chunk_checks.message_id),
          expected_hash = COALESCE(excluded.expected_hash, chunk_checks.expected_hash),
          status = excluded.status,
-         detail = excluded.detail`,
+         detail = excluded.detail,
+         first_seen = COALESCE(chunk_checks.first_seen, excluded.first_seen)`,
     )
-    .bind(c.landedUid, c.batchKey, c.chunk, c.landedTx, int(c.landedBlock), opt(c.sentTx), opt(c.messageId), opt(c.expectedHash), c.status, opt(c.detail));
+    .bind(c.landedUid, c.batchKey, c.chunk, c.landedTx, int(c.landedBlock), opt(c.sentTx), opt(c.messageId), opt(c.expectedHash), c.status, opt(c.detail), opt(c.firstSeen));
 }
 
 const writePages = (db: D1Database, pages: readonly SeedPage[]): D1PreparedStatement[] => {

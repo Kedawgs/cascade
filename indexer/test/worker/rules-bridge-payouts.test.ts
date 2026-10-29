@@ -42,24 +42,25 @@ const rowOf = (w: ChunkCheckWrite): ChunkCheckRow => ({
   expectedHash: w.expectedHash ?? null,
   status: w.status,
   detail: w.detail ?? null,
+  firstSeen: w.firstSeen ?? null,
 });
 
-/** A tick that settles Base blocks 37,000,000–37,001,000, with Bittensor settled `bitLag` seconds past
- * every landing. */
+/** A tick at LANDED_AT (unless `nowS`), with Bittensor settled `bitLag` seconds past every landing. */
 function tick(
   logs: StoredLog[],
-  o: { rows?: ChunkCheckRow[]; reads?: Snapshot["deliveredReads"]; cfg?: Config; bitLag?: number; fresh?: boolean; newUids?: Hex[] } = {},
+  o: { rows?: ChunkCheckRow[]; reads?: Snapshot["deliveredReads"]; cfg?: Config; bitLag?: number; fresh?: boolean; newUids?: Hex[]; nowS?: number; noTimes?: boolean } = {},
 ): RuleCtx {
   const base = ruleCtx();
   return ruleCtx({
     cfg: o.cfg ?? testConfig(),
+    nowS: o.nowS ?? LANDED_AT,
     logs: logQuery(logs),
     // every log given is first stored by this tick, unless `fresh` is false or `newUids` names them
     newUids: new Set(o.newUids ?? (o.fresh === false ? [] : logs.map((l) => l.uid))),
     snap: { ...base.snap, deliveredReads: o.reads ?? [] },
     checks: { batches: [], chunks: o.rows ?? [] },
     settled: { base: base.settled.base, bittensor: { block: 10n ** 9n, time: LANDED_AT + (o.bitLag ?? 60) } },
-    blockTime: (chain) => (chain === "base" ? LANDED_AT : LANDED_AT - 900),
+    blockTime: (chain) => (o.noTimes ? undefined : chain === "base" ? LANDED_AT : LANDED_AT - 900),
   });
 }
 const all = (...ps: PayoutFixture[]) => ps.flatMap((p) => [...p.bit, ...p.base]);
@@ -81,6 +82,7 @@ describe("bridge.payout_mismatch: honest chunks pass", () => {
         messageId: c.messageId,
         expectedHash: hashOf(KEY, c.chunk, c.entries),
         status: "awaiting_read",
+        firstSeen: LANDED_AT,
       })),
     );
     expect(p.chunks[1].entries.map((e) => e.user)).toEqual([C]);
@@ -257,6 +259,59 @@ describe("bridge.payout_mismatch: no landing skips its check", () => {
   });
 });
 
+describe("bridge.check_stuck: no landing waits forever without a warning", () => {
+  const p = () => payoutBatch({ key: KEY, list, chunks: [{ taken: 3, fee: FEE }] });
+  const stuckKey = (l: StoredLog) => `bridge.check_stuck:payout:${KEY}:0:${l.uid}`;
+
+  it("warns 60 minutes after a landing still waiting for Bittensor, timed from its block", () => {
+    const x = p();
+    const l = x.chunks[0].landing!;
+    const first = tick(all(x), { bitLag: -1 });
+    bridgePayouts.run(first);
+    const rows = first.writes.chunkChecks.map(rowOf);
+    expect(rows.map((r) => [r.status, r.firstSeen])).toEqual([["waiting", LANDED_AT]]);
+    expect(bridgePayouts.run(tick(all(x), { rows, fresh: false, bitLag: -1, nowS: LANDED_AT + 3599 }))).toEqual([]);
+    const late = tick(all(x), { rows, fresh: false, bitLag: -1, nowS: LANDED_AT + 3600 });
+    const [f] = bridgePayouts.run(late);
+    expect(f).toMatchObject({ rule: "bridge.check_stuck", key: stuckKey(l), facts: { side: "base", key: KEY, chunk: "0" } });
+    expect(late.writes.chunkChecks).toEqual([]);
+  });
+
+  it("times a landing from when its row was first seen when its block time is never fetched, and when its log isn't loaded", () => {
+    const x = p();
+    const l = x.chunks[0].landing!;
+    // a row stored with its log has no first-seen time yet: the rule gives it one
+    const stored = rowOf({ landedUid: l.uid, batchKey: KEY, chunk: 0, landedTx: l.txHash, landedBlock: l.block, status: "waiting" });
+    const first = tick(all(x), { rows: [stored], fresh: false, noTimes: true });
+    expect(bridgePayouts.run(first)).toEqual([]);
+    expect(first.writes.chunkChecks.map((w) => [w.status, w.firstSeen])).toEqual([["waiting", LANDED_AT]]);
+    const rows = first.writes.chunkChecks.map(rowOf);
+    expect(bridgePayouts.run(tick(all(x), { rows, fresh: false, noTimes: true, nowS: LANDED_AT + 3599 }))).toEqual([]);
+    expect(bridgePayouts.run(tick(all(x), { rows, fresh: false, noTimes: true, nowS: LANDED_AT + 3600 })).map((f) => f.key)).toEqual([stuckKey(l)]);
+    // its log not loaded at all: the row alone is enough
+    const noLog = tick([], { rows: [stored] });
+    expect(bridgePayouts.run(noLog)).toEqual([]);
+    expect(noLog.writes.chunkChecks.map((w) => [w.landedUid, w.status, w.firstSeen])).toEqual([[l.uid, "waiting", LANDED_AT]]);
+    expect(bridgePayouts.run(tick([], { rows, nowS: LANDED_AT + 3600 })).map((f) => f.key)).toEqual([stuckKey(l)]);
+  });
+
+  it("warns about a landing awaiting its delivered() read for 60 minutes", () => {
+    const x = p();
+    const l = x.chunks[0].landing!;
+    const first = tick(all(x));
+    bridgePayouts.run(first);
+    const rows = first.writes.chunkChecks.map(rowOf);
+    expect(rows.map((r) => r.status)).toEqual(["awaiting_read"]);
+    // no read yet, or only from a reading before the landing
+    expect(bridgePayouts.run(tick(all(x), { rows, fresh: false, nowS: LANDED_AT + 3599 }))).toEqual([]);
+    const late = tick(all(x), { rows, fresh: false, nowS: LANDED_AT + 3600, reads: [read(l, false, l.block - 1n)] });
+    expect(bridgePayouts.run(late).map((f) => f.key)).toEqual([stuckKey(l)]);
+    expect(late.writes.chunkChecks).toEqual([]);
+    // decided this tick: no warning
+    expect(bridgePayouts.run(tick(all(x), { rows, fresh: false, nowS: LANDED_AT + 3600, reads: [read(l, true)] }))).toEqual([]);
+  });
+});
+
 describe("the payout list, a chunk's entries and the message", () => {
   it("lists bounced deposits (0 shares) first, then redeems, each in log order, for one key only", () => {
     const x = payoutBatch({ key: KEY, list: [list[1], list[0], list[2]], chunks: [{ taken: 3, fee: FEE }] });
@@ -303,6 +358,7 @@ describe("the payout list, a chunk's entries and the message", () => {
       expectedHash: h("hash"),
       status: "awaiting_read",
       detail: null,
+      firstSeen: null,
       bridge: D.baseAdapter,
       ...o,
     });

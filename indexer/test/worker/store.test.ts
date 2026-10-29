@@ -200,6 +200,16 @@ describe("check rows stored with their logs", () => {
     await upsertBatchCheck(db, { batchId: 43n, deliveredKey: h("key"), deliveredUid: h("d"), deliveredTx: h("dtx"), status: "ok", firstSeen: 500 }).run();
     expect(await db.prepare("SELECT first_seen FROM batch_checks").first("first_seen")).toBe(99);
   });
+
+  it("keeps a landing's first-seen time from the first write that gives one", async () => {
+    await db.batch(upsertLogs(db, [landed]));
+    const write = { landedUid: h("l"), batchKey: h("key"), chunk: 2, landedTx: h("ltx"), landedBlock: 37_000_100n };
+    expect(await db.prepare("SELECT first_seen FROM chunk_checks").first("first_seen")).toBeNull();
+    await upsertChunkCheck(db, { ...write, status: "waiting", firstSeen: 77 }).run();
+    await upsertChunkCheck(db, { ...write, status: "awaiting_read", firstSeen: 500 }).run();
+    expect(await db.prepare("SELECT status, first_seen FROM chunk_checks").first()).toEqual({ status: "awaiting_read", first_seen: 77 });
+    expect((await loadTickState(db, 1)).openChecks.chunks.map((r) => r.firstSeen)).toEqual([77]);
+  });
 });
 
 describe("checks and holds", () => {

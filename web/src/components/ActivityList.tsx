@@ -74,7 +74,13 @@ export function DepositList({ deposits }: { deposits: DepositRecord[] }) {
 }
 
 export function WithdrawalList({ withdrawals }: { withdrawals: WithdrawalRecord[] }) {
-  if (withdrawals.length === 0) return null;
+  if (withdrawals.length === 0) {
+    return (
+      <p className={styles.empty}>
+        No unstakes yet. When you <Link href="/unstake">unstake</Link>, it shows up here with a receipt for every step.
+      </p>
+    );
+  }
   return (
     <ul className={styles.list}>
       {withdrawals.map((w) => {

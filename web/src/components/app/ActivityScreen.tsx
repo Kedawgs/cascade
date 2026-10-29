@@ -6,7 +6,7 @@ import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
 import { useBalances, useDeposit, useDeposits, useIsV3, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
 import { type ActivityTab, parseActivityParams } from "@/lib/activity-params";
-import { needsYou, offersClaim } from "@/lib/cascade/trail";
+import { offersClaim } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { DepositList, WithdrawalList } from "../ActivityList";
@@ -31,7 +31,7 @@ function NotFound({ what }: { what: "deposit" | "unstake" }) {
     <div className={`${app.card} ${styles.panel}`}>
       <p className={styles.panelTitle}>We couldn&apos;t find this {what}.</p>
       <p className={styles.panelText}>It may belong to a different wallet.</p>
-      <BackLink />
+      <BackLink href={what === "unstake" ? "/activity?tab=unstakes" : "/activity"} />
     </div>
   );
 }
@@ -255,8 +255,9 @@ const TABS: { key: ActivityTab; label: string; href: string }[] = [
   { key: "unstakes", label: "Unstakes", href: "/activity?tab=unstakes" },
 ];
 
-/** Deposits or unstakes, one at a time. Each tab shows its count once known, and a dot when something
- * in it waits on you, so a claim can't hide behind the other tab. */
+/** Deposits or unstakes, one at a time. Each tab shows its count once known, and Unstakes a dot while
+ * money is ready to claim (`offersClaim`, which clears once it's claimed or delivered), so a claim
+ * can't hide behind Deposits. */
 export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   const deposits = useDeposits(account);
   const withdrawals = useWithdrawals(account);
@@ -277,10 +278,11 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
               aria-current={t.key === tab ? "page" : undefined}
             >
               {t.label}
+              <span className="sr-only">: </span>
               <span className={styles.count}>{items ? items.length : ""}</span>
-              {items?.some(needsYou) && (
+              {t.key === "unstakes" && withdrawals.data?.some(offersClaim) && (
                 <span className={styles.attention}>
-                  <span className="sr-only">, needs you</span>
+                  <span className="sr-only">, money ready to claim</span>
                 </span>
               )}
             </Link>
@@ -299,15 +301,7 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
         <Loading />
       ) : (
         <section className={styles.section} aria-label={tab === "deposits" ? "Your deposits" : "Your unstakes"}>
-          {tab === "deposits" ? (
-            <DepositList deposits={deposits.data} />
-          ) : withdrawals.data.length > 0 ? (
-            <WithdrawalList withdrawals={withdrawals.data} />
-          ) : (
-            <p className={styles.empty}>
-              No unstakes yet. When you <Link href="/unstake">unstake</Link>, it shows up here with a receipt for every step.
-            </p>
-          )}
+          {tab === "deposits" ? <DepositList deposits={deposits.data} /> : <WithdrawalList withdrawals={withdrawals.data} />}
         </section>
       )}
     </>

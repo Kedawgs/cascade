@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DepositOp, WithdrawalOp } from "./oplog";
-import { chainOnlyDeposit, type DepositFacts, depositRecord, isDelivering, needsYou, offersClaim, type WithdrawalFacts, withdrawalRecord } from "./trail";
+import { chainOnlyDeposit, type DepositFacts, depositRecord, isDelivering, offersClaim, type WithdrawalFacts, withdrawalRecord } from "./trail";
 
 const ME = "0x000000000000000000000000000000000000A11c" as const;
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
@@ -619,14 +619,5 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(r.usdcAmount).toBe(2.5);
     const paid = withdrawalRecord(wop, { ...back, claimable: 0n, claimed: { ...claimed, taoClaimed: 2n * CREDIT } });
     expect(paid.received).toEqual({ usdc: 2.45 });
-  });
-});
-
-describe("needsYou", () => {
-  const step = (status: "done" | "active" | "action" | "pending" | "failed") => ({ status });
-  it("is true only when a step waits on the owner, or money is ready to claim", () => {
-    expect(needsYou({ steps: [step("done"), step("action"), step("pending")] })).toBe(true);
-    expect(needsYou({ status: "ready", steps: [step("done")] })).toBe(true);
-    expect(needsYou({ steps: [step("done"), step("active"), step("failed")] })).toBe(false);
   });
 });

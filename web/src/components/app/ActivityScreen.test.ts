@@ -41,7 +41,7 @@ const html = (tab: ActivityTab, withdrawals: WithdrawalRecord[]) =>
 describe("Activity lists", () => {
   it("shows one list at a time, with both tabs' counts", () => {
     const text = plainText(html("deposits", [unstake()]));
-    expect(text).toContain("Deposits1Unstakes1");
+    expect(text).toContain("Deposits: 1Unstakes: 1");
     expect(text).toContain("$25 from Base");
     expect(text).not.toContain("17.41");
     expect(plainText(html("unstakes", [unstake()]))).not.toContain("$25 from Base");
@@ -51,9 +51,15 @@ describe("Activity lists", () => {
     expect(html("unstakes", [unstake()])).toMatch(/aria-current="page"[^>]*>Unstakes/);
   });
 
-  it("puts a dot on a tab with something waiting on you, even from the other tab", () => {
-    expect(plainText(html("deposits", [unstake({ status: "ready" })]))).toContain("Unstakes1, needs you");
-    expect(plainText(html("deposits", [unstake()]))).not.toContain("needs you");
+  it("puts a dot on Unstakes while money is ready to claim, so it can't hide behind Deposits", () => {
+    expect(plainText(html("deposits", [unstake({ status: "ready" })]))).toContain("Unstakes: 1, money ready to claim");
+    expect(plainText(html("deposits", [unstake()]))).not.toContain("ready to claim");
+  });
+
+  it("puts no dot on what stays flagged after it's dealt with (a daily-limit unstake, a claim whose swap failed)", () => {
+    const dailyLimit = unstake({ status: "needs_you", unstakeAgain: true, steps: [{ key: "unstake", title: "Unstake on Bittensor", status: "action" }] });
+    const swapFailed = unstake({ status: "needs_you", steps: [{ key: "claim", title: "Swap it to USDC", status: "action" }] });
+    expect(plainText(html("deposits", [dailyLimit, swapFailed]))).not.toContain("ready to claim");
   });
 
   it("says so when there are no unstakes yet", () => {

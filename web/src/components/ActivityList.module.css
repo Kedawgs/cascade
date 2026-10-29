@@ -100,6 +100,11 @@
   color: var(--ink-2);
 }
 
+.empty a {
+  color: var(--water-deep);
+  font-weight: 600;
+}
+
 @media (max-width: 560px) {
   .row {
     grid-template-columns: 1fr auto;

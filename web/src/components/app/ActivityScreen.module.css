@@ -13,6 +13,7 @@
 }
 
 .switchTab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -38,33 +39,31 @@
 
 /* room for a count from the first render, so the tabs don't widen when the lists arrive */
 .count {
-  min-width: 1ch;
+  min-width: 2ch;
   color: var(--ink-3);
   font-weight: 500;
 }
 
+/* on the tab's corner, so it doesn't widen the tab when it appears */
 .attention {
+  position: absolute;
+  top: 7px;
+  right: 7px;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--amber);
 }
 
-.empty {
-  padding: 16px 0;
-  font-size: 14.5px;
-  color: var(--ink-2);
-}
-
-.empty a {
-  color: var(--water-deep);
-  font-weight: 600;
-}
-
 @media (max-width: 480px) {
   .switch {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .switchTab {
+    gap: 6px;
+    padding: 0 10px;
   }
 }
 

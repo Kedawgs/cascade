@@ -447,10 +447,6 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
  * the screens use to show the claim button or banner. */
 export const offersClaim = (r: Pick<WithdrawalRecord, "status">): boolean => r.status === "ready";
 
-/** Whether a deposit or unstake waits on its owner: a step only they can take, or money to claim. */
-export const needsYou = (r: { status?: string; steps: readonly { status: string }[] }): boolean =>
-  r.status === "ready" || r.steps.some((s) => s.status === "action");
-
 /** v3: what the last step says while the USDC is on its way to the wallet by itself. */
 const DELIVERING = "USDC is being delivered to your wallet automatically";
 

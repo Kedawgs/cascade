@@ -4,7 +4,7 @@ import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deploym
 import { cancelTook, chainDeposits, confirmAccountEvents, depositFacts, scanVault, type VaultScan, withdrawalFacts } from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
-import { createScanStore, type ScanStore } from "./scan-store";
+import { createScanStore, dropSavedScans, type ScanStore } from "./scan-store";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
 import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
@@ -75,7 +75,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   const storage = browserStorage();
   const deps: LiveDeps = {
     clients: given.clients ?? createClients(),
-    opLog: given.opLog ?? createOpLog(storage, d.frontDoor),
+    // the op log wins the browser's storage: saved history is dropped to make room for it
+    opLog: given.opLog ?? createOpLog(storage, d.frontDoor, () => dropSavedScans(storage)),
     scanStore: given.scanStore ?? createScanStore(storage, d),
     readFrontDoor: reads.readFrontDoor,
     readVault: reads.readVault,

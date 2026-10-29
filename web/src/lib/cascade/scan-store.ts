@@ -79,6 +79,8 @@ function decode(x: unknown, scan: Pick<VaultScan, "vault" | "from">) {
   };
 }
 
+type Decoded = NonNullable<ReturnType<typeof decode>>;
+
 const byBlock = <T extends { block: bigint }>(xs: T[]) => [...xs].sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0));
 
 /** Carries `scan` forward with a saved or published state that reaches further than it has read: the
@@ -88,7 +90,11 @@ const byBlock = <T extends { block: bigint }>(xs: T[]) => [...xs].sort((a, b) =>
  * nothing. True when the scan moved forward. */
 export function seedScan(scan: VaultScan, seed: unknown): boolean {
   const s = decode(seed, scan);
-  if (!s || s.next <= scan.next) return false;
+  return s !== null && merge(scan, s);
+}
+
+function merge(scan: VaultScan, s: Decoded): boolean {
+  if (s.next <= scan.next) return false;
   // what the scan already read stays as it read it
   const unread = <T extends { block: bigint }>(xs: T[]) => byBlock(xs.filter((e) => e.block >= scan.next));
   for (const { batchId, ...e } of unread(s.delivered)) if (!scan.delivered.has(batchId)) scan.delivered.set(batchId, e);
@@ -117,32 +123,73 @@ export function seedScan(scan: VaultScan, seed: unknown): boolean {
  * this stays in memory, and the one saved earlier is resumed from instead. */
 const MAX_SAVED_CHARS = 1_000_000;
 
+const PREFIX = "cascade.scan.";
+
 /** Each account's scan of one deployment, saved in the browser (the op log's storage) so a later visit
- * resumes it rather than reading the vault's history from the deploy block again. Keyed by front door,
- * deploy block and account; an entry that can't be read or isn't valid starts the scan over. */
+ * resumes it rather than reading the vault's history from the deploy block again. The deployment's own
+ * events (deliveries, stakes, payout chunks) are saved once, under its front door and deploy block, and
+ * each account's Deposited and Redeemed under that and the account; a scan resumes from the earlier of
+ * the two. A half that is missing, can't be read or isn't valid starts the scan over. */
 export function createScanStore(storage: StringStorage, d: Deployment) {
-  const key = (account: Address) => `cascade.scan.${d.frontDoor.toLowerCase()}.${d.bitBlock}.${account.toLowerCase()}`;
+  const deployment = `${PREFIX}${d.frontDoor.toLowerCase()}.${d.bitBlock}`;
+  const key = (account: Address) => `${deployment}.${account.toLowerCase()}`;
+  const read = (k: string): unknown => {
+    const raw = storage.getItem(k);
+    return raw === null ? null : JSON.parse(raw);
+  };
+  const write = (k: string, state: ScanState) => {
+    const json = JSON.stringify(state);
+    if (json.length <= MAX_SAVED_CHARS) storage.setItem(k, json);
+  };
   return {
     /** The saved scan for `account`, or a new one from the deploy block. */
     load(account: Address): VaultScan {
       const scan = newScan(d);
       try {
-        const raw = storage.getItem(key(account));
-        if (raw !== null) seedScan(scan, JSON.parse(raw));
+        const [shared, own] = [decode(read(deployment), scan), decode(read(key(account)), scan)];
+        if (!shared || !own) return scan;
+        const next = shared.next < own.next ? shared.next : own.next;
+        const below = <T extends { block: bigint }>(xs: T[]) => xs.filter((e) => e.block < next);
+        merge(scan, {
+          next,
+          delivered: below(shared.delivered),
+          staked: below(shared.staked),
+          payouts: below(shared.payouts),
+          deposited: below(own.deposited),
+          redeemed: below(own.redeemed),
+        });
       } catch {
         // storage blocked, or not JSON: start from the deploy block
       }
       return scan;
     },
     save(account: Address, scan: VaultScan): void {
+      const state = scanState(scan);
       try {
-        const json = JSON.stringify(scanState(scan));
-        if (json.length <= MAX_SAVED_CHARS) storage.setItem(key(account), json);
+        write(deployment, { ...state, deposited: [], redeemed: [] });
+        write(key(account), { ...state, delivered: [], staked: [], payouts: [] });
       } catch {
         // storage full or blocked: this visit keeps its scan in memory
       }
     },
   };
+}
+
+/** Removes every saved scan, of any deployment or account: the op log needs the room more, and a scan
+ * can always be read again. True if there was one to remove. */
+export function dropSavedScans(storage: StringStorage): boolean {
+  try {
+    if (!storage.removeItem || !storage.key || storage.length === undefined) return false;
+    const saved: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (k?.startsWith(PREFIX)) saved.push(k);
+    }
+    for (const k of saved) storage.removeItem(k);
+    return saved.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 export type ScanStore = ReturnType<typeof createScanStore>;

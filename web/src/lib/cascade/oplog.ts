@@ -70,16 +70,25 @@ export function entryPriceUsd(op: Pick<DepositOp, "priceUsd">): number | undefin
   return op.priceUsd !== undefined && op.priceUsd > 0 ? op.priceUsd : undefined;
 }
 
-/** Where the browser keeps text by key: localStorage, or memory where storage is blocked. */
-export type StringStorage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
+/** Where the browser keeps text by key: localStorage, or memory where storage is blocked. Listing and
+ * removing keys is needed only to make room (see createOpLog). */
+export type StringStorage = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
+  key?(index: number): string | null;
+  readonly length?: number;
+};
 
 const replacer = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);
 const reviver = (_k: string, v: unknown) =>
   v && typeof v === "object" && "$bigint" in v ? BigInt((v as { $bigint: string }).$bigint) : v;
 
 /** The transactions this site sent, per account and deployment, kept in the browser. There is no
- * indexer: the activity trails start from these and read the rest from the chain. */
-export function createOpLog(storage: StringStorage, frontDoor: Address) {
+ * indexer: the activity trails start from these and read the rest from the chain. When storage is full,
+ * `makeRoom` may free some (saved history, which can be read again) before a write is kept in memory
+ * only: these records can't be read back from anywhere else. */
+export function createOpLog(storage: StringStorage, frontDoor: Address, makeRoom?: () => boolean) {
   const memory = new Map<string, Operation[]>();
   /** Lists whose last write storage refused (full, or blocked): this tab's memory is newer than what is stored. */
   const unsaved = new Set<string>();
@@ -100,13 +109,18 @@ export function createOpLog(storage: StringStorage, frontDoor: Address) {
   function write(account: Address, ops: Operation[]) {
     const k = key(account);
     memory.set(k, ops);
-    try {
-      storage.setItem(k, JSON.stringify(ops, replacer));
-      unsaved.delete(k);
-    } catch {
-      // kept in memory for this tab, which reads it from there until a write gets through again
-      unsaved.add(k);
-    }
+    const json = JSON.stringify(ops, replacer);
+    const store = () => {
+      try {
+        storage.setItem(k, json);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // kept in memory for this tab, which reads it from there until a write gets through again
+    if (store() || (makeRoom?.() && store())) unsaved.delete(k);
+    else unsaved.add(k);
   }
 
   /** Flows running in this tab right now: a "running" record not in here was left by a reload. */

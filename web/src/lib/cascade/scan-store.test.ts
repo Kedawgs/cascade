@@ -16,6 +16,8 @@ const D: Deployment = {
 const ME = "0x000000000000000000000000000000000000A11c" as const;
 const YOU = "0x000000000000000000000000000000000000b0B0" as const;
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
+const GLOBAL_KEY = `cascade.scan.${D.frontDoor.toLowerCase()}.1000`;
+const MY_KEY = `${GLOBAL_KEY}.${ME.toLowerCase()}`;
 
 function memoryStorage() {
   const m = new Map<string, string>();
@@ -67,7 +69,52 @@ describe("scan store", () => {
     // the same front door, redeployed from a later block
     const again = { ...D, bitBlock: 9_000n };
     expect(createScanStore(storage, again).load(ME).next).toBe(9_000n);
-    expect([...storage.m.keys()]).toEqual([`cascade.scan.${D.frontDoor.toLowerCase()}.1000.${ME.toLowerCase()}`]);
+    expect([...storage.m.keys()].sort()).toEqual([GLOBAL_KEY, MY_KEY]);
+  });
+
+  it("saves the deployment's own events once for every account, and each account's events apart", () => {
+    const storage = memoryStorage();
+    const store = createScanStore(storage, D);
+    store.save(ME, scanned());
+    const yours = scanned();
+    yours.deposited = [{ key: H(79), txHash: H(14), block: 2_500n, assets: 3n }];
+    yours.redeemed = [];
+    store.save(YOU, yours);
+    expect(storage.m.size).toBe(3);
+    // the deliveries, stakes and chunks are in the deployment's entry only
+    expect(storage.m.get(MY_KEY)).not.toContain(H(10).slice(2));
+    expect(JSON.parse(storage.m.get(GLOBAL_KEY)!).deposited).toEqual([]);
+    const back = store.load(YOU);
+    expect(back.delivered.get("3")?.txHash).toBe(H(9));
+    expect(back.staked).toHaveLength(1);
+    expect(back.deposited).toEqual([{ key: H(79), txHash: H(14), block: 2_500n, assets: 3n, unconfirmed: true }]);
+    expect(store.load(ME).redeemed).toHaveLength(1);
+  });
+
+  it("resumes from the earlier of the two saves when another account saved the deployment's events at another block", () => {
+    const storage = memoryStorage();
+    const store = createScanStore(storage, D);
+    store.save(ME, scanned());
+    const behind = newScan(D);
+    behind.next = 3_000n;
+    behind.delivered.set("3", { key: H(77), txHash: H(9), block: 1_500n });
+    store.save(YOU, behind);
+    const back = store.load(ME);
+    expect(back.next).toBe(2_990n);
+    // the redeem at block 4,000 is past that: it is read again, not taken from the save
+    expect(back.redeemed).toEqual([]);
+    expect(back.deposited).toHaveLength(1);
+  });
+
+  it("starts over when either half of a save is missing", () => {
+    const storage = memoryStorage();
+    createScanStore(storage, D).save(ME, scanned());
+    const noAccount = memoryStorage();
+    noAccount.setItem(GLOBAL_KEY, storage.m.get(GLOBAL_KEY)!);
+    expect(createScanStore(noAccount, D).load(ME).next).toBe(D.bitBlock);
+    const noDeployment = memoryStorage();
+    noDeployment.setItem(MY_KEY, storage.m.get(MY_KEY)!);
+    expect(createScanStore(noDeployment, D).load(ME).next).toBe(D.bitBlock);
   });
 
   it("discards an entry that is corrupt, of another version or for another vault, rather than half-trusting it", () => {
@@ -86,10 +133,14 @@ describe("scan store", () => {
       { ...good, deposited: [{ key: H(77), txHash: H(9), block: "1500", assets: 1e16 }] },
       { ...good, redeemed: "none" },
     ];
-    for (const entry of bad) {
+    const loaded = (entry: unknown) => {
       const storage = memoryStorage();
-      storage.setItem(`cascade.scan.${D.frontDoor.toLowerCase()}.1000.${ME.toLowerCase()}`, typeof entry === "string" ? entry : JSON.stringify(entry));
-      const s = createScanStore(storage, D).load(ME);
+      for (const k of [GLOBAL_KEY, MY_KEY]) storage.setItem(k, typeof entry === "string" ? entry : JSON.stringify(entry));
+      return createScanStore(storage, D).load(ME);
+    };
+    expect(loaded(good).next).toBe(4_990n);
+    for (const entry of bad) {
+      const s = loaded(entry);
       expect(s.next).toBe(D.bitBlock);
       expect(s.delivered.size + s.staked.length + s.deposited.length).toBe(0);
     }

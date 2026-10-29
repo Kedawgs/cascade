@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createOpLog, type DepositOp, effectiveState } from "./oplog";
+import { dropSavedScans } from "./scan-store";
 
 const FD = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750" as const;
 const ME = "0x000000000000000000000000000000000000A11c" as const;
@@ -105,6 +106,40 @@ describe("operation log", () => {
     log.put(deposit("c", ME, 3));
     s.setItem(`cascade.ops.${FD.toLowerCase()}.${ME.toLowerCase()}`, "[]");
     expect(log.list(ME)).toEqual([]);
+  });
+});
+
+describe("the op log and saved history in one storage", () => {
+  it("makes room by dropping the saved history when storage is full: the op log wins", () => {
+    const m = new Map<string, string>();
+    const QUOTA = 2_000;
+    const used = () => [...m].reduce((n, [k, v]) => n + k.length + v.length, 0);
+    const storage = {
+      getItem: (k: string) => m.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        const before = m.get(k);
+        m.set(k, v);
+        if (used() > QUOTA) {
+          if (before === undefined) m.delete(k);
+          else m.set(k, before);
+          throw new DOMException("quota", "QuotaExceededError");
+        }
+      },
+      removeItem: (k: string) => void m.delete(k),
+      key: (i: number) => [...m.keys()][i] ?? null,
+      get length() {
+        return m.size;
+      },
+    };
+    storage.setItem("cascade.scan.0xfd.1", "x".repeat(1_800));
+    storage.setItem("cascade.scan.0xfd.1.0xme", "x".repeat(100));
+    storage.setItem("something.else", "kept");
+    const log = createOpLog(storage, FD, () => dropSavedScans(storage));
+    log.put(deposit("a", ME, 1));
+    // stored for good, so another tab or a reload reads it
+    expect(createOpLog(storage, FD).get(ME, "a")?.id).toBe("a");
+    expect([...m.keys()].filter((k) => k.startsWith("cascade.scan."))).toEqual([]);
+    expect(m.get("something.else")).toBe("kept");
   });
 });
 

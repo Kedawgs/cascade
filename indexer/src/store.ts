@@ -83,6 +83,23 @@ export interface MessageRow {
 }
 
 export type BatchCheckStatus = "waiting" | "ok" | "mismatch" | "ok_by_owner";
+
+/** One delivery's cross-check (one row per batch id and delivered key). */
+export interface BatchCheckRow {
+  batchId: bigint;
+  deliveredKey: Hex;
+  deliveredUid: Hex;
+  deliveredTx: Hex;
+  closedTx: Hex | null;
+  messageId: Hex | null;
+  expectedKey: Hex | null;
+  status: BatchCheckStatus;
+  detail: string | null;
+  approvedNote: string | null;
+  approvedAt: number | null;
+  queuedBlock: bigint | null;
+  payoutDoneBlock: bigint | null;
+}
 export type ChunkCheckStatus = "waiting" | "awaiting_read" | "ok" | "mismatch";
 
 export interface ChunkCheckRow {
@@ -127,6 +144,8 @@ export interface TickState {
   pendingMessages: MessageRow[];
   /** payout landings waiting for a delivered(...) read */
   awaitingReads: ChunkCheckRow[];
+  /** the cross-checks still open: deliveries waiting, landings waiting or awaiting their read */
+  openChecks: { batches: BatchCheckRow[]; chunks: ChunkCheckRow[] };
   /** at most 50 users with a PayoutReceived in the last 7 days, not since claimed or delivered */
   payoutUsers: Hex[];
   /** deliveries whose payouts are queued and not yet done */
@@ -196,7 +215,52 @@ const messageOf = (r: Row): MessageRow => ({
   dstBlock: big(r.dst_block),
 });
 
-const chunkCheckOf = (r: Row): ChunkCheckRow => ({
+export const batchCheckOf = (r: Row): BatchCheckRow => ({
+  batchId: BigInt(r.batch_id as number),
+  deliveredKey: r.delivered_key as Hex,
+  deliveredUid: r.delivered_uid as Hex,
+  deliveredTx: r.delivered_tx as Hex,
+  closedTx: (r.closed_tx as Hex | null) ?? null,
+  messageId: (r.message_id as Hex | null) ?? null,
+  expectedKey: (r.expected_key as Hex | null) ?? null,
+  status: r.status as BatchCheckStatus,
+  detail: (r.detail as string | null) ?? null,
+  approvedNote: (r.approved_note as string | null) ?? null,
+  approvedAt: num(r.approved_at),
+  queuedBlock: big(r.queued_block),
+  payoutDoneBlock: big(r.payout_done_block),
+});
+
+/** A stored log as read back. */
+export const logOf = (r: Row): StoredLog => {
+  const log: StoredLog = {
+    uid: r.uid as Hex,
+    chain: r.chain as ChainName,
+    contract: r.contract as Role,
+    address: r.address as Hex,
+    block: BigInt(r.block as number),
+    logIndex: Number(r.log_index),
+    txHash: r.tx_hash as Hex,
+    event: r.event as string,
+    data: r.data as Hex,
+    args: JSON.parse(r.args as string) as StoredLog["args"],
+  };
+  if (r.topic1) log.topic1 = r.topic1 as Hex;
+  if (r.topic2) log.topic2 = r.topic2 as Hex;
+  if (r.topic3) log.topic3 = r.topic3 as Hex;
+  if (Number(r.removed) === 1) log.removed = true;
+  return log;
+};
+
+export const txRowOf = (r: Row): TxRow => {
+  const row: TxRow = { chain: r.chain as ChainName, hash: r.hash as Hex, from: r.from_addr as Hex };
+  if (r.to_addr) row.to = r.to_addr as Hex;
+  if (r.selector) row.selector = r.selector as Hex;
+  if (r.nonce !== null && r.nonce !== undefined) row.nonce = Number(r.nonce);
+  return row;
+};
+
+export const chunkCheckOf = (r: Row): ChunkCheckRow => ({
   landedUid: r.landed_uid as Hex,
   batchKey: r.batch_key as Hex,
   chunk: Number(r.chunk),
@@ -248,6 +312,8 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     ).bind(PAYOUT_USERS_BLOCKS, nowS - 7 * 86400),
     db.prepare("SELECT delivered_key, queued_block FROM batch_checks WHERE queued_block IS NOT NULL AND payout_done_block IS NULL"),
     db.prepare("SELECT k, v FROM meta"),
+    db.prepare("SELECT * FROM batch_checks WHERE status = 'waiting'"),
+    db.prepare("SELECT * FROM chunk_checks WHERE status IN ('waiting', 'awaiting_read')"),
   ]);
   const rows = (i: number) => rs[i].results;
   const cursors: TickState["cursors"] = {};
@@ -275,6 +341,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     payoutUsers: rows(9).map((r) => `0x${(r.user as string).slice(-40)}` as Hex),
     pendingPayoutKeys: rows(10).map((r) => ({ key: r.delivered_key as Hex, queuedBlock: BigInt(r.queued_block as number) })),
     meta: Object.fromEntries(rows(11).map((r) => [r.k as string, r.v as string])),
+    openChecks: { batches: rows(12).map(batchCheckOf), chunks: rows(13).map(chunkCheckOf) },
   };
 }
 
@@ -435,21 +502,33 @@ export function checkDeployment(meta: Readonly<Record<string, string>>, d: Pick<
 
 /** One delivery's cross-check row (one per batch id and delivered key). An owner's approval is never
  * overwritten by a later check. */
-export function upsertBatchCheck(
-  db: D1Database,
-  c: {
-    batchId: bigint;
-    deliveredKey: Hex;
-    deliveredUid: Hex;
-    deliveredTx: Hex;
-    closedTx?: Hex;
-    messageId?: Hex;
-    expectedKey?: Hex;
-    status: Exclude<BatchCheckStatus, "ok_by_owner">;
-    detail?: string;
-    queuedBlock?: bigint;
-  },
-): D1PreparedStatement {
+export interface BatchCheckWrite {
+  batchId: bigint;
+  deliveredKey: Hex;
+  deliveredUid: Hex;
+  deliveredTx: Hex;
+  closedTx?: Hex;
+  messageId?: Hex;
+  expectedKey?: Hex;
+  status: Exclude<BatchCheckStatus, "ok_by_owner">;
+  detail?: string;
+  queuedBlock?: bigint;
+}
+
+export interface ChunkCheckWrite {
+  landedUid: Hex;
+  batchKey: Hex;
+  chunk: number;
+  landedTx: Hex;
+  landedBlock: bigint;
+  sentTx?: Hex;
+  messageId?: Hex;
+  expectedHash?: Hex;
+  status: ChunkCheckStatus;
+  detail?: string;
+}
+
+export function upsertBatchCheck(db: D1Database, c: BatchCheckWrite): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO batch_checks (batch_id, delivered_key, delivered_uid, delivered_tx, closed_tx, message_id, expected_key, status, detail, queued_block)
@@ -469,10 +548,7 @@ export function upsertBatchCheck(
 
 /** One payout landing's cross-check row, keyed by its PayoutsDelivered log: a forged duplicate landing
  * gets its own row and never touches the honest one's. */
-export function upsertChunkCheck(
-  db: D1Database,
-  c: { landedUid: Hex; batchKey: Hex; chunk: number; landedTx: Hex; landedBlock: bigint; sentTx?: Hex; messageId?: Hex; expectedHash?: Hex; status: ChunkCheckStatus; detail?: string },
-): D1PreparedStatement {
+export function upsertChunkCheck(db: D1Database, c: ChunkCheckWrite): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO chunk_checks (landed_uid, batch_key, chunk, landed_tx, landed_block, sent_tx, message_id, expected_hash, status, detail)

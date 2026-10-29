@@ -52,11 +52,22 @@ describe("the keeper commands sign as the record's keeper", () => {
   it("run checks first that the keystore really signs as the keeper", async () => {
     const ctx = (signs: string, code = 0) =>
       ({ paths: p, runner: { run: async () => ({ code, stdout: `${signs}\n`, stderr: "" }) }, signer: keeperSigner(KEYS, p, launch.plan) }) as unknown as Ctx;
-    await expect(requireKeeperKey(ctx(KEEPER))).resolves.toBeUndefined();
-    await expect(requireKeeperKey(ctx(WALLET))).rejects.toThrow(
+    await expect(requireKeeperKey(ctx(KEEPER), launch)).resolves.toBeUndefined();
+    await expect(requireKeeperKey(ctx(WALLET), launch)).rejects.toThrow(
       `the keeper's keystore /keys/keeper.json signs as ${WALLET}, not the record's keeper ${KEEPER}: set OPS_KEEPER_KEYSTORE and OPS_KEEPER_PASSWORD_FILE to the keeper's key; nothing sent`,
     );
-    await expect(requireKeeperKey(ctx("", 1))).rejects.toThrow(/signs as no account \(it can't be opened\)/);
+    await expect(requireKeeperKey(ctx("", 1), launch)).rejects.toThrow(/signs as no account \(it can't be opened\)/);
+  });
+
+  it("run stops at once when the record's keeper isn't who it signs as, even with the default keystore, before opening it", async () => {
+    const opened: string[][] = [];
+    const ctx = { paths: p, runner: { run: async (_f: string, args: string[]) => (opened.push(args), { code: 0, stdout: `${WALLET}\n`, stderr: "" }) } } as unknown as Ctx;
+    await expect(requireKeeperKey(ctx, launch)).rejects.toThrow(
+      `the record's keeper is ${KEEPER}, but the keeper commands sign as ${WALLET}: set OPS_KEEPER_KEYSTORE and OPS_KEEPER_PASSWORD_FILE to the keeper's key; nothing sent`,
+    );
+    expect(opened).toEqual([]);
+    // a test record's keeper is the test wallet, which the default keystore signs as
+    await expect(requireKeeperKey(ctx, v3Record())).resolves.toBeUndefined();
   });
 });
 

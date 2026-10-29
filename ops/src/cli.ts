@@ -144,7 +144,7 @@ async function run(a: Args): Promise<number> {
       const rec = needRecord(a.live);
       const ctx = keeperCtx(a.live, rec);
       // a wrong key stops the loop now, not at its first send
-      await requireKeeperKey(ctx);
+      await requireKeeperKey(ctx, rec);
       for (const line of uncheckedLines(rec)) log(line);
       await runLoop(keeperDeps(ctx, rec, recordPath(a.live), a.users as Address[]), rec, {
         intervalMs: 60_000,

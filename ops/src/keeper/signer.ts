@@ -23,10 +23,13 @@ export function keeperSigner(env: Env, p: Pick<Paths, "keystore" | "passwordFile
 export const keeperMismatch = (keeper: string, signer: string) =>
   `the record's keeper is ${keeper}, but the keeper commands sign as ${signer}: set ${KEEPER_KEY_VARS} to the keeper's key; nothing sent`;
 
-/** Before `run` starts: the keeper's keystore must really sign as the address it is used for (each send
- * checks it again), so a wrong key stops the loop at once instead of at its first send. */
-export async function requireKeeperKey(ctx: Pick<Ctx, "runner" | "paths" | "signer">): Promise<void> {
+/** Before `run` starts: the record's keeper must be who the keeper commands sign as (with the default
+ * keystore too: the test wallet), and the keystore must really sign as it (each send checks it again),
+ * so a mismatch or a wrong key stops the loop at once instead of at its first send. */
+export async function requireKeeperKey(ctx: Pick<Ctx, "runner" | "paths" | "signer">, rec: { plan: Plan | PlanV3 }): Promise<void> {
   const s = signerOf(ctx);
+  const keeper = rolesOf(rec.plan).keeper;
+  if (keeper.toLowerCase() !== s.address.toLowerCase()) throw new Error(keeperMismatch(keeper, s.address));
   const signs = await signingAccount(ctx, s);
   if (!signs || signs.toLowerCase() !== s.address.toLowerCase()) {
     throw new Error(

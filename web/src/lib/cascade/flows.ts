@@ -5,6 +5,7 @@ import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, U
 import type { ClaimOp, DepositOp, OpState } from "./oplog";
 import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 import { floorRao } from "./units";
+import type { Wiring } from "./wiring";
 import { formatUsdShort } from "../format";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
@@ -484,6 +485,31 @@ export class FlowError extends Error {
     super(message);
     this.state = state;
   }
+}
+
+/** The contracts aren't wired as this site's build says (wiring.ts): nothing is ever sent from it. */
+export const WIRING_MISMATCH = "This site doesn't match Cascade's contracts, so staking, unstaking and claiming are off. Nothing will be sent.";
+/** The wiring couldn't be read: nothing is sent until it can. */
+export const WIRING_UNCHECKED = "We can't check Cascade's contracts right now, so nothing can be sent. Try again in a moment.";
+
+/** Before any flow builds or sends anything: the contracts must check out (`check`, see wiring.ts). A
+ * mismatch stops it for good; a check that can't be done stops it too, never failing open. */
+export async function assertWired(check: () => Promise<Wiring>): Promise<void> {
+  let wiring: Wiring;
+  try {
+    wiring = await check();
+  } catch {
+    throw new FlowError(WIRING_UNCHECKED, "needs-you");
+  }
+  if (wiring !== "ok") throw new FlowError(WIRING_MISMATCH, "failed");
+}
+
+/** Why sending is off, from the wiring check's state, before anyone clicks; null while it passes or is
+ * still being checked (a click then waits for it, through assertWired). */
+export function wiringNotice(q: { data?: Wiring; isError: boolean }): string | null {
+  if (q.data === "mismatch") return WIRING_MISMATCH;
+  if (q.isError && q.data !== "ok") return WIRING_UNCHECKED;
+  return null;
 }
 
 /** The wallet can't pay the network fee (viem's and the node's wordings). */

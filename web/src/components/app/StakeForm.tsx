@@ -131,7 +131,7 @@ export function StakeForm({
       </p>
 
       {account ? (
-        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth}>
+        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth || flows.blocked !== null}>
           {label}
         </button>
       ) : (
@@ -145,10 +145,10 @@ export function StakeForm({
           many transactions), then come back.
         </p>
       )}
-      {flows.error && (
+      {(flows.error ?? flows.blocked) && (
         <p role="alert" className={styles.error}>
-          {flows.error}
-          {opId && (
+          {flows.error ?? flows.blocked}
+          {flows.error && opId && (
             <>
               {" "}
               <Link href={`/activity?deposit=${opId}`}>See this deposit</Link>.

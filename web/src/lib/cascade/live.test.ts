@@ -71,6 +71,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     quotePayoutFee: async () => 105n * 10n ** 13n,
     readRewardCutBps: async () => 1000,
     readApyPercent: async () => 5.36,
+    checkWiring: async () => "ok",
     scan: async () => undefined,
     scanStore: createScanStore(memory(), D),
     now: () => 1_800_000_100_000,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createClients } from "./chain";
 import { readDeployment } from "./config";
 import { readFrontDoor, readVault, taoPriceUsd } from "./reads";
+import { checkWiring } from "./wiring";
 
 /** Reads the live deployment over the public RPCs. Runs only with LIVE=1 and the settings in the environment. */
 const d = readDeployment(process.env);
@@ -15,5 +16,9 @@ describe.runIf(process.env.LIVE === "1" && d)("live smoke", () => {
     const price = await taoPriceUsd(c);
     expect(price).toBeGreaterThan(10);
     console.log({ openBatchId: fd.openBatchId, totalAssets: v.totalAssets, nominatorMinWei: v.nominatorMinWei, price });
+  }, 60_000);
+
+  it("finds the contracts wired to each other as the config says", async () => {
+    expect(await checkWiring(createClients(), d!)).toBe("ok");
   }, 60_000);
 });

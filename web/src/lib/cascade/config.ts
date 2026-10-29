@@ -1,4 +1,5 @@
 import { type Address, encodePacked, isAddress } from "viem";
+import EXPECTED from "./deployments.json";
 
 /** The live deployment the site talks to, from `web/.env.local` (written by `pnpm ops web-config`). */
 export interface Deployment {
@@ -75,8 +76,59 @@ export function readDeployment(env: Env): Deployment | null {
   };
 }
 
+/** A deployment the site may be built for, as committed in deployments.json (reviewed in git). */
+export interface ExpectedDeployment {
+  version: 2 | 3;
+  frontDoor: string;
+  baseAdapter: string;
+  vault: string;
+  bitAdapter: string;
+  /** v3 only. */
+  staker?: string;
+  oracle?: string;
+  bitBlock: string;
+  vaultSs58: string;
+  hotkeySs58: string;
+}
+
+/** Every deployment the site may be built for, by its ops name. A build env that names any other fails
+ * the build (checkedDeployment), and the browser checks again before sending (wiring.ts). */
+export const EXPECTED_DEPLOYMENTS = EXPECTED as Readonly<Record<string, ExpectedDeployment>>;
+
+const sameAddress = (a: string | undefined, b: string | undefined) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
+
+/** The name of the committed deployment `d` is, every address, block and name alike; undefined for any other. */
+export function knownDeployment(d: Deployment, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): string | undefined {
+  return Object.entries(list).find(
+    ([, e]) =>
+      sameAddress(e.frontDoor, d.frontDoor) &&
+      sameAddress(e.baseAdapter, d.baseAdapter) &&
+      sameAddress(e.vault, d.vault) &&
+      sameAddress(e.bitAdapter, d.bitAdapter) &&
+      (e.version === 3) === isV3(d) &&
+      sameAddress(e.staker, d.staker) &&
+      sameAddress(e.oracle, d.oracle) &&
+      e.bitBlock === String(d.bitBlock) &&
+      e.vaultSs58 === d.vaultSs58 &&
+      e.hotkeySs58 === d.hotkeySs58,
+  )?.[0];
+}
+
+/** The env's deployment, only if it is one of the committed ones: anything else throws, so `next build`
+ * (and `next dev`) fail rather than make a site that sends to contracts no one reviewed. */
+export function checkedDeployment(d: Deployment | null): Deployment | null {
+  if (d && !knownDeployment(d)) {
+    throw new Error(
+      "The env names a deployment that isn't in web/src/lib/cascade/deployments.json. Refusing to build a site " +
+        "for contracts that aren't listed there: add the deployment to that file in a reviewed commit, or run " +
+        "`pnpm ops web-config` for a listed one.",
+    );
+  }
+  return d;
+}
+
 /** Next inlines each NEXT_PUBLIC_ value only where it is written out by name. */
-export const DEPLOYMENT = readDeployment({
+export const DEPLOYMENT = checkedDeployment(readDeployment({
   NEXT_PUBLIC_CASCADE_FRONT_DOOR: process.env.NEXT_PUBLIC_CASCADE_FRONT_DOOR,
   NEXT_PUBLIC_CASCADE_BASE_ADAPTER: process.env.NEXT_PUBLIC_CASCADE_BASE_ADAPTER,
   NEXT_PUBLIC_CASCADE_VAULT: process.env.NEXT_PUBLIC_CASCADE_VAULT,
@@ -88,7 +140,7 @@ export const DEPLOYMENT = readDeployment({
   NEXT_PUBLIC_CASCADE_ORACLE: process.env.NEXT_PUBLIC_CASCADE_ORACLE,
   NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: process.env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S,
   NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: process.env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S,
-});
+}));
 
 export const TOKENS = {
   usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

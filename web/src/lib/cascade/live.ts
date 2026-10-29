@@ -20,6 +20,7 @@ import { createScanStore, dropSavedScans, type ScanStore } from "./scan-store";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
 import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
+import { checkWiring, createWiringCheck } from "./wiring";
 
 export class NotConfiguredError extends Error {
   constructor() {
@@ -43,6 +44,7 @@ export interface LiveDeps {
   quotePayoutFee: typeof reads.quotePayoutFee;
   readRewardCutBps: typeof reads.readRewardCutBps;
   readApyPercent: typeof reads.readApyPercent;
+  checkWiring: typeof checkWiring;
   scan(c: Clients, d: Deployment, scan: VaultScan, account?: Address, onWindow?: () => void): Promise<void>;
   /** Where each account's scan is saved between visits. */
   scanStore: ScanStore;
@@ -109,6 +111,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     quotePayoutFee: reads.quotePayoutFee,
     readRewardCutBps: reads.readRewardCutBps,
     readApyPercent: reads.readApyPercent,
+    checkWiring,
     scan: scanVault,
     now: Date.now,
     ...given,
@@ -455,6 +458,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     deployment: d,
     clients: c,
     opLog: deps.opLog,
+    checkWiring: createWiringCheck(c, d, deps.checkWiring),
 
     async getProtocolStats() {
       const [v, price] = await Promise.all([deps.readVault(c, d), deps.taoPriceUsd(c)]);
@@ -611,5 +615,6 @@ export function notConfiguredData(): CascadeData {
     quoteDeposit: fail,
     quoteWithdrawal: fail,
     quoteRoundTrip: fail,
+    checkWiring: fail,
   };
 }

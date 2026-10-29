@@ -171,7 +171,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
       )}
 
       {account ? (
-        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth}>
+        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth || flows.blocked !== null}>
           {label}
         </button>
       ) : (
@@ -186,10 +186,10 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
           wallet has less. Add a little ETH on Base, then come back.
         </p>
       )}
-      {flows.error && (
+      {(flows.error ?? flows.blocked) && (
         <p role="alert" className={styles.error}>
-          {flows.error}
-          {opId && (
+          {flows.error ?? flows.blocked}
+          {flows.error && opId && (
             <>
               {" "}
               <Link href={`/activity?withdrawal=${opId}`}>See this unstake</Link>.

@@ -26,6 +26,15 @@ Without `.env.local` the site shows that it isn't connected to a deployment and 
 `.env.local` holds only public values (addresses, a block number, SS58 names); no RPC key ever goes
 into the site.
 
+The env must name one of the deployments committed in `src/lib/cascade/deployments.json`, every
+address, block and SS58 name alike; any other fails `pnpm build` (and `pnpm dev`). A new deployment
+is added there in a reviewed commit. Before any transaction, the browser also reads the contracts
+(`wiring.ts`, once a session) and checks they are wired to each other as the config says: the front
+door to the vault, TAO and the Base adapter; the adapters to each other; on v3 the staker and the
+front door to each other and to the oracle; on Bittensor the vault to this front door and its
+adapter. A mismatch turns staking, unstaking and claiming off with one message; a check that can't
+be read says so and sends nothing either.
+
 ## Routes
 
 | Route | What it is |

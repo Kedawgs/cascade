@@ -18,6 +18,7 @@ import type { Deployment } from "./config";
 import { STAKER } from "./abi";
 import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
 import {
+  assertWired,
   claimCalls,
   claimRetryPatch,
   createFlowGuard,
@@ -46,6 +47,9 @@ import {
   userMessage,
   walletTaoDepositOp,
   type WalletPort,
+  WIRING_MISMATCH,
+  WIRING_UNCHECKED,
+  wiringNotice,
 } from "./flows";
 import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
 
@@ -358,6 +362,42 @@ describe("TAO already in the wallet", () => {
     const c = sellTaoCalls(10n ** 16n, 2_400_000n, { ...none, taoRouterAllowance: 10n ** 15n }, ME);
     expect(c[0]).toMatchObject({ key: "approveTao", to: TOKENS.tao, functionName: "approve", args: [UNISWAP.router, 10n ** 16n] });
     expect(sellTaoCalls(10n ** 16n, 2_400_000n, { ...none, taoRouterAllowance: 10n ** 16n }, ME).map((x) => x.key)).toEqual(["swap"]);
+  });
+});
+
+describe("the wiring gate before any flow", () => {
+  it("lets a flow go on only once the contracts check out", async () => {
+    await expect(assertWired(async () => "ok")).resolves.toBeUndefined();
+  });
+
+  it("stops it, with one plain message, when they don't match", async () => {
+    const err = await assertWired(async () => "mismatch").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).message).toBe(WIRING_MISMATCH);
+    expect((err as FlowError).state).toBe("failed");
+    expect(userMessage(err)).toBe(WIRING_MISMATCH);
+  });
+
+  it("stops it too when they can't be checked right now: never fails open", async () => {
+    const err = await assertWired(async () => Promise.reject(new Error("archive node down"))).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).message).toBe(WIRING_UNCHECKED);
+    expect((err as FlowError).state).toBe("needs-you");
+  });
+
+  it("says why sending is off before anyone clicks: a mismatch, a check that failed, or nothing", () => {
+    expect(wiringNotice({ data: "mismatch", isError: false })).toBe(WIRING_MISMATCH);
+    // a failed re-check after a mismatch still says mismatch
+    expect(wiringNotice({ data: "mismatch", isError: true })).toBe(WIRING_MISMATCH);
+    expect(wiringNotice({ data: undefined, isError: true })).toBe(WIRING_UNCHECKED);
+    expect(wiringNotice({ data: "ok", isError: false })).toBeNull();
+    // still checking: nothing to say yet (a click waits for the check)
+    expect(wiringNotice({ data: undefined, isError: false })).toBeNull();
+  });
+
+  it("words both plainly, in the site's voice", () => {
+    expect(WIRING_MISMATCH).toBe("This site doesn't match Cascade's contracts, so staking, unstaking and claiming are off. Nothing will be sent.");
+    expect(WIRING_UNCHECKED).toBe("We can't check Cascade's contracts right now, so nothing can be sent. Try again in a moment.");
   });
 });
 

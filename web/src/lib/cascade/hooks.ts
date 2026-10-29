@@ -51,6 +51,23 @@ export function useIsV3(): boolean {
   }
 }
 
+/** Whether the contracts are wired as the build says (wiring.ts), asked once a session while a wallet is
+ * connected; a check that failed is asked again every half minute. Outside the "cascade" keys, so the
+ * refresh after every flow doesn't ask again. */
+export function useWiring(enabled: boolean) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: ["wiring"],
+    queryFn: () => data.checkWiring(),
+    enabled,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: 2,
+    refetchInterval: (q) => (q.state.status === "error" ? IDLE_MS : false),
+  });
+}
+
 export function useProtocolStats() {
   const data = useCascadeData();
   return useQuery({ queryKey: cascadeKeys.stats(), queryFn: () => data.getProtocolStats(), refetchInterval: IDLE_MS });

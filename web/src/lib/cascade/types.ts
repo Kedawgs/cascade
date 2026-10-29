@@ -167,4 +167,7 @@ export interface CascadeData {
   quoteWithdrawal(account: string, shares: bigint): Promise<WithdrawalQuote>;
   /** The costs of a later unstake of `taoWei`, and Cascade's reward cut. */
   quoteRoundTrip(taoWei: bigint): Promise<RoundTripCosts>;
+  /** Whether the contracts are wired to each other as the build's config says (wiring.ts), checked once
+   * a session. Rejects when they can't be read right now: nothing may be sent until it resolves "ok". */
+  checkWiring(): Promise<"ok" | "mismatch">;
 }

@@ -24,6 +24,14 @@ export const FRONT_DOOR = parseAbi([
   "function setDelivery(uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
   "function requestRedeemWithDelivery(uint256 shares, uint128 minUsdcPerTao, uint64 deadline, uint32 destination) payable",
   "function maxDeliverySlippageBps() view returns (uint16)",
+  // how it is wired, read before anything is sent (wiring.ts); oracle and swapper are v3 only
+  "function asset() view returns (address)",
+  "function vault() view returns (address)",
+  "function vaultChain() view returns (uint64)",
+  "function primaryBridge() view returns (address)",
+  "function bridgeEnabled(address bridge) view returns (bool)",
+  "function oracle() view returns (address)",
+  "function swapper() view returns (address)",
   "event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)",
   "event RedeemRequested(uint64 indexed batchId, address indexed user, uint256 shares)",
   "event DepositCancelled(uint64 indexed batchId, address indexed user, uint256 amount)",
@@ -38,6 +46,9 @@ export const STAKER = parseAbi([
   "function stakeWithPermit(address beneficiary, uint256 usdcIn, uint256 minTaoOut, uint8 routeId, uint256 deadline, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s) returns (uint256)",
   "function swapFeeBps() view returns (uint16)",
   "function depositFeeUsdc() view returns (uint256)",
+  "function frontDoor() view returns (address)",
+  "function usdc() view returns (address)",
+  "function tao() view returns (address)",
   "event Staked(address indexed payer, address indexed beneficiary, uint256 usdcIn, uint256 fees, uint256 taoDeposited)",
   // what a stake can revert with, so a pre-send check can say why: the staker's own errors, and the
   // front door's that its depositFor passes back (EnforcedPause is OpenZeppelin's Pausable)
@@ -66,6 +77,9 @@ export const VAULT = parseAbi([
   "function payoutDelay() view returns (uint64)",
   "function rewardCutBps() view returns (uint16)",
   "function coldkey() view returns (bytes32)",
+  "function frontDoorActive(bytes32 peer) view returns (bool)",
+  "function primaryBridge() view returns (address)",
+  "function bridgeEnabled(address bridge) view returns (bool)",
   "event BatchDelivered(bytes32 indexed key, uint64 indexed sourceChain, address indexed frontDoor, uint64 batchId, uint256 amount)",
   "event Deposited(bytes32 indexed key, address indexed user, uint256 assets, uint256 shares)",
   "event DepositBounced(bytes32 indexed key, address indexed user, uint256 assets)",
@@ -86,6 +100,9 @@ export const STAKING_ADDRESS = "0x0000000000000000000000000000000000000805" as c
 
 export const ADAPTER = parseAbi([
   "function quoteFee(uint64 destChain, address recipient, bytes message, uint256 amount) view returns (uint256)",
+  "function token() view returns (address)",
+  "function remoteAdapter() view returns (address)",
+  "function remoteChainId() view returns (uint64)",
   "event Sent(bytes32 indexed messageId, uint64 destChain, address indexed sender, address indexed recipient, uint256 amount, uint256 fee, uint256 gasLimit)",
   "event Delivered(bytes32 indexed messageId, uint64 sourceChain, address indexed sender, address indexed recipient, uint256 amount)",
 ]);

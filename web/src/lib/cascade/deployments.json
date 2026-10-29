@@ -1,0 +1,24 @@
+{
+  "v3-test": {
+    "version": 3,
+    "frontDoor": "0xDBe6aDCac889adcbE4D4230a82C8d719FB3C1f8B",
+    "baseAdapter": "0x7c9Ceb476C50B4E4eCc1610d3cEe5d146c2bB9a0",
+    "staker": "0x5659c5929Dfe7993f3db521582B0201d6bf246B7",
+    "oracle": "0x45614AE84875EFA577F21F85cf8a6abAA6B2f217",
+    "vault": "0x32f4c98ACb181a80343CC0925b4202C35e0EB6e3",
+    "bitAdapter": "0x5659c5929Dfe7993f3db521582B0201d6bf246B7",
+    "bitBlock": "9368744",
+    "vaultSs58": "5DFRFf7grg31puQ47VnEVcv1DyutyxFBBLLDexbCcoAFn1Y2",
+    "hotkeySs58": "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u"
+  },
+  "test-2026-10": {
+    "version": 2,
+    "frontDoor": "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
+    "baseAdapter": "0x221Cc4cF9c72EA7270f90E8C0756F8f003b6887b",
+    "vault": "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
+    "bitAdapter": "0x221Cc4cF9c72EA7270f90E8C0756F8f003b6887b",
+    "bitBlock": "9357492",
+    "vaultSs58": "5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu",
+    "hotkeySs58": "5E4z3h9yVhmQyCFWNbY9BPpwhx4xFiPwq3eeqmBgVF6KULde"
+  }
+}

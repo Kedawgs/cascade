@@ -84,12 +84,12 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
         {(deposit.status === "needs_you" || deposit.retryable || deposit.restake || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
           <Actions>
             {deposit.status === "needs_you" && (
-              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
+              <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
               </button>
             )}
             {deposit.status === "failed" && deposit.retryable && (
-              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
+              <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Try the deposit again"}
               </button>
             )}
@@ -99,7 +99,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
               </Link>
             )}
             {walletTaoBack > 0n && (
-              <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.sellWalletTao(walletTaoBack).catch(() => undefined)}>
+              <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.sellWalletTao(walletTaoBack).catch(() => undefined)}>
                 {flows.busy === "swap" ? "Confirm in your wallet…" : "Swap your TAO back to USDC"}
               </button>
             )}
@@ -107,6 +107,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
               <button
                 type="button"
                 className="pill pill-ghost pill-block"
+                // sends nothing, so the wiring check doesn't hold it
                 disabled={flows.busy !== null}
                 onClick={() => {
                   if (flows.remove(id)) router.push("/activity");
@@ -119,7 +120,7 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
               <button
                 type="button"
                 className="pill pill-ghost pill-block"
-                disabled={flows.busy !== null}
+                disabled={flows.locked}
                 onClick={() => void flows.cancel("deposit", id, deposit.cancellableWei as bigint).catch(() => undefined)}
               >
                 Cancel this deposit before its batch closes
@@ -127,9 +128,9 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
             )}
           </Actions>
         )}
-        {flows.error && (
+        {(flows.error ?? flows.blocked) && (
           <p role="alert" className={styles.alert}>
-            {flows.error}
+            {flows.error ?? flows.blocked}
           </p>
         )}
       </div>
@@ -197,7 +198,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
         </dl>
         {withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
           <Actions>
-            <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>
+            <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>
               {flows.busy === "claim" ? "Confirm in your wallet…" : "Swap it to USDC"}
             </button>
           </Actions>
@@ -216,13 +217,13 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
                 <button
                   type="button"
                   className="pill pill-block"
-                  disabled={flows.busy !== null}
+                  disabled={flows.locked}
                   onClick={() => void flows.claim(claimIds, false).then(() => setClaimFailed(false), () => setClaimFailed(true))}
                 >
                   {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
                 </button>
                 {claimFailed && (
-                  <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
+                  <button type="button" className="pill pill-ghost pill-block" disabled={flows.locked} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
                     Claim now and swap to USDC separately
                   </button>
                 )}
@@ -232,7 +233,7 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
               <button
                 type="button"
                 className="pill pill-ghost pill-block"
-                disabled={flows.busy !== null}
+                disabled={flows.locked}
                 onClick={() => void flows.cancel("withdrawal", id, withdrawal.cancellableShares as bigint).catch(() => undefined)}
               >
                 Cancel this unstake (the 0.0001 ETH request fee isn&apos;t refunded)
@@ -240,9 +241,9 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
             )}
           </Actions>
         )}
-        {flows.error && (
+        {(flows.error ?? flows.blocked) && (
           <p role="alert" className={styles.alert}>
-            {flows.error}
+            {flows.error ?? flows.blocked}
           </p>
         )}
       </div>

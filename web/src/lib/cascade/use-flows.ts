@@ -19,6 +19,7 @@ import { isV3 } from "./config";
 import { useCascadeData } from "./context";
 import { claimWentThrough, findStakeTx } from "./facts";
 import {
+  assertWired,
   cancelCall,
   claimCalls,
   claimRetryPatch,
@@ -42,8 +43,9 @@ import {
   unstakeCall,
   unstakeV3Call,
   type WalletPort,
+  wiringNotice,
 } from "./flows";
-import { cascadeKeys } from "./hooks";
+import { cascadeKeys, useWiring } from "./hooks";
 import { cancelStore, opStore, scratchStore } from "./op-store";
 import { type ClaimOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
 import { quoteSell, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
@@ -137,19 +139,27 @@ export function useFlows(account: string | null) {
   const a = account as Address;
   const d = () => data.deployment;
   const port = () => wagmiPort(config, a, data.clients.base);
+  // sending is off while the contracts don't check out, or can't be checked (wiring.ts)
+  const wiring = useWiring(account !== null);
+  const blocked = wiringNotice(wiring);
 
-  /** Runs `body` under the guard (claimed before any read), records errors and refreshes the data. */
+  /** Runs `body` under the guard (claimed before any read), once the contracts check out (nothing is
+   * read for, recorded or sent before that), records errors and refreshes the data. */
   async function flow<T>(label: string, body: () => Promise<T>): Promise<T> {
     if (!account) throw new Error("Connect a wallet first");
     setError(null);
     try {
-      return await guard.run(label, body);
+      return await guard.run(label, async () => {
+        await assertWired(() => data.checkWiring());
+        return body();
+      });
     } catch (e) {
       setError(userMessage(e));
       throw e;
     } finally {
       void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
       void queryClient.invalidateQueries({ queryKey: ["quote"] });
+      void queryClient.invalidateQueries({ queryKey: ["wiring"] });
     }
   }
 
@@ -182,6 +192,10 @@ export function useFlows(account: string | null) {
   return {
     busy,
     error,
+    /** Why nothing can be sent from this site right now (the wiring check), or null. */
+    blocked,
+    /** No action can start: one is running, or sending is off. */
+    locked: busy !== null || blocked !== null,
 
     /** Starts a stake from a quote; `onStart` gets the operation id before the first wallet prompt. On
      * v3 it is one CascadeStaker transaction, paid by a USDC permit or, failing that, an exact approval. */

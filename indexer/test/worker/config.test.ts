@@ -138,8 +138,10 @@ describe("parseConfig", () => {
     expect(parseConfig(withVars({ PRICE_SOURCES: "[]" })).priceSources).toEqual([]);
   });
 
-  it("refuses a site origin with a path", () => {
-    expect(refused(withVars({ SITE_ORIGIN: "https://cascade.fi/" })).message).toContain("SITE_ORIGIN");
+  it("refuses a site origin with a path, or with no host at all", () => {
+    for (const origin of ["https://cascade.fi/", "https://", "https:", "cascade.fi", 7]) {
+      expect(refused(withVars({ SITE_ORIGIN: origin })).message).toContain("SITE_ORIGIN");
+    }
   });
 });
 

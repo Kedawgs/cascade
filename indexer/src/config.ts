@@ -241,7 +241,14 @@ export function parseConfig(env: ConfigEnv): Config {
   if (leaseS < 3 * scanWallS) throw new ConfigError("LEASE_S", "must be at least three times SCAN_WALL_S");
 
   const origin = env.SITE_ORIGIN;
-  if (typeof origin !== "string" || !/^https:\/\//.test(origin) || new URL(origin).origin !== origin) {
+  const originOf = (x: string) => {
+    try {
+      return new URL(x).origin;
+    } catch {
+      return undefined;
+    }
+  };
+  if (typeof origin !== "string" || !/^https:\/\//.test(origin) || originOf(origin) !== origin) {
     throw new ConfigError("SITE_ORIGIN", "is not an https:// origin (scheme and host, no path)");
   }
   const pages = stringList("SITE_PAGES", env.SITE_PAGES);

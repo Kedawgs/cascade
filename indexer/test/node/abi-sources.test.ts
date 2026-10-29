@@ -15,34 +15,36 @@ const SOURCES: Record<Role, string[]> = {
 };
 
 /** Events each role inherits from OpenZeppelin (ERC20, Pausable, Ownable2Step), not in contracts/src. */
+const OWNABLE2STEP = [
+  "OwnershipTransferStarted(address indexed previousOwner,address indexed newOwner)",
+  "OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
+];
 const OPENZEPPELIN: Record<Role, string[]> = {
-  vault: ["Transfer(address indexed,address indexed,uint256)", ...pausableOwnable()],
-  frontDoor: pausableOwnable(),
-  staker: ["OwnershipTransferStarted(address indexed,address indexed)", "OwnershipTransferred(address indexed,address indexed)"],
+  vault: ["Transfer(address indexed from,address indexed to,uint256 value)", "Paused(address account)", "Unpaused(address account)", ...OWNABLE2STEP],
+  frontDoor: ["Paused(address account)", "Unpaused(address account)", ...OWNABLE2STEP],
+  staker: OWNABLE2STEP,
   baseAdapter: [],
   bitAdapter: [],
 };
-function pausableOwnable() {
-  return ["Paused(address)", "Unpaused(address)", "OwnershipTransferStarted(address indexed,address indexed)", "OwnershipTransferred(address indexed,address indexed)"];
-}
 
 /** Solidity types that are enums in the sources, encoded as uint8 in the ABI. */
 const ENUMS: Record<string, string> = { RouterKind: "uint8" };
 
-/** Every `event Name(...)` declared in a source, as "Name(type [indexed],...)". */
+/** Every `event Name(...)` declared in a source, as "Name(type [indexed] name,...)": the parameter names
+ * count, since the code reads decoded arguments by name. */
 function declared(file: string): string[] {
   const text = readFileSync(pkg(`../contracts/src/${file}`), "utf8").replace(/\/\/[^\n]*/g, "");
   return [...text.matchAll(/\bevent\s+(\w+)\s*\(([^)]*)\)\s*;/g)].map(([, name, params]) => {
-    const types = params
+    const inputs = params
       .split(",")
       .map((p) => p.trim().split(/\s+/))
       .filter((p) => p[0] !== "")
-      .map((p) => `${ENUMS[p[0]] ?? p[0]}${p[1] === "indexed" ? " indexed" : ""}`);
-    return `${name}(${types.join(",")})`;
+      .map((p) => `${ENUMS[p[0]] ?? p[0]}${p[1] === "indexed" ? " indexed" : ""} ${p[p.length - 1]}`);
+    return `${name}(${inputs.join(",")})`;
   });
 }
 
-const signature = (e: AbiEvent) => `${e.name}(${e.inputs.map((i) => `${i.type}${i.indexed ? " indexed" : ""}`).join(",")})`;
+const signature = (e: AbiEvent) => `${e.name}(${e.inputs.map((i) => `${i.type}${i.indexed ? " indexed" : ""} ${i.name}`).join(",")})`;
 const events = (role: Role) => abiFor(role).filter((x): x is AbiEvent => x.type === "event");
 
 describe("the ABIs match the contracts' sources", () => {
@@ -71,6 +73,6 @@ describe("the ABIs match the contracts' sources", () => {
 
   it("finds the sources' events at all (the parser isn't reading nothing)", () => {
     expect(declared("CascadeVault.sol").length).toBeGreaterThan(30);
-    expect(declared("CascadeStaker.sol")).toContain("Staked(address indexed,address indexed,uint256,uint256,uint256)");
+    expect(declared("CascadeStaker.sol")).toContain("Staked(address indexed payer,address indexed beneficiary,uint256 usdcIn,uint256 fees,uint256 taoDeposited)");
   });
 });

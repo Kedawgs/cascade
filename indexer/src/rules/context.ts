@@ -101,6 +101,9 @@ const EXPLORER: Record<ChainName, string> = { base: "https://basescan.org", bitt
 export const addressLink = (chain: ChainName, a: Hex): string => `${EXPLORER[chain]}/address/${a}`;
 export const txLink = (chain: ChainName, hash: Hex): string => `${EXPLORER[chain]}/tx/${hash}`;
 
+/** A chain time as an email shows it: "2026-10-29 14:05 UTC". */
+export const utc = (t: number): string => `${new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
 /** How an email names a scanned contract. */
 export const CONTRACT_NAMES: Record<Role, string> = {
   frontDoor: "front door",

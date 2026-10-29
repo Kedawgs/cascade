@@ -24,6 +24,8 @@ export const DEFAULTS = {
   maxWaitGraceS: 900,
   /** payout.overdue: this long past queuedAt + payoutDelay */
   payoutGraceS: 3600,
+  /** bridge.check_stuck: a delivery's check still waiting this long after the delivery */
+  checkStuckS: 3600,
   /** delivery.overdue: this long after a user's PayoutReceived */
   deliveryGraceS: 7200,
   keeperMinEthWei: 2n * 10n ** 15n,

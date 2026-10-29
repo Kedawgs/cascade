@@ -12,11 +12,11 @@ import {
   numberToHex,
   parseAbi,
 } from "viem";
-import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
+import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
-import { type Ctx, describeRevert, logsOf, sendCall } from "../send.ts";
+import { type Ctx, describeRevert, logsOf, sendCall, signerOf } from "../send.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
@@ -217,6 +217,9 @@ export function startBlock(rec: DeploymentRecord): bigint {
  * loop), so each round scans only the blocks since the last, and some before them (REREAD). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
+  /** Who the keeper's sends come from (the context's signer: keeperSigner), whose nonces, balances and
+   * claim the keeper reads, and who simulates a delivery. */
+  const signer = signerOf(ctx).address;
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
@@ -279,7 +282,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const canClose = (await r("base", a.frontDoor, FRONT, "canClose")) as boolean;
       const fdPaused = (await r("base", a.frontDoor, FRONT, "paused")) as boolean;
       const claimable = [];
-      for (const user of [...new Set([WALLET, ...users])] as Address[]) {
+      for (const user of [...new Set([signer, ...users])] as Address[]) {
         claimable.push({ user, amount: (await r("base", a.frontDoor, FRONT, "claimable", [user])) as bigint });
       }
       const healthy =
@@ -328,13 +331,14 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
           batches,
           payoutDelay,
           claimable,
-          balances: { tao: await balanceOf(ctx.rpc, "bittensor", WALLET), eth: await balanceOf(ctx.rpc, "base", WALLET) },
+          balances: { tao: await balanceOf(ctx.rpc, "bittensor", signer), eth: await balanceOf(ctx.rpc, "base", signer) },
           messages: await messages(),
         },
       };
     },
     sendCall: (req) => sendCall(ctx, req),
-    nonce: (chain) => nonceOf(ctx.rpc, chain, WALLET),
+    signer,
+    nonce: (chain) => nonceOf(ctx.rpc, chain, signer),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
       const { logs: bounced } = await bouncedLogs();
@@ -386,7 +390,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const claimGasRequired = (await r("bittensor", a.vault, REWARDS_VAULT, "claimGasRequired")) as bigint;
       const now = await blockTime("bittensor");
       const gasPriceWei = await gasPriceOf(ctx.rpc, "bittensor");
-      const walletWei = await balanceOf(ctx.rpc, "bittensor", WALLET);
+      const walletWei = await balanceOf(ctx.rpc, "bittensor", signer);
       const [usdcPerTao] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ROUTE_0.sellPath, 10n ** 18n])) as readonly [bigint];
       return { hotkey, waitingWei, lastClaimAt, now, taoPriceUsd: Number(usdcPerTao) / 1e6, claimGasRequired, gasPriceWei, walletWei };
     },
@@ -439,7 +443,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     async simulateDeliver(user, keeperMinOut) {
       const data = encodeFunctionData({ abi: DELIVER_ABI, functionName: "deliver", args: [user, keeperMinOut] });
       try {
-        const out = (await ctx.rpc.request("base", "eth_call", [{ from: WALLET, to: a.frontDoor, data }, "latest"])) as Hex;
+        const out = (await ctx.rpc.request("base", "eth_call", [{ from: signer, to: a.frontDoor, data }, "latest"])) as Hex;
         return { ok: true, usdcOut: decodeFunctionResult({ abi: DELIVER_ABI, functionName: "deliver", data: out }) };
       } catch (e) {
         if (unanswered(e)) return { ok: false, reason: NO_ANSWER, unanswered: true };

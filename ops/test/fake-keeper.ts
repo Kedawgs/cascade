@@ -85,6 +85,7 @@ const missing = (name: string) => () => {
 export function stubDeps(over: Partial<KeeperDeps>): KeeperDeps {
   return {
     readState: missing("readState"),
+    signer: WALLET,
     sendCall: missing("sendCall"),
     nonce: async () => 4,
     quoteClose: missing("quoteClose"),

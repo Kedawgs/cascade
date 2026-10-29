@@ -69,6 +69,7 @@ function deps(
   const recorded: unknown[] = [];
   return {
     recorded,
+    signer: WALLET,
     recordMessage: (m) => {
       recorded.push(m);
     },

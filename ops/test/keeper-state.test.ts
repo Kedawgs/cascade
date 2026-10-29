@@ -541,7 +541,8 @@ describe("the open batch and its close's economics", () => {
 
 describe("a roll goes through the same send guards as close", () => {
   const T = 1_800_000_000;
-  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
+  // the keeper is the test wallet, as the ops keeper signs by default
+  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", { ...ROLES, keeper: WALLET }));
   const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-roll-")), "rec.json");
 
   /** An empty launch batch two hours old that the front door would let close; the wallet's next nonce
@@ -613,7 +614,8 @@ describe("a roll that reverts on chain", () => {
   const T = 1_800_000_000;
   const HASH: Hex = `0x${"7e".repeat(32)}`;
   const alice: Address = "0x000000000000000000000000000000000000a11c";
-  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
+  // the keeper is the test wallet, as the ops keeper signs by default
+  const launch: DeploymentRecord = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", { ...ROLES, keeper: WALLET }));
   const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-roll-")), "rec.json");
 
   /** An empty launch batch two hours old that the front door would let close. The roll passes every

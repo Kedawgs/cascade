@@ -1,6 +1,6 @@
 import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, parseAbi } from "viem";
-import { CLAIM_POLICY, type ChainName, type ClaimPolicy } from "../config.ts";
-import { isPlanV3, type PlanV3 } from "../plan.ts";
+import { CLAIM_POLICY, type ChainName, type ClaimPolicy, WALLET } from "../config.ts";
+import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
 import { RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
@@ -8,6 +8,7 @@ import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from 
 import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
 import { type Payout, type PayoutLog, payoutsHash, rebuildPayouts } from "./payouts.ts";
 import { claimGasLimit, claimRequest, decideClaim, type RewardsDeps, upfrontShortfall } from "./rewards.ts";
+import { keeperMismatch } from "./signer.ts";
 import type { StatusDetail } from "./status.ts";
 
 export type KeeperState = State & { detail: StatusDetail };
@@ -22,6 +23,8 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
    * which reads prices and scans Base's logs: only `run` and `status` ask for it. */
   readState(opts?: { economics?: boolean }): Promise<KeeperState>;
   sendCall(req: CallRequest): Promise<Sent>;
+  /** Who the keeper's sends come from (keeperSigner): requireReady checks it is the record's keeper */
+  signer: Address;
   nonce(chain: ChainName): Promise<number>;
   quoteClose(s: KeeperState): Promise<bigint>;
   payoutLogs(): Promise<PayoutLog[]>;
@@ -59,8 +62,9 @@ export function messageIdFrom(logs: Sent["logs"], adapter: Hex): Hex | undefined
 }
 
 /** Keeper sends need the whole deployment in place and its read-back passed; a launch, its hand-off
- * accepted by the final owners too. */
-export function requireReady(rec: DeploymentRecord): void {
+ * accepted by the final owners too; and `signer`, who the keeper commands sign as (keeperSigner), must be
+ * the record's keeper. */
+export function requireReady(rec: DeploymentRecord, signer: Address = WALLET): void {
   const missing = rec.plan.steps.filter((s) => !rec.done[s.id]);
   if (missing.length || !rec.verify?.ok) {
     throw new Error(
@@ -68,6 +72,8 @@ export function requireReady(rec: DeploymentRecord): void {
     );
   }
   requireHandoff(rec);
+  const keeper = rolesOf(rec.plan).keeper;
+  if (keeper.toLowerCase() !== signer.toLowerCase()) throw new Error(keeperMismatch(keeper, signer));
 }
 
 async function withMessage(deps: KeeperDeps, sent: Sent, adapter: Hex, direction: Message["direction"]): Promise<Done> {
@@ -137,7 +143,7 @@ export function payoutsRequest(
 }
 
 export async function close(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   const s = await deps.readState();
   if (!s.alphaVault.healthy) throw new Error("AlphaVault is paused or migrating — not closing the batch");
   if (s.frontDoor.paused) throw new Error("the front door is paused");
@@ -160,7 +166,7 @@ export type Rolled = ({ rolled: true } & Done) | { rolled: false; reason: string
  * refusals). If a redeem lands between the simulation and the transaction, its fee pot may pay for a
  * real close; its bridge message is then recorded like a close's. */
 export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rolled> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   const s = await deps.readState();
   const fd = s.frontDoor;
   const skip = (reason: string): Rolled => ({ rolled: false, reason });
@@ -193,14 +199,14 @@ export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rol
 }
 
 export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   const s = await deps.readState();
   if (s.vault.paused) throw new Error("the vault is paused");
   return deps.sendCall(stakeRequest(rec, await deps.nonce("bittensor")));
 }
 
 export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex): Promise<Done> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   const s = await deps.readState();
   if (!s.alphaVault.healthy) throw new Error("AlphaVault is paused or migrating — not paying out");
   if (s.vault.paused) throw new Error("the vault is paused");
@@ -215,7 +221,7 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
 /** Claims the vault's rewards on its stake hotkey, only when the claim policy says so; otherwise refuses
  * with the policy's reason. Sent with a fixed gas limit the wallet must cover up front. */
 export async function claim(deps: KeeperDeps, rec: DeploymentRecord, policy: ClaimPolicy): Promise<Done> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   const r = await deps.readRewards();
   const d = decideClaim(r, policy);
   if (!d.claim) throw new Error(`not claiming: ${d.reason}; nothing sent`);
@@ -237,7 +243,7 @@ export function deliveryPlan(rec: DeploymentRecord): PlanV3 {
 /** Checks one user (decision, then simulation) and delivers when both pass. A revert in the simulation
  * or in the send's own estimate is a skip for a later round, never retried here. */
 export async function deliver(deps: KeeperDeps, rec: DeploymentRecord, user: Address): Promise<Delivery> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   const plan = deliveryPlan(rec);
   const c = await checkDelivery(deps, user);
   if (!c.deliver || c.keeperMinOut === undefined) return { user, delivered: false, reason: c.reason };
@@ -261,7 +267,7 @@ export async function deliverAll(
   users: readonly Address[],
   report: (d: Delivery) => void = () => undefined,
 ): Promise<Delivery[]> {
-  requireReady(rec);
+  requireReady(rec, deps.signer);
   deliveryPlan(rec);
   const out: Delivery[] = [];
   for (const user of users) {

@@ -33,11 +33,12 @@ The oracle and the adapters have no owner. Then:
    recorded that, the keeper commands and `web-config` refuse the launch: the test wallet, a hot key,
    still owns everything and could hand it elsewhere.
 
-- **Decision: the keeper.** The ops keeper commands (close, stake, payouts, claim, deliver) still sign
-  as the test wallet. Set `OPS_LAUNCH_KEEPER` to the test wallet (allowed), or the contracts refuse
-  `stakeIdle`, `claimRewards` and `deliver` from it. Closes and payouts would still go through, but
-  without the keeper's chunk size. The keeper can time and route but never take funds. A separate keeper
-  key would need the keeper commands to sign with another keystore. That is not built.
+- **Decision: the keeper.** The keeper commands (run, close, stake, payouts, claim, deliver) sign as the
+  record's keeper. With `OPS_KEEPER_KEYSTORE` and `OPS_KEEPER_PASSWORD_FILE` set, they use that key.
+  Without them they sign as the test wallet, so `OPS_LAUNCH_KEEPER` can be the test wallet with no more
+  setup. If the record's keeper isn't who the commands sign as, they refuse before sending, and `run`
+  also checks the keystore before it starts. The keeper can time and route but never take funds. A
+  separate keeper key keeps the deployer's key off the always-on keeper machine.
 - **Decision: the owners.** Is the owner a Safe, or a timelock behind a Safe? The README assumes a
   48-hour timelock. With a timelock, every limit change and every unpause waits for it. Check that
   Safe{Wallet} supports Bittensor EVM (chain 964) for the Bittensor owner. If it doesn't, use a plain

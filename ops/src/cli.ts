@@ -10,10 +10,11 @@ import { pauseCommand, pauseSigner } from "./pause.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
+import { keeperSigner, requireKeeperKey } from "./keeper/signer.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
 import { preflight } from "./preflight.ts";
-import { loadRecordFor, needRecord as needRecordAt } from "./record.ts";
+import { type DeploymentRecord, loadRecordFor, needRecord as needRecordAt } from "./record.ts";
 import { verifyAllowFromEnv } from "./registry.ts";
 import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
@@ -34,6 +35,10 @@ function ctxFor(live: boolean): Ctx {
   const logs = live ? logsRpc(rpc, createRpc({ ...t, base: baseLogsTarget(env) })) : undefined;
   return { live, targets: t, rpc, ...(logs ? { logs } : {}), runner: execFileRunner, paths: paths(env), log, receiptTimeoutMs: 300_000 };
 }
+
+/** The keeper commands' context: their sends sign as the record's keeper with OPS_KEEPER_KEYSTORE and
+ * OPS_KEEPER_PASSWORD_FILE, else as the test wallet (keeperSigner); requireReady refuses a mismatch. */
+const keeperCtx = (live: boolean, rec: DeploymentRecord): Ctx => ({ ...ctxFor(live), signer: keeperSigner(env, paths(env), rec.plan) });
 
 /** The record of the deployment OPS_DEPLOYMENT names (without it, the v2 test deployment's). */
 const recordPath = (live: boolean) => recordFor(env, live);
@@ -74,7 +79,8 @@ async function run(a: Args): Promise<number> {
       // refuses a v2 record before reading anything: its contracts no longer match the build
       return (await verifyAndSave(ctxFor(a.live), recordPath(a.live), needRecord(a.live), { allow: verifyAllowFromEnv(env) })) ? 0 : 1;
     case "status": {
-      const deps = keeperDeps(ctxFor(a.live), needRecord(a.live), recordPath(a.live), a.users as Address[]);
+      const rec = needRecord(a.live);
+      const deps = keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live), a.users as Address[]);
       const s = await deps.readState({ economics: true });
       for (const line of formatStatus(s.detail, { now: s.now, hold: closeHold(s) })) log(line);
       return 0;
@@ -82,7 +88,7 @@ async function run(a: Args): Promise<number> {
     case "close":
     case "stake": {
       const rec = needRecord(a.live);
-      const deps = keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]);
+      const deps = keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live), a.users as Address[]);
       const done = await (a.cmd === "close" ? close(deps, rec) : stake(deps, rec));
       log(`Done (transaction ${done.hash}, cost ${formatEther(done.costWei)} ${unit(a.cmd === "close" ? "base" : "bittensor")})`);
       if (done.messageId) log(`Bridge message ${done.messageId} sent. Follow it with: pnpm ops track ${done.messageId}${a.live ? " --live" : ""}`);
@@ -90,7 +96,7 @@ async function run(a: Args): Promise<number> {
     }
     case "payouts": {
       const rec = needRecord(a.live);
-      const deps = keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]);
+      const deps = keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live), a.users as Address[]);
       const s = await deps.readState();
       const due = s.vault.batches.filter((b) => b.cursor < b.count && s.now >= b.queuedAt + s.vault.payoutDelay);
       if (!due.length) log("No payout batch is due.");
@@ -103,13 +109,13 @@ async function run(a: Args): Promise<number> {
     }
     case "rewards": {
       const rec = needRecord(a.live);
-      const deps = keeperDeps(ctxFor(a.live), rec, recordPath(a.live));
+      const deps = keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live));
       for (const line of formatRewards(await deps.readRewards(), claimPolicy(env))) log(line);
       return 0;
     }
     case "claim": {
       const rec = needRecord(a.live);
-      const done = await claim(keeperDeps(ctxFor(a.live), rec, recordPath(a.live)), rec, claimPolicy(env));
+      const done = await claim(keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live)), rec, claimPolicy(env));
       // Bittensor refunds the unused part of the large gas limit: this is what the claim cost
       log(`Done (transaction ${done.hash}, cost ${formatEther(done.costWei)} TAO). Set OPS_CLAIM_COST_TAO to that cost for the next decisions.`);
       return 0;
@@ -118,14 +124,17 @@ async function run(a: Args): Promise<number> {
       const rec = needRecord(a.live);
       deliveryPlan(rec);
       // each result is printed as it happens; a failure then exits non-zero through main
-      await deliverCommand(keeperDeps(ctxFor(a.live), rec, recordPath(a.live)), rec, a.users as Address[], log);
+      await deliverCommand(keeperDeps(keeperCtx(a.live, rec), rec, recordPath(a.live)), rec, a.users as Address[], log);
       return 0;
     }
     case "track":
       return (await trackMessage(ctxFor(a.live), needRecord(a.live), a.messageId as Hex)) === "SUCCESS" ? 0 : 1;
     case "run": {
       const rec = needRecord(a.live);
-      await runLoop(keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]), rec, {
+      const ctx = keeperCtx(a.live, rec);
+      // a wrong key stops the loop now, not at its first send
+      await requireKeeperKey(ctx);
+      await runLoop(keeperDeps(ctx, rec, recordPath(a.live), a.users as Address[]), rec, {
         intervalMs: 60_000,
         policy: claimPolicy(env),
         live: a.live,

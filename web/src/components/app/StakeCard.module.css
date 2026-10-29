@@ -2,6 +2,8 @@
   display: grid;
   /* halves that never grow to fit a long figure (see .v) */
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* a figure cut short ends clear of the one beside it */
+  column-gap: 12px;
   row-gap: 18px;
   padding: 20px 24px 22px;
   background: var(--mist);
@@ -70,6 +72,11 @@
    wider is cut short at its end (its smaller part first) rather than running under the next column, and
    stays one line, as its "–" does */
 @media (max-width: 360px) {
+  /* "Available to unstake" stays on one line beside the column gap */
+  .k {
+    font-size: 12px;
+  }
+
   .v {
     display: block;
     overflow: hidden;

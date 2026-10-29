@@ -52,11 +52,19 @@ out the week; an urgent fix can be let through by name with `minimumReleaseAgeEx
 The site is hosted as static files on Cloudflare Pages, which reads `out/_headers`. `public/_headers`
 sets, on every path, a Content-Security-Policy (only this site's scripts; connections only to the
 RPCs above and Base Account's wallet hosts, `*.wallet.coinbase.com`; no framing, plugins, other
-`<base>` or form targets), HSTS, `nosniff`, a referrer policy and a minimal permissions policy. After
-`next build`, `scripts/csp-headers.mjs` adds each page's own policy, which allows only that page's
-inline scripts by their sha256 hashes (Next writes a few into every page, different in every build).
-Styles keep `'unsafe-inline'`: the pages have inline `style` attributes and Base Account injects a
-`<style>`.
+`<base>` or form targets), HSTS, `nosniff`, a referrer policy and a minimal permissions policy. As
+committed, the policy allows no inline script. After `next build`, `scripts/csp-headers.mjs` adds the
+sha256 of every exported page's inline scripts (the 404 page's too) to it, and gives each page a
+policy of its own allowing only that page's (Next writes a few into every page, different in every
+build). Styles keep `'unsafe-inline'`: the pages have inline `style` attributes and Base Account
+injects a `<style>`.
+
+On Cloudflare Pages:
+- **The build command must be `pnpm build`** (in `web/`, output `out`). `next build` alone leaves
+  out the hashes: every page then breaks loudly instead of running without the policy.
+- **Keep off every Cloudflare feature that injects scripts into pages:** Rocket Loader, Email
+  Obfuscation, automatically injected Web Analytics, and Zaraz. The policy would block their scripts,
+  and allowing them would let code that isn't in this repository run on the page.
 
 Base Account asks `rpc.wallet.coinbase.com` for a batch's status before it connects. Once
 connected, it sends what it doesn't answer itself (a batch's status among them) to the RPC its popup

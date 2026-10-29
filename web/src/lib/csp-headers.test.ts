@@ -12,6 +12,10 @@ const directives = (policy: string) => new Map(policy.split(";").map((d) => d.tr
 describe("the committed headers", () => {
   const policy = directives(fallbackPolicy(HEADERS));
 
+  it("allow no inline script until the build adds their hashes: without that step the site breaks loudly, never runs open", () => {
+    expect(policy.get("script-src")).toEqual(["'self'"]);
+  });
+
   it("keep the page out of frames, plugins and other bases and form targets", () => {
     expect(policy.get("frame-ancestors")).toEqual(["'none'"]);
     expect(policy.get("object-src")).toEqual(["'none'"]);
@@ -65,19 +69,34 @@ describe("each page's own policy", () => {
     for (const f of ["404.html", "404/index.html", "_not-found/index.html", "index.txt"]) expect(routeOf(f)).toBeNull();
   });
 
-  it("is the fallback with script-src narrowed to 'self' and the page's hashes", () => {
+  /** The policy a rule of `headers` gives `route`. */
+  const policyOf = (headers: string, route: string) => {
+    const at = headers.split("\n").findIndex((l) => l === route);
+    return headers.split("\n")[at + 1].replace(/^ {2}Content-Security-Policy: /, "");
+  };
+
+  it("is the committed fallback with script-src 'self' and the page's own hashes", () => {
     const html = `<script>a()</script><script>b()</script>`;
     const out = withPageRules(HEADERS, [{ route: "/stake/", html }]);
-    const rule = out.slice(out.lastIndexOf("/stake/\n"));
-    const own = rule.split("\n")[1].replace(/^ {2}Content-Security-Policy: /, "");
     const fallback = fallbackPolicy(HEADERS);
-    expect(own).toBe(fallback.replace("script-src 'self' 'unsafe-inline'", `script-src 'self' ${sha("a()")} ${sha("b()")}`));
-    expect(directives(own).get("script-src")).not.toContain("'unsafe-inline'");
-    // the committed headers come first, unchanged
-    expect(out.startsWith(HEADERS.trimEnd())).toBe(true);
+    expect(policyOf(out, "/stake/")).toBe(fallback.replace("script-src 'self';", `script-src 'self' ${sha("a()")} ${sha("b()")};`));
+    expect(directives(policyOf(out, "/stake/")).get("script-src")).not.toContain("'unsafe-inline'");
   });
 
-  it("replaces the pages' rules when run again, never adding them twice", () => {
+  it("gives the fallback every page's hashes, the 404 page's too, so it allows each page's and the 404 page's inline scripts", () => {
+    const pages = [
+      { route: "/", html: "<script>common()</script><script>home()</script>" },
+      { route: "/stake/", html: "<script>common()</script><script>stake()</script>" },
+    ];
+    const out = withPageRules(HEADERS, pages, ["<script>common()</script><script>notFound()</script>"]);
+    expect(directives(fallbackPolicy(out)).get("script-src")).toEqual(["'self'", sha("common()"), sha("home()"), sha("stake()"), sha("notFound()")]);
+    // everything else in it is the committed fallback's
+    expect(fallbackPolicy(out).replace(/script-src [^;]*;/, "")).toBe(fallbackPolicy(HEADERS).replace(/script-src [^;]*;/, ""));
+    // and each page's own policy narrows it to the page's
+    expect(directives(policyOf(out, "/")).get("script-src")).toEqual(["'self'", sha("common()"), sha("home()")]);
+  });
+
+  it("replaces the fallback's hashes and the pages' rules when run again, never adding them twice", () => {
     const once = withPageRules(HEADERS, [{ route: "/", html: "<script>a()</script>" }]);
     const twice = withPageRules(once, [{ route: "/", html: "<script>b()</script>" }]);
     expect(twice.match(/^\/$/gm)).toHaveLength(1);
@@ -92,10 +111,9 @@ describe("each page's own policy", () => {
     expect(() => withPageRules(HEADERS, pages)).toThrow(/100/);
   });
 
-  it("fails the build when the fallback policy has no inline script-src to narrow", () => {
-    expect(() => withPageRules(HEADERS.replace("script-src 'self' 'unsafe-inline'", "script-src 'self'"), [{ route: "/", html: "" }])).toThrow(
-      /script-src/,
-    );
+  it("fails the build when the committed fallback's script-src is anything but 'self'", () => {
+    expect(() => withPageRules(HEADERS.replace("script-src 'self';", "script-src 'self' 'unsafe-inline';"), [{ route: "/", html: "" }])).toThrow(/script-src/);
+    expect(() => withPageRules(HEADERS.replace("script-src 'self';", ""), [{ route: "/", html: "" }])).toThrow(/script-src/);
     expect(() => fallbackPolicy("/*\n  X-Frame-Options: DENY\n")).toThrow(/Content-Security-Policy/);
   });
 });

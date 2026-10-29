@@ -1,16 +1,17 @@
-// After `next build`: gives each exported page its own Content-Security-Policy in out/_headers (the
-// copy of public/_headers), allowing only that page's inline scripts by their sha256 hashes. Next's
-// static export writes a few inline scripts into every page (the RSC payload and the chunk list), and
-// they change with every build, so their hashes are taken from the built pages. Fails the build
-// rather than write a file Cloudflare Pages would refuse (a line over 2,000 characters, more than
-// 100 rules).
+// After `next build`: allows the exported pages' inline scripts, by their sha256 hashes, in out/_headers
+// (the copy of public/_headers). The committed fallback (the `/*` rule) allows no inline script at all
+// (script-src 'self'), so a deploy that skipped this step breaks loudly instead of running open. This
+// step gives the fallback every exported page's hashes, the 404 page's too, and each page a rule of its
+// own with only its hashes: Cloudflare joins the two with a comma, the browser enforces both, so a page
+// runs only its own inline scripts and the 404 page only its own and the pages'. Next's static export
+// writes a few inline scripts into every page (the RSC payload and the chunk list), and they change with
+// every build. Fails the build rather than write a file Cloudflare Pages would refuse (a line over 2,000
+// characters, more than 100 rules).
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** What the fallback policy allows of inline scripts, which each page's own policy narrows. */
-export const INLINE_SCRIPTS = "script-src 'self' 'unsafe-inline'";
 const MARKER = "# ---- each page's own policy (written by scripts/csp-headers.mjs after next build) ----";
 const MAX_LINE = 2000;
 const MAX_RULES = 100;
@@ -40,25 +41,40 @@ export function routeOf(file) {
   return `/${m[1]}/`;
 }
 
-/** The Content-Security-Policy of the `/*` rule in a _headers file. */
-export function fallbackPolicy(headers) {
-  const block = headers.split(/\n(?=\S)/).find((b) => b.split("\n")[0].trim() === "/*");
-  const line = block?.split("\n").find((l) => l.trim().startsWith("Content-Security-Policy:"));
-  if (!line) throw new Error("public/_headers has no Content-Security-Policy for /*");
-  return line.trim().slice("Content-Security-Policy:".length).trim();
+/** The `/*` rule's Content-Security-Policy line in a _headers file: its index and its policy. */
+function fallbackLine(headers) {
+  const lines = headers.split("\n");
+  let inFallback = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\S/.test(lines[i])) inFallback = lines[i].trim() === "/*";
+    else if (inFallback && lines[i].trim().startsWith("Content-Security-Policy:")) {
+      return { index: i, policy: lines[i].trim().slice("Content-Security-Policy:".length).trim() };
+    }
+  }
+  throw new Error("public/_headers has no Content-Security-Policy for /*");
 }
 
-/** `headers` with one rule per page after it: the fallback policy with script-src narrowed to 'self'
- * and the page's inline-script hashes. A previous run's rules are replaced. */
-export function withPageRules(headers, pages) {
+/** The Content-Security-Policy of the `/*` rule in a _headers file. */
+export const fallbackPolicy = (headers) => fallbackLine(headers).policy;
+
+/** `policy` with its script-src as 'self' and `hashes`. */
+const withScripts = (policy, hashes) => policy.replace(/(^|;\s*)script-src [^;]*/, (_m, lead) => `${lead}${["script-src 'self'", ...hashes].join(" ")}`);
+
+/** `headers` with the fallback allowing every page's inline scripts and those of `others` (the 404 page),
+ * and one rule per page after it allowing that page's alone. A previous run's hashes and rules are
+ * replaced. The committed fallback's script-src must be 'self' alone. */
+export function withPageRules(headers, pages, others = []) {
   const base = headers.includes(MARKER) ? headers.slice(0, headers.indexOf(MARKER)) : headers;
-  const fallback = fallbackPolicy(base);
-  if (!fallback.includes(INLINE_SCRIPTS)) throw new Error(`the fallback Content-Security-Policy has no "${INLINE_SCRIPTS}" to narrow`);
-  const rules = pages.map(({ route, html }) => {
-    const policy = fallback.replace(INLINE_SCRIPTS, ["script-src 'self'", ...inlineScriptHashes(html)].join(" "));
-    return `${route}\n  Content-Security-Policy: ${policy}`;
-  });
-  const text = `${base.trimEnd()}\n\n${MARKER}\n${rules.join("\n\n")}\n`;
+  const { index, policy } = fallbackLine(base);
+  // a previous run's hashes are taken off again; what is left must be the committed 'self' alone
+  const committed = policy.replace(/(^|;\s*)script-src 'self'(?: 'sha256-[A-Za-z0-9+/=]+')+/, "$1script-src 'self'");
+  const scripts = /(?:^|;\s*)script-src ([^;]*)/.exec(committed)?.[1].trim();
+  if (scripts !== "'self'") throw new Error(`the fallback Content-Security-Policy's script-src must be 'self' alone, not "${scripts ?? "(none)"}"`);
+  const every = [...new Set([...pages.map((p) => p.html), ...others].flatMap(inlineScriptHashes))];
+  const lines = base.trimEnd().split("\n");
+  lines[index] = `  Content-Security-Policy: ${withScripts(committed, every)}`;
+  const rules = pages.map(({ route, html }) => `${route}\n  Content-Security-Policy: ${withScripts(committed, inlineScriptHashes(html))}`);
+  const text = `${lines.join("\n")}\n\n${MARKER}\n${rules.join("\n\n")}\n`;
   const long = text.split("\n").find((l) => l.length > MAX_LINE);
   if (long) throw new Error(`a _headers line is over Cloudflare's 2,000 characters (${long.length}): ${long.slice(0, 80)}…`);
   const count = text.split("\n").filter((l) => /^[/h]/.test(l)).length;
@@ -73,13 +89,14 @@ function htmlFiles(dir) {
 function main() {
   const out = fileURLToPath(new URL("../out", import.meta.url));
   const headersPath = join(out, "_headers");
-  const pages = htmlFiles(out)
-    .map((file) => ({ route: routeOf(relative(out, file).split(sep).join("/")), html: readFileSync(file, "utf8") }))
-    .filter((p) => p.route !== null)
-    .sort((a, b) => a.route.localeCompare(b.route));
+  const files = htmlFiles(out).map((file) => ({ route: routeOf(relative(out, file).split(sep).join("/")), html: readFileSync(file, "utf8") }));
+  const pages = files.filter((p) => p.route !== null).sort((a, b) => a.route.localeCompare(b.route));
   if (pages.length === 0) throw new Error("no exported pages in out/: run next build first");
-  writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages));
-  console.log(`csp-headers: a Content-Security-Policy for each of ${pages.length} pages in out/_headers (${pages.map((p) => p.route).join(" ")})`);
+  const others = files.filter((p) => p.route === null).map((p) => p.html);
+  writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages, others));
+  console.log(
+    `csp-headers: a Content-Security-Policy for each of ${pages.length} pages in out/_headers (${pages.map((p) => p.route).join(" ")}), and the fallback with all their inline scripts and the 404 page's`,
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

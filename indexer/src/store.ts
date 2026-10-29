@@ -1,6 +1,7 @@
 import type { Hex } from "viem";
 import type { ChainName } from "./config.ts";
 import type { StoredLog } from "./logs.ts";
+import { appendPages, rebuildPages, type SeedEvent, type SeedPage } from "./seed.ts";
 
 // D1 access: reads, and prepared statements a tick commits together in one db.batch(). Every query is a
 // fixed prepared statement with bound values: no SQL is ever built from data. Blocks are bigints in
@@ -444,6 +445,25 @@ export function upsertChunkCheck(
     )
     .bind(c.landedUid, c.batchKey, c.chunk, c.landedTx, int(c.landedBlock), opt(c.sentTx), opt(c.messageId), opt(c.expectedHash), c.status, opt(c.detail));
 }
+
+const writePages = (db: D1Database, pages: readonly SeedPage[]): D1PreparedStatement[] => {
+  const stmt = db.prepare(
+    `INSERT INTO seed_pages (page, first_block, last_block, count, json) VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT (page) DO UPDATE SET first_block = excluded.first_block, last_block = excluded.last_block, count = excluded.count, json = excluded.json`,
+  );
+  return pages.map((p) => stmt.bind(p.page, int(p.firstBlock), int(p.lastBlock), p.count, p.json));
+};
+
+/** The seed pages after newly settled seed events: the last page filled up to 500, then new pages
+ * (committed with the cursor that settled them). */
+export const appendStatements = (db: D1Database, lastPage: { page: number; events: SeedEvent[] } | null, events: readonly SeedEvent[], pageSize?: number): D1PreparedStatement[] =>
+  writePages(db, appendPages(lastPage, events, pageSize));
+
+/** Every seed page written again from all the seed events (after a log was removed or re-mined). */
+export const rebuildStatements = (db: D1Database, allEvents: readonly SeedEvent[], pageSize?: number): D1PreparedStatement[] => [
+  db.prepare("DELETE FROM seed_pages"),
+  ...writePages(db, rebuildPages(allEvents, pageSize)),
+];
 
 /** "h_" and 8 random hex digits: what the public status shows of a hold. */
 export function newPublicId(): string {

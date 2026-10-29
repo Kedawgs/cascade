@@ -388,8 +388,12 @@ contract EndToEndTest is Test {
         close(fd2);
         assertEq(vault.balanceOf(alice), 1e27);
         assertEq(vault.balanceOf(bob), 1e27);
+        // the keeper stakes both deposits, and a day later all of it is in the allowance base
+        vm.prank(keeper);
+        vault.stakeIdle();
+        vm.warp(block.timestamp + 1 days);
 
-        // Each front door has its own window: 20% of gross 2_000e18 = 400e18.
+        // Each front door has its own window: 20% of the 2_000e18 staked = 400e18.
         // fd: A = 2_000e18, S = 2e27: sMax = 400e18 * (2e27 + 1e6) / (2_000e18 + 1) = 4e26 → 400e18
         requestVia(fd, alice, 5e26);
         bytes32 k1 = keyOf(BASE, address(fd), 2, noEntries(), entries1(alice, 5e26));
@@ -398,7 +402,7 @@ contract EndToEndTest is Test {
         CascadeMessages.Payout[] memory list1 = redeemedList(vm.getRecordedLogs(), k1);
         assertPayout(list1, alice, 4e26, 400e18);
 
-        // fd2: A = 1_600e18 (pending excluded), S = 1.6e27, gross still 2_000e18:
+        // fd2: A = 1_600e18 (pending excluded), S = 1.6e27, stake still 2_000e18:
         // sMax = 400e18 * (1.6e27 + 1e6) / (1_600e18 + 1) = 4e26 → 400e18
         requestVia(fd2, bob, 5e26);
         bytes32 k2 = keyOf(CHAIN2, address(fd2), 2, noEntries(), entries1(bob, 5e26));
@@ -443,9 +447,10 @@ contract EndToEndTest is Test {
         // 1_000e18 - 399_999e15
         assertEq(fd.netForwarded(), 600_001e15);
         assertEq(fd2.netForwarded(), 600_001e15);
-        // Bittensor: 2_000e18 + ED in, 2 * 400e18 out, nothing staked
+        // Bittensor: 2_000e18 + ED in, 2 * 400e18 out, unstaked exactly
         assertEq(vault.pendingPayouts(), 0);
-        assertEq(address(vault).balance, ED + 1_200e18);
+        assertEq(address(vault).balance, ED);
+        assertEq(vault.rootStakeRao(), 1_200e9);
         assertEq(bridge.failedCount(), 0);
     }
 

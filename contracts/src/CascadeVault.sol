@@ -26,6 +26,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint64 public constant KEEPER_FALLBACK = 7 days;
     uint64 public constant REWARD_VESTING = 7 days;
     uint16 public constant MAX_REWARD_CUT_BPS = 2_000;
+    /// Stake added by stakeIdle enters the outflow allowance's base linearly over this period.
+    uint256 internal constant STAKE_RAMP = 1 days;
     IStaking public constant STAKING = IStaking(ISTAKING_ADDRESS);
     IAddressMapping public constant ADDRESS_MAPPING = IAddressMapping(ADDRESS_MAPPING_ADDRESS);
 
@@ -46,6 +48,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     address public keeper;
     uint64 public lastStakeAt;
     bool internal _unstaking;
+    /// Wei staked by stakeIdle, still entering the allowance base over STAKE_RAMP from lastStakeAt.
+    uint256 internal rampingStake;
 
     // accounting
     uint256 public pendingPayouts;
@@ -82,7 +86,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     /// Every delivered batch, payouts or not: the replay record.
     mapping(bytes32 => bool) public processed;
-    mapping(bytes32 => PayoutBatch) public payoutBatches;
+    /// Read with getPayoutBatch.
+    mapping(bytes32 => PayoutBatch) internal payoutBatches;
     /// Value burned per front door (keyed by peerId) in its current 24-hour window.
     mapping(bytes32 => Window) public burnWindows;
 
@@ -295,9 +300,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     function unvestedRewards() public view returns (uint256) {
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed >= REWARD_VESTING) return 0;
-        return vestingAmount * (REWARD_VESTING - elapsed) / REWARD_VESTING;
+        return _unspent(vestingAmount, vestingStart, REWARD_VESTING);
     }
 
     function totalAssets() public view returns (uint256) {
@@ -391,10 +394,13 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Stakes the liquid balance not reserved for queued payouts or the existential deposit. Keeper
-    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake (or the deploy).
+    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake (or the deploy). What it
+    /// stakes, with what is still ramping from earlier stakes, enters the outflow allowance's base
+    /// linearly over STAKE_RAMP from now.
     function stakeIdle() external whenNotPaused nonReentrant {
+        uint64 last = lastStakeAt;
         // forge-lint: disable-next-line(block-timestamp)
-        if (msg.sender != keeper && block.timestamp < lastStakeAt + KEEPER_FALLBACK) revert NotKeeper();
+        if (msg.sender != keeper && block.timestamp < last + KEEPER_FALLBACK) revert NotKeeper();
         uint256 rao = _available() / RAO;
         if (rao < minStakeRao()) revert NothingToStake();
 
@@ -402,6 +408,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         uint256 before = _stakeOf(h);
         STAKING.addStake(h, rao, NETUID_ROOT);
         uint256 measured = _sub0(_stakeOf(h), before);
+        rampingStake = _unspent(rampingStake, last, STAKE_RAMP) + rao * RAO;
         lastStakeAt = uint64(block.timestamp);
         emit Staked(h, rao, measured);
     }
@@ -537,8 +544,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         emit BatchDelivered(key, sourceChain, sender, batchId, amount);
 
         // one read of the stake for the whole delivery: A is totalAssets() without this delivery's
-        // credited value, and the allowance base is the gross before this delivery's deposits
-        // (msg.value), so they cannot raise it
+        // credited value
         uint256 gross = grossAssets();
         uint256 A = _sub0(_sub0(gross, pendingPayouts + unvestedRewards()), msg.value - msg.value % RAO);
         uint256 S = totalSupply();
@@ -550,7 +556,19 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         // one queue for both steps: bounced deposits first, then redeems
         PayoutBatch memory b;
         _creditDeposits(key, deposits, A, S, insolvent, b);
-        _burnRedeems(key, peer, redeems, A, S, _sub0(gross, msg.value), b);
+        // The allowance base is the root stake (gross less the liquid balance, so never this or an
+        // earlier delivery's TAO, nor a direct deposit) less what stakeIdle added in the last STAKE_RAMP
+        // and has not yet ramped in: capital borrowed for a transaction, or parked for less than a day,
+        // cannot raise it.
+        _burnRedeems(
+            key,
+            peer,
+            redeems,
+            A,
+            S,
+            _sub0(_sub0(gross + ED_RESERVE, address(this).balance), _unspent(rampingStake, lastStakeAt, STAKE_RAMP)),
+            b
+        );
         if (b.remaining != 0) {
             b.sourceChain = sourceChain;
             b.frontDoor = sender;
@@ -734,6 +752,12 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         return a > b ? a - b : 0;
     }
 
+    /// What is left of `amount` spent linearly over `period` from `start` (unvested rewards, ramping stake).
+    function _unspent(uint256 amount, uint64 start, uint256 period) internal view returns (uint256) {
+        uint256 elapsed = block.timestamp - start;
+        return elapsed >= period ? 0 : amount * (period - elapsed) / period;
+    }
+
     /// Root stake across the set plus the liquid balance, in wei, before any reserve.
     function _positionWei() internal view returns (uint256) {
         return rootStakeRao() * RAO + address(this).balance;
@@ -780,24 +804,23 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
-    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `grossBefore`,
-    /// the gross before this delivery's deposits, minDailyOutflow) per 24-hour window, and queues it in
-    /// `b` after any bounced deposits. Only burns count against the window. The caller fills in the
-    /// rest of `b`.
+    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `base`, the
+    /// ramped-in root stake, minDailyOutflow) per 24-hour window, and queues it in `b` after any bounced
+    /// deposits. Only burns count against the window. The caller fills in the rest of `b`.
     function _burnRedeems(
         bytes32 key,
         bytes32 peer,
         CascadeMessages.Entry[] memory redeems,
         uint256 A,
         uint256 S,
-        uint256 grossBefore,
+        uint256 base,
         PayoutBatch memory b
     ) internal {
         if (redeems.length == 0) return;
         Window memory w = burnWindows[peer];
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp >= w.start + 24 hours) w = Window(uint64(block.timestamp), 0);
-        uint256 allowance = _sub0(Math.max(grossBefore * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
+        uint256 allowance = _sub0(Math.max(base * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
         uint256 maxEntry = maxEntryValue;
         // this delivery's burns, without its bounced deposits
         uint256 burned;

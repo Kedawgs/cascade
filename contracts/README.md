@@ -220,8 +220,8 @@ forge lint
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
   payout-batch cancel may leave it below that batch's delivery price by at most one rao of rounding
   dust per re-minted entry; gross assets are conserved; reserved payouts match the queue; no front
-  door burns more than its allowance in a window (measured on the gross before the delivery's
-  deposits); the front door's token and ETH balances match its books; users never claim more than
+  door burns more than its allowance in a window (checked against the vault's root stake, the most
+  the allowance base can be); the front door's token and ETH balances match its books; users never claim more than
   was paid out; no unexpected reverts. The one expected exit failure is counted, not hidden: an
   `UnstakeShort` while the vault's only stake sits below the minimum stake (see the soft spots).
   The handler also simulates rare losses (at most two a run, from liquid TAO not reserved for
@@ -338,6 +338,7 @@ node: 1 TAO and exactly 0.002 TAO (the floor) delivered; `RESERVE=0` reverted `C
    `Redeemed` events, in log order. No single entry can make a batch revert. Delivery never stakes
    and never claims rewards.
 5. Later, the keeper calls `stakeIdle` to stake the liquid TAO that is not reserved for payouts.
+   That stake ramps into the front doors' daily allowance base over the next 24 hours.
 
 ### Payout leg (Bittensor to Base)
 
@@ -448,9 +449,10 @@ The honest statement, from the spec:
 > signers, Chainlink's lane configuration and Bittensor's sudo key can stop or change the rails with
 > no delay.
 
-"About 20% of the vault" is measured on gross assets before the batch's deposits are credited, so a
-batch's own deposits cannot raise it. Gross assets include payouts still queued (see the soft spots
-below).
+"About 20% of the vault" is measured on the vault's root stake that has ramped in: stake that
+`stakeIdle` added counts linearly over the 24 hours after it, and liquid TAO never counts. So neither
+a batch's own deposits, nor capital delivered or deposited earlier and taken back within a day, can
+raise it (see the soft spots below).
 
 The four layers:
 
@@ -459,8 +461,8 @@ The four layers:
    guardian or owner can cancel a proposal, remove a front door or disable a bridge at once. The guardian itself can be replaced only 8 days after the
    owner proposes it, so it outlasts any registry proposal made alongside.
 2. **Burns are capped per front door at delivery.** Each front door may burn at most
-   `max(20% of gross assets before the batch's deposits, 100 TAO)` per fixed 24-hour window;
-   requests beyond that are deferred and the users keep their shares.
+   `max(20% of the ramped-in root stake, 100 TAO)` per fixed 24-hour window; requests beyond that
+   are deferred and the users keep their shares.
 3. **Payouts wait, and stop the moment a front door is removed.** Nothing burned can leave for 24
    hours, `processPayouts` refuses a removed front door's batches, and the owner can then
    `cancelPayoutBatch`, which re-mints every unsent user's shares at the batch's price.
@@ -472,20 +474,33 @@ The four layers:
 
 Soft spots:
 
-- **The allowance base counts any capital already in the vault.** The allowance is computed on the
-  gross before the delivery's own deposits, which only stops a batch's OWN deposits from counting.
-  Any capital in the vault before the redeem batch raises the base: a rogue front door's earlier
-  deposit batch, a forged deposit batch delivered in an earlier block (or earlier in the same
-  transaction by a rogue adapter: measured, 4,000 TAO of flash capital that way still burns a
-  1,000-TAO holder in full, and the adapter takes its 4,000 back with `redeemDirect` in the same
-  transaction), or a `depositDirect` up to `maxTotalAssets` (which grows when the beta cap is
-  lifted). The backstop is unchanged: the 24-hour payout delay, the guardian's hold and the owner's
-  cancel. Flagged for the auditor.
+- **The allowance base trusts capital that stays a day.** The base is the vault's root stake less
+  what `stakeIdle` added and has not yet ramped in (each stake re-spreads what is still ramping, plus
+  the new stake, linearly over the next 24 hours, like reward vesting). Liquid TAO never counts: a
+  delivery's deposits, an earlier delivery's, a direct deposit, payouts reserved in the balance. So
+  borrowed or short-lived capital cannot raise the base. Measured: a rogue adapter that delivers
+  4,000 TAO of its own as a deposit-only batch, then a redeem batch naming a 1,000-TAO holder, burns
+  that holder for 200 TAO, not 1,000, whether in the same transaction (the adapter then takes its
+  4,000 back with `redeemDirect`), a block later, or a block after the keeper staked the 4,000
+  (about 200.1 TAO). Capital that stays staked raises the base as it ramps in: half after 12 hours,
+  all after 24. To the vault that is a holder like any other, and a percentage cap cannot tell them
+  apart; the backstop is unchanged (the 24-hour payout delay, the guardian's hold and the owner's
+  cancel). Flagged for the auditor.
+- **New stake waits a day to count.** The cost to honest users: deposits count in the base only as
+  they ramp in after the keeper stakes them, so a new vault, or one that grew fast, has a lower
+  allowance for about a day (never below `minDailyOutflow`). A keeper that stops staking freezes the
+  base at the stake it last ramped in; anyone may stake after `KEEPER_FALLBACK`.
+- **Cycling capital lowers the base for a day.** Someone who deposits, waits for the keeper to stake
+  it, then redeems directly adds to what is ramping without adding stake, so the base falls (to the
+  `minDailyOutflow` floor at worst) for up to a day. It costs them the capital for a keeper round and
+  gas, takes nothing, and leaves exits open at the floor and through `redeemDirect`. A keeper that
+  stakes less often (say daily) makes each cycle hold its capital longer.
 - **First come, first served.** A front door's allowance goes to redeems in delivery order, so one
   large holder can take a door's whole window. Deferred users must request again and pay the
   redeem-request fee again.
-- **Earlier unpaid burns count again.** Gross assets include `pendingPayouts`, so value burned in
-  one window and not yet paid out still counts in the next window's allowance base.
+- **Earlier unpaid burns can count again.** Payouts reserved in the liquid balance do not count in
+  the base, but value burned and not yet paid out that is still staked (when the balance does not
+  cover the queue, which `processPayouts` then unstakes) counts in the next window's base.
 - **Windows are fixed, not rolling.** A rogue front door can burn a full allowance just before its
   window ends and another just after, about 2× in a short span.
 - **A rogue adapter gets every door's allowance.** Any enabled adapter can present any registered
@@ -585,8 +600,8 @@ Contracts:
 
 | If compromised | What it can do | What bounds it |
 |---|---|---|
-| A front door | Burn the shares of users it names, up to `max(20% of gross assets before its batch's deposits, 100 TAO)` per fixed 24-hour window, with the TAO owed to itself. | The 24-hour payout delay, an instant guardian hold, and an owner cancel that re-mints the shares. Users marked `directOnly` are skipped. |
-| An adapter | Present any registered front door, so it gets every door's allowance (same bounds). It holds whatever passes through it in flight. On Base it can credit only tokens the front door holds beyond its books: donations, or payout tokens that landed ahead of their data in the separate-data-message fallback. It can credit that surplus to anyone with a made-up `PAYOUTS` message, and the pending chunk whose tokens it spent then fails `TokensNotReceived`. Its replay slots are its own, so it cannot pre-mark another adapter's deliveries. Whichever adapter is primary sets the fee quote: it can quote up to the fee ceiling and keep the excess. With borrowed TAO it can raise a door's allowance base within one transaction by delivering a forged deposit-only batch first (see the soft spots). | The same bounds, plus the 7-day bridge registry and the guardian's `disableBridge`. A non-primary adapter's forged redeems are paid out through the primary adapter to the registered front door, which credits the named users on Base: forced exits, not theft. Theft needs a rogue front door or the primary adapter. Disabling a non-primary adapter does not hold batches it already delivered; hold those by removing the front door, then cancel them. |
+| A front door | Burn the shares of users it names, up to `max(20% of the ramped-in root stake, 100 TAO)` per fixed 24-hour window, with the TAO owed to itself. | The 24-hour payout delay, an instant guardian hold, and an owner cancel that re-mints the shares. Users marked `directOnly` are skipped. |
+| An adapter | Present any registered front door, so it gets every door's allowance (same bounds). It holds whatever passes through it in flight. On Base it can credit only tokens the front door holds beyond its books: donations, or payout tokens that landed ahead of their data in the separate-data-message fallback. It can credit that surplus to anyone with a made-up `PAYOUTS` message, and the pending chunk whose tokens it spent then fails `TokensNotReceived`. Its replay slots are its own, so it cannot pre-mark another adapter's deliveries. Whichever adapter is primary sets the fee quote: it can quote up to the fee ceiling and keep the excess. Borrowed TAO delivered as a forged deposit-only batch first does not raise a door's allowance base: only stake that has ramped in for a day counts (see the soft spots). | The same bounds, plus the 7-day bridge registry and the guardian's `disableBridge`. A non-primary adapter's forged redeems are paid out through the primary adapter to the registered front door, which credits the named users on Base: forced exits, not theft. Theft needs a rogue front door or the primary adapter. Disabling a non-primary adapter does not hold batches it already delivered; hold those by removing the front door, then cancel them. |
 
 App side (outside this build): the swap router and onramp APIs, npm dependencies, and the keeper's
 RPC provider.

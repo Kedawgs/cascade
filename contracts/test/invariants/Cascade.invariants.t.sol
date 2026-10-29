@@ -396,29 +396,41 @@ contract CascadeInvariantTest is Test {
     }
 
     /// @dev A loss inside a burn window, then a delivery whose only payouts are bounced deposits: the vault
-    /// burns nothing, so the window an earlier delivery filled against the higher gross is not measured
+    /// burns nothing, so the window an earlier delivery filled against the higher base is not measured
     /// again against the lower one. (Found at 512 runs x depth 256: the handler checked the window on
     /// every queued payout batch, counting this as a violation.)
     function test_bounceAfterLossDoesNotRecheckBurnWindow() public {
-        // alice, bob and carol deposit 200e18 each directly; neither amount is 3 mod 4 in rao
+        // alice, bob and carol deposit 200e18 each directly; neither amount is 3 mod 4 in rao. The keeper
+        // stakes it and a day later all of it is in the allowance base.
         for (uint256 i; i < 3; ++i) {
             handler.depositDirect(i, 100_000_000_000);
             handler.depositDirect(i, 100_000_000_000);
         }
-        // alice asks for all of hers: the window allows 20% of the 600e18 gross, 120e18
+        handler.stakeIdle();
+        handler.warp(1 days);
+        // carol adds 800e18 directly, which stays liquid, outside the base
+        for (uint256 i; i < 8; ++i) {
+            handler.depositDirect(2, 100_000_000_000);
+        }
+        // alice asks for all of hers: the window allows 20% of the 600e18 staked, 120e18
         handler.requestRedeem(0, type(uint256).max);
         handler.closeBatch();
         (, uint256 burned) = vault.burnWindows(handler.peer());
         assertEq(burned, 120e18);
         assertEq(vault.pendingPayouts(), 120e18);
 
-        // seed 7 * 480e18: everything not reserved for her payout is lost, so the vault is insolvent
-        handler.simulateLoss(7 * 480e18);
-        assertEq(handler.ghostLoss(), 480e18);
-        assertEq(vault.totalAssets(), 0);
+        // seed 7 * 680e18: all the liquid TAO not reserved for her payout is lost: 600e18 of assets left
+        // against 1_280e24 shares, so the vault is insolvent
+        handler.simulateLoss(7 * 680e18);
+        assertEq(handler.ghostLoss(), 680e18);
+        assertEq(vault.totalAssets(), 600e18);
+        // bob leaves directly at the lowered price: 200e24 * (600e18 + 1) / (1_280e24 + 1e6) = 93.75e18, all
+        // of it unstaked, so the stake (the base) falls to 506.25e18
+        handler.redeemDirect(1, type(uint256).max);
+        assertEq(vault.rootStakeRao(), 506_250_000_000);
 
-        // 12 hours into the same window, bob's 1 TAO bounces against a gross of 120e18, whose 20% (24e18)
-        // and the 100e18 minimum are both below the 120e18 already burned
+        // 12 hours into the same window, bob's 1 TAO bounces against a base of 506.25e18, whose 20%
+        // (101.25e18) and the 100e18 minimum are both below the 120e18 already burned
         handler.deposit(1, 1_000_000_000);
         handler.closeBatch();
         assertEq(handler.depositBounces(), 1);

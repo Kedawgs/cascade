@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {Vm} from "forge-std/Vm.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeBase} from "../../src/CascadeBase.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
@@ -26,6 +27,25 @@ contract FlashAdapter is ICascadeBridge {
 
     function attack(uint64 chain, address door, bytes calldata message, uint256 amount) external {
         vault.onBridgeMessage{value: amount}(chain, door, message, amount);
+        vault.redeemDirect(vault.balanceOf(address(this)));
+    }
+
+    /// Two deliveries in one transaction: a deposit-only batch of borrowed TAO first, so the gross
+    /// before the second (redeem-only) delivery's deposits already holds it, then the redeems, then the
+    /// capital back out with redeemDirect.
+    function attackSplit(uint64 chain, address door, bytes calldata deposits, uint256 amount, bytes calldata redeems)
+        external
+    {
+        vault.onBridgeMessage{value: amount}(chain, door, deposits, amount);
+        vault.onBridgeMessage(chain, door, redeems, 0);
+        vault.redeemDirect(vault.balanceOf(address(this)));
+    }
+
+    function deliver(uint64 chain, address door, bytes calldata message, uint256 amount) external {
+        vault.onBridgeMessage{value: amount}(chain, door, message, amount);
+    }
+
+    function exit() external {
         vault.redeemDirect(vault.balanceOf(address(this)));
     }
 
@@ -286,12 +306,22 @@ contract VaultDeliveryTest is VaultTestBase {
         assertEq(vault.pendingPayouts(), 2e18);
     }
 
+    /// Stakes the vault's idle TAO as the keeper (exact reads) and lets a day pass, so all of it has
+    /// ramped into the allowance base.
+    function stakeAndRamp() internal {
+        staking.setOneRaoShort(false);
+        vm.prank(keeper);
+        vault.stakeIdle();
+        vm.warp(block.timestamp + 1 days);
+    }
+
     function test_delivery_redeemClippedToPeerAllowanceThenDeferred() public {
         depositVia(alice, 1_000e18);
+        stakeAndRamp();
         bytes32 peer = vault.peerId(BASE, frontDoor);
         uint256 t0 = block.timestamp;
 
-        // allowance = max(1_000e18 * 2000 / 10000, 100e18) = 200e18;
+        // allowance = max(1_000e18 staked * 2000 / 10000, 100e18) = 200e18;
         // sMax = 200e18 * (1e27 + 1e6) / (1_000e18 + 1) = 2e26; 2e26 * (1_000e18 + 1) / (1e27 + 1e6) = 200e18
         bytes32 key = nextRedeemKey(alice, 1e27);
         vm.expectEmit(address(vault));
@@ -317,7 +347,8 @@ contract VaultDeliveryTest is VaultTestBase {
         assertEq(vault.balanceOf(alice), 8e26);
         assertEq(vault.pendingPayouts(), 200e18);
 
-        // New window; gross still holds the reserved 200e18, so the allowance is 200e18 again.
+        // New window; the stake still holds the reserved 200e18 (not paid out yet), so the allowance is
+        // 200e18 again.
         // A = 1_000e18 - 200e18 = 800e18, S = 8e26: sMax = 200e18 * (8e26 + 1e6) / (800e18 + 1) = 2e26;
         // 2e26 * (800e18 + 1) / (8e26 + 1e6) = 200e18
         vm.warp(t0 + 24 hours);
@@ -376,6 +407,130 @@ contract VaultDeliveryTest is VaultTestBase {
         assertEq(vault.totalAssets(), 800e18);
     }
 
+    /// alice holds 1e27 shares worth 1_000e18, staked on HK1 more than a day ago, and a FlashAdapter is an
+    /// enabled bridge.
+    function flashSetup() internal returns (FlashAdapter adapter) {
+        staking.setOneRaoShort(false);
+        depositVia(alice, 1_000e18);
+        vm.prank(keeper);
+        vault.stakeIdle();
+        adapter = new FlashAdapter(vault);
+        vm.startPrank(owner);
+        vault.proposeBridge(address(adapter));
+        vm.warp(block.timestamp + 7 days);
+        vault.activateBridge(address(adapter));
+        vm.stopPrank();
+    }
+
+    /// The README soft spot in one transaction: a rogue adapter delivers a deposit-only batch of 4_000e18
+    /// borrowed TAO, then a redeem-only batch naming alice, then takes its capital back with redeemDirect.
+    /// The second delivery's gross before its own deposits holds the borrowed 4_000e18 (5_000e18), so on
+    /// that gross the allowance would be 1_000e18 and alice would be burned in full. The base is the stake
+    /// the vault has held for a day, 1_000e18: the allowance is 200e18.
+    function test_delivery_flashCapitalInEarlierDeliveryDoesNotRaiseAllowance() public {
+        FlashAdapter adapter = flashSetup();
+        uint256 flash = 4_000e18;
+        vm.deal(address(adapter), flash);
+        bytes memory deposits = CascadeMessages.encodeBatch(77, entries1(address(adapter), flash), noEntries());
+        bytes memory redeems = CascadeMessages.encodeBatch(78, noEntries(), entries1(alice, type(uint256).max));
+        bytes32 key = vault.batchKey(BASE, frontDoor, redeems);
+
+        // the deposit mints 4e27 at A = 1_000e18, S = 1e27; the redeems price at A = 5_000e18, S = 5e27:
+        // sMax = 200e18 * (5e27 + 1e6) / (5_000e18 + 1) = 2e26 → 200e18
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 2e26, 200e18);
+        // assets 5_000e18 - 200e18 pending, S = 4.8e27: 4e27 * (4_800e18 + 1) / (4.8e27 + 1e6) = 4_000e18
+        vm.expectEmit(address(vault));
+        emit CascadeVault.RedeemedDirect(address(adapter), 4e27, flash);
+        adapter.attackSplit(BASE, frontDoor, deposits, flash, redeems);
+
+        assertEq(vault.balanceOf(alice), 8e26);
+        assertEq(vault.pendingPayouts(), 200e18);
+        (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(burned, 200e18);
+        assertEq(vault.balanceOf(address(adapter)), 0);
+        assertEq(address(adapter).balance, flash);
+        assertEq(vault.totalAssets(), 800e18);
+    }
+
+    /// Delivers `flash` of the adapter's own TAO as a deposit-only batch: it mints 4e27 shares at
+    /// A = 1_000e18, S = 1e27.
+    function flashDeposit(FlashAdapter adapter, uint256 flash) internal {
+        vm.deal(address(adapter), flash);
+        adapter.deliver(
+            BASE, frontDoor, CascadeMessages.encodeBatch(77, entries1(address(adapter), flash), noEntries()), flash
+        );
+        assertEq(vault.balanceOf(address(adapter)), 4e27);
+    }
+
+    /// Delivers a redeem-only batch for all of alice's shares through the adapter and returns what she
+    /// was burned for (her Redeemed event's assets, 0 if none).
+    function redeemAliceVia(FlashAdapter adapter) internal returns (uint256 out) {
+        bytes memory redeems = CascadeMessages.encodeBatch(++nextBatchId + 100, noEntries(), entries1(alice, 1e27));
+        vm.recordLogs();
+        adapter.deliver(BASE, frontDoor, redeems, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == address(vault) && logs[i].topics[0] == CascadeVault.Redeemed.selector) {
+                (, out) = abi.decode(logs[i].data, (uint256, uint256));
+            }
+        }
+    }
+
+    /// The same capital a block earlier: still liquid, which the base never counts. Priced at
+    /// A = 5_000e18, S = 5e27: sMax = 200e18 * (5e27 + 1e6) / (5_000e18 + 1) = 2e26 → 200e18.
+    function test_delivery_capitalFromEarlierBlockDoesNotRaiseAllowance() public {
+        FlashAdapter adapter = flashSetup();
+        flashDeposit(adapter, 4_000e18);
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 12);
+
+        assertEq(redeemAliceVia(adapter), 200e18);
+        assertEq(vault.balanceOf(alice), 8e26);
+        adapter.exit();
+        assertEq(address(adapter).balance, 4_000e18);
+    }
+
+    /// The same capital staked by the keeper in between (the ops keeper stakes idle TAO as soon as it can):
+    /// stake added in the last day counts only as it ages, linearly over the day. 12 seconds after the
+    /// stake, base = 5_000e18 - 4_000e18 * (86_400 - 12) / 86_400 = 1_000_555_555_555_555_555_556, so the
+    /// allowance is 200_111_111_111_111_111_111 and alice is burned for that, floored to rao.
+    function test_delivery_capitalStakedJustBeforeDoesNotRaiseAllowance() public {
+        FlashAdapter adapter = flashSetup();
+        flashDeposit(adapter, 4_000e18);
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 12);
+        vm.prank(keeper);
+        vault.stakeIdle();
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 12);
+
+        uint256 out = redeemAliceVia(adapter);
+        assertEq(out, 200_111_111_111_000_000_000);
+        (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(burned, out);
+        // the adapter unstakes its capital and leaves with it
+        adapter.exit();
+        assertEq(address(adapter).balance, 4_000e18);
+    }
+
+    /// The residual: capital that stays staked for a day is, to the vault, a holder like any other, and
+    /// counts in full. Half a day in, half of it counts.
+    function test_delivery_stakeCountsInAllowanceAsItAges() public {
+        FlashAdapter adapter = flashSetup();
+        flashDeposit(adapter, 4_000e18);
+        vm.prank(keeper);
+        vault.stakeIdle();
+
+        // half a day: base 1_000e18 + 2_000e18 = 3_000e18, allowance 600e18
+        vm.warp(block.timestamp + 12 hours);
+        assertEq(redeemAliceVia(adapter), 600e18);
+        // a new window a day after the stake: base 5_000e18 less nothing, and alice's other 400e18 burn
+        vm.warp(block.timestamp + 24 hours);
+        assertEq(redeemAliceVia(adapter), 400e18);
+        assertEq(vault.balanceOf(alice), 0);
+    }
+
     function test_delivery_minDailyOutflowFloor() public {
         depositVia(alice, 10e18);
 
@@ -388,6 +543,23 @@ contract VaultDeliveryTest is VaultTestBase {
         (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
         assertEq(burned, 10e18);
         assertEq(vault.pendingPayouts(), 10e18);
+    }
+
+    /// Liquid TAO is not in the allowance base: deposits the keeper has not staked yet (a new vault) and
+    /// a direct deposit leave the front door the minDailyOutflow floor, here 100e18 of alice's 1_000e18.
+    function test_delivery_liquidTaoNotInAllowanceBase() public {
+        depositVia(alice, 1_000e18);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(10_000e18);
+        // A = 1_000e18, S = 1e27: 4_000e18 * (1e27 + 1e6) / (1_000e18 + 1) = 4e27
+        depositDirect(carol, 4_000e18);
+
+        // A = 5_000e18, S = 5e27, allowance max(0, 100e18): sMax = 100e18 * (5e27 + 1e6) / (5_000e18 + 1) =
+        // 1e26 → 100e18
+        bytes32 key = nextRedeemKey(alice, 1e27);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 1e26, 100e18);
+        redeemVia(alice, 1e27);
     }
 
     function test_delivery_directOnlySkippedUntilOptIn() public {
@@ -540,14 +712,15 @@ contract VaultDeliveryTest is VaultTestBase {
         address fd2 = makeAddr("frontDoor2");
         registerFrontDoor(4663, fd2);
         deliver(BASE, frontDoor, 1, entries2(alice, 500e18, bob, 500e18), noEntries());
+        stakeAndRamp();
 
-        // fd1: A = 1_000e18, S = 1e27, allowance 200e18: sMax = 2e26 → 200e18
+        // fd1: A = 1_000e18, S = 1e27, allowance 200e18 of the 1_000e18 staked: sMax = 2e26 → 200e18
         bytes32 k1 = keyOf(BASE, frontDoor, 2, noEntries(), entries1(alice, 5e26));
         vm.expectEmit(address(vault));
         emit CascadeVault.Redeemed(k1, alice, 2e26, 200e18);
         deliver(BASE, frontDoor, 2, noEntries(), entries1(alice, 5e26));
 
-        // fd2: A = 800e18, S = 8e26, its own allowance 200e18 on gross 1_000e18:
+        // fd2: A = 800e18, S = 8e26, its own allowance 200e18 on the 1_000e18 staked:
         // sMax = 200e18 * (8e26 + 1e6) / (800e18 + 1) = 2e26 → 200e18
         bytes32 k2 = keyOf(4663, fd2, 1, noEntries(), entries1(bob, 5e26));
         vm.expectEmit(address(vault));

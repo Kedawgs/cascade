@@ -576,6 +576,12 @@ describe("facts", () => {
       expect(f.delivered?.outcome).toBe("deposited");
     }
     const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, hash: H(3), batchId: 3n, state: "sent" };
+    // a cancel Base can't show yet is pending, not "didn't go through"
+    const pending = await depositWith(H(16));
+    expect(pending.cancelMined).toBe(false);
+    expect(pending.cancelPending).toBe(true);
+    expect(took.cancelPending).toBeUndefined();
+    expect((await depositWith(H(14))).cancelPending).toBeUndefined();
     const cancelled = await withdrawalFacts(c.clients, D, { ...w, cancelled: { hash: H(15), at: 1 } }, { fd, vault, scan, claims: [] });
     expect(cancelled.facts.cancelMined).toBe(true);
     expect(cancelled.facts.delivered).toBeUndefined();

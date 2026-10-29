@@ -356,6 +356,14 @@ export async function cancelTook(c: Pick<Clients, "base">, op: DepositOp | Withd
   return cancel !== undefined && (batchId === undefined || cancel.args.batchId === batchId);
 }
 
+/** What the trail needs of a record's cancel: whether it took the record out (cancelTook), and whether
+ * Base can't show it settled yet (pending), when the record has one. */
+async function cancelFacts(c: Pick<Clients, "base">, op: DepositOp | WithdrawalOp, batchId: bigint | undefined): Promise<{ cancelMined?: boolean; cancelPending?: true }> {
+  if (!op.cancelled) return { cancelMined: undefined };
+  const took = await cancelTook(c, op, batchId);
+  return { cancelMined: took === true, ...(took === undefined ? { cancelPending: true as const } : {}) };
+}
+
 export async function depositFacts(
   c: Pick<Clients, "base" | "bittensor">,
   d: Deployment,
@@ -382,7 +390,7 @@ export async function depositFacts(
     depositMined: mined(dep),
     ...(usdcSpent > 0n ? { usdcSpent } : {}),
     ...(taoDeposited !== undefined ? { taoDeposited } : {}),
-    cancelMined: op.cancelled ? (await cancelTook(c, op, batchId)) === true : undefined,
+    ...(await cancelFacts(c, op, batchId)),
     now: new Date(),
     depositedAt: new Date(op.createdAt),
     watchUrl: explorer.ccipAddress(d.baseAdapter),
@@ -434,7 +442,7 @@ export async function withdrawalFacts(
   const batchId = op.batchId ?? batchIdFrom(req, "RedeemRequested", op.account);
   const facts: WithdrawalFacts = {
     requestMined: mined(req),
-    cancelMined: op.cancelled ? (await cancelTook(c, op, batchId)) === true : undefined,
+    ...(await cancelFacts(c, op, batchId)),
     now: new Date(),
     requestedAt: new Date(op.createdAt),
     watchUrl: explorer.ccipAddress(d.baseAdapter),

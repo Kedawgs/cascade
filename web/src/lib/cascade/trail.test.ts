@@ -132,6 +132,19 @@ describe("deposit trail", () => {
     expect(r.steps[2].detail).toMatch(/back in your wallet/i);
   });
 
+  it("says it is cancelling, and offers no second cancel, while Base hasn't settled the one sent", () => {
+    const sent = { ...op, cancelled: { hash: H(12), at: T0.getTime() + 4 * 60_000 } };
+    const r = depositRecord(sent, { ...base, cancelPending: true });
+    expect(r.steps[2]).toMatchObject({ status: "active", detail: "Cancelling…" });
+    expect(r.steps[2].txUrl).toContain(H(12));
+    expect(r.cancellableWei).toBeUndefined();
+    expect(r.status).toBe("in_progress");
+    // ten minutes on and still nothing on Base: taken for dropped, and Cancel is offered again
+    const later = depositRecord(sent, { ...base, cancelPending: true, now: new Date(T0.getTime() + 15 * 60_000) });
+    expect(later.cancellableWei).toBe(78_000_000_000_000_000n);
+    expect(later.steps[2].detail).not.toBe("Cancelling…");
+  });
+
   it("stays cancelled after its batch is delivered with other people's deposits", () => {
     const delivered = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "deposited" as const };
     const r = depositRecord(
@@ -408,6 +421,14 @@ describe("withdrawal trail", () => {
     expect(r.status).toBe("cancelled");
     expect(r.cancellableShares).toBeUndefined();
     expect(r.steps[1].detail).toMatch(/fee/i);
+  });
+
+  it("says it is cancelling, and offers no second cancel, while Base hasn't settled the one sent", () => {
+    const sent = { ...wop, cancelled: { hash: H(13), at: T0.getTime() + 4 * 60_000 } };
+    const r = withdrawalRecord(sent, { ...wbase, cancelPending: true });
+    expect(r.steps[1]).toMatchObject({ status: "active", detail: "Cancelling…" });
+    expect(r.cancellableShares).toBeUndefined();
+    expect(withdrawalRecord(sent, { ...wbase, cancelPending: true, now: new Date(T0.getTime() + 15 * 60_000) }).cancellableShares).toBe(10n ** 22n);
   });
 
   it("stays cancelled when its batch is delivered with another request of the account's", () => {

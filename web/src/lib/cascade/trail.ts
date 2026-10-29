@@ -11,6 +11,8 @@ export interface DepositFacts {
   depositMined: boolean;
   /** The cancel (taking it back out of the open batch) went through. */
   cancelMined?: boolean;
+  /** A cancel was sent and Base doesn't show it settled yet (not mined, or not readable). */
+  cancelPending?: true;
   /** USDC the swap really took (its receipt), when known. */
   usdcSpent?: bigint;
   /** v3: the TAO the front door recorded for this stake (the swap's output, at least the floor), when known. */
@@ -44,6 +46,7 @@ export interface DepositFacts {
 export interface WithdrawalFacts {
   requestMined: boolean;
   cancelMined?: boolean;
+  cancelPending?: true;
   now: Date;
   /** When the unstake was asked for, when its batch left Base (if known), and where to watch the bridge. */
   requestedAt?: Date;
@@ -156,6 +159,13 @@ function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "
  * wherever the record shows or counts. */
 export const isCancelled = (op: { cancelled?: unknown }, f: { cancelMined?: boolean }): boolean => op.cancelled !== undefined && f.cancelMined === true;
 
+/** A cancel sent from here that Base doesn't show settled yet: "Cancelling…", with no second cancel
+ * offered. Still nothing on Base this long after it was sent, it is taken for dropped and Cancel is
+ * offered again. */
+const isCancelling = (op: { cancelled?: { at: number } }, f: { cancelPending?: true; now: Date }): boolean =>
+  op.cancelled !== undefined && f.cancelPending === true && f.now.getTime() - op.cancelled.at < STALE_MS;
+const CANCELLING = "Cancelling…";
+
 /** The status of a wallet step: done once mined, otherwise whatever the operation says. */
 function walletStep(mined: boolean, op: { state: string }, started: boolean): StepStatus {
   if (mined) return "done";
@@ -192,6 +202,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   };
 
   const cancelled = isCancelled(op, f);
+  const cancelling = !cancelled && isCancelling(op, f);
   let bridge: TrailStep<DepositStepKey> = { key: "bridge", title: "Cross to Bittensor", status: "pending" };
   if (cancelled && op.cancelled) {
     bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Cancelled. Your TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
@@ -212,6 +223,8 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
             : "The vault skipped this deposit; the TAO stays in the vault",
       };
     }
+  } else if (cancelling && op.cancelled) {
+    bridge = { ...bridge, status: "active", detail: CANCELLING, txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.depositMined) {
     bridge = {
       ...bridge,
@@ -245,7 +258,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     // "at $X" only for a deposit recorded with a price
     ...(price !== undefined ? { taoPriceUsd: price } : {}),
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
-    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled ? { cancellableWei: taoWei } : {}),
+    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled && !cancelling ? { cancellableWei: taoWei } : {}),
     // the swap worked but the deposit failed: the deposit alone can be tried again (the TAO is in the wallet)
     ...(op.state === "failed" && f.swapMined && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
     // the swap itself failed (reverted, or a batch that failed whole): start a new stake at today's price
@@ -288,6 +301,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
 
   let unstake: TrailStep<WithdrawalStepKey> = { key: "unstake", title: "Unstake on Bittensor", status: "pending" };
   const cancelled = isCancelled(op, f);
+  const cancelling = !cancelled && isCancelling(op, f);
   // taken back out of its batch: a delivery of that batch isn't this request's
   const d = cancelled ? undefined : f.delivered;
   if (cancelled && op.cancelled) {
@@ -311,6 +325,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     } else {
       unstake = { ...unstake, ...link, status: "action", detail: "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow." };
     }
+  } else if (cancelling && op.cancelled) {
+    unstake = { ...unstake, status: "active", detail: CANCELLING, txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.requestMined) {
     unstake = {
       ...unstake,
@@ -448,7 +464,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     ...(received ? { received } : {}),
     ...(belowMinimum ? { belowMinimum } : {}),
     ...(awaitingDelivery ? { awaitingDelivery: true as const } : {}),
-    ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" ? { cancellableShares: op.shares } : {}),
+    ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" && !cancelling ? { cancellableShares: op.shares } : {}),
   };
 }
 

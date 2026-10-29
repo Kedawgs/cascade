@@ -7,7 +7,7 @@ import { base } from "viem/chains";
 import { type Config, useConfig } from "wagmi";
 import {
   getCapabilities,
-  getChainId,
+  getConnection,
   sendCalls,
   signTypedData,
   switchChain,
@@ -54,8 +54,12 @@ import { lessSlippage } from "./units";
  * public RPC (`reader`) answers what the wallet doesn't need to: code at the account, and simulations. */
 export function wagmiPort(config: Config, account: Address, reader: PublicClient): WalletPort {
   return {
+    /** The wallet's own chain decides: wagmi's chain id stays on Base while the wallet sits on a chain
+     * the site doesn't know, so it can't tell a wallet on another chain from one on Base. */
     async switchToBase() {
-      if (getChainId(config) !== base.id) await switchChain(config, { chainId: base.id });
+      const { connector, chainId } = getConnection(config);
+      const current = connector ? await connector.getChainId().catch(() => chainId) : chainId;
+      if (current !== base.id) await switchChain(config, { chainId: base.id });
     },
     async canBatch() {
       try {

@@ -5,7 +5,7 @@ export interface SourceChainInfo {
   label: string;
   /** Brand colour for the chip dot. */
   color: string;
-  /** EVM chain id, matches the wagmi config. */
+  /** EVM chain id. Only live chains are in the wagmi config (wagmi.ts): a "soon" one is shown, never used. */
   chainId: number;
   /** Only live chains can be picked; the rest show as "Soon". */
   status: "live" | "soon";

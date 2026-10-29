@@ -134,8 +134,10 @@ describe("logs", () => {
     // D1 reports rows read (not 0), and the index keeps them to the range
     expect(c.stats.rowsRead).toBeGreaterThan(0);
     expect(c.stats.rowsRead).toBeLessThan(20);
-    expect([...(got.get("bittensor") ?? [])]).toEqual([[h("in"), 3101n]]);
-    expect([...(got.get("base") ?? [])]).toEqual([[h("base"), 90n]]);
+    expect([...(got.get("bittensor") ?? [])].map(([uid, r]) => [uid, r.block])).toEqual([[h("in"), 3101n]]);
+    expect([...(got.get("base") ?? [])].map(([uid, r]) => [uid, r.block])).toEqual([[h("base"), 90n]]);
+    // with its place and content, so a re-read can recognise it without hashing it again
+    expect(got.get("bittensor")?.get(h("in"))).toEqual({ block: 3101n, logIndex: 0, txHash: h("tx"), contract: "vault", event: "Staked", topic1: null, topic2: null, topic3: null, data: "0x" });
     expect((await storedUids(db, [])).size).toBe(0);
   });
 });

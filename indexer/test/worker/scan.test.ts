@@ -2,10 +2,9 @@ import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { FRONT_DOOR, VAULT } from "../../src/abi.ts";
 import { type ChainName, rolesOf } from "../../src/config.ts";
-import { identify, type RawLog } from "../../src/logs.ts";
+import { decode, identify, type RawLog, type StoredRef, storedRefOf } from "../../src/logs.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
-import { headTimeOf, REREAD, rereadRange, SETTLE, scanChain, WINDOW } from "../../src/scan.ts";
-import { type ChainSpec, type FetchRecord, fakeChains, fakeClock, TEST_URLS, windowsAsked } from "./fake-rpc.ts";
+import { headTimeOf, REREAD, rereadRange, SETTLE, scanChain, WINDOW } from "../../src/scan.ts";import { type ChainSpec, type FetchRecord, fakeChains, fakeClock, TEST_URLS, windowsAsked } from "./fake-rpc.ts";
 import { rawLog, testConfig, tx } from "./fixtures.ts";
 
 const d = testConfig().deployment;
@@ -17,6 +16,9 @@ const BASE = [d.frontDoor, d.baseAdapter, d.staker];
 const vlog = (block: bigint, n: number, logIndex = 0): RawLog =>
   rawLog({ address: d.vault, abi: VAULT, eventName: "Staked", args: { hotkey: d.stakeHotkey, rao: BigInt(n), measured: BigInt(n) }, block, logIndex, txHash: tx(n) });
 const uidOf = (chain: ChainName, l: RawLog) => identify(chain, [l])[0].uid;
+/** What the store holds of these logs, as storedUids loads it (uid → position and content). */
+const storedOf = (chain: ChainName, logs: RawLog[]): Map<Hex, StoredRef> =>
+  new Map(identify(chain, logs).map((x) => [x.uid, storedRefOf(decode(chain, x, roleOf)!)]));
 
 function setup(
   specs: Partial<Record<ChainName, ChainSpec>>,
@@ -27,7 +29,7 @@ function setup(
   const budget = new Budget(o.subrequests ?? 45);
   const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget, sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 } });
   const decodeBudget = new Budget(o.decode ?? 300, "decode");
-  const scan = (chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, more: { stored?: Map<Hex, bigint>; startBlock?: bigint; window?: bigint; deadlineMs?: number; reserve?: number } = {}) =>
+  const scan = (chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, more: { stored?: Map<Hex, StoredRef>; startBlock?: bigint; window?: bigint; deadlineMs?: number; reserve?: number } = {}) =>
     scanChain({
       rpc,
       chain,
@@ -91,7 +93,7 @@ describe("scanChain on Bittensor", () => {
     expect(first.cursor.settledTo).toBe(3490n);
     // next tick: the head moved on; the deep log is stored already, the recent one now settles
     spec.head = 3510n;
-    const stored = new Map([[uidOf("bittensor", deep), 3480n]]);
+    const stored = storedOf("bittensor", [deep]);
     const second = await setup({ bittensor: spec }).scan("bittensor", first.cursor, { stored });
     expect(second.upserts.map((l) => l.block)).toEqual([3495n]);
     expect(second.fresh).toEqual([]);
@@ -99,7 +101,7 @@ describe("scanChain on Bittensor", () => {
 
   it("treats a re-mined copy as the same log, at its new block", async () => {
     const copy = vlog(3250n, 7);
-    const stored = new Map([[uidOf("bittensor", vlog(3200n, 7, 3)), 3200n]]);
+    const stored = storedOf("bittensor", [vlog(3200n, 7, 3)]);
     const r = await setup({ bittensor: { head: 3510n, logs: [copy] } }).scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored });
     expect(r.upserts.map((l) => [l.uid, l.block])).toEqual([[uidOf("bittensor", copy), 3250n]]);
     expect(r.removed).toEqual([]);
@@ -108,10 +110,7 @@ describe("scanChain on Bittensor", () => {
   it("marks a stored log that vanished from a re-read as removed, and brings it back when it is re-mined", async () => {
     const gone = vlog(3200n, 8);
     const kept = vlog(3300n, 9);
-    const stored = new Map([
-      [uidOf("bittensor", gone), 3200n],
-      [uidOf("bittensor", kept), 3300n],
-    ]);
+    const stored = storedOf("bittensor", [gone, kept]);
     const spec: ChainSpec = { head: 3510n, logs: [kept] };
     const r = await setup({ bittensor: spec }).scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored });
     expect(r.removed).toEqual([uidOf("bittensor", gone)]);
@@ -120,7 +119,7 @@ describe("scanChain on Bittensor", () => {
     // later it is mined again in block 3520: an upsert at its new block (the store clears the mark)
     spec.head = 3600n;
     spec.logs = [kept, { ...gone, blockNumber: "0xdc0" }];
-    const again = await setup({ bittensor: spec }).scan("bittensor", r.cursor, { stored: new Map([[uidOf("bittensor", kept), 3300n]]) });
+    const again = await setup({ bittensor: spec }).scan("bittensor", r.cursor, { stored: storedOf("bittensor", [kept]) });
     expect(again.upserts.map((l) => [l.uid, l.block])).toEqual([[uidOf("bittensor", gone), 3520n]]);
     expect(again.removed).toEqual([]);
   });
@@ -181,14 +180,66 @@ describe("scanChain on Bittensor", () => {
     expect(budget.left).toBe(8);
   });
 
-  it("finishes the window that spends the decode budget, then stops", async () => {
+  it("cuts at a block boundary once the decode budget is spent, keeping the blocks it finished", async () => {
     const many = Array.from({ length: 350 }, (_, i) => vlog(1000n + BigInt(i), i + 1));
     const { decodeBudget, scan } = setup({ bittensor: { head: 3500n, logs: [...many, vlog(2500n, 999)] } }, { decode: 300 });
     const r = await scan("bittensor", FIRST);
     expect(r.stopped).toBe("decode");
-    expect(r.upserts).toHaveLength(350);
-    expect(r.cursor).toEqual({ scannedTo: 1999n, settledTo: 1999n });
+    expect(r.upserts).toHaveLength(300);
+    // block 1300's log is the first it couldn't afford: everything to the block before is read and stored
+    expect(r.cursor).toEqual({ scannedTo: 1299n, settledTo: 1299n });
     expect(decodeBudget.left).toBe(0);
+  });
+
+  it("never splits a block: a block's logs are taken together even past the budget", async () => {
+    const block = [vlog(1500n, 1, 0), vlog(1500n, 2, 1), vlog(1500n, 3, 2)];
+    const { decodeBudget, scan } = setup({ bittensor: { head: 3500n, logs: [...block, vlog(1600n, 4)] } }, { decode: 2 });
+    const r = await scan("bittensor", FIRST);
+    expect(r.upserts.map((l) => l.block)).toEqual([1500n, 1500n, 1500n]);
+    expect(r.cursor.scannedTo).toBe(1599n);
+    expect(r.stopped).toBe("decode");
+    expect(decodeBudget.left).toBe(0);
+  });
+
+  it("charges nothing for logs already stored at the same transaction, index, block and content", async () => {
+    const many = Array.from({ length: 350 }, (_, i) => vlog(3101n + BigInt(i), i + 1));
+    const { decodeBudget, scan } = setup({ bittensor: { head: 3500n, logs: many } }, { decode: 10 });
+    const r = await scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored: storedOf("bittensor", many) });
+    expect(r.stopped).toBeUndefined();
+    expect([r.upserts, r.removed]).toEqual([[], []]);
+    expect(decodeBudget.left).toBe(10);
+    // a stored log whose content differs at the same place is hashed again (and charged)
+    const changed = { ...many[0], data: many[1].data };
+    const s = setup({ bittensor: { head: 3500n, logs: [changed, ...many.slice(1)] } }, { decode: 10 });
+    const r2 = await s.scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored: storedOf("bittensor", many) });
+    expect(s.decodeBudget.left).toBe(9);
+    expect(r2.removed).toEqual([uidOf("bittensor", many[0])]);
+  });
+
+  it("still reads on through blocks with nothing to decode once the budget is spent", async () => {
+    const { scan } = setup({ bittensor: { head: 3500n, logs: [vlog(1100n, 1), vlog(2600n, 2)] } }, { decode: 1 });
+    const r = await scan("bittensor", FIRST);
+    expect(r.stopped).toBe("decode");
+    expect(r.cursor.scannedTo).toBe(2599n);
+  });
+
+  it("moves a busy history on every tick, however many logs a window holds", async () => {
+    // 600 logs in one 1,000-block window: more than a tick may decode
+    const busy = Array.from({ length: 600 }, (_, i) => vlog(1000n + BigInt(Math.floor(i / 2)), i + 1, i % 2));
+    const store = new Map<Hex, StoredRef>();
+    let cursor: { scannedTo: bigint | null; settledTo: bigint } = FIRST;
+    const seen: bigint[] = [];
+    for (let tick = 0; tick < 10 && cursor.scannedTo !== 1500n; tick++) {
+      const s = setup({ bittensor: { head: 1500n, logs: busy } }, { decode: 100 });
+      const r = await s.scan("bittensor", cursor, { stored: new Map([...store].filter(([, ref]) => cursor.scannedTo !== null && ref.block > cursor.scannedTo - 400n)) });
+      for (const l of r.upserts) store.set(l.uid, storedRefOf(l));
+      expect(s.decodeBudget.left).toBeGreaterThanOrEqual(0);
+      seen.push(r.cursor.scannedTo ?? 0n);
+      cursor = r.cursor;
+    }
+    expect(cursor.scannedTo).toBe(1500n);
+    expect(store.size).toBe(600);
+    expect(seen).toEqual([...seen].sort((a, b) => (a < b ? -1 : 1)));
   });
 
   it("starts no window after the wall-time limit", async () => {

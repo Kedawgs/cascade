@@ -1,6 +1,6 @@
 import { type Hex, hexToBigInt, hexToNumber } from "viem";
 import type { ChainName, RoleOf } from "./config.ts";
-import { decode, identify, type StoredLog } from "./logs.ts";
+import { decode, identityOf, type RawLog, type StoredLog, type StoredRef, sortByPosition, storedIdentity, uidFor } from "./logs.ts";
 import { type Budget, BudgetExhausted, type Rpc } from "./rpc.ts";
 
 // The keeper's scan numbers (ops/src/keeper/state.ts; a test compares them), so the indexer and the
@@ -60,8 +60,11 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * window reach further. A window is accepted only from a node whose head, asked in the same request,
  * has reached the window's end; a node behind it is asked once more, then the chain stops for this tick.
  * It also stops, keeping every whole window read, when the subrequest budget (or its reserve) runs out, a
- * request fails, the wall time is up (no window starts after `deadlineMs`), or the decode budget is
- * spent (after finishing the window that spent it). Logs are settled up to min(last block read,
+ * request fails, or the wall time is up (no window starts after `deadlineMs`). The decode budget bounds
+ * the tick's CPU: each log hashed and decoded costs one unit (one already stored at the same place costs
+ * nothing), and once it is spent the scan stops before the next block that needs work, keeping every
+ * block taken whole, so a window busier than one tick can afford is read over several. Logs are
+ * settled up to min(last block read,
  * head − SETTLE): those are returned to store; nearer ones are returned fresh. A stored log in the
  * settled part of a re-read that the read no longer has is returned as removed. */
 export async function scanChain(o: {
@@ -71,8 +74,8 @@ export async function scanChain(o: {
   addresses: Hex[];
   startBlock: bigint;
   cursor: { scannedTo: bigint | null; settledTo: bigint };
-  /** uid → block of the stored logs in this chain's re-read range */
-  stored: Map<Hex, bigint>;
+  /** the stored logs in this chain's re-read range (store.storedUids) */
+  stored: Map<Hex, StoredRef>;
   decodeBudget: Budget;
   deadlineMs: number;
   now: () => number;
@@ -96,6 +99,51 @@ export async function scanChain(o: {
     result.stopped = why;
     if (e !== undefined) result.error = message(e);
   };
+
+  /** The stored logs by place, with the identity of their content: a re-read log found at the same
+   * transaction, index and block with the same content is the stored one, recognised without a hash. */
+  const byPlace = new Map<string, { uid: Hex; what: string }>();
+  for (const [uid, s] of o.stored) {
+    const what = storedIdentity(s);
+    if (what !== undefined) byPlace.set(`${s.txHash}:${s.logIndex}:${s.block}`, { uid, what });
+  }
+
+  /** Takes a window's logs block by block (a block is never split: its logs number identical copies
+   * together). A log recognised by place costs nothing; any other is hashed and, unless stored at that
+   * block already, decoded, costing one unit of the decode budget, the tick's CPU. Before a block that
+   * needs any such work once the budget is spent, it stops and returns the last block taken whole. */
+  function take(logs: readonly RawLog[], a: bigint, b: bigint): bigint | undefined {
+    const counts = new Map<string, number>();
+    const blocks = new Map<bigint, RawLog[]>();
+    for (const raw of sortByPosition(logs)) {
+      const block = hexToBigInt(raw.blockNumber);
+      if (block < a || block > b) continue;
+      if (!blocks.has(block)) blocks.set(block, []);
+      blocks.get(block)!.push(raw);
+    }
+    for (const [block, raws] of blocks) {
+      const items = raws.map((raw) => {
+        const what = identityOf(raw);
+        const n = counts.get(what) ?? 0;
+        counts.set(what, n + 1);
+        const place = byPlace.get(`${raw.transactionHash.toLowerCase()}:${hexToNumber(raw.logIndex)}:${block}`);
+        return { raw, what, n, uid: place?.what === what ? place.uid : undefined };
+      });
+      if (o.decodeBudget.left === 0 && items.some((i) => i.uid === undefined)) return block - 1n;
+      for (const i of items) {
+        if (i.uid !== undefined) {
+          read.push({ log: undefined, uid: i.uid, block });
+          continue;
+        }
+        if (o.decodeBudget.left > 0) o.decodeBudget.spend();
+        const uid = uidFor(chain, i.what, i.n);
+        // the same log at another index of the same block: nothing to write
+        const log = o.stored.get(uid)?.block === block ? undefined : decode(chain, { uid, raw: i.raw }, o.roleOf);
+        read.push({ log, uid, block });
+      }
+    }
+    return undefined;
+  }
   const failed = (e: unknown) => stop(e instanceof BudgetExhausted ? "budget" : "error", e instanceof BudgetExhausted ? undefined : e);
 
   scan: {
@@ -153,24 +201,15 @@ export async function scanChain(o: {
       }
       head = head === undefined ? answer.head : max(head, answer.head);
       known = max(known, answer.head);
-      for (const x of identify(chain, answer.logs)) {
-        const block = hexToBigInt(x.raw.blockNumber);
-        if (block < a || block > b) continue;
-        const unchanged = o.stored.get(x.uid) === block;
-        let log: StoredLog | undefined;
-        if (!unchanged) {
-          // decoding is the CPU cost: count it, and finish the window even once the budget is spent
-          if (o.decodeBudget.left > 0) o.decodeBudget.spend();
-          log = decode(chain, x, o.roleOf);
-        }
-        read.push({ log, uid: x.uid, block });
-      }
-      scannedTo = b;
-      a = b + 1n;
-      if (o.decodeBudget.left === 0) {
+      const cut = take(answer.logs, a, b);
+      if (cut !== undefined) {
+        // the decode budget is spent: keep every block taken whole, and stop before the first one not
+        if (cut >= a) scannedTo = cut;
         stop("decode");
         break;
       }
+      scannedTo = b;
+      a = b + 1n;
     }
   }
 
@@ -190,8 +229,8 @@ export async function scanChain(o: {
       else result.fresh.push(r.log);
     }
     const checkedTo = min(scannedTo, settled);
-    for (const [uid, block] of o.stored) {
-      if (block >= start && block <= checkedTo && !seen.has(uid)) result.removed.push(uid);
+    for (const [uid, s] of o.stored) {
+      if (s.block >= start && s.block <= checkedTo && !seen.has(uid)) result.removed.push(uid);
     }
   }
   return result;

@@ -1,6 +1,6 @@
 import type { Hex } from "viem";
-import type { ChainName } from "./config.ts";
-import type { StoredLog } from "./logs.ts";
+import type { ChainName, Role } from "./config.ts";
+import type { StoredLog, StoredRef } from "./logs.ts";
 import { appendPages, rebuildPages, type SeedEvent, type SeedPage } from "./seed.ts";
 
 // D1 access: reads, and prepared statements a tick commits together in one db.batch(). Every query is a
@@ -271,10 +271,10 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
   };
 }
 
-/** The uids (and blocks) of the stored, not removed logs in each chain's re-read range, in one query:
+/** The stored, not removed logs in each chain's re-read range (uid → place and content), in one query:
  * the only range a tick's windows read again, so the only place a stored log can go missing. */
-export async function storedUids(db: D1Database, ranges: readonly { chain: ChainName; from: bigint; to: bigint }[]): Promise<Map<ChainName, Map<Hex, bigint>>> {
-  const out = new Map<ChainName, Map<Hex, bigint>>();
+export async function storedUids(db: D1Database, ranges: readonly { chain: ChainName; from: bigint; to: bigint }[]): Promise<Map<ChainName, Map<Hex, StoredRef>>> {
+  const out = new Map<ChainName, Map<Hex, StoredRef>>();
   if (ranges.length === 0) return out;
   // a chain without a range gets an empty one (from 1 to 0)
   const range = (chain: ChainName) => ranges.find((r) => r.chain === chain) ?? { from: 1n, to: 0n };
@@ -282,14 +282,25 @@ export async function storedUids(db: D1Database, ranges: readonly { chain: Chain
   const bit = range("bittensor");
   const { results } = await db
     .prepare(
-      `SELECT chain, uid, block FROM logs WHERE removed = 0 AND (
+      `SELECT chain, uid, block, log_index, tx_hash, contract, event, topic1, topic2, topic3, data FROM logs WHERE removed = 0 AND (
          (chain = 'base' AND block BETWEEN ?1 AND ?2) OR (chain = 'bittensor' AND block BETWEEN ?3 AND ?4))`,
     )
     .bind(int(base.from), int(base.to), int(bit.from), int(bit.to))
-    .all<{ chain: ChainName; uid: Hex; block: number }>();
+    .all<Row>();
   for (const r of results) {
-    if (!out.has(r.chain)) out.set(r.chain, new Map());
-    out.get(r.chain)!.set(r.uid, BigInt(r.block));
+    const chain = r.chain as ChainName;
+    if (!out.has(chain)) out.set(chain, new Map());
+    out.get(chain)!.set(r.uid as Hex, {
+      block: BigInt(r.block as number),
+      logIndex: Number(r.log_index),
+      txHash: r.tx_hash as Hex,
+      contract: r.contract as Role,
+      event: r.event as string,
+      topic1: (r.topic1 as Hex | null) ?? null,
+      topic2: (r.topic2 as Hex | null) ?? null,
+      topic3: (r.topic3 as Hex | null) ?? null,
+      data: r.data as Hex,
+    });
   }
   return out;
 }

@@ -43,7 +43,10 @@
         "BASE_LOG_WINDOW": "100",
         // sized for Workers Free (50 subrequests and 10 ms CPU per invocation); raise them on Paid
         "SUBREQUEST_BUDGET": "45",
-        "DECODE_BUDGET": "300",
+        // logs a tick may hash and decode, both chains together: about 42 µs each (23 to hash, 19 to
+        // decode), so 100 is about 4 ms of Free's 10 ms. A log already stored at the same place costs
+        // nothing. On Workers Paid (30 s of CPU) a few thousand is fine.
+        "DECODE_BUDGET": "100",
         "SCAN_WALL_S": "40",
         "LEASE_S": "180",
         "SITE_FILES_PER_RUN": "2",

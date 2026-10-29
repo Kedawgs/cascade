@@ -116,7 +116,7 @@ describe("call builders", () => {
     expect(unstakeV3Call(10n ** 22n, 5n, 10n ** 14n, q, D).value).toBe(0n);
   });
 
-  it("approves only ever exactly what the next call spends, from that call's own arguments, and never an open amount", () => {
+  it("approves only ever exactly the most the next call may spend, from that call's own arguments, and never an unlimited amount", () => {
     /** What a call takes from the account under the approval before it. */
     const spends = (c: FlowCall): bigint => {
       if (c.functionName === "exactOutput") return (c.args[0] as { amountInMaximum: bigint }).amountInMaximum;

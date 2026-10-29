@@ -121,8 +121,11 @@ A deployment with a staker and price oracle in `.env.local` runs the v3 flows; o
 v2. An env that names a v3 deployment (a staker, an oracle or a payout delay) without both a valid
 staker and oracle fails the build rather than falling back to v2.
 
-Every approval the site asks for is for exactly what the call after it spends (a test checks every
-flow); none is ever open-ended.
+Every approval the site asks for is for exactly the most the call after it may spend (a test checks
+every flow), never an unlimited amount. All but one are spent in full. The exception is the v2
+stake's USDC approval to Uniswap's router: `exactOutput` spends only what buying the TAO costs, so
+up to the 0.5% slippage margin (about 0.5% of the stake) can stay approved to that fixed router
+until the next approval replaces it.
 
 - **Stake (v3):** one signature plus one transaction. The wallet signs a USDC permit (EIP-2612, exactly
   the amount, valid 30 minutes) and the site sends `CascadeStaker.stakeWithPermit`, which swaps the
@@ -138,7 +141,8 @@ flow); none is ever open-ended.
   (price below the floor, deadline passed) or more than an hour has passed since the TAO landed on
   Base ("It's taking longer than usual").
 - **Cancel:** `cancelDeposit` / `cancelRedeem` while the batch is still open.
-- **Stake (v2):** approve exactly the swap's most USDC to Uniswap's SwapRouter02 if needed, `exactOutput` along
+- **Stake (v2):** approve exactly the swap's most USDC to Uniswap's SwapRouter02 if needed (what it
+  doesn't spend, up to the 0.5% margin, stays approved to the router), `exactOutput` along
   TAO←WETH←USDC for exactly the deposit's TAO (0.5% slippage), approve that TAO to the front door,
   `deposit`. v2 unstakes pay nothing automatically and always end in a claim.
 

@@ -28,8 +28,10 @@ const call = (key: string, to: Address, abi: Abi, functionName: string, args: re
 });
 
 /** USDC → exactly `targetTao` TAO (unused USDC never leaves the wallet) → the front door. Every approval
- * is for exactly what the call after it may spend: Uniswap's router the swap's most (`usdcIn`), the front
- * door the exact deposit. None is ever left open. */
+ * is for exactly the most the call after it may spend: Uniswap's router the swap's most (`usdcIn`), the
+ * front door the exact deposit. None is unlimited, but the router's may not be spent in full: the
+ * exact-output swap pays only what the TAO costs, so up to the 0.5% slippage margin stays approved to
+ * that fixed router until the next approval replaces it. */
 export function stakeCalls(q: Pick<DepositQuote, "usdcIn" | "targetTao">, w: Balances, d: Deployment, account: Address): FlowCall[] {
   const out: FlowCall[] = [];
   if (w.usdcRouterAllowance < q.usdcIn) out.push(call("approveUsdc", TOKENS.usdc, ERC20, "approve", [UNISWAP.router, q.usdcIn]));

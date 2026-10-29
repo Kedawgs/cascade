@@ -11,9 +11,9 @@ export interface DepositFacts {
   depositMined: boolean;
   /** The cancel (taking it back out of the open batch) went through. */
   cancelMined?: boolean;
-  /** A cancel was sent and has no receipt yet: Base has the transaction and it can still be mined
-   * ("known"), or Base doesn't know it ("unseen": just sent, or dropped). */
-  cancelPending?: "known" | "unseen";
+  /** A cancel was sent and has no receipt yet: mined (its receipt not readable yet), waiting to be
+   * mined, or one Base doesn't know ("unseen": just sent, or dropped). */
+  cancelPending?: "mined" | "waiting" | "unseen";
   /** USDC the swap really took (its receipt), when known. */
   usdcSpent?: bigint;
   /** v3: the TAO the front door recorded for this stake (the swap's output, at least the floor), when known. */
@@ -47,7 +47,7 @@ export interface DepositFacts {
 export interface WithdrawalFacts {
   requestMined: boolean;
   cancelMined?: boolean;
-  cancelPending?: "known" | "unseen";
+  cancelPending?: "mined" | "waiting" | "unseen";
   now: Date;
   /** When the unstake was asked for, when its batch left Base (if known), and where to watch the bridge. */
   requestedAt?: Date;
@@ -162,13 +162,23 @@ function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "
  * wherever the record shows or counts. */
 export const isCancelled = (op: { cancelled?: unknown }, f: { cancelMined?: boolean }): boolean => op.cancelled !== undefined && f.cancelMined === true;
 
-/** A cancel sent from here with no receipt yet that can still go through: "Cancelling…", with no second
- * cancel offered. One Base has and can still mine stays so however long it takes; one Base doesn't know
- * is given ten minutes to appear, then taken for dropped, and Cancel is offered again. (One whose nonce
- * the account used for another transaction can never be mined: Cancel is offered at once.) */
-const isCancelling = (op: { cancelled?: { at: number } }, f: { cancelPending?: "known" | "unseen"; now: Date }): boolean =>
-  op.cancelled !== undefined && (f.cancelPending === "known" || (f.cancelPending === "unseen" && f.now.getTime() - op.cancelled.at < STALE_MS));
+type CancelFacts = { cancelPending?: "mined" | "waiting" | "unseen"; now: Date; stillOpen: boolean };
+
+/** A cancel sent from here with no receipt yet that can still take the record out of its batch, which is
+ * still open: "Cancelling…", with no second cancel offered. One Base has mined or can still mine stays so
+ * however long it takes; one Base doesn't know is given ten minutes to appear, then taken for dropped,
+ * and Cancel is offered again. (One whose nonce the account used for another transaction can never be
+ * mined: Cancel is offered at once.) Once the batch has closed, the trail shows its real progress. */
+const isCancelling = (op: { cancelled?: { at: number } }, f: CancelFacts): boolean =>
+  op.cancelled !== undefined &&
+  f.stillOpen &&
+  (f.cancelPending === "mined" || f.cancelPending === "waiting" || (f.cancelPending === "unseen" && f.now.getTime() - op.cancelled.at < STALE_MS));
 const CANCELLING = "Cancelling…";
+/** What "Cancelling…" says: still waiting to be mined ten minutes on, that the wallet can speed it up. */
+const cancellingDetail = (op: { cancelled?: { at: number } }, f: CancelFacts): string =>
+  f.cancelPending === "waiting" && op.cancelled !== undefined && f.now.getTime() - op.cancelled.at >= STALE_MS
+    ? `${CANCELLING} It's taking longer than usual. You can speed it up in your wallet.`
+    : CANCELLING;
 
 /** The status of a wallet step: done once mined, otherwise whatever the operation says. */
 function walletStep(mined: boolean, op: { state: string }, started: boolean): StepStatus {
@@ -228,7 +238,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
       };
     }
   } else if (cancelling && op.cancelled) {
-    bridge = { ...bridge, status: "active", detail: CANCELLING, txUrl: explorer.baseTx(op.cancelled.hash) };
+    bridge = { ...bridge, status: "active", detail: cancellingDetail(op, f), txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.depositMined) {
     bridge = {
       ...bridge,
@@ -330,7 +340,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       unstake = { ...unstake, ...link, status: "action", detail: "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow." };
     }
   } else if (cancelling && op.cancelled) {
-    unstake = { ...unstake, status: "active", detail: CANCELLING, txUrl: explorer.baseTx(op.cancelled.hash) };
+    unstake = { ...unstake, status: "active", detail: cancellingDetail(op, f), txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.requestMined) {
     unstake = {
       ...unstake,

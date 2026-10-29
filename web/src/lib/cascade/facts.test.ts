@@ -719,12 +719,14 @@ describe("facts", () => {
 
   it("knows whether a cancel with no receipt can still go through: still waiting, or its nonce taken by another transaction", async () => {
     const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: {}, batchId: 4n, state: "sent", cancelled: { hash: H(16), at: 1 } };
-    const pendingWith = async (nonce: number) =>
-      (await depositFacts(chains({ baseTxs: { [H(16)]: { nonce: 7, blockNumber: null } }, nonce }).clients, D, dep, { fd, vault, scan: newScan(D) })).facts.cancelPending;
+    const pendingWith = async (nonce: number, blockNumber: bigint | null = null) =>
+      (await depositFacts(chains({ baseTxs: { [H(16)]: { nonce: 7, blockNumber } }, nonce }).clients, D, dep, { fd, vault, scan: newScan(D) })).facts.cancelPending;
     // waiting to be mined: the account hasn't used nonce 7 yet
-    expect(await pendingWith(7)).toBe("known");
+    expect(await pendingWith(7)).toBe("waiting");
     // the account's nonce is past it: another transaction took nonce 7, so this cancel can never be mined
     expect(await pendingWith(8)).toBeUndefined();
+    // mined, its receipt just not readable yet
+    expect(await pendingWith(8, 1_000n)).toBe("mined");
   });
 
   it("says a claim went through only when its receipt succeeded and shows the account's Claimed event", async () => {

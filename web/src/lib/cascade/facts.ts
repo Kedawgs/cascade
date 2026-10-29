@@ -388,26 +388,26 @@ async function cancelFacts(
   c: Pick<Clients, "base">,
   op: DepositOp | WithdrawalOp,
   batchId: bigint | undefined,
-): Promise<{ cancelMined?: boolean; cancelPending?: "known" | "unseen" }> {
+): Promise<{ cancelMined?: boolean; cancelPending?: "mined" | "waiting" | "unseen" }> {
   if (!op.cancelled) return { cancelMined: undefined };
   const took = await cancelTook(c, op, batchId);
   const pending = took === undefined ? await cancelInFlight(c, op.account, op.cancelled.hash) : undefined;
   return { cancelMined: took === true, ...(pending ? { cancelPending: pending } : {}) };
 }
 
-/** A cancel with no receipt yet, as Base sees it: "known" while Base has the transaction (mined, or
- * waiting with a nonce the account hasn't used for another); "unseen" while Base doesn't know it (just
- * sent, or dropped); undefined once the account's nonce is past it, so it can never be mined. */
-async function cancelInFlight(c: Pick<Clients, "base">, account: Address, hash: Hex): Promise<"known" | "unseen" | undefined> {
+/** A cancel with no receipt yet, as Base sees it: "mined" (its receipt just isn't readable yet);
+ * "waiting" to be mined, with a nonce the account hasn't used for another; "unseen" while Base doesn't
+ * know it (just sent, or dropped); undefined once the account's nonce is past it, so it can never be mined. */
+async function cancelInFlight(c: Pick<Clients, "base">, account: Address, hash: Hex): Promise<"mined" | "waiting" | "unseen" | undefined> {
   let tx: { nonce: number; blockNumber: bigint | null };
   try {
     tx = (await c.base.getTransaction({ hash })) as unknown as { nonce: number; blockNumber: bigint | null };
   } catch {
     return "unseen";
   }
-  if (tx.blockNumber !== null) return "known";
+  if (tx.blockNumber !== null) return "mined";
   const used = await c.base.getTransactionCount({ address: account, blockTag: "latest" }).catch(() => undefined);
-  return used !== undefined && used > tx.nonce ? undefined : "known";
+  return used !== undefined && used > tx.nonce ? undefined : "waiting";
 }
 
 /** A batch's delivery as a trail may use it: the scan's, with its receipt (read in any case, for the

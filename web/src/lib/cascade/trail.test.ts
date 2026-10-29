@@ -143,10 +143,23 @@ describe("deposit trail", () => {
     const later = depositRecord(sent, { ...base, cancelPending: "unseen", now: new Date(T0.getTime() + 15 * 60_000) });
     expect(later.cancellableWei).toBe(78_000_000_000_000_000n);
     expect(later.steps[2].detail).not.toBe("Cancelling…");
-    // a cancel Base has, still waiting to be mined, is on its way however long it takes
-    const waiting = depositRecord(sent, { ...base, cancelPending: "known", now: new Date(T0.getTime() + 60 * 60_000) });
-    expect(waiting.steps[2].detail).toBe("Cancelling…");
+    // a cancel Base has, still waiting to be mined, is on its way however long it takes; after ten minutes
+    // it says the wallet can speed it up
+    const soon = depositRecord(sent, { ...base, cancelPending: "waiting", now: new Date(T0.getTime() + 8 * 60_000) });
+    expect(soon.steps[2].detail).toBe("Cancelling…");
+    const waiting = depositRecord(sent, { ...base, cancelPending: "waiting", now: new Date(T0.getTime() + 60 * 60_000) });
+    expect(waiting.steps[2].detail).toBe("Cancelling… It's taking longer than usual. You can speed it up in your wallet.");
     expect(waiting.cancellableWei).toBeUndefined();
+    // mined, its receipt not readable yet: no hint, it's done waiting
+    expect(depositRecord(sent, { ...base, cancelPending: "mined", now: new Date(T0.getTime() + 60 * 60_000) }).steps[2].detail).toBe("Cancelling…");
+  });
+
+  it("shows the batch's real progress once it has closed, whatever became of a cancel sent before", () => {
+    const sent = { ...op, cancelled: { hash: H(12), at: T0.getTime() + 4 * 60_000 } };
+    const closed = { ...base, openBatchId: 4n, stillOpen: false, depositedAt: new Date("2026-10-25T09:53:00Z"), cancelPending: "waiting" as const };
+    const r = depositRecord(sent, closed);
+    expect(r.steps[2].detail).toMatch(/^On the bridge to Bittensor/);
+    expect(r.cancellableWei).toBeUndefined();
   });
 
   it("stays cancelled after its batch is delivered with other people's deposits", () => {
@@ -444,7 +457,10 @@ describe("withdrawal trail", () => {
     expect(r.steps[1]).toMatchObject({ status: "active", detail: "Cancelling…" });
     expect(r.cancellableShares).toBeUndefined();
     expect(withdrawalRecord(sent, { ...wbase, cancelPending: "unseen", now: new Date(T0.getTime() + 15 * 60_000) }).cancellableShares).toBe(10n ** 22n);
-    expect(withdrawalRecord(sent, { ...wbase, cancelPending: "known", now: new Date(T0.getTime() + 60 * 60_000) }).cancellableShares).toBeUndefined();
+    expect(withdrawalRecord(sent, { ...wbase, cancelPending: "waiting", now: new Date(T0.getTime() + 60 * 60_000) }).cancellableShares).toBeUndefined();
+    // the batch closed: its real progress, not "Cancelling…"
+    const closed = withdrawalRecord(sent, { ...wbase, openBatchId: 6n, stillOpen: false, cancelPending: "waiting" });
+    expect(closed.steps[1].detail).toMatch(/^On the bridge to Bittensor/);
   });
 
   it("stays cancelled when its batch is delivered with another request of the account's", () => {

@@ -81,6 +81,31 @@ describe("operation log", () => {
     log.put(deposit("a", ME, 1));
     expect(log.get(ME, "a")?.id).toBe("a");
   });
+
+  it("reads this tab's own writes once storage is full, not the older list still stored", () => {
+    const s = memoryStorage();
+    let full = false;
+    const quota = {
+      getItem: s.getItem,
+      setItem: (k: string, v: string) => {
+        if (full) throw new DOMException("quota", "QuotaExceededError");
+        s.setItem(k, v);
+      },
+    };
+    const log = createOpLog(quota, FD);
+    log.put(deposit("a", ME, 1));
+    full = true;
+    log.put(deposit("b", ME, 2));
+    expect(log.get(ME, "b")?.id).toBe("b");
+    log.update(ME, "b", { state: "sent" });
+    expect(log.get(ME, "b")?.state).toBe("sent");
+    expect(log.list(ME).map((o) => o.id)).toEqual(["b", "a"]);
+    // once a write gets through again, storage is the record (another tab may change it)
+    full = false;
+    log.put(deposit("c", ME, 3));
+    s.setItem(`cascade.ops.${FD.toLowerCase()}.${ME.toLowerCase()}`, "[]");
+    expect(log.list(ME)).toEqual([]);
+  });
 });
 
 describe("effectiveState", () => {

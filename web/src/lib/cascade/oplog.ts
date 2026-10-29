@@ -80,24 +80,31 @@ const reviver = (_k: string, v: unknown) =>
  * indexer: the activity trails start from these and read the rest from the chain. */
 export function createOpLog(storage: Storage, frontDoor: Address) {
   const memory = new Map<string, Operation[]>();
+  /** Lists whose last write storage refused (full, or blocked): this tab's memory is newer than what is stored. */
+  const unsaved = new Set<string>();
   const key = (account: Address) => `cascade.ops.${frontDoor.toLowerCase()}.${account.toLowerCase()}`;
 
   function read(account: Address): Operation[] {
+    const k = key(account);
+    if (unsaved.has(k)) return memory.get(k) ?? [];
     try {
-      const raw = storage.getItem(key(account));
+      const raw = storage.getItem(k);
       if (raw !== null) return JSON.parse(raw, reviver) as Operation[];
     } catch {
       // storage blocked or unreadable: fall back to this tab's memory
     }
-    return memory.get(key(account)) ?? [];
+    return memory.get(k) ?? [];
   }
 
   function write(account: Address, ops: Operation[]) {
-    memory.set(key(account), ops);
+    const k = key(account);
+    memory.set(k, ops);
     try {
-      storage.setItem(key(account), JSON.stringify(ops, replacer));
+      storage.setItem(k, JSON.stringify(ops, replacer));
+      unsaved.delete(k);
     } catch {
-      // kept in memory for this tab
+      // kept in memory for this tab, which reads it from there until a write gets through again
+      unsaved.add(k);
     }
   }
 

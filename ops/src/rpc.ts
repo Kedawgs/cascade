@@ -78,6 +78,28 @@ export function createRpc(targets: Record<ChainName, ChainTarget>, opts: RpcOpti
   };
 }
 
+/** The RPC log scans use: Base's on `baseLogs` (its own server: OPS_BASE_LOGS_RPC), Bittensor's on `main`
+ * (the archive node, behind the same rate-limit queue as every other Bittensor read). A scan reads its
+ * head here too, so a server that lags can't answer an older head's range as "no logs". Before Base's
+ * first request it checks the logs server is Base: one on another chain would answer every query with
+ * nothing. */
+export function logsRpc(main: Rpc, baseLogs: Rpc, baseChainId = 8453): Rpc {
+  let checked = false;
+  return {
+    async request(chain, method, params) {
+      if (chain !== "base") return main.request(chain, method, params);
+      if (!checked) {
+        const id = hexToNumber((await baseLogs.request("base", "eth_chainId", [])) as Hex);
+        if (id !== baseChainId) {
+          throw new Error(`OPS_BASE_LOGS_RPC answers chain id ${id}, not Base (${baseChainId}): set it to a Base RPC that serves eth_getLogs`);
+        }
+        checked = true;
+      }
+      return baseLogs.request(chain, method, params);
+    },
+  };
+}
+
 export async function read(
   rpc: Rpc,
   chain: ChainName,

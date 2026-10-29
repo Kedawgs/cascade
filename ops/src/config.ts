@@ -240,6 +240,14 @@ export function targets(env: Env): { live: Record<ChainName, ChainTarget>; rehea
   };
 }
 
+/** Where the live tools read Base's logs: OPS_BASE_LOGS_RPC, by default publicnode. mainnet.base.org (the
+ * default OPS_BASE_RPC) refuses eth_getLogs outright ("request limit reached", checked 2026-10-28), and
+ * publicnode serves recent ranges but not archive depth without a token. The site reads Base's logs
+ * the same way (web/src/lib/cascade/config.ts, baseLogs). */
+export function baseLogsTarget(env: Env): ChainTarget {
+  return { name: "base", rpcUrl: env.OPS_BASE_LOGS_RPC ?? "https://base-rpc.publicnode.com", chainId: 8453, legacy: false };
+}
+
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 export function paths(env: Env) {

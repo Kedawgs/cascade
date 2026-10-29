@@ -484,13 +484,19 @@ describe("verify reads back the registries, the pending proposals and the state"
     expect(chains.calls.filter((m) => m === "eth_getLogs")).toHaveLength(2);
   });
 
-  it("a check it cannot read is a failure that says so, not a crash", async () => {
+  it("a check it cannot read is a failure that says so, not a crash; Base's names the logs RPC", async () => {
     const chains = chainsFor(recordOf(plan), THIS_CODE);
     const request = chains.ctx.rpc.request;
-    const rpc: Rpc = { request: (c, m, p) => (m === "eth_getLogs" ? Promise.reject(new Error("range too large")) : request(c, m, p)) };
-    const r = await verify({ ...chains.ctx, rpc }, recordOf(plan));
-    expect(r.ok).toBe(false);
-    expect(r.failures).toEqual(["the bridge, front-door and route registries: could not be read (range too large)"]);
+    const refusing = (chain: string): Rpc => ({
+      request: (c, m, p) => (m === "eth_getLogs" && c === chain ? Promise.reject(new Error("range too large")) : request(c, m, p)),
+    });
+    const base = await verify({ ...chains.ctx, rpc: refusing("base") }, recordOf(plan));
+    expect(base.ok).toBe(false);
+    expect(base.failures).toEqual([
+      "the bridge, front-door and route registries: could not be read (Base's logs from block 1 (range too large): OPS_BASE_LOGS_RPC must serve eth_getLogs that far back; run verify often (each one scans only from the last), or use an archive-capable endpoint)",
+    ]);
+    const bit = await verify({ ...chains.ctx, rpc: refusing("bittensor") }, recordOf(plan));
+    expect(bit.failures).toEqual(["the bridge, front-door and route registries: could not be read (range too large)"]);
   });
 
   it("names a wrong limit like any other setting", async () => {

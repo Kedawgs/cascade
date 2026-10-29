@@ -7,7 +7,7 @@ import { type ChainName, LIVE, SETTINGS, WALLET } from "./config.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { WINDOW } from "./keeper/state.ts";
 import { balanceOf, nonceOf, read } from "./rpc.ts";
-import { type Ctx, chainLabel } from "./send.ts";
+import { type Ctx, chainLabel, logsOf } from "./send.ts";
 
 const ROUTER = parseAbi([
   "struct OffRamp { uint64 sourceChainSelector; address offRamp; }",
@@ -42,11 +42,13 @@ export function checkAlphaVault(s: { isPaused: boolean; migrationReadyAt: bigint
   return null;
 }
 
-/** One eth_getLogs over the keeper's window on `chain`: null if the RPC accepts it. */
-export async function logProbe(ctx: Pick<Ctx, "rpc">, chain: ChainName): Promise<string | null> {
+/** One eth_getLogs over the keeper's window on `chain`, through the logs server the scans use (Base:
+ * OPS_BASE_LOGS_RPC), its head from there too: null if it accepts it. */
+export async function logProbe(ctx: Pick<Ctx, "rpc" | "logs">, chain: ChainName): Promise<string | null> {
   try {
-    const latest = BigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as string);
-    await ctx.rpc.request(chain, "eth_getLogs", [
+    const rpc = logsOf(ctx);
+    const latest = BigInt((await rpc.request(chain, "eth_blockNumber", [])) as string);
+    await rpc.request(chain, "eth_getLogs", [
       { address: LIVE[chain].ROUTER, fromBlock: `0x${(latest - WINDOW[chain] + 1n).toString(16)}`, toBlock: `0x${latest.toString(16)}` },
     ]);
     return null;
@@ -88,7 +90,8 @@ export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?:
   }
 
   for (const chain of ["base", "bittensor"] as const) {
-    check(`${chainLabel(chain)}'s RPC answers the keeper's log queries`, await logProbe(ctx, chain));
+    const which = chain === "base" ? "Base's logs RPC (OPS_BASE_LOGS_RPC)" : "Bittensor's RPC";
+    check(`${which} answers the keeper's log queries`, await logProbe(ctx, chain));
   }
 
   const alpha = (fn: string) => read(ctx.rpc, "bittensor", { address: LIVE.ALPHA_VAULT, abi: ALPHA, functionName: fn });

@@ -4,7 +4,7 @@ import { WINDOW, startBlock } from "./keeper/state.ts";
 import type { PlanV3 } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { firstBlockWithCode, read } from "./rpc.ts";
-import { type Ctx, chainLabel } from "./send.ts";
+import { type Ctx, chainLabel, logsOf } from "./send.ts";
 
 /** What verify may find beyond the plan without failing: addresses (a bridge, a front door, a guardian
  * the owner proposed or enabled on purpose) and staker routes by id. From OPS_VERIFY_ALLOW, e.g.
@@ -70,14 +70,16 @@ export function baseStartBlock(rec: DeploymentRecord): number | undefined {
 
 type RawLog = { address: Address; topics: Hex[] };
 
-/** `addresses`' logs with any of `topics` as topic0, from `from` to the head, in the RPC's windows. */
-async function scan(ctx: Pick<Ctx, "rpc">, chain: ChainName, addresses: Address[], topics: Hex[], from: number) {
-  const head = Number(hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex));
+/** `addresses`' logs with any of `topics` as topic0, from `from` to the head, in the RPC's windows; the head
+ * and the logs both from the logs server (Base: OPS_BASE_LOGS_RPC). */
+async function scan(ctx: Pick<Ctx, "rpc" | "logs">, chain: ChainName, addresses: Address[], topics: Hex[], from: number) {
+  const rpc = logsOf(ctx);
+  const head = Number(hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex));
   const logs: RawLog[] = [];
   const step = Number(WINDOW[chain]);
   for (let start = from; start <= head; start += step) {
     const end = Math.min(start + step - 1, head);
-    const got = (await ctx.rpc.request(chain, "eth_getLogs", [{ address: addresses, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topics] }])) as RawLog[];
+    const got = (await rpc.request(chain, "eth_getLogs", [{ address: addresses, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topics] }])) as RawLog[];
     logs.push(...got);
   }
   return { logs, to: Math.max(from - 1, head - SETTLE[chain]) };
@@ -88,11 +90,15 @@ const union = <T>(a: readonly T[], b: readonly T[]) => [...new Set([...a, ...b])
 
 /** Scans the front door's and the staker's registry events on Base, and the vault's on Bittensor, from
  * where `prev` settled (else the deployment's first block on each chain). */
-export async function scanRegistry(ctx: Pick<Ctx, "rpc">, rec: DeploymentRecord, prev?: RegistryScan): Promise<RegistryScan> {
+export async function scanRegistry(ctx: Pick<Ctx, "rpc" | "logs">, rec: DeploymentRecord, prev?: RegistryScan): Promise<RegistryScan> {
   const plan = rec.plan as PlanV3;
   const a = plan.addresses;
   const baseFrom = prev ? prev.base.to + 1 : (baseStartBlock(rec) ?? (await firstBlockWithCode(ctx.rpc, "base", a.baseAdapter)));
-  const base = await scan(ctx, "base", [a.frontDoor, a.staker], [...BRIDGE_TOPICS, ROUTE_TOPIC], baseFrom);
+  const base = await scan(ctx, "base", [a.frontDoor, a.staker], [...BRIDGE_TOPICS, ROUTE_TOPIC], baseFrom).catch((e: Error) => {
+    throw new Error(
+      `Base's logs from block ${baseFrom} (${e.message.split("\n")[0]}): OPS_BASE_LOGS_RPC must serve eth_getLogs that far back; run verify often (each one scans only from the last), or use an archive-capable endpoint`,
+    );
+  });
   const bitFrom = prev ? prev.bittensor.to + 1 : Number(startBlock(rec));
   const bit = await scan(ctx, "bittensor", [a.vault], [...BRIDGE_TOPICS, ...FRONT_DOOR_TOPICS], bitFrom);
   const ours = (l: RawLog, x: Address) => l.address.toLowerCase() === x.toLowerCase();

@@ -38,6 +38,9 @@ export interface Ctx {
   live: boolean;
   targets: Record<ChainName, ChainTarget>;
   rpc: Rpc;
+  /** Where log scans go (rpc.ts logsRpc): the live tools' own Base logs server. Absent = `rpc` (the
+   * local forks, and tests). Every eth_getLogs, and the head a scan reads first, goes through logsOf. */
+  logs?: Rpc;
   runner: Runner;
   paths: Paths;
   log(line: string): void;
@@ -90,6 +93,9 @@ export class ReceiptTimeout extends Error {
     this.nonce = nonce;
   }
 }
+
+/** The RPC for log scans and their heads: the context's logs server, else its main RPC. */
+export const logsOf = (ctx: Pick<Ctx, "rpc" | "logs">): Rpc => ctx.logs ?? ctx.rpc;
 
 export const chainLabel = (chain: ChainName) => (chain === "base" ? "Base" : "Bittensor");
 export const unit = (chain: ChainName) => (chain === "base" ? "ETH" : "TAO");

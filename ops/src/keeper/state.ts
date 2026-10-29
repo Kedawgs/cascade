@@ -12,11 +12,11 @@ import {
   numberToHex,
   parseAbi,
 } from "viem";
-import { BASE_V3, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
+import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE, WALLET } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
-import { type Ctx, describeRevert, sendCall } from "../send.ts";
+import { type Ctx, describeRevert, logsOf, sendCall } from "../send.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
@@ -123,7 +123,8 @@ export function isRevert(e: unknown): boolean {
 const unanswered = (e: unknown) => e instanceof RpcError && !isRevert(e);
 export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE"];
 const ED_RESERVE = 10n ** 12n;
-/** eth_getLogs block ranges the public RPCs accept: mainnet.base.org refuses more than 200 blocks. */
+/** eth_getLogs block ranges the public RPCs accept. Base's go to OPS_BASE_LOGS_RPC (mainnet.base.org
+ * refuses eth_getLogs altogether); some public Base endpoints refuse more than 200 blocks. */
 export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
 /** The furthest the keeper's first look at a batch's deposits reaches back on Base: four hours of its
  * 2-second blocks, 72 queries. Fees decide a close only once the batch can close (an hour in at the launch
@@ -174,12 +175,13 @@ export async function scanLogs(
   topics: (Hex | null)[] = [],
   to?: bigint,
 ) {
-  const latest = to ?? hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
+  const rpc = logsOf(ctx);
+  const latest = to ?? hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex);
   const topic0 = encodeEventTopics({ abi: [ev], eventName: ev.name } as never)[0];
   const out: ScannedLog[] = [];
   for (let start = from; start <= latest; start += WINDOW[chain]) {
     const end = start + WINDOW[chain] - 1n < latest ? start + WINDOW[chain] - 1n : latest;
-    const logs = (await ctx.rpc.request(chain, "eth_getLogs", [
+    const logs = (await rpc.request(chain, "eth_getLogs", [
       { address, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topic0, ...topics] },
     ])) as { address: Address; topics: Hex[]; data: Hex; blockNumber: Hex; logIndex: Hex; transactionHash: Hex }[];
     for (const l of logs) {
@@ -227,7 +229,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     const seen = new Set<string>();
     let scannedTo: bigint | undefined;
     return async (first: (head: bigint) => bigint): Promise<{ logs: ScannedLog[]; head: bigint }> => {
-      const head = hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
+      // the head from the server the logs come from
+      const head = hexToBigInt((await logsOf(ctx).request(chain, "eth_blockNumber", [])) as Hex);
       const earliest = first(head);
       const back = scannedTo === undefined ? earliest : scannedTo + 1n - REREAD[chain];
       const from = back > earliest ? back : earliest;
@@ -506,6 +509,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
 
   /** The open batch's DepositRequested logs on Base, kept for one batch across rounds. */
   let requested: { batchId: bigint; read: ReturnType<typeof logCursor> } | undefined;
+  /** The batch whose deposits the logs server last failed to give: its failure is said once. */
+  let logsFailedFor: bigint | undefined;
 
   /** The open batch's deposits the staker made (DepositRequested names it as the payer): only those paid
    * the staker's deposit and swap fees; TAO deposited straight into the front door (deposit, depositFor)
@@ -544,7 +549,21 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const [ethPriceUsdc] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ETH_USDC_PATH, E18])) as readonly [bigint];
       const bridgeFeeWei = await closeFeeWei(deposits, redeems);
       if (taoPriceUsdc === 0n || ethPriceUsdc === 0n || bridgeFeeWei === 0n) return null;
-      const staked = await stakerDeposits(batch.id, batch.ageS, staker);
+      let staked: { count: number; tao: bigint };
+      try {
+        staked = await stakerDeposits(batch.id, batch.ageS, staker);
+        logsFailedFor = undefined;
+      } catch (e) {
+        // said once a batch, not every round of `run`
+        if (logsFailedFor !== batch.id) {
+          logsFailedFor = batch.id;
+          const hours = planMaxWait(rec.plan) / 3600;
+          ctx.log(
+            `Base logs: couldn't read batch ${batch.id}'s deposits (${(e as Error).message.split("\n")[0]}), so its deposit fees are unknown and it waits for its max wait (${hours} hours) instead of closing when they cover its bridge fee. Set OPS_BASE_LOGS_RPC to a Base RPC that serves eth_getLogs (default ${baseLogsTarget({}).rpcUrl}).`,
+          );
+        }
+        return null;
+      }
       const stakedTao = staked.tao < batch.totalDeposits ? staked.tao : batch.totalDeposits;
       return closeEconomicsOf({ nStaked: staked.count, depositFeeUsdc, stakedTao, taoPriceUsdc, swapFeeBps, feePot: batch.feePot, ethPriceUsdc, bridgeFeeWei });
     } catch {
@@ -572,7 +591,7 @@ export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opt
   }
   if (!dst) {
     // not one the keeper sent: look back over Base's last 1,000 blocks (about half an hour)
-    const latest = hexToBigInt((await ctx.rpc.request("base", "eth_blockNumber", [])) as Hex);
+    const latest = hexToBigInt((await logsOf(ctx).request("base", "eth_blockNumber", [])) as Hex);
     if ((await scanLogs(ctx, "base", a.baseAdapter, event(ADAPTER, "Sent"), latest - 1_000n, [id])).length) dst = "bittensor";
   }
   if (!dst) throw new Error(`no bridge message ${id} was found from either adapter`);
@@ -586,7 +605,7 @@ export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opt
     if (state === "SUCCESS") return state;
     if (state === "FAILURE") {
       // the change happened since the last poll: a recent window is enough
-      const latest = hexToBigInt((await ctx.rpc.request(dst, "eth_blockNumber", [])) as Hex);
+      const latest = hexToBigInt((await logsOf(ctx).request(dst, "eth_blockNumber", [])) as Hex);
       const changed = await scanLogs(ctx, dst, offRamp, event(OFFRAMP, "ExecutionStateChanged"), latest - WINDOW[dst] + 1n, [null, null, id]);
       ctx.log(`The delivery failed; the OffRamp returned ${(changed.at(-1)?.args.returnData as Hex) ?? "nothing"}`);
       return state;

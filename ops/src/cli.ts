@@ -3,7 +3,7 @@ import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
 import { cardinalityReport } from "./cardinality.ts";
-import { cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
+import { baseLogsTarget, cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
 import { handoff, ownershipStatus } from "./handoff.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
@@ -16,7 +16,7 @@ import { loadRecordFor, needRecord as needRecordAt } from "./record.ts";
 import { verifyAllowFromEnv } from "./registry.ts";
 import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
-import { createRpc } from "./rpc.ts";
+import { createRpc, logsRpc } from "./rpc.ts";
 import { type Ctx, execFileRunner, unit } from "./send.ts";
 import { verifyAndSave } from "./verify.ts";
 import { writeWebEnv } from "./webconfig.ts";
@@ -28,7 +28,10 @@ const log = (l: string) => console.log(l);
 function ctxFor(live: boolean): Ctx {
   const t = live ? targets(env).live : targets(env).rehearsal;
   const rpc = createRpc(t, live ? {} : { minIntervalMs: { bittensor: 0 } });
-  return { live, targets: t, rpc, runner: execFileRunner, paths: paths(env), log, receiptTimeoutMs: 300_000 };
+  // the live tools read Base's logs from their own server (mainnet.base.org refuses eth_getLogs); the
+  // forks serve their own
+  const logs = live ? logsRpc(rpc, createRpc({ ...t, base: baseLogsTarget(env) })) : undefined;
+  return { live, targets: t, rpc, ...(logs ? { logs } : {}), runner: execFileRunner, paths: paths(env), log, receiptTimeoutMs: 300_000 };
 }
 
 /** The record of the deployment OPS_DEPLOYMENT names (without it, the v2 test deployment's). */

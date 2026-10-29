@@ -62,6 +62,8 @@ export const USAGE = `usage: pnpm ops <command> [--live]
                              increaseObservationCardinalityNext transactions to send from any wallet
 
 Without --live, deploy and the keeper commands use the local forks.
+Live, Base's logs are read from OPS_BASE_LOGS_RPC (default https://base-rpc.publicnode.com): the default
+OPS_BASE_RPC, mainnet.base.org, refuses eth_getLogs.
 A launch (OPS_CADENCE=launch) reads its roles from OPS_LAUNCH_OWNER_BASE, OPS_LAUNCH_OWNER_BITTENSOR,
 OPS_LAUNCH_GUARDIAN_BASE, OPS_LAUNCH_GUARDIAN_BITTENSOR, OPS_LAUNCH_KEEPER and OPS_LAUNCH_TREASURY.`;
 

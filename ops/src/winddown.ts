@@ -1,7 +1,8 @@
 import { type Address, formatEther, type Hex, isAddress, parseAbi } from "viem";
 import { read } from "./rpc.ts";
-import { PRECOMPILE, SETTINGS, WALLET } from "./config.ts";
+import { PRECOMPILE, WALLET } from "./config.ts";
 import type { KeeperDeps } from "./keeper/actions.ts";
+import { settingsOf } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
 import { type Ctx, type Sent, sendCall, sendValue } from "./send.ts";
@@ -52,7 +53,8 @@ export async function windDown(deps: KeeperDeps, rec: DeploymentRecord): Promise
         nonce: await deps.nonce("base"),
         label: "set the front door's deposit cap to 0",
         functionName: "setCaps",
-        args: [SETTINGS.minDeposit, 0n],
+        // setCaps sets both: the minimum deposit stays the one the plan deployed (v3's is not v2's)
+        args: [settingsOf(rec.plan).minDeposit, 0n],
       }),
     );
   }
@@ -67,6 +69,9 @@ export function sweepLegs(s: { tao: bigint; eth: bigint; frontDoorPaused: boolea
   if (!legs.length) throw new Error("nothing left to sweep: both balances are already home");
   return legs;
 }
+
+/** The gas limit the TAO leg is sent with, and held back from its value. */
+const TAO_SWEEP_GAS = 40_000n;
 
 const floorRao = (wei: bigint) => (wei / 10n ** 9n) * 10n ** 9n;
 const pos = (x: bigint) => (x > 0n ? x : 0n);
@@ -90,7 +95,7 @@ export function sweepDestinations(taoTo: string, ethTo: string): { taoKey: Hex; 
  * swept is skipped, so it can be run again after a stop. */
 export async function sweep(ctx: Ctx, rec: DeploymentRecord, taoTo: string, ethToRaw: string): Promise<void> {
   const { taoKey, ethTo } = sweepDestinations(taoTo, ethToRaw);
-  const tao = taoSweepValue(await balanceOf(ctx.rpc, "bittensor", WALLET), 40_000n, await gasPriceOf(ctx.rpc, "bittensor"));
+  const tao = taoSweepValue(await balanceOf(ctx.rpc, "bittensor", WALLET), TAO_SWEEP_GAS, await gasPriceOf(ctx.rpc, "bittensor"));
   const eth = ethSweepValue(await balanceOf(ctx.rpc, "base", WALLET), 26_250n, await gasPriceOf(ctx.rpc, "base"));
   const paused = (await read(ctx.rpc, "base", { address: rec.plan.addresses.frontDoor, abi: ABI, functionName: "paused" })) as boolean;
   const legs = sweepLegs({ tao, eth, frontDoorPaused: paused });
@@ -105,6 +110,8 @@ export async function sweep(ctx: Ctx, rec: DeploymentRecord, taoTo: string, ethT
     functionName: "transfer",
     args: [taoKey],
     value: tao,
+    // the limit the value left room for: a transfer whose estimate is above it is refused, not sent short
+    gasLimit: TAO_SWEEP_GAS,
     });
   }
   if (legs.includes("eth")) {

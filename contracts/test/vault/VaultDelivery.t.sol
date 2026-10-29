@@ -8,6 +8,7 @@ import {CascadeVault} from "../../src/CascadeVault.sol";
 import {ICascadeBridge} from "../../src/interfaces/ICascadeBridge.sol";
 import {ISTAKING_ADDRESS, IStaking} from "../../src/interfaces/IStaking.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
+import {MockStaking} from "../mocks/MockStaking.sol";
 import {VaultTestBase} from "../VaultTestBase.sol";
 
 /// A rogue adapter with flash capital: delivers a forged batch whose deposit is its own borrowed TAO,
@@ -37,6 +38,23 @@ contract FlashAdapter is ICascadeBridge {
         external
     {
         vault.onBridgeMessage{value: amount}(chain, door, deposits, amount);
+        vault.onBridgeMessage(chain, door, redeems, 0);
+        vault.redeemDirect(vault.balanceOf(address(this)));
+    }
+
+    /// attackSplit with a stake gift between the deliveries: `giftRao` of root stake moved onto the vault's
+    /// stake hotkey from another coldkey (transferStake on the chain; the mock's donateStake here). The
+    /// gift raises every share's value, so a holder of most of the shares gets most of it back.
+    function attackWithGift(
+        uint64 chain,
+        address door,
+        bytes calldata deposits,
+        uint256 amount,
+        bytes calldata redeems,
+        uint256 giftRao
+    ) external {
+        vault.onBridgeMessage{value: amount}(chain, door, deposits, amount);
+        MockStaking(ISTAKING_ADDRESS).donateStake(vault.stakeHotkey(), vault.coldkey(), giftRao);
         vault.onBridgeMessage(chain, door, redeems, 0);
         vault.redeemDirect(vault.balanceOf(address(this)));
     }
@@ -451,6 +469,60 @@ contract VaultDeliveryTest is VaultTestBase {
         assertEq(vault.balanceOf(address(adapter)), 0);
         assertEq(address(adapter).balance, flash);
         assertEq(vault.totalAssets(), 800e18);
+    }
+
+    /// Stake can rise without stakeIdle: another coldkey can move stake onto the vault's hotkey. The gift
+    /// is spread over every share, so an adapter that first delivers 100_000e18 of its own as a deposit
+    /// holds 99% of the shares and gets about 3_960e18 of a 4_000e18 gift back with redeemDirect: about
+    /// 40e18 to lift the stake from 1_000e18 to 5_000e18, and with it the allowance on the stake read from
+    /// 200e18 to 1_000e18. The base counts only the stake the vault booked (stakeIdle and reward claims,
+    /// less what it unstaked), so it stays 1_000e18 and the allowance 200e18.
+    function test_delivery_giftedStakeDoesNotRaiseAllowance() public {
+        FlashAdapter adapter = flashSetup();
+        uint256 flash = 100_000e18;
+        vm.deal(address(adapter), flash);
+        bytes memory deposits = CascadeMessages.encodeBatch(77, entries1(address(adapter), flash), noEntries());
+        bytes memory redeems = CascadeMessages.encodeBatch(78, noEntries(), entries1(alice, 1e27));
+        bytes32 key = vault.batchKey(BASE, frontDoor, redeems);
+
+        vm.recordLogs();
+        adapter.attackWithGift(BASE, frontDoor, deposits, flash, redeems, 4_000e9);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 out;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == address(vault) && logs[i].topics[0] == CascadeVault.Redeemed.selector) {
+                assertEq(logs[i].topics[1], key);
+                (, out) = abi.decode(logs[i].data, (uint256, uint256));
+            }
+        }
+        // alice's shares are worth about 1_039.6e18 now (her part of the gift); 200e18 of it burns, floored
+        assertLe(out, 200e18);
+        assertGe(out, 200e18 - 1e9);
+        (, uint256 burned) = vault.burnWindows(vault.peerId(BASE, frontDoor));
+        assertEq(burned, out);
+        // the adapter got its deposit back and most of the gift
+        assertGt(address(adapter).balance, flash + 3_950e18);
+        assertLt(address(adapter).balance, flash + 4_000e18);
+    }
+
+    /// The booked-stake cap does not hold back the vault's own stake: a validator's hotkey swap moves it
+    /// outside the set (the base, like the price, drops to what the set holds), and once the new hotkey
+    /// is added back it counts in full again, because the vault booked it when it staked.
+    function test_delivery_swappedHotkeyReAddedCountsAgain() public {
+        depositVia(alice, 1_000e18);
+        stakeAndRamp();
+        vm.prank(address(vault));
+        staking.moveStake(HK1, HK5, 0, 0, 1_000e9);
+        // the set holds nothing: A = 0 against S = 1e27, and the base is 0, so the floor applies
+        assertEq(vault.rootStakeRao(), 0);
+        vm.prank(guardian);
+        vault.addHotkey(HK5);
+
+        // A = 1_000e18, S = 1e27, base 1_000e18 again: allowance 200e18
+        bytes32 key = nextRedeemKey(alice, 1e27);
+        vm.expectEmit(address(vault));
+        emit CascadeVault.Redeemed(key, alice, 2e26, 200e18);
+        redeemVia(alice, 1e27);
     }
 
     /// Delivers `flash` of the adapter's own TAO as a deposit-only batch: it mints 4e27 shares at

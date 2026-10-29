@@ -19,10 +19,10 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     // ---- constants ----
 
     uint256 public constant RAO = 1e9;
-    uint256 public constant NETUID_ROOT = 0;
+    uint256 internal constant NETUID_ROOT = 0;
     /// Never spent and never counted, so the chain's existential deposit cannot fail a payout.
     uint256 public constant ED_RESERVE = 1e12;
-    uint256 public constant MAX_HOTKEYS = 4;
+    uint256 internal constant MAX_HOTKEYS = 4;
     uint64 public constant KEEPER_FALLBACK = 7 days;
     uint64 public constant REWARD_VESTING = 7 days;
     uint16 public constant MAX_REWARD_CUT_BPS = 2_000;
@@ -63,6 +63,10 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     bool internal _unstaking;
     /// Wei staked by stakeIdle, still entering the allowance base over STAKE_RAMP from lastStakeAt.
     uint256 internal rampingStake;
+    /// The stake the vault put there itself, in wei: what stakeIdle staked and reward claims measured,
+    /// less what unstakes paid. Caps the allowance base, so stake moved onto the vault's hotkeys from
+    /// outside (a gift its depositors get back through their shares) cannot raise it.
+    uint256 internal bookedStake;
 
     // accounting
     uint256 public pendingPayouts;
@@ -421,7 +425,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         uint256 before = _stakeOf(h);
         STAKING.addStake(h, rao, NETUID_ROOT);
         uint256 measured = _sub0(_stakeOf(h), before);
-        rampingStake = _unspent(rampingStake, last, STAKE_RAMP) + rao * RAO;
+        uint256 added = rao * RAO;
+        rampingStake = _unspent(rampingStake, last, STAKE_RAMP) + added;
+        bookedStake += added;
         lastStakeAt = uint64(block.timestamp);
         emit Staked(h, rao, measured);
     }
@@ -448,6 +454,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         STAKING.claimRootWithHotkey(hotkey);
         uint256 delta = _sub0(_positionWei(), before);
         lastClaimAt[hotkey] = uint64(block.timestamp);
+        bookedStake += delta;
         uint256 fee = delta * rewardCutBps / 10_000;
         if (fee != 0) {
             // the price before this claim: totalAssets() already counts delta, the old schedule does not
@@ -526,8 +533,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
 
     /// Delivers a front door's BATCH with its deposits' TAO. Prices every entry at one price fixed
     /// before the batch (A = assets without this delivery, S = supply), mints for deposits, then burns
-    /// for redeems within the front door's daily allowance (measured on the gross before this delivery's
-    /// deposits) and queues their payouts. Below half the launch price deposits are not minted but
+    /// for redeems within the front door's daily allowance (measured on the root stake that has ramped
+    /// in) and queues their payouts. Below half the launch price deposits are not minted but
     /// bounced: queued back to the front door ahead of the redeems, as entries with 0 shares. No
     /// per-entry condition reverts the batch. Reverts while paused so the rail holds the money. No
     /// staking or claiming here.
@@ -569,17 +576,20 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         // one queue for both steps: bounced deposits first, then redeems
         PayoutBatch memory b;
         _creditDeposits(key, deposits, A, S, insolvent, b);
-        // The allowance base is the root stake (gross less the liquid balance, so never this or an
-        // earlier delivery's TAO, nor a direct deposit) less what stakeIdle added in the last STAKE_RAMP
-        // and has not yet ramped in: capital borrowed for a transaction, or parked for less than a day,
-        // cannot raise it.
+        // The allowance base is the root stake (gross less the liquid balance: liquid TAO, such as this
+        // or an earlier delivery's deposits or a direct deposit, never counts), at most the stake the
+        // vault booked, less what stakeIdle added and has not yet ramped in over STAKE_RAMP: capital
+        // borrowed for a transaction, parked for less than a day, or gifted as stake, cannot raise it.
         _burnRedeems(
             key,
             peer,
             redeems,
             A,
             S,
-            _sub0(_sub0(gross + ED_RESERVE, address(this).balance), _unspent(rampingStake, lastStakeAt, STAKE_RAMP)),
+            _sub0(
+                Math.min(_sub0(gross + ED_RESERVE, address(this).balance), bookedStake),
+                _unspent(rampingStake, lastStakeAt, STAKE_RAMP)
+            ),
             b
         );
         if (b.remaining != 0) {
@@ -825,8 +835,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
-    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `base`, the
-    /// ramped-in root stake, minDailyOutflow) per 24-hour window, and queues it in `b` after any bounced
+    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `base` (the
+    /// ramped-in root stake), minDailyOutflow) per 24-hour window, and queues it in `b` after any bounced
     /// deposits. A redeem worth less than MIN_REDEEM_VALUE after clipping is deferred, not burned. Only
     /// burns count against the window. The caller fills in the rest of `b`.
     function _burnRedeems(
@@ -1018,6 +1028,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         if (full) STAKING.removeStakeFull(h, NETUID_ROOT);
         else STAKING.removeStake(h, want, NETUID_ROOT);
         received = _sub0(address(this).balance, before);
+        bookedStake = _sub0(bookedStake, received);
         emit Unstaked(h, want, received);
     }
 }

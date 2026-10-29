@@ -222,9 +222,9 @@ forge fmt --check
 forge lint
 ```
 
-- **Suite:** 349 tests (unit, end-to-end, and 9 invariants at 128 runs × 64 depth, set in
-  `foundry.toml`), plus 12 fork tests that report as skipped unless `FORK` is set (below). The
-  invariants also held at 3,000 × 64.
+- **Suite:** 438 tests (unit, end-to-end, fuzz, and 10 invariants at 128 runs × 64 depth, set in
+  `foundry.toml`), plus 18 fork tests that report as skipped unless `FORK` is set (below). The
+  invariants also held at 3,000 × 64 (before the pre-audit changes).
 - **Stale artifacts:** running `forge lint` right after an edit can leave test artifacts without
   bytecode, and `forge test` then reports "No tests found". `forge clean && forge build` fixes it.
 - **Invariants:** the price never falls (one rao of rounding tolerance), except that an owner's
@@ -250,21 +250,23 @@ forge lint
   ERC-165 gate, tokens, then `ccipReceive` as the Router), and `MockAlphaVault` converts 1:1 both
   ways with a settable pause, floor and short payment. Also `MockAddressMapping`, `StubBridge` and
   `MockTAO`.
-- **Gas:** a 100 + 100 batch delivery costs 4,540,281 gas (test bound 6,500,000); 50 + 50 costs
-  2,389,100 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
+- **Gas:** a 100 + 100 batch delivery costs 4,549,540 gas (test bound 6,500,000); 50 + 50 costs
+  2,398,159 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
   (one `getStake` per hotkey in the set). The lane gives about 7.2M. Operator limits default to
   50 + 50; raise them to 100 only after a fork measurement.
-- **Sizes:** `CascadeVault` is 23,777 B of runtime code at `optimizer_runs = 200` (limit 24,576;
-  799 B of headroom, so any post-audit change must watch `forge build --sizes`).
-  `CascadeFrontDoor` is 13,663 B.
+- **Sizes:** `CascadeVault` is 24,509 B of runtime code at `optimizer_runs = 200` (limit 24,576;
+  67 B of headroom, so any post-audit change must watch `forge build --sizes`, and pay for any
+  growth). `CascadeFrontDoor` is 17,677 B, `CcipBaseAdapter` 6,852 B, `CcipBittensorAdapter`
+  7,989 B.
 
 ### Fork tests and the live simulation
 
-The fork tests (`test/fork`, 6 on Base and 6 on Bittensor) fork both mainnets and are skipped
-unless `FORK` is set. `FORK=1 forge test` runs the whole suite including all 12.
+The fork tests (`test/fork`, 12 on Base, six of them v3's in `BaseForkV3.t.sol`, and 6 on
+Bittensor) fork both mainnets and are skipped unless `FORK` is set. `FORK=1 forge test` runs the
+whole suite including all 18.
 
 ```shell
-FORK=1 forge test --match-path "test/fork/*.t.sol"           # all 12 fork tests
+FORK=1 forge test --match-path "test/fork/*.t.sol"           # all 18 fork tests
 FORK=1 forge test --match-path test/fork/BaseFork.t.sol      # Base only
 FORK=1 forge test --match-path test/fork/BittensorFork.t.sol # Bittensor only (rate limit below)
 bash script/simulate_inbound.sh                              # live eth_call, Bittensor node
@@ -487,15 +489,23 @@ The four layers:
 
 Soft spots:
 
-- **The allowance base trusts capital that stays a day.** The base is the vault's root stake less
-  what `stakeIdle` added and has not yet ramped in (each stake re-spreads what is still ramping, plus
-  the new stake, linearly over the next 24 hours, like reward vesting). Liquid TAO never counts: a
-  delivery's deposits, an earlier delivery's, a direct deposit, payouts reserved in the balance. So
-  borrowed or short-lived capital cannot raise the base. Measured: a rogue adapter that delivers
+- **The allowance base trusts capital that stays a day.** The base is the vault's root stake, at
+  most the stake the vault booked itself, less what `stakeIdle` added and has not yet ramped in
+  (each stake re-spreads what is still ramping, plus the new stake, linearly over the next 24 hours,
+  like reward vesting). Liquid TAO never counts: a delivery's deposits, an earlier delivery's, a
+  direct deposit, payouts reserved in the balance. So borrowed or short-lived capital cannot raise
+  the base. Measured: a rogue adapter that delivers
   4,000 TAO of its own as a deposit-only batch, then a redeem batch naming a 1,000-TAO holder, burns
   that holder for 200 TAO, not 1,000, whether in the same transaction (the adapter then takes its
   4,000 back with `redeemDirect`), a block later, or a block after the keeper staked the 4,000
-  (about 200.1 TAO). Capital that stays staked raises the base as it ramps in: half after 12 hours,
+  (about 200.1 TAO). The ramp applies whoever calls `stakeIdle` (the keeper, or anyone after
+  `KEEPER_FALLBACK`), so a stolen keeper key cannot shortcut it. Stake can also rise without
+  `stakeIdle`: another coldkey can move stake onto the vault's hotkeys, and depositors get such a
+  gift back through their shares (measured: next to a borrowed 100,000-TAO deposit, a 4,000-TAO gift
+  costs its giver about 40 TAO). The booked-stake cap (what `stakeIdle` staked and reward claims
+  measured, less what unstakes paid) keeps it out: the allowance stays 200 TAO. Booked stake can
+  overstate the real stake by rewards paid out as balance and by any chain fee on unstakes (none
+  today), which a gift could then fill. Capital that stays staked raises the base as it ramps in: half after 12 hours,
   all after 24. To the vault that is a holder like any other, and a percentage cap cannot tell them
   apart; the backstop is unchanged (the 24-hour payout delay, the guardian's hold and the owner's
   cancel). Flagged for the auditor.
@@ -547,7 +557,7 @@ Soft spots:
   | Setter | Bound in the code | Why this bound |
   |---|---|---|
   | `setOutflowLimits` | at most 50% of the base a day; a floor of at most 100 TAO | A rogue front door takes at most half the base a window; the floor exists only so a small vault can exit, and 100 TAO is the spec's default. |
-  | `setPayoutDelay` | 1 hour to 7 days | The delay is the guardian's window to hold a rogue batch; 1 hour is what the test cadence uses (see open decisions). |
+  | `setPayoutDelay` | 1 hour to 7 days | The delay is the guardian's window to hold a rogue batch; 1 hour is what the test cadence uses. A launch build may want a higher floor (12 hours or more), a code change that the test cadence would then have to follow. |
   | `setFeeLimits` | at most 5% of a chunk, or 0.1 TAO | What the primary adapter can quote, and keep, per chunk; the live fee is about 0.001 TAO. |
   | `setMessageLimits` | `maxMessageValue` at most 5,000 TAO | The lane's per-message limit (the adapters' `MAX_MESSAGE_VALUE`): above it chunks are unsendable. Keep it at or below the Bittensor adapter's deployed `maxMessageValue()` too. |
   | `setUnstakeMarginRao` | at most 1 TAO per removal | A huge margin turns every exit into a full unstake and re-stake, which also ramps back into the allowance base. |
@@ -939,7 +949,7 @@ Rails and ForeverMoney:
 Measurements and policy:
 
 17. Fork-measure delivery gas before raising batch limits above 50 + 50.
-18. Watch `forge build --sizes` after any post-audit change (799 B of headroom in the vault at
+18. Watch `forge build --sizes` after any post-audit change (67 B of headroom in the vault at
     `optimizer_runs = 200`).
 19. Decide the `setClaimGasRequired` bounds policy: 0 disables the guard and too high blocks claims.
     It is owner discipline, behind the timelock.

@@ -1198,33 +1198,110 @@ describe("the batch an unstake request with no receipt joined", () => {
     ...over,
   });
 
-  it("is still unsure while Base has it waiting, with a nonce no other transaction has taken", async () => {
-    const c = chains({ baseTxs: { [H(20)]: { nonce: 5, blockNumber: null } }, nonce: 5 });
-    expect(await requestBatch(c.clients, request({ sentAt: NOW - 60 * MIN }), NOW)).toEqual({ unsure: true });
-  });
+  const SHARES = 5n * 10n ** 21n;
+  const HEAD = 10_000_000n;
+  const redeemRequested = (user: Hex, shares: bigint, batchId: bigint, block: bigint, tx: Hex) =>
+    log(
+      D.frontDoor,
+      encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { batchId, user } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256"), [shares]),
+      block,
+      tx,
+    );
 
-  it("joined none once the account's nonce is past it: another transaction took its place, so it can never be mined", async () => {
-    const c = chains({ baseTxs: { [H(20)]: { nonce: 5, blockNumber: null } }, nonce: 6 });
-    expect(await requestBatch(c.clients, request(), NOW)).toEqual({});
-  });
-
-  it("is unsure while Base doesn't know it yet, and joined none once Base still doesn't ten minutes after it was sent", async () => {
-    const c = chains({ baseTxs: {} });
-    expect(await requestBatch(c.clients, request({ sentAt: NOW - 9 * MIN }), NOW)).toEqual({ unsure: true });
-    expect(await requestBatch(c.clients, request({ sentAt: NOW - 10 * MIN }), NOW)).toEqual({});
-    // recorded before the send was dated: from when it was made
-    expect(await requestBatch(c.clients, request({ sentAt: undefined }), NOW)).toEqual({});
-    expect(await requestBatch(c.clients, request({ sentAt: undefined, createdAt: NOW - 2 * MIN }), NOW)).toEqual({ unsure: true });
-  });
-
-  it("stays unsure while Base can't be asked, or shows it mined with a receipt not readable yet", async () => {
-    const down = chains({});
-    (down.clients as unknown as { base: { getTransaction: () => Promise<never> } }).base.getTransaction = async () => {
-      throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
+  /** Base as a request with no receipt meets it: the transaction (pending, unknown, or not answering),
+   * the account's nonce, and the logs server the search for its replacement reads. */
+  function onBase(o: {
+    tx?: { nonce: number; blockNumber: bigint | null };
+    txDown?: boolean;
+    nonce?: number;
+    logs?: ReturnType<typeof redeemRequested>[];
+    logsDown?: boolean;
+    logsHead?: bigint;
+  }) {
+    const windows: [bigint, bigint][] = [];
+    const asked: unknown[] = [];
+    const base = {
+      getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
+        throw new TransactionReceiptNotFoundError({ hash });
+      },
+      getTransaction: async ({ hash }: { hash: Hex }) => {
+        if (o.txDown) throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
+        if (!o.tx) throw new TransactionNotFoundError({ hash });
+        return o.tx;
+      },
+      getTransactionCount: async () => o.nonce ?? 0,
+      getBlockNumber: async () => HEAD,
     };
-    expect(await requestBatch(down.clients, request({ sentAt: NOW - 60 * MIN }), NOW)).toEqual({ unsure: true });
-    const mined = chains({ baseTxs: { [H(20)]: { nonce: 5, blockNumber: 123n } }, nonce: 9 });
-    expect(await requestBatch(mined.clients, request({ sentAt: NOW - 60 * MIN }), NOW)).toEqual({ unsure: true });
+    const baseLogs = {
+      request: async ({ method, params }: { method: string; params?: { address: string; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }[] }) => {
+        if (method === "eth_blockNumber") return `0x${(o.logsHead ?? HEAD).toString(16)}`;
+        if (o.logsDown) throw new Error("HTTP request failed. URL: https://base-rpc.publicnode.com Status: 503");
+        const q = params![0];
+        const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+        windows.push([from, to]);
+        asked.push({ address: q.address, topics: q.topics });
+        return (o.logs ?? []).filter((l) => l.blockNumber >= from && l.blockNumber <= to);
+      },
+    };
+    return { clients: { base, baseLogs } as never, windows, asked };
+  }
+  const place = (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set()) =>
+    requestBatch(b.clients, D, request({ shares: SHARES, ...over }), { now: NOW, skip });
+  /** The old hash can never be mined: pending, its nonce taken by another transaction. */
+  const replaced = { tx: { nonce: 5, blockNumber: null }, nonce: 6 };
+
+  it("is still unsure while Base has it waiting with a nonce no other transaction has taken, and searches nothing", async () => {
+    const b = onBase({ tx: { nonce: 5, blockNumber: null }, nonce: 5 });
+    expect(await place(b, { sentAt: NOW - 60 * MIN })).toEqual({ unsure: true });
+    expect(b.windows).toEqual([]);
+  });
+
+  it("is still unsure while Base doesn't know it, until ten minutes after it was sent", async () => {
+    const b = onBase({});
+    expect(await place(b, { sentAt: NOW - 9 * MIN })).toEqual({ unsure: true });
+    expect(await place(b, { sentAt: undefined, createdAt: NOW - 2 * MIN })).toEqual({ unsure: true });
+    expect(b.windows).toEqual([]);
+  });
+
+  it("finds the request a speed-up put in its place, once the old hash can never be mined, and takes its batch", async () => {
+    const logs = [redeemRequested(ME, SHARES, 7n, HEAD - 50n, H(88))];
+    // the account's nonce is past it
+    const b = onBase({ ...replaced, logs });
+    expect(await place(b)).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // Base doesn't know it ten minutes on (recorded before sends were dated: from when it was made)
+    expect(await place(onBase({ logs }), { sentAt: NOW - 10 * MIN })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    expect(await place(onBase({ logs }), { sentAt: undefined })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // only the front door's requests by this account, from a little before it was sent, 2,000 blocks a query
+    expect(b.asked[0]).toEqual({ address: D.frontDoor, topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { user: ME } }) });
+    for (const [from, to] of b.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
+    expect(b.windows[0][0]).toBeLessThan(HEAD - 30n);
+    expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 30n - 150n);
+    expect(b.windows.at(-1)![1]).toBe(HEAD);
+  });
+
+  it("is dropped once a complete search finds nothing in its place: another amount, another account's, or one another record owns", async () => {
+    const OTHER = getAddress("0x000000000000000000000000000000000000b0b0");
+    const logs = [
+      redeemRequested(ME, SHARES - 1n, 7n, HEAD - 50n, H(88)),
+      redeemRequested(OTHER, SHARES, 7n, HEAD - 40n, H(89)),
+      redeemRequested(ME, SHARES, 7n, HEAD - 30n, H(90)),
+    ];
+    expect(await place(onBase({ ...replaced, logs }), {}, new Set([H(90)]))).toEqual({ dropped: true });
+    expect(await place(onBase({ ...replaced }))).toEqual({ dropped: true });
+  });
+
+  it("stays unsure when the search can't be completed: logs refused, or a logs server behind", async () => {
+    expect(await place(onBase({ ...replaced, logsDown: true }))).toEqual({ unsure: true });
+    expect(await place(onBase({ ...replaced, logsHead: HEAD - 500n }))).toEqual({ unsure: true });
+  });
+
+  it("stays unsure, searching nothing, while Base can't be asked or shows it mined with a receipt not readable yet", async () => {
+    const down = onBase({ txDown: true });
+    expect(await place(down, { sentAt: NOW - 60 * MIN })).toEqual({ unsure: true });
+    const mined = onBase({ tx: { nonce: 5, blockNumber: 123n }, nonce: 9 });
+    expect(await place(mined, { sentAt: NOW - 60 * MIN })).toEqual({ unsure: true });
+    expect([...down.windows, ...mined.windows]).toEqual([]);
   });
 });
 

@@ -605,28 +605,76 @@ describe("unstakes sharing a batch", () => {
     expect(await availableWith(async () => ({ status: "reverted", logs: [] }))).toBe(8n * 10n ** 22n - 10n ** 21n);
   });
 
-  it("stop counting as asked once their request was dropped, so what can be unstaked comes back", async () => {
+  describe("whose request's hash can never be mined", () => {
     const NOW = 1_800_000_100_000; // deps' clock
-    const availableWith = async (sentAt: number, tx: Partial<Record<"pending", { nonce: number; blockNumber: null }>> = {}, nonce = 0) => {
-      const notMined = async () => {
-        throw new TransactionReceiptNotFoundError({ hash: H(20) });
-      };
-      const getTransaction = async ({ hash }: { hash: `0x${string}` }) => {
-        if (tx.pending) return tx.pending;
-        throw new TransactionNotFoundError({ hash });
-      };
-      const d = deps({ clients: { base: { getTransactionReceipt: notMined, getTransaction, getTransactionCount: async () => nonce } } as never });
-      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent" });
-      return (await createLiveCascadeData(D, d).getAvailable(ME)).availableShares;
-    };
+    const SHARES = 2n * 10n ** 21n;
+    const HEAD = 10_000_000n;
     const all = 8n * 10n ** 22n - 10n ** 21n;
-    // just sent, Base doesn't know it yet: still counted
-    expect(await availableWith(NOW - 60_000)).toBe(all - 2n * 10n ** 21n);
-    // still unknown ten minutes on: dropped
-    expect(await availableWith(NOW - 10 * 60_000)).toBe(all);
-    // waiting, but the account's nonce has moved past it (a speed-up or cancel took its place)
-    expect(await availableWith(NOW - 60_000, { pending: { nonce: 3, blockNumber: null } }, 4)).toBe(all);
-    expect(await availableWith(NOW - 60_000, { pending: { nonce: 3, blockNumber: null } }, 3)).toBe(all - 2n * 10n ** 21n);
+    /** Base for a request with no receipt: pending with `nonce` taken, or unknown; the logs the search
+     * for its replacement reads, which counts the transaction lookups. */
+    function base(o: { pending?: { nonce: number; blockNumber: null }; nonce?: number; logs?: unknown[] }) {
+      const seen = { lookups: 0 };
+      const clients = {
+        base: {
+          getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+            if (hash === H(88)) return { status: "success", logs: o.logs ?? [] };
+            throw new TransactionReceiptNotFoundError({ hash });
+          },
+          getTransaction: async ({ hash }: { hash: `0x${string}` }) => {
+            seen.lookups++;
+            if (o.pending) return o.pending;
+            throw new TransactionNotFoundError({ hash });
+          },
+          getTransactionCount: async () => o.nonce ?? 0,
+          getBlockNumber: async () => HEAD,
+        },
+        baseLogs: {
+          request: async ({ method, params }: { method: string; params?: { fromBlock: `0x${string}`; toBlock: `0x${string}` }[] }) => {
+            if (method === "eth_blockNumber") return `0x${HEAD.toString(16)}`;
+            const [from, to] = [BigInt(params![0].fromBlock), BigInt(params![0].toBlock)];
+            return (o.logs ?? []).filter((l) => (l as { blockNumber: bigint }).blockNumber >= from && (l as { blockNumber: bigint }).blockNumber <= to);
+          },
+        },
+      };
+      return { clients, seen };
+    }
+    const requested = (batchId: bigint) => ({
+      address: D.frontDoor,
+      topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { batchId, user: ME } }),
+      data: encodeAbiParameters(parseAbiParameters("uint256"), [SHARES]),
+      blockNumber: HEAD - 50n,
+      transactionHash: H(88),
+      logIndex: 0,
+    });
+    const setUp = (b: ReturnType<typeof base>, sentAt: number) => {
+      const d = deps({ clients: b.clients as never });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent" });
+      return { d, data: createLiveCascadeData(D, d) };
+    };
+
+    it("still count as asked while Base may yet take them", async () => {
+      // just sent, Base doesn't know it yet; or waiting with its nonce free
+      expect((await setUp(base({}), NOW - 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect((await setUp(base({ pending: { nonce: 3, blockNumber: null }, nonce: 3 }), NOW - 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+    });
+
+    it("are followed to the request a speed-up put in their place, its hash and batch recorded", async () => {
+      // the account's nonce is past it, and the front door shows the same request since, in closed batch 3
+      const { d, data } = setUp(base({ pending: { nonce: 3, blockNumber: null }, nonce: 4, logs: [requested(3n)] }), NOW - 60_000);
+      // batch 3 hasn't reached the vault: still asked
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ hash: H(88), batchId: 3n, state: "sent" });
+    });
+
+    it("stop counting once a search finds nothing in their place, and are marked so it isn't asked again", async () => {
+      const b = base({});
+      const { d, data } = setUp(b, NOW - 10 * 60_000);
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
+      const before = b.seen.lookups;
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(b.seen.lookups).toBe(before);
+    });
   });
 
   it("are placed from their request's receipt when this browser hasn't recorded their batch yet", async () => {

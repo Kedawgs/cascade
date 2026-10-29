@@ -353,28 +353,54 @@ function requestIn(r: Receipt | null, eventName: "DepositRequested" | "RedeemReq
 const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address): bigint | undefined =>
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
-/** The batch an unstake joined: as recorded, or from its request's receipt. `unsure` when it was sent
- * but its receipt can't be read or isn't there yet, so its batch can't be known right now (one that shows
- * no request, as when it reverted, joined none). A request that can never be mined (requestDropped)
- * joined none either, so it doesn't count as asked for ever. */
-export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp, now: number = Date.now()): Promise<{ batchId?: bigint; unsure?: true }> {
+/** Where an unstake request stands on Base. `unsure` while its batch can't be known right now (it still
+ * counts as asked); `replacedBy` the request a speed-up or replacement put in place of its hash, with
+ * that one's batch; `dropped` when nothing took its place, so it asked for nothing. */
+export interface RequestPlace {
+  batchId?: bigint;
+  unsure?: true;
+  replacedBy?: Hex;
+  dropped?: true;
+}
+
+/** The batch an unstake joined: as recorded, or from its request's receipt (one that shows no request,
+ * as when it reverted, joined none). With no receipt it is `unsure` until its hash can never be mined
+ * (requestHashDead); then the front door's logs are searched for the same request in its place
+ * (findRequestTx: a speed-up made while no tab of this site watched looks exactly like a drop). Found,
+ * it is that one's batch; a search that finds nothing makes it `dropped`; one that can't be completed
+ * leaves it `unsure`, still counted. `skip`: the hashes other records own. */
+export async function requestBatch(
+  c: Pick<Clients, "base" | "baseLogs">,
+  d: Deployment,
+  op: WithdrawalOp,
+  ctx: { now: number; skip: ReadonlySet<string> },
+): Promise<RequestPlace> {
   if (op.batchId !== undefined) return { batchId: op.batchId };
   if (!op.hash) return {};
   const r = await baseReceipt(c, op.hash);
-  if (!r) return (await requestDropped(c, op, op.hash, now)) ? {} : { unsure: true };
-  const batchId = batchIdFrom(r, "RedeemRequested", op.account);
-  return batchId !== undefined ? { batchId } : {};
+  if (r) {
+    const batchId = batchIdFrom(r, "RedeemRequested", op.account);
+    return batchId !== undefined ? { batchId } : {};
+  }
+  if (!(await requestHashDead(c, op, op.hash, ctx.now))) return { unsure: true };
+  let found: { hash: Hex; batchId: bigint } | null;
+  try {
+    found = await findRequestTx(c, d, { account: op.account, shares: op.shares, sinceMs: op.sentAt ?? op.createdAt, nowMs: ctx.now, skip: ctx.skip });
+  } catch {
+    return { unsure: true };
+  }
+  return found ? { batchId: found.batchId, replacedBy: found.hash } : { dropped: true };
 }
 
-/** How long after it was sent a request Base has never heard of counts as dropped (Base mines in
- * seconds; a wallet's speed-up this site didn't see leaves the old hash unknown for good). */
+/** How long after it was sent a request Base has never heard of may be taken for gone (Base mines in
+ * seconds), and its replacement searched for. */
 export const DROPPED_AFTER_MS = 10 * 60_000;
 
-/** Whether a request with no receipt can never be mined: Base doesn't know it ten minutes after it was
- * sent, or the account's nonce is past it (another transaction, such as a speed-up or cancel this site
- * didn't see, took its place). False whenever that can't be told: Base not answering, or showing it
+/** Whether a request's hash with no receipt can never be mined: Base doesn't know it ten minutes after
+ * it was sent, or the account's nonce is past it (another transaction took its place: a speed-up, a
+ * cancel, or another request). False whenever that can't be told: Base not answering, or showing it
  * mined with a receipt that isn't readable yet. */
-async function requestDropped(c: Pick<Clients, "base">, op: WithdrawalOp, hash: Hex, now: number): Promise<boolean> {
+async function requestHashDead(c: Pick<Clients, "base">, op: WithdrawalOp, hash: Hex, now: number): Promise<boolean> {
   let tx: { nonce: number; blockNumber: bigint | null };
   try {
     tx = (await c.base.getTransaction({ hash })) as unknown as { nonce: number; blockNumber: bigint | null };
@@ -860,21 +886,9 @@ export async function findStakeTx(
 ): Promise<Hex | null> {
   if (!d.staker) return null;
   const staker = d.staker;
-  // up to the newer of two servers' heads: a logs server that is behind then fails its window check
-  // instead of answering "none" for blocks it hasn't seen
-  const [logsHead, baseHead] = await Promise.all([
-    c.baseLogs.request({ method: "eth_blockNumber" }).then((h) => BigInt(h as string)),
-    c.base.getBlockNumber(),
-  ]);
-  const head = logsHead > baseHead ? logsHead : baseHead;
-  // the device clock made both times, so their difference is the time since the record, whatever the clock says
-  const back = BigInt(Math.ceil(Math.max(0, s.nowMs - s.createdAtMs) / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
-  const start = head > back ? head - back : 0n;
   const topics = encodeEventTopics({ abi: STAKER, eventName: "Staked", args: { payer: s.account, beneficiary: s.account } });
   const skip = new Set([...s.skip].map((h) => h.toLowerCase()));
-  for (let from = start; from <= head; from += BASE_LOG_WINDOW) {
-    const to = from + BASE_LOG_WINDOW - 1n < head ? from + BASE_LOG_WINDOW - 1n : head;
-    const raw = await baseWindowLogs(c, { address: staker, topics }, from, to);
+  return searchBaseSince(c, { sinceMs: s.createdAtMs, nowMs: s.nowMs }, { address: staker, topics }, (raw) => {
     const hit = parseEventLogs({ abi: STAKER, logs: raw as never, eventName: "Staked", strict: false }).find(
       (l) =>
         same(l.address, staker) &&
@@ -886,7 +900,59 @@ export async function findStakeTx(
         !!l.transactionHash &&
         !skip.has(l.transactionHash.toLowerCase()),
     );
-    if (hit) return hit.transactionHash as Hex;
+    return hit ? (hit.transactionHash as Hex) : undefined;
+  });
+}
+
+/** The account's unstake request of exactly `shares` through the front door, mined since it was sent (a
+ * little earlier, for timing), that no other record (`skip`) owns, with the batch it joined: the request
+ * a wallet's speed-up or replacement put in place of a hash that can never be mined. Null if there is
+ * none; throws when the logs can't be read, which must never be taken for "none". */
+export async function findRequestTx(
+  c: Pick<Clients, "base" | "baseLogs">,
+  d: Deployment,
+  s: { account: Address; shares: bigint; sinceMs: number; nowMs: number; skip: ReadonlySet<string> },
+): Promise<{ hash: Hex; batchId: bigint } | null> {
+  const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { user: s.account } });
+  const skip = new Set([...s.skip].map((h) => h.toLowerCase()));
+  return searchBaseSince(c, s, { address: d.frontDoor, topics }, (raw) => {
+    const hit = parseEventLogs({ abi: FRONT_DOOR, logs: raw as never, eventName: "RedeemRequested", strict: false }).find(
+      (l) =>
+        same(l.address, d.frontDoor) &&
+        !!l.args.user &&
+        same(l.args.user, s.account) &&
+        l.args.shares === s.shares &&
+        l.args.batchId !== undefined &&
+        !!l.transactionHash &&
+        !skip.has(l.transactionHash.toLowerCase()),
+    );
+    return hit ? { hash: hit.transactionHash as Hex, batchId: hit.args.batchId as bigint } : undefined;
+  });
+}
+
+/** Searches Base's logs matching `filter`, oldest first, from a little before `sinceMs` up to the head,
+ * for the first window `pick` finds something in. Null when none does; throws when a window can't be read
+ * (or its server is behind), which must never be taken for "none". */
+async function searchBaseSince<T>(
+  c: Pick<Clients, "base" | "baseLogs">,
+  s: { sinceMs: number; nowMs: number },
+  filter: { address: Address; topics: (Hex | Hex[] | null)[] },
+  pick: (raw: RawLog[]) => T | undefined,
+): Promise<T | null> {
+  // up to the newer of two servers' heads: a logs server that is behind then fails its window check
+  // instead of answering "none" for blocks it hasn't seen
+  const [logsHead, baseHead] = await Promise.all([
+    c.baseLogs.request({ method: "eth_blockNumber" }).then((h) => BigInt(h as string)),
+    c.base.getBlockNumber(),
+  ]);
+  const head = logsHead > baseHead ? logsHead : baseHead;
+  // the device clock made both times, so their difference is the time since, whatever the clock says
+  const back = BigInt(Math.ceil(Math.max(0, s.nowMs - s.sinceMs) / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
+  const start = head > back ? head - back : 0n;
+  for (let from = start; from <= head; from += BASE_LOG_WINDOW) {
+    const to = from + BASE_LOG_WINDOW - 1n < head ? from + BASE_LOG_WINDOW - 1n : head;
+    const hit = pick(await baseWindowLogs(c, filter, from, to));
+    if (hit !== undefined) return hit;
   }
   return null;
 }

@@ -51,6 +51,9 @@ export interface LiveDeps {
   now(): number;
 }
 
+/** An unstake request Base never took, and nothing took the place of. */
+const REQUEST_DROPPED = "This unstake request never reached Base, so nothing was asked.";
+
 /** A stand-in payee for quoting the bridge fee before there is an unstake. */
 const ANY_ACCOUNT: Address = "0x0000000000000000000000000000000000000001";
 
@@ -256,19 +259,29 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   /** This browser's unstakes still counted in their batches (not failed, not taken back out by a cancel:
    * the one decision, cancelTook), each with its batch: as recorded, or from its request's receipt, which
-   * is then recorded. */
+   * is then recorded. One whose hash can never be mined is followed to the request in its place (whose
+   * hash and batch are recorded), or, with none, marked failed: it asked for nothing, and isn't asked
+   * about again. */
   async function placedWithdrawals(a: Address, withdrawals: WithdrawalOp[]): Promise<Placed[]> {
+    const all = deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal");
     const placed = await Promise.all(
       withdrawals
         .filter((o) => o.state !== "failed")
         .map(async (o) => {
-          const { batchId, unsure } = await requestBatch(c, o, deps.now());
-          if (batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId });
-          return { ...o, batchId, unsure };
+          // a request another record already owns is never taken for this one's replacement
+          const skip = new Set(all.filter((x) => x.id !== o.id && x.hash).map((x) => x.hash as string));
+          const p = await requestBatch(c, d, o, { now: deps.now(), skip });
+          if (p.replacedBy) deps.opLog.update(a, o.id, { hash: p.replacedBy, batchId: p.batchId });
+          else if (p.batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId: p.batchId });
+          // still running in this tab: its own flow is waiting on it
+          if (p.dropped && !deps.opLog.isActive(o.id)) deps.opLog.update(a, o.id, { state: "failed", error: REQUEST_DROPPED });
+          return { ...o, batchId: p.batchId, unsure: p.unsure, dropped: p.dropped };
         }),
     );
     const gone = await cancelledIn(placed);
-    return placed.filter((o) => !gone.has(o.id)).map(({ id, batchId, shares, unsure }) => ({ id, batchId, shares, ...(unsure ? { unsure } : {}) }));
+    return placed
+      .filter((o) => !gone.has(o.id) && !o.dropped)
+      .map(({ id, batchId, shares, unsure }) => ({ id, batchId, shares, ...(unsure ? { unsure } : {}) }));
   }
 
   /** The stake itself, from contract reads alone: it never waits on the vault's history. */
@@ -407,7 +420,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     // each unstake's batch and cancel first: one entry of several is shared out between those still in it
     const siblings = await placedWithdrawals(a, withdrawals);
     const out: WithdrawalRecord[] = [];
-    for (const op of withdrawals) {
+    for (const w of withdrawals) {
+      // as placedWithdrawals left it: a request found in place of its hash, or a drop, shows at once
+      const op = live((deps.opLog.get(a, w.id) as WithdrawalOp | undefined) ?? w);
       const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims, siblings });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       out.push(withdrawalRecord({ ...op, batchId: batchId ?? op.batchId }, facts));

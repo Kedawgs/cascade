@@ -121,7 +121,7 @@ export function StakeForm({
         unit="USDC"
         chain={liveChains()[0]}
         decimals={2}
-        onMax={account ? () => setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc)) : undefined}
+        onMax={account ? () => setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc, lim && !lim.full ? lim.maxUsd : undefined)) : undefined}
         maxDisabled={maxUsdc === null}
         invalid={error !== null}
         describedBy={noteId}

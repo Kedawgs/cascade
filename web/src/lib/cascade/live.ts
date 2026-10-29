@@ -180,12 +180,17 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const minUsd = fees
       ? minTaoUsd / kept / (1 - POOL_FEE) / (1 - Number(fees.swapFeeBps) / 10_000) + toDisplay(fees.depositFeeUsdc, 6)
       : minTaoUsd / kept;
+    const minCents = Math.ceil(minUsd * 100) / 100;
+    // what a room in TAO lets the form take, in whole cents
+    const usdFor = (room: bigint) => Math.floor(toDisplay(floorRao(room), 18) * price * (1 - LIMIT_MARGIN) * 100) / 100;
     return {
       minTao: fd.minDeposit,
       maxTao,
-      minUsd: Math.ceil(minUsd * 100) / 100,
-      maxUsd: Math.floor(toDisplay(maxTao, 18) * price * (1 - LIMIT_MARGIN) * 100) / 100,
-      full: capRoom < fd.minDeposit ? "cap" : batchRoom < fd.minDeposit ? "batch" : null,
+      minUsd: minCents,
+      maxUsd: usdFor(maxTao),
+      // judged in dollars, as the form judges amounts: a room just over minDeposit is still under the
+      // dollar minimum once the margins are counted
+      full: usdFor(capRoom) < minCents ? "cap" : usdFor(batchRoom) < minCents ? "batch" : null,
     };
   }
 

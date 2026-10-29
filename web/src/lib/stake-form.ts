@@ -29,7 +29,7 @@ export type StakeState = {
 /** Why no stake fits right now, by the limit that is reached. */
 const FULL_TEXT = {
   cap: "Cascade is full for now. Try again later.",
-  batch: "This batch is full. A new one opens once it leaves, so try again soon.",
+  batch: "The current batch is full. A new one opens once it leaves, so try again soon.",
 } as const;
 
 type StakeLimits = Pick<Limits, "minUsd" | "maxUsd" | "full">;
@@ -57,9 +57,18 @@ export function stakeLimitsNote(limits: StakeLimits): string {
   return limits.full ? FULL_TEXT[limits.full] : `From ${formatUsdShort(limits.minUsd)} to ${formatUsdShort(limits.maxUsd)}`;
 }
 
-/** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds. */
-export function maxStakeInput(balance: number): string {
-  return (Math.floor(balance * 100) / 100).toFixed(2);
+/** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds,
+ * nor more than the most a stake can be right now (`most`, when the limits are known). */
+export function maxStakeInput(balance: number, most?: number): string {
+  return floorTo(Math.min(balance, most ?? Infinity), 2).toFixed(2);
+}
+
+/** Why TAO sitting in the wallet can't be deposited as it is, or null when it can. */
+export function walletTaoNote(tao: bigint, limits: Pick<Limits, "minTao" | "maxTao" | "full">): string | null {
+  if (tao < limits.minTao) return `Deposits start at ${taoLabel.format(toDisplay(limits.minTao, 18))} TAO.`;
+  if (tao <= limits.maxTao) return null;
+  if (limits.maxTao < limits.minTao && limits.full) return FULL_TEXT[limits.full];
+  return `Deposits take at most ${taoLabel.format(toDisplay(limits.maxTao, 18))} TAO right now.`;
 }
 
 export function stakeButtonLabel(s: StakeState): string {

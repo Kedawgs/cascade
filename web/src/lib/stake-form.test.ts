@@ -26,6 +26,7 @@ import {
   unstakeEquivalent,
   unstakeRequestWei,
   validateStakeAmount,
+  walletTaoNote,
 } from "./stake-form";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
@@ -51,17 +52,35 @@ describe("validateStakeAmount", () => {
 
   it("says why no amount fits when a limit is reached, rather than a maximum under the minimum", () => {
     const batch = { minUsd: 10, maxUsd: 4, full: "batch" as const };
-    expect(validateStakeAmount(20, batch)).toBe("This batch is full. A new one opens once it leaves, so try again soon.");
-    expect(validateStakeAmount(5, batch)).toBe("This batch is full. A new one opens once it leaves, so try again soon.");
+    expect(validateStakeAmount(20, batch)).toBe("The current batch is full. A new one opens once it leaves, so try again soon.");
+    expect(validateStakeAmount(5, batch)).toBe("The current batch is full. A new one opens once it leaves, so try again soon.");
     expect(validateStakeAmount(20, { ...batch, full: "cap" })).toBe("Cascade is full for now. Try again later.");
     expect(validateStakeAmount(null, batch)).toBeNull();
+  });
+});
+
+describe("walletTaoNote", () => {
+  const TAO = 10n ** 18n;
+  const l = { minTao: 4n * 10n ** 16n, maxTao: 7n * TAO, full: null };
+
+  it("says nothing when the wallet's TAO can be deposited as it is", () => {
+    expect(walletTaoNote(TAO, l)).toBeNull();
+    expect(walletTaoNote(4n * 10n ** 16n, l)).toBeNull();
+    expect(walletTaoNote(7n * TAO, l)).toBeNull();
+  });
+
+  it("says why it can't: under the minimum, more than fits right now, or no room at all", () => {
+    expect(walletTaoNote(10n ** 16n, l)).toBe("Deposits start at 0.04 TAO.");
+    expect(walletTaoNote(12n * TAO, l)).toBe("Deposits take at most 7.00 TAO right now.");
+    expect(walletTaoNote(TAO, { ...l, maxTao: 10n ** 16n, full: "batch" })).toBe("The current batch is full. A new one opens once it leaves, so try again soon.");
+    expect(walletTaoNote(TAO, { ...l, maxTao: 0n, full: "cap" })).toBe("Cascade is full for now. Try again later.");
   });
 });
 
 describe("stakeLimitsNote", () => {
   it("gives the range, or why there is none", () => {
     expect(stakeLimitsNote({ minUsd: 10.33, maxUsd: 2_450, full: null })).toBe("From $10.33 to $2,450");
-    expect(stakeLimitsNote({ minUsd: 10, maxUsd: 4, full: "batch" })).toBe("This batch is full. A new one opens once it leaves, so try again soon.");
+    expect(stakeLimitsNote({ minUsd: 10, maxUsd: 4, full: "batch" })).toBe("The current batch is full. A new one opens once it leaves, so try again soon.");
   });
 });
 
@@ -202,6 +221,11 @@ describe("balance checks", () => {
     expect(maxStakeInput(2.999999)).toBe("2.99");
     expect(maxStakeInput(12.345678)).toBe("12.34");
     expect(maxStakeInput(2400)).toBe("2400.00");
+  });
+
+  it("keeps MAX to the most a stake can be right now", () => {
+    expect(maxStakeInput(5_000, 2_485.49)).toBe("2485.49");
+    expect(maxStakeInput(100, 2_485.49)).toBe("100.00");
   });
 });
 

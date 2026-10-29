@@ -6,7 +6,7 @@ import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
-import { CLAIM_ENDS_DELIVERY, claimEndsDelivery, offerClaim } from "@/lib/stake-form";
+import { CLAIM_ENDS_DELIVERY, claimEndsDelivery, offerClaim, walletTaoNote } from "@/lib/stake-form";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
 import app from "./App.module.css";
@@ -44,7 +44,9 @@ function WalletTao({ account }: { account: string }) {
   const flows = useFlows(account);
   const tao = balances.data?.tao ?? 0n;
   if (tao === 0n) return null;
-  const canDeposit = limits.data !== undefined && tao >= limits.data.minTao && tao <= limits.data.maxTao;
+  // why it can't be deposited as it is (null when it can); unknown until the limits load
+  const note = limits.data ? walletTaoNote(tao, limits.data) : undefined;
+  const canDeposit = note === null;
   return (
     <div className={styles.walletTao}>
       <p>
@@ -67,6 +69,7 @@ function WalletTao({ account }: { account: string }) {
           Swap to USDC
         </button>
       </div>
+      {note && <p className={styles.walletTaoNote}>{note}</p>}
       {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
     </div>
   );

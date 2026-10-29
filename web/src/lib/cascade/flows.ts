@@ -140,7 +140,7 @@ const UNREACHABLE = "We couldn't reach Base just now. Nothing was sent. Continue
 /** Reasons the staker or the front door gives, in plain words (contracts/src/CascadeStaker.sol and
  * CascadeFrontDoor.sol); anything else keeps the general wording. */
 const BELOW_MIN = new Set(["BelowMinDeposit", "AmountTooSmall"]);
-const FULL = new Set(["CapExceeded", "BatchValueFull", "BatchFull"]);
+const BATCH_FULL = new Set(["BatchValueFull", "BatchFull"]);
 const PAUSED = new Set(["EnforcedPause", "RouteInactive"]);
 /** The staker's floor check, or the router's own ("Too little received", which some nodes answer
  * with no data, only "execution reverted: Too little received"). */
@@ -152,7 +152,8 @@ export function stakeRefusal(reason: string | undefined, minUsd?: number): strin
   if (BELOW_MIN.has(reason)) {
     return `That's below the minimum stake${minUsd !== undefined ? ` of about ${formatUsdShort(minUsd)}` : ""}, so nothing was sent.`;
   }
-  if (FULL.has(reason)) return "Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.";
+  if (reason === "CapExceeded") return "Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.";
+  if (BATCH_FULL.has(reason)) return "The current batch filled up, so nothing was sent. Try a smaller amount, or try again soon.";
   if (PAUSED.has(reason)) return "Staking is paused right now, so nothing was sent. Try again later.";
   if (priceMoved(reason)) return "The price moved since your quote, so this stake wouldn't go through and nothing was sent. Stake again at today's price.";
   return WONT_GO_THROUGH;

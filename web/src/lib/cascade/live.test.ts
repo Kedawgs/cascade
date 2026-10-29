@@ -226,8 +226,29 @@ describe("live data", () => {
     // the open batch: less than the minimum left under its value limit, or its list at 50
     expect(await limitsWith({ maxBatchValue: 10n ** 16n * 5n, openTotal: 10n ** 16n * 4n + 10n ** 9n, netForwarded: 0n })).toBe("batch");
     expect(await limitsWith({ openDeposits: 50 })).toBe("batch");
-    // the deposit cap, which won't free up by waiting for the next batch
+    // room for the minimum in TAO, but not for the minimum in dollars once the margins are counted
+    expect(await limitsWith({ maxBatchValue: 105n * 10n ** 14n, netForwarded: 0n })).toBe("batch");
+    // the deposit cap, which won't free up by waiting for the next batch, even when the batch is full too
     expect(await limitsWith({ netForwarded: 15n * 10n ** 16n })).toBe("cap");
+    expect(await limitsWith({ netForwarded: 15n * 10n ** 16n, openDeposits: 50 })).toBe("cap");
+  });
+
+  it("never shows a range whose top is under its bottom", async () => {
+    for (const room of [10n ** 16n, 102n * 10n ** 14n, 105n * 10n ** 14n, 11n * 10n ** 15n, 2n * 10n ** 16n]) {
+      const l = await createLiveCascadeData(D, deps({ readFrontDoor: async () => ({ ...fd, maxBatchValue: room, netForwarded: 0n }) })).getLimits();
+      if (l.full === null) expect(l.maxUsd).toBeGreaterThanOrEqual(l.minUsd);
+    }
+  });
+
+  it("v3: a stake of the most the form allows still fits in the open batch, even if TAO gets a little cheaper", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    const roomy = { ...fd, depositCap: 40n * 10n ** 18n, netForwarded: 0n, maxBatchValue: 10n * 10n ** 18n, openTotal: 3n * 10n ** 18n };
+    const units = (usd: number) => BigInt(Math.round(usd * 1e6));
+    const l = await createLiveCascadeData(D3, deps({ readFrontDoor: async () => roomy })).getLimits();
+    for (const buyAt of [252n, 247n]) {
+      const moved = deps({ readFrontDoor: async () => roomy, quoteBuy: async (_c, usdc) => (usdc * 10n ** 12n) / buyAt });
+      expect((await createLiveCascadeData(D3, moved).quoteDeposit(units(l.maxUsd))).expectedTao).toBeLessThanOrEqual(l.maxTao);
+    }
   });
 
   it("v2's minimum stays as it was: the pools' fees, the 0.5% slippage and a 2% margin", async () => {

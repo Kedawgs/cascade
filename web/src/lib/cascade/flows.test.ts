@@ -576,9 +576,13 @@ describe("planStakeV3", () => {
       expect(await why("BelowMinDeposit")).toBe("That's below the minimum stake, so nothing was sent.");
     });
 
-    it("over the cap, or the open batch full by value or by count: Cascade is full for now", async () => {
-      for (const revert of ["CapExceeded", "BatchValueFull", "BatchFull"]) {
-        expect(await why(revert)).toBe("Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.");
+    it("over the cap: Cascade is full for now", async () => {
+      expect(await why("CapExceeded")).toBe("Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.");
+    });
+
+    it("the open batch full by value or by count: it filled up, and the next one opens soon", async () => {
+      for (const revert of ["BatchValueFull", "BatchFull"]) {
+        expect(await why(revert)).toBe("The current batch filled up, so nothing was sent. Try a smaller amount, or try again soon.");
       }
     });
 

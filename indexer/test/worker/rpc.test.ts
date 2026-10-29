@@ -1,7 +1,7 @@
 import { type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import { getJson, getText, HttpError } from "../../src/http.ts";
-import { Budget, BudgetExhausted, createRpc, RpcError } from "../../src/rpc.ts";
+import { Budget, BudgetExhausted, createRpc, RpcError, scrub } from "../../src/rpc.ts";
 import { fakeChains, fakeClock, TEST_URLS } from "./fake-rpc.ts";
 
 const quiet = { sleep: async () => {}, spacingMs: { base: 0, bittensor: 0 } };
@@ -221,7 +221,6 @@ describe("createRpc", () => {
     const net = fakeChains({ base: { head: 10n, failNext: { count: 1, status: 429 } } });
     const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget: new Budget(45), sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 }, deadlineMs: clock.now() + 1000 });
     expect(((await rejection(rpc.call("base", "eth_blockNumber", []))) as RpcError).deadline).toBe(true);
-    net.fetches.length = 0;
     const net2 = fakeChains({ base: { head: 10n, failNext: { count: 1, status: 429 } } });
     const rpc2 = createRpc({ urls: TEST_URLS, fetch: net2.fetch, budget: new Budget(45), sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 }, deadlineMs: clock.now() + 1000 });
     expect(await rpc2.call("base", "eth_blockNumber", [], { deadlineMs: clock.now() + 60_000 })).toBe("0xa");
@@ -275,6 +274,16 @@ describe("createRpc", () => {
     expect(await rpc.batch("base", [])).toEqual([]);
     expect(net.count()).toBe(0);
     expect(numberToHex(1n)).toBe("0x1");
+  });
+});
+
+describe("scrub", () => {
+  it("cuts the URL's long parts (8+ characters) and leaves short words in a node's message readable", () => {
+    const url = "https://base-mainnet.quiknode.pro/chain/abcdefgh12345678?k=v&token=0123456789abcdef";
+    const said = "execution reverted on chain mainnet: base fee too low (abcdefgh12345678, token 0123456789abcdef, host base-mainnet.quiknode.pro)";
+    const out = scrub(said, url);
+    expect(out).toContain("execution reverted on chain mainnet: base fee too low");
+    expect(out).not.toMatch(/abcdefgh12345678|0123456789abcdef|base-mainnet/);
   });
 });
 

@@ -60,8 +60,8 @@ export class RpcError extends Error {
   }
 }
 
-/** `text` with every part of `url` but its registrable domain cut out: the host and its subdomain
- * labels, the path, the query and any credentials. */
+/** `text` with every part of `url` of 8 or more characters but its registrable domain cut out: the host
+ * and its subdomain labels, the path and its segments, the query's names and values, any credentials. */
 export function scrub(text: string, url: string): string {
   let u: URL;
   try {
@@ -87,9 +87,10 @@ export function scrub(text: string, url: string): string {
     subdomain.join("."),
     ...subdomain,
   ];
-  // whatever case a node echoes it in (a URL's host comes back lowercased, the key may not)
+  // whatever case a node echoes it in (a URL's host comes back lowercased, the key may not); only parts of
+  // 8+ characters, which a key always is, so short words in a node's message ("chain", "base") stay readable
   const escaped = [...new Set(parts)]
-    .filter((p) => p.length >= 4)
+    .filter((p) => p.length >= 8)
     .sort((a, b) => b.length - a.length)
     .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   return escaped.length === 0 ? text : text.replace(new RegExp(escaped.join("|"), "gi"), "…");

@@ -4,7 +4,8 @@ import { FRONT_DOOR, VAULT } from "../../src/abi.ts";
 import { type ChainName, rolesOf } from "../../src/config.ts";
 import { decode, identify, type RawLog, type StoredRef, storedRefOf } from "../../src/logs.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
-import { headTimeOf, REREAD, rereadRange, SETTLE, scanChain, WINDOW } from "../../src/scan.ts";import { type ChainSpec, type FetchRecord, fakeChains, fakeClock, TEST_URLS, windowsAsked } from "./fake-rpc.ts";
+import { headTimeOf, REREAD, rereadRange, SETTLE, scanChain, WINDOW } from "../../src/scan.ts";
+import { type ChainSpec, type FetchRecord, fakeChains, fakeClock, TEST_URLS, windowsAsked } from "./fake-rpc.ts";
 import { rawLog, testConfig, tx } from "./fixtures.ts";
 
 const d = testConfig().deployment;

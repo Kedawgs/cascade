@@ -871,7 +871,7 @@ every `https://` host found in its HTML and JavaScript.
   a file can do is stop a site-check invocation, never the security tick. It writes only its own progress and
   findings to D1 (`meta`); the next tick turns findings into alerts and emails.
 - **Bounded per file.** Each file is read as a stream and abandoned at `SITE_MAX_BYTES` (2 MB); an oversized file
-  is reported, not scanned. Each invocation handles up to `SITE_FILES_PER_RUN` files (default 2), so a pass of
+  is reported, not scanned. Each invocation handles up to `SITE_FILES_PER_RUN` files (20 on Paid, 2 on Free), so a pass of
   up to 80 files completes in well under 2 hours on the free plan; on Workers Paid the files per run can be
   raised.
 - **A file that kills the check is skipped and reported.** Before fetching a file, the invocation records it as
@@ -994,8 +994,8 @@ crons, `"cache": { "enabled": true }`, the D1 binding `DB` and the `send_email` 
 | `BRIDGES` | `{"base":["<Base adapter>"],"bittensor":["<Bittensor adapter>"]}` | the bridges a payout or batch may arrive through; default the deployment's adapters |
 | `TOKENS` | FM-TAO on Base and Bittensor, the Bittensor lock pool, USDC, WETH, the two Uniswap pools, Multicall3, OffRamps, AlphaVault | public constants, as in `ops/src/config.ts` |
 | `BASE_RPC_URL`, `BASE_LOGS_RPC_URL`, `BITTENSOR_RPC_URL` | `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://archive.chain.opentensor.ai` | a secret named `<var>_SECRET` (`BASE_RPC_URL_SECRET`, …) overrides each (for a keyed URL) |
-| `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `45`, `100`, `40`, `180` | raise the budgets on Workers Paid (`DECODE_BUDGET` to a few thousand: one unit is one log hashed and decoded, about 42 µs); `LEASE_S` at least 3 × `SCAN_WALL_S` |
-| `SITE_FILES_PER_RUN`, `SITE_MAX_BYTES` | `2`, `2000000` | the site check's own invocation (6.6) |
+| `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `200`, `5000`, `40`, `180` | the Workers Paid profile (Free fallback: `45` and `100` for the two budgets; section 12). One `DECODE_BUDGET` unit is one log hashed and decoded, about 42 µs; `LEASE_S` at least 3 × `SCAN_WALL_S` |
+| `SITE_FILES_PER_RUN`, `SITE_MAX_BYTES` | `20`, `2000000` | the site check's own invocation (6.6); Free fallback `2` files per run |
 | `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascade.fi`, `https://cascade.fi`, `["/","/stake/"]` | CORS and the integrity check |
 | `ALERT_FROM`, `ALERT_MODE` | `monitor@cascade.fi`, `send` | `log` in dev and tests |
 | `THRESHOLDS` | `{}` | overrides of `src/thresholds.ts`; the `THRESHOLDS_SECRET` secret wins |
@@ -1039,7 +1039,8 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
 
 ### 11. Deploy steps the owner will do later
 
-0. **Choose the plan shape** (open question 1). Workers plans apply to the whole Cloudflare account. Either
+0. **Check the plan shape** (open question 1, answered: Workers Paid, so option (a); confirm it in the
+   dashboard). Workers plans apply to the whole Cloudflare account. Either
    (a) put the account on Workers Paid ($5/month), and run `test` and `production` side by side; or (b) stay on
    Free with **one environment per account**: `production` in the main account and `test` in a second, free
    Cloudflare account. Don't run both environments in one Free account: eight crons exceed its five, and both
@@ -1072,20 +1073,39 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
 
 ### 12. Cost
 
-| Resource | Use | Free limit (per account) |
-|---|---|---|
-| Worker requests | 1,440 ticks + 720 site checks + 24 hourly + 1 digest + API calls (about 2 per first visit; repeat visits rarely ask) ≈ 4,200/day at 1,000 visits | 100,000/day (shared with Pages Functions; static Pages are free) |
-| Cron triggers | 4 per environment | 5 per account |
-| Subrequests | ~10 per steady tick; backfill ticks up to 45; site check up to 3 | 50 per invocation |
-| CPU | steady tick estimated 3–8 ms (decoding a few logs, two multicall answers): **unmeasured**; the site check runs apart | 10 ms per invocation |
-| D1 rows written | cursors 2,880 + readings 1,440 + hours 1,440 + logs ~600 + seed pages ~200 + alerts ≈ 7–11 k/day | 100 k/day |
-| D1 rows read | ticks ~100 k/day (hourly rows, not per-minute history) + API (the shared half is cached; an account half reads that account's rows) | 5 M/day |
-| D1 storage | ~200 MB/year of logs, plus small tables | 500 MB per database |
-| Email | alerts and digests to verified addresses | free, no quota |
-| RPC, price APIs | public endpoints | free (rate-limited) |
+**Decided (open question 1, answered 2026-10-29):** the account is on Workers Paid ($5/month), to be confirmed
+in the dashboard at deploy. Test and production share the one account.
 
-It fits at $0 for one environment per Free account. *call*: **recommend Workers Paid ($5/month) for the
-account** (open question 1), because a security monitor shouldn't run at the edge of its limits:
+| Resource | Use | Free limit (per account) | Paid |
+|---|---|---|---|
+| Worker requests | 1,440 ticks + 720 site checks + 24 hourly + 1 digest + API calls (about 2 per first visit; repeat visits rarely ask) ≈ 4,200/day at 1,000 visits | 100,000/day (shared with Pages Functions; static Pages are free) | no daily limit (10 M/month included) |
+| Cron triggers | 4 per environment | 5 per account | 250 per account |
+| Subrequests | ~10 per steady tick; backfill ticks up to `SUBREQUEST_BUDGET` (200 on Paid, 45 on Free); site check up to `SITE_FILES_PER_RUN` + 1 | 50 per invocation | 1,000 or more per invocation |
+| CPU | steady tick estimated 3–8 ms (decoding a few logs, two multicall answers): **unmeasured**; a full `DECODE_BUDGET` of 5,000 logs about 210 ms; the site check runs apart | 10 ms per invocation | about 30 s per cron invocation |
+| D1 rows written | cursors 2,880 + readings 1,440 + hours 1,440 + logs ~600 + seed pages ~200 + alerts ≈ 7–11 k/day | 100 k/day | 50 M/month included |
+| D1 rows read | ticks ~100 k/day (hourly rows, not per-minute history) + API (the shared half is cached; an account half reads that account's rows) | 5 M/day | 25 billion/month included |
+| D1 storage | ~200 MB/year of logs, plus small tables | 500 MB per database | 10 GB per database |
+| Email | alerts and digests to verified addresses | free, no quota | free, no quota |
+| RPC, price APIs | public endpoints | free (rate-limited) | free (rate-limited) |
+
+**Budget profiles.** Every budget is a var, so the code stays safe on either plan; `wrangler.jsonc` sets the
+Paid profile for both environments and keeps the Free one in a comment as the fallback:
+
+| Var | Paid (set) | Free (fallback) | Bound by |
+|---|---|---|---|
+| `SUBREQUEST_BUDGET` | 200 | 45 | subrequests per invocation; polite to public RPCs |
+| `DECODE_BUDGET` | 5,000 | 100 | CPU: about 42 µs per log hashed and decoded |
+| `SITE_FILES_PER_RUN` | 20 | 2 | CPU per site-check invocation |
+| `SCAN_WALL_S` | 40 | 40 | a tick a minute |
+| `LEASE_S` | 180 | 180 | at least 3 × `SCAN_WALL_S` |
+| `SITE_MAX_BYTES` | 2,000,000 | 2,000,000 | the largest site file read |
+
+The Paid values are generous but bounded: a few percent of Paid's CPU and subrequests, so a slow RPC or a
+burst of logs can't run a tick into its limits. To fall back to Free, set the Free column in an environment's
+vars and run only one environment per account (section 11).
+
+It would fit at $0 for one environment per Free account. Paid was chosen because a security monitor shouldn't
+run at the edge of its limits:
 
 - **CPU.** 10 ms is tight; a tick over it is killed and commits nothing (the watchdog notices, section 1). The
   scan is split across ticks and the site check runs in its own invocation, but rule evaluation can't be split
@@ -1147,9 +1167,8 @@ a second RPC per chain for the critical reads is a later improvement (open quest
 
 Tasks that depend on an answer are marked in the plan.
 
-1. **Plan shape:** Workers Paid ($5/month) for the account, with test and production side by side (recommended,
-   section 12)? Or stay Free with a second Cloudflare account for test, accepting that the test Worker can't
-   send from cascade.fi or use `api.cascade.fi` (section 11)?
+1. **Plan shape:** *Answered 2026-10-29:* the account already pays for Workers Paid ($5/month); test and
+   production share it, with the Paid budget profile (section 12). To be confirmed in the dashboard at deploy.
 2. **Email:** is cascade.fi's DNS on Cloudflare, and does anything else receive mail for cascade.fi today
    (Email Routing takes over its MX records)? Which address gets alerts? A sending subdomain (e.g.
    `alerts.cascade.fi` with Email Sending on Paid) avoids touching the main domain's mail.

@@ -28,7 +28,8 @@ describe("parseConfig", () => {
     expect(cfg.deployment.bittensor).toEqual({ chainId: 964, startBlock: 6_900_000n, baselineBlock: 6_900_040n });
     expect(cfg.deployment.base.startBlock).toBe(37_000_000n);
     expect(cfg.bridges).toEqual({ base: [deployment.baseAdapter.toLowerCase()], bittensor: [deployment.bitAdapter.toLowerCase()] });
-    expect(cfg.budgets).toEqual({ subrequests: 45, decode: 100, scanWallS: 40, leaseS: 180, siteFilesPerRun: 2, siteMaxBytes: 2_000_000 });
+    // the Workers Paid profile (wrangler.jsonc)
+    expect(cfg.budgets).toEqual({ subrequests: 200, decode: 5000, scanWallS: 40, leaseS: 180, siteFilesPerRun: 20, siteMaxBytes: 2_000_000 });
     expect(cfg.baseLogWindow).toBe(100n);
     expect(cfg.rpc.bittensor).toBe("https://archive.chain.opentensor.ai");
     expect(cfg.site.pages).toEqual(["/", "/stake/"]);

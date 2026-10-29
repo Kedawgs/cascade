@@ -13,8 +13,20 @@
   "cache": { "enabled": true },
   // Four crons, the same in every environment (a test checks them against src/crons.ts):
   // the tick every minute, the site check every two minutes, the hourly job and the daily digest.
-  // Workers Free allows five per account, so only one environment fits in a Free account.
+  // The account is on Workers Paid (open question 1), which allows 250 crons, so test and production
+  // run side by side in it. Workers Free allows five per account: there only one environment fits.
   "triggers": { "crons": ["* * * * *", "*/2 * * * *", "17 * * * *", "0 13 * * *"] },
+  // Budgets, two profiles (spec section 12). Both environments use the Workers Paid profile: about 30 s
+  // of CPU per cron invocation, 1,000+ subrequests, 1,000 D1 queries per invocation and a monthly D1
+  // allowance. The values stay well inside those, and the code stays safe on Free: every budget is a var.
+  //   var                 Paid (set)   Free (fallback)
+  //   SUBREQUEST_BUDGET   200          45     (Free: 50 external subrequests per invocation)
+  //   DECODE_BUDGET       5000         100    (about 42 µs a log: ~210 ms on Paid, ~4 ms of Free's 10 ms)
+  //   SITE_FILES_PER_RUN  20           2      (Free: a big chunk can use up 10 ms of CPU)
+  //   SCAN_WALL_S         40           40     (a tick a minute either way)
+  //   LEASE_S             180          180    (at least 3 × SCAN_WALL_S)
+  //   SITE_MAX_BYTES      2000000      2000000
+  // To run on Free, set the Free column in the environment's vars.
   "env": {
     // The v3 test deployment.
     "test": {
@@ -41,15 +53,14 @@
         // the archive node: the lite node keeps only minutes of logs
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
         "BASE_LOG_WINDOW": "100",
-        // sized for Workers Free (50 subrequests and 10 ms CPU per invocation); raise them on Paid
-        "SUBREQUEST_BUDGET": "45",
+        // the Workers Paid profile (see the table above; Free: 45, 100, 2)
+        "SUBREQUEST_BUDGET": "200",
         // logs a tick may hash and decode, both chains together: about 42 µs each (23 to hash, 19 to
-        // decode), so 100 is about 4 ms of Free's 10 ms. A log already stored at the same place costs
-        // nothing. On Workers Paid (30 s of CPU) a few thousand is fine.
-        "DECODE_BUDGET": "100",
+        // decode). A log already stored at the same place costs nothing.
+        "DECODE_BUDGET": "5000",
         "SCAN_WALL_S": "40",
         "LEASE_S": "180",
-        "SITE_FILES_PER_RUN": "2",
+        "SITE_FILES_PER_RUN": "20",
         "SITE_MAX_BYTES": "2000000",
         "SITE_ORIGIN": "https://cascade.fi",
         "SITE_URL": "https://cascade.fi",
@@ -79,8 +90,8 @@
         }
       }
     },
-    // The launch deployment, once it exists. Its vars are added when it does: until then it has
-    // none, and the Worker refuses to run in it.
+    // The launch deployment, once it exists, in the same account as test. Until its DEPLOYMENT is
+    // pasted the Worker refuses to run in it.
     "production": {
       "d1_databases": [
         {
@@ -90,7 +101,46 @@
           "migrations_dir": "migrations"
         }
       ],
-      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascade.fi"] }]
+      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascade.fi"] }],
+      // As test's, with the launch deployment's own DEPLOYMENT (and, at launch, ALERT_MODE "send").
+      "vars": {
+        "DEPLOYMENT": "not configured: paste the JSON printed by pnpm config:from-record",
+        "BASE_RPC_URL": "https://mainnet.base.org",
+        "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
+        "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
+        "BASE_LOG_WINDOW": "100",
+        // the Workers Paid profile (see the table above; Free: 45, 100, 2)
+        "SUBREQUEST_BUDGET": "200",
+        "DECODE_BUDGET": "5000",
+        "SCAN_WALL_S": "40",
+        "LEASE_S": "180",
+        "SITE_FILES_PER_RUN": "20",
+        "SITE_MAX_BYTES": "2000000",
+        "SITE_ORIGIN": "https://cascade.fi",
+        "SITE_URL": "https://cascade.fi",
+        "SITE_PAGES": ["/", "/stake/"],
+        "ALERT_FROM": "monitor@cascade.fi",
+        "ALERT_MODE": "log",
+        "THRESHOLDS": "{}",
+        "PRICE_SOURCES": ["coingecko", "coinbase"],
+        "TOKENS": {
+          "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11",
+          "base": {
+            "fmTao": "0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67",
+            "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "weth": "0x4200000000000000000000000000000000000006",
+            "taoWethPool": "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A",
+            "wethUsdcPool": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+            "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808"
+          },
+          "bittensor": {
+            "fmTao": "0xC5b6C1632d34901239396F5E1BDe54B342900256",
+            "lockPool": "0xB66b9c085ab711ECC373aaF6dc959a4A6B42BE2e",
+            "offRamp": "0xF9410A08FD57e629c66E1f37a5Ae8f0a757d9AD9",
+            "alphaVault": "0x11837459896D96F821a8D88eC93a3C8D152033D4"
+          }
+        }
+      }
     }
   }
 }

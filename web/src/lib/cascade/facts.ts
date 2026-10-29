@@ -232,15 +232,9 @@ export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Dep
   scan.redeemed.splice(0, scan.redeemed.length, ...(redeemed as AccountEvent[]));
 }
 
-/** Confirms a saved delivery of batch `batchId` by its receipt before anything relies on it: the vault's
- * BatchDelivered for that batch from our front door must be in it. As with saved amounts, a receipt that
- * can't be read (or a server behind its block) throws and changes nothing, and one that shows otherwise
- * sends the scan back to the deploy block (HistoryMismatchError). */
-export async function confirmDelivery(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchId: string): Promise<void> {
-  const hit = scan.delivered.get(batchId);
-  if (!hit?.unconfirmed) return;
-  const r = await receiptAt(c, scan, hit.txHash, hit.block);
-  const shown =
+/** Whether a receipt holds the vault's BatchDelivered of batch `batchId` from our front door, under `key`. */
+function deliveryIn(r: Receipt | null, d: Deployment, batchId: string, key: Hex): boolean {
+  return (
     mined(r) &&
     parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "BatchDelivered", strict: false }).some(
       (l) =>
@@ -249,13 +243,28 @@ export async function confirmDelivery(c: Pick<Clients, "bittensor">, d: Deployme
         l.args.sourceChain === BASE_CHAIN_ID &&
         !!l.args.frontDoor &&
         same(l.args.frontDoor, d.frontDoor) &&
-        same(l.args.key as string, hit.key),
+        same(l.args.key as string, key),
+    )
+  );
+}
+
+/** Confirms saved deliveries of these batches by their receipts, a few at a time: one whose receipt shows
+ * the vault's BatchDelivered for its batch from our front door is confirmed. Any other (a receipt that
+ * can't be read yet, or one that shows otherwise) stays unconfirmed, and nothing relies on it. Never
+ * throws and never sends the scan back: what can be unstaked mustn't fail, or wipe history, over one
+ * receipt. */
+export async function checkDeliveries(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchIds: string[]): Promise<void> {
+  const saved = batchIds.filter((id) => scan.delivered.get(id)?.unconfirmed);
+  for (let i = 0; i < saved.length; i += CONFIRM_AT_ONCE) {
+    await Promise.all(
+      saved.slice(i, i + CONFIRM_AT_ONCE).map(async (batchId) => {
+        const hit = scan.delivered.get(batchId);
+        if (!hit?.unconfirmed) return;
+        const r = await bitReceipt(c, scan, hit.txHash).catch(() => null);
+        if (deliveryIn(r, d, batchId, hit.key)) scan.delivered.set(batchId, { key: hit.key, txHash: hit.txHash, block: hit.block });
+      }),
     );
-  if (!shown) {
-    restart(scan);
-    throw new HistoryMismatchError();
   }
-  scan.delivered.set(batchId, { key: hit.key, txHash: hit.txHash, block: hit.block });
 }
 
 /** A Bittensor receipt, asked together with the server's head (one request to one server, as windowLogs

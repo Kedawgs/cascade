@@ -279,19 +279,40 @@ describe("the vault's history", () => {
     expect(scans).toBe(1);
   });
 
-  it("relies on a saved delivery only once its receipt shows it, and reads the history again when it doesn't", async () => {
+  it("counts an unstake as on the bridge while its saved delivery can't be confirmed, never failing or touching the history", async () => {
     const storage = savedDelivery();
+    let scans = 0;
     const visit = (bittensor: unknown) => {
-      const d = deps({ scan: never, scanStore: createScanStore(storage, D), clients: { bittensor } as never });
+      const d = deps({ scan: async () => void scans++, scanStore: createScanStore(storage, D), clients: { bittensor } as never });
       d.opLog.put(unstake(3n));
       return createLiveCascadeData(D, d).getAvailable(ME);
     };
-    // a node behind the delivery can't say: nothing rather than a guess, and the save stands
-    await expect(visit(deliveryAt(300n))).rejects.toThrow();
-    expect(createScanStore(storage, D).load(ME).delivered.has("3")).toBe(true);
-    // a node past it shows a transaction with no such delivery: the saved history is read again from the start
-    await expect(visit(deliveryAt(2_000n, false))).rejects.toThrow();
-    expect(createScanStore(storage, D).load(ME).delivered.size).toBe(0);
+    const onTheBridge = 8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n;
+    // a node behind the delivery, and one whose receipt shows no such delivery: on the bridge, as far as anyone can tell
+    for (const node of [deliveryAt(300n), deliveryAt(2_000n, false)]) {
+      expect((await visit(node)).availableShares).toBe(onTheBridge);
+      expect(createScanStore(storage, D).load(ME).delivered.has("3")).toBe(true);
+    }
+    // the scan was brought up to date each time, in case it finds the delivery again
+    expect(scans).toBe(2);
+    expect((await visit(deliveryAt(2_000n))).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+  });
+
+  it("isn't failed by one saved delivery whose receipt can't be read: the others still count as arrived", async () => {
+    const storage = savedDelivery((s) => s.delivered.set("2", { key: H(2), txHash: H(5), block: 400n }));
+    const node = deliveryAt(2_000n);
+    const bittensor = {
+      ...node,
+      getTransactionReceipt: async (q: { hash: `0x${string}` }) => {
+        if (q.hash === H(5)) throw new Error("HTTP request failed. Status: 503");
+        return node.getTransactionReceipt(q);
+      },
+    };
+    const d = deps({ scanStore: createScanStore(storage, D), clients: { bittensor } as never });
+    d.opLog.put(unstake(3n));
+    d.opLog.put(unstake(2n));
+    // batch 3's delivery is confirmed; batch 2's can't be read yet, so its unstake counts as on the bridge
+    expect((await createLiveCascadeData(D, d).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
   });
 
   it("reads the vault again after waiting for the scan, so a delivery it finds isn't counted twice", async () => {

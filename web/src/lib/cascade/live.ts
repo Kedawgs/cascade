@@ -5,7 +5,7 @@ import {
   cancelTook,
   chainDeposits,
   confirmAccountEvents,
-  confirmDelivery,
+  checkDeliveries,
   depositFacts,
   HistoryMismatchError,
   type Placed,
@@ -297,15 +297,23 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     let [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
     const withdrawals = await placedWithdrawals(a, deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal"));
     let scan = known(a);
-    // a saved delivery is relied on only once its receipt shows it
-    const arrived = withdrawals.filter((w) => w.batchId !== undefined && w.batchId < fd.openBatchId && scan.delivered.get(String(w.batchId))?.unconfirmed);
-    for (const w of arrived) await serial(a, (s) => confirming(a, s, () => confirmDelivery(history, d, s, String(w.batchId))));
-    if (withdrawals.some((w) => onTheBridge(w, fd, scan))) {
+    /** In a closed batch that hasn't arrived as far as anyone can tell: a saved delivery counts only once
+     * its receipt shows it, and one that can't be shown yet leaves the unstake on the bridge. */
+    const arrived = (batchId: bigint) => {
+      const hit = scan.delivered.get(String(batchId));
+      return hit !== undefined && !hit.unconfirmed;
+    };
+    const away = () => withdrawals.filter((w) => w.batchId !== undefined && w.batchId < fd.openBatchId && !arrived(w.batchId));
+    const saved = away()
+      .filter((w) => scan.delivered.has(String(w.batchId)))
+      .map((w) => String(w.batchId));
+    if (saved.length > 0) await serial(a, (s) => checkDeliveries(history, d, s, saved));
+    if (away().length > 0) {
       scan = await scanFor(a);
       // a delivery the scan found may have burned the shares since the first reads: read them again
       [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
     }
-    const asked = fd.redeemOf + sum(withdrawals.filter((w) => onTheBridge(w, fd, scan)).map((w) => w.shares));
+    const asked = fd.redeemOf + sum(away().map((w) => w.shares));
     const availableShares = v.shares > asked ? v.shares - asked : 0n;
     return { availableShares, availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply) };
   }

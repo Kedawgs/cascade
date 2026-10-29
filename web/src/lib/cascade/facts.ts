@@ -351,15 +351,25 @@ function requestIn(r: Receipt | null, eventName: "DepositRequested" | "RedeemReq
 const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address): bigint | undefined =>
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
-/** The batch an unstake joined: as recorded, or from its request's receipt (undefined while that isn't mined or can't be read). */
-export const requestBatch = async (c: Pick<Clients, "base">, op: WithdrawalOp): Promise<bigint | undefined> =>
-  op.batchId ?? batchIdFrom(await baseReceipt(c, op.hash), "RedeemRequested", op.account);
+/** The batch an unstake joined: as recorded, or from its request's receipt. `unsure` when it was sent
+ * but its receipt can't be read or isn't there yet, so its batch can't be known right now (one that shows
+ * no request, as when it reverted, joined none). */
+export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp): Promise<{ batchId?: bigint; unsure?: true }> {
+  if (op.batchId !== undefined) return { batchId: op.batchId };
+  if (!op.hash) return {};
+  const r = await baseReceipt(c, op.hash);
+  if (!r) return { unsure: true };
+  const batchId = batchIdFrom(r, "RedeemRequested", op.account);
+  return batchId !== undefined ? { batchId } : {};
+}
 
-/** An unstake still counted in its batch (not failed, not taken back out by a cancel), with that batch. */
+/** An unstake still counted in its batch (not failed, not taken back out by a cancel), with that batch;
+ * `unsure` when it was sent and its batch can't be known right now. */
 export interface Placed {
   id: string;
   batchId?: bigint;
   shares: bigint;
+  unsure?: true;
 }
 
 const closesAt = (fd: FrontDoorState, d: Deployment) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);

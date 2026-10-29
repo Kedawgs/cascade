@@ -587,6 +587,23 @@ describe("unstakes sharing a batch", () => {
     expect(records.map((r) => r.taoAmount)).toEqual([0.002, 0.002, 0.002]);
   });
 
+  it("count as still asked while their batch can't be found out, but not once their request shows it reverted", async () => {
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), state: "sent" };
+    const availableWith = async (receipt: () => Promise<unknown>) => {
+      const d = deps({ clients: { base: { getTransactionReceipt: receipt } } as never });
+      d.opLog.put(w);
+      return (await createLiveCascadeData(D, d).getAvailable(ME)).availableShares;
+    };
+    // the request's receipt can't be read right now: its batch may have closed, so its shares count as asked
+    expect(
+      await availableWith(async () => {
+        throw new Error("HTTP request failed. Status: 503");
+      }),
+    ).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
+    // the request reverted: it asked for nothing
+    expect(await availableWith(async () => ({ status: "reverted", logs: [] }))).toBe(8n * 10n ** 22n - 10n ** 21n);
+  });
+
   it("are placed from their request's receipt when this browser hasn't recorded their batch yet", async () => {
     const d = threeInOneBatch();
     // batch 3 hasn't reached the vault: all three are on the bridge (the reverted cancel took nothing out)

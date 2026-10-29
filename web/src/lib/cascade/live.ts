@@ -259,13 +259,13 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       withdrawals
         .filter((o) => o.state !== "failed")
         .map(async (o) => {
-          const batchId = await requestBatch(c, o);
+          const { batchId, unsure } = await requestBatch(c, o);
           if (batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId });
-          return { ...o, batchId };
+          return { ...o, batchId, unsure };
         }),
     );
     const gone = await cancelledIn(placed);
-    return placed.filter((o) => !gone.has(o.id)).map(({ id, batchId, shares }) => ({ id, batchId, shares }));
+    return placed.filter((o) => !gone.has(o.id)).map(({ id, batchId, shares, unsure }) => ({ id, batchId, shares, ...(unsure ? { unsure } : {}) }));
   }
 
   /** The stake itself, from contract reads alone: it never waits on the vault's history. */
@@ -303,7 +303,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       const hit = scan.delivered.get(String(batchId));
       return hit !== undefined && !hit.unconfirmed;
     };
-    const away = () => withdrawals.filter((w) => w.batchId !== undefined && w.batchId < fd.openBatchId && !arrived(w.batchId));
+    // one whose batch can't be known right now counts as asked too: at worst the figure is a little low
+    const away = () => withdrawals.filter((w) => w.unsure || (w.batchId !== undefined && w.batchId < fd.openBatchId && !arrived(w.batchId)));
     const saved = away()
       .filter((w) => scan.delivered.has(String(w.batchId)))
       .map((w) => String(w.batchId));

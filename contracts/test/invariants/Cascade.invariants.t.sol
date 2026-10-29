@@ -286,7 +286,6 @@ contract CascadeInvariantTest is Test {
         assertEq(handler.base(), 100e18);
     }
 
-
     /// @dev The sequence that took a cancel more than one rao below its batch's delivery price: alice
     /// keeps part of her shares through a 3-entry batch, takes her part of its dust out by a direct
     /// redeem, then the owner cancels the batch. Amounts are inside the handler's bounds, so they pass

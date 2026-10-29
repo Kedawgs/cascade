@@ -1,6 +1,8 @@
-import { type Hex, hexToBigInt, numberToHex } from "viem";
+import { type Abi, decodeFunctionData, encodeFunctionResult, type Hex, hexToBigInt, numberToHex } from "viem";
+import { MULTICALL3 } from "../../src/abi.ts";
 import type { ChainName } from "../../src/config.ts";
 import type { RawLog } from "../../src/logs.ts";
+import { MULTICALL3_ADDRESS } from "../../src/multicall.ts";
 
 /** RPC URLs for tests: keyed-looking paths and queries, so a test can check none of it leaks. */
 export const TEST_URLS = {
@@ -116,6 +118,74 @@ export function fakeChains(specs: Partial<Record<ChainName, ChainSpec>>, opts: {
     fetches,
     /** fetches made to one chain */
     count: (chain?: ChainName) => fetches.filter((f) => chain === undefined || f.chain === chain).length,
+  };
+}
+
+/** A view that reverts. */
+export const REVERT = Symbol("revert");
+/** A view that answers these bytes as they are (e.g. data that doesn't decode). */
+export const raw = (data: Hex) => ({ [RAW]: data });
+const RAW = Symbol("raw");
+
+type View = (args: readonly unknown[], at: bigint) => unknown;
+export interface FakeContracts {
+  [address: Hex]: { abi: Abi; fns: Record<string, View> };
+}
+
+/** An eth_call handler for `fakeChains`' `calls`: views of the given contracts, called directly or
+ * through Multicall3's aggregate3 (with getBlockNumber, getCurrentBlockTimestamp and getEthBalance
+ * answered from the block the node is at). A view returning REVERT (or throwing) reverts. */
+export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => number; balance?: (address: Hex, at: bigint) => bigint } = {}) {
+  const byAddress = new Map(Object.entries(contracts).map(([a, c]) => [a.toLowerCase(), c]));
+  const time = o.time ?? ((at: bigint) => 1_700_000_000 + Number(at) * 12);
+
+  /** One call's answer: the encoded result, or null for a revert. */
+  function one(target: Hex, data: Hex, at: bigint): Hex | null {
+    if (target.toLowerCase() === MULTICALL3_ADDRESS) {
+      const { functionName, args } = decodeFunctionData({ abi: MULTICALL3, data });
+      if (functionName === "getBlockNumber") return encodeFunctionResult({ abi: MULTICALL3, functionName, result: at });
+      if (functionName === "getCurrentBlockTimestamp") return encodeFunctionResult({ abi: MULTICALL3, functionName, result: BigInt(time(at)) });
+      if (functionName === "getEthBalance") return encodeFunctionResult({ abi: MULTICALL3, functionName, result: o.balance?.(args[0] as Hex, at) ?? 0n });
+      return null;
+    }
+    const c = byAddress.get(target.toLowerCase());
+    if (!c) return "0x";
+    let call: { functionName: string; args?: readonly unknown[] };
+    try {
+      call = decodeFunctionData({ abi: c.abi, data }) as typeof call;
+    } catch {
+      return null;
+    }
+    const fn = c.fns[call.functionName];
+    if (!fn) return null;
+    let value: unknown;
+    try {
+      value = fn(call.args ?? [], at);
+    } catch {
+      return null;
+    }
+    if (value === REVERT) return null;
+    if (typeof value === "object" && value !== null && RAW in value) return (value as Record<symbol, Hex>)[RAW];
+    return encodeFunctionResult({ abi: c.abi, functionName: call.functionName, result: value } as never);
+  }
+
+  return (params: unknown[], at: bigint): Hex => {
+    const { to, data } = params[0] as { to: Hex; data: Hex };
+    if (to.toLowerCase() === MULTICALL3_ADDRESS) {
+      const { functionName, args } = decodeFunctionData({ abi: MULTICALL3, data });
+      if (functionName === "aggregate3") {
+        const calls = args[0] as readonly { target: Hex; allowFailure: boolean; callData: Hex }[];
+        const results = calls.map((c) => {
+          const out = one(c.target, c.callData, at);
+          if (out === null && !c.allowFailure) throw Object.assign(new Error("execution reverted: Multicall3: call failed"), { rpcCode: 3 });
+          return { success: out !== null, returnData: out ?? "0x" };
+        });
+        return encodeFunctionResult({ abi: MULTICALL3, functionName: "aggregate3", result: results });
+      }
+    }
+    const out = one(to, data, at);
+    if (out === null) throw Object.assign(new Error("execution reverted"), { rpcCode: 3, rpcData: "0x" });
+    return out;
   };
 }
 

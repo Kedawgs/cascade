@@ -515,12 +515,12 @@ export async function assertWired(check: () => Promise<Wiring>): Promise<void> {
   if (wiring !== "ok") throw new FlowError(WIRING_MISMATCH, "failed");
 }
 
-/** Why sending is off, from the wiring check's state, before anyone clicks; null while it passes or is
- * still being checked (a click then waits for it, through assertWired). */
+/** Why sending is off, before anyone clicks: only a mismatch, which turns the actions off. A check that
+ * couldn't be read says nothing on its own (a message appearing by itself would move the page): its
+ * actions stay as they are, and a click checks again and, failing, says why nothing was sent
+ * (assertWired), in response to the click. Null too while it passes or is still being checked. */
 export function wiringNotice(q: { data?: Wiring; isError: boolean }): string | null {
-  if (q.data === "mismatch") return WIRING_MISMATCH;
-  if (q.isError && q.data !== "ok") return WIRING_UNCHECKED;
-  return null;
+  return q.data === "mismatch" ? WIRING_MISMATCH : null;
 }
 
 /** The wallet can't pay the network fee (viem's and the node's wordings). */

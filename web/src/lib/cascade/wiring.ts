@@ -1,4 +1,15 @@
-import { type Abi, type Address, encodeAbiParameters, type Hex, keccak256, type PublicClient } from "viem";
+import {
+  type Abi,
+  type Address,
+  BaseError,
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  encodeAbiParameters,
+  type Hex,
+  keccak256,
+  type PublicClient,
+} from "viem";
 import { ADAPTER, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Clients } from "./chain";
 import { type Deployment, isV3, knownDeployment, TOKENS } from "./config";
@@ -70,12 +81,31 @@ function links(d: Deployment): { base: Link[]; bittensor: Link[] } {
 const answers = (got: unknown, want: Link["want"]) =>
   typeof want === "string" ? typeof got === "string" && got.toLowerCase() === want.toLowerCase() : got === want;
 
-/** One multicall of a chain's links: true when every one answers as it must. A read that reverts (a
- * contract without that function, or no contract at all) is a mismatch; a chain that can't be read throws. */
+/** Whether a failed read is the contract's own answer: it reverted, or nothing answered (no code at the
+ * address, empty data). Anything else (the node not reached, a rate limit, a timeout, an RPC error, or
+ * the multicall itself failing, whatever error the node gave it) says only that the chain can't be
+ * read right now. viem's multicall with allowFailure reports both kinds per call and never throws. */
+export function contractRefused(e: unknown): boolean {
+  if (!(e instanceof BaseError)) return false;
+  if (e instanceof ContractFunctionExecutionError && e.functionName === "aggregate3") return false;
+  return e.walk((x) => x instanceof ContractFunctionRevertedError || x instanceof ContractFunctionZeroDataError) !== null;
+}
+
+/** One multicall of a chain's links: true when every one answers as it must. A read the contract
+ * refused (contractRefused) is a mismatch; any other failed read throws, so the check is "can't check
+ * right now" and is asked again, never a mismatch kept for the page's life. */
 async function holds(client: Pick<PublicClient, "multicall">, ls: Link[]): Promise<boolean> {
   const contracts = ls.map((l) => ({ address: l.address, abi: l.abi, functionName: l.functionName, ...(l.args ? { args: l.args } : {}) }));
-  const results = (await client.multicall({ contracts, allowFailure: true } as never)) as { status: "success" | "failure"; result?: unknown }[];
-  return ls.every((l, i) => results[i]?.status === "success" && answers(results[i].result, l.want));
+  const results = (await client.multicall({ contracts, allowFailure: true } as never)) as { status: "success" | "failure"; result?: unknown; error?: unknown }[];
+  let ok = true;
+  ls.forEach((l, i) => {
+    const r = results[i];
+    if (r?.status === "success") {
+      if (!answers(r.result, l.want)) ok = false;
+    } else if (r && contractRefused(r.error)) ok = false;
+    else throw r?.error ?? new Error(`no answer for ${l.functionName}`);
+  });
+  return ok;
 }
 
 /** Reads the contracts and checks they are wired to each other as the build's config says, after

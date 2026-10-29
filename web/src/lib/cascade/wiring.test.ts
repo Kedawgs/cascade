@@ -1,7 +1,31 @@
-import { type Address, getAddress, HttpRequestError } from "viem";
+import {
+  type Abi,
+  type Address,
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  createPublicClient,
+  custom,
+  decodeFunctionData,
+  encodeFunctionResult,
+  getAddress,
+  type Hex,
+  HttpRequestError,
+  multicall3Abi,
+  RpcRequestError,
+  TimeoutError,
+} from "viem";
+import { base } from "viem/chains";
 import { describe, expect, it, vi } from "vitest";
+import { ADAPTER, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import { type Deployment, EXPECTED_DEPLOYMENTS, readDeployment, TOKENS } from "./config";
 import { checkWiring, createWiringCheck, peerId, type Wiring } from "./wiring";
+
+/** What viem gives for a call a contract reverted, as multicall reports it per call. */
+const reverted = (functionName: string) =>
+  new ContractFunctionExecutionError(new ContractFunctionRevertedError({ abi: [], functionName, message: "execution reverted" }), { abi: [], functionName, args: [] });
+/** What viem gives for a call nothing answered (no code at the address). */
+const noCode = (functionName: string) => new ContractFunctionExecutionError(new ContractFunctionZeroDataError({ functionName }), { abi: [], functionName, args: [] });
 
 const e3 = EXPECTED_DEPLOYMENTS["v3-test"];
 const e2 = EXPECTED_DEPLOYMENTS["test-2026-10"];
@@ -58,24 +82,58 @@ function wiredAs(d: Deployment, over: Record<string, Answer> = {}): Record<strin
   return { ...answers, ...over };
 }
 
-/** Clients whose multicalls answer from `answers`: a missing entry reverts, as a contract without the
- * function does. `down` makes a chain's whole read fail, as an unreachable node does. */
-function chains(answers: Record<string, Answer>, down: { base?: boolean; bittensor?: boolean } = {}) {
+/** Clients whose multicalls answer from `answers` as viem's multicall does with allowFailure: per call,
+ * never throwing. A missing entry reverts, as a contract without the function does; an Error entry is
+ * that call's failure. `down` gives every call on that chain the failure an unreachable node gives
+ * (viem doesn't throw then either: each call fails, carrying the network's error). */
+function chains(answers: Record<string, Answer>, down: { base?: Error; bittensor?: Error } = {}) {
   const asked: string[] = [];
   const client = (name: "base" | "bittensor") => ({
     multicall: vi.fn(async ({ contracts, allowFailure }: { contracts: { address: Address; functionName: string; args?: unknown[] }[]; allowFailure: boolean }) => {
-      if (down[name]) throw new HttpRequestError({ url: `https://${name}.example`, status: 503 });
       expect(allowFailure).toBe(true);
       return contracts.map((k) => {
         const id = `${name}:${k.address.toLowerCase()}.${k.functionName}(${(k.args ?? []).map((a) => String(a).toLowerCase()).join(",")})`;
         asked.push(id);
+        if (down[name]) return { status: "failure", error: down[name] };
         const a = answers[id];
-        if (a === undefined || a instanceof Error) return { status: "failure", error: a ?? new Error("reverted") };
+        if (a === undefined) return { status: "failure", error: reverted(k.functionName) };
+        if (a instanceof Error) return { status: "failure", error: a };
         return { status: "success", result: a };
       });
     }),
   });
   return { clients: { base: client("base"), bittensor: client("bittensor") } as never, asked };
+}
+
+/** Real viem clients (batched as the site's are, or not) over a node that answers each Multicall3
+ * `aggregate3` from `answers`, or fails every request with `fail`. */
+function realChains(answers: Record<string, Answer>, opts: { fail?: () => unknown; batched?: boolean } = {}) {
+  const abi = [...FRONT_DOOR, ...STAKER, ...VAULT, ...ADAPTER] as Abi;
+  const node = (name: "base" | "bittensor") =>
+    custom(
+      {
+        request: async ({ method, params }: { method: string; params?: unknown }) => {
+          if (opts.fail) throw opts.fail();
+          if (method === "eth_chainId") return "0x2105";
+          if (method !== "eth_call") throw new Error(`unexpected ${method}`);
+          const [{ data }] = params as [{ data: Hex }];
+          const { args } = decodeFunctionData({ abi: multicall3Abi, data });
+          const calls = args[0] as readonly { target: Address; callData: Hex }[];
+          const result = calls.map(({ target, callData }) => {
+            const call = decodeFunctionData({ abi, data: callData });
+            const id = `${name}:${target.toLowerCase()}.${call.functionName}(${(call.args ?? []).map((a) => String(a).toLowerCase()).join(",")})`;
+            const a = answers[id];
+            if (a === undefined || a instanceof Error) return { success: false, returnData: "0x" as Hex };
+            return { success: true, returnData: encodeFunctionResult({ abi, functionName: call.functionName, result: a } as never) };
+          });
+          return encodeFunctionResult({ abi: multicall3Abi, functionName: "aggregate3", result });
+        },
+      },
+      { retryCount: 0 },
+    );
+  const client = (name: "base" | "bittensor") =>
+    createPublicClient({ chain: base, transport: node(name), ...(opts.batched ? { batch: { multicall: { wait: 0 } } } : {}) });
+  return { base: client("base"), bittensor: client("bittensor") } as never;
 }
 
 describe("checkWiring", () => {
@@ -121,9 +179,10 @@ describe("checkWiring", () => {
     }
   });
 
-  it("refuses a contract that doesn't answer a read (not the contract the config names)", async () => {
+  it("refuses a contract that reverts a read, or no contract at all (not the contract the config names)", async () => {
     const st = D3.staker!.toLowerCase();
-    expect(await checkWiring(chains(wiredAs(D3, { [`base:${st}.frontDoor()`]: new Error("reverted") })).clients, D3)).toBe("mismatch");
+    expect(await checkWiring(chains(wiredAs(D3, { [`base:${st}.frontDoor()`]: reverted("frontDoor") })).clients, D3)).toBe("mismatch");
+    expect(await checkWiring(chains(wiredAs(D3, { [`base:${st}.frontDoor()`]: noCode("frontDoor") })).clients, D3)).toBe("mismatch");
   });
 
   it("keys the front door in the vault's registry as CascadeVault.peerId does", () => {
@@ -137,9 +196,36 @@ describe("checkWiring", () => {
     expect(c.asked).toEqual([]);
   });
 
-  it("throws when either chain can't be read, never answering ok", async () => {
-    await expect(checkWiring(chains(wiredAs(D3), { base: true }).clients, D3)).rejects.toThrow();
-    await expect(checkWiring(chains(wiredAs(D3), { bittensor: true }).clients, D3)).rejects.toThrow();
+  it("throws, never answering ok nor mismatch, when either chain can't be read: unreachable, rate-limited, timing out or refusing", async () => {
+    const failures = [
+      new HttpRequestError({ url: "https://mainnet.base.org", status: 503 }),
+      new HttpRequestError({ url: "https://mainnet.base.org", status: 429 }),
+      new TimeoutError({ body: {}, url: "https://archive.chain.opentensor.ai" }),
+      new RpcRequestError({ body: {}, url: "https://archive.chain.opentensor.ai", error: { code: -32005, message: "limit exceeded" } }),
+      // the multicall itself failing, with an error a node gave it: not one of the contracts answering
+      new ContractFunctionExecutionError(new ContractFunctionRevertedError({ abi: [], functionName: "aggregate3", message: "internal error" }), { abi: [], functionName: "aggregate3", args: [] }),
+    ];
+    for (const failure of failures) {
+      await expect(checkWiring(chains(wiredAs(D3), { base: failure }).clients, D3), failure.name).rejects.toThrow();
+      await expect(checkWiring(chains(wiredAs(D3), { bittensor: failure }).clients, D3), failure.name).rejects.toThrow();
+    }
+  });
+
+  describe("through viem's own multicall, batched as the site's clients are or not", () => {
+    for (const batched of [false, true]) {
+      it(`${batched ? "batched" : "unbatched"}: ok when wired, mismatch on a revert, and a throw when the node fails`, async () => {
+        expect(await checkWiring(realChains(wiredAs(D3), { batched }), D3)).toBe("ok");
+        const st = D3.staker!.toLowerCase();
+        expect(await checkWiring(realChains(wiredAs(D3, { [`base:${st}.frontDoor()`]: reverted("frontDoor") }), { batched }), D3)).toBe("mismatch");
+        expect(await checkWiring(realChains(wiredAs(D3, { [`base:${st}.frontDoor()`]: OTHER }), { batched }), D3)).toBe("mismatch");
+        const down = [
+          () => new HttpRequestError({ url: "https://mainnet.base.org", status: 429 }),
+          // a node's internal error, which viem files under the multicall's own revert
+          () => ({ code: -32603, message: "internal error" }),
+        ];
+        for (const fail of down) await expect(checkWiring(realChains(wiredAs(D3), { fail, batched }), D3)).rejects.toThrow();
+      });
+    }
   });
 });
 

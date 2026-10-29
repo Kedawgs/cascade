@@ -417,11 +417,14 @@ describe("the wiring gate before any flow", () => {
     expect((err as FlowError).state).toBe("needs-you");
   });
 
-  it("says why sending is off before anyone clicks: a mismatch, a check that failed, or nothing", () => {
+  it("says before anyone clicks only that the contracts don't match: a check that couldn't be read says so only on a click", () => {
     expect(wiringNotice({ data: "mismatch", isError: false })).toBe(WIRING_MISMATCH);
     // a failed re-check after a mismatch still says mismatch
     expect(wiringNotice({ data: "mismatch", isError: true })).toBe(WIRING_MISMATCH);
-    expect(wiringNotice({ data: undefined, isError: true })).toBe(WIRING_UNCHECKED);
+    // can't check right now: nothing appears on its own (it would move the page); a click checks again,
+    // and assertWired says why nothing was sent, in response to it
+    expect(wiringNotice({ data: undefined, isError: true })).toBeNull();
+    expect(wiringNotice({ data: "ok", isError: true })).toBeNull();
     expect(wiringNotice({ data: "ok", isError: false })).toBeNull();
     // still checking: nothing to say yet (a click waits for the check)
     expect(wiringNotice({ data: undefined, isError: false })).toBeNull();

@@ -146,7 +146,8 @@ export function useFlows(account: string | null) {
   const a = account as Address;
   const d = () => data.deployment;
   const port = () => wagmiPort(config, a, data.clients.base);
-  // sending is off while the contracts don't check out, or can't be checked (wiring.ts)
+  // the actions are off while the contracts don't match (wiring.ts); while they can't be checked, a
+  // click checks again and sends nothing unless they then check out (assertWired, in flow)
   const wiring = useWiring(account !== null);
   const blocked = wiringNotice(wiring);
 

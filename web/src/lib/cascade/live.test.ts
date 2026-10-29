@@ -6,6 +6,7 @@ import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredE
 import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState, WalletState } from "./reads";
 import { createScanStore } from "./scan-store";
+import { scanVault } from "./facts";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -413,6 +414,34 @@ describe("the vault's history", () => {
       };
       return { status: "success", logs: [depositedLog] };
     },
+  });
+
+  it("never wipes the saved history because a server's receipts lag its head: the scan reads the deposit again and that confirms it", async () => {
+    const storage = memory();
+    const depositedLog = {
+      address: D.vault,
+      topics: encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: H(3), user: ME } }),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [7n * 10n ** 16n, 7n * 10n ** 22n]),
+      blockNumber: 950n,
+      transactionHash: H(4),
+      logIndex: 0,
+    };
+    const nowS = BigInt(Math.floor(Date.now() / 1000));
+    /** A node at block 1,000 that has the deposit's log; `lagging`: its receipt index hasn't caught up. */
+    const node = (lagging: boolean) => ({
+      getBlock: async () => ({ number: 1_000n, timestamp: nowS }),
+      getLogs: async () => [depositedLog],
+      request: async () => "0x3e8",
+      getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+        if (lagging) throw new TransactionReceiptNotFoundError({ hash });
+        return { status: "success", logs: [depositedLog] };
+      },
+    });
+    const visit = (lagging: boolean) =>
+      createLiveCascadeData(D, deps({ clients: { bittensor: node(lagging) } as never, scan: scanVault, scanStore: createScanStore(storage, D) })).getPositionHistory(ME);
+    expect((await visit(false)).rewardsEarnedTao).toBeCloseTo(0.01, 12);
+    expect((await visit(true)).rewardsEarnedTao).toBeCloseTo(0.01, 12);
+    expect(createScanStore(storage, D).load(ME).deposited).toHaveLength(1);
   });
 
   it("sums the account's saved amounts only as their receipts on Bittensor confirm them", async () => {

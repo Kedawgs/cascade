@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
 import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
+import { StaleChainError } from "./fresh";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
 
@@ -197,6 +198,16 @@ describe("facts", () => {
     expect(scan.next).toBe(1_999n);
   });
 
+  it("takes the chain's copy of a saved account event it reads again, confirmed by the log itself", async () => {
+    const [, , mine] = nearHead();
+    const scan = newScan(D);
+    scan.next = 2_400n;
+    // saved with a changed amount; the read again (from block 2,000) finds the deposit at block 2,200
+    scan.deposited.push({ key: KEY, txHash: H(42), block: 2_200n, assets: 10n ** 20n, unconfirmed: true });
+    await scanVault(chains({ latest: 2_500n, bitLogs: [mine] }).clients, D, scan, ME);
+    expect(scan.deposited).toEqual([{ key: KEY, txHash: H(42), block: 2_200n, assets: 5n }]);
+  });
+
   it("drops a log near the head whose block was then replaced", async () => {
     const logs = nearHead();
     const c = chains({ latest: 2_400n, bitLogs: logs });
@@ -284,7 +295,17 @@ describe("facts", () => {
     expect(scan.next).toBe(2_000n);
   });
 
-  it("reads the history again, rather than dropping an amount, when a node past its block shows it isn't there", async () => {
+  it("takes no \"not found\" for proof from a server whose receipts may still be catching up with its head", async () => {
+    // the server says it is at block 1,800, 100 past the deposit: its receipt index may lag that much and more
+    const scan = newScan(D);
+    scan.next = 2_000n;
+    scan.deposited.push({ key: KEY, txHash: H(31), block: 1_700n, assets: 10n ** 16n, unconfirmed: true });
+    await expect(confirmAccountEvents(chains({ latest: 1_800n }).clients, D, scan, ME)).rejects.toBeInstanceOf(StaleChainError);
+    expect(scan.next).toBe(2_000n);
+    expect(scan.deposited).toHaveLength(1);
+  });
+
+  it("reads the history again, rather than dropping an amount, when a node well past its block shows it isn't there", async () => {
     const shown = (bitReceipts: Record<string, unknown>) => {
       const scan = newScan(D);
       scan.next = 2_000n;

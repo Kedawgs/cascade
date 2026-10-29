@@ -162,9 +162,11 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
       } else if (l.eventName === "Deposited" && account && l.args.user && same(l.args.user, account)) {
         const e = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint };
         if (fresh(accountEvent("deposited", e))) scan.deposited.push(e);
+        else confirmedBy(scan.deposited, e);
       } else if (l.eventName === "Redeemed" && account && l.args.user && same(l.args.user, account)) {
         const e = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint };
         if (fresh(accountEvent("redeemed", e))) scan.redeemed.push(e);
+        else confirmedBy(scan.redeemed, e);
       }
     }
     // a log found on a read again goes in its block's place: "the first stake after" reads in order
@@ -175,6 +177,13 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
 }
 
 const byBlock = (a: { block: bigint }, b: { block: bigint }) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0);
+
+/** A saved account event read again from the chain: the chain's copy takes its place, confirmed by the
+ * log itself, so it never has to wait on a receipt (and a receipt index that lags can't hold it up). */
+function confirmedBy(list: AccountEvent[], e: AccountEvent): void {
+  const i = list.findIndex((x) => x.unconfirmed && same(x.txHash, e.txHash) && same(x.key, e.key));
+  if (i >= 0) list[i] = e;
+}
 
 /** How many receipts confirmAccountEvents asks Bittensor's public node for at once. */
 const CONFIRM_AT_ONCE = 8;
@@ -250,8 +259,9 @@ export async function confirmDelivery(c: Pick<Clients, "bittensor">, d: Deployme
 }
 
 /** A Bittensor receipt, asked together with the server's head (one request to one server, as windowLogs
- * asks): null only when that server has reached `block` and has no such transaction. Throws while it
- * can't tell (no answer, or a server behind the block), which must never be taken for "not there". */
+ * asks): null only when that server is REREAD blocks past `block` and has no such transaction (a node's
+ * log and receipt index can run hundreds of blocks behind the head it reports). Throws while it can't
+ * tell (no answer, or a server not that far on), which must never be taken for "not there". */
 async function receiptAt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: Hex, block: bigint): Promise<Receipt | null> {
   const cached = scan.receipts.get(hash);
   if (cached) return cached;
@@ -266,7 +276,7 @@ async function receiptAt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: H
     scan.receipts.set(hash, r as Receipt);
     return r as Receipt;
   }
-  if (BigInt(head as string) >= block) return null;
+  if (BigInt(head as string) >= block + REREAD) return null;
   throw new StaleChainError();
 }
 

@@ -613,10 +613,11 @@ describe("unstakes sharing a batch", () => {
     /** Base for a request with no receipt: pending with `nonce` taken, or unknown; the logs the search
      * for its replacement reads, which counts the transaction lookups. */
     function base(o: { pending?: { nonce: number; blockNumber: null }; nonce?: number; logs?: unknown[]; receipts?: Record<string, unknown>; logsDown?: boolean }) {
-      const seen = { lookups: 0, logReads: 0 };
+      const seen = { lookups: 0, logReads: 0, ownReceipts: 0 };
       const clients = {
         base: {
           getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+            if (hash === H(20)) seen.ownReceipts++;
             if (o.receipts?.[hash]) return o.receipts[hash];
             if (hash === H(88)) return { status: "success", logs: o.logs ?? [] };
             throw new TransactionReceiptNotFoundError({ hash });
@@ -751,6 +752,41 @@ describe("unstakes sharing a batch", () => {
       const back = d.opLog.get(ME, "w") as WithdrawalOp;
       expect(back).toMatchObject({ state: "sent", hash: H(20), batchId: 3n });
       expect(back.error).toBeUndefined();
+    });
+
+    it("stop looking at the request itself a day after they were taken for dropped", async () => {
+      const receipts: Record<string, unknown> = {};
+      const b = base({ nonce: 4, receipts });
+      let now = NOW;
+      const d = deps({ clients: b.clients as never, now: () => now });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: LONG_AGO, nonce: 3, state: "sent" });
+      const data = createLiveCascadeData(D, d);
+      await data.getAvailable(ME);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed", droppedAt: NOW });
+      // a day on, its own hash isn't read any more, and a late mine is no longer looked for
+      now = NOW + DAY;
+      receipts[H(20)] = { status: "success", logs: [requested(3n)] };
+      const before = b.seen.ownReceipts;
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(b.seen.ownReceipts).toBe(before);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
+      // just under a day, it is
+      now = NOW + DAY - 60_000;
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "sent", batchId: 3n });
+      expect((d.opLog.get(ME, "w") as WithdrawalOp).droppedAt).toBeUndefined();
+    });
+
+    it("taken for dropped before that was dated, stop looking a day after they were sent", async () => {
+      const receipts: Record<string, unknown> = {};
+      const b = base({ nonce: 4, receipts });
+      const { d, data } = setUp(b, LONG_AGO, { nonce: 3 });
+      await data.getAvailable(ME);
+      d.opLog.update(ME, "w", { droppedAt: undefined });
+      receipts[H(20)] = { status: "success", logs: [requested(3n)] };
+      const before = b.seen.ownReceipts;
+      expect((await data.getAvailable(ME)).availableShares).toBe(all);
+      expect(b.seen.ownReceipts).toBe(before);
     });
 
     describe("two of them asking for the same shares", () => {

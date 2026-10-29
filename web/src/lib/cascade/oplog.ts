@@ -57,6 +57,9 @@ export interface WithdrawalOp extends OpBase {
   /** The last Base block read so far in the search for what took this request's place, when its hash
    * can't be mined: the next search reads on from there (facts.ts, requestReplacement). */
   searchedTo?: bigint;
+  /** ms since the epoch when it was taken for dropped (live.ts): its own hash is still looked at for a
+   * day after, in case Base mines it late. */
+  droppedAt?: number;
   batchId?: bigint;
   cancelled?: { hash: Hex; at: number };
 }

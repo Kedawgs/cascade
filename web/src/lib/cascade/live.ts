@@ -55,9 +55,13 @@ export interface LiveDeps {
 
 /** An unstake request Base never took, and nothing took the place of. */
 const REQUEST_DROPPED = "This unstake request never reached Base, so nothing was asked.";
-/** Marked failed as dropped (REQUEST_DROPPED): a judgement from the chain, not the wallet's own answer,
- * so its hash is still looked at. */
-const takenForDropped = (o: WithdrawalOp) => o.state === "failed" && o.error === REQUEST_DROPPED && !!o.hash;
+/** How long after a request was taken for dropped its own hash is still looked at. */
+const LATE_MINE_MS = 24 * 60 * 60_000;
+/** Marked failed as dropped (REQUEST_DROPPED) less than LATE_MINE_MS ago: a judgement from the chain,
+ * not the wallet's own answer, so its hash is still looked at. One marked before that was dated goes by
+ * when it was sent. */
+const takenForDropped = (o: WithdrawalOp, now: number) =>
+  o.state === "failed" && o.error === REQUEST_DROPPED && !!o.hash && now - (o.droppedAt ?? o.sentAt ?? o.createdAt) < LATE_MINE_MS;
 
 /** A stand-in payee for quoting the bridge fee before there is an unstake. */
 const ANY_ACCOUNT: Address = "0x0000000000000000000000000000000000000001";
@@ -272,17 +276,19 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * the one decision, cancelTook), each with its batch: as recorded, or from its request's receipt, which
    * is then recorded. One whose hash can never be mined is followed to the request in its place (whose
    * hash and batch are recorded), or, with none, marked failed: it asked for nothing, and isn't searched
-   * for again. Only its own hash is still looked at: if Base shows that mined after all, it is put back
-   * as sent and counts again. */
+   * for again. For a day after, only its own hash is still looked at: if Base shows that mined after
+   * all, it is put back as sent and counts again. */
   async function placedWithdrawals(a: Address, withdrawals: WithdrawalOp[]): Promise<Placed[]> {
     const all = deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal");
     const revived = await Promise.all(
-      withdrawals.filter(takenForDropped).map(async (o): Promise<WithdrawalOp | undefined> => {
-        const batchId = await droppedRequestMined(c, o);
-        if (batchId === undefined) return undefined;
-        deps.opLog.update(a, o.id, { state: "sent", error: undefined, batchId });
-        return { ...o, state: "sent", error: undefined, batchId };
-      }),
+      withdrawals
+        .filter((o) => takenForDropped(o, deps.now()))
+        .map(async (o): Promise<WithdrawalOp | undefined> => {
+          const batchId = await droppedRequestMined(c, o);
+          if (batchId === undefined) return undefined;
+          deps.opLog.update(a, o.id, { state: "sent", error: undefined, droppedAt: undefined, batchId });
+          return { ...o, state: "sent", error: undefined, droppedAt: undefined, batchId };
+        }),
     );
     const open = [...withdrawals.filter((o) => o.state !== "failed"), ...revived.filter((o) => o !== undefined)];
     const places = await Promise.all(open.map((o) => requestBatch(c, o, deps.now())));
@@ -306,7 +312,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       if (p.replacedBy) deps.opLog.update(a, o.id, { hash: p.replacedBy, batchId: p.batchId });
       else if (p.batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId: p.batchId });
       // still running in this tab: its own flow is waiting on it
-      if (p.dropped && !deps.opLog.isActive(o.id)) deps.opLog.update(a, o.id, { state: "failed", error: REQUEST_DROPPED });
+      if (p.dropped && !deps.opLog.isActive(o.id)) deps.opLog.update(a, o.id, { state: "failed", error: REQUEST_DROPPED, droppedAt: deps.now() });
       return { ...o, batchId: p.batchId, unsure: p.unsure, dropped: p.dropped };
     });
     const gone = await cancelledIn(placed);

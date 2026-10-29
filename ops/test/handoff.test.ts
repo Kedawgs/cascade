@@ -46,6 +46,44 @@ describe("Safe Transaction Builder batch files", () => {
     expect(checksumSerialize("a")).toBe('"a"');
   });
 
+  it("matches the tx-builder's own golden vector (safe-react-apps, apps/tx-builder/src/lib/checksum.test.js)", () => {
+    // upstream's test batch, verbatim; its addChecksum hashed it with `checksum: ""` still in meta
+    const upstream = {
+      version: "1.0",
+      chainId: "4",
+      createdAt: 1646321521061,
+      meta: {
+        name: "test batch file",
+        txBuilderVersion: "1.4.0",
+        checksum: "",
+        createdFromSafeAddress: "0xDF8a1Ce35c9a6ACE153B4e0767942f1E2291a1Aa",
+        createdFromOwnerAddress: "0x49d4450977E2c95362C13D3a31a09311E0Ea26A6",
+      },
+      transactions: [
+        {
+          to: "0x49d4450977E2c95362C13D3a31a09311E0Ea26A6",
+          value: "0",
+          contractMethod: { inputs: [{ internalType: "address", name: "paramAddress", type: "address" }], name: "testAddress", payable: false },
+          contractInputsValues: { paramAddress: "0x49d4450977E2c95362C13D3a31a09311E0Ea26A6" },
+        },
+        {
+          to: "0x49d4450977E2c95362C13D3a31a09311E0Ea26A6",
+          value: "0",
+          contractMethod: { inputs: [{ internalType: "bool", name: "paramBool", type: "bool" }], name: "testBool", payable: false },
+          contractInputsValues: { paramAddress: "", paramBool: "false" },
+        },
+        { to: "0x49d4450977E2c95362C13D3a31a09311E0Ea26A6", value: "2000000000000000000", data: "0x42f4579000000000000000000000000049d4450977e2c95362c13d3a31a09311e0ea26a6" },
+      ],
+    };
+    const GOLDEN = "0x4ecbfd364aa6759983915644e73f8bd411e85a2dc306f252a387c2728c4db64c";
+    expect(keccak256(stringToBytes(checksumSerialize({ ...upstream, meta: { ...upstream.meta, name: null } })))).toBe(GOLDEN);
+    // the same file once its checksum is filled in validates the way the app's importer checks it:
+    // validateChecksum deletes meta.checksum, then hashes, as safeChecksum does
+    const stored = { ...upstream, meta: { ...upstream.meta, checksum: GOLDEN } };
+    const { checksum: _, ...withoutChecksum } = stored.meta;
+    expect(safeChecksum(stored as never)).toBe(keccak256(stringToBytes(checksumSerialize({ ...stored, meta: { ...withoutChecksum, name: null } }))));
+  });
+
   it("checksums everything but the batch's name, without its own checksum", () => {
     const { checksum, ...meta } = file.meta;
     const bare = { ...file, meta };

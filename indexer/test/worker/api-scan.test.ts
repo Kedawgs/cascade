@@ -75,7 +75,10 @@ describe("GET /v1/scan/{vault}", () => {
   it("serves the deployment-wide half the site's store saves", async () => {
     const r = await get(`/v1/scan/${VAULT}`);
     expect(r.status).toBe(200);
-    const s = await json(r);
+    const text = await r.text();
+    // built from the pages' fragments, byte for byte what the store would save
+    expect(text).toBe(JSON.stringify(sharedHalf({ vault: VAULT, from: FROM, next: SETTLED + 1n, events: SHARED_EVENTS })));
+    const s = JSON.parse(text) as ScanState;
     assertValidScanState(s, VAULT, FROM);
     expect(s).toEqual(sharedHalf({ vault: VAULT, from: FROM, next: SETTLED + 1n, events: SHARED_EVENTS }));
     expect([s.vault, s.from, s.next, s.deposited, s.redeemed]).toEqual([VAULT, String(FROM), String(SETTLED + 1n), [], []]);

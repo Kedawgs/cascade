@@ -1,6 +1,7 @@
 import { type Hex, pad } from "viem";
 import type { Config } from "./config.ts";
-import { type AccountEvent, type SeedEvent, sharedHalf, accountHalf } from "./seed.ts";
+import { type AccountEvent, accountHalf, sharedHalfJson } from "./seed.ts";
+import { seedPageOf } from "./store.ts";
 
 // The read-only HTTP routes (spec section 4). Nothing here writes: every route reads D1 through fixed
 // prepared statements, and every parameter is checked before D1 is touched.
@@ -42,7 +43,7 @@ export async function handleScan(request: Request, env: { DB: D1Database }, cfg:
     const db = env.DB;
     const second =
       account === undefined
-        ? db.prepare("SELECT json FROM seed_pages ORDER BY page")
+        ? db.prepare("SELECT page, first_block, last_block, count, delivered, staked, payouts FROM seed_pages ORDER BY page")
         : db
             .prepare(
               // by the account's index: the planner would otherwise walk every account's deposits
@@ -68,10 +69,10 @@ export async function handleScan(request: Request, env: { DB: D1Database }, cfg:
   const next = BigInt(cursor.settled_to as number) + 1n;
   const vault = cfg.deployment.vault;
 
-  let body: unknown;
+  let body: string;
   if (account === undefined) {
-    const events = rows[1].flatMap((r) => JSON.parse(r.json as string) as SeedEvent[]);
-    body = sharedHalf({ vault, from, next, events });
+    // joined from the pages' pre-split lists: no page wholly inside [from, next) is parsed
+    body = sharedHalfJson({ vault, from, next, pages: rows[1].map(seedPageOf) });
   } else {
     const deposited: AccountEvent[] = [];
     const redeemed: AccountEvent[] = [];
@@ -79,7 +80,7 @@ export async function handleScan(request: Request, env: { DB: D1Database }, cfg:
       const args = JSON.parse(r.args as string) as { key: Hex; assets: string };
       (r.event === "Deposited" ? deposited : redeemed).push({ key: args.key, txHash: r.tx_hash as Hex, block: String(r.block), assets: args.assets });
     }
-    body = accountHalf({ vault, from, next, deposited, redeemed });
+    body = JSON.stringify(accountHalf({ vault, from, next, deposited, redeemed }));
   }
 
   const headers: Record<string, string> = {
@@ -89,5 +90,5 @@ export async function handleScan(request: Request, env: { DB: D1Database }, cfg:
     "Access-Control-Expose-Headers": "Cascade-Settled-Time",
   };
   if (cursor.settled_time !== null && cursor.settled_time !== undefined) headers["Cascade-Settled-Time"] = String(cursor.settled_time);
-  return new Response(JSON.stringify(body), { status: 200, headers });
+  return new Response(body, { status: 200, headers });
 }

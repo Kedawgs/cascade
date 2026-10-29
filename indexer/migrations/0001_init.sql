@@ -51,9 +51,13 @@ CREATE TABLE txs (                                      -- senders of attributab
   selector TEXT, nonce INTEGER, PRIMARY KEY (chain, hash));  -- to/selector/nonce null when known from args
 CREATE INDEX txs_by_from ON txs(chain, from_addr);
 
--- the deployment-wide half of the seed, pre-built: pages of up to 500 events in block order
+-- the deployment-wide half of the seed, pre-built: pages of up to 500 events in block order, each kept as
+-- the half's three lists already in JSON (the elements joined by commas, no brackets), so serving the half
+-- joins strings instead of parsing every page (the spec's single json column cost about 33 ms of CPU at
+-- 40,000 events, past Workers Free's 10 ms)
 CREATE TABLE seed_pages (page INTEGER PRIMARY KEY, first_block INTEGER NOT NULL,
-                         last_block INTEGER NOT NULL, count INTEGER NOT NULL, json TEXT NOT NULL);
+                         last_block INTEGER NOT NULL, count INTEGER NOT NULL,
+                         delivered TEXT NOT NULL, staked TEXT NOT NULL, payouts TEXT NOT NULL);
 
 -- the last 120 per-tick readings of both chains' state (pruned every hour)
 CREATE TABLE readings (at INTEGER PRIMARY KEY, base_block INTEGER, bit_block INTEGER, json TEXT NOT NULL);

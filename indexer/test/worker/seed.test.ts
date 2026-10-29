@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { type Hex, keccak256, pad, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
-import { accountHalf, appendPages, rebuildPages, type SeedEvent, seedEventsOf, sharedHalf } from "../../src/seed.ts";
+import { accountHalf, appendPages, pageEvents, rebuildPages, type SeedEvent, type SeedPage, seedEventsOf, sharedHalf, sharedHalfJson } from "../../src/seed.ts";
 import { appendStatements, rebuildStatements } from "../../src/store.ts";
 import { wipe } from "./d1-count.ts";
 import { testConfig, tx } from "./fixtures.ts";
@@ -67,12 +67,12 @@ describe("seed pages", () => {
       [1, 500, 1500n, 1999n],
       [2, 201, 2000n, 2200n],
     ]);
-    expect(JSON.parse(pages[2].json)).toHaveLength(201);
+    expect(pageEvents(pages[2])).toHaveLength(201);
   });
 
   it("fills the last page to 500, then opens another", () => {
     const [last] = rebuildPages(events(495));
-    const out = appendPages({ page: last.page, events: JSON.parse(last.json) }, events(10, 2000));
+    const out = appendPages({ page: last.page, events: pageEvents(last) }, events(10, 2000));
     expect(out.map((p) => [p.page, p.count, p.firstBlock, p.lastBlock])).toEqual([
       [0, 500, 1000n, 2004n],
       [1, 5, 2005n, 2009n],
@@ -91,7 +91,7 @@ describe("seed pages", () => {
     logs[1] = { ...logs[1], removed: true };
     const again = rebuildPages(seedEventsOf(logs, d));
     expect(again[0].count).toBe(2);
-    expect((JSON.parse(again[0].json) as SeedEvent[]).map((e) => e.block)).toEqual(["5", "7"]);
+    expect(pageEvents(again[0]).map((e) => e.block)).toEqual(["5", "7"]);
   });
 });
 
@@ -152,5 +152,43 @@ describe("the two halves", () => {
     const a = accountHalf({ vault: d.vault, from: 1000n, next: 1001n, deposited: [{ key: KEY, txHash: tx(4), block: "1001", assets: "1" }], redeemed: [] });
     expect(a.deposited).toEqual([]);
     expect(pad("0x01")).toHaveLength(66);
+  });
+});
+
+describe("the shared half built from page fragments", () => {
+  /** A mixed history: deliveries, stakes and chunks, several to a block. */
+  const mixed: SeedEvent[] = Array.from({ length: 23 }, (_, i): SeedEvent => {
+    const block = String(1000 + Math.floor(i / 2));
+    if (i % 3 === 0) return { kind: "delivered", batchId: String(i), key: KEY, txHash: tx(i), block };
+    if (i % 3 === 1) return { kind: "staked", block, txHash: tx(i) };
+    return { kind: "payout", key: KEY, chunk: i, taken: 1, txHash: tx(i), block };
+  });
+
+  it("is byte for byte the shared half, for every [from, next), across pages and their edges", () => {
+    const pages = rebuildPages(mixed, 4);
+    expect(pages.length).toBeGreaterThan(4);
+    for (let from = 998n; from <= 1013n; from++) {
+      for (const next of [from, from + 1n, from + 3n, from + 7n, 1013n]) {
+        if (next < from) continue;
+        expect(sharedHalfJson({ vault: d.vault, from, next, pages }), `[${from}, ${next})`).toBe(JSON.stringify(sharedHalf({ vault: d.vault, from, next, events: mixed })));
+      }
+    }
+    expect(sharedHalfJson({ vault: d.vault, from: 1000n, next: 1000n, pages: [] })).toBe(JSON.stringify(sharedHalf({ vault: d.vault, from: 1000n, next: 1000n, events: [] })));
+  });
+
+  it("joins the pages wholly inside [from, next) as they are, parsing only a page at an edge", () => {
+    const inside: SeedPage = { page: 0, firstBlock: 1000n, lastBlock: 1001n, count: 2, delivered: "NOT-PARSED", staked: "", payouts: "" };
+    const edge = rebuildPages([{ kind: "staked", block: "1002", txHash: tx(1) }, { kind: "staked", block: "1003", txHash: tx(2) }])[0];
+    const json = sharedHalfJson({ vault: d.vault, from: 1000n, next: 1003n, pages: [inside, { ...edge, page: 1 }] });
+    expect(json).toContain('"delivered":[NOT-PARSED]');
+    expect(json).toContain(`"staked":[${JSON.stringify({ block: "1002", txHash: tx(1) })}]`);
+  });
+
+  it("can give back a page's events, for appending to it", () => {
+    const [page] = rebuildPages(mixed.slice(0, 6));
+    const byTx = (es: SeedEvent[]) => [...es].sort((a, b) => a.txHash.localeCompare(b.txHash));
+    // the same events, in block order (within a block, grouped by kind: the halves keep kinds apart)
+    expect(byTx(pageEvents(page))).toEqual(byTx(mixed.slice(0, 6)));
+    expect(pageEvents(page).map((e) => e.block)).toEqual(["1000", "1000", "1001", "1001", "1002", "1002"]);
   });
 });

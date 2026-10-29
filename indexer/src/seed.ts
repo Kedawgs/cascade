@@ -32,13 +32,47 @@ export type SeedEvent =
   | { kind: "staked"; block: string; txHash: Hex }
   | { kind: "payout"; key: Hex; chunk: number; taken: number; txHash: Hex; block: string };
 
-/** A row of `seed_pages`. */
+/** A row of `seed_pages`: its events pre-split into the shared half's three lists, each a JSON fragment
+ * (the list's elements joined by commas, without the brackets), so serving the half joins strings
+ * rather than parsing every page. */
 export interface SeedPage {
   page: number;
   firstBlock: bigint;
   lastBlock: bigint;
   count: number;
-  json: string;
+  delivered: string;
+  staked: string;
+  payouts: string;
+}
+
+type Lists = Pick<ScanState, "delivered" | "staked" | "payouts">;
+
+/** The shared half's list elements, key order as the site's store writes them. */
+const deliveredOf = (e: Extract<SeedEvent, { kind: "delivered" }>): ScanState["delivered"][number] => ({ batchId: e.batchId, key: e.key, txHash: e.txHash, block: e.block });
+const stakedOf = (e: Extract<SeedEvent, { kind: "staked" }>): ScanState["staked"][number] => ({ block: e.block, txHash: e.txHash });
+const payoutOf = (e: Extract<SeedEvent, { kind: "payout" }>): ScanState["payouts"][number] => ({ key: e.key, chunk: e.chunk, taken: e.taken, txHash: e.txHash, block: e.block });
+
+function listsOf(events: readonly SeedEvent[]): Lists {
+  return {
+    delivered: events.flatMap((e) => (e.kind === "delivered" ? [deliveredOf(e)] : [])),
+    staked: events.flatMap((e) => (e.kind === "staked" ? [stakedOf(e)] : [])),
+    payouts: events.flatMap((e) => (e.kind === "payout" ? [payoutOf(e)] : [])),
+  };
+}
+
+/** A list's JSON without its brackets. */
+const fragment = (xs: readonly unknown[]) => xs.map((x) => JSON.stringify(x)).join(",");
+const parseFragment = <T>(f: string): T[] => (f === "" ? [] : (JSON.parse(`[${f}]`) as T[]));
+
+/** A page's events again (for appending to it), in block order, grouped by kind within a block. */
+export function pageEvents(p: Pick<SeedPage, "delivered" | "staked" | "payouts">): SeedEvent[] {
+  const events: SeedEvent[] = [
+    ...parseFragment<ScanState["delivered"][number]>(p.delivered).map((e): SeedEvent => ({ kind: "delivered", ...e })),
+    ...parseFragment<ScanState["staked"][number]>(p.staked).map((e): SeedEvent => ({ kind: "staked", ...e })),
+    ...parseFragment<ScanState["payouts"][number]>(p.payouts).map((e): SeedEvent => ({ kind: "payout", ...e })),
+  ];
+  // a stable sort keeps each kind's own order
+  return events.sort((a, b) => (BigInt(a.block) < BigInt(b.block) ? -1 : BigInt(a.block) > BigInt(b.block) ? 1 : 0));
 }
 
 export const PAGE_SIZE = 500;
@@ -70,7 +104,16 @@ function pagesFrom(first: number, events: readonly SeedEvent[], pageSize: number
   const out: SeedPage[] = [];
   for (let i = 0; i < events.length; i += pageSize) {
     const part = events.slice(i, i + pageSize);
-    out.push({ page: first + out.length, firstBlock: BigInt(part[0].block), lastBlock: BigInt(part[part.length - 1].block), count: part.length, json: JSON.stringify(part) });
+    const lists = listsOf(part);
+    out.push({
+      page: first + out.length,
+      firstBlock: BigInt(part[0].block),
+      lastBlock: BigInt(part[part.length - 1].block),
+      count: part.length,
+      delivered: fragment(lists.delivered),
+      staked: fragment(lists.staked),
+      payouts: fragment(lists.payouts),
+    });
   }
   return out;
 }
@@ -92,18 +135,33 @@ const inRange = (from: bigint, next: bigint) => (e: { block: string }) => BigInt
 /** The deployment-wide half: what the site's store saves under the front door and deploy block, with the
  * account lists empty. Only events in [from, next). */
 export function sharedHalf(o: { vault: Hex; from: bigint; next: bigint; events: readonly SeedEvent[] }): ScanState {
-  const events = o.events.filter(inRange(o.from, o.next));
   return {
     v: 1,
     vault: o.vault.toLowerCase(),
     from: String(o.from),
     next: String(o.next),
-    delivered: events.flatMap((e) => (e.kind === "delivered" ? [{ batchId: e.batchId, key: e.key, txHash: e.txHash, block: e.block }] : [])),
-    staked: events.flatMap((e) => (e.kind === "staked" ? [{ block: e.block, txHash: e.txHash }] : [])),
-    payouts: events.flatMap((e) => (e.kind === "payout" ? [{ key: e.key, chunk: e.chunk, taken: e.taken, txHash: e.txHash, block: e.block }] : [])),
+    ...listsOf(o.events.filter(inRange(o.from, o.next))),
     deposited: [],
     redeemed: [],
   };
+}
+
+/** The shared half as JSON, byte for byte JSON.stringify(sharedHalf(...)) of the pages' events, built from
+ * the pages' fragments: a page wholly inside [from, next) is joined as it is (never parsed, so serving a
+ * long history costs little CPU); only a page across an edge is parsed and filtered. */
+export function sharedHalfJson(o: { vault: Hex; from: bigint; next: bigint; pages: readonly SeedPage[] }): string {
+  const parts: Record<keyof Lists, string[]> = { delivered: [], staked: [], payouts: [] };
+  const keep = inRange(o.from, o.next);
+  for (const p of o.pages) {
+    if (p.count === 0 || p.lastBlock < o.from || p.firstBlock >= o.next) continue;
+    const whole = p.firstBlock >= o.from && p.lastBlock < o.next;
+    for (const k of ["delivered", "staked", "payouts"] as const) {
+      const f = whole ? p[k] : fragment(parseFragment<{ block: string }>(p[k]).filter(keep));
+      if (f !== "") parts[k].push(f);
+    }
+  }
+  const head = JSON.stringify({ v: 1, vault: o.vault.toLowerCase(), from: String(o.from), next: String(o.next) }).slice(0, -1);
+  return `${head},"delivered":[${parts.delivered.join(",")}],"staked":[${parts.staked.join(",")}],"payouts":[${parts.payouts.join(",")}],"deposited":[],"redeemed":[]}`;
 }
 
 /** One account's half: its Deposited and Redeemed, with the deployment lists empty. Only events in

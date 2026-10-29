@@ -461,11 +461,23 @@ export function upsertChunkCheck(
 
 const writePages = (db: D1Database, pages: readonly SeedPage[]): D1PreparedStatement[] => {
   const stmt = db.prepare(
-    `INSERT INTO seed_pages (page, first_block, last_block, count, json) VALUES (?1, ?2, ?3, ?4, ?5)
-     ON CONFLICT (page) DO UPDATE SET first_block = excluded.first_block, last_block = excluded.last_block, count = excluded.count, json = excluded.json`,
+    `INSERT INTO seed_pages (page, first_block, last_block, count, delivered, staked, payouts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+     ON CONFLICT (page) DO UPDATE SET first_block = excluded.first_block, last_block = excluded.last_block, count = excluded.count,
+       delivered = excluded.delivered, staked = excluded.staked, payouts = excluded.payouts`,
   );
-  return pages.map((p) => stmt.bind(p.page, int(p.firstBlock), int(p.lastBlock), p.count, p.json));
+  return pages.map((p) => stmt.bind(p.page, int(p.firstBlock), int(p.lastBlock), p.count, p.delivered, p.staked, p.payouts));
 };
+
+/** A seed_pages row as read back. */
+export const seedPageOf = (r: Record<string, unknown>): SeedPage => ({
+  page: Number(r.page),
+  firstBlock: BigInt(r.first_block as number),
+  lastBlock: BigInt(r.last_block as number),
+  count: Number(r.count),
+  delivered: r.delivered as string,
+  staked: r.staked as string,
+  payouts: r.payouts as string,
+});
 
 /** The seed pages after newly settled seed events: the last page filled up to 500, then new pages
  * (committed with the cursor that settled them). */

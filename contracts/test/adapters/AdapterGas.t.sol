@@ -23,6 +23,12 @@ contract AdapterGasTest is AdaptersFixture {
     //     (187,450 + 300,000) x 1.15 = 560,567 <= 540,000 + 26,450 = 566,450.
     //   Base:      128,115 x 1.15 - 29,900 = 117,432 -> 120,000 (no precompile allowance on this side)
     // Both fit the cap: 540,000 + 200 x 26,450 = 5,830,000 and 120,000 + 200 x 29,900 = 6,100,000 <= 7,000,000.
+    // Since then (2026-10-29, the pre-audit changes) the vault side reads 1+0 = 136,763, 50+50 = 2,437,137,
+    // 100+100 = 4,620,503 (main read 136,914 / 2,430,018 / 4,613,184; a delivery with redeems now reads the
+    // booked and ramping stake, about 7,000 gas, and a deposit-only one does not). The real-AlphaVault 1+0
+    // point is not re-measured offline, so the test carries the vault's own change since the calibration
+    // onto it: 187,450 + (136,763 - 134,606) = 189,607, and (189,607 + 300,000) x 1.15 = 563,048 <= 566,450,
+    // about 3,400 gas of slack. A batch with redeems has more: 50+50 is 3,147,707 <= 3,185,000.
     uint256 public constant GAS_BASE_TO_BITTENSOR = 540_000;
     uint256 public constant GAS_PER_ENTRY_TO_BITTENSOR = 26_450;
     uint256 public constant GAS_BASE_TO_BASE = 120_000;
@@ -31,6 +37,11 @@ contract AdapterGasTest is AdaptersFixture {
     /// Two real precompile calls a delivery makes that the mock does not charge for (a real removeStake
     /// measured 144,811 gas; bittensor_evm_home_chain.md).
     uint256 constant PRECOMPILE_ALLOWANCE = 300_000;
+
+    /// Task 8's real-AlphaVault receiver gas for the 1+0 point (BittensorFork's "receiver gas 1+0"), and the
+    /// mock 1+0 gas this test read at the same calibration. The vault's own changes since move both alike.
+    uint256 constant REAL_ALPHAVAULT_1_0 = 187_450;
+    uint256 constant MOCK_1_0_AT_CALIBRATION = 134_606;
 
     /// 100 holders (0x1000 + i) deposit 10e18 each at A = 0, S = 0: 1e25 shares each.
     function setUp() public override {
@@ -138,6 +149,12 @@ contract AdapterGasTest is AdaptersFixture {
         emit log_named_uint("vault gas 50+50", g50);
         emit log_named_uint("vault gas 100+100", g100);
         assertGe(GAS_BASE_TO_BITTENSOR + 1 * GAS_PER_ENTRY_TO_BITTENSOR, (g1 + PRECOMPILE_ALLOWANCE) * 115 / 100, "1+0");
+        // the real-AlphaVault 1+0 point, carried forward by the vault's change since the calibration
+        uint256 real1 = REAL_ALPHAVAULT_1_0 + g1 - MOCK_1_0_AT_CALIBRATION;
+        uint256 need1 = (real1 + PRECOMPILE_ALLOWANCE) * 115 / 100;
+        emit log_named_uint("real 1+0 (estimated)", real1);
+        emit log_named_uint("real 1+0 slack", GAS_BASE_TO_BITTENSOR + GAS_PER_ENTRY_TO_BITTENSOR - need1);
+        assertGe(GAS_BASE_TO_BITTENSOR + 1 * GAS_PER_ENTRY_TO_BITTENSOR, need1, "real 1+0");
         assertGe(
             GAS_BASE_TO_BITTENSOR + 100 * GAS_PER_ENTRY_TO_BITTENSOR, (g50 + PRECOMPILE_ALLOWANCE) * 115 / 100, "50+50"
         );

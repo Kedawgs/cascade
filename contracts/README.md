@@ -155,7 +155,9 @@ the fee rule.
   cap. They are constructor arguments, so a tune is a redeploy, not a code change. A delivery that
   still runs short fails and is re-executed with `gasLimitOverride`; nothing is lost. The
   Bittensor-side figures rest on mock-precompile measurements plus a 300,000-gas allowance; the
-  1-deposit point has 5,883 gas of slack against the real-AlphaVault fork measurement. Real-precompile
+  1-deposit point has about 3,400 gas of slack against the real-AlphaVault fork measurement (187,450,
+  carried forward by the vault's own gas changes since, which the mock measures; `AdapterGas.t.sol`
+  checks it, and a deposit-only delivery does not read the allowance state). Real-precompile
   delivery gas is unmeasured until the first live batch, which should therefore be the single-entry
   batch of the checklist (item 28), with the re-execution path and its `verifierResults` source
   ready.
@@ -253,8 +255,8 @@ forge lint
   ERC-165 gate, tokens, then `ccipReceive` as the Router), and `MockAlphaVault` converts 1:1 both
   ways with a settable pause, floor and short payment. Also `MockAddressMapping`, `StubBridge` and
   `MockTAO`.
-- **Gas:** a 100 + 100 batch delivery costs 4,549,540 gas (test bound 6,500,000); 50 + 50 costs
-  2,398,159 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
+- **Gas:** a 100 + 100 batch delivery costs 4,549,546 gas (test bound 6,500,000); 50 + 50 costs
+  2,398,165 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
   (one `getStake` per hotkey in the set). The lane gives about 7.2M. Operator limits default to
   50 + 50; raise them to 100 only after a fork measurement.
 - **Sizes:** `CascadeVault` is 24,509 B of runtime code at `optimizer_runs = 200` (limit 24,576;

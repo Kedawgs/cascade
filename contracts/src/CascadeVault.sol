@@ -580,22 +580,7 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         // one queue for both steps: bounced deposits first, then redeems
         PayoutBatch memory b;
         _creditDeposits(key, deposits, A, S, insolvent, b);
-        // The allowance base is the root stake (gross less the liquid balance: liquid TAO, such as this
-        // or an earlier delivery's deposits or a direct deposit, never counts), at most the stake the
-        // vault booked, less what stakeIdle added and has not yet ramped in over STAKE_RAMP: capital
-        // borrowed for a transaction, parked for less than a day, or gifted as stake, cannot raise it.
-        _burnRedeems(
-            key,
-            peer,
-            redeems,
-            A,
-            S,
-            _sub0(
-                Math.min(_sub0(gross + ED_RESERVE, address(this).balance), bookedStake),
-                _unspent(rampingStake, lastStakeAt, STAKE_RAMP)
-            ),
-            b
-        );
+        _burnRedeems(key, peer, redeems, A, S, gross, b);
         if (b.remaining != 0) {
             b.sourceChain = sourceChain;
             b.frontDoor = sender;
@@ -839,24 +824,37 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Delivery steps 2-3: burns each redeem at (A, S), clipped to the holder's balance, the per-entry
-    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of `base` (the
-    /// ramped-in root stake), minDailyOutflow) per 24-hour window, and queues it in `b` after any bounced
-    /// deposits. A redeem worth less than MIN_REDEEM_VALUE after clipping is deferred, not burned. Only
-    /// burns count against the window. The caller fills in the rest of `b`.
+    /// bound and the front door's remaining daily allowance, max(maxDailyOutflowBps of the base,
+    /// minDailyOutflow) per 24-hour window, and queues it in `b` after any bounced deposits. A redeem
+    /// worth less than MIN_REDEEM_VALUE after clipping is deferred, not burned. Only burns count against
+    /// the window. The caller fills in the rest of `b`. Reads nothing when there are no redeems.
     function _burnRedeems(
         bytes32 key,
         bytes32 peer,
         CascadeMessages.Entry[] memory redeems,
         uint256 A,
         uint256 S,
-        uint256 base,
+        uint256 gross,
         PayoutBatch memory b
     ) internal {
         if (redeems.length == 0) return;
         Window memory w = burnWindows[peer];
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp >= w.start + 24 hours) w = Window(uint64(block.timestamp), 0);
-        uint256 allowance = _sub0(Math.max(base * maxDailyOutflowBps / 10_000, minDailyOutflow), w.burned);
+        // The base is the root stake (gross less the liquid balance: liquid TAO, such as this or an
+        // earlier delivery's deposits or a direct deposit, never counts), at most the booked stake, less
+        // what is still ramping in over STAKE_RAMP: capital borrowed for a transaction, parked for less
+        // than a day, or gifted as stake, cannot raise it.
+        uint256 allowance = _sub0(
+            Math.max(
+                _sub0(
+                        Math.min(_sub0(gross + ED_RESERVE, address(this).balance), bookedStake),
+                        _unspent(rampingStake, lastStakeAt, STAKE_RAMP)
+                    ) * maxDailyOutflowBps / 10_000,
+                minDailyOutflow
+            ),
+            w.burned
+        );
         uint256 maxEntry = maxEntryValue;
         // this delivery's burns, without its bounced deposits
         uint256 burned;

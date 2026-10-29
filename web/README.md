@@ -19,7 +19,7 @@ pnpm install
 pnpm dev                                  # http://localhost:3000
 pnpm test                                 # vitest, pure logic (LIVE=1 also reads mainnet)
 pnpm typecheck && pnpm lint
-pnpm build                                # static export into out/
+pnpm build                                # static export into out/, with out/_headers for Cloudflare Pages
 ```
 
 Without `.env.local` the site shows that it isn't connected to a deployment and no figure appears.
@@ -34,6 +34,16 @@ door to the vault, TAO and the Base adapter; the adapters to each other; on v3 t
 front door to each other and to the oracle; on Bittensor the vault to this front door and its
 adapter. A mismatch turns staking, unstaking and claiming off with one message; a check that can't
 be read says so and sends nothing either.
+
+## Response headers
+
+The site is hosted as static files on Cloudflare Pages, which reads `out/_headers`. `public/_headers`
+sets, on every path, a Content-Security-Policy (only this site's scripts; connections only to the
+RPCs above and Base Account's `rpc.wallet.coinbase.com`; no framing, plugins, other `<base>` or form
+targets), HSTS, `nosniff`, a referrer policy and a minimal permissions policy. After `next build`,
+`scripts/csp-headers.mjs` adds each page's own policy, which allows only that page's inline scripts
+by their sha256 hashes (Next writes a few into every page, different in every build). Styles keep
+`'unsafe-inline'`: the pages have inline `style` attributes and Base Account injects a `<style>`.
 
 ## Routes
 

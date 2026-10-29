@@ -35,6 +35,11 @@ front door to each other and to the oracle; on Bittensor the vault to this front
 adapter. A mismatch turns staking, unstaking and claiming off with one message; a check that can't
 be read says so and sends nothing either.
 
+Dependencies: exact versions, a committed lockfile, install scripts blocked except as allowed, and
+`minimumReleaseAge` (7 days) in `pnpm-workspace.yaml`: pnpm installs no version published less than a
+week ago, and checks every lockfile entry against that on each install, frozen or not. A bump waits
+out the week; an urgent fix can be let through by name with `minimumReleaseAgeExclude`.
+
 ## Response headers
 
 The site is hosted as static files on Cloudflare Pages, which reads `out/_headers`. `public/_headers`

@@ -1,3 +1,7 @@
 allowBuilds:
   sharp: false
   unrs-resolver: false
+# Supply chain: never install a version published less than 7 days ago (in minutes). pnpm 11 checks
+# every lockfile entry against it on each install too, so a poisoned release caught within a week of
+# publishing never reaches a build; a dependency bump simply waits out the week.
+minimumReleaseAge: 10080

@@ -1,7 +1,7 @@
 import { d1Args, type Deps, isEnv, parseArgs, rowsOf, runIfMain, shown } from "./d1.ts";
 import { approveSql, checksOfKeySql, KEY_RE, NOTE_RE } from "./sql.ts";
 
-// pnpm checks:approve -- --env <test|production> --key <delivered key> --note "<text>" [--dry-run]
+// pnpm checks:approve -- --env <test|production> --key <delivered key> --batch <batch id> --note "<text>" [--dry-run]
 //
 // Approves a delivery check by hand (spec 6.2, "Owner approval"): after you have verified the batch yourself,
 // its key becomes ok for the keeper. It prints the check first: compare the delivered key with the key the
@@ -9,10 +9,10 @@ import { approveSql, checksOfKeySql, KEY_RE, NOTE_RE } from "./sql.ts";
 // one already ok. The next tick emails the critical checks.owner_approved, so an approval nobody expected is
 // noticed. Needs Cloudflare account access; with --dry-run it reads the check and prints the UPDATE only.
 
-const USAGE = 'usage: pnpm checks:approve -- --env <test|production> --key <0x… delivered key> --note "<text>" [--dry-run]';
+const USAGE = 'usage: pnpm checks:approve -- --env <test|production> --key <0x… delivered key> --batch <its batch id> --note "<text>" [--dry-run]';
 
 export async function main(argv: string[], deps: Deps): Promise<number> {
-  const a = parseArgs(argv, ["env", "key", "note"], ["dry-run"]);
+  const a = parseArgs(argv, ["env", "key", "batch", "note"], ["dry-run"]);
   const refuse = (why: string) => {
     deps.print(`${why}\n${USAGE}`);
     return 2;
@@ -22,6 +22,8 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
   if (!isEnv(env)) return refuse("--env must be test or production");
   if (!KEY_RE.test(a.opts.key ?? "")) return refuse("--key must be a delivered key: 0x and 64 lowercase hex digits");
   if (!NOTE_RE.test(a.opts.note ?? "")) return refuse("--note must be 1-200 letters, digits, spaces or . , : ; ( ) _ - (no quotes or backticks)");
+  // retyped by hand from the alert, so a pasted key from the wrong email can't be approved by mistake
+  if (!/^[0-9]{1,20}$/.test(a.opts.batch ?? "")) return refuse("--batch must be the check's batch id, as the alert names it (digits only)");
   const key = a.opts.key as string;
   const rows = rowsOf(await deps.wrangler(d1Args(env, checksOfKeySql(key), true)));
   if (rows.length === 0) {
@@ -44,7 +46,11 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
     deps.print("this key is already ok: nothing to approve");
     return 1;
   }
-  const update = d1Args(env, approveSql(key, a.opts.note as string, deps.now()));
+  if (!rows.every((r) => String(r.batch_id) === a.opts.batch)) {
+    deps.print(`the key's check is for batch ${rows.map((r) => r.batch_id).join(", ")}, not ${a.opts.batch}: nothing approved`);
+    return 1;
+  }
+  const update = d1Args(env, approveSql(key, a.opts.note as string));
   if (a.flags.has("dry-run")) {
     deps.print(`would approve:\n  ${shown(update)}`);
     return 0;

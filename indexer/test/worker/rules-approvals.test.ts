@@ -29,7 +29,10 @@ describe("checks.owner_approved", () => {
     expect(await okKeys()).toEqual([]);
 
     // the owner runs pnpm checks:approve: its UPDATE, applied to the test D1 directly
-    await db.prepare(approveSql(key, "verified by hand", NOW + 5)).run();
+    await db.prepare(approveSql(key, "verified by hand")).run();
+    // stamped by the database's clock, never the owner's computer's
+    const stamped = Number(await db.prepare("SELECT approved_at FROM batch_checks").first("approved_at"));
+    expect(Math.abs(stamped - Math.floor(Date.now() / 1000))).toBeLessThan(60);
     expect(await okKeys()).toEqual([key]);
 
     const s = await loadTickState(db, NOW + 60);
@@ -37,10 +40,10 @@ describe("checks.owner_approved", () => {
     const found = ownerApproved.run(c);
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ rule: "checks.owner_approved", facts: { key, batch: "43", note: "verified by hand" } });
-    expect(c.writes.meta).toEqual([{ k: "approvals_seen", v: String(NOW + 5) }]);
+    expect(c.writes.meta).toEqual([{ k: "approvals_seen", v: String(stamped) }]);
 
     // committed: the next tick finds nothing new
-    await setMeta(db, "approvals_seen", String(NOW + 5)).run();
+    await setMeta(db, "approvals_seen", String(stamped)).run();
     const next = await loadTickState(db, NOW + 120);
     expect(next.approvals).toEqual([]);
     expect(ownerApproved.run(ruleCtx({ approvals: next.approvals, meta: next.meta }))).toEqual([]);

@@ -81,27 +81,42 @@ describe("checks:approve", () => {
 
   it("with --dry-run prints the row (the delivered key next to the expected one), then the UPDATE", async () => {
     const f = fake([row]);
-    expect(await checksApprove(["--env", "test", "--key", KEY, "--note", "verified by hand", "--dry-run"], f.deps)).toBe(0);
+    expect(await checksApprove(["--env", "test", "--key", KEY, "--batch", "43", "--note", "verified by hand", "--dry-run"], f.deps)).toBe(0);
     const t = f.text();
     expect(t).toContain(`delivered key ${KEY}`);
     expect(t).toContain(`expected key  ${row.expected_key}`);
-    expect(t).toContain(`UPDATE batch_checks SET status = 'ok_by_owner', approved_note = 'verified by hand', approved_at = 1800000000 WHERE delivered_key = '${KEY}'`);
+    expect(t).toContain(`UPDATE batch_checks SET status = 'ok_by_owner', approved_note = 'verified by hand', approved_at = unixepoch() WHERE delivered_key = '${KEY}'`);
     expect(t.indexOf("delivered key")).toBeLessThan(t.indexOf("UPDATE"));
     // the SELECT was read; nothing was written
     expect(f.calls.map(sqlOf)).toEqual([expect.stringMatching(/^SELECT .* FROM batch_checks WHERE delivered_key = /)]);
   });
 
   it("refuses an unknown key, a malformed key, and a key already ok", async () => {
-    expect(await checksApprove(["--env", "test", "--key", KEY, "--note", "ok", "--dry-run"], fake([]).deps)).toBe(1);
+    expect(await checksApprove(["--env", "test", "--key", KEY, "--batch", "43", "--note", "ok", "--dry-run"], fake([]).deps)).toBe(1);
     const bad = fake([row]);
-    expect(await checksApprove(["--env", "test", "--key", "0xABC", "--note", "ok"], bad.deps)).toBe(2);
+    expect(await checksApprove(["--env", "test", "--key", "0xABC", "--batch", "43", "--note", "ok"], bad.deps)).toBe(2);
     expect(bad.calls).toEqual([]);
-    expect(await checksApprove(["--env", "test", "--key", KEY, "--note", "ok"], fake([{ ...row, status: "ok" }]).deps)).toBe(1);
+    expect(await checksApprove(["--env", "test", "--key", KEY, "--batch", "43", "--note", "ok"], fake([{ ...row, status: "ok" }]).deps)).toBe(1);
+  });
+
+  it("makes the owner retype the batch id, and refuses one that isn't the check's", async () => {
+    const f = fake([row]);
+    expect(await checksApprove(["--env", "test", "--key", KEY, "--note", "ok", "--dry-run"], f.deps)).toBe(2);
+    expect(await checksApprove(["--env", "test", "--key", KEY, "--batch", "44", "--note", "ok"], f.deps)).toBe(1);
+    expect(f.text()).toContain("batch 43");
+    expect(f.calls.map(sqlOf).filter((s) => s.startsWith("UPDATE"))).toEqual([]);
+  });
+
+  it("takes hold ids up to 200 characters (a payout landing's is about 150)", async () => {
+    const id = `bridge.payout:0x${"ab".repeat(32)}:0:0x${"cd".repeat(32)}`;
+    expect(id.length).toBeGreaterThan(120);
+    expect(await holdClear(["--env", "test", "--dry-run", "--id", id, "--note", "ok"], fake().deps)).toBe(0);
+    expect(await holdClear(["--env", "test", "--dry-run", "--id", "a".repeat(201), "--note", "ok"], fake().deps)).toBe(2);
   });
 
   it("without --dry-run runs the UPDATE after printing the row", async () => {
     const f = fake([row]);
-    expect(await checksApprove(["--env", "test", "--key", KEY, "--note", "verified"], f.deps)).toBe(0);
+    expect(await checksApprove(["--env", "test", "--key", KEY, "--batch", "43", "--note", "verified"], f.deps)).toBe(0);
     expect(f.calls.map(sqlOf)).toEqual([expect.stringMatching(/^SELECT/), expect.stringMatching(/^UPDATE batch_checks SET status = 'ok_by_owner'/)]);
   });
 });

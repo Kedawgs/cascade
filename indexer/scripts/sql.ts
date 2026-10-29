@@ -6,7 +6,7 @@
 /** A note: letters, digits, spaces and . , : ; ( ) _ - only (no quote, no backtick). */
 export const NOTE_RE = /^[A-Za-z0-9 .,:;()_-]{1,200}$/;
 /** A hold id (e.g. `bridge.batch:42:0x…`) or a public id (`h_3f9a0c1e`). */
-export const HOLD_ID_RE = /^[a-z0-9_.:-]{1,120}$/;
+export const HOLD_ID_RE = /^[a-z0-9_.:-]{1,200}$/;
 /** A delivered batch key. */
 export const KEY_RE = /^0x[0-9a-f]{64}$/;
 export const ALERT_ID_RE = /^[0-9]{1,12}$/;
@@ -28,6 +28,7 @@ export const checksOfKeySql = (key: string): string =>
   `SELECT batch_id, delivered_key, expected_key, status, detail, delivered_tx, closed_tx, message_id FROM batch_checks WHERE delivered_key = '${key}'`;
 
 /** Marks a key's delivery checks approved by the owner: the keeper may then pay the batch, and the next tick
- * emails checks.owner_approved. */
-export const approveSql = (key: string, note: string, nowS: number): string =>
-  `UPDATE batch_checks SET status = 'ok_by_owner', approved_note = '${note}', approved_at = ${nowS} WHERE delivered_key = '${key}'`;
+ * emails checks.owner_approved. Stamped by the database's clock (unixepoch()), never the owner's computer's:
+ * an approval stamped behind the last one the monitor saw would never be emailed. */
+export const approveSql = (key: string, note: string): string =>
+  `UPDATE batch_checks SET status = 'ok_by_owner', approved_note = '${note}', approved_at = unixepoch() WHERE delivered_key = '${key}'`;

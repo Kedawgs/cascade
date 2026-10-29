@@ -58,12 +58,21 @@ export interface HoldRow {
   clearedNote: string | null;
 }
 
+/** A watched address (spec 6.1 keys.unexplained_tx). Its transactions the logs don't explain are
+ * `nonce − baseline − seen`. */
 export interface NonceRow {
   chain: ChainName;
+  /** lowercase */
   address: Hex;
+  /** the roles it holds, e.g. "frontDoor.owner"; none once it holds none */
   roles: string[];
+  /** transactions the logs never explained: those before watching began, and those already alerted */
   baseline: number;
+  /** transactions seen in Cascade's logs since watching began */
+  seen: number;
+  /** the last count read (an account's transaction count, or a Safe's nonce()) */
   nonce: number;
+  /** since when the count has been ahead of what the logs explain (or when that last began) */
   changedAt: number;
 }
 
@@ -288,7 +297,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 4"),
     db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 4"),
     db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 25"),
-    db.prepare("SELECT chain, address, roles, baseline, nonce, changed_at FROM nonces"),
+    db.prepare("SELECT chain, address, roles, baseline, seen, nonce, changed_at FROM nonces"),
     db.prepare("SELECT * FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' ORDER BY src_block LIMIT 100"),
     // with the bridge the landing came through: delivered(bridge, hash) is read for it
     db.prepare(
@@ -336,6 +345,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
       address: r.address as Hex,
       roles: JSON.parse(r.roles as string) as string[],
       baseline: Number(r.baseline),
+      seen: Number(r.seen),
       nonce: Number(r.nonce),
       changedAt: Number(r.changed_at),
     })),
@@ -451,6 +461,16 @@ export function setCursor(
 export function upsertBlocks(db: D1Database, rows: readonly { chain: ChainName; number: bigint; time: number }[]): D1PreparedStatement[] {
   const stmt = db.prepare("INSERT INTO blocks (chain, number, time) VALUES (?1, ?2, ?3) ON CONFLICT (chain, number) DO UPDATE SET time = excluded.time");
   return rows.map((r) => stmt.bind(r.chain, int(r.number), r.time));
+}
+
+/** Watched addresses' rows, written as the keys rule decided them. */
+export function upsertNonces(db: D1Database, rows: readonly NonceRow[]): D1PreparedStatement[] {
+  const stmt = db.prepare(
+    `INSERT INTO nonces (chain, address, roles, baseline, seen, nonce, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+     ON CONFLICT (chain, address) DO UPDATE SET roles = excluded.roles, baseline = excluded.baseline, seen = excluded.seen,
+       nonce = excluded.nonce, changed_at = excluded.changed_at`,
+  );
+  return rows.map((r) => stmt.bind(r.chain, r.address, JSON.stringify(r.roles), r.baseline, r.seen, r.nonce, r.changedAt));
 }
 
 /** A fetched transaction (with `to`, selector and nonce) fills in, and wins over, one known only from an

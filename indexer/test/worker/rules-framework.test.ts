@@ -108,7 +108,7 @@ describe("prefetch", () => {
     ]);
   });
 
-  const steady: PrefetchNeeds = { since: { base: 20_090n, bittensor: 3_990n }, batchIds: [], bitTxs: [], baseTxs: [], payoutKeys: [], watched: [], txHashes: [], blocks: [], requestsSince: 20_090n };
+  const steady: PrefetchNeeds = { since: { base: 20_090n, bittensor: 3_990n }, batchIds: [], bitTxs: [], baseTxs: [], payoutKeys: [], txHashes: [], blocks: [], requestsSince: 20_090n };
 
   it("loads a delivery's transaction in log order, its batch's front door history and the close's transaction, in one query", async () => {
     const c = countingDb(db);

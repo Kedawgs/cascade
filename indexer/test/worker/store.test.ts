@@ -25,6 +25,7 @@ import {
   upsertChunkCheck,
   upsertHour,
   upsertLogs,
+  upsertNonces,
 } from "../../src/store.ts";
 import { countingDb, rowCounts, TABLES, wipe } from "./d1-count.ts";
 
@@ -226,7 +227,7 @@ describe("loadTickState", () => {
       insertHold(db, { id: "price.drop:9", rule: "price.drop", summary: "s", raisedAt: 1 }),
       insertHold(db, { id: "old", rule: "price.drop", summary: "s", raisedAt: 1 }),
       db.prepare("UPDATE holds SET cleared_at = 5 WHERE id = 'old'"),
-      db.prepare(`INSERT INTO nonces VALUES ('base', '${USER}', '["owner"]', 3, 4, 9)`),
+      upsertNonces(db, [{ chain: "base", address: USER, roles: ["owner"], baseline: 3, seen: 2, nonce: 4, changedAt: 9 }])[0],
       db.prepare("INSERT INTO messages (message_id, direction, sender, recipient, amount, src_tx, src_block, src_time) VALUES ('0x01','base>bittensor','0xa','0xb','1','0xt',1,1)"),
       db.prepare("INSERT INTO messages (message_id, direction, sender, recipient, amount, src_tx, src_block, src_time, dst_tx) VALUES ('0x02','base>bittensor','0xa','0xb','1','0xt',1,1,'0xd')"),
       upsertChunkCheck(db, { landedUid: h("l1"), batchKey: h("key"), chunk: 0, landedTx: h("t"), landedBlock: 5n, status: "awaiting_read" }),
@@ -240,11 +241,18 @@ describe("loadTickState", () => {
     expect(s.openAlerts.map((a) => a.alertKey)).toEqual(["k1"]);
     expect(s.activeHolds.map((x) => x.id)).toEqual(["price.drop:9"]);
     expect(s.holdIds.sort()).toEqual(["old", "price.drop:9"]);
-    expect(s.nonces).toEqual([{ chain: "base", address: USER, roles: ["owner"], baseline: 3, nonce: 4, changedAt: 9 }]);
+    expect(s.nonces).toEqual([{ chain: "base", address: USER, roles: ["owner"], baseline: 3, seen: 2, nonce: 4, changedAt: 9 }]);
     expect(s.pendingMessages.map((m) => m.messageId)).toEqual(["0x01"]);
     expect(s.awaitingReads.map((c) => c.landedUid)).toEqual([h("l1")]);
     expect(s.pendingPayoutKeys).toEqual([{ key: h("q"), queuedBlock: 77n }]);
     expect(s.meta.digest_date).toBe("2026-10-29");
+  });
+
+  it("upsertNonces replaces a watched address's row", async () => {
+    const row = { chain: "bittensor" as const, address: USER, roles: ["vault.keeper"], baseline: 10, seen: 0, nonce: 10, changedAt: 1 };
+    await db.batch(upsertNonces(db, [row]));
+    await db.batch(upsertNonces(db, [{ ...row, roles: [], seen: 3, nonce: 14, changedAt: 7 }]));
+    expect((await loadTickState(db, 100)).nonces).toEqual([{ ...row, roles: [], seen: 3, nonce: 14, changedAt: 7 }]);
   });
 
   it("lists recent payout users not since claimed or delivered, at most 50", async () => {

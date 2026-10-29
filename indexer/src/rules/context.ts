@@ -11,6 +11,7 @@ import {
   chunkCheckOf,
   type HoldRow,
   logOf,
+  type NonceRow,
   type TxRow,
   txRowOf,
 } from "../store.ts";
@@ -73,6 +74,9 @@ export interface RuleCtx {
   hours: HourAgg[];
   /** how far each chain's logs are stored, and that block's time */
   settled: Record<ChainName, { block: bigint; time: number; headTime?: number }>;
+  /** the blocks this tick settled on each chain (none when from > to): an event rule reports a log once,
+   * on the tick its block settles */
+  fresh: Record<ChainName, { from: bigint; to: bigint }>;
   payoutDelayS: number;
   lagLimitS: number;
   logs: LogQuery;
@@ -82,14 +86,32 @@ export interface RuleCtx {
   blockTime: (chain: ChainName, block: bigint) => number | undefined;
   /** senders of transactions, by `${chain}:${hash}` */
   txs: Map<string, TxRow>;
-  /** distinct transactions seen per watched address */
-  txCounts: Record<ChainName, Record<Hex, number>>;
+  /** the transactions first stored this tick (fetched, or known from an event's args), one per hash */
+  newTxs: TxRow[];
+  /** the watched addresses' rows */
+  nonces: NonceRow[];
   t: Thresholds;
   holdActive: boolean;
   meta: Record<string, string>;
-  /** check rows the rules decided this tick, committed with everything else */
-  writes: { batchChecks: BatchCheckWrite[]; chunkChecks: ChunkCheckWrite[] };
+  /** rows the rules decided this tick, committed with everything else */
+  writes: { batchChecks: BatchCheckWrite[]; chunkChecks: ChunkCheckWrite[]; nonces: NonceRow[] };
 }
+
+const EXPLORER: Record<ChainName, string> = { base: "https://basescan.org", bittensor: "https://evm.taostats.io" };
+export const addressLink = (chain: ChainName, a: Hex): string => `${EXPLORER[chain]}/address/${a}`;
+export const txLink = (chain: ChainName, hash: Hex): string => `${EXPLORER[chain]}/tx/${hash}`;
+
+/** How an email names a scanned contract. */
+export const CONTRACT_NAMES: Record<Role, string> = {
+  frontDoor: "front door",
+  staker: "staker",
+  baseAdapter: "Base adapter",
+  vault: "vault",
+  bitAdapter: "Bittensor adapter",
+};
+
+/** A log's block was settled by this tick. */
+export const isFresh = (ctx: RuleCtx, l: Pick<StoredLog, "chain" | "block">): boolean => l.block >= ctx.fresh[l.chain].from && l.block <= ctx.fresh[l.chain].to;
 
 /** The condition held in this reading and in the previous one too, from an older block, on each chain it
  * reads: one bad answer can't trip a rule marked ×2. */
@@ -121,9 +143,7 @@ export interface PrefetchNeeds {
   baseTxs: Hex[];
   /** payout keys: their delivery's payout list and queue, their chunks and the chunks' transactions */
   payoutKeys: Hex[];
-  /** addresses whose transactions are counted */
-  watched: Hex[];
-  /** transactions whose senders to load */
+  /** transactions whose senders to load (this tick's own too: those found are not new) */
   txHashes: Hex[];
   /** blocks whose times to load */
   blocks: { chain: ChainName; number: bigint }[];
@@ -136,7 +156,6 @@ export interface Prefetched {
   batchChecks: BatchCheckRow[];
   chunkChecks: ChunkCheckRow[];
   txs: TxRow[];
-  txCounts: Record<ChainName, Record<Hex, number>>;
   /** `${chain}:${number}` → time */
   blockTimes: Map<string, number>;
 }
@@ -191,12 +210,6 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
     db.prepare("SELECT * FROM txs WHERE chain IN ('base', 'bittensor') AND hash IN (SELECT value FROM json_each(?1))").bind(json(n.txHashes.map((x) => x.toLowerCase()))),
     db
       .prepare(
-        `SELECT chain, from_addr, COUNT(*) AS n FROM txs WHERE chain IN ('base', 'bittensor')
-         AND from_addr IN (SELECT value FROM json_each(?1)) GROUP BY chain, from_addr`,
-      )
-      .bind(json(n.watched.map((x) => x.toLowerCase()))),
-    db
-      .prepare(
         `SELECT b.chain, b.number, b.time FROM json_each(?1) j
          JOIN blocks b ON b.chain = json_extract(j.value, '$.chain') AND b.number = json_extract(j.value, '$.number')`,
       )
@@ -204,15 +217,11 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
     db.prepare("SELECT * FROM logs WHERE chain = 'base' AND contract = 'frontDoor' AND event = 'RedeemRequested' AND block >= ?1 AND removed = 0").bind(Number(n.requestsSince)),
   ]);
   const rows = (i: number) => rs[i].results;
-  const logs = [0, 1, 2, 3, 4, 5, 6, 7, 13].flatMap((i) => rows(i).map(logOf));
-  const txCounts: Prefetched["txCounts"] = { base: {}, bittensor: {} };
-  for (const r of rows(11)) txCounts[r.chain as ChainName][r.from_addr as Hex] = Number(r.n);
   return {
-    logs,
+    logs: [0, 1, 2, 3, 4, 5, 6, 7, 12].flatMap((i) => rows(i).map(logOf)),
     batchChecks: rows(8).map(batchCheckOf),
     chunkChecks: rows(9).map(chunkCheckOf),
     txs: rows(10).map(txRowOf),
-    txCounts,
-    blockTimes: new Map(rows(12).map((r) => [`${r.chain}:${r.number}`, Number(r.time)])),
+    blockTimes: new Map(rows(11).map((r) => [`${r.chain}:${r.number}`, Number(r.time)])),
   };
 }

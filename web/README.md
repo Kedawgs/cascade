@@ -34,7 +34,10 @@ after each flow) and checks they are wired to each other as the config says: the
 door to the vault, TAO and the Base adapter; the adapters to each other; on v3 the staker and the
 front door to each other and to the oracle; on Bittensor the vault to this front door and its
 adapter. A wrong answer, or a read the contract refuses (a revert, or no contract there), is a
-mismatch: it turns staking, unstaking and claiming off with one message. A read the node couldn't
+mismatch: it turns staking and unstaking off with one message. The ways out stay open (claim,
+cancel, and swapping wallet TAO to USDC): they touch only the listed front door and the fixed Uniswap
+router, send no ETH and approve only that router, so a user can always get their own money out. The
+check holds only a stake (new, carried on, or of wallet TAO) and an unstake. A read the node couldn't
 answer (unreachable, rate-limited, timing out) is never a mismatch: nothing is said on its own, and a
 click checks again and sends nothing unless the contracts then check out ("We can't check Cascade's
 contracts right now…").

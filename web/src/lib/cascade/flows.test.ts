@@ -19,6 +19,8 @@ import { STAKER } from "./abi";
 import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
 import {
   assertWired,
+  cancelCall,
+  needsWiring,
   claimCalls,
   claimRetryPatch,
   createFlowGuard,
@@ -431,8 +433,36 @@ describe("the wiring gate before any flow", () => {
   });
 
   it("words both plainly, in the site's voice", () => {
-    expect(WIRING_MISMATCH).toBe("This site doesn't match Cascade's contracts, so staking, unstaking and claiming are off. Nothing will be sent.");
-    expect(WIRING_UNCHECKED).toBe("We can't check Cascade's contracts right now, so nothing can be sent. Try again in a moment.");
+    expect(WIRING_MISMATCH).toBe(
+      "This site doesn't match Cascade's contracts, so staking and unstaking are off. You can still claim, cancel, or swap your TAO to USDC.",
+    );
+    expect(WIRING_UNCHECKED).toBe("We can't check Cascade's contracts right now, so nothing was sent. Try again in a moment.");
+  });
+
+  it("holds only what puts money in or asks for it back: a stake (new, continued, or wallet TAO) and an unstake", () => {
+    expect(needsWiring("stake")).toBe(true);
+    expect(needsWiring("unstake")).toBe(true);
+    // the ways out stay open: they only return the account's own funds
+    for (const label of ["claim", "cancel", "swap"]) expect(needsWiring(label), label).toBe(false);
+  });
+
+  it("leaves open only ways out that touch the listed front door and the fixed router, send no ETH, and approve only the router", () => {
+    const fixed = new Set([D.frontDoor, TOKENS.tao, UNISWAP.router].map((a) => a.toLowerCase()));
+    const exits: [string, FlowCall[]][] = [
+      ["cancel a deposit", [cancelCall("deposit", 10n ** 16n, D)]],
+      ["cancel an unstake", [cancelCall("withdrawal", 10n ** 21n, D)]],
+      ["claim as USDC", claimCalls(10n ** 16n, 2_400_000n, none, D, ME, false)],
+      ["claim as TAO", claimCalls(10n ** 16n, 0n, none, D, ME, true)],
+      ["swap wallet TAO to USDC", sellTaoCalls(10n ** 16n, 2_400_000n, none, ME)],
+    ];
+    for (const [name, calls] of exits) {
+      for (const c of calls) {
+        expect(fixed.has(c.to.toLowerCase()), `${name}: ${c.functionName} to ${c.to}`).toBe(true);
+        expect(c.value ?? 0n, `${name}: ${c.functionName} value`).toBe(0n);
+        if (c.functionName === "approve") expect((c.args[0] as string).toLowerCase(), name).toBe(UNISWAP.router.toLowerCase());
+        if (c.functionName === "exactInput") expect((c.args[0] as { recipient: string }).recipient, name).toBe(ME);
+      }
+    }
   });
 });
 

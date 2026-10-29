@@ -67,7 +67,7 @@ function WalletTao({ account }: { account: string }) {
             Deposit it
           </button>
         )}
-        <button type="button" className="pill pill-ghost" disabled={flows.locked} onClick={() => void flows.sellWalletTao(tao).catch(() => undefined)}>
+        <button type="button" className="pill pill-ghost" disabled={flows.busy !== null} onClick={() => void flows.sellWalletTao(tao).catch(() => undefined)}>
           Swap to USDC
         </button>
       </div>
@@ -102,7 +102,7 @@ function ClaimReady({ account }: { account: string }) {
         <button
           type="button"
           className="pill"
-          disabled={flows.locked || (!withdrawals.data && !withdrawals.isError)}
+          disabled={flows.busy !== null || (!withdrawals.data && !withdrawals.isError)}
           onClick={() => void flows.claim(ready, false).catch(() => undefined)}
         >
           {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}

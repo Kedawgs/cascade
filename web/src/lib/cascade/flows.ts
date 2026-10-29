@@ -498,10 +498,19 @@ export class FlowError extends Error {
   }
 }
 
-/** The contracts aren't wired as this site's build says (wiring.ts): nothing is ever sent from it. */
-export const WIRING_MISMATCH = "This site doesn't match Cascade's contracts, so staking, unstaking and claiming are off. Nothing will be sent.";
-/** The wiring couldn't be read: nothing is sent until it can. */
-export const WIRING_UNCHECKED = "We can't check Cascade's contracts right now, so nothing can be sent. Try again in a moment.";
+/** The contracts aren't wired as this site's build says (wiring.ts): nothing goes in or is asked back
+ * from it, but the ways out stay open (needsWiring). */
+export const WIRING_MISMATCH =
+  "This site doesn't match Cascade's contracts, so staking and unstaking are off. You can still claim, cancel, or swap your TAO to USDC.";
+/** The wiring couldn't be read when a stake or unstake was clicked: nothing was sent. */
+export const WIRING_UNCHECKED = "We can't check Cascade's contracts right now, so nothing was sent. Try again in a moment.";
+
+/** Whether a flow (by its label in useFlows) waits for the contracts to check out: a stake (new, carried
+ * on, or of wallet TAO), which approves and sends to the staker or the front door, and an unstake, which
+ * pays the front door its fee. The ways out don't: a claim, a cancel and a swap of wallet TAO only touch
+ * the listed front door and the fixed Uniswap router, send no ETH and approve only that router, and a
+ * user should always be able to get their own money out. */
+export const needsWiring = (label: string): boolean => label === "stake" || label === "unstake";
 
 /** Before any flow builds or sends anything: the contracts must check out (`check`, see wiring.ts). A
  * mismatch stops it for good; a check that can't be done stops it too, never failing open. */

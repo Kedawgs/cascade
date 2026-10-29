@@ -20,6 +20,7 @@ import { useCascadeData } from "./context";
 import { claimWentThrough, findStakeTx } from "./facts";
 import {
   assertWired,
+  needsWiring,
   cancelCall,
   claimCalls,
   claimRetryPatch,
@@ -151,14 +152,15 @@ export function useFlows(account: string | null) {
   const wiring = useWiring(account !== null);
   const blocked = wiringNotice(wiring);
 
-  /** Runs `body` under the guard (claimed before any read), once the contracts check out (nothing is
-   * read for, recorded or sent before that), records errors and refreshes the data. */
+  /** Runs `body` under the guard (claimed before any read), a stake or unstake only once the contracts
+   * check out (nothing is read for, recorded or sent before that; the ways out don't wait: needsWiring),
+   * records errors and refreshes the data. */
   async function flow<T>(label: string, body: () => Promise<T>): Promise<T> {
     if (!account) throw new Error("Connect a wallet first");
     setError(null);
     try {
       return await guard.run(label, async () => {
-        await assertWired(() => data.checkWiring());
+        if (needsWiring(label)) await assertWired(() => data.checkWiring());
         return body();
       });
     } catch (e) {
@@ -202,9 +204,9 @@ export function useFlows(account: string | null) {
   return {
     busy,
     error,
-    /** Why nothing can be sent from this site right now (the wiring check), or null. */
+    /** Why no stake or unstake can be sent from this site (the contracts don't match), or null. */
     blocked,
-    /** No action can start: one is running, or sending is off. */
+    /** No stake or unstake can start: a flow is running, or the contracts don't match (the ways out use busy alone). */
     locked: busy !== null || blocked !== null,
 
     /** Starts a stake from a quote; `onStart` gets the operation id before the first wallet prompt. On

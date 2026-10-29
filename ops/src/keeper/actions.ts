@@ -18,7 +18,9 @@ export type Message = { id: Hex; direction: "Base â†’ Bittensor" | "Bittensor â†
 export type Done = Sent & { messageId?: Hex };
 
 export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
-  readState(): Promise<KeeperState>;
+  /** Both chains' state. `economics` prices the open batch for the close rule (frontDoor.closeEconomics),
+   * which reads prices and scans Base's logs: only `run` and `status` ask for it. */
+  readState(opts?: { economics?: boolean }): Promise<KeeperState>;
   sendCall(req: CallRequest): Promise<Sent>;
   nonce(chain: ChainName): Promise<number>;
   quoteClose(s: KeeperState): Promise<bigint>;
@@ -342,7 +344,7 @@ export async function runLoop(
     let deliveries: DueDelivery[] = [];
     const facts = new Map<string, string | undefined>();
     try {
-      s = await deps.readState();
+      s = await deps.readState({ economics: true });
       for (const user of await deps.deliveryCandidates()) {
         const c = await checkDelivery(deps, user);
         const key = c.user.toLowerCase();

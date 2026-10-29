@@ -348,7 +348,7 @@ describe("the open batch and its close's economics", () => {
   }
   const LIMIT_READS = ["maxDeposits", "maxRedeems", "maxBatchValue", "minDeposit"];
   const recordPath = () => join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
-  const read = (f: ReturnType<typeof chain>, r: DeploymentRecord = launch) => keeperDeps(f.ctx, r, recordPath()).readState();
+  const read = (f: ReturnType<typeof chain>, r: DeploymentRecord = launch) => keeperDeps(f.ctx, r, recordPath()).readState({ economics: true });
   const called = (f: ReturnType<typeof chain>) => f.calls.map((c) => c.fn).filter((n) => n !== undefined);
 
   it("estimates the batch's fees and the bridge fee in USDC units from the chain's reads", async () => {
@@ -384,14 +384,14 @@ describe("the open batch and its close's economics", () => {
     expect((await read(mixed)).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
   });
 
-  it("finds the batch's deposits on Base by its id, at most two hours of blocks back, then only the new blocks each round", async () => {
+  it("finds the batch's deposits on Base by its id, back to its start (2-second blocks, a minute's margin), then only the new blocks each round", async () => {
     let head = BASE_HEAD;
     let batchId = 7n;
     const queries: { from: bigint; to: bigint; topics: (Hex | null)[] }[] = [];
-    // a stake older than the first look counts as unpaid
+    // the batch is two hours old: 3,600 blocks, and 30 more; a stake older than that is not found
     const logs = [
-      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_600),
-      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_599),
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_631),
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_630),
       requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 5, { logIndex: 1 }),
     ];
     const f = chain(
@@ -400,22 +400,47 @@ describe("the open batch and its close's economics", () => {
     );
     const deps = keeperDeps(f.ctx, launch, recordPath());
     // 2 × $0.05 + 0.2 TAO × $250 × 15 bps + the fee pot
-    expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 75_000n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect((await deps.readState({ economics: true })).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 75_000n + 230_000n, bridgeFeeUsdc: 1_380_000n });
     expect(queries.every((q) => q.topics[1] === numberToHex(7n, { size: 32 }))).toBe(true);
-    expect(queries).toHaveLength(36);
-    expect([queries[0].from, queries.at(-1)!.to]).toEqual([BigInt(BASE_HEAD - 3_599), BigInt(BASE_HEAD)]);
+    expect(queries).toHaveLength(37);
+    expect([queries[0].from, queries.at(-1)!.to]).toEqual([BigInt(BASE_HEAD - 3_630), BigInt(BASE_HEAD)]);
     // the next round reads only the new blocks, from 70 back: the stake read again there is counted once
     queries.length = 0;
     logs.push(requested(STAKER_AT, 10n ** 17n, BASE_HEAD + 25));
     head = BASE_HEAD + 30;
-    expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 150_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect((await deps.readState({ economics: true })).frontDoor.closeEconomics).toEqual({ feesUsdc: 150_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
     expect(queries.map((q) => [q.from, q.to])).toEqual([[BigInt(BASE_HEAD - 69), BigInt(BASE_HEAD + 30)]]);
     // the next batch starts over, with its own id
     queries.length = 0;
     batchId = 8n;
-    expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 230_000n, bridgeFeeUsdc: 1_380_000n });
-    expect(queries).toHaveLength(36);
+    expect((await deps.readState({ economics: true })).frontDoor.closeEconomics).toEqual({ feesUsdc: 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect(queries[0].from).toBe(BigInt(BASE_HEAD + 30 - 3_630));
     expect(queries.every((q) => q.topics[1] === numberToHex(8n, { size: 32 }))).toBe(true);
+  });
+
+  it("looks back at most four hours of Base blocks for an older batch: its earlier deposits count as unpaid", async () => {
+    const queries: { from: bigint; to: bigint; topics: (Hex | null)[] }[] = [];
+    const logs = [requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 7_201), requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 7_200)];
+    // twenty hours old: under the launch cadence's 24-hour max wait, so its fees still decide
+    const f = chain({ openBatch: () => [7n, BigInt(T - 20 * HOUR), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] }, { eth_getLogs: logsOn(logs, queries) });
+    expect((await read(f)).frontDoor.closeEconomics).toEqual({ feesUsdc: 50_000n + 37_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect(queries).toHaveLength(73);
+    expect(queries[0].from).toBe(BigInt(BASE_HEAD - 7_200));
+  });
+
+  it("counts a cancelled stake's deposit fee, which the treasury kept, but the swap fee on no more than the batch's TAO", async () => {
+    // alice staked 0.4 TAO, then cancelled 0.3 of it: 0.1 TAO is left in the batch
+    const cancelled = chain({ openDeposits: () => [{ user: alice, amount: 10n ** 17n }], openBatch: () => [7n, BigInt(T - 2 * HOUR), 10n ** 17n, 10n ** 14n, 1n, 0n] });
+    // 1 × $0.05 + 0.1 TAO × $250 × 15 bps + the fee pot
+    expect((await read(cancelled)).frontDoor.closeEconomics).toEqual({ feesUsdc: 50_000n + 37_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+  });
+
+  it("prices the batch only when asked (run and status): close, stake and payouts read no prices and scan no Base logs", async () => {
+    const f = chain();
+    const s = await keeperDeps(f.ctx, launch, recordPath()).readState();
+    expect(s.frontDoor.closeEconomics).toBeUndefined();
+    expect(called(f).filter((n) => PRICE_READS.includes(n))).toEqual([]);
+    expect(f.calls.some((c) => c.chain === "base" && c.method === "eth_getLogs")).toBe(false);
   });
 
   it("a Base log query that fails leaves the economics unknown (null)", async () => {

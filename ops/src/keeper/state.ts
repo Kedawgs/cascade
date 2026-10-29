@@ -125,10 +125,12 @@ export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE
 const ED_RESERVE = 10n ** 12n;
 /** eth_getLogs block ranges the public RPCs accept: mainnet.base.org refuses more than 200 blocks. */
 export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
-/** How far back the keeper's first look at a batch's deposits reaches on Base: two hours of its 2-second
- * blocks, 36 queries. Fees decide a close only once the batch can close (an hour in at the launch
- * cadence), and `run` then looks again each round. */
-const REQUESTED_LOOKBACK = 3_600n;
+/** The furthest the keeper's first look at a batch's deposits reaches back on Base: four hours of its
+ * 2-second blocks, 72 queries. Fees decide a close only once the batch can close (an hour in at the launch
+ * cadence), and `run` then looks again each round, so it sees a batch's whole life unless it starts late. */
+const REQUESTED_LOOKBACK = 7_200n;
+/** Blocks looked back beyond a batch's age in Base's 2-second blocks: a minute. */
+const REQUESTED_MARGIN = 30n;
 /** Each later scan of an event starts this many blocks before the last head it reached, so a log a
  * lagging (load-balanced) node or a reorg hid is found on a later round; still one query a round (about
  * 70 + 30 new blocks of Base's 100-block window, 400 + 5 of Bittensor's 1,000). */
@@ -262,7 +264,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   }
 
   const deps: KeeperDeps = {
-    async readState() {
+    async readState(opts = {}) {
       const deposits = (await r("base", a.frontDoor, FRONT, "openDeposits")) as Entry[];
       const redeems = (await r("base", a.frontDoor, FRONT, "openRedeems")) as Entry[];
       const canClose = (await r("base", a.frontDoor, FRONT, "canClose")) as boolean;
@@ -289,7 +291,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;
       const rootStake = ((await r("bittensor", a.vault, VAULT, "rootStakeRao")) as bigint) * 10n ** 9n;
       const now = hexToNumber(block.timestamp);
-      const { frontDoor, closeMaxWaitS } = await openBatchState(deposits, redeems, canClose, fdPaused);
+      const { frontDoor, closeMaxWaitS } = await openBatchState(deposits, redeems, canClose, fdPaused, opts.economics ?? false);
       return {
         now,
         frontDoor,
@@ -446,12 +448,14 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   /** The open batch as the close rule sees it, with the record's max wait and Base's time (read after
    * canClose, so not older than the block it was decided at). Its limits and prices are read only when
    * they can change the decision: it has entries, can close, and is younger than the max wait (never
-   * under the test cadence); the prices only when it is not full either. */
+   * under the test cadence); the prices only when it is not full either, and `economics` asks for them
+   * (run and status: a hand-run close, stake or payout doesn't decide on them). */
   async function openBatchState(
     deposits: readonly Entry[],
     redeems: readonly Entry[],
     canClose: boolean,
     paused: boolean,
+    economics: boolean,
   ): Promise<{ frontDoor: State["frontDoor"]; closeMaxWaitS: number }> {
     const fd = a.frontDoor;
     const [id, start, totalDeposits, feePot] = (await r("base", fd, FRONT, "openBatch")) as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
@@ -484,8 +488,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       full,
       now,
     };
-    if (undecided && !full) {
-      frontDoor.closeEconomics = await closeEconomics(id, deposits, redeems, feePot);
+    if (economics && undecided && !full) {
+      frontDoor.closeEconomics = await closeEconomics({ id, ageS: now - openStart, totalDeposits, feePot }, deposits, redeems);
     }
     return { frontDoor, closeMaxWaitS };
   }
@@ -495,23 +499,32 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
 
   /** The open batch's deposits the staker made (DepositRequested names it as the payer): only those paid
    * the staker's deposit and swap fees; TAO deposited straight into the front door (deposit, depositFor)
-   * paid neither. Found by the batch's id over Base's logs, the first look reaching back REQUESTED_LOOKBACK
-   * blocks at most: an older deposit (a batch the keeper first sees late) counts as unpaid. */
-  async function stakerDeposits(batchId: bigint, staker: Address): Promise<{ count: number; tao: bigint }> {
+   * paid neither. Found by the batch's id over Base's logs, the first look reaching back to the batch's
+   * start (its age in Base's 2-second blocks, and a minute more), REQUESTED_LOOKBACK blocks at most: an
+   * older deposit (a batch the keeper first sees late) counts as unpaid. */
+  async function stakerDeposits(batchId: bigint, ageS: number, staker: Address): Promise<{ count: number; tao: bigint }> {
     if (requested?.batchId !== batchId) {
       requested = { batchId, read: logCursor("base", a.frontDoor, event(FRONT, "DepositRequested"), [numberToHex(batchId, { size: 32 })]) };
     }
-    const { logs } = await requested.read((head) => (head + 1n > REQUESTED_LOOKBACK ? head + 1n - REQUESTED_LOOKBACK : 0n));
+    const age = (BigInt(Math.max(ageS, 0)) + 1n) / 2n + REQUESTED_MARGIN;
+    const back = age < REQUESTED_LOOKBACK ? age : REQUESTED_LOOKBACK;
+    const { logs } = await requested.read((head) => (head > back ? head - back : 0n));
     const staked = logs.filter((l) => (l.args.payer as Address).toLowerCase() === staker.toLowerCase());
     return { count: staked.length, tao: staked.reduce((t, l) => t + (l.args.amount as bigint), 0n) };
   }
 
   /** The batch's estimated fees and its close's bridge fee, in USDC units, at the front door's oracle's
    * TAO price and Uniswap's WETH/USDC price, with the front door's staker's fees on the deposits the
-   * staker made. null when any of those reads fails (a revert or a node that didn't answer), or a price or
-   * the bridge fee reads 0 (a $0 bridge fee would count any batch as covered): the batch then waits for its
-   * max wait, never closing early on a guess. */
-  async function closeEconomics(batchId: bigint, deposits: readonly Entry[], redeems: readonly Entry[], feePot: bigint): Promise<CloseEconomics | null> {
+   * staker made. A deposit cancelled since still counts its deposit fee, which the staker really paid to
+   * the treasury; the swap fee is counted on no more than the batch's TAO now. null when any of those
+   * reads fails (a revert or a node that didn't answer), or a price or the bridge fee reads 0 (a $0 bridge
+   * fee would count any batch as covered): the batch then waits for its max wait, never closing early on a
+   * guess. */
+  async function closeEconomics(
+    batch: { id: bigint; ageS: number; totalDeposits: bigint; feePot: bigint },
+    deposits: readonly Entry[],
+    redeems: readonly Entry[],
+  ): Promise<CloseEconomics | null> {
     try {
       const oracle = (await r("base", a.frontDoor, DELIVERY_FRONT, "oracle")) as Address;
       const staker = (await r("base", a.frontDoor, DELIVERY_FRONT, "swapper")) as Address;
@@ -521,8 +534,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const [ethPriceUsdc] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ETH_USDC_PATH, E18])) as readonly [bigint];
       const bridgeFeeWei = await closeFeeWei(deposits, redeems);
       if (taoPriceUsdc === 0n || ethPriceUsdc === 0n || bridgeFeeWei === 0n) return null;
-      const staked = await stakerDeposits(batchId, staker);
-      return closeEconomicsOf({ nStaked: staked.count, depositFeeUsdc, stakedTao: staked.tao, taoPriceUsdc, swapFeeBps, feePot, ethPriceUsdc, bridgeFeeWei });
+      const staked = await stakerDeposits(batch.id, batch.ageS, staker);
+      const stakedTao = staked.tao < batch.totalDeposits ? staked.tao : batch.totalDeposits;
+      return closeEconomicsOf({ nStaked: staked.count, depositFeeUsdc, stakedTao, taoPriceUsdc, swapFeeBps, feePot: batch.feePot, ethPriceUsdc, bridgeFeeWei });
     } catch {
       return null;
     }

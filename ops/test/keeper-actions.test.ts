@@ -166,6 +166,14 @@ describe("keeper actions", () => {
     expect(lines.at(-1)).toMatch(/^Stopped: the deployment is not complete and verified yet \(the read-back has not passed\)/);
   });
 
+  it("run's round asks for the batch's close economics; the close it then sends re-reads without them", async () => {
+    const asked: unknown[] = [];
+    const d = { ...deps(), readState: async (o?: { economics?: boolean }) => (asked.push(o), state()) };
+    await runLoop(d, structuredClone(rec), { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+    expect(d.send).toHaveBeenCalledOnce();
+    expect(asked).toEqual([{ economics: true }, undefined]);
+  });
+
   it("run stops, sending nothing, when the record can't be re-read as this deployment", async () => {
     const lines: string[] = [];
     const refresh = () => {

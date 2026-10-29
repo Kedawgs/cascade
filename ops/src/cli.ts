@@ -59,7 +59,7 @@ async function run(a: Args): Promise<number> {
       return (await verifyAndSave(ctxFor(a.live), recordPath(a.live), needRecord(a.live))) ? 0 : 1;
     case "status": {
       const deps = keeperDeps(ctxFor(a.live), needRecord(a.live), recordPath(a.live), a.users as Address[]);
-      const s = await deps.readState();
+      const s = await deps.readState({ economics: true });
       for (const line of formatStatus(s.detail, { now: s.now, hold: closeHold(s) })) log(line);
       return 0;
     }

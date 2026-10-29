@@ -63,6 +63,14 @@ export function maxStakeInput(balance: number, most?: number): string {
   return floorTo(Math.min(balance, most ?? Infinity), 2).toFixed(2);
 }
 
+/** What the stake form's MAX types, or null while it can't offer one: the balance or the limits not
+ * read yet (before the limits, MAX would type the whole balance, past the most a stake can be). With
+ * no room at all it types the balance, and the form says why that can't be staked. */
+export function stakeMaxInput(balance: number | null, limits: StakeLimits | undefined): string | null {
+  if (balance === null || !limits) return null;
+  return maxStakeInput(balance, limits.full ? undefined : limits.maxUsd);
+}
+
 /** Why TAO sitting in the wallet can't be deposited as it is, or null when it can. */
 export function walletTaoNote(tao: bigint, limits: Pick<Limits, "minTao" | "maxTao" | "full">): string | null {
   if (tao < limits.minTao) return `Deposits start at ${taoLabel.format(toDisplay(limits.minTao, 18))} TAO.`;

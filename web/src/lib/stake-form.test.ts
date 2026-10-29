@@ -11,6 +11,7 @@ import {
   deliveryFloorUsd,
   deliveryNote,
   maxStakeInput,
+  stakeMaxInput,
   offerClaim,
   stakeAmountText,
   stakeFootText,
@@ -249,6 +250,17 @@ describe("balance checks", () => {
   it("keeps MAX to the most a stake can be right now", () => {
     expect(maxStakeInput(5_000, 2_485.49)).toBe("2485.49");
     expect(maxStakeInput(100, 2_485.49)).toBe("100.00");
+  });
+
+  it("offers MAX only once both the balance and the limits are in, so it never types more than a stake can be", () => {
+    const limits = { minUsd: 10, maxUsd: 2_485.49, full: null };
+    expect(stakeMaxInput(5_000, limits)).toBe("2485.49");
+    expect(stakeMaxInput(100, limits)).toBe("100.00");
+    // the limits still loading: no MAX yet (it would offer the whole balance)
+    expect(stakeMaxInput(5_000, undefined)).toBeNull();
+    expect(stakeMaxInput(null, limits)).toBeNull();
+    // no room at all: MAX types the balance, and the form says why it can't be staked
+    expect(stakeMaxInput(5_000, { ...limits, full: "cap" })).toBe("5000.00");
   });
 });
 

@@ -15,7 +15,7 @@ import {
   cascadeFeesText,
   contractWalletNote,
   etaText,
-  maxStakeInput,
+  stakeMaxInput,
   POOL_FEES_TEXT,
   stakeAmountText,
   stakeButtonLabel,
@@ -90,6 +90,8 @@ export function StakeForm({
   const amount = parseAmount(raw);
   const lim = limits.data;
   const error = lim ? validateStakeAmount(amount, lim, account ? maxUsdc : null) : null;
+  // MAX waits for the limits as well as the balance
+  const maxInput = stakeMaxInput(maxUsdc, lim);
   const units = lim && amount !== null && amount > 0 && error === null ? usdcUnits(raw) : null;
   const quoteQuery = useDepositQuote(units);
   // ignore the previous amount's quote while the new one loads
@@ -138,12 +140,13 @@ export function StakeForm({
         onMax={
           account
             ? () => {
-                setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc, lim && !lim.full ? lim.maxUsd : undefined));
+                if (maxInput === null) return;
+                setRaw(maxInput);
                 start();
               }
             : undefined
         }
-        maxDisabled={maxUsdc === null}
+        maxDisabled={maxInput === null}
         invalid={error !== null}
         describedBy={noteId}
       />

@@ -112,17 +112,34 @@ describe("scanChain on Bittensor", () => {
     const gone = vlog(3200n, 8);
     const kept = vlog(3300n, 9);
     const stored = storedOf("bittensor", [gone, kept]);
-    const spec: ChainSpec = { head: 3510n, logs: [kept] };
+    // a node REREAD blocks past the log no longer has it: removed
+    const spec: ChainSpec = { head: 3610n, logs: [kept] };
     const r = await setup({ bittensor: spec }).scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored });
     expect(r.removed).toEqual([uidOf("bittensor", gone)]);
     // stored and unchanged: no write needed
     expect(r.upserts).toEqual([]);
-    // later it is mined again in block 3520: an upsert at its new block (the store clears the mark)
-    spec.head = 3600n;
-    spec.logs = [kept, { ...gone, blockNumber: "0xdc0" }];
+    // later it is mined again in block 3620: an upsert at its new block (the store clears the mark)
+    spec.head = 3700n;
+    spec.logs = [kept, { ...gone, blockNumber: "0xe24" }];
     const again = await setup({ bittensor: spec }).scan("bittensor", r.cursor, { stored: storedOf("bittensor", [kept]) });
-    expect(again.upserts.map((l) => [l.uid, l.block])).toEqual([[uidOf("bittensor", gone), 3520n]]);
+    expect(again.upserts.map((l) => [l.uid, l.block])).toEqual([[uidOf("bittensor", gone), 3620n]]);
     expect(again.removed).toEqual([]);
+  });
+
+  it("trusts a log's absence only from a node REREAD blocks past it, as the site does", async () => {
+    // a node whose log index lags its head answers "no logs" for blocks it has imported: near the head
+    // that must not flip a stored log to removed and back
+    const gone = vlog(3200n, 8);
+    const stored = storedOf("bittensor", [gone]);
+    const near = await setup({ bittensor: { head: 3510n, logs: [] } }).scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored });
+    expect(near.removed).toEqual([]);
+    const deep = await setup({ bittensor: { head: 3600n, logs: [] } }).scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored });
+    expect(deep.removed).toEqual([uidOf("bittensor", gone)]);
+    // on Base the depth is Base's REREAD, 70 blocks
+    const b = rawLog({ address: d.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 1n }, block: 1100n, logIndex: 0, txHash: tx(77) });
+    const baseStored = storedOf("base", [b]);
+    expect((await setup({ base: { head: 1169n, logs: [] } }).scan("base", { scannedTo: 1150n, settledTo: 1120n }, { stored: baseStored })).removed).toEqual([]);
+    expect((await setup({ base: { head: 1170n, logs: [] } }).scan("base", { scannedTo: 1150n, settledTo: 1120n }, { stored: baseStored })).removed).toEqual([uidOf("base", b)]);
   });
 
   it("never advances the cursor on a lagging node", async () => {
@@ -239,7 +256,7 @@ describe("scanChain on Bittensor", () => {
     expect(decodeBudget.left).toBe(10);
     // a stored log whose content differs at the same place is hashed again (and charged)
     const changed = { ...many[0], data: many[1].data };
-    const s = setup({ bittensor: { head: 3500n, logs: [changed, ...many.slice(1)] } }, { decode: 10 });
+    const s = setup({ bittensor: { head: 3510n, logs: [changed, ...many.slice(1)] } }, { decode: 10 });
     const r2 = await s.scan("bittensor", { scannedTo: 3500n, settledTo: 3490n }, { stored: storedOf("bittensor", many) });
     expect(s.decodeBudget.left).toBe(9);
     expect(r2.removed).toEqual([uidOf("bittensor", many[0])]);

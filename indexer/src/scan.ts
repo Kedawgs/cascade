@@ -67,7 +67,10 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * block taken whole, so a window busier than one tick can afford is read over several. Logs are
  * settled up to min(last block read,
  * head − SETTLE): those are returned to store; nearer ones are returned fresh. A stored log in the
- * settled part of a re-read that the read no longer has is returned as removed. */
+ * settled part of a re-read that the read no longer has is returned as removed, but only when the node
+ * that answered is REREAD blocks past it (the site's rule for trusting an absence): a node whose log
+ * index lags its head answers "no logs" for blocks it has imported, and must not flip a log to removed
+ * and back. */
 export async function scanChain(o: {
   rpc: Rpc;
   chain: ChainName;
@@ -95,6 +98,8 @@ export async function scanChain(o: {
   let head: bigint | undefined;
   let firstRequest = true;
   let scannedTo: bigint | null = null;
+  /** each accepted window, with the head of the node that answered it */
+  const answered: { a: bigint; b: bigint; head: bigint }[] = [];
 
   const stop = (why: ScanStop, e?: unknown) => {
     result.stopped = why;
@@ -216,6 +221,7 @@ export async function scanChain(o: {
         break;
       }
       head = head === undefined ? answer.head : max(head, answer.head);
+      answered.push({ a, b, head: answer.head });
       known = max(known, answer.head);
       const cut = take(answer.logs, a, b);
       if (cut !== undefined) {
@@ -246,7 +252,10 @@ export async function scanChain(o: {
     }
     const checkedTo = min(scannedTo, settled);
     for (const [uid, s] of o.stored) {
-      if (s.block >= start && s.block <= checkedTo && !seen.has(uid)) result.removed.push(uid);
+      if (s.block < start || s.block > checkedTo || seen.has(uid)) continue;
+      // an absence counts only from a node REREAD blocks past the log
+      const w = answered.find((x) => s.block >= x.a && s.block <= x.b);
+      if (w && w.head >= s.block + REREAD[chain]) result.removed.push(uid);
     }
   }
   return result;

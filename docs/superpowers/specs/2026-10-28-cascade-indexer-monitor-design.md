@@ -455,8 +455,9 @@ the rest of the tick needs), the decode budget and the 40 s wall time last:
     scanned_to = b
 settled_to = min(scanned_to, head − SETTLE)   (only ever moves forward)
 upserts    = the settled logs that are new or found at another block (stored, unchanged logs cost no write)
-vanished   = each log in `stored` with block in [start, settled_to] missing from this tick's reads: staged
-             removed = 1, and raises the indexer.reorg warning
+vanished   = each log in `stored` with block in [start, settled_to] missing from this tick's reads, from a
+             node REREAD blocks past it (the site's rule: a node whose log index lags its head answers
+             "no logs" for blocks it has imported): staged removed = 1, and raises the indexer.reorg warning
 head_time  = max(head_time, the newest of: the head's block time, this tick's reading's block time, the Worker's
              clock if neither chain answered)   (set every tick, even when no window could be read)
 ```

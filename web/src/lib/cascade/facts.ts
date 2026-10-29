@@ -94,7 +94,12 @@ export const SETTLE = 10n;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** Drops the events in blocks `from` to `to`: the read about to start reads those blocks again. */
+/** Before the read about to start reads blocks `from` to `to` again: drops the deliveries, stakes and
+ * chunks found there (read again, or gone with a replaced block; they only move a trail's status, or make
+ * what can be unstaked lower meanwhile), and marks the account's Deposited and Redeemed there
+ * unconfirmed rather than dropping them. A node whose logs lag the head it reports returns too little,
+ * and an amount must never vanish over that: one read again is confirmed by its log, and one that
+ * isn't waits on its receipt (confirmAccountEvents), so the figure shows "–" until it is known. */
 function forget(scan: VaultScan, from: bigint, to: bigint): void {
   const kept = (e: { block: bigint }) => e.block < from || e.block > to;
   for (const [id, e] of scan.delivered) if (!kept(e)) scan.delivered.delete(id);
@@ -103,7 +108,10 @@ function forget(scan: VaultScan, from: bigint, to: bigint): void {
     if (left.length > 0) scan.payouts.set(key, left);
     else scan.payouts.delete(key);
   }
-  for (const list of [scan.staked, scan.deposited, scan.redeemed] as { block: bigint }[][]) list.splice(0, list.length, ...list.filter(kept));
+  scan.staked.splice(0, scan.staked.length, ...scan.staked.filter(kept));
+  for (const list of [scan.deposited, scan.redeemed]) {
+    for (let i = 0; i < list.length; i++) if (!kept(list[i])) list[i] = { ...list[i], unconfirmed: true };
+  }
 }
 
 /** A log known by its transaction and content, numbered when one transaction has several alike: the

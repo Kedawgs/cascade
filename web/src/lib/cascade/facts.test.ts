@@ -217,6 +217,26 @@ describe("facts", () => {
     expect(scan.deposited).toEqual([{ key: KEY, txHash: H(42), block: 2_200n, assets: 5n }]);
   });
 
+  it("keeps an account event the re-read doesn't return, unconfirmed: a node whose logs lag its head isn't proof it's gone", async () => {
+    const logs = nearHead();
+    const scan = newScan(D);
+    await scanVault(chains({ latest: 2_400n, bitLogs: logs }).clients, D, scan, ME);
+    // the next read comes from a node that reports block 2,403 but whose logs stop at 2,100
+    const lagging = chains({ latest: 2_403n, bitLogs: logs });
+    const node = lagging.clients as unknown as { bittensor: { getLogs: (q: { fromBlock: bigint; toBlock: bigint }) => Promise<unknown[]> } };
+    const real = node.bittensor.getLogs;
+    node.bittensor.getLogs = async (q) => (await real(q)).filter((l) => (l as { blockNumber: bigint }).blockNumber <= 2_100n);
+    scan.deposited.push({ key: H(79), txHash: H(45), block: 2_395n, assets: 9n });
+    await scanVault(lagging.clients, D, scan, ME);
+    // the deposit in the last ten blocks stays, waiting for its receipt; the stake there is read again later
+    expect(scan.deposited.find((e) => e.txHash === H(45))).toEqual({ key: H(79), txHash: H(45), block: 2_395n, assets: 9n, unconfirmed: true });
+    expect(scan.staked).toEqual([]);
+    // a healthy node returns it: confirmed by the log again
+    await scanVault(chains({ latest: 2_406n, bitLogs: [...logs, log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: H(79), user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256, uint256"), [9n, 9n]), 2_395n, H(45))] }).clients, D, scan, ME);
+    expect(scan.deposited.find((e) => e.txHash === H(45))).toEqual({ key: H(79), txHash: H(45), block: 2_395n, assets: 9n });
+    expect(scan.staked).toHaveLength(1);
+  });
+
   it("drops a log near the head whose block was then replaced", async () => {
     const logs = nearHead();
     const c = chains({ latest: 2_400n, bitLogs: logs });
@@ -227,7 +247,7 @@ describe("facts", () => {
     logs.splice(0, 1);
     await scanVault(c.clients, D, scan, ME);
     expect(scan.staked).toEqual([]);
-    expect(scan.deposited).toHaveLength(1);
+    expect(scan.deposited).toEqual([{ key: KEY, txHash: H(42), block: 2_200n, assets: 5n }]);
   });
 
   it("stops two blocks short of the newest, so an event landing mid-read is never skipped", async () => {

@@ -465,6 +465,44 @@ describe("the vault's history", () => {
     expect(createScanStore(storage, D).load(ME).deposited).toHaveLength(1);
   });
 
+  it("shows \"–\", never a wrong figure, while a node whose logs lag its head can't return a deposit it just read", async () => {
+    const deposit = (block: bigint, tx: number, key: number, assets: bigint) => ({
+      address: D.vault,
+      topics: encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key: H(key), user: ME } }),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256"), [assets, assets * 10n ** 6n]),
+      blockNumber: block,
+      transactionHash: H(tx),
+      logIndex: 0,
+    });
+    // 0.03 TAO in long ago, 0.04 TAO in five blocks ago: 0.08 now, so 0.01 earned
+    const older = deposit(500n, 4, 3, 3n * 10n ** 16n);
+    const recent = deposit(995n, 6, 5, 4n * 10n ** 16n);
+    const nowS = BigInt(Math.floor(Date.now() / 1000));
+    let head = 1_000n;
+    let indexedTo = 1_000n;
+    const node = {
+      getBlock: async () => ({ number: head, timestamp: nowS }),
+      request: async () => `0x${head.toString(16)}`,
+      // a server that reports its head, but whose log and receipt index stops at `indexedTo`
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        [older, recent].filter((l) => l.blockNumber >= fromBlock && l.blockNumber <= toBlock && l.blockNumber <= indexedTo),
+      getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+        const l = [older, recent].find((x) => x.transactionHash === hash && x.blockNumber <= indexedTo);
+        if (!l) throw new TransactionReceiptNotFoundError({ hash });
+        return { status: "success", logs: [l] };
+      },
+    };
+    const data = createLiveCascadeData(D, deps({ clients: { bittensor: node } as never, scan: scanVault }));
+    expect((await data.getPositionHistory(ME)).rewardsEarnedTao).toBeCloseTo(0.01, 12);
+    // 30 s on: the head is 1,003, but the logs only reach 990
+    head = 1_003n;
+    indexedTo = 990n;
+    await expect(data.getPositionHistory(ME)).rejects.toThrow();
+    // a healthy server again
+    indexedTo = 1_003n;
+    expect((await data.getPositionHistory(ME)).rewardsEarnedTao).toBeCloseTo(0.01, 12);
+  });
+
   it("sums the account's saved amounts only as their receipts on Bittensor confirm them", async () => {
     // saved as 5 TAO in, but the receipt says 0.07
     const d = deps({ clients: { bittensor: bittensorAt(2_000n) } as never, scanStore: createScanStore(savedDeposit(5n * 10n ** 18n), D) });

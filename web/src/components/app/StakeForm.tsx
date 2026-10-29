@@ -6,13 +6,14 @@ import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
-import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
+import { useAccountCode, useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatUsd, parseAmount } from "@/lib/format";
 import {
   breakEvenDays,
   breakEvenText,
   cascadeFeesText,
+  contractWalletNote,
   etaText,
   maxStakeInput,
   POOL_FEES_TEXT,
@@ -76,6 +77,15 @@ export function StakeForm({
   const [opId, setOpId] = useState<string | null>(null);
   const inputId = useId();
   const noteId = useId();
+  // a contract account (not a plain or EIP-7702 one) is told how it can leave once it starts to stake:
+  // the note comes with the typing (or MAX, or the click) that brings it, never on its own after the
+  // page has loaded, so it moves nothing by itself; one whose code isn't known yet waits for the next input
+  const code = useAccountCode(account);
+  const [started, setStarted] = useState(false);
+  const start = () => {
+    if (code.data !== undefined) setStarted(true);
+  };
+  const walletNote = started ? contractWalletNote(code.data) : null;
 
   const amount = parseAmount(raw);
   const lim = limits.data;
@@ -99,6 +109,7 @@ export function StakeForm({
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!account || !quote || pending) return;
+    start();
     setOpId(null);
     flows.stake(quote, setOpId).then(
       (id) => router.push(`/activity?deposit=${id}`),
@@ -117,11 +128,21 @@ export function StakeForm({
       <AmountField
         id={inputId}
         value={raw}
-        onChange={setRaw}
+        onChange={(v) => {
+          setRaw(v);
+          start();
+        }}
         unit="USDC"
         chain={liveChains()[0]}
         decimals={2}
-        onMax={account ? () => setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc, lim && !lim.full ? lim.maxUsd : undefined)) : undefined}
+        onMax={
+          account
+            ? () => {
+                setRaw(maxUsdc === null ? "" : maxStakeInput(maxUsdc, lim && !lim.full ? lim.maxUsd : undefined));
+                start();
+              }
+            : undefined
+        }
         maxDisabled={maxUsdc === null}
         invalid={error !== null}
         describedBy={noteId}
@@ -139,6 +160,7 @@ export function StakeForm({
           <ConnectWallet variant="pill-block" />
         </div>
       )}
+      {account && walletNote && <p className={styles.under}>{walletNote}</p>}
       {lowEth && (
         <p className={styles.error}>
           Network fees on Base are paid in ETH, and this wallet has almost none. Add a little ETH on Base (about $1 covers

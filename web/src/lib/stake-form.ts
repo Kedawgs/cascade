@@ -71,6 +71,18 @@ export function walletTaoNote(tao: bigint, limits: Pick<Limits, "minTao" | "maxT
   return `Deposits take at most ${taoLabel.format(toDisplay(limits.maxTao, 18))} TAO right now.`;
 }
 
+export const CONTRACT_WALLET_NOTE =
+  "This wallet is a contract account, so it can only leave Cascade through Unstake here, not directly on Bittensor. If Unstake is ever paused, leaving waits until it reopens.";
+
+/** What a stake from an account with this code on Base should know first: nothing for a plain key
+ * account ("0x") or an EIP-7702 one (code 0xef0100 + the delegate's address: a key account that can
+ * still act on Bittensor), nor while the code isn't known; any other contract account can only leave
+ * through the front door. */
+export function contractWalletNote(code: string | undefined): string | null {
+  if (code === undefined || code === "0x" || code.toLowerCase().startsWith("0xef0100")) return null;
+  return CONTRACT_WALLET_NOTE;
+}
+
 export function stakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";

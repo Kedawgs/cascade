@@ -27,6 +27,8 @@ import {
   unstakeRequestWei,
   validateStakeAmount,
   walletTaoNote,
+  CONTRACT_WALLET_NOTE,
+  contractWalletNote,
 } from "./stake-form";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
@@ -74,6 +76,27 @@ describe("walletTaoNote", () => {
     expect(walletTaoNote(12n * TAO, l)).toBe("Deposits take at most 7.00 TAO right now.");
     expect(walletTaoNote(TAO, { ...l, maxTao: 10n ** 16n, full: "batch" })).toBe("The current batch is full. A new one opens once it leaves, so try again soon.");
     expect(walletTaoNote(TAO, { ...l, maxTao: 0n, full: "cap" })).toBe("Cascade is full for now. Try again later.");
+  });
+});
+
+describe("contractWalletNote", () => {
+  it("says nothing for a plain account, or while its code isn't known", () => {
+    expect(contractWalletNote("0x")).toBeNull();
+    expect(contractWalletNote(undefined)).toBeNull();
+  });
+
+  it("says nothing for an EIP-7702 account (a key account with a delegation), in any case of hex", () => {
+    expect(contractWalletNote(`0xef0100${"ab".repeat(20)}`)).toBeNull();
+    expect(contractWalletNote(`0xEF0100${"AB".repeat(20)}`)).toBeNull();
+  });
+
+  it("warns any other contract account that it can only leave through Unstake here", () => {
+    expect(contractWalletNote("0x6080604052348015600f57600080fd5b50")).toBe(CONTRACT_WALLET_NOTE);
+    // a proxy (like a Safe) is a contract too, even a short one
+    expect(contractWalletNote("0x363d3d373d3d3d363d73")).toBe(CONTRACT_WALLET_NOTE);
+    expect(CONTRACT_WALLET_NOTE).toBe(
+      "This wallet is a contract account, so it can only leave Cascade through Unstake here, not directly on Bittensor. If Unstake is ever paused, leaving waits until it reopens.",
+    );
   });
 });
 

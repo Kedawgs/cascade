@@ -1,10 +1,10 @@
 # Cascade history indexer and monitor — design
 
-Date: 2026-10-28; revised 2026-10-29 after review (items C1, I1–I11, M1–M13). Status: design, not built. Builds
-on the v3 contracts (`contracts/src`, tags `v3.0`/`v3.1`), the keeper's incremental log scan
-(`ops/src/keeper/state.ts`) and the site's resumable vault scan on branch `web-hardening`
-(`web/src/lib/cascade/facts.ts`, `live.ts`, `scan-store.ts`), which is still in review: section 5 is to be
-re-checked once it merges.
+Date: 2026-10-28; revised 2026-10-29 after review (round 1: C1, I1–I11, M1–M13; round 2: R1–R4 and minors).
+Status: design, not built. Builds on the v3 contracts (`contracts/src`, tags `v3.0`/`v3.1`), the keeper's
+incremental log scan (`ops/src/keeper/state.ts`) and the site's resumable vault scan
+(`web/src/lib/cascade/facts.ts`, `live.ts`, `scan-store.ts`), merged into main at `438deaf`; section 5 is to be
+re-checked against main's files when its tasks start, in case they have moved on.
 
 ## Intent
 
@@ -12,7 +12,7 @@ Two small backend pieces, in one Cloudflare Worker with one D1 database:
 
 1. **A history indexer.** Today every browser reads the vault's whole event history from the deploy block in
    1,000-block windows: about 3 seconds per day of deployment age, so about 18 minutes for a first visit a year
-   after launch. `web-hardening` makes the scan resumable in the browser (a deployment-wide half and a
+   after launch. The site (since `web-hardening`, now on main) makes the scan resumable in the browser (a deployment-wide half and a
    per-account half) and accepts a published starting point (`seedScan`). The indexer publishes both halves. It
    is an accelerator only: the site checks what it uses against chain receipts and works without it.
 2. **A monitor.** It watches both chains and the bridge between them every minute, emails the owner when
@@ -129,7 +129,7 @@ Two small backend pieces, in one Cloudflare Worker with one D1 database:
   price rule must subtract these (6.1).
 - `payoutDelay` is 3,600 s on v3-test and 86,400 s in the launch cadence (`ops/src/config.ts`).
 
-### The site's scan (branch `web-hardening`, in review; re-check after merge)
+### The site's scan (main at `438deaf`, merged from `web-hardening`)
 
 - `VaultScan` (`facts.ts`) holds the vault's `BatchDelivered` from our front door with `sourceChain == 8453`
   (by batch id), every `Staked`, every `PayoutChunkSent` (by key and chunk), and the connected account's own
@@ -148,7 +148,10 @@ Two small backend pieces, in one Cloudflare Worker with one D1 database:
   batch from our front door (`deliveryOf`); what can be unstaked confirms saved deliveries by receipt
   (`checkDeliveries`); amounts wait for `confirmAccountEvents`, which restarts the scan (`HistoryMismatchError`)
   when a receipt from a server well past the block shows the event isn't there. Stakes and payout chunks are not
-  marked.
+  marked, and four places use them as they are: `depositFacts` takes the first stake after a delivery
+  (`facts.ts` l.496), `withdrawalFacts` maps an entry to its chunk with `chunkOf` (l.547, which adds up `taken`
+  over the chunks it holds, l.597), `deliveryFacts` takes a key's first chunk (`payouts.get(key)?.[0]`, l.623),
+  and `chainDeposits` sets each deposit's `staked` flag (l.869).
 
 ### The keeper's scan (`ops/src/keeper/state.ts` on main)
 
@@ -173,6 +176,8 @@ vault's `payoutDelay` and its pending payout batches.
 ### Cloudflare (docs read 2026-10-28)
 
 - **Plans apply to the whole account**: an account is on Workers Free or Workers Paid, for every Worker in it.
+  A Worker's custom domain must be a zone in its own account, and it can send email only from an Email Routing
+  domain in its own account.
 - Workers Free: 100,000 requests a day per account (Workers and Pages Functions together; static Pages assets
   are free), 10 ms CPU per invocation (HTTP and cron alike), 50 external subrequests per invocation (1,000 to
   Cloudflare services), 5 cron triggers per account, cron wall time up to 15 minutes. Workers Paid ($5/month):
@@ -219,7 +224,8 @@ vault's `payoutDelay` and its pending payout batches.
                   ┌──────────── Worker cascade-indexer ────────────┐
                   │ fetch():      four read-only routes            │
                   │ scheduled():  * * * * *    tick                │───▶ D1: logs, cursors, readings,
-                  │               17 * * * *   hourly              │         hours, checks, alerts, holds
+                  │               */2 * * * *  site check          │         hours, checks, alerts, holds
+                  │               17 * * * *   hourly              │
                   │               0 13 * * *   daily digest        │
                   └───────┬────────────────┬────────────────┬──────┘
                           ▼                ▼                ▼
@@ -229,38 +235,45 @@ vault's `payoutDelay` and its pending payout batches.
 
 - **One Worker, `cascade-indexer`**, two handlers. `fetch` serves four read-only routes and nothing else
   (section 4). `scheduled` dispatches on `controller.cron`; a test checks that the crons in `wrangler.jsonc` and
-  the dispatch table match. *call*: three crons per environment: the **tick** every minute, an **hourly** job at
-  minute 17 (hourly aggregates, pruning, the site check's new pass, the watchdog), and the **daily digest** at
-  13:00 UTC (sent once per UTC day, whatever retries happen). Each runs in its own invocation with its own
-  subrequest and CPU budget.
+  the dispatch table match. *call*: four crons per environment: the **tick** every minute; the **site check**
+  every two minutes (section 6.6), apart from the tick so that whatever the site serves can never slow or stop
+  the security tick; an **hourly** job at minute 17 (hourly aggregates, pruning, the watchdog); and the **daily
+  digest** at 13:00 UTC (sent once per UTC day, whatever retries happen). Each runs in its own invocation with its
+  own subrequest and CPU budget. Only the tick sends alert email: the other jobs leave their findings in D1 for
+  the next tick, except the watchdog's `monitor.stalled`, which must not depend on a working tick.
 - **One D1 database** per environment (`test` for the v3 test deployment, `production` later). Two
-  environments on one Free account would need six crons, over the five allowed (section 11).
+  environments on one Free account would need eight crons, over the five allowed (section 11).
 - **No keys.** The Worker reads public chain data, writes only its own D1, and sends email to verified
   addresses. It never builds or sends a transaction (a test fails if transaction-sending methods appear in
   `src/`).
 - **A tick** (*call*), in order; every external fetch spends the tick's subrequest budget (section 3.6):
-  1. take the lease row (`UPDATE lease … WHERE until < now`); skip the tick if another holds it;
+  1. take the lease row for 3 minutes under a fresh random holder id (`UPDATE lease … WHERE until < now`); skip
+     the tick if another holds it;
   2. load cursors, open alerts, holds, the last readings, the last 25 hourly rows, the watched addresses, the
      messages and `delivered(...)` reads still pending, and the recent payout users in one `db.batch()`;
   3. load the uids already stored in each chain's REREAD range (one query for both chains);
-  4. scan Bittensor, then Base, forward from their cursors (section 3), within the subrequest and decode budgets;
+  4. scan Bittensor, then Base, forward from their cursors (section 3), within the subrequest and decode budgets
+     and a wall-time limit (40 s from the tick's start, well inside the 3-minute lease), so a long backfill
+     commits what it read and the next tick carries on;
   5. fetch block times and the transactions behind attributable events found this tick;
   6. read both chains' state: one Multicall3 `aggregate3` per chain, which includes the block number it was
      read at, plus one batched nonce request per chain;
   7. prefetch, in one `db.batch()`, every stored log and check row the rules will read;
   8. run the rules; reconcile alerts; work out holds and which emails are due;
-  9. **commit 1**, one `db.batch()` guarded by the lease (it fails whole if the lease is no longer this tick's,
-     section 2): logs, cursors, seed pages, blocks, txs, the reading, hourly running values, messages, checks,
-     alerts, holds, `meta.last_complete_tick`;
+  9. **commit 1**, one `db.batch()` guarded by the lease (it fails whole if another tick has since taken the lease,
+     section 2): logs, cursors (with each chain's `head_time`, set every tick, section 3.2), seed pages, blocks,
+     txs, the reading, hourly running values, messages, checks, alerts, holds, `meta.last_complete_tick`;
   10. send the due emails;
   11. **commit 2**, a small batch: mark the sent alerts notified, release the lease.
   An email is sent only after the alert behind it is committed, so a commit that keeps failing can't flood the
-  inbox. If commit 1 fails, the tick sends no alert emails; instead, only when the tick's scheduled minute is 0
-  (stateless, so at most hourly), it sends one `monitor.db_failing` email straight from memory. A failing rule
+  inbox. If commit 1 fails, the tick reads the lease row once: if another tick took it over, it stops quietly
+  (that tick does the work); otherwise it sends no alert emails, and only when the tick's scheduled minute is 0
+  (stateless, so at most hourly) it sends one `monitor.db_failing` email straight from memory. A failing rule
   or read is caught and recorded; it never stops the other rules.
-- **Watchdog** (*call*): the hourly and daily jobs read `meta.last_complete_tick` and raise the critical
-  `monitor.stalled` when it is more than 15 minutes old: a tick killed for CPU commits nothing, so only another
-  job can notice. A tick killed the same way every time (a deterministic overrun) is what this catches.
+- **Watchdog** (*call*): the hourly and daily jobs read `meta.last_complete_tick` and, when it is more than 15
+  minutes old, record the critical `monitor.stalled` and send its email themselves: a tick killed for CPU
+  commits nothing, so only another job can notice. A tick killed the same way every time (a deterministic
+  overrun) is what this catches.
 
 ### 2. The D1 schema
 
@@ -278,7 +291,9 @@ CREATE TABLE cursors (
   scanned_to   INTEGER,            -- the last head fully read (null before the first window)
   settled_to   INTEGER NOT NULL,   -- every log in [from_block, settled_to] is stored (from_block − 1 at first)
   settled_time INTEGER,            -- block time of settled_to
-  head_time    INTEGER,            -- block time of the head when settled_to was last moved (for the lag)
+  head_time    INTEGER,            -- set EVERY tick: the newest time known for this chain (the scan head's block
+                                   -- time, else this tick's reading's block time, else the Worker's clock);
+                                   -- lag = head_time − settled_time, so a stuck scan shows as growing lag
   updated_at   INTEGER NOT NULL
 );
 
@@ -328,16 +343,24 @@ CREATE TABLE messages (
   state TEXT NOT NULL DEFAULT 'UNTOUCHED', state_at INTEGER,
   dst_tx TEXT, dst_block INTEGER);                       -- set from the destination adapter's Delivered
 
--- the cross-check, one row per batch and per payout chunk
-CREATE TABLE batch_checks (batch_id INTEGER PRIMARY KEY, closed_tx TEXT, message_id TEXT,
-  expected_key TEXT, delivered_key TEXT, delivered_tx TEXT,
-  status TEXT NOT NULL,              -- 'waiting' | 'ok' | 'mismatch'
-  detail TEXT);
+-- the cross-check: one row per DELIVERY (a forged delivery reusing an honest batch id gets its own row and can't
+-- block the honest one), and one row per LANDING on Base (keyed by the PayoutsDelivered log's uid)
+CREATE TABLE batch_checks (
+  batch_id INTEGER NOT NULL, delivered_key TEXT NOT NULL, delivered_uid TEXT NOT NULL, delivered_tx TEXT NOT NULL,
+  closed_tx TEXT, message_id TEXT, expected_key TEXT,
+  status TEXT NOT NULL,              -- 'waiting' | 'ok' | 'mismatch' | 'ok_by_owner'
+  detail TEXT, approved_note TEXT, approved_at INTEGER,
+  queued_block INTEGER,              -- the delivery's PayoutBatchQueued block, if it queued payouts
+  payout_done_block INTEGER,         -- first reading block (after queued_block) where getPayoutBatch(key).count = 0
+  PRIMARY KEY (batch_id, delivered_key));
 CREATE INDEX batch_checks_by_key ON batch_checks(delivered_key);
-CREATE TABLE chunk_checks (batch_key TEXT NOT NULL, chunk INTEGER NOT NULL, sent_tx TEXT, message_id TEXT,
-  expected_hash TEXT, landed_tx TEXT, landed_block INTEGER,
+CREATE TABLE chunk_checks (
+  landed_uid TEXT PRIMARY KEY,       -- the PayoutsDelivered log: a forged duplicate landing gets its own row
+  batch_key TEXT NOT NULL, chunk INTEGER NOT NULL, landed_tx TEXT NOT NULL, landed_block INTEGER NOT NULL,
+  sent_tx TEXT, message_id TEXT, expected_hash TEXT,
   status TEXT NOT NULL,              -- 'waiting' | 'awaiting_read' | 'ok' | 'mismatch'
-  detail TEXT, PRIMARY KEY (batch_key, chunk));
+  detail TEXT);
+CREATE INDEX chunk_checks_by_chunk ON chunk_checks(batch_key, chunk);
 
 -- watched addresses' transaction counts (or a Safe's nonce): compared with the transactions seen in our logs
 CREATE TABLE nonces (chain TEXT NOT NULL, address TEXT NOT NULL, roles TEXT NOT NULL, baseline INTEGER NOT NULL,
@@ -351,18 +374,23 @@ CREATE TABLE alerts (
   notified_at INTEGER, notify_count INTEGER NOT NULL DEFAULT 0, acknowledged_at INTEGER);
 CREATE UNIQUE INDEX alerts_open ON alerts(alert_key) WHERE resolved_at IS NULL;
 
-CREATE TABLE holds (id TEXT PRIMARY KEY, rule TEXT NOT NULL, summary TEXT NOT NULL,
+CREATE TABLE holds (id TEXT PRIMARY KEY,           -- internal: 'bridge.batch:42' (emails, scripts)
+  public_id TEXT NOT NULL UNIQUE,                   -- opaque: 'h_' + 8 random hex digits (the public status)
+  rule TEXT NOT NULL, summary TEXT NOT NULL,
   raised_at INTEGER NOT NULL, cleared_at INTEGER, cleared_note TEXT);
 
 CREATE TABLE lease (name TEXT PRIMARY KEY, holder TEXT NOT NULL, until INTEGER NOT NULL);
--- the commit's first statement inserts 1 here unless this tick still holds the lease; the CHECK then fails the
--- whole batch, so a tick whose lease expired can never commit over a newer one
+-- the commit's first statement inserts 1 here unless this tick is still the lease's holder; the CHECK then fails
+-- the whole batch, so a tick can never commit over a newer tick that took the lease from it
 CREATE TABLE guard (x INTEGER CHECK (x = 0));
 ```
 
 The guard statement is `INSERT INTO guard (x) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM lease WHERE name =
-'tick' AND holder = ?1 AND until > ?2)`: it inserts nothing while the lease is ours, and fails the batch (as a
-transaction) when it isn't. Logs are written with an upsert: `INSERT … ON CONFLICT (uid) DO UPDATE SET removed =
+'tick' AND holder = ?1)`: it inserts nothing while this tick is still the holder, and fails the batch (as a
+transaction) once another tick has taken the lease. It deliberately doesn't test `until`: a slow tick whose
+lease ran out but that nobody replaced may still commit what it read, so a long backfill always makes progress.
+The lease lasts 3 minutes and the scan stops at 40 seconds, so a takeover only happens when a tick is really
+stuck. Logs are written with an upsert: `INSERT … ON CONFLICT (uid) DO UPDATE SET removed =
 0, block = excluded.block, log_index = excluded.log_index`, so a log marked removed by a reorg and re-mined in
 a later block comes back.
 
@@ -390,7 +418,7 @@ its chain.
 ```
 stored      = uids of stored logs in [start, scanned_to] (loaded in step 3, one query for both chains)
 start       = scanned_to === null ? from_block : max(from_block, scanned_to + 1 − REREAD)
-for each window [a, b] from start (b ≤ head), while the subrequest and decode budgets last:
+for each window [a, b] from start (b ≤ head), while the subrequest and decode budgets and the 40 s wall time last:
     [logs, serverHead] = one JSON-RPC batch: eth_getLogs(addresses, a, b), eth_blockNumber
     if serverHead < b: retry once; still behind → stop this chain for this tick (cursor stays at a − 1)
     identify every log: uid = keccak(chain:txHash:topics:data#n), n counting identical logs in one tx
@@ -400,7 +428,15 @@ for each window [a, b] from start (b ≤ head), while the subrequest and decode 
                     is staged removed = 1, and raises the indexer.reorg warning
     scanned_to = b
 settled_to = min(scanned_to, head − SETTLE)   (only ever moves forward)
+head_time  = max(head_time, the newest of: the head's block time, this tick's reading's block time, the Worker's
+             clock if neither chain answered)   (set every tick, even when no window could be read)
 ```
+
+- **The lag sees a stuck scan** (*call*): `lag = head_time − settled_time`. Because `head_time` moves every tick
+  from whatever still answers (the reading, or at worst the Worker's clock), a logs endpoint that fails while
+  state reads keep working shows as a lag growing by a minute a minute, which trips `indexer.lag`, then
+  `indexer.blind`, and the keeper's hold (section 8). The head's block time comes free with the first window's
+  batch (`eth_getBlockByNumber("latest")` asked alongside); when no window is read, the reading supplies it.
 
 - A window is accepted only from a server that has reached its end (*call*: logs and head travel in one batched
   request to one server, as the site's `windowLogs` does). A node that is behind answers "no logs" for blocks
@@ -454,10 +490,12 @@ from (section 6, "Readings").
 
 *call*: every external `fetch` spends a per-invocation counter (45 of the free plan's 50; configurable); the
 tick stops scanning when 5 are left, so the state reads, the rules and the emails always run. A steady tick
-needs about 10: one window per chain (logs and head together), one multicall per chain, one nonce batch per
-chain, one block-time batch per chain, the odd transaction lookup, the price references every fifth minute, and
-up to two files of the site check. A second budget caps the logs decoded per tick (default 300), so a backfill
-over a busy stretch can't overrun the CPU limit: the tick finishes the window it is in and stops.
+needs about 10: one window per chain (logs, head number and head block together), one multicall per chain, one
+nonce batch per chain, one block-time batch per chain, the odd transaction lookup, and the price references
+every fifth minute. A second budget caps the logs decoded per tick (default 300), so a backfill over a busy
+stretch can't overrun the CPU limit: the tick finishes the window it is in and stops. A third limit stops
+scanning 40 seconds into the tick (RPC backoff included), well inside the 3-minute lease, so a slow backfill
+tick still commits what it read. The site check has its own cron and budgets (section 6.6).
 
 D1 work stays at about 6 queries per tick (each `db.batch()` counts once): the load, the uid query, the
 prefetch, the lease and the two commits. Rows read stay small: rules that look back a day or a week read the
@@ -491,7 +529,9 @@ Four routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404 
 - *call*: two halves instead of one combined state, because they match the site's store exactly, and because
   the shared half is one URL for every visitor (one cached response, one page read per 500 events), while an
   account half reads only that account's rows through an index (a few rows, or none).
-- `vault` must be the configured vault (any case), else 404; `account` must be 40 hex digits, else 400.
+- *call*: one spelling per resource, checked before D1 is touched, so the cache can't be sidestepped with
+  variants: `vault` must be the configured vault **in lowercase** (else 404), `account` must be 40 **lowercase**
+  hex digits after `0x` (else 400), and any query string is refused (400). The site always asks in lowercase.
 - Both halves of one tick carry the same `next = settled_to + 1` of Bittensor; every event has
   `from ≤ block < next` and comes from a stored, not removed log. The account half matches `topic2` (the account
   left-padded to 32 bytes; `user` is the second indexed argument of both events) on the vault's `Deposited` and
@@ -504,16 +544,17 @@ Four routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404 
   falls back).
 
 **`GET /v1/status`** — the hold, the per-batch confirmations and the monitor's sight, for the keeper (section 8).
-`Cache-Control: no-store`. It carries hold ids but no summaries and no alert details: the reasons go only to the
-owner's email (*call*, so an attacker reading it learns no more than "a hold is on").
+`Cache-Control: no-store`. It carries opaque hold ids (`h_` and 8 random hex digits, from `holds.public_id`), no
+rule names, batch ids or summaries, and no alert details: the reasons go only to the owner's email (*call*, so an
+attacker reading it learns no more than "a hold is on"). Query strings are refused here too.
 
 **`GET /v1/health`** — `200 ok` while the last complete tick is under 5 minutes old, else `503`;
 `Cache-Control: no-store` (Workers Cache is on). For an outside uptime checker (open question 9).
 
 ### 5. How the site verifies, and how it falls back
 
-The site work is its own tasks, after `web-hardening` merges, and is **to be re-checked against its merged
-shape** (it is in review). With `NEXT_PUBLIC_CASCADE_INDEXER_URL` unset, nothing changes.
+The site work is its own tasks (Part G). `web-hardening` is merged (main at `438deaf`); the tasks **re-check main's
+files first**, in case they have moved on. With `NEXT_PUBLIC_CASCADE_INDEXER_URL` unset, nothing changes.
 
 1. **When to ask.** In `scanFor(account)`, after loading the saved halves: if the chain head is more than 14,400
    blocks (2 days) past `scan.next` and the indexer isn't distrusted, fetch both halves in parallel with a
@@ -521,16 +562,25 @@ shape** (it is in review). With `NEXT_PUBLIC_CASCADE_INDEXER_URL` unset, nothing
    seed": the scan goes on from the browser's own state, exactly as today.
 2. **Seeding.** The halves are merged as the store merges saved halves (the earlier `next` wins), through the
    same function, so seeded and saved history follow one path. `decode` already marks seeded deliveries and
-   account events `unconfirmed`. The account's half is saved with an optional `seeded: true` (older saved halves
-   without it load as before), cleared once the account's history is verified (step 5).
+   account events `unconfirmed`. **Both halves** are saved with an optional `seeded: true` (older saved halves
+   without it load as before). The account half's mark is cleared once the account's history is verified
+   (step 5); the shared half's mark stays until a restart rebuilds that half from the browser's own scan, so a
+   contradiction found on any account's trail, later, still knows the indexer was the source.
 3. **Deliveries, stakes and chunks are confirmed on use.** A trail already uses a delivery only when its receipt
    shows the vault's `BatchDelivered` for that batch (`deliveryOf`). *call*: stakes and payout chunks get the
-   same treatment wherever they come from (seed, storage or the browser's own scan), instead of persisted marks:
-   the "first stake after a delivery" counts only if its receipt shows the vault's `Staked`, and a key's chunks
-   count, for mapping an entry to its chunk, only if each one's receipt shows `PayoutChunkSent` with that key,
-   chunk and `taken`. Receipts are cached for the visit. A receipt that contradicts an entry, from a server well
-   past its block (`receiptAt`'s rule), discards the shared half (the scan restarts from the deploy block) and,
-   if the scan was seeded, distrusts the indexer for 24 hours in this browser.
+   same treatment wherever they come from (seed, storage or the browser's own scan), instead of persisted marks,
+   in **all four places that use them** (Facts): `depositFacts`' first stake after a delivery, `withdrawalFacts`'
+   chunk mapping, `deliveryFacts`' first chunk of a key, and `chainDeposits`' `staked` flag.
+   - A stake counts only if its receipt shows the vault's `Staked`.
+   - A key's chunks are used only when they are numbered `0 … n` **with no gap** and each one's receipt shows
+     `PayoutChunkSent` with that key, chunk and `taken` (a gap would silently shift the entry-to-chunk mapping,
+     which adds up `taken`). In a seeded scan a gap means the seed left a chunk out; in the browser's own scan it
+     means a read hasn't caught up, and the trail waits.
+   - A receipt that contradicts a stake or a chunk, from a server well past its block (`receiptAt`'s rule),
+     discards the shared half (the scan restarts from the deploy block) and, when that half is `seeded`,
+     distrusts the indexer for 24 hours in this browser; a chunk gap in a seeded half does the same. Stakes and
+     chunks are treated alike. A receipt not readable yet leaves the trail at its previous step, never a guess.
+   - Receipts are cached for the visit.
 4. **Amounts.** The account's `Deposited`/`Redeemed` are confirmed by `confirmAccountEvents` before anything sums
    them, as today; it now also keeps each event's `shares`.
 5. **Completeness, stated honestly.** Receipts prove an event exists, not that none was left out. A seed could
@@ -544,7 +594,9 @@ shape** (it is in review). With `NEXT_PUBLIC_CASCADE_INDEXER_URL` unset, nothing
      background check reads the account's own `Deposited` and `Redeemed` from the deploy block to the seed's
      `next` (topic-filtered by user, resumable across visits). When it matches the seeded events exactly,
      `seeded` is cleared and the figure is final; when it doesn't, the seed is discarded and the indexer
-     distrusted. Everything else (the trail, the lists) shows at once.
+     distrusted. Everything else (the trail, the lists) shows at once. The check costs about 2,600 archive log
+     windows per year of deployment age (the same count as today's full scan, with tiny answers); that is fine
+     because it runs in the background, never in front of the user, and resumes where it stopped.
 6. **Omitted deliveries.** A record whose batch closed more than 2 hours before the seed's `next` with no
    delivery in the scan is looked up directly: the site reads the Bittensor windows from the close time to
    `next`; a delivery found there means the seed lied (discard and distrust).
@@ -568,9 +620,15 @@ Conventions:
   the front door's ETH balance; FM-TAO `totalSupply` on Base and the lock pool's FM-TAO balance on Bittensor;
   both pools' `slot0` and `liquidity`, the TAO held by the TAO/WETH pool, the oracle's `usdcValue(1e18)`; keeper
   balances; the Bittensor adapter's balance; AlphaVault `isPaused`, `migrationReadyAt`, `migrationFinished`; the
-  OffRamp execution state of every message not yet settled; `nonce()` for a watched owner that is a Safe; and the
-  `delivered(...)` reads the payout checks are waiting for. Each chain's nonces come from one batched
-  `eth_getTransactionCount` request.
+  OffRamp execution state of every message not yet settled; `nonce()` for a watched owner that is a Safe; the
+  `delivered(...)` reads the payout checks are waiting for; and `getPayoutBatch(key)` for every delivery whose
+  payouts are queued and not yet done (`batch_checks.queued_block` set, `payout_done_block` null). Each chain's
+  nonces come from one batched `eth_getTransactionCount` request.
+- **When a payout batch is done** (*call*, the one source for `okKeys` and `payout.overdue`): a key's payouts are
+  pending from its `PayoutBatchQueued` block, and done at the first reading whose block is after that queue block
+  and in which `getPayoutBatch(key).count` is 0 (the vault deletes the batch when its last chunk is sent or it is
+  cancelled). Readings are block-pinned and only move forward, so a node that hasn't seen the queue yet can't
+  make a pending batch look done; `payout_done_block` records it.
 - **Readings only move forward.** A chain's reading whose block isn't newer than the last stored one (a lagging
   node behind `latest`) is dropped for this tick; rules over that chain's readings skip it. Five ticks in a row
   without a usable reading raise `monitor.chain_unreadable`.
@@ -602,7 +660,7 @@ place.
 | `stake.unexplained_drop` | for a hotkey in the set, `getStake(h, vaultColdkey, 0)` fell by more than 1,000 rao between two readings, with no vault `Unstaked`, `StakeMoved` or `HotkeyRemoved` log in that block range (evaluated once Bittensor settled past the later reading) | readings, logs | 1,000 rao | yes | Stake left the vault without a vault action: look up the hotkey on taostats (swap, slash, chain change). Guardian: pause the vault until it is explained. |
 | `stake.hotkey_changed` | the vault's `stakeHotkey` or hotkey set differs from the last reading; or the hotkey's owner in SubtensorModule `Owner` (storage-query precompile `0x…0807`, as `web/src/lib/cascade/apy.ts` reads `BasketTwr`) changed or vanished ×2 | readings | — | yes when the owner vanished | A hotkey change the owner didn't make means a validator-side swap: re-add the new hotkey with `addHotkey` (owner, guardian or keeper) and check the price. |
 | `admin.event` | any admin event (list in Facts) from the vault, front door or staker after the baseline | logs, txs | — | no | Name the sender. If it was a planned change, acknowledge. If not: guardian `pause()` both contracts now, then rotate keys. |
-| `keys.unexplained_tx` | a watched address holding the owner, pending-owner or guardian role (read every tick) sent more transactions than its transactions seen in Cascade's logs (section 3.3), still so 15 minutes later. For an owner that is a Safe, its `nonce()` counts instead of the account's transaction count | nonce batch, txs | 15 min | no | A transaction left a Cascade admin key that didn't touch Cascade (or reverted). Open the address on the explorer (link). If it isn't yours, treat the key as compromised: guardian pause, rotate. The rule is quiet only while these keys are used for Cascade alone; acknowledge your own other transactions. |
+| `keys.unexplained_tx` | a watched address holding the owner, pending-owner or guardian role (read every tick) sent more transactions than its transactions seen in Cascade's logs (section 3.3), still so 15 minutes later. For an owner that is a Safe, its `nonce()` counts instead of the account's transaction count | nonce batch, txs | 15 min | no | A transaction left a Cascade admin key that didn't touch Cascade (or reverted). Open the address on the explorer (link). If it isn't yours, treat the key as compromised: guardian pause, rotate. The rule is quiet only while these keys are used for Cascade alone; acknowledge your own other transactions. On v3-test owner, guardian and keeper are one address, so a reverted keeper call pages here as critical: expect that noise there. |
 | `frontdoor.solvency` | TAO `balanceOf(frontDoor)` < `openBatch.totalDeposits + totalClaimable`, or the front door's ETH < `openBatch.feePot + totalFeeCredit`, in one block ×2 | readings | — | yes | The front door holds less than it owes. Guardian: `pause()` the front door (claims and cancels still work); find the transfer that broke the identity. |
 | `vault.solvency` | `rootStakeRao × 1e9 + balance(vault) < pendingPayouts + 1e12` ×2 | readings | — | yes | The vault can't cover its queued payouts. Guardian: pause the vault; do not process payouts. |
 | `ccip.failure` | the destination OffRamp's `getExecutionState(messageId)` is `FAILURE` for a message our front door or vault sent, and the destination adapter has no `Delivered` for it | messages, readings, logs | — | no | The message and its tokens wait in CCIP. Open it on ccip.chain.link (link) and note the reason; it can be executed again by hand once the cause is fixed. Don't pause anything else for this alone. |
@@ -613,10 +671,11 @@ place.
 | `bridge.batch_mismatch` | a delivery fails the batch cross-check (6.2) | logs, D1 | — | yes | Possible forged batch. Guardian: `pause()` the vault now. Owner: `cancelPayoutBatch(key, payouts)` before **{deadline UTC}** (queued time + `payoutDelay`), with the list rebuilt from the vault's events for this key. Keep the hold until the cancel lands. |
 | `bridge.payout_mismatch` | a payout landing on Base fails the payout cross-check (6.2) | logs, D1 | — | yes | Possible forged payout: TAO was minted on Base for it. Guardian: `pause()` the front door (deliveries stop; claims can't be stopped); tell ForeverMoney and Chainlink; keep the hold. |
 | `bridge.duplicate` | a second `BatchDelivered` for one batch id from our front door, or a second `PayoutsDelivered` for one (key, chunk) | logs | — | yes | One message delivered twice under different content. As `bridge.batch_mismatch` (vault side) or `bridge.payout_mismatch` (Base side). |
-| `site.integrity` | a pass over the live site's scripts found a configured Cascade address missing, or an address or host not on the approved lists (6.6) | site check | — | no | The site may be tampered with. Take it down (Pages: roll back or disable the project), then check DNS, the build and the Pages project. |
-| `indexer.blind` | a chain's settled time more than `max(2 × lagLimit, 30 min)` behind its head | cursors | derived | no (the keeper holds on lag itself) | The monitor can't see a chain and the keeper is holding: fix the RPC (quota, outage, switch URLs). |
+| `site.integrity` | a pass over the live site's scripts found a configured Cascade address missing, or an address or host not on the approved lists, or a file it couldn't check (larger than the byte cap, or one that stopped a site-check invocation) (6.6) | site check | 2 MB cap | no | The site may be tampered with. Take it down (Pages: roll back or disable the project), then check DNS, the build and the Pages project. If the file is a legitimate large chunk, raise `SITE_MAX_BYTES`. |
+| `indexer.blind` | a chain's lag (`head_time − settled_time`, section 3.2) more than `max(2 × lagLimit, 30 min)` | cursors | derived | no (the keeper holds on lag itself) | The monitor can't see a chain and the keeper is holding: fix the RPC (quota, outage, switch URLs). |
+| `checks.owner_approved` | (event) a delivery check was marked `ok_by_owner` with `pnpm checks:approve` | batch_checks | — | no | Confirm it was you: a hand approval lets the keeper pay that batch. If it wasn't, rotate Cloudflare access now and hold the keeper (`ops/hold.json`). |
 | `monitor.stalled` | (hourly and daily jobs) `meta.last_complete_tick` more than 15 minutes old | meta | 15 min | no (the keeper holds on a stale status) | Ticks aren't completing (likely the CPU limit): check Workers Observability for the error; the keeper is holding. |
-| `monitor.db_failing` | commit 1 failed; sent only at minute 0, straight from memory | the tick | — | no | The monitor can't write its database (D1 limit or error): check the D1 dashboard; the keeper is holding once the status goes stale. |
+| `monitor.db_failing` | commit 1 failed for a reason other than a lost lease; sent only at minute 0, straight from memory | the tick | — | no | The monitor can't write its database (D1 limit or error): check the D1 dashboard; the keeper is holding once the status goes stale. |
 
 #### 6.2 The bridge cross-check
 
@@ -652,8 +711,18 @@ amount)`, once Base has settled past its block time:
 
 Any failure is `bridge.batch_mismatch` with the failing step in the email; a replay that can't be done (a cancel
 for an entry the replay doesn't have) is the same alert, worded "can't rebuild this batch", because the response
-is the same: stop and look. The result is stored in `batch_checks` (`ok`, `waiting`, `mismatch`), so each batch
-is checked once; `ok` keys are what the keeper needs before paying out (section 8).
+is the same: stop and look. The result is stored in `batch_checks`, **one row per delivery** (batch id and
+delivered key), so each delivery is checked once and a forged delivery that reuses an honest batch id (a later
+one, say, to grief the keeper) gets its own `mismatch` row without touching the honest delivery's `ok`. Two
+deliveries for one batch id still raise `bridge.duplicate` and its hold: a human looks before anything moves.
+`ok` keys are what the keeper needs before paying out (section 8).
+
+**Owner approval** (*call*). A check can be wrong (a false mismatch, or one left `waiting`), and the keeper would
+then never pay an honest batch. The owner can approve a delivery by hand after checking it:
+`pnpm checks:approve -- --env <env> --key <delivered key> --note "…"` runs `wrangler d1 execute --remote`, prints
+the check first, and sets `status = 'ok_by_owner'` with the note and time. `okKeys` includes `ok_by_owner` keys;
+the next tick sends the critical `checks.owner_approved` email, so an approval nobody expected is noticed. Like
+clearing a hold, approving needs Cloudflare account access.
 
 **Payouts, Bittensor → Base.** For each stored front door `PayoutsDelivered(batchKey, chunk, amount, bridge)`,
 once Bittensor has settled past its block time:
@@ -670,6 +739,9 @@ once Bittensor has settled past its block time:
 5. `frontDoor.delivered(bridge, keccak256(encodePayouts(batchKey, chunk, entries)))` reads true in a later
    tick's multicall, counted only from a reading at or after the landing block (a node behind the landing would
    answer false for an honest chunk). Until then the check is `awaiting_read`.
+
+Each landing is its own `chunk_checks` row, keyed by its `PayoutsDelivered` log's uid, so a forged duplicate
+landing for the same (key, chunk) is judged on its own and can't overwrite or collide with the honest one.
 
 **Timeliness (warnings).** A message our contracts sent that hasn't arrived (no destination adapter `Delivered`,
 OffRamp state not `SUCCESS`) 60 minutes after its source block time is `ccip.undelivered` (6.3).
@@ -703,7 +775,8 @@ a few minutes of arriving, far inside `payoutDelay`; and if the monitor can't se
 | `rewards.uncollected` | Bittensor time − `lastClaimAt(stakeHotkey)` > 35 days, or unclaimed rewards ≥ 25 × 0.057 TAO (the keeper's claim policy) | readings | 35 d, 25× | Run `pnpm ops claim --live`. |
 | `validator.not_earning` | the stake hotkey's unclaimed rewards haven't grown in 24 h (`hours`), with no `RewardsClaimed` in that time | readings, logs | 24 h | The validator may have stopped earning (deregistered, offline): check it on taostats; consider moving stake. |
 | `vault.events` | any `RedeemDeferred`, `PayoutDust`, `DepositSkipped` or an undecodable log | logs | — | Read the event in the email; usually a user-level edge case. |
-| `indexer.lag` | a chain's settled time more than `lagLimit` behind its head (the keeper holds past this) | cursors | derived | The monitor is behind on a chain and the keeper is holding: check the RPC. |
+| `indexer.lag` | a chain's lag (`head_time − settled_time`, set every tick even when no logs can be read) more than `lagLimit` (the keeper holds past this) | cursors | derived | The monitor is behind on a chain and the keeper is holding: check the logs RPC first (state reads may still work). |
+| `bridge.check_stuck` | a delivery check still `waiting` 60 min after its delivery | batch_checks | 60 min | The keeper won't pay this batch until it is `ok`. Find out why (usually Base lag); if you have verified the batch by hand, `pnpm checks:approve`. |
 | `indexer.reorg` | a stored log vanished from a later read | logs | — | Usually harmless; if it was a Cascade transaction, re-check its effects. |
 | `site.unreachable` | the site check couldn't fetch the site for 30 min | site check | 30 min | Check that the site is up (Pages, DNS). |
 | `monitor.chain_unreadable` / `monitor.email_failing` / `monitor.rule_failed` | 5 ticks in a row without a usable reading of a chain; emails failing for 30 min; a rule that threw | tick | 5, 30 min | Check RPC URLs and the email binding; a failing rule names its error (a bug to fix). |
@@ -740,11 +813,23 @@ every `https://` host found in its HTML and JavaScript.
   named inside the files fetched (the lazily loaded chunks), up to 80 files. Addresses are matched with hex
   boundaries (`(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])`), so 64-digit hashes don't match.
 - **Findings.** Critical `site.integrity` when a configured Cascade address (front door, staker, vault, adapters,
-  oracle) is missing from a complete pass, or an address or host appears that isn't approved (a new RPC
-  endpoint counts); warning `site.unreachable` after 30 minutes without a fetch.
-- **Within the CPU limit.** The hourly job starts a pass (the pages); each minute tick then fetches and scans
-  up to `SITE_FILES_PER_TICK` files (default 2), keeping the pass's progress in `meta`, so a pass completes in
-  well under an hour on the free plan; on Workers Paid the hourly job can run a whole pass at once.
+  oracle) is missing from a complete pass, an address or host appears that isn't approved (a new RPC endpoint
+  counts), or a file couldn't be checked (below); warning `site.unreachable` after 30 minutes without a fetch.
+- **Its own cron, never the tick** (*call*). The site is outside our control: a tampered site could serve a huge
+  or hostile file. The check therefore runs in its own invocation every two minutes (`*/2 * * * *`), so the worst
+  a file can do is stop a site-check invocation, never the security tick. It writes only its own progress and
+  findings to D1 (`meta`); the next tick turns findings into alerts and emails.
+- **Bounded per file.** Each file is read as a stream and abandoned at `SITE_MAX_BYTES` (2 MB); an oversized file
+  is reported, not scanned. Each invocation handles up to `SITE_FILES_PER_RUN` files (default 2), so a pass of
+  up to 80 files completes in well under 2 hours on the free plan; on Workers Paid the files per run can be
+  raised.
+- **A file that kills the check is skipped and reported.** Before fetching a file, the invocation records it as
+  "being tried" in `meta`; it clears the mark when the file is done. An invocation that finds a mark left by an
+  earlier one (that invocation died on that file: CPU, memory, wall time) skips the file, marks the pass
+  incomplete and reports `site.integrity` naming it. So a hostile file is tried only once, and the pass goes
+  on.
+- **Starting a pass.** A site-check invocation starts a new pass (fetching the pages) when none is running and
+  the last one finished at least an hour ago.
 - **Limits, stated.** An address assembled at run time, or code fetched from elsewhere at run time, is not seen;
   content hashes are not compared (they change with every build, while the address and host lists change only
   when dependencies or the deployment do, so the owner refreshes them rarely and reviews them in git). The check
@@ -782,7 +867,8 @@ every `https://` host found in its HTML and JavaScript.
 ### 8. The hold flag, the per-batch confirmation, and what the keeper does
 
 **When the hold is raised.** Findings of rules marked "Hold" in 6.1 raise a hold row with a stable id
-(`bridge.batch:42`, `price.drop:{bittensor block}`, …). The Worker never clears a hold by itself, even when the
+(`bridge.batch:42`, `price.drop:{bittensor block}`, …) and a random opaque public id for the status. The Worker
+never clears a hold by itself, even when the
 condition clears. It never pauses anything either: a paused vault or front door makes bridge messages that arrive
 meanwhile fail until someone executes them again by hand, so a pause stays a human decision, taken with the
 email's steps in front of them.
@@ -794,7 +880,7 @@ schema v1:
 {
   "v": 1,
   "deployment": { "frontDoor": "0x…", "vault": "0x…", "baseChainId": 8453, "bittensorChainId": 964 },
-  "hold": { "active": true, "ids": ["bridge.batch:42"] },
+  "hold": { "active": true, "ids": ["h_3f9a0c1e"] },
   "payouts": { "okKeys": ["0x…", "0x…"] },
   "indexer": {
     "base":      { "settledTo": 53227000, "settledTime": "…Z", "lagS": 64 },
@@ -805,8 +891,10 @@ schema v1:
 }
 ```
 
-`okKeys` lists the keys of payout batches still pending in the vault whose batch check is `ok`. `lagS` is the
-head's block time minus the settled block time, at the last complete tick.
+`hold.ids` are the holds' opaque public ids (the email carries the internal id and the reason). `okKeys` lists the
+keys of deliveries whose check is `ok` or `ok_by_owner` and whose payout batch is still pending (section 6,
+"When a payout batch is done"). `lagS` is `head_time − settled_time` at the last complete tick (section 3.2: it
+grows even when a chain's logs can't be read), and `settledTime` is the settled block's time.
 
 **What the keeper does with it** (*call*, the interface the later task builds; open questions 3 and 4):
 
@@ -817,8 +905,11 @@ head's block time minus the settled block time, at the last complete tick.
   - `hold.active`, or the local file `ops/hold.json` (git-ignored, `{ "v": 1, "hold": true, "reason": "…" }`)
     says hold;
   - the status can't be read or parsed, `v` isn't 1, or its `deployment` isn't the keeper's record;
-  - `max(lagS) + (now − lastCompleteTickAt)` on either chain exceeds `min(30 min, payoutDelay / 4)`, with
-    `payoutDelay` read on chain by the keeper itself (its `readState` already does).
+  - on either chain, `lagS + (now − lastCompleteTickAt)` **or** `now − settledTime` exceeds
+    `lagLimit = min(30 min, payoutDelay / 4)`, with `payoutDelay` read on chain by the keeper itself (its
+    `readState` already does). The second test reads the settled time directly against the keeper's own clock,
+    so it holds even if the Worker's lag figure were wrong (normally `now − settledTime` is 2–3 minutes: SETTLE
+    plus a tick).
   The keeper fails closed: a monitor that can't see is treated as a monitor that says stop. Payouts wait out
   `payoutDelay` anyway, so a monitor outage costs time, not money.
 - Deposit-only closes, staking and reward reports are unaffected. USDC deliveries are unaffected unless the owner
@@ -833,7 +924,8 @@ head's block time minus the settled block time, at the last complete tick.
   the human steps in the email; it doesn't replace them.
 
 **Clearing.** No HTTP route can set or clear a hold. A human runs `pnpm hold:clear -- --env production --id <id>
---note "…"` (or `--all`), which first prints the active holds, then runs `wrangler d1 execute <db> --remote` with
+--note "…"` (or `--all`; the internal id is in the email, and the script also accepts the public id), which first
+prints the active holds, then runs `wrangler d1 execute <db> --remote` with
 the `UPDATE holds SET cleared_at, cleared_note WHERE id = … AND cleared_at IS NULL` (the note restricted to
 letters, digits, spaces and basic punctuation). Clearing needs Cloudflare account access, the right authority for
 it. A cleared id is never raised again; for the price rule the 24-hour high is reset to the current price, so the
@@ -841,7 +933,7 @@ same drop isn't re-counted.
 
 ### 9. Config and secrets
 
-`indexer/wrangler.jsonc` (committed): name, `main`, `compatibility_date`, `observability.enabled`, the three
+`indexer/wrangler.jsonc` (committed): name, `main`, `compatibility_date`, `observability.enabled`, the four
 crons, `"cache": { "enabled": true }`, the D1 binding `DB` and the `send_email` binding `EMAIL` per environment
 (`env.test`, `env.production`), and `vars`:
 
@@ -851,7 +943,8 @@ crons, `"cache": { "enabled": true }`, the D1 binding `DB` and the `send_email` 
 | `BRIDGES` | `{"base":["<Base adapter>"],"bittensor":["<Bittensor adapter>"]}` | the bridges a payout or batch may arrive through; default the deployment's adapters |
 | `TOKENS` | FM-TAO on Base and Bittensor, the Bittensor lock pool, USDC, WETH, the two Uniswap pools, Multicall3, OffRamps, AlphaVault | public constants, as in `ops/src/config.ts` |
 | `BASE_RPC_URL`, `BASE_LOGS_RPC_URL`, `BITTENSOR_RPC_URL` | `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://archive.chain.opentensor.ai` | a secret of the same name overrides each (for a keyed URL) |
-| `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SITE_FILES_PER_TICK` | `100`, `45`, `300`, `2` | raise the last three on Workers Paid |
+| `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `45`, `300`, `40`, `180` | raise the budgets on Workers Paid; `LEASE_S` must stay well above `SCAN_WALL_S` |
+| `SITE_FILES_PER_RUN`, `SITE_MAX_BYTES` | `2`, `2000000` | the site check's own invocation (6.6) |
 | `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascade.fi`, `https://cascade.fi`, `["/","/stake/"]` | CORS and the integrity check |
 | `ALERT_FROM`, `ALERT_MODE` | `monitor@cascade.fi`, `send` | `log` in dev and tests |
 | `THRESHOLDS` | `{}` | overrides of `src/thresholds.ts`; a secret of the same name wins |
@@ -884,7 +977,8 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
   without logging in or creating anything; it runs in CI-style checks with `pnpm test`.
 - **Run it locally:** `pnpm wrangler d1 migrations apply DB --local --env test`, then `pnpm wrangler dev --env test
   --test-scheduled`, then `curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=*+*+*+*+*"` to run a tick
-  against the live chains (read-only) and `curl http://localhost:8787/v1/scan/{vault}`. Local D1 lives in
+  against the live chains (read-only), `cron=*/2+*+*+*+*` for a site-check run, and
+  `curl http://localhost:8787/v1/scan/{vault}`. Local D1 lives in
   `.wrangler/state` (git-ignored). Email stays in `ALERT_MODE=log`; never set the binding's `remote: true`.
 - **Live smoke** (`pnpm smoke`, skipped unless `INDEXER_SMOKE=1`): one tick against the v3 test deployment into a
   Miniflare D1, printing the digest; asserts the halves for the test wallet pass the web's `decode` rules.
@@ -894,8 +988,12 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
 0. **Choose the plan shape** (open question 1). Workers plans apply to the whole Cloudflare account. Either
    (a) put the account on Workers Paid ($5/month), and run `test` and `production` side by side; or (b) stay on
    Free with **one environment per account**: `production` in the main account and `test` in a second, free
-   Cloudflare account. Don't run both environments in one Free account: six crons exceed its five, and both
-   would share one set of daily quotas.
+   Cloudflare account. Don't run both environments in one Free account: eight crons exceed its five, and both
+   would share one set of daily quotas. Option (b) has two limits for the test Worker: it **can't send email
+   from cascade.fi** (a Worker sends only from an Email Routing domain in its own account, so the second account
+   needs a domain of its own onboarded, or the test Worker stays in `ALERT_MODE=log`), and it **can't use
+   `api.cascade.fi`** (a custom domain must be a zone in the Worker's own account; the test Worker uses its
+   `workers.dev` URL).
 1. `pnpm --dir indexer install && pnpm --dir indexer test`.
 2. `pnpm --dir indexer wrangler login`.
 3. `pnpm --dir indexer wrangler d1 create cascade-indexer-test`; paste the printed `database_id` into
@@ -921,9 +1019,10 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
 
 | Resource | Use | Free limit (per account) |
 |---|---|---|
-| Worker requests | 1,440 ticks + 24 hourly + 1 digest + API calls (about 2 per first visit; repeat visits rarely ask) ≈ 3,500/day at 1,000 visits | 100,000/day (shared with Pages Functions; static Pages are free) |
-| Subrequests | ~10 per steady tick; backfill ticks up to 45 | 50 per invocation |
-| CPU | steady tick estimated 3–8 ms (decoding a few logs, two multicall answers, two site files): **unmeasured** | 10 ms per invocation |
+| Worker requests | 1,440 ticks + 720 site checks + 24 hourly + 1 digest + API calls (about 2 per first visit; repeat visits rarely ask) ≈ 4,200/day at 1,000 visits | 100,000/day (shared with Pages Functions; static Pages are free) |
+| Cron triggers | 4 per environment | 5 per account |
+| Subrequests | ~10 per steady tick; backfill ticks up to 45; site check up to 3 | 50 per invocation |
+| CPU | steady tick estimated 3–8 ms (decoding a few logs, two multicall answers): **unmeasured**; the site check runs apart | 10 ms per invocation |
 | D1 rows written | cursors 2,880 + readings 1,440 + hours 1,440 + logs ~600 + seed pages ~200 + alerts ≈ 7–11 k/day | 100 k/day |
 | D1 rows read | ticks ~100 k/day (hourly rows, not per-minute history) + API (the shared half is cached; an account half reads that account's rows) | 5 M/day |
 | D1 storage | ~200 MB/year of logs, plus small tables | 500 MB per database |
@@ -934,8 +1033,8 @@ It fits at $0 for one environment per Free account. *call*: **recommend Workers 
 account** (open question 1), because a security monitor shouldn't run at the edge of its limits:
 
 - **CPU.** 10 ms is tight; a tick over it is killed and commits nothing (the watchdog notices, section 1). The
-  scan and the site check are split across ticks, but rule evaluation can't be split indefinitely. Measure in the
-  first week (Workers Observability shows CPU per invocation).
+  scan is split across ticks and the site check runs in its own invocation, but rule evaluation can't be split
+  indefinitely. Measure in the first week (Workers Observability shows CPU per invocation).
 - **Subrequests.** 50 per invocation slows backfill and leaves little slack when RPCs retry.
 - **Shared daily quotas.** Public API traffic and the monitor draw on the same account quotas (requests, D1 rows
   read), and on Free those reset only at midnight UTC. Defences: Workers Paid (no daily request limit, a monthly
@@ -966,7 +1065,12 @@ and any keyed RPC URLs. No signing key, no user data beyond public addresses.
 - send false alerts: emails carry explorer links and hashes only, and every action they ask for is done from the
   owner's own tools, never from a link (stated in every footer);
 - raise a false hold or withhold `ok`: our keeper stops redeem closes and payouts until a human acts (a delay,
-  bounded by the human); or clear a real hold: back to the brake not existing;
+  bounded by the human; `pnpm checks:approve` releases an honest batch); or clear a real hold: back to the brake
+  not existing;
+- approve a forged delivery with `checks:approve` (it needs account access, like everything else here): the
+  approval sends the critical `checks.owner_approved` email, which is the owner's cue if it wasn't them;
+- serve a hostile site file to the site check: at worst it stops a site-check invocation, never the tick, and the
+  file is skipped and reported (6.6);
 - read the keyed RPC URLs (quota theft), the private thresholds and the recipient address;
 - with the account itself, also change the Pages site: that is account security (hardware-key 2FA, few members),
   outside this design.
@@ -975,11 +1079,11 @@ and any keyed RPC URLs. No signing key, no user data beyond public addresses.
 wallet is asked to sign, or change a balance the site shows.
 
 **Hardening in the design:** no write routes and no admin routes; every route validates its parameters and queries
-D1 only through prepared statements; one fixed CORS origin; `no-store` on status and health; the status shows
-hold ids, not reasons; minimal dependencies (viem and `@noble/hashes` at runtime), exact pins and a committed
+D1 only through prepared statements; lowercase-only paths and no query strings on the seed routes; one fixed CORS
+origin; `no-store` on status and health; the status shows opaque hold ids, not rules, batches or reasons; minimal dependencies (viem and `@noble/hashes` at runtime), exact pins and a committed
 lockfile; secrets only for the recipients, private thresholds and keyed RPC URLs; the RPC client never logs URLs;
-a test that greps `src/` for transaction-sending methods; holds cleared only with account access; commits guarded
-by the lease. A lying RPC can make the monitor miss or invent things; readings that go backwards are dropped, and
+a test that greps `src/` for transaction-sending methods; holds cleared and checks approved only with account
+access; commits guarded by the lease; the site check isolated in its own invocation with a byte cap. A lying RPC can make the monitor miss or invent things; readings that go backwards are dropped, and
 a second RPC per chain for the critical reads is a later improvement (open question 12).
 
 ### 14. Open questions for the owner
@@ -987,7 +1091,8 @@ a second RPC per chain for the critical reads is a later improvement (open quest
 Tasks that depend on an answer are marked in the plan.
 
 1. **Plan shape:** Workers Paid ($5/month) for the account, with test and production side by side (recommended,
-   section 12)? Or stay Free with a second Cloudflare account for test?
+   section 12)? Or stay Free with a second Cloudflare account for test, accepting that the test Worker can't
+   send from cascade.fi or use `api.cascade.fi` (section 11)?
 2. **Email:** is cascade.fi's DNS on Cloudflare, and does anything else receive mail for cascade.fi today
    (Email Routing takes over its MX records)? Which address gets alerts? A sending subdomain (e.g.
    `alerts.cascade.fi` with Email Sending on Paid) avoids touching the main domain's mail.
@@ -1011,7 +1116,8 @@ Tasks that depend on an answer are marked in the plan.
 10. **FM-TAO backing:** is FM-TAO bridged to chains other than Base? If so, the backing rule (Base supply ≤
     Bittensor lock) still holds but is weaker.
 11. **Run on the v3 test deployment now?** Recommended: it rehearses the backfill, the cross-check on real batches,
-    the email path and the keeper's per-batch confirmation before launch.
+    the email path and the keeper's per-batch confirmation before launch. Expect noise there: owner, guardian and
+    keeper are one address, so a reverted keeper call pages as a critical `keys.unexplained_tx`.
 12. **A second RPC per chain** for the critical reads (price, stake, supply), raising a warning when they disagree:
     worth paying for a keyed provider?
 13. **The two proposed rules** (6.4): keep `rail.alpha_vault` and `fmtao.mint_surge`?

@@ -160,7 +160,15 @@ async function settlePending(ctx: Ctx, rec: DeploymentRecord, path: string): Pro
         saveRecord(path, rec);
         return;
       }
-      throw new Error(`${where} (transaction ${p.hash}) is still pending; run deploy again once it is mined`);
+      if (known || (await latestNonce(ctx, p.chain)) <= p.nonce) {
+        throw new Error(`${where} (transaction ${p.hash}) is still pending; run deploy again once it is mined`);
+      }
+      // another transaction at its nonce was mined instead (sped up, replaced or cancelled): the effect
+      // check below records the step as recovered, or the nonce check voids the plan
+      ctx.log(`${where}: transaction ${p.hash} was replaced by another at its nonce; checking the step on-chain`);
+      delete rec.pending;
+      saveRecord(path, rec);
+      return;
     }
     if (r.status !== "0x1") {
       throw new Error(`${where} (transaction ${p.hash}) reverted; the plan is void: run deploy --new-plan`);

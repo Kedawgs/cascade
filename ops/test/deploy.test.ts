@@ -168,6 +168,33 @@ describe("deploy", () => {
     expect(w.sent).toEqual(ALL.slice(1));
   });
 
+  it("a pending transaction replaced by another at its nonce is settled from the chain, not left pending forever", async () => {
+    // sped up: the node no longer knows the recorded hash, the wallet moved past its nonce, and the step is done
+    const sped = world({ base: 2, bittensor: 0 });
+    saveRecord(sped.recordPath, recordWith(["baseAdapter"], { pending: { step: "frontDoor", chain: "base", nonce: 1, hash: HASH } }));
+    sped.effects.add("frontDoor");
+    const rec = await deploy(sped.ctx, sped.recordPath, { newPlan: false }, sped.deps);
+    expect(rec.pending).toBeUndefined();
+    expect(rec.done.frontDoor).toEqual({ recovered: true });
+    expect(sped.sent).toEqual(ALL.slice(2));
+
+    // cancelled: the step's effect is absent and the create's nonce is gone, so the plan is void
+    const cancelled = world({ base: 2, bittensor: 0 });
+    saveRecord(cancelled.recordPath, recordWith(["baseAdapter"], { pending: { step: "frontDoor", chain: "base", nonce: 1, hash: HASH } }));
+    await expect(deploy(cancelled.ctx, cancelled.recordPath, { newPlan: false }, cancelled.deps)).rejects.toThrow(
+      /the plan no longer matches the wallet \(nonce 2, expected 1\).*deploy --new-plan/,
+    );
+    expect(loadRecord(cancelled.recordPath)!.pending).toBeUndefined();
+    expect(cancelled.sent).toEqual([]);
+
+    // a replacement still waiting to be mined keeps the run waiting
+    const waiting = world({ base: 2, bittensor: 0 }, { latest: { base: 1 } });
+    saveRecord(waiting.recordPath, recordWith(["baseAdapter"], { pending: { step: "frontDoor", chain: "base", nonce: 1, hash: HASH } }));
+    await expect(deploy(waiting.ctx, waiting.recordPath, { newPlan: false }, waiting.deps)).rejects.toThrow(/still pending/);
+    expect(loadRecord(waiting.recordPath)!.pending).toMatchObject({ step: "frontDoor", hash: HASH });
+    expect(waiting.sent).toEqual([]);
+  });
+
   it("refuses a record of the other kind of run before archiving or sending anything", async () => {
     const w = world({ base: 0, bittensor: 0 });
     saveRecord(w.recordPath, recordWith([]));

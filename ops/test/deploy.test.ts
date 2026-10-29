@@ -125,10 +125,22 @@ describe("deploy", () => {
       throw new Error("missing trie node");
     };
     await expect(deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps)).rejects.toThrow(
-      /deploy the Bittensor bridge adapter is already on-chain, but the block it was created in could not be found \(missing trie node\); nothing sent — run deploy again/,
+      /deploy the Bittensor bridge adapter is already on-chain, but the block it was created in could not be found \(missing trie node\): that reads old state, so OPS_BITTENSOR_RPC must be an archive node \(the default, archive\.chain\.opentensor\.ai, is one\); nothing sent — run deploy again/,
     );
     expect(loadRecord(w.recordPath)!.done.bitAdapter).toBeUndefined();
     expect(w.sent).toEqual([]);
+  });
+
+  it("looks up the block of the Bittensor adapter only: a recovered vault is recorded without one", async () => {
+    const w = world({ base: 2, bittensor: 2 });
+    saveRecord(w.recordPath, recordWith(["baseAdapter", "frontDoor", "bitAdapter"]));
+    w.effects.add("vault");
+    w.deps.deployBlock = async () => {
+      throw new Error("missing trie node");
+    };
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps);
+    expect(rec.done.vault).toEqual({ recovered: true });
+    expect(w.sent).toEqual(ALL.slice(4));
   });
 
   it("finds the block of a Bittensor create recovered by an earlier run that didn't keep it", async () => {

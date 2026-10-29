@@ -136,10 +136,11 @@ const realDeps: DeployDeps = {
   deployBlock: (ctx, chain, address) => firstBlockWithCode(ctx.rpc, chain, address),
 };
 
-/** A create on Bittensor: the keeper's log scans start at the Bittensor adapter's block (startBlock). */
-const keepsBlock = (step: PlannedStep) => step.kind === "create" && step.chain === "bittensor";
+/** The Bittensor adapter, whose block every Bittensor log scan starts from (startBlock): the one create
+ * whose block a recovery looks up, so a failed lookup for any other can't stop a deploy. */
+const keepsBlock = (step: PlannedStep) => step.id === "bitAdapter";
 
-/** A step found done on-chain, as the record keeps it: a create on Bittensor with the block it was
+/** A step found done on-chain, as the record keeps it: the Bittensor adapter with the block it was
  * created in. A block that can't be found stops the run; nothing is recorded on a guess. */
 async function recovered(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep, deps: DeployDeps): Promise<DoneStep> {
   if (!keepsBlock(step)) return { recovered: true };
@@ -147,7 +148,7 @@ async function recovered(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep, deps:
     return { recovered: true, block: await deps.deployBlock(ctx, step.chain, createdAt(plan, step.id)) };
   } catch (e) {
     throw new Error(
-      `${chainLabel(step.chain)}: ${step.label} is already on-chain, but the block it was created in could not be found (${(e as Error).message}); nothing sent — run deploy again`,
+      `${chainLabel(step.chain)}: ${step.label} is already on-chain, but the block it was created in could not be found (${(e as Error).message}): that reads old state, so OPS_BITTENSOR_RPC must be an archive node (the default, archive.chain.opentensor.ai, is one); nothing sent — run deploy again`,
     );
   }
 }

@@ -1,5 +1,4 @@
-import { blake2b } from "@noble/hashes/blake2b";
-import { bytesToHex, encodeAbiParameters, type Hex, hexToBytes, keccak256, toBytes } from "viem";
+import { encodeAbiParameters, type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
 import { compact, expand, hourRollup, payoutsDone, peerIdOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
 import { decodeAccountId, OWNER_PREFIX, ownerStorageKey } from "../../src/subtensor.ts";
@@ -237,9 +236,15 @@ describe("keys", () => {
 
   it("ownerStorageKey is twox128(SubtensorModule) ++ twox128(Owner) ++ blake2_128_concat(hotkey)", () => {
     const hotkey = "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748" as Hex;
-    // worked out by hand: the two prefixes, then blake2b-128 of the key, then the key itself
-    const byHand = `0x658faa385070e074c85bf6b568cf0555eca6b7a1fdc9f689184ecb4f359c0518${bytesToHex(blake2b(hexToBytes(hotkey), { dkLen: 16 })).slice(2)}${hotkey.slice(2)}`;
-    expect(ownerStorageKey(hotkey)).toBe(byHand);
+    // computed apart from the code: twox128("SubtensorModule") (the site's BasketTwr prefix),
+    // twox128("Owner") (confirmed by the Tasks 11–20 review with its own xxhash), then blake2b-128 of the
+    // key from CPython's hashlib (hashlib.blake2b(key, digest_size=16)), then the key itself
+    expect(ownerStorageKey(hotkey)).toBe(
+      "0x658faa385070e074c85bf6b568cf0555" +
+        "eca6b7a1fdc9f689184ecb4f359c0518" +
+        "6c1664b37fae67165907bd92805ee938" +
+        "56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748",
+    );
     expect(OWNER_PREFIX).toBe("0x658faa385070e074c85bf6b568cf0555eca6b7a1fdc9f689184ecb4f359c0518");
   });
 

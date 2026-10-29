@@ -39,8 +39,20 @@ export interface FetchRecord {
   chain: ChainName;
   /** the methods asked, in order (one for a single request) */
   methods: string[];
+  /** each call's params, in the same order */
+  params: unknown[][];
   batch: boolean;
 }
+
+/** The [from, to] of each eth_getLogs asked, in order. */
+export const windowsAsked = (fetches: readonly FetchRecord[]): [bigint, bigint][] =>
+  fetches.flatMap((f) =>
+    f.methods.flatMap((m, i) => {
+      if (m !== "eth_getLogs") return [];
+      const p = f.params[i][0] as { fromBlock: Hex; toBlock: Hex };
+      return [[hexToBigInt(p.fromBlock), hexToBigInt(p.toBlock)] as [bigint, bigint]];
+    }),
+  );
 
 const toTag = (x: unknown) => (typeof x === "string" ? x : "latest");
 
@@ -90,7 +102,7 @@ export function fakeChains(specs: Partial<Record<ChainName, ChainSpec>>, opts: {
     if (!chain || !spec) throw new TypeError(`fake: nothing answers ${url}`);
     const body = JSON.parse(String(init?.body)) as { id: number; method: string; params: unknown[] } | { id: number; method: string; params: unknown[] }[];
     const calls = Array.isArray(body) ? body : [body];
-    const record: FetchRecord = { url, chain, methods: calls.map((c) => c.method), batch: Array.isArray(body) };
+    const record: FetchRecord = { url, chain, methods: calls.map((c) => c.method), params: calls.map((c) => c.params), batch: Array.isArray(body) };
     fetches.push(record);
     await opts.onFetch?.(record);
     if (spec.failNext && spec.failNext.count > 0) {

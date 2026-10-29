@@ -6,8 +6,9 @@ import { useId, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
-import { useAccountCode, useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
+import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
+import { useWalletKind } from "@/lib/cascade/use-wallet-kind";
 import { formatUsd, parseAmount } from "@/lib/format";
 import {
   breakEvenDays,
@@ -78,14 +79,15 @@ export function StakeForm({
   const inputId = useId();
   const noteId = useId();
   // a contract account (not a plain or EIP-7702 one) is told how it can leave once it starts to stake:
-  // the note comes with the typing (or MAX, or the click) that brings it, never on its own after the
-  // page has loaded, so it moves nothing by itself; one whose code isn't known yet waits for the next input
-  const code = useAccountCode(account);
+  // the note comes with the first input in the form that brings it (focus, typing, MAX or the click,
+  // so a pre-filled amount gets it too), never on its own after the page has loaded, so it moves
+  // nothing by itself; a wallet not known yet waits for the next input
+  const kind = useWalletKind(account);
   const [started, setStarted] = useState(false);
   const start = () => {
-    if (code.data !== undefined) setStarted(true);
+    if (kind.data !== undefined) setStarted(true);
   };
-  const walletNote = started ? contractWalletNote(code.data) : null;
+  const walletNote = started && kind.data ? contractWalletNote(kind.data) : null;
 
   const amount = parseAmount(raw);
   const lim = limits.data;
@@ -122,7 +124,8 @@ export function StakeForm({
   const note = error ?? (lim ? stakeLimitsNote(lim) : limits.isError ? "Limits unavailable right now" : "Checking the limits…");
 
   return (
-    <form className={styles.form} onSubmit={onSubmit} noValidate>
+    // focus anywhere in the form (the amount, MAX, the button) is a first input too
+    <form className={styles.form} onSubmit={onSubmit} onFocus={start} noValidate>
       {v3 && <PriceStrip />}
       <label htmlFor={inputId} className={styles.lbl}>
         Amount

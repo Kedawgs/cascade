@@ -90,13 +90,32 @@ export function walletTaoNote(tao: bigint, limits: Pick<Limits, "minTao" | "maxT
 export const CONTRACT_WALLET_NOTE =
   "This wallet is a contract account, so it can only leave Cascade through Unstake here, not directly on Bittensor. If Unstake is ever paused, leaving waits until it reopens.";
 
-/** What a stake from an account with this code on Base should know first: nothing for a plain key
- * account ("0x") or an EIP-7702 one (code 0xef0100 + the delegate's address: a key account that can
- * still act on Bittensor), nor while the code isn't known; any other contract account can only leave
- * through the front door. */
-export function contractWalletNote(code: string | undefined): string | null {
-  if (code === undefined || code === "0x" || code.toLowerCase().startsWith("0xef0100")) return null;
-  return CONTRACT_WALLET_NOTE;
+/** What the stake form knows of the connected wallet: its code on Base, its wagmi connector, and
+ * whether it says it runs a batch atomically there (atomicOf). */
+export interface WalletKind {
+  code?: string;
+  connectorId?: string;
+  atomic?: string;
+}
+
+/** Whether a wallet runs a batch atomically on Base, from its EIP-5792 capabilities for Base: the
+ * current `atomic.status` ("supported", or "ready" for a key account it would first upgrade), or the
+ * older `atomicBatch.supported`. */
+export function atomicOf(caps: unknown): string | undefined {
+  const c = caps as { atomic?: { status?: string }; atomicBatch?: { supported?: boolean } } | undefined;
+  return c?.atomic?.status ?? (c?.atomicBatch?.supported ? "supported" : undefined);
+}
+
+/** What a stake from this wallet should know first: nothing for a plain key account or an EIP-7702 one
+ * (code 0xef0100 + the delegate's address: a key account that can still act on Bittensor), nor while
+ * its code isn't known. Any other contract account can only leave through the front door: one with
+ * code, a Base Account (a smart account, though it has no code until its first transaction), or one
+ * with no code that runs batches atomically (a key account can't without a delegation, which is code). */
+export function contractWalletNote(w: WalletKind): string | null {
+  if (w.connectorId === "baseAccount") return CONTRACT_WALLET_NOTE;
+  if (w.code === undefined) return null;
+  if (w.code !== "0x") return w.code.toLowerCase().startsWith("0xef0100") ? null : CONTRACT_WALLET_NOTE;
+  return w.atomic === "supported" ? CONTRACT_WALLET_NOTE : null;
 }
 
 export function stakeButtonLabel(s: StakeState): string {

@@ -30,6 +30,7 @@ import {
   walletTaoNote,
   CONTRACT_WALLET_NOTE,
   contractWalletNote,
+  atomicOf,
 } from "./stake-form";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
@@ -89,22 +90,42 @@ describe("walletTaoNote", () => {
 
 describe("contractWalletNote", () => {
   it("says nothing for a plain account, or while its code isn't known", () => {
-    expect(contractWalletNote("0x")).toBeNull();
-    expect(contractWalletNote(undefined)).toBeNull();
+    expect(contractWalletNote({ code: "0x" })).toBeNull();
+    expect(contractWalletNote({ code: "0x", connectorId: "io.metamask", atomic: "ready" })).toBeNull();
+    expect(contractWalletNote({})).toBeNull();
   });
 
-  it("says nothing for an EIP-7702 account (a key account with a delegation), in any case of hex", () => {
-    expect(contractWalletNote(`0xef0100${"ab".repeat(20)}`)).toBeNull();
-    expect(contractWalletNote(`0xEF0100${"AB".repeat(20)}`)).toBeNull();
+  it("says nothing for an EIP-7702 account (a key account with a delegation), in any case of hex, batching or not", () => {
+    expect(contractWalletNote({ code: `0xef0100${"ab".repeat(20)}` })).toBeNull();
+    expect(contractWalletNote({ code: `0xEF0100${"AB".repeat(20)}`, atomic: "supported" })).toBeNull();
   });
 
   it("warns any other contract account that it can only leave through Unstake here", () => {
-    expect(contractWalletNote("0x6080604052348015600f57600080fd5b50")).toBe(CONTRACT_WALLET_NOTE);
+    expect(contractWalletNote({ code: "0x6080604052348015600f57600080fd5b50" })).toBe(CONTRACT_WALLET_NOTE);
     // a proxy (like a Safe) is a contract too, even a short one
-    expect(contractWalletNote("0x363d3d373d3d3d363d73")).toBe(CONTRACT_WALLET_NOTE);
+    expect(contractWalletNote({ code: "0x363d3d373d3d3d363d73" })).toBe(CONTRACT_WALLET_NOTE);
     expect(CONTRACT_WALLET_NOTE).toBe(
       "This wallet is a contract account, so it can only leave Cascade through Unstake here, not directly on Bittensor. If Unstake is ever paused, leaving waits until it reopens.",
     );
+  });
+
+  it("warns a smart account that has no code yet: a Base Account (deployed on its first transaction), or one that batches atomically", () => {
+    // a brand-new Base Account: no code until its first transaction, but a contract account all the same
+    expect(contractWalletNote({ code: "0x", connectorId: "baseAccount" })).toBe(CONTRACT_WALLET_NOTE);
+    expect(contractWalletNote({ connectorId: "baseAccount" })).toBe(CONTRACT_WALLET_NOTE);
+    // a key account can only batch atomically with a delegation (code), so one with no code that does is a smart account
+    expect(contractWalletNote({ code: "0x", atomic: "supported" })).toBe(CONTRACT_WALLET_NOTE);
+  });
+});
+
+describe("atomicOf", () => {
+  it("reads whether a wallet runs a batch atomically on Base from its EIP-5792 capabilities, old shape or new", () => {
+    expect(atomicOf({ atomic: { status: "supported" } })).toBe("supported");
+    expect(atomicOf({ atomic: { status: "ready" } })).toBe("ready");
+    expect(atomicOf({ atomicBatch: { supported: true } })).toBe("supported");
+    expect(atomicOf({ atomicBatch: { supported: false } })).toBeUndefined();
+    expect(atomicOf(undefined)).toBeUndefined();
+    expect(atomicOf({})).toBeUndefined();
   });
 });
 

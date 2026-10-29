@@ -1,7 +1,6 @@
 "use client";
 
 import { keepPreviousData, type QueryClient, useQuery } from "@tanstack/react-query";
-import type { Address } from "viem";
 import { shownFigure, STATS_KEEP_MS } from "../stats";
 import { isV3 } from "./config";
 import { useCascadeData, useSnapshotAt } from "./context";
@@ -115,19 +114,6 @@ export function useBalances(account: string | null) {
     queryFn: () => data.getBalances(account as string),
     enabled: account !== null,
     refetchInterval: IDLE_MS,
-  });
-}
-
-/** The account's code on Base ("0x" for a plain key account), read once it connects and again after
- * each flow (a wallet may upgrade itself to an EIP-7702 account while sending). */
-export function useAccountCode(account: string | null) {
-  const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.code(account ?? ""),
-    queryFn: async () => (await data.clients.base.getCode({ address: account as Address })) ?? "0x",
-    enabled: account !== null,
-    staleTime: Infinity,
-    refetchOnWindowFocus: false,
   });
 }
 

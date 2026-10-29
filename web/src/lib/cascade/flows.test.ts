@@ -687,10 +687,14 @@ describe("planStakeV3", () => {
       expect(await why("CapExceeded")).toBe("Cascade is full for now, so nothing was sent. Try a smaller amount, or try again later.");
     });
 
-    it("the open batch full by value or by count: it filled up, and the next one opens soon", async () => {
-      for (const revert of ["BatchValueFull", "BatchFull"]) {
-        expect(await why(revert)).toBe("The current batch filled up, so nothing was sent. Try a smaller amount, or try again soon.");
-      }
+    it("the open batch full by value: a smaller amount may still fit, or the next batch opens soon", async () => {
+      expect(await why("BatchValueFull")).toBe("The current batch filled up, so nothing was sent. Try a smaller amount, or try again soon.");
+    });
+
+    it("the open batch's list of stakes full: no amount fits, so it says only to wait for the next batch", async () => {
+      const said = await why("BatchFull");
+      expect(said).toBe("The current batch has as many stakes as it can take, so nothing was sent. A new one opens once it leaves, so try again soon.");
+      expect(said).not.toMatch(/smaller amount/);
     });
 
     it("the front door paused (EnforcedPause) or the staker's route turned off: staking is paused", async () => {

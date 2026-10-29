@@ -31,6 +31,7 @@ import {
   isRevert,
   planResumeStakeV3,
   planStakeV3,
+  type Replacement,
   retryPatch,
   revertReason,
   runFlow,
@@ -98,8 +99,14 @@ export function wagmiPort(config: Config, account: Address, reader: PublicClient
         args: c.args,
         value: c.value,
       } as never),
-    async wait(hash: Hex) {
-      const r = await waitForTransactionReceipt(config, { hash, chainId: base.id });
+    /** Base (through viem) notices when the wallet sped the transaction up, cancelled it or replaced it,
+     * and then waits for the one in its place: `onReplaced` hears which, so the record follows it. */
+    async wait(hash: Hex, onReplaced?: (r: Replacement) => void) {
+      const r = await waitForTransactionReceipt(config, {
+        hash,
+        chainId: base.id,
+        onReplaced: (x) => onReplaced?.({ hash: x.transaction.hash, reason: x.reason }),
+      });
       return { status: r.status === "success" ? "success" : "reverted" };
     },
     async hasCode(address: Address) {

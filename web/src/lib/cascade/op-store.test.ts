@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { cancelCall, FlowError, runFlow, type WalletPort } from "./flows";
-import { createOpLog, type DepositOp } from "./oplog";
+import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import { cancelStore, opStore } from "./op-store";
 
 const FD = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750" as const;
@@ -35,6 +35,19 @@ describe("opStore", () => {
     const back = log.get(ME, "d1") as DepositOp;
     expect(back.hashes.swap).toBe(`0x${"22".repeat(32)}`);
     expect(back.targetTao).toBe(78_000_000_000_000_000n);
+  });
+
+  it("dates an unstake request's hash when it is recorded, again when a sped-up one takes its place", () => {
+    const log = createOpLog(memoryStorage(), FD);
+    const w: WithdrawalOp = { id: "w1", kind: "withdrawal", account: ME, createdAt: 1, shares: 1n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, state: "running" };
+    log.put(w);
+    let now = 5_000;
+    const store = opStore(log, ME, "w1", () => now);
+    store.setHash("request", `0x${"22".repeat(32)}`);
+    expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"22".repeat(32)}`, sentAt: 5_000 });
+    now = 9_000;
+    store.setHash("request", `0x${"33".repeat(32)}`);
+    expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"33".repeat(32)}`, sentAt: 9_000 });
   });
 });
 

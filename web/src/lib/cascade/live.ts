@@ -262,7 +262,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       withdrawals
         .filter((o) => o.state !== "failed")
         .map(async (o) => {
-          const { batchId, unsure } = await requestBatch(c, o);
+          const { batchId, unsure } = await requestBatch(c, o, deps.now());
           if (batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId });
           return { ...o, batchId, unsure };
         }),

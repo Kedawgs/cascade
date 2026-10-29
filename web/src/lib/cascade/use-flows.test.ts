@@ -1,11 +1,15 @@
-import { getAddress } from "viem";
+import { getAddress, type Hex } from "viem";
 import { base } from "viem/chains";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createConfig, createConnector, http } from "wagmi";
-import { connect } from "wagmi/actions";
+import { connect, waitForTransactionReceipt } from "wagmi/actions";
 import { wagmiPort } from "./use-flows";
 
+// the real actions, but a receipt wait the test controls
+vi.mock("wagmi/actions", async (importOriginal) => ({ ...(await importOriginal<typeof import("wagmi/actions")>()), waitForTransactionReceipt: vi.fn() }));
+
 const ME = getAddress("0x000000000000000000000000000000000000a11c");
+const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 
 /** A wallet sitting on `startChain`, which switches when asked (and records that it was). */
 function walletOn(startChain: number) {
@@ -51,6 +55,18 @@ describe("the wallet port", () => {
     await connect(w.config, { connector: w.config.connectors[0] } as never);
     await wagmiPort(w.config, ME, {} as never).switchToBase();
     expect(w.switched).toEqual([base.id]);
+  });
+
+  it("hears from Base when the wallet puts another transaction in place of the one it waits for", async () => {
+    const w = walletOn(base.id);
+    vi.mocked(waitForTransactionReceipt).mockImplementation((async (_config: unknown, p: { onReplaced?: (r: unknown) => void }) => {
+      p.onReplaced?.({ reason: "repriced", transaction: { hash: H(2) }, replacedTransaction: { hash: H(1) }, transactionReceipt: {} });
+      return { status: "success" };
+    }) as never);
+    const seen: unknown[] = [];
+    expect(await wagmiPort(w.config, ME, {} as never).wait(H(1), (r) => seen.push(r))).toEqual({ status: "success" });
+    expect(vi.mocked(waitForTransactionReceipt).mock.calls[0][1]).toMatchObject({ hash: H(1), chainId: base.id });
+    expect(seen).toEqual([{ hash: H(2), reason: "repriced" }]);
   });
 
   it("leaves a wallet already on Base where it is", async () => {

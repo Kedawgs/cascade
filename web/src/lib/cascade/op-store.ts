@@ -2,10 +2,11 @@ import type { Address, Hex } from "viem";
 import type { FlowStore } from "./flows";
 import type { OpLog, Operation } from "./oplog";
 
-/** A flow's progress kept in its operation log entry. A withdrawal has one call ("request").
- * If the entry disappears while the flow runs (removed from another tab), it is put back before
- * anything is read or written, so a transaction signed after that is still recorded. */
-export function opStore(log: OpLog, account: Address, id: string): FlowStore {
+/** A flow's progress kept in its operation log entry. A withdrawal has one call ("request"), whose
+ * hash is dated when recorded (`now`). If the entry disappears while the flow runs (removed from
+ * another tab), it is put back before anything is read or written, so a transaction signed after that
+ * is still recorded. */
+export function opStore(log: OpLog, account: Address, id: string, now: () => number = Date.now): FlowStore {
   let last = log.get(account, id) as Operation;
   const op = (): Operation => {
     const o = log.get(account, id);
@@ -25,7 +26,7 @@ export function opStore(log: OpLog, account: Address, id: string): FlowStore {
     },
     setHash: (k, h) => {
       const o = op();
-      update(o.kind === "withdrawal" ? { hash: h } : ({ hashes: { ...o.hashes, [k]: h } } as Partial<Operation>));
+      update(o.kind === "withdrawal" ? { hash: h, sentAt: now() } : ({ hashes: { ...o.hashes, [k]: h } } as Partial<Operation>));
     },
     setState: (state, error) => update({ state, error }),
     callsId: () => {

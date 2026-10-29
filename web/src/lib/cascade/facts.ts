@@ -353,14 +353,36 @@ const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemR
 
 /** The batch an unstake joined: as recorded, or from its request's receipt. `unsure` when it was sent
  * but its receipt can't be read or isn't there yet, so its batch can't be known right now (one that shows
- * no request, as when it reverted, joined none). */
-export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp): Promise<{ batchId?: bigint; unsure?: true }> {
+ * no request, as when it reverted, joined none). A request that can never be mined (requestDropped)
+ * joined none either, so it doesn't count as asked for ever. */
+export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp, now: number = Date.now()): Promise<{ batchId?: bigint; unsure?: true }> {
   if (op.batchId !== undefined) return { batchId: op.batchId };
   if (!op.hash) return {};
   const r = await baseReceipt(c, op.hash);
-  if (!r) return { unsure: true };
+  if (!r) return (await requestDropped(c, op, op.hash, now)) ? {} : { unsure: true };
   const batchId = batchIdFrom(r, "RedeemRequested", op.account);
   return batchId !== undefined ? { batchId } : {};
+}
+
+/** How long after it was sent a request Base has never heard of counts as dropped (Base mines in
+ * seconds; a wallet's speed-up this site didn't see leaves the old hash unknown for good). */
+export const DROPPED_AFTER_MS = 10 * 60_000;
+
+/** Whether a request with no receipt can never be mined: Base doesn't know it ten minutes after it was
+ * sent, or the account's nonce is past it (another transaction, such as a speed-up or cancel this site
+ * didn't see, took its place). False whenever that can't be told: Base not answering, or showing it
+ * mined with a receipt that isn't readable yet. */
+async function requestDropped(c: Pick<Clients, "base">, op: WithdrawalOp, hash: Hex, now: number): Promise<boolean> {
+  let tx: { nonce: number; blockNumber: bigint | null };
+  try {
+    tx = (await c.base.getTransaction({ hash })) as unknown as { nonce: number; blockNumber: bigint | null };
+  } catch (e) {
+    if ((e as { name?: string })?.name !== "TransactionNotFoundError") return false;
+    return now - (op.sentAt ?? op.createdAt) >= DROPPED_AFTER_MS;
+  }
+  if (tx.blockNumber !== null) return false;
+  const used = await c.base.getTransactionCount({ address: op.account, blockTag: "latest" }).catch(() => undefined);
+  return used !== undefined && used > tx.nonce;
 }
 
 /** An unstake still counted in its batch (not failed, not taken back out by a cancel), with that batch;

@@ -199,6 +199,38 @@ function tracker(initial: Record<string, Hex> = {}, start: { mode?: "batch" | "s
 
 const calls = stakeCalls(quote, none, D, ME);
 
+describe("a step the wallet puts another transaction in place of", () => {
+  it("follows one sped up: the replacement's hash is recorded, and its receipt decides", async () => {
+    const p = port({
+      wait: vi.fn(async (h: Hex, onReplaced?: (r: { hash: Hex; reason: "repriced" | "cancelled" | "replaced" }) => void) => {
+        if (h === H(1)) onReplaced?.({ hash: H(77), reason: "repriced" });
+        return { status: "success" as const };
+      }),
+    });
+    const t = tracker();
+    await runFlow(p, t.store as never, calls);
+    expect(t.hashes.approveUsdc).toBe(H(77));
+    expect(p.send).toHaveBeenCalledTimes(4);
+    expect(t.states.at(-1)).toBe("sent");
+  });
+
+  it("stops at one cancelled or replaced by a different transaction: that step never happened, and nothing after it is sent", async () => {
+    for (const reason of ["cancelled", "replaced"] as const) {
+      const p = port({
+        wait: vi.fn(async (_h: Hex, onReplaced?: (r: { hash: Hex; reason: "repriced" | "cancelled" | "replaced" }) => void) => {
+          onReplaced?.({ hash: H(78), reason });
+          return { status: "success" as const };
+        }),
+      });
+      const t = tracker();
+      await expect(runFlow(p, t.store as never, calls)).rejects.toThrow(/replaced in your wallet/);
+      expect(p.send, reason).toHaveBeenCalledTimes(1);
+      expect(t.hashes.approveUsdc, reason).toBe(H(1));
+      expect(t.states.at(-1), reason).toBe("failed");
+    }
+  });
+});
+
 describe("runFlow", () => {
   it("sends each call in turn, recording each hash before waiting", async () => {
     const p = port();
@@ -273,7 +305,7 @@ describe("flow control", () => {
     const p = port();
     const t = tracker({ approveUsdc: H(50) });
     await runFlow(p, t.store as never, calls);
-    expect(p.wait).toHaveBeenCalledWith(H(50));
+    expect(p.wait).toHaveBeenCalledWith(H(50), expect.any(Function));
     expect(vi.mocked(p.send).mock.calls.map((c) => c[0].key)).toEqual(["swap", "approveTao", "deposit"]);
   });
 
@@ -810,7 +842,7 @@ describe("carrying on a v3 stake the chain may already show", () => {
     await runFlow(p, t.store as never, calls);
     expect(p.send).not.toHaveBeenCalled();
     expect(p.sendBatch).not.toHaveBeenCalled();
-    expect(p.wait).toHaveBeenCalledWith(H(61));
+    expect(p.wait).toHaveBeenCalledWith(H(61), expect.any(Function));
     expect(t.states.at(-1)).toBe("sent");
   });
 

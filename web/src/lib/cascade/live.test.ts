@@ -1,4 +1,4 @@
-import { encodeAbiParameters, encodeEventTopics, parseAbiParameters, TransactionReceiptNotFoundError } from "viem";
+import { encodeAbiParameters, encodeEventTopics, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
 import { FRONT_DOOR, VAULT } from "./abi";
 import type { Deployment } from "./config";
@@ -603,6 +603,30 @@ describe("unstakes sharing a batch", () => {
     ).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
     // the request reverted: it asked for nothing
     expect(await availableWith(async () => ({ status: "reverted", logs: [] }))).toBe(8n * 10n ** 22n - 10n ** 21n);
+  });
+
+  it("stop counting as asked once their request was dropped, so what can be unstaked comes back", async () => {
+    const NOW = 1_800_000_100_000; // deps' clock
+    const availableWith = async (sentAt: number, tx: Partial<Record<"pending", { nonce: number; blockNumber: null }>> = {}, nonce = 0) => {
+      const notMined = async () => {
+        throw new TransactionReceiptNotFoundError({ hash: H(20) });
+      };
+      const getTransaction = async ({ hash }: { hash: `0x${string}` }) => {
+        if (tx.pending) return tx.pending;
+        throw new TransactionNotFoundError({ hash });
+      };
+      const d = deps({ clients: { base: { getTransactionReceipt: notMined, getTransaction, getTransactionCount: async () => nonce } } as never });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent" });
+      return (await createLiveCascadeData(D, d).getAvailable(ME)).availableShares;
+    };
+    const all = 8n * 10n ** 22n - 10n ** 21n;
+    // just sent, Base doesn't know it yet: still counted
+    expect(await availableWith(NOW - 60_000)).toBe(all - 2n * 10n ** 21n);
+    // still unknown ten minutes on: dropped
+    expect(await availableWith(NOW - 10 * 60_000)).toBe(all);
+    // waiting, but the account's nonce has moved past it (a speed-up or cancel took its place)
+    expect(await availableWith(NOW - 60_000, { pending: { nonce: 3, blockNumber: null } }, 4)).toBe(all);
+    expect(await availableWith(NOW - 60_000, { pending: { nonce: 3, blockNumber: null } }, 3)).toBe(all - 2n * 10n ** 21n);
   });
 
   it("are placed from their request's receipt when this browser hasn't recorded their batch yet", async () => {

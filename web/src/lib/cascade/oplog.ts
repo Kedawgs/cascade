@@ -47,6 +47,9 @@ export interface WithdrawalOp extends OpBase {
   /** v3: the USDC delivery preference sent with the request. */
   delivery?: { minUsdcPerTao: bigint; deadline: number };
   hash?: Hex;
+  /** ms since the epoch when `hash` was recorded (a sped-up request's when its replacement was):
+   * a request Base still doesn't know ten minutes on was dropped (facts.ts, requestBatch). */
+  sentAt?: number;
   batchId?: bigint;
   cancelled?: { hash: Hex; at: number };
 }

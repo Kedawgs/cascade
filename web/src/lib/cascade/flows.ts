@@ -453,7 +453,9 @@ export interface WalletPort {
   sendBatch(calls: FlowCall[]): Promise<{ id: string }>;
   waitBatch(id: string): Promise<{ status: "success" | "failure"; hashes: Hex[] }>;
   send(call: FlowCall): Promise<Hex>;
-  wait(hash: Hex): Promise<{ status: "success" | "reverted" }>;
+  /** Waits for `hash` to be mined, or for the transaction the wallet put in its place (`onReplaced`
+   * hears of that one first). */
+  wait(hash: Hex, onReplaced?: (r: Replacement) => void): Promise<{ status: "success" | "reverted" }>;
   /** The account has code on Base (an EIP-7702 smart account or a contract wallet). */
   hasCode(account: Address): Promise<boolean>;
   /** Asks the wallet to sign a USDC permit, split into v, r, s; rejects if the user declines. */
@@ -461,6 +463,13 @@ export interface WalletPort {
   /** Runs `call` from the account on Base without sending it: not ok if it would revert, with the
    * reason when Base gives one. Throws when Base can't be asked. */
   simulate(call: FlowCall): Promise<Simulation>;
+}
+
+/** A transaction the wallet put in place of one before it was mined, with viem's reason: sped up
+ * ("repriced": the same call at a higher fee), cancelled, or replaced by a different transaction. */
+export interface Replacement {
+  hash: Hex;
+  reason: "repriced" | "cancelled" | "replaced";
 }
 
 /** A pre-send check: whether the call would go through and, when not, why (see `revertReason`). */
@@ -557,6 +566,7 @@ function revertMessage(key: string): string {
 }
 
 const LOST = "We couldn't confirm the transaction yet. Continue to check it again; nothing is sent twice.";
+const REPLACED = "This step was cancelled or replaced in your wallet, so it didn't go through. Nothing after it was sent.";
 
 function fail(store: FlowStore, message: string, state: OpState): never {
   store.setState(state, message);
@@ -635,11 +645,18 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
       store.setHash(c.key, hash);
     }
     let r: { status: "success" | "reverted" };
+    let replaced = false;
     try {
-      r = await port.wait(hash);
+      r = await port.wait(hash, (x) => {
+        // sped up: the same call under a new hash, the one that counts from now on
+        if (x.reason === "repriced") store.setHash(c.key, x.hash);
+        // cancelled, or another transaction took its nonce: this step never happened
+        else replaced = true;
+      });
     } catch {
       fail(store, LOST, "needs-you");
     }
+    if (replaced) fail(store, REPLACED, "failed");
     if (r.status !== "success") fail(store, revertMessage(c.key), "failed");
   }
   store.setState("sent");

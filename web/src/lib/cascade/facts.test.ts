@@ -1,8 +1,8 @@
-import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
+import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpRequestError, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, scanVault, withdrawalFacts } from "./facts";
+import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, requestBatch, scanVault, withdrawalFacts } from "./facts";
 import { StaleChainError } from "./fresh";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
@@ -1138,6 +1138,54 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     expect(f.usdcDelivered).toBeUndefined();
     expect(f.preference).toBeUndefined();
     expect(b.reads).toEqual(["getExecutionState"]);
+  });
+});
+
+describe("the batch an unstake request with no receipt joined", () => {
+  const NOW = 1_800_000_000_000;
+  const MIN = 60_000;
+  const request = (over: Partial<WithdrawalOp> = {}): WithdrawalOp => ({
+    id: "w",
+    kind: "withdrawal",
+    account: ME,
+    createdAt: NOW - 60 * MIN,
+    shares: 1n,
+    taoEstimate: 0n,
+    usdcEstimate: 0n,
+    fee: 0n,
+    hash: H(20),
+    sentAt: NOW - MIN,
+    state: "sent",
+    ...over,
+  });
+
+  it("is still unsure while Base has it waiting, with a nonce no other transaction has taken", async () => {
+    const c = chains({ baseTxs: { [H(20)]: { nonce: 5, blockNumber: null } }, nonce: 5 });
+    expect(await requestBatch(c.clients, request({ sentAt: NOW - 60 * MIN }), NOW)).toEqual({ unsure: true });
+  });
+
+  it("joined none once the account's nonce is past it: another transaction took its place, so it can never be mined", async () => {
+    const c = chains({ baseTxs: { [H(20)]: { nonce: 5, blockNumber: null } }, nonce: 6 });
+    expect(await requestBatch(c.clients, request(), NOW)).toEqual({});
+  });
+
+  it("is unsure while Base doesn't know it yet, and joined none once Base still doesn't ten minutes after it was sent", async () => {
+    const c = chains({ baseTxs: {} });
+    expect(await requestBatch(c.clients, request({ sentAt: NOW - 9 * MIN }), NOW)).toEqual({ unsure: true });
+    expect(await requestBatch(c.clients, request({ sentAt: NOW - 10 * MIN }), NOW)).toEqual({});
+    // recorded before the send was dated: from when it was made
+    expect(await requestBatch(c.clients, request({ sentAt: undefined }), NOW)).toEqual({});
+    expect(await requestBatch(c.clients, request({ sentAt: undefined, createdAt: NOW - 2 * MIN }), NOW)).toEqual({ unsure: true });
+  });
+
+  it("stays unsure while Base can't be asked, or shows it mined with a receipt not readable yet", async () => {
+    const down = chains({});
+    (down.clients as unknown as { base: { getTransaction: () => Promise<never> } }).base.getTransaction = async () => {
+      throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
+    };
+    expect(await requestBatch(down.clients, request({ sentAt: NOW - 60 * MIN }), NOW)).toEqual({ unsure: true });
+    const mined = chains({ baseTxs: { [H(20)]: { nonce: 5, blockNumber: 123n } }, nonce: 9 });
+    expect(await requestBatch(mined.clients, request({ sentAt: NOW - 60 * MIN }), NOW)).toEqual({ unsure: true });
   });
 });
 

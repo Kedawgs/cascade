@@ -66,6 +66,10 @@ On Cloudflare Pages:
   Obfuscation, automatically injected Web Analytics, and Zaraz. The policy would block their scripts,
   and allowing them would let code that isn't in this repository run on the page.
 
+HSTS covers this host only (`max-age=31536000`). Adding `includeSubDomains` is the owner's decision,
+for later: it makes browsers refuse plain HTTP on every subdomain of the domain for a year, so it
+waits until every subdomain serves HTTPS. `preload` is a further step after that.
+
 Base Account asks `rpc.wallet.coinbase.com` for a batch's status before it connects. Once
 connected, it sends what it doesn't answer itself (a batch's status among them) to the RPC its popup
 names, which its own constants give as `chain-proxy.wallet.coinbase.com`: both are under

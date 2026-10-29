@@ -34,7 +34,7 @@ describe("the committed headers", () => {
   it("set HSTS, nosniff, a referrer policy, a minimal permissions policy and no framing on every path", () => {
     expect(HEADERS).toMatch(/^\/\*$/m);
     for (const h of [
-      "Strict-Transport-Security: max-age=31536000; includeSubDomains",
+      "Strict-Transport-Security: max-age=31536000",
       "X-Content-Type-Options: nosniff",
       "X-Frame-Options: DENY",
       "Referrer-Policy: strict-origin-when-cross-origin",
@@ -42,6 +42,10 @@ describe("the committed headers", () => {
     ]) {
       expect(HEADERS).toContain(`  ${h}\n`);
     }
+  });
+
+  it("hold HSTS to this host for now: other subdomains are the owner's to add once all of them serve HTTPS", () => {
+    expect(HEADERS).not.toMatch(/includeSubDomains|preload/i);
   });
 });
 

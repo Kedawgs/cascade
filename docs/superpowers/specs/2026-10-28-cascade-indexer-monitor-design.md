@@ -1,7 +1,9 @@
 # Cascade history indexer and monitor — design
 
-Date: 2026-10-28; revised 2026-10-29 after review (round 1: C1, I1–I11, M1–M13; round 2: R1–R4 and minors).
-Status: design, not built. Builds on the v3 contracts (`contracts/src`, tags `v3.0`/`v3.1`), the keeper's
+Date: 2026-10-28; revised 2026-10-29 after review (round 1: C1, I1–I11, M1–M13; round 2: R1–R4 and minors),
+and again while building plan Tasks 1–10 and after their review (secret names, the scan's requests and CPU
+budget, extra indexes, pre-split seed pages, the deployment mark, RPC deadlines and domains).
+Status: design, being built (plan Tasks 1–10 done). Builds on the v3 contracts (`contracts/src`, tags `v3.0`/`v3.1`), the keeper's
 incremental log scan (`ops/src/keeper/state.ts`) and the site's resumable vault scan
 (`web/src/lib/cascade/facts.ts`, `live.ts`, `scan-store.ts`), merged into main at `438deaf`; section 5 is to be
 re-checked against main's files when its tasks start, in case they have moved on.
@@ -315,6 +317,8 @@ CREATE TABLE logs (
 CREATE INDEX logs_by_event ON logs(chain, contract, event, block);
 CREATE INDEX logs_by_topic2 ON logs(contract, event, topic2);  -- Deposited/Redeemed/PayoutReceived by user
 CREATE INDEX logs_by_tx ON logs(chain, tx_hash, log_index);
+CREATE INDEX logs_by_block ON logs(chain, block);              -- the stored uids of a re-read range, every tick
+CREATE INDEX logs_by_topic1 ON logs(contract, event, topic1, block);  -- a payout user's claims since, every tick
 
 CREATE TABLE blocks (chain TEXT NOT NULL, number INTEGER NOT NULL, time INTEGER NOT NULL,
                      PRIMARY KEY (chain, number));     -- times of blocks that hold stored logs
@@ -324,9 +328,11 @@ CREATE TABLE txs (                                      -- senders of attributab
   selector TEXT, nonce INTEGER, PRIMARY KEY (chain, hash));  -- to/selector/nonce null when known from args
 CREATE INDEX txs_by_from ON txs(chain, from_addr);
 
--- the deployment-wide half of the seed, pre-built: pages of up to 500 events in block order
+-- the deployment-wide half of the seed, pre-built: pages of up to 500 events in block order, each kept as the
+-- half's three lists already in JSON (elements joined by commas, no brackets), so serving it joins strings
 CREATE TABLE seed_pages (page INTEGER PRIMARY KEY, first_block INTEGER NOT NULL,
-                         last_block INTEGER NOT NULL, count INTEGER NOT NULL, json TEXT NOT NULL);
+                         last_block INTEGER NOT NULL, count INTEGER NOT NULL,
+                         delivered TEXT NOT NULL, staked TEXT NOT NULL, payouts TEXT NOT NULL);
 
 -- the last 120 per-tick readings of both chains' state (pruned every hour)
 CREATE TABLE readings (at INTEGER PRIMARY KEY, base_block INTEGER, bit_block INTEGER, json TEXT NOT NULL);
@@ -342,6 +348,7 @@ CREATE TABLE messages (
   src_tx TEXT NOT NULL, src_block INTEGER NOT NULL, src_time INTEGER NOT NULL,
   state TEXT NOT NULL DEFAULT 'UNTOUCHED', state_at INTEGER,
   dst_tx TEXT, dst_block INTEGER);                       -- set from the destination adapter's Delivered
+CREATE INDEX messages_pending ON messages(src_block) WHERE dst_tx IS NULL;
 
 -- the cross-check: one row per DELIVERY (a forged delivery reusing an honest batch id gets its own row and can't
 -- block the honest one), and one row per LANDING on Base (keyed by the PayoutsDelivered log's uid)
@@ -361,6 +368,8 @@ CREATE TABLE chunk_checks (
   status TEXT NOT NULL,              -- 'waiting' | 'awaiting_read' | 'ok' | 'mismatch'
   detail TEXT);
 CREATE INDEX chunk_checks_by_chunk ON chunk_checks(batch_key, chunk);
+CREATE INDEX chunk_checks_by_status ON chunk_checks(status);
+CREATE INDEX batch_checks_pending ON batch_checks(delivered_key) WHERE queued_block IS NOT NULL AND payout_done_block IS NULL;
 
 -- watched addresses' transaction counts (or a Safe's nonce): compared with the transactions seen in our logs
 CREATE TABLE nonces (chain TEXT NOT NULL, address TEXT NOT NULL, roles TEXT NOT NULL, baseline INTEGER NOT NULL,
@@ -394,6 +403,17 @@ stuck. Logs are written with an upsert: `INSERT … ON CONFLICT (uid) DO UPDATE 
 0, block = excluded.block, log_index = excluded.log_index`, so a log marked removed by a reorg and re-mined in
 a later block comes back.
 
+Indexes beyond the obvious ones (added while building, each for a query every tick or every API call runs):
+`logs_by_block` for the stored uids of a re-read range, `logs_by_topic1` for each recent payout user's later
+claims and deliveries, and `chunk_checks_by_status`, `batch_checks_pending` and `messages_pending` for what
+the tick loads. Without them those queries read whole tables that only grow (the payout users' lookup alone
+measured 1.8 M rows a day at 50 users). Where SQLite's planner prefers another index, the query names its own
+with `INDEXED BY` (the account half by `logs_by_topic2`, the payout users' lookup by `logs_by_topic1`).
+
+`meta.deployment` holds the deployment's id (`<frontDoor>:<vault>`), written by the tick's first commit and
+never changed. The tick refuses to run, and the API to serve, when it differs from `DEPLOYMENT` (or is
+missing), so a database can't serve one deployment's history under another's configuration.
+
 Size: a stored log is under 1 KB; at 100 stakes a day (about 6 logs each, with csTAO transfers) that is about
 200 MB a year, inside the free 500 MB per database for about two years; `readings` holds 120 rows and `hours`
 35 days. Logs are kept for good: the seed and the cross-check replay need them.
@@ -416,21 +436,36 @@ its chain.
 #### 3.2 The algorithm (per chain, per tick)
 
 ```
-stored      = uids of stored logs in [start, scanned_to] (loaded in step 3, one query for both chains)
+stored      = stored logs in [start, scanned_to], with their place and content (loaded in step 3, one query
+              for both chains)
 start       = scanned_to === null ? from_block : max(from_block, scanned_to + 1 − REREAD)
-for each window [a, b] from start (b ≤ head), while the subrequest and decode budgets and the 40 s wall time last:
+known       = scanned_to ?? from_block − 1        (the highest block some node has said it has)
+if start > known: ask the head (and its block's time) alone first
+for each window [a, b = min(a + WINDOW − 1, known)] from start, while the subrequest budget (and the reserve
+the rest of the tick needs), the decode budget and the 40 s wall time last:
     [logs, serverHead] = one JSON-RPC batch: eth_getLogs(addresses, a, b), eth_blockNumber
-    if serverHead < b: retry once; still behind → stop this chain for this tick (cursor stays at a − 1)
-    identify every log: uid = keccak(chain:txHash:topics:data#n), n counting identical logs in one tx
-    settled = logs with block ≤ head − SETTLE
-    stage an upsert for each settled log (decoded, role-tagged, args as JSON; clears removed)
-    vanished check: each uid in `stored` with block in [a, min(b, head − SETTLE)] missing from this read
-                    is staged removed = 1, and raises the indexer.reorg warning
+                         (the tick's first also asks eth_getBlockByNumber("latest"), for the head's time)
+    if serverHead < b: ask once more while time is left; still behind → stop this chain for this tick
+    known = max(known, serverHead)
+    take the window block by block (never splitting one):
+        a log stored at the same transaction, index and block with the same content is that log: no hash
+        any other: uid = keccak(chain:txHash:topics:data#n), n counting identical logs in one tx; decoded
+        and role-tagged unless stored at that block already; each costs one unit of the decode budget
+        before a block that needs such work once the budget is spent: stop, scanned_to = that block − 1
     scanned_to = b
 settled_to = min(scanned_to, head − SETTLE)   (only ever moves forward)
+upserts    = the settled logs that are new or found at another block (stored, unchanged logs cost no write)
+vanished   = each log in `stored` with block in [start, settled_to] missing from this tick's reads: staged
+             removed = 1, and raises the indexer.reorg warning
 head_time  = max(head_time, the newest of: the head's block time, this tick's reading's block time, the Worker's
              clock if neither chain answered)   (set every tick, even when no window could be read)
 ```
+
+- **Never past a reported head** (*call*, decided while building): a window never asks for blocks beyond the
+  highest head a node has reported, so correctness doesn't depend on how each RPC treats a `toBlock` beyond
+  its head. A steady tick's first request re-reads REREAD blocks up to the last head read (known to exist) and
+  brings back the current head and its time; the second reads the new blocks. That is two requests per chain
+  per steady tick, not one; a chain's very first scan asks for the head alone before its first window.
 
 - **The lag sees a stuck scan** (*call*): `lag = head_time − settled_time`. Because `head_time` moves every tick
   from whatever still answers (the reading, or at worst the Worker's clock), a logs endpoint that fails while
@@ -476,12 +511,19 @@ In the same commit that moves Bittensor's `settled_to`, the tick appends the new
 events (our front door's `BatchDelivered` with `sourceChain == 8453`, every vault `Staked`, every
 `PayoutChunkSent`) to the last `seed_pages` row, opening a new page every 500 events. The shared half of the
 seed (section 4) is these pages, so serving it reads one row per 500 events, and it is cached for everyone.
+Each page keeps the half's three lists already in JSON, so a cache miss joins strings: a page wholly inside
+`[from, next)` is never parsed, only one across an edge (parsing every page cost about 33 ms of CPU at 40,000
+events; joining them about 2 ms).
 
 #### 3.5 RPC client
 
 One choke point (`src/rpc.ts`), as in `ops/src/rpc.ts`: JSON-RPC over `fetch`, batched requests, a minimum
-spacing per chain (Base 300 ms ≈ 200 a minute; Bittensor 500 ms), HTTP 429 retried with backoff while wall time
-allows, RPC URLs redacted from every error and log line. Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`,
+spacing per chain (Base 300 ms ≈ 200 a minute; Bittensor 500 ms), HTTP 429 and 5xx retried with backoff, a
+20-second timeout on every request (not retried, so a hung node can't hold the tick). A caller's deadline (the
+scan's 40-second limit) is kept: no spacing wait or backoff that would end past it is started, and a request's
+timeout is cut short at it. Errors and log lines name an RPC by its registrable domain only (`quiknode.pro`,
+`drpc.org`), never a subdomain, path or query, where a provider can put its key, and anything a node echoes
+back is scrubbed of the URL's host, path and query. Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`,
 on both chains) carries every `eth_call` of a tick in one `aggregate3` with `allowFailure: true`, and always
 includes its own `getBlockNumber()` and `getCurrentBlockTimestamp()`, so every reading knows the block it came
 from (section 6, "Readings").
@@ -489,13 +531,18 @@ from (section 6, "Readings").
 #### 3.6 Budgets
 
 *call*: every external `fetch` spends a per-invocation counter (45 of the free plan's 50; configurable); the
-tick stops scanning when 5 are left, so the state reads, the rules and the emails always run. A steady tick
-needs about 10: one window per chain (logs, head number and head block together), one multicall per chain, one
-nonce batch per chain, one block-time batch per chain, the odd transaction lookup, and the price references
-every fifth minute. A second budget caps the logs decoded per tick (default 300), so a backfill over a busy
-stretch can't overrun the CPU limit: the tick finishes the window it is in and stops. A third limit stops
-scanning 40 seconds into the tick (RPC backoff included), well inside the 3-minute lease, so a slow backfill
-tick still commits what it read. The site check has its own cron and budgets (section 6.6).
+tick stops scanning while enough are left for everything after the scan (about 10: two multicalls, two nonce
+batches, up to two block-time and two transaction batches, two price reads), and never starts a window that
+could take it below that (a lagging node is asked twice), so the state reads, the rules and the emails always
+run. A steady tick needs about 12: two requests per chain for the scan (section 3.2), one multicall per chain,
+one nonce batch per chain, one block-time batch per chain, the odd transaction lookup, and the price references
+every fifth minute. A second budget bounds the scan's CPU (`DECODE_BUDGET`, default 100 on Free): each log
+hashed and decoded costs one unit (about 42 µs, so 100 is about 4 ms of Free's 10 ms), a log already stored
+at the same place costs nothing, and once it is spent the scan stops before the next block that needs work,
+keeping every block taken whole, so a window busier than one tick can afford is read over several. A third
+limit stops scanning 40 seconds into the tick (RPC backoff and timeouts kept inside it), well inside the
+3-minute lease, so a slow backfill tick still commits what it read. The site check has its own cron and
+budgets (section 6.6).
 
 D1 work stays at about 6 queries per tick (each `db.batch()` counts once): the load, the uid query, the
 prefetch, the lease and the two commits. Rows read stay small: rules that look back a day or a week read the
@@ -535,13 +582,16 @@ Four routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404 
 - Both halves of one tick carry the same `next = settled_to + 1` of Bittensor; every event has
   `from ≤ block < next` and comes from a stored, not removed log. The account half matches `topic2` (the account
   left-padded to 32 bytes; `user` is the second indexed argument of both events) on the vault's `Deposited` and
-  `Redeemed`, read in the same `db.batch()` as the cursor.
+  `Redeemed`, read in the same `db.batch()` as the cursor, by `logs_by_topic2` (named with `INDEXED BY`: the
+  planner would otherwise walk every account's deposits), so other accounts' events cost nothing.
 - Headers: `Content-Type: application/json`, `Cache-Control: public, max-age=30`,
   `Access-Control-Allow-Origin: <SITE_ORIGIN>` (one fixed origin, *call*: a constant header keeps cached
   responses valid for every caller; CORS here is not a security boundary, the data is public),
   `Cascade-Settled-Time: <unix>` (exposed via `Access-Control-Expose-Headers`).
-- 503 with `Retry-After: 60` until the first Bittensor window is stored, or when a D1 read fails (the site then
-  falls back).
+- 503 with `Retry-After: 60` (and the CORS header) until the first Bittensor window is stored, when a D1 read
+  fails or a stored row can't be read, when the database holds another deployment (`meta.deployment` missing or
+  not `DEPLOYMENT`'s, or the cursor starting at another block), or when the Worker isn't configured (the site
+  then falls back).
 
 **`GET /v1/status`** — the hold, the per-batch confirmations and the monitor's sight, for the keeper (section 8).
 `Cache-Control: no-store`. It carries opaque hold ids (`h_` and 8 random hex digits, from `holds.public_id`), no
@@ -649,8 +699,8 @@ Conventions:
   each chain) are the baseline, not alerts.
 
 Thresholds are defaults in `src/thresholds.ts`, overridable through the `THRESHOLDS` variable or, so that
-production values needn't be public, a `THRESHOLDS` secret (which wins). *call*: every number below is in one
-place.
+production values needn't be public, a `THRESHOLDS_SECRET` secret (which wins; a secret can't share a var's
+name, section 9). *call*: every number below is in one place.
 
 #### 6.1 Critical
 
@@ -942,16 +992,19 @@ crons, `"cache": { "enabled": true }`, the D1 binding `DB` and the `send_email` 
 | `DEPLOYMENT` | JSON: chain ids, front door, Base adapter, staker, oracle, vault, Bittensor adapter, vault coldkey, stake hotkey, Base and Bittensor start blocks, baseline blocks, `batchMaxWaitS` | public; generated by `pnpm config:from-record ../ops/deployments/v3-test.json` (reads the ops record with its `$bigint` reviver) |
 | `BRIDGES` | `{"base":["<Base adapter>"],"bittensor":["<Bittensor adapter>"]}` | the bridges a payout or batch may arrive through; default the deployment's adapters |
 | `TOKENS` | FM-TAO on Base and Bittensor, the Bittensor lock pool, USDC, WETH, the two Uniswap pools, Multicall3, OffRamps, AlphaVault | public constants, as in `ops/src/config.ts` |
-| `BASE_RPC_URL`, `BASE_LOGS_RPC_URL`, `BITTENSOR_RPC_URL` | `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://archive.chain.opentensor.ai` | a secret of the same name overrides each (for a keyed URL) |
-| `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `45`, `300`, `40`, `180` | raise the budgets on Workers Paid; `LEASE_S` must stay well above `SCAN_WALL_S` |
+| `BASE_RPC_URL`, `BASE_LOGS_RPC_URL`, `BITTENSOR_RPC_URL` | `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://archive.chain.opentensor.ai` | a secret named `<var>_SECRET` (`BASE_RPC_URL_SECRET`, …) overrides each (for a keyed URL) |
+| `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `45`, `100`, `40`, `180` | raise the budgets on Workers Paid (`DECODE_BUDGET` to a few thousand: one unit is one log hashed and decoded, about 42 µs); `LEASE_S` at least 3 × `SCAN_WALL_S` |
 | `SITE_FILES_PER_RUN`, `SITE_MAX_BYTES` | `2`, `2000000` | the site check's own invocation (6.6) |
 | `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascade.fi`, `https://cascade.fi`, `["/","/stake/"]` | CORS and the integrity check |
 | `ALERT_FROM`, `ALERT_MODE` | `monitor@cascade.fi`, `send` | `log` in dev and tests |
-| `THRESHOLDS` | `{}` | overrides of `src/thresholds.ts`; a secret of the same name wins |
+| `THRESHOLDS` | `{}` | overrides of `src/thresholds.ts`; the `THRESHOLDS_SECRET` secret wins |
 | `PRICE_SOURCES` | `["coingecko","coinbase"]` | reference TAO price for `fmtao.depeg` (median of those that answer; both must agree within 2%) |
 
-Secrets (`wrangler secret put`, or `.dev.vars` locally, git-ignored): `ALERT_TO`; optionally `THRESHOLDS` and the
-three RPC URLs. **No private key, mnemonic or signer exists anywhere in the Worker.** `src/config.ts` parses and
+Secrets (`wrangler secret put`, or `.dev.vars` locally, git-ignored): `ALERT_TO`; optionally `THRESHOLDS_SECRET`,
+`BASE_RPC_URL_SECRET`, `BASE_LOGS_RPC_URL_SECRET` and `BITTENSOR_RPC_URL_SECRET`. A secret can't share a var's
+name (the Worker sees one value per name, and Cloudflare keeps one binding per name), so each override is the
+var's name plus `_SECRET`, and wins over the var. **No private key, mnemonic or signer exists anywhere in the
+Worker.** `src/config.ts` parses and
 validates all of it at the start of every invocation (checksummed addresses, integer blocks, known price
 sources) and refuses to run on a bad config with a log line only (an unconfigured Worker must not spam).
 
@@ -1001,7 +1054,8 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
 4. `pnpm --dir indexer wrangler d1 migrations apply cascade-indexer-test --remote --env test`.
 5. Email (open question 2): in the dashboard, Email Service → Email Routing → onboard the sending domain (it
    adds MX and SPF records), then add and verify the destination address. `pnpm --dir indexer wrangler secret put
-   ALERT_TO --env test`; optionally `THRESHOLDS` and keyed RPC URLs as secrets.
+   ALERT_TO --env test`; optionally `THRESHOLDS_SECRET` and keyed RPC URLs as `BASE_RPC_URL_SECRET`,
+   `BASE_LOGS_RPC_URL_SECRET` and `BITTENSOR_RPC_URL_SECRET` (section 9).
 6. `pnpm --dir indexer config:from-record ../ops/deployments/v3-test.json` and paste the `DEPLOYMENT` value.
 7. `pnpm --dir indexer site:approved ../web/out` after building the site to deploy; commit the lists.
 8. `pnpm --dir indexer wrangler deploy --env test`; add the custom domain (`api.cascade.fi`, or the
@@ -1081,9 +1135,11 @@ wallet is asked to sign, or change a balance the site shows.
 **Hardening in the design:** no write routes and no admin routes; every route validates its parameters and queries
 D1 only through prepared statements; lowercase-only paths and no query strings on the seed routes; one fixed CORS
 origin; `no-store` on status and health; the status shows opaque hold ids, not rules, batches or reasons; minimal dependencies (viem and `@noble/hashes` at runtime), exact pins and a committed
-lockfile; secrets only for the recipients, private thresholds and keyed RPC URLs; the RPC client never logs URLs;
-a test that greps `src/` for transaction-sending methods; holds cleared and checks approved only with account
-access; commits guarded by the lease; the site check isolated in its own invocation with a byte cap. A lying RPC can make the monitor miss or invent things; readings that go backwards are dropped, and
+lockfile; secrets only for the recipients (`ALERT_TO`), private thresholds (`THRESHOLDS_SECRET`) and keyed RPC
+URLs (`<var>_SECRET`); the RPC client names an RPC by its registrable domain only, never a URL, subdomain, path
+or query; a test that greps `src/` and `scripts/` for sending and signing methods; holds cleared and checks
+approved only with account access; commits guarded by the lease; a database marked with its deployment, served
+and ticked only under that deployment's configuration; the site check isolated in its own invocation with a byte cap. A lying RPC can make the monitor miss or invent things; readings that go backwards are dropped, and
 a second RPC per chain for the critical reads is a later improvement (open question 12).
 
 ### 14. Open questions for the owner

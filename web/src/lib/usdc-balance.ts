@@ -7,7 +7,7 @@ export const USDC_DECIMALS = 6;
 /** The shape the on-chain balance is reduced to for display. */
 export type BalanceQuery = { status: "pending" | "error" | "success"; data?: number };
 
-/** What the summary shows for "Available to stake", and what MAX fills in. */
+/** What the summary shows for "Your USDC", and what MAX fills in. */
 export function availableToStake(q: BalanceQuery): { text: string; max: number | null } {
   if (q.status === "success" && q.data !== undefined) {
     return { text: `${formatUsdc(q.data)} USDC`, max: q.data };

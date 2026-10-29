@@ -23,7 +23,7 @@ export function UnstakeSummary({ account }: { account: string }) {
   return (
     <>
       <div>
-        <p className={card.k}>Staked</p>
+        <p className={card.k}>Your stake</p>
         <p className={card.v}>
           {p ? (
             <>
@@ -72,7 +72,7 @@ export function UnstakeScreen() {
               ) : (
                 <>
                   <div>
-                    <p className={card.k}>Staked</p>
+                    <p className={card.k}>Your stake</p>
                     <p className={card.v}>–</p>
                   </div>
                   <div>

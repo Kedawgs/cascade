@@ -18,19 +18,19 @@ const text = (el: Parameters<typeof renderWithCache>[0], cached: Cached[]) => pl
 
 describe("the balance, before the vault's history is read", () => {
   it("shows what is staked from the contract reads alone", () => {
-    expect(text(createElement(StakedSummary, { account: ME }), [POSITION])).toContain("Staked0.08 TAO $20.00");
+    expect(text(createElement(StakedSummary, { account: ME }), [POSITION])).toContain("Your stake0.08 TAO $20.00");
   });
 
   it("keeps a dash in the balance's place while it loads, and says when it can't be shown", () => {
-    expect(text(createElement(StakedSummary, { account: ME }), [])).toContain("Staked–Loading");
-    expect(text(createElement(StakedSummary, { account: ME }), [{ ...POSITION, failed: true }])).toContain("Staked–Not available");
+    expect(text(createElement(StakedSummary, { account: ME }), [])).toContain("Your stake–Loading");
+    expect(text(createElement(StakedSummary, { account: ME }), [{ ...POSITION, failed: true }])).toContain("Your stake–Not available");
   });
 });
 
 describe("Unstake summary", () => {
   it("shows the balance while what can be unstaked is still being worked out", () => {
     const t = text(createElement(UnstakeSummary, { account: ME }), [POSITION]);
-    expect(t).toContain("Staked0.0800 TAO$20.00");
+    expect(t).toContain("Your stake0.0800 TAO$20.00");
     expect(t).toContain("Available to unstake–Loading");
   });
 

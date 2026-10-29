@@ -19,7 +19,7 @@ export function StakedSummary({ account }: { account: string }) {
   const position = usePosition(account);
   return (
     <div>
-      <p className={styles.k}>Staked</p>
+      <p className={styles.k}>Your stake</p>
       <p
         className={styles.v}
         title={position.isError ? "We couldn't load your balance just now." : undefined}
@@ -123,7 +123,7 @@ export function StakeCard({ account }: { account: string | null }) {
       <div className={styles.summary}>
         <div>
           <p className={styles.k}>
-            Available to stake
+            Your USDC
             {account && <span className={styles.liveDot} aria-hidden="true" />}
           </p>
           <p className={styles.v}>{account ? avail.text : "–"}</p>
@@ -132,7 +132,7 @@ export function StakeCard({ account }: { account: string | null }) {
           <StakedSummary account={account} />
         ) : (
           <div>
-            <p className={styles.k}>Staked</p>
+            <p className={styles.k}>Your stake</p>
             <p className={styles.v}>–</p>
           </div>
         )}

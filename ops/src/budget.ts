@@ -5,7 +5,7 @@ import { readColdkey } from "./deploy.ts";
 import { claimGasLimit, VAULT_CLAIM_GAS_REQUIRED } from "./keeper/rewards.ts";
 import { buildPlan, buildPlanV3, isPlanV3 } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
-import type { ROUND_TRIP } from "./roundtrip.ts";
+import { ROUND_TRIP } from "./roundtrip.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
 import type { Ctx } from "./send.ts";
 import type { StepId } from "./types.ts";
@@ -115,6 +115,29 @@ export function formatBudget(b: Budget): string[] {
   return lines;
 }
 
+/** Why a rehearsal record can't price the live deployment, or nothing when it can: every step landed
+ * with its gas measured and nothing pending, the read-back passed, a batch close was measured and, for
+ * v3, the round trip finished. A rehearsal that stops partway leaves such a record (the previous one is
+ * archived when it starts), and its missing gas would count as 0. */
+export function unfinishedRehearsal(rec: DeploymentRecord): string[] {
+  const out: string[] = [];
+  const unmeasured = rec.plan.steps.filter((s) => {
+    const d = rec.done[s.id];
+    return !d || !("gasUsed" in d);
+  });
+  if (unmeasured.length) out.push(`${unmeasured.length} deployment step(s) with no measured gas (${unmeasured.map((s) => s.id).join(", ")})`);
+  if (rec.pending) out.push("a transaction still pending");
+  if (!rec.verify) out.push("no read-back check");
+  else if (!rec.verify.ok) out.push("its read-back check failed");
+  if (!rec.rehearsalClose) out.push("no measured batch close");
+  if (isPlanV3(rec.plan)) {
+    const reached = new Set((rec.roundTrip ?? []).map((s) => s.step));
+    const next = ROUND_TRIP.find((step) => !reached.has(step));
+    if (next) out.push(`its round trip stopped before "${next}"`);
+  }
+  return out;
+}
+
 const sumGas = (rec: DeploymentRecord, ids: StepId[]) =>
   ids.reduce((s, id) => {
     const d = rec.done[id];
@@ -129,8 +152,13 @@ const estimateCreate = async (ctx: Ctx, name: string, args: unknown[]) => {
 
 /** Live reads and estimates (no sends) plus the rehearsal's measured gas: every Base step of its plan,
  * every Bittensor configuration call and, for v3, its round trip's USDC delivery and the claim policy's
- * cost of a claim. `ctx` points at the live chains. */
+ * cost of a claim. `ctx` points at the live chains. An unfinished rehearsal is refused before anything is
+ * read, so budget and preflight never price the deployment from partial data. */
 export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord, policy: ClaimPolicy = CLAIM_POLICY): Promise<BudgetInputs> {
+  const unfinished = unfinishedRehearsal(rehearsal);
+  if (unfinished.length) {
+    throw new Error(`the rehearsal record is unfinished (${unfinished.join("; ")}), so it can't price the live deployment: run \`pnpm ops rehearse\` again; nothing read`);
+  }
   // an estimate creates at the wallet's current nonce, so the vault's coldkey is that address's
   const nonce = await nonceOf(ctx.rpc, "bittensor", WALLET);
   const here = getContractAddress({ from: WALLET, nonce: BigInt(nonce) });

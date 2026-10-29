@@ -4,6 +4,7 @@ import { type BudgetInputs, computeBudget, formatBudget, gatherBudgetInputs } fr
 import { claimPolicy, paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
+import { ROUND_TRIP, type StepReport } from "../src/roundtrip.ts";
 import type { Ctx, Sent } from "../src/send.ts";
 
 const inputs: BudgetInputs = {
@@ -97,18 +98,32 @@ describe("budget v3", () => {
 
 describe("gatherBudgetInputs", () => {
   const COLDKEY: Hex = `0x${"22".repeat(32)}`;
-  /** A rehearsal record whose every step used a distinct amount of gas: step i used 1,000 × (i + 1). */
+  /** A finished rehearsal record whose every step used a distinct amount of gas: step i used 1,000 ×
+   * (i + 1); a v3 one has its whole round trip, the USDC delivery using 333,333 gas. */
   function rehearsalOf(plan: DeploymentRecord["plan"], extra: Partial<DeploymentRecord> = {}): DeploymentRecord {
     const done = Object.fromEntries(plan.steps.map((s, i) => [s.id, { hash: `0x${"cd".repeat(32)}`, block: 1, gasUsed: 1_000n * BigInt(i + 1), costWei: 1n } satisfies Sent]));
-    return { target: "rehearsal", wallet: WALLET, createdAt: "", plan, done, rehearsalClose: { gasUsed: 410_000n, fee: 6n * 10n ** 14n }, ...extra };
+    const roundTrip = ROUND_TRIP.map((step): StepReport => ({ step, chain: "base", payer: "keeper", gasUsed: step === "deliver USDC" ? 333_333n : 1n, costWei: 1n, detail: "" }));
+    return {
+      target: "rehearsal",
+      wallet: WALLET,
+      createdAt: "",
+      plan,
+      done,
+      verify: { ok: true, failures: [], checkedAt: "" },
+      rehearsalClose: { gasUsed: 410_000n, fee: 6n * 10n ** 14n },
+      ...("version" in plan ? { roundTrip } : {}),
+      ...extra,
+    };
   }
   function liveChains() {
+    const calls: string[] = [];
     const estimates: Hex[] = [];
     const ctx: Ctx = {
       live: true,
       targets: targets({}).live,
       rpc: {
         async request(_chain, method, params) {
+          calls.push(method);
           if (method === "eth_getTransactionCount") return numberToHex(7);
           if (method === "eth_call") return COLDKEY;
           if (method === "eth_estimateGas") {
@@ -125,16 +140,14 @@ describe("gatherBudgetInputs", () => {
       log: () => undefined,
       receiptTimeoutMs: 10,
     };
-    return { ctx, estimates };
+    return { ctx, estimates, calls };
   }
   const sumOf = (plan: DeploymentRecord["plan"], keep: (s: DeploymentRecord["plan"]["steps"][number]) => boolean) =>
     plan.steps.reduce((t, s, i) => (keep(s) ? t + 1_000n * BigInt(i + 1) : t), 0n);
 
   it("counts all eleven v3 Base steps, the five Bittensor calls, the round trip's delivery and the claim's gas limit", async () => {
     const plan = buildPlanV3(0, 0, COLDKEY);
-    const rec = rehearsalOf(plan, {
-      roundTrip: [{ step: "deliver USDC", chain: "base", payer: "keeper", gasUsed: 333_333n, costWei: 1n, detail: "" }],
-    });
+    const rec = rehearsalOf(plan);
     const { ctx, estimates } = liveChains();
     const i = await gatherBudgetInputs(ctx, rec);
     expect(i.baseDeploySteps).toBe(11);
@@ -148,6 +161,34 @@ describe("gatherBudgetInputs", () => {
     expect(measured.claimCostTao).toBe(45n * 10n ** 15n);
     // the vault is estimated with the v3 arguments: tao.bot's hotkey
     expect(estimates[1]).toContain(SETTINGS_V3.hotkey.slice(2));
+  });
+
+  it("refuses an unfinished rehearsal before reading anything live: a re-rehearsal that stopped must not price the deployment", async () => {
+    const plan = buildPlanV3(0, 0, COLDKEY);
+    const finished = rehearsalOf(plan);
+    const { vault: _, ...missingStep } = finished.done;
+    const unfinished: [Partial<DeploymentRecord>, RegExp][] = [
+      // the deployment stopped partway, or a step was recovered without its gas
+      [{ done: missingStep }, /1 deployment step\(s\) with no measured gas \(vault\)/],
+      [{ done: { ...finished.done, setKeeper: { recovered: true } } }, /no measured gas \(setKeeper\)/],
+      [{ pending: { step: "setRewardCut", chain: "bittensor", nonce: 15 } }, /a transaction still pending/],
+      // the read-back never ran, or failed
+      [{ verify: undefined }, /no read-back check/],
+      [{ verify: { ok: false, failures: ["x"], checkedAt: "" } }, /its read-back check failed/],
+      // no measured close, or a round trip that stopped before the delivery
+      [{ rehearsalClose: undefined }, /no measured batch close/],
+      [{ roundTrip: undefined }, /round trip stopped before "permit stake"/],
+      [{ roundTrip: finished.roundTrip!.slice(0, -1) }, /round trip stopped before "deliver USDC"/],
+    ];
+    for (const [extra, why] of unfinished) {
+      const live = liveChains();
+      const err = await gatherBudgetInputs(live.ctx, { ...finished, ...extra }).catch((e) => e);
+      expect(err.message).toMatch(why);
+      expect(err.message).toMatch(/run `pnpm ops rehearse` again/);
+      expect(live.calls).toEqual([]);
+    }
+    // v2 has no round trip to finish
+    await expect(gatherBudgetInputs(liveChains().ctx, rehearsalOf(buildPlan(0, 0, COLDKEY)))).resolves.toMatchObject({ baseDeploySteps: 2 });
   });
 
   it("leaves a v2 rehearsal's budget as it was: two Base steps, no deliveries, no claim", async () => {

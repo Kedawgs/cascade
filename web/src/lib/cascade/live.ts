@@ -1,7 +1,7 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
 import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
-import { cancelTook, chainDeposits, confirmAccountEvents, depositFacts, scanVault, type VaultScan, withdrawalFacts } from "./facts";
+import { cancelTook, chainDeposits, confirmAccountEvents, depositFacts, type Placed, requestBatch, scanVault, type VaultScan, withdrawalFacts } from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore } from "./scan-store";
@@ -170,15 +170,29 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   const onTheBridge = (op: { batchId?: bigint }, fd: reads.FrontDoorState, scan: VaultScan) =>
     op.batchId !== undefined && op.batchId < fd.openBatchId && !scan.delivered.has(String(op.batchId));
 
-  /** This browser's deposits and unstakes still counted: a request taken back out of a batch that has
-   * since closed is neither on the bridge nor delivered (see cancelTook). */
-  async function counted(a: Address, fd: reads.FrontDoorState) {
-    const ops = deps.opLog.list(a);
-    const gone = await cancelledIn(ops.filter((o): o is DepositOp | WithdrawalOp => o.kind !== "claim" && o.batchId !== undefined && o.batchId < fd.openBatchId));
-    return {
-      withdrawals: ops.filter((o): o is WithdrawalOp => o.kind === "withdrawal" && o.state !== "failed" && !gone.has(o.id)),
-      deposits: ops.filter((o): o is DepositOp => o.kind === "deposit" && !gone.has(o.id)),
-    };
+  /** This browser's deposits still counted: one taken back out of a batch that has since closed is
+   * neither on the bridge nor delivered (see cancelTook). */
+  async function countedDeposits(a: Address, fd: reads.FrontDoorState): Promise<DepositOp[]> {
+    const deposits = deps.opLog.list(a).filter((o): o is DepositOp => o.kind === "deposit");
+    const gone = await cancelledIn(deposits.filter((o) => o.batchId !== undefined && o.batchId < fd.openBatchId));
+    return deposits.filter((o) => !gone.has(o.id));
+  }
+
+  /** This browser's unstakes still counted in their batches (not failed, not taken back out by a cancel:
+   * the one decision, cancelTook), each with its batch: as recorded, or from its request's receipt, which
+   * is then recorded. */
+  async function placedWithdrawals(a: Address, withdrawals: WithdrawalOp[]): Promise<Placed[]> {
+    const placed = await Promise.all(
+      withdrawals
+        .filter((o) => o.state !== "failed")
+        .map(async (o) => {
+          const batchId = await requestBatch(c, o);
+          if (batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId });
+          return { ...o, batchId };
+        }),
+    );
+    const gone = await cancelledIn(placed);
+    return placed.filter((o) => !gone.has(o.id)).map(({ id, batchId, shares }) => ({ id, batchId, shares }));
   }
 
   /** The stake itself, from contract reads alone: it never waits on the vault's history. */
@@ -208,7 +222,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   async function getAvailable(account: string): Promise<Available> {
     const a = account as Address;
     const [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
-    const { withdrawals } = await counted(a, fd);
+    const withdrawals = await placedWithdrawals(a, deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal"));
     let scan = known(a);
     if (withdrawals.some((w) => onTheBridge(w, fd, scan))) scan = await scanFor(a);
     const asked = fd.redeemOf + sum(withdrawals.filter((w) => onTheBridge(w, fd, scan)).map((w) => w.shares));
@@ -220,7 +234,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   async function getPositionHistory(account: string): Promise<PositionHistory> {
     const a = account as Address;
     const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
-    const { deposits } = await counted(a, fd);
+    const deposits = await countedDeposits(a, fd);
     const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
     const pendingWei = fd.depositOf + sum(deposits.filter((o) => onTheBridge(o, fd, scan)).map((o) => o.targetTao));
     const putIn = sum(scan.deposited.map((e) => e.assets));
@@ -298,9 +312,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     if (withdrawals.length === 0) return [];
     const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
     const claims = ops.filter((o): o is ClaimOp => o.kind === "claim").map(live);
+    // each unstake's batch and cancel first: one entry of several is shared out between those still in it
+    const siblings = await placedWithdrawals(a, withdrawals);
     const out: WithdrawalRecord[] = [];
     for (const op of withdrawals) {
-      const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims, siblings: withdrawals });
+      const { batchId, facts } = await withdrawalFacts(c, d, op, { fd, vault: v, scan, claims, siblings });
       if (batchId !== undefined && op.batchId === undefined) deps.opLog.update(a, op.id, { batchId });
       out.push(withdrawalRecord({ ...op, batchId: batchId ?? op.batchId }, facts));
     }

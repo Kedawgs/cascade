@@ -298,6 +298,17 @@ function requestIn(r: Receipt | null, eventName: "DepositRequested" | "RedeemReq
 const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemRequested", account: Address): bigint | undefined =>
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
+/** The batch an unstake joined: as recorded, or from its request's receipt (undefined while that isn't mined or can't be read). */
+export const requestBatch = async (c: Pick<Clients, "base">, op: WithdrawalOp): Promise<bigint | undefined> =>
+  op.batchId ?? batchIdFrom(await baseReceipt(c, op.hash), "RedeemRequested", op.account);
+
+/** An unstake still counted in its batch (not failed, not taken back out by a cancel), with that batch. */
+export interface Placed {
+  id: string;
+  batchId?: bigint;
+  shares: bigint;
+}
+
 const closesAt = (fd: FrontDoorState, d: Deployment) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
 
 /** Whether a record's cancel took it back out of its batch: the cancel went through on Base and came
@@ -388,9 +399,9 @@ export async function withdrawalFacts(
   c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
   d: Deployment,
   op: WithdrawalOp,
-  /** `siblings`: the account's unstakes from this browser (this one among them), to share out an entry
-   * the front door made of several of them. */
-  ctx: { fd: FrontDoorState; vault: VaultState; scan: VaultScan; claims: ClaimOp[]; siblings?: WithdrawalOp[] },
+  /** `siblings`: this browser's unstakes still counted in their batches, to share out an entry the
+   * front door made of several of them. */
+  ctx: { fd: FrontDoorState; vault: VaultState; scan: VaultScan; claims: ClaimOp[]; siblings?: Placed[] },
 ): Promise<{ batchId?: bigint; facts: WithdrawalFacts }> {
   const req = await baseReceipt(c, op.hash);
   const batchId = op.batchId ?? batchIdFrom(req, "RedeemRequested", op.account);
@@ -451,10 +462,8 @@ export async function withdrawalFacts(
  * requests in one batch into one entry, so each one's part is its shares over the larger of what the
  * entry burned (all of them, from any browser) and what this browser's requests there asked for (more,
  * when the vault couldn't burn the whole entry). An entry that was this request's alone is all its own. */
-function partOf(op: WithdrawalOp, burned: bigint, siblings: WithdrawalOp[]): (amount: bigint) => bigint {
-  const asked = siblings
-    .filter((o) => o.id !== op.id && o.batchId !== undefined && o.batchId === op.batchId && o.state !== "failed" && !o.cancelled)
-    .reduce((sum, o) => sum + o.shares, op.shares);
+function partOf(op: WithdrawalOp, burned: bigint, siblings: Placed[]): (amount: bigint) => bigint {
+  const asked = siblings.filter((o) => o.id !== op.id && o.batchId !== undefined && o.batchId === op.batchId).reduce((sum, o) => sum + o.shares, op.shares);
   const whole = burned > asked ? burned : asked;
   return (amount) => (op.shares >= whole ? amount : (amount * op.shares) / whole);
 }

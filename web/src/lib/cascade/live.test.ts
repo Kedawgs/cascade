@@ -340,6 +340,74 @@ describe("the vault's history", () => {
   });
 });
 
+describe("unstakes sharing a batch", () => {
+  const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
+  const KEY = H(77);
+  const evLog = (address: string, topics: unknown, data: string, tx: string, logIndex = 0) => ({ address, topics, data, blockNumber: 1_500n, transactionHash: tx, logIndex });
+  const requested = (tx: string) =>
+    evLog(D.frontDoor, encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { batchId: 3n, user: ME } }), encodeAbiParameters(parseAbiParameters("uint256"), [5n * 10n ** 21n]), tx);
+  /** Three unstakes of 5e21 shares in batch 3, merged into one entry the vault could burn only 6e21 of. */
+  function threeInOneBatch() {
+    const baseReceipts: Record<string, unknown> = {
+      [H(20)]: { status: "success", logs: [requested(H(20))] },
+      [H(21)]: { status: "success", logs: [requested(H(21))] },
+      [H(22)]: { status: "success", logs: [requested(H(22))] },
+      // a cancel that reverted: that unstake stayed in the batch
+      [H(30)]: { status: "reverted", logs: [] },
+    };
+    const redeemed = evLog(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user: ME } }),
+      encodeAbiParameters(parseAbiParameters("uint256, uint256"), [6n * 10n ** 21n, 6n * 10n ** 15n]),
+      H(9),
+      1,
+    );
+    const clients = {
+      base: {
+        getTransactionReceipt: async ({ hash }: { hash: string }) => {
+          if (!baseReceipts[hash]) throw new Error("receipt not found");
+          return baseReceipts[hash];
+        },
+      },
+      bittensor: {
+        getTransactionReceipt: async ({ hash }: { hash: string }) => (hash === H(9) ? { status: "success", logs: [redeemed] } : null),
+        getBlock: async () => ({ timestamp: 1_800_000_000n }),
+      },
+    };
+    const d = deps({ clients: clients as never, scan: async (_c, _d, s) => void s.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n }) });
+    const w = (id: string, hash: `0x${string}`, over: Partial<WithdrawalOp> = {}): WithdrawalOp => ({
+      id,
+      kind: "withdrawal",
+      account: ME,
+      createdAt: 1,
+      shares: 5n * 10n ** 21n,
+      taoEstimate: 0n,
+      usdcEstimate: 0n,
+      fee: 0n,
+      hash,
+      state: "sent",
+      ...over,
+    });
+    d.opLog.put(w("a", H(20), { batchId: 3n }));
+    // its batch isn't recorded yet: the request's receipt says
+    d.opLog.put(w("b", H(21)));
+    d.opLog.put(w("c", H(22), { batchId: 3n, cancelled: { hash: H(30), at: 2 } }));
+    return d;
+  }
+
+  it("split what the vault burned between every unstake still in the batch, so the parts add up to it", async () => {
+    const records = await createLiveCascadeData(D, threeInOneBatch()).listWithdrawals(ME);
+    expect(records.map((r) => r.taoAmount)).toEqual([0.002, 0.002, 0.002]);
+  });
+
+  it("are placed from their request's receipt when this browser hasn't recorded their batch yet", async () => {
+    const d = threeInOneBatch();
+    // batch 3 hasn't reached the vault: all three are on the bridge (the reverted cancel took nothing out)
+    const data = createLiveCascadeData(D, { ...d, scan: async () => undefined });
+    expect((await data.getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 15n * 10n ** 21n);
+  });
+});
+
 describe("unstakes", () => {
   it("are none, without reading either chain, when this browser has made none", async () => {
     let reads = 0;

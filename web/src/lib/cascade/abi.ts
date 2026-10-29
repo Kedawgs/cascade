@@ -75,6 +75,7 @@ export const VAULT = parseAbi([
   "event RedeemDeferred(bytes32 indexed key, address indexed user, uint256 requested)",
   "event Staked(bytes32 indexed hotkey, uint256 rao, uint256 measured)",
   "event PayoutChunkSent(bytes32 indexed key, uint32 chunk, uint32 taken, uint256 gross, uint256 net, uint256 fee)",
+  "event PayoutDust(bytes32 indexed key, address indexed user, uint256 assets)",
 ]);
 
 export const STAKING = parseAbi([

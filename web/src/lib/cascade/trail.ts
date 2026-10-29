@@ -57,7 +57,9 @@ export interface WithdrawalFacts {
   closesBy?: boolean;
   stillOpen: boolean;
   delivered?: { at: Date; txHash: Hex; outcome: "redeemed" | "skipped" | "deferred"; taoWei?: bigint };
-  payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date };
+  /** The chunk that carried this account's entry. `dust` when the entry was worth less than its share of
+   * the bridge fee: the vault kept it, and nothing comes back. */
+  payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date; dust?: true };
   claimable: bigint;
   /** The claim's receipts: TAO claimed, the USDC the swap paid (if it ran), and whether it was kept as TAO
    * or the swap failed after the claim (the TAO then sits in the wallet). `shared` when the claim named
@@ -341,7 +343,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   let ret: TrailStep<WithdrawalStepKey> = { key: "return", title: "Return to Base", status: "pending" };
   if (d?.outcome === "redeemed") {
     const p = f.payout;
-    if (p && p.state === 2) ret = { ...ret, status: "done", at: p.at, ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
+    if (p?.dust) ret = { ...ret, status: "failed", at: p.at, detail: "Too small to send back after the bridge fee, so nothing came back" };
+    else if (p && p.state === 2) ret = { ...ret, status: "done", at: p.at, ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
     else if (p && p.state === 3) {
       // a failed delivery on the bridge is sent again: delayed, not lost
       ret = {
@@ -429,6 +432,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   else status = "in_progress";
 
   const nothingTaken = d !== undefined && (d.outcome === "skipped" || d.outcome === "deferred");
+  // taken, but too small to send back: nothing comes back either
+  const nothingBack = nothingTaken || f.payout?.dust === true;
   // only what was this unstake's alone: one sale or claim of several payouts shows its total in the step instead
   const received = sold
     ? sold.shared
@@ -440,7 +445,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
         : { usdc: toDisplay(c.usdcOut ?? 0n, 6) }
       : undefined;
   // nothing was taken, so nothing comes back; a paid v3 unstake shows what arrived (its receipt) or nothing, never the estimate
-  const usdcAmount = nothingTaken ? undefined : auto && status === "paid" ? received?.usdc : toDisplay(op.usdcEstimate, 6);
+  const usdcAmount = nothingBack ? undefined : auto && status === "paid" ? received?.usdc : toDisplay(op.usdcEstimate, 6);
   // v3: asked for, still on its way back, its USDC to be delivered when it lands (the preference it set
   // hasn't run out); claim() clears the account's preference, so a claim by hand now would turn that off
   const awaitingDelivery =
@@ -448,7 +453,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     op.delivery.deadline * 1000 >= f.now.getTime() &&
     f.requestMined &&
     !landed &&
-    !nothingTaken &&
+    !nothingBack &&
     (status === "in_progress" || status === "needs_you");
   return {
     // nothing was taken (balance too small, or the daily limit): the user can simply unstake again

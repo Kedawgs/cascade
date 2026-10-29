@@ -383,6 +383,17 @@ describe("withdrawal trail", () => {
     expect(r.status).toBe("in_progress");
   });
 
+  it("says plainly when its payout was too small to send back, rather than on the bridge for ever", () => {
+    const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 10n ** 12n };
+    const r = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), state: 0, at: new Date(), dust: true } });
+    expect(r.steps[2]).toMatchObject({ status: "failed", detail: "Too small to send back after the bridge fee, so nothing came back" });
+    expect(r.steps[3].status).toBe("pending");
+    expect(r.status).toBe("failed");
+    expect(r.usdcAmount).toBeUndefined();
+    expect(r.unstakeAgain).toBeUndefined();
+    expect(withdrawalRecord({ ...wop, delivery: { minUsdcPerTao: 1n, deadline: 2_000_000_000 } }, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), state: 0, at: new Date(), dust: true } }).awaitingDelivery).toBeUndefined();
+  });
+
   it("asks the user to claim once the TAO is back on Base, then shows it paid", () => {
     const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date() };

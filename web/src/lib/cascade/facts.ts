@@ -475,14 +475,22 @@ export async function withdrawalFacts(
     const sent = redeemed ? chunkOf(ctx.scan.payouts.get(hit.key) ?? [], entryIndex(r, d, hit.key, op.account)) : undefined;
     if (redeemed && sent) {
       const pr = await bitReceipt(c, ctx.scan, sent.txHash);
-      const msg = parseEventLogs({ abi: ADAPTER, logs: (pr?.logs ?? []) as never, eventName: "Sent", strict: false }).find((l) =>
-        same(l.address, d.bitAdapter),
+      const at = await blockTime(c, ctx.scan, sent.block);
+      // worth less than its share of the bridge fee: the vault kept it and sent this account nothing
+      const dust = parseEventLogs({ abi: VAULT, logs: (pr?.logs ?? []) as never, eventName: "PayoutDust", strict: false }).some(
+        (l) => same(l.address, d.vault) && same(l.args.key as string, hit.key) && !!l.args.user && same(l.args.user as string, op.account),
       );
-      const messageId = msg?.args.messageId as Hex | undefined;
-      const state = messageId
-        ? Number(await c.base.readContract({ address: OFFRAMP.base, abi: OFFRAMP_ABI, functionName: "getExecutionState", args: [messageId] }))
-        : 0;
-      facts.payout = { txHash: sent.txHash, messageId, state: Math.min(3, Math.max(0, state)) as 0 | 1 | 2 | 3, at: await blockTime(c, ctx.scan, sent.block) };
+      if (dust) facts.payout = { txHash: sent.txHash, state: 0, at, dust: true };
+      else {
+        const msg = parseEventLogs({ abi: ADAPTER, logs: (pr?.logs ?? []) as never, eventName: "Sent", strict: false }).find((l) =>
+          same(l.address, d.bitAdapter),
+        );
+        const messageId = msg?.args.messageId as Hex | undefined;
+        const state = messageId
+          ? Number(await c.base.readContract({ address: OFFRAMP.base, abi: OFFRAMP_ABI, functionName: "getExecutionState", args: [messageId] }))
+          : 0;
+        facts.payout = { txHash: sent.txHash, messageId, state: Math.min(3, Math.max(0, state)) as 0 | 1 | 2 | 3, at };
+      }
     }
   }
   const claim = ctx.claims.find((k) => k.withdrawalIds?.includes(op.id) && k.hashes.claim);

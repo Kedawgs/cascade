@@ -487,6 +487,37 @@ describe("facts", () => {
     expect(await payoutOf([delivered, first, second], mineFirst)).toMatchObject({ txHash: H(10), messageId: H(6), state: 2 });
   });
 
+  it("knows when the account's entry was too small to send back after the bridge fee", async () => {
+    const redeemedLog = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key: KEY, user: ME } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256, uint256"), [10n ** 18n, 10n ** 12n]),
+      1_500n,
+      H(9),
+      1,
+    );
+    // the chunk sent nothing: every entry in it was worth less than its share of the fee
+    const chunkLog = log(
+      D.vault,
+      encodeEventTopics({ abi: VAULT, eventName: "PayoutChunkSent", args: { key: KEY } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256"), [0, 1, 10n ** 12n, 0n, 0n]),
+      1_900n,
+      H(10),
+    );
+    const dust = log(D.vault, encodeEventTopics({ abi: VAULT, eventName: "PayoutDust", args: { key: KEY, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256"), [10n ** 12n]), 1_900n, H(10), 1);
+    const c = chains({
+      bitLogs: [delivered, chunkLog],
+      bitReceipts: { [H(9)]: { status: "success", logs: [delivered, redeemedLog] }, [H(10)]: { status: "success", logs: [chunkLog, dust] } },
+      executionState: 2,
+    });
+    const scan = newScan(D);
+    await scanVault(c.clients, D, scan, ME);
+    const op: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 18n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
+    const f = (await withdrawalFacts(c.clients, D, op, { fd, vault, scan, claims: [] })).facts;
+    expect(f.payout).toMatchObject({ txHash: H(10), dust: true, state: 0 });
+    expect(f.payout?.messageId).toBeUndefined();
+  });
+
   it("reads what a claim paid from its receipts, for the unstakes it names", async () => {
     const claimedLog = log(
       D.frontDoor,

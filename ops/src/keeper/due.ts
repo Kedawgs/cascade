@@ -8,7 +8,8 @@ export interface DueDelivery {
 
 /** What closing the open batch earns and costs, in USDC units (6 decimals). */
 export interface CloseEconomics {
-  /** The batch's estimated Cascade fees: its deposit fees, the swap fee on its TAO, and its fee pot */
+  /** The batch's estimated Cascade fees: the deposit fee and the swap fee on the TAO of each deposit the
+   * staker made (TAO deposited straight into the front door paid neither), and its fee pot */
   feesUsdc: bigint;
   /** The close's bridge (CCIP) fee */
   bridgeFeeUsdc: bigint;
@@ -77,13 +78,14 @@ export function closesWithoutFees(s: { closeMaxWaitS: number; frontDoor: Pick<St
   return fd.full || s.closeMaxWaitS <= fd.batchInterval || fd.now >= fd.openStart + s.closeMaxWaitS;
 }
 
-/** The fee estimate for a batch, in USDC units: a deposit fee per deposit, the swap fee on its TAO at
- * the oracle's price, and its fee pot at ETH's price; and the close's bridge fee at ETH's price. Prices
- * are USDC units per 1e18 wei. */
+/** The fee estimate for a batch, in USDC units: a deposit fee per deposit the staker made, the swap fee
+ * on their TAO at the oracle's price, and its fee pot at ETH's price; and the close's bridge fee at ETH's
+ * price. Prices are USDC units per 1e18 wei. */
 export function closeEconomicsOf(r: {
-  nDeposits: number;
+  /** The staker's deposits into the batch, and their TAO */
+  nStaked: number;
   depositFeeUsdc: bigint;
-  totalDeposits: bigint;
+  stakedTao: bigint;
   taoPriceUsdc: bigint;
   swapFeeBps: number;
   feePot: bigint;
@@ -92,7 +94,7 @@ export function closeEconomicsOf(r: {
 }): CloseEconomics {
   const E18 = 10n ** 18n;
   const feesUsdc =
-    BigInt(r.nDeposits) * r.depositFeeUsdc + (r.totalDeposits * r.taoPriceUsdc * BigInt(r.swapFeeBps)) / 10_000n / E18 + (r.feePot * r.ethPriceUsdc) / E18;
+    BigInt(r.nStaked) * r.depositFeeUsdc + (r.stakedTao * r.taoPriceUsdc * BigInt(r.swapFeeBps)) / 10_000n / E18 + (r.feePot * r.ethPriceUsdc) / E18;
   return { feesUsdc, bridgeFeeUsdc: (r.bridgeFeeWei * r.ethPriceUsdc) / E18 };
 }
 

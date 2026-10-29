@@ -13,6 +13,7 @@ import {
   type Hex,
   hexToBigInt,
   numberToHex,
+  parseAbi,
   parseAbiParameters,
   toFunctionSelector,
 } from "viem";
@@ -202,9 +203,33 @@ describe("the open batch and its close's economics", () => {
   const ETH_USDC = encodePacked(["address", "uint24", "address"], [BASE_V3.WETH, 500, BASE_V3.USDC]).toLowerCase();
   const launch: DeploymentRecord = { ...v3Record(), plan: buildPlanV3(0, 0, COLDKEY, "launch") };
   const PRICE_READS = ["oracle", "swapper", "usdcValue", "depositFeeUsdc", "swapFeeBps", "quoteExactInput", "quoteFee"];
+  const BASE_HEAD = 20_000_000;
+  const DEPOSIT_REQUESTED = parseAbi(["event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)"]);
 
-  /** A launch batch two hours old, the contract able to close it: one deposit of 0.4 TAO, a 0.0001 ETH
-   * fee pot; TAO at $250, ETH at $2,300, a 15 bps swap fee, a $0.05 deposit fee, a 0.0006 ETH bridge fee. */
+  /** A DepositRequested log of the front door's: `amount` added to `user`'s entry in batch `batchId`,
+   * paid for by `payer`. */
+  const requested = (payer: Address, amount: bigint, block: number, o: { batchId?: bigint; user?: Address; logIndex?: number } = {}) => ({
+    address: launch.plan.addresses.frontDoor,
+    topics: encodeEventTopics({ abi: DEPOSIT_REQUESTED, eventName: "DepositRequested", args: { batchId: o.batchId ?? 7n, user: o.user ?? alice } }) as Hex[],
+    data: encodeAbiParameters(parseAbiParameters("uint256, address"), [amount, payer]),
+    blockNumber: numberToHex(block),
+    logIndex: numberToHex(o.logIndex ?? 0),
+    transactionHash: numberToHex(block, { size: 32 }),
+  });
+  /** eth_getLogs over `logs`: on Base, those in the query's blocks, of its event and batch id. */
+  const logsOn =
+    (logs: ReturnType<typeof requested>[], queries: { from: bigint; to: bigint; topics: (Hex | null)[] }[] = []) =>
+    (chain: ChainName, params: unknown[]) => {
+      if (chain !== "base") return [];
+      const q = params[0] as { fromBlock: Hex; toBlock: Hex; topics: (Hex | null)[] };
+      const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+      queries.push({ from, to, topics: q.topics });
+      return logs.filter((l) => l.topics[0] === q.topics[0] && l.topics[1] === q.topics[1] && BigInt(l.blockNumber) >= from && BigInt(l.blockNumber) <= to);
+    };
+
+  /** A launch batch two hours old, the contract able to close it: one deposit of 0.4 TAO, which the
+   * staker made 50 blocks ago, a 0.0001 ETH fee pot; TAO at $250, ETH at $2,300, a 15 bps swap fee, a
+   * $0.05 deposit fee, a 0.0006 ETH bridge fee. */
   function chain(over: Record<string, Answer> = {}, methods: Record<string, (chain: ChainName, params: unknown[]) => unknown> = {}) {
     const answers: Record<string, Answer> = {
       openDeposits: () => [{ user: alice, amount: 4n * 10n ** 17n }],
@@ -242,8 +267,8 @@ describe("the open batch and its close's economics", () => {
     };
     return fakeChain(Object.values(KEEPER_READ_ABIS), answers, {
       eth_getBalance: () => "0x0",
-      eth_blockNumber: () => numberToHex(1_000),
-      eth_getLogs: () => [],
+      eth_blockNumber: (c) => numberToHex(c === "base" ? BASE_HEAD : 1_000),
+      eth_getLogs: logsOn([requested(STAKER_AT, 4n * 10n ** 17n, BASE_HEAD - 50)]),
       ...methods,
     });
   }
@@ -263,6 +288,70 @@ describe("the open batch and its close's economics", () => {
     expect(f.calls.find((c) => c.fn === "usdcValue")).toMatchObject({ to: ORACLE_AT, args: [10n ** 18n] });
     expect(f.calls.find((c) => c.fn === "depositFeeUsdc")?.to).toBe(STAKER_AT);
     expect(f.calls.find((c) => c.fn === "swapFeeBps")?.to).toBe(STAKER_AT);
+  });
+
+  it("counts the staker's fees only for the deposits the staker made: TAO deposited straight into the front door paid none", async () => {
+    const bob: Address = "0x000000000000000000000000000000000000b0b0";
+    const direct = chain({}, { eth_getLogs: logsOn([requested(alice, 4n * 10n ** 17n, BASE_HEAD - 50, { user: alice })]) });
+    // only the fee pot: 0.0001 ETH × $2,300
+    expect((await read(direct)).frontDoor.closeEconomics).toEqual({ feesUsdc: 230_000n, bridgeFeeUsdc: 1_380_000n });
+    // alice staked twice (two deposit fees) and deposited TAO herself; bob deposited TAO himself
+    const twoStakes = [
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 900),
+      requested(STAKER_AT, 2n * 10n ** 17n, BASE_HEAD - 40, { logIndex: 3 }),
+      requested(alice, 10n ** 17n, BASE_HEAD - 30),
+      requested(bob, 10n ** 18n, BASE_HEAD - 20, { user: bob }),
+    ];
+    const mixed = chain(
+      { openDeposits: () => [{ user: alice, amount: 4n * 10n ** 17n }, { user: bob, amount: 10n ** 18n }] },
+      { eth_getLogs: logsOn(twoStakes) },
+    );
+    // 2 × $0.05 + 0.3 TAO × $250 × 15 bps + the fee pot
+    expect((await read(mixed)).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+  });
+
+  it("finds the batch's deposits on Base by its id, at most two hours of blocks back, then only the new blocks each round", async () => {
+    let head = BASE_HEAD;
+    let batchId = 7n;
+    const queries: { from: bigint; to: bigint; topics: (Hex | null)[] }[] = [];
+    // a stake older than the first look counts as unpaid
+    const logs = [
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_600),
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_599),
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 5, { logIndex: 1 }),
+    ];
+    const f = chain(
+      { openBatch: () => [batchId, BigInt(T - 2 * HOUR), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] },
+      { eth_blockNumber: (c) => numberToHex(c === "base" ? head : 1_000), eth_getLogs: logsOn(logs, queries) },
+    );
+    const deps = keeperDeps(f.ctx, launch, recordPath());
+    // 2 × $0.05 + 0.2 TAO × $250 × 15 bps + the fee pot
+    expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 75_000n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect(queries.every((q) => q.topics[1] === numberToHex(7n, { size: 32 }))).toBe(true);
+    expect(queries).toHaveLength(36);
+    expect([queries[0].from, queries.at(-1)!.to]).toEqual([BigInt(BASE_HEAD - 3_599), BigInt(BASE_HEAD)]);
+    // the next round reads only the new blocks, from 10 back: the stake read again there is counted once
+    queries.length = 0;
+    logs.push(requested(STAKER_AT, 10n ** 17n, BASE_HEAD + 25));
+    head = BASE_HEAD + 30;
+    expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 150_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect(queries.map((q) => [q.from, q.to])).toEqual([[BigInt(BASE_HEAD - 9), BigInt(BASE_HEAD + 30)]]);
+    // the next batch starts over, with its own id
+    queries.length = 0;
+    batchId = 8n;
+    expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 230_000n, bridgeFeeUsdc: 1_380_000n });
+    expect(queries).toHaveLength(36);
+    expect(queries.every((q) => q.topics[1] === numberToHex(8n, { size: 32 }))).toBe(true);
+  });
+
+  it("a Base log query that fails leaves the economics unknown (null)", async () => {
+    const refused = chain({}, {
+      eth_getLogs: (c) => {
+        if (c === "base") throw new RpcError("base eth_getLogs: limit exceeded", -32005);
+        return [];
+      },
+    });
+    expect((await read(refused)).frontDoor.closeEconomics).toBeNull();
   });
 
   it("a failed price or fee read leaves the economics unknown (null), never a guess", async () => {

@@ -39,6 +39,7 @@ const FRONT = parseAbi([
   "function maxBatchValue() view returns (uint256)",
   "function minDeposit() view returns (uint256)",
   "event BatchClosed(uint64 indexed id, uint256 totalDeposits, uint256 nDeposits, uint256 nRedeems, uint256 fee, uint256 potUsed)",
+  "event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)",
 ]);
 const VAULT = parseAbi([
   "struct PayoutBatch { uint64 sourceChain; address frontDoor; uint64 batchId; uint64 queuedAt; uint32 cursor; uint32 count; uint32 chunk; uint256 remaining; bytes32 payoutsHash; }",
@@ -124,6 +125,10 @@ export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE
 const ED_RESERVE = 10n ** 12n;
 /** eth_getLogs block ranges the public RPCs accept: mainnet.base.org refuses more than 200 blocks. */
 export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
+/** How far back the keeper's first look at a batch's deposits reaches on Base: two hours of its 2-second
+ * blocks, 36 queries. Fees decide a close only once the batch can close (an hour in at the launch
+ * cadence), and `run` then looks again each round. */
+const REQUESTED_LOOKBACK = 3_600n;
 
 const event = (abi: readonly unknown[], name: string) =>
   (abi as AbiEvent[]).find((i) => i.type === "event" && i.name === name) as AbiEvent;
@@ -181,10 +186,11 @@ export function startBlock(rec: DeploymentRecord): bigint {
   );
 }
 
-/** The keeper's reads and sends. Base is never scanned for logs here (its public RPC allows 200
- * blocks a query): bridge messages come from the record, which the keeper fills as it sends. The
- * vault's payout events (and with them the delivery candidates) are kept for the life of these deps
- * (one `run` loop), so each round scans only the blocks since the last, and a few before them (OVERLAP). */
+/** The keeper's reads and sends. Base is scanned for logs only for the open batch's deposits, over its
+ * last blocks, when its fees decide its close (its public RPC allows 200 blocks a query): bridge messages
+ * come from the record, which the keeper fills as it sends. The vault's payout events (and with them the
+ * delivery candidates) and the open batch's deposits are kept for the life of these deps (one `run`
+ * loop), so each round scans only the blocks since the last, and a few before them (OVERLAP). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
   /** Each later scan starts this many blocks back, so a block a lagging (load-balanced) node hadn't
@@ -408,7 +414,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     paused: boolean,
   ): Promise<{ frontDoor: State["frontDoor"]; closeMaxWaitS: number }> {
     const fd = a.frontDoor;
-    const [, start, totalDeposits, feePot] = (await r("base", fd, FRONT, "openBatch")) as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+    const [id, start, totalDeposits, feePot] = (await r("base", fd, FRONT, "openBatch")) as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
     const batchInterval = Number(await r("base", fd, FRONT, "batchInterval"));
     const now = await blockTime("base");
     const openStart = Number(start);
@@ -439,17 +445,45 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       now,
     };
     if (undecided && !full) {
-      frontDoor.closeEconomics = await closeEconomics(deposits, redeems, totalDeposits, feePot);
+      frontDoor.closeEconomics = await closeEconomics(id, deposits, redeems, feePot);
     }
     return { frontDoor, closeMaxWaitS };
   }
 
+  /** The open batch's deposits as DepositRequested logged them on Base, kept for one batch across
+   * rounds: each later scan reads only the blocks since the last, from OVERLAP before them. */
+  let requested: { batchId: bigint; scannedTo?: bigint; seen: Set<string>; logs: { payer: Address; amount: bigint }[] } | undefined;
+
+  /** The open batch's deposits the staker made (DepositRequested names it as the payer): only those paid
+   * the staker's deposit and swap fees; TAO deposited straight into the front door (deposit, depositFor)
+   * paid neither. Found by the batch's id over Base's logs, the first look reaching back REQUESTED_LOOKBACK
+   * blocks at most: an older deposit (a batch the keeper first sees late) counts as unpaid. */
+  async function stakerDeposits(batchId: bigint, staker: Address): Promise<{ count: number; tao: bigint }> {
+    if (requested?.batchId !== batchId) requested = { batchId, seen: new Set(), logs: [] };
+    const q = requested;
+    const latest = hexToBigInt((await ctx.rpc.request("base", "eth_blockNumber", [])) as Hex);
+    const back = q.scannedTo === undefined ? latest + 1n - REQUESTED_LOOKBACK : q.scannedTo + 1n - OVERLAP;
+    const from = back > 0n ? back : 0n;
+    if (from <= latest) {
+      const id = numberToHex(batchId, { size: 32 });
+      for (const l of await scanLogs(ctx, "base", a.frontDoor, event(FRONT, "DepositRequested"), from, [id], latest)) {
+        const key = `${l.blockNumber}:${l.transactionHash}:${l.logIndex}`;
+        if (!q.seen.has(key)) q.logs.push({ payer: l.args.payer as Address, amount: l.args.amount as bigint });
+        q.seen.add(key);
+      }
+    }
+    // only once the whole range is in: a failed scan is retried from the same block
+    q.scannedTo = latest;
+    const staked = q.logs.filter((l) => l.payer.toLowerCase() === staker.toLowerCase());
+    return { count: staked.length, tao: staked.reduce((t, l) => t + l.amount, 0n) };
+  }
+
   /** The batch's estimated fees and its close's bridge fee, in USDC units, at the front door's oracle's
-   * TAO price and Uniswap's WETH/USDC price, with the front door's staker's fees. null when any of those
-   * reads fails (a revert or a node that didn't answer), or a price or the bridge fee reads 0 (a $0 bridge
-   * fee would count any batch as covered): the batch then waits for its max wait, never closing early on a
-   * guess. */
-  async function closeEconomics(deposits: readonly Entry[], redeems: readonly Entry[], totalDeposits: bigint, feePot: bigint): Promise<CloseEconomics | null> {
+   * TAO price and Uniswap's WETH/USDC price, with the front door's staker's fees on the deposits the
+   * staker made. null when any of those reads fails (a revert or a node that didn't answer), or a price or
+   * the bridge fee reads 0 (a $0 bridge fee would count any batch as covered): the batch then waits for its
+   * max wait, never closing early on a guess. */
+  async function closeEconomics(batchId: bigint, deposits: readonly Entry[], redeems: readonly Entry[], feePot: bigint): Promise<CloseEconomics | null> {
     try {
       const oracle = (await r("base", a.frontDoor, DELIVERY_FRONT, "oracle")) as Address;
       const staker = (await r("base", a.frontDoor, DELIVERY_FRONT, "swapper")) as Address;
@@ -459,7 +493,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const [ethPriceUsdc] = (await r("base", BASE_V3.QUOTER_V2, QUOTER, "quoteExactInput", [ETH_USDC_PATH, E18])) as readonly [bigint];
       const bridgeFeeWei = await closeFeeWei(deposits, redeems);
       if (taoPriceUsdc === 0n || ethPriceUsdc === 0n || bridgeFeeWei === 0n) return null;
-      return closeEconomicsOf({ nDeposits: deposits.length, depositFeeUsdc, totalDeposits, taoPriceUsdc, swapFeeBps, feePot, ethPriceUsdc, bridgeFeeWei });
+      const staked = await stakerDeposits(batchId, staker);
+      return closeEconomicsOf({ nStaked: staked.count, depositFeeUsdc, stakedTao: staked.tao, taoPriceUsdc, swapFeeBps, feePot, ethPriceUsdc, bridgeFeeWei });
     } catch {
       return null;
     }

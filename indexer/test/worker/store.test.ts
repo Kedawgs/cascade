@@ -250,7 +250,7 @@ describe("checks and holds", () => {
 });
 
 describe("loadTickState", () => {
-  it("is one query, reading at most 6 readings per chain and 25 hour rows", async () => {
+  it("is one query, reading at most 6 readings per chain and a week of hour rows", async () => {
     const readings = Array.from({ length: 200 }, (_, i) => insertReading(db, { at: 1000 + i * 60, baseBlock: BigInt(37_000_000 + i * 30), bitBlock: i % 2 ? BigInt(6_900_000 + i * 5) : null, json: "{}" }));
     const hours = Array.from({ length: 100 }, (_, i) => upsertHour(db, 3600 * i, `{"i":${i}}`));
     await db.batch([...readings, ...hours]);
@@ -262,10 +262,10 @@ describe("loadTickState", () => {
     expect(s.lastReadings.length).toBeLessThanOrEqual(12);
     expect(s.lastReadings.filter((r) => r.baseBlock !== null).slice(0, 6).map((r) => r.at)).toEqual([199, 198, 197, 196, 195, 194].map((i) => 1000 + i * 60));
     expect(s.lastReadings.filter((r) => r.bitBlock !== null).map((r) => r.at)).toEqual([199, 197, 195, 193, 191, 189].map((i) => 1000 + i * 60));
-    expect(s.hours).toHaveLength(25);
+    expect(s.hours).toHaveLength(100);
     expect(s.hours[0].hour).toBe(3600 * 99);
     expect(c.stats.rowsRead).toBeGreaterThan(25);
-    expect(c.stats.rowsRead).toBeLessThan(80);
+    expect(c.stats.rowsRead).toBeLessThan(160);
   });
 
   it("loads open alerts, holds, nonces, pending messages, awaiting reads, pending payout keys and meta", async () => {

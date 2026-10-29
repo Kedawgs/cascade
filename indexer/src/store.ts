@@ -307,7 +307,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     db.prepare("SELECT * FROM holds ORDER BY raised_at, id"),
     db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 6"),
     db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 6"),
-    db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 25"),
+    db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 170"),
     db.prepare("SELECT chain, address, roles, baseline, seen, nonce, changed_at FROM nonces"),
     db.prepare("SELECT * FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' ORDER BY src_block LIMIT 100"),
     // with the bridge the landing came through: delivered(bridge, hash) is read for it

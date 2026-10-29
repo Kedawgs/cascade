@@ -16,6 +16,7 @@ import {
   type TxRow,
   txRowOf,
 } from "../store.ts";
+import type { Reference } from "../prices.ts";
 import type { Thresholds } from "../thresholds.ts";
 
 /** The logs the rules read, in memory: what the prefetch loaded and this tick's own. */
@@ -71,7 +72,7 @@ export interface RuleCtx {
   history: { base: ChainReading<BaseState>[]; bittensor: ChainReading<BitState>[] };
   /** every hold, cleared or not */
   holds: HoldRow[];
-  /** the last 25 hours' aggregates (170 for the weekly rules), newest first */
+  /** the last 170 hours' aggregates (a week, for pool.liquidity's median), newest first */
   hours: HourAgg[];
   /** how far each chain's logs are stored, and that block's time */
   settled: Record<ChainName, { block: bigint; time: number; headTime?: number }>;
@@ -93,6 +94,8 @@ export interface RuleCtx {
   newTxs: TxRow[];
   /** the bridge messages still pending (loaded), with this tick's new ones */
   messages: MessageRow[];
+  /** the reference TAO price, on the ticks that read it (every fifth minute) */
+  reference?: Reference;
   /** the watched addresses' rows */
   nonces: NonceRow[];
   t: Thresholds;

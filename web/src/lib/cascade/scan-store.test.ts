@@ -2,7 +2,7 @@ import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
 import { newScan, type VaultScan } from "./facts";
-import { createScanStore, SCAN_VERSION, scanState, seedScan } from "./scan-store";
+import { createScanStore, dropSavedScans, SCAN_VERSION, scanState, seedScan } from "./scan-store";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -155,6 +155,29 @@ describe("scan store", () => {
     for (let i = 0; i < 12_000; i++) huge.staked.push({ block: 5_000n + BigInt(i), txHash: H(i) });
     store.save(ME, huge);
     expect(store.load(ME).next).toBe(4_990n);
+  });
+
+  it("saves no scan again this visit once the op log needed their room: storage doesn't fill straight back up", () => {
+    const m = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => m.get(k) ?? null,
+      setItem: (k: string, v: string) => void m.set(k, v),
+      removeItem: (k: string) => void m.delete(k),
+      key: (i: number) => [...m.keys()][i] ?? null,
+      get length() {
+        return m.size;
+      },
+    };
+    const store = createScanStore(storage, D);
+    store.save(ME, scanned());
+    expect(dropSavedScans(storage)).toBe(true);
+    store.save(ME, scanned());
+    createScanStore(storage, D).save(YOU, scanned());
+    expect(m.size).toBe(0);
+    // another storage is unaffected
+    const other = memoryStorage();
+    createScanStore(other, D).save(ME, scanned());
+    expect(other.m.size).toBe(2);
   });
 
   it("keeps the scan in memory when storage is full or blocked", () => {

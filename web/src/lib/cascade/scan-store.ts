@@ -124,6 +124,9 @@ function merge(scan: VaultScan, s: Decoded): boolean {
 const MAX_SAVED_CHARS = 1_000_000;
 
 const PREFIX = "cascade.scan.";
+/** Storage whose saved scans were dropped this visit to make room for the op log: no scan is saved
+ * there again until the next visit, so storage doesn't fill straight back up and crowd it out again. */
+const crowded = new WeakSet<object>();
 
 /** Each account's scan of one deployment, saved in the browser (the op log's storage) so a later visit
  * resumes it rather than reading the vault's history from the deploy block again. The deployment's own
@@ -164,6 +167,7 @@ export function createScanStore(storage: StringStorage, d: Deployment) {
       return scan;
     },
     save(account: Address, scan: VaultScan): void {
+      if (crowded.has(storage)) return;
       const state = scanState(scan);
       try {
         write(deployment, { ...state, deposited: [], redeemed: [] });
@@ -176,8 +180,9 @@ export function createScanStore(storage: StringStorage, d: Deployment) {
 }
 
 /** Removes every saved scan, of any deployment or account: the op log needs the room more, and a scan
- * can always be read again. True if there was one to remove. */
+ * can always be read again. None is saved there again this visit. True if there was one to remove. */
 export function dropSavedScans(storage: StringStorage): boolean {
+  crowded.add(storage);
   try {
     if (!storage.removeItem || !storage.key || storage.length === undefined) return false;
     const saved: string[] = [];

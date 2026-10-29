@@ -301,6 +301,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     }
     const placed = open.map((o, i) => {
       const p = places[i];
+      // how far the search for its replacement has read: the next one reads on from there
+      if (p.searchedTo !== undefined) deps.opLog.update(a, o.id, { searchedTo: p.searchedTo });
       if (p.replacedBy) deps.opLog.update(a, o.id, { hash: p.replacedBy, batchId: p.batchId });
       else if (p.batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId: p.batchId });
       // still running in this tab: its own flow is waiting on it

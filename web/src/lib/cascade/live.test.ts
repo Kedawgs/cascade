@@ -655,6 +655,11 @@ describe("unstakes sharing a batch", () => {
       return { d, data: createLiveCascadeData(D, d) };
     };
     const HOUR = 60 * 60_000;
+    const DAY = 24 * HOUR;
+    /** Sent three days ago: the two days after it in which a replacement is looked for have passed. */
+    const LONG_AGO = NOW - 3 * DAY;
+    /** The Base block a request sent at `sentAt` went out in, and one `ms` after it. */
+    const afterSend = (sentAt: number, ms: number) => HEAD - BigInt(Math.ceil((NOW - sentAt) / 2_000)) + BigInt(ms / 2_000);
 
     it("still count as asked while Base may yet take them", async () => {
       // just sent, Base doesn't know it yet; or waiting with its nonce free
@@ -669,9 +674,15 @@ describe("unstakes sharing a batch", () => {
       expect(d.opLog.get(ME, "w")).toMatchObject({ state: "sent" });
     });
 
-    it("with no nonce recorded (older records), still count for three hours", async () => {
-      expect((await setUp(base({ nonce: 9 }), NOW - 3 * HOUR + 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
-      const { d, data } = setUp(base({ nonce: 9 }), NOW - 3 * HOUR);
+    it("with no nonce recorded (older records), aren't searched for until three hours on, and count until the search is done", async () => {
+      const early = base({ nonce: 9 });
+      expect((await setUp(early, NOW - 3 * HOUR + 60_000).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(early.seen.logReads).toBe(0);
+      // searched for, nothing found so far, but the two days after it haven't passed: still counted
+      const searched = base({ nonce: 9 });
+      expect((await setUp(searched, NOW - 3 * HOUR).data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(searched.seen.logReads).toBeGreaterThan(0);
+      const { d, data } = setUp(base({ nonce: 9 }), LONG_AGO);
       expect((await data.getAvailable(ME)).availableShares).toBe(all);
       expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
     });
@@ -684,10 +695,22 @@ describe("unstakes sharing a batch", () => {
       expect(d.opLog.get(ME, "w")).toMatchObject({ hash: H(88), batchId: 3n, state: "sent" });
     });
 
-    it("stop counting once a search finds nothing in their place, and are marked so it isn't asked again", async () => {
+    it("read each block once while nothing is found yet: the next read goes on from where the last stopped", async () => {
+      const b = base({ nonce: 4 });
+      const { d, data } = setUp(b, NOW - HOUR, { nonce: 3 });
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      const read = b.seen.logReads;
+      expect(read).toBeGreaterThan(0);
+      expect(d.opLog.get(ME, "w")).toMatchObject({ state: "sent", searchedTo: HEAD - 2n });
+      // the head hasn't moved: there is nothing new to read
+      expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+      expect(b.seen.logReads).toBe(read);
+    });
+
+    it("stop counting once a search of the two days after they were sent finds nothing in their place, and are marked so it isn't asked again", async () => {
       // Base doesn't know it, and the account's nonce is past the one read before it was sent
       const b = base({ nonce: 4 });
-      const { d, data } = setUp(b, NOW - 10 * 60_000, { nonce: 3 });
+      const { d, data } = setUp(b, LONG_AGO, { nonce: 3 });
       expect((await data.getAvailable(ME)).availableShares).toBe(all);
       expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
       const before = b.seen.lookups;
@@ -700,7 +723,7 @@ describe("unstakes sharing a batch", () => {
       const b = base(opts);
       let now = NOW;
       const d = deps({ clients: b.clients as never, now: () => now });
-      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: NOW - 20 * 60_000, nonce: 3, state: "sent" });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: LONG_AGO, nonce: 3, state: "sent" });
       const data = createLiveCascadeData(D, d);
       // the logs can't be read: still counted
       expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
@@ -719,7 +742,7 @@ describe("unstakes sharing a batch", () => {
 
     it("count again, put back as sent, if Base later shows the request itself mined", async () => {
       const receipts: Record<string, unknown> = {};
-      const { d, data } = setUp(base({ nonce: 4, receipts }), NOW - 10 * 60_000, { nonce: 3 });
+      const { d, data } = setUp(base({ nonce: 4, receipts }), LONG_AGO, { nonce: 3 });
       expect((await data.getAvailable(ME)).availableShares).toBe(all);
       expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed" });
       // mined after all, in closed batch 3, which hasn't reached the vault
@@ -745,7 +768,7 @@ describe("unstakes sharing a batch", () => {
           usdcEstimate: 0n,
           fee: 0n,
           hash,
-          sentAt: NOW - 20 * 60_000,
+          sentAt: LONG_AGO,
           nonce: 3,
           state: "sent",
         });
@@ -755,14 +778,14 @@ describe("unstakes sharing a batch", () => {
       };
 
       it("never take the same request for their replacement: the older one takes it, and the other is dropped", async () => {
-        const { d, data } = twoDead([requestedIn(H(88), HEAD - 50n)]);
+        const { d, data } = twoDead([requestedIn(H(88), afterSend(LONG_AGO, 10 * 60_000))]);
         expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
         expect(d.opLog.get(ME, "older")).toMatchObject({ hash: H(88), batchId: 3n, state: "sent" });
         expect(d.opLog.get(ME, "newer")).toMatchObject({ hash: H(21), state: "failed" });
       });
 
       it("each take one of two such requests, oldest first", async () => {
-        const { d, data } = twoDead([requestedIn(H(88), HEAD - 50n), requestedIn(H(89), HEAD - 40n)]);
+        const { d, data } = twoDead([requestedIn(H(88), afterSend(LONG_AGO, 10 * 60_000)), requestedIn(H(89), afterSend(LONG_AGO, 12 * 60_000))]);
         expect((await data.getAvailable(ME)).availableShares).toBe(all - 2n * SHARES);
         expect(d.opLog.get(ME, "older")).toMatchObject({ hash: H(88), batchId: 3n, state: "sent" });
         expect(d.opLog.get(ME, "newer")).toMatchObject({ hash: H(89), batchId: 3n, state: "sent" });
@@ -771,7 +794,7 @@ describe("unstakes sharing a batch", () => {
 
     it("stay failed if the request itself turns up reverted, or with no request in it", async () => {
       const receipts: Record<string, unknown> = {};
-      const { d, data } = setUp(base({ nonce: 4, receipts }), NOW - 10 * 60_000, { nonce: 3 });
+      const { d, data } = setUp(base({ nonce: 4, receipts }), LONG_AGO, { nonce: 3 });
       await data.getAvailable(ME);
       receipts[H(20)] = { status: "reverted", logs: [] };
       expect((await data.getAvailable(ME)).availableShares).toBe(all);

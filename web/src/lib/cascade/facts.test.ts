@@ -1261,6 +1261,10 @@ describe("the batch an unstake request with no receipt joined", () => {
   /** The old hash can never be mined: pending, its nonce taken by another transaction. */
   const replaced = { tx: { nonce: 5, blockNumber: null }, nonce: 6 };
   const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  /** The Base block a request sent at `sentAt` went out in (2-second blocks back from the head), and one `ms` after it. */
+  const sentBlock = (sentAt: number) => HEAD - BigInt(Math.ceil((NOW - sentAt) / 2_000));
+  const afterSend = (sentAt: number, ms: number) => sentBlock(sentAt) + BigInt(ms / 2_000);
 
   it("is still unsure while Base has it waiting with a nonce no other transaction has taken, and searches nothing", async () => {
     const b = onBase({ tx: { nonce: 5, blockNumber: null }, nonce: 5 });
@@ -1318,27 +1322,67 @@ describe("the batch an unstake request with no receipt joined", () => {
     for (const [from, to] of b.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
     expect(b.windows[0][0]).toBeLessThan(HEAD - 30n);
     expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 30n - 150n);
-    expect(b.windows.at(-1)![1]).toBe(HEAD);
+    // the window is still open: the newest couple of blocks are read next time
+    expect(b.windows.at(-1)![1]).toBe(HEAD - 2n);
   });
 
-  it("is dropped once a complete search finds nothing in its place: another amount, another account's, or one another record owns", async () => {
+  it("is dropped once the whole two days after it was sent are read and hold nothing in its place: another amount, another account's, or one another record owns", async () => {
     const OTHER = getAddress("0x000000000000000000000000000000000000b0b0");
+    const sentAt = NOW - 3 * DAY;
     const logs = [
-      redeemRequested(ME, SHARES - 1n, 7n, HEAD - 50n, H(88)),
-      redeemRequested(OTHER, SHARES, 7n, HEAD - 40n, H(89)),
-      redeemRequested(ME, SHARES, 7n, HEAD - 30n, H(90)),
+      redeemRequested(ME, SHARES - 1n, 7n, afterSend(sentAt, 5 * MIN), H(88)),
+      redeemRequested(OTHER, SHARES, 7n, afterSend(sentAt, 6 * MIN), H(89)),
+      redeemRequested(ME, SHARES, 7n, afterSend(sentAt, 7 * MIN), H(90)),
     ];
-    expect(await place(onBase({ ...replaced, logs }), {}, new Set([H(90)]))).toEqual({ dropped: true });
-    expect(await place(onBase({ ...replaced }))).toEqual({ dropped: true });
+    const b = onBase({ ...replaced, logs });
+    expect(await place(b, { sentAt }, new Set([H(90)]))).toEqual({ dropped: true });
+    // from a little before it was sent to a little after two days on, 2,000 blocks a query
+    expect(b.windows[0][0]).toBe(sentBlock(sentAt) - 150n);
+    expect(b.windows.at(-1)![1]).toBe(afterSend(sentAt, 2 * DAY) + 150n);
+    for (const [from, to] of b.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
+    expect(await place(onBase({ ...replaced }), { sentAt })).toEqual({ dropped: true });
     // Base doesn't know it, and the account's nonce is past the one read before it was sent
-    expect(await place(onBase({ nonce: 6, logs }), { nonce: 5, sentAt: NOW - 10 * MIN }, new Set([H(90)]))).toEqual({ dropped: true });
-    // an older record with no nonce, three hours on
-    expect(await place(onBase({ logs }), { sentAt: NOW - 3 * HOUR }, new Set([H(90)]))).toEqual({ dropped: true });
+    expect(await place(onBase({ nonce: 6, logs }), { nonce: 5, sentAt }, new Set([H(90)]))).toEqual({ dropped: true });
+    // an older record with no nonce
+    expect(await place(onBase({ logs }), { sentAt }, new Set([H(90)]))).toEqual({ dropped: true });
+  });
+
+  it("isn't taken for replaced by a request of the same shares made after those two days: that is another request", async () => {
+    const sentAt = NOW - 5 * DAY;
+    const later = [redeemRequested(ME, SHARES, 9n, afterSend(sentAt, 2 * DAY + HOUR), H(91))];
+    expect(await place(onBase({ nonce: 6, logs: later }), { nonce: 5, sentAt })).toEqual({ dropped: true });
+  });
+
+  it("stays unsure while the two days after it was sent haven't all passed, even with nothing found so far, and says how far it read", async () => {
+    const sentAt = NOW - HOUR;
+    const b = onBase({ nonce: 6 });
+    expect(await place(b, { nonce: 5, sentAt })).toEqual({ unsure: true, searchedTo: HEAD - 2n });
+    expect(b.windows[0][0]).toBe(sentBlock(sentAt) - 150n);
+    // the next search reads on from there, never the same blocks again
+    const next = onBase({ nonce: 6 });
+    expect(await place(next, { nonce: 5, sentAt, searchedTo: HEAD - 500n })).toEqual({ unsure: true, searchedTo: HEAD - 2n });
+    expect(next.windows).toEqual([[HEAD - 499n, HEAD - 2n]]);
+    const done = onBase({ nonce: 6 });
+    expect(await place(done, { nonce: 5, sentAt, searchedTo: HEAD - 2n })).toEqual({ unsure: true });
+    expect(done.windows).toEqual([]);
+  });
+
+  it("is dropped without reading again once the window has passed and was read before", async () => {
+    const sentAt = NOW - 3 * DAY;
+    const b = onBase({ nonce: 6 });
+    expect(await place(b, { nonce: 5, sentAt, searchedTo: afterSend(sentAt, 2 * DAY) + 150n })).toEqual({ dropped: true });
+    expect(b.windows).toEqual([]);
   });
 
   it("stays unsure when the search can't be completed, and says so: logs refused, or a logs server behind", async () => {
     expect(await place(onBase({ ...replaced, logsDown: true }))).toEqual({ unsure: true, searchFailed: true });
     expect(await place(onBase({ ...replaced, logsHead: HEAD - 500n }))).toEqual({ unsure: true, searchFailed: true });
+  });
+
+  it("keeps what a search read before a window it couldn't read", async () => {
+    // three windows from three hours ago; the logs server has only reached the second one's end
+    const b = onBase({ ...replaced, logsHead: HEAD - 500n });
+    expect(await place(b, { sentAt: NOW - 3 * HOUR })).toEqual({ unsure: true, searchFailed: true, searchedTo: HEAD - 1_551n });
   });
 
   it("isn't searched for again within five minutes of a search that couldn't answer", async () => {
@@ -1351,19 +1395,16 @@ describe("the batch an unstake request with no receipt joined", () => {
     expect(await place(onBase({ ...replaced, logs }), {}, new Set(), NOW + 60 * MIN)).toEqual({ batchId: 7n, replacedBy: H(88) });
   });
 
-  it("looks back at most a day, and a request sent before that with nothing found since stays unsure, never dropped", async () => {
-    const DAY = 24 * HOUR;
-    const old = { nonce: 5, sentAt: NOW - 3 * DAY };
-    // the replacement was mined two days ago: before the day the search looks at
-    const b = onBase({ nonce: 6, logs: [redeemRequested(ME, SHARES, 7n, HEAD - 86_400n, H(88))] });
-    expect(await place(b, old)).toEqual({ unsure: true, searchFailed: true });
-    // a day of 2-second blocks, and the margin for timing
-    expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 43_200n - 150n);
-    expect(b.windows.length).toBeLessThanOrEqual(22);
-    // one mined within the day is found
-    expect(await place(onBase({ nonce: 6, logs: [redeemRequested(ME, SHARES, 7n, HEAD - 50n, H(88))] }), old)).toEqual({ batchId: 7n, replacedBy: H(88) });
-    // one sent within the day is searched for since it was sent, so finding nothing drops it
-    expect(await place(onBase({ nonce: 6 }), { nonce: 5, sentAt: NOW - DAY + HOUR })).toEqual({ dropped: true });
+  it("finds a speed-up made after the tab was closed when the user comes back days later: it reuses the nonce, so it was mined soon after the send", async () => {
+    const sentAt = NOW - 5 * DAY;
+    const logs = [redeemRequested(ME, SHARES, 7n, afterSend(sentAt, 20 * MIN), H(88))];
+    const b = onBase({ nonce: 6, logs });
+    expect(await place(b, { nonce: 5, sentAt })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // read from a little before the send, not back from today
+    expect(b.windows[0][0]).toBe(sentBlock(sentAt) - 150n);
+    expect(b.windows).toHaveLength(1);
+    // an older record with no nonce, too
+    expect(await place(onBase({ logs }), { sentAt })).toEqual({ batchId: 7n, replacedBy: H(88) });
   });
 
   it("stays unsure, searching nothing, while Base can't be asked or shows it mined with a receipt not readable yet", async () => {

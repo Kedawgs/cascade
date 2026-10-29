@@ -354,14 +354,16 @@ const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemR
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
 /** Where an unstake request stands on Base. `unsure` while its batch can't be known right now (it still
- * counts as asked), with `searchFailed` when a search for its replacement was made and couldn't answer;
- * `dead` when its hash can't be mined as sent, so what took its place is still to be searched for
- * (requestReplacement); `replacedBy` the request a speed-up or replacement put in place of its hash,
- * with that one's batch; `dropped` when nothing took its place, so it asked for nothing. */
+ * counts as asked), with `searchFailed` when a search for its replacement was made and couldn't answer,
+ * and `searchedTo` when a search read further than the record says; `dead` when its hash can't be mined
+ * as sent, so what took its place is still to be searched for (requestReplacement); `replacedBy` the
+ * request a speed-up or replacement put in place of its hash, with that one's batch; `dropped` when
+ * nothing took its place, so it asked for nothing. */
 export interface RequestPlace {
   batchId?: bigint;
   unsure?: true;
   searchFailed?: true;
+  searchedTo?: bigint;
   dead?: true;
   replacedBy?: Hex;
   dropped?: true;
@@ -383,18 +385,17 @@ export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp, n
 
 /** How long after a search for a dead request's replacement couldn't answer it is tried again. */
 export const SEARCH_RETRY_MS = 5 * 60_000;
-/** How far back a search for a dead request's replacement looks at most: a day of Base blocks. */
-export const SEARCH_BACK_MS = 24 * 60 * 60_000;
 
-/** What took the place of a `dead` request: the front door's logs are searched for the same request
- * since it was sent, or for the last day if that was longer ago (findRequestTx: a speed-up made while no
- * tab of this site watched looks exactly like a drop). Found, it is that one's batch; a search since it
- * was sent that finds nothing makes it `dropped`. One that can't be completed, or that couldn't look
- * back to when it was sent (something earlier may have taken its place), leaves it `unsure`, still
- * counted, and says so (`searchFailed`); within SEARCH_RETRY_MS of that (`searchFailedAt`) it isn't
- * searched again. `skip`: the hashes other records own, or have taken for theirs (two dead records
- * asking for the same shares are searched for one at a time, oldest first, so they never take the same
- * request). */
+/** What took the place of a `dead` request: the front door's logs are searched for the same request in
+ * the two days after it was sent (findRequestTx: a speed-up made while no tab of this site watched
+ * looks exactly like a drop). Found, it is that one's batch. Once those two days have passed and every
+ * block of them is read with none found, it is `dropped`. Until then it stays `unsure`, still counted,
+ * with `searchedTo`, the last block read, to be kept on the record (op.searchedTo): the next search
+ * reads on from there, so each block is read once. One that can't be completed also stays `unsure`,
+ * keeps what it read, and says so (`searchFailed`); within SEARCH_RETRY_MS of that (`searchFailedAt`) it
+ * isn't searched again. `skip`: the hashes other records own, or have taken for theirs (two dead
+ * records asking for the same shares are searched for one at a time, oldest first, so they never take
+ * the same request). */
 export async function requestReplacement(
   c: Pick<Clients, "base" | "baseLogs">,
   d: Deployment,
@@ -403,16 +404,18 @@ export async function requestReplacement(
 ): Promise<RequestPlace> {
   const failed = ctx.searchFailedAt;
   if (failed !== undefined && ctx.now >= failed && ctx.now - failed < SEARCH_RETRY_MS) return { unsure: true };
-  const sent = op.sentAt ?? op.createdAt;
-  const since = Math.max(sent, ctx.now - SEARCH_BACK_MS);
-  let found: { hash: Hex; batchId: bigint } | null;
+  const progress: { next?: bigint } = op.searchedTo !== undefined ? { next: op.searchedTo + 1n } : {};
+  /** How far this search read, when that is further than the record says. */
+  const read = () => (progress.next !== undefined && progress.next - 1n !== op.searchedTo ? { searchedTo: progress.next - 1n } : {});
+  let found: Awaited<ReturnType<typeof findRequestTx>>;
   try {
-    found = await findRequestTx(c, d, { account: op.account, shares: op.shares, sinceMs: since, nowMs: ctx.now, skip: ctx.skip });
+    found = await findRequestTx(c, d, { account: op.account, shares: op.shares, sentAtMs: op.sentAt ?? op.createdAt, nowMs: ctx.now, skip: ctx.skip, progress });
   } catch {
-    return { unsure: true, searchFailed: true };
+    return { unsure: true, searchFailed: true, ...read() };
   }
-  if (found) return { batchId: found.batchId, replacedBy: found.hash };
-  return since > sent ? { unsure: true, searchFailed: true } : { dropped: true };
+  if (found === "none") return { dropped: true };
+  if (found === "not yet") return { unsure: true, ...read() };
+  return { batchId: found.batchId, replacedBy: found.hash };
 }
 
 /** How long after it was sent a request Base has never heard of is left alone before the account's
@@ -945,19 +948,38 @@ export async function findStakeTx(
   });
 }
 
-/** The account's unstake request of exactly `shares` through the front door, mined since it was sent (a
- * little earlier, for timing), that no other record (`skip`) owns, with the batch it joined: the request
- * a wallet's speed-up or replacement put in place of a hash that can never be mined. Null if there is
- * none; throws when the logs can't be read, which must never be taken for "none". */
+/** How long after it was sent a request's replacement is looked for: a speed-up or replacement reuses
+ * its nonce, so it is mined soon after the send, whenever the user comes back to look. */
+export const REPLACEMENT_SPAN_MS = 2 * 24 * 60 * 60_000;
+
+/** The account's unstake request of exactly `shares` through the front door that no other record
+ * (`skip`) owns, with the batch it joined: the request a wallet's speed-up or replacement put in place
+ * of a hash that can't be mined. Searched for from a little before the request was sent (`sentAtMs`) to
+ * a little after REPLACEMENT_SPAN_MS on (a later request of the same shares is another request), oldest
+ * first, from `progress.next` when an earlier search got that far: each block is read once, and
+ * `progress.next` follows every window read, so a search cut short keeps what it read. "none" once the
+ * whole span is read and holds none; "not yet" while the span hasn't all passed (its newest blocks are
+ * read next time). Throws when a window can't be read, which must never be taken for "none". */
 export async function findRequestTx(
   c: Pick<Clients, "base" | "baseLogs">,
   d: Deployment,
-  s: { account: Address; shares: bigint; sinceMs: number; nowMs: number; skip: ReadonlySet<string> },
-): Promise<{ hash: Hex; batchId: bigint } | null> {
+  s: { account: Address; shares: bigint; sentAtMs: number; nowMs: number; skip: ReadonlySet<string>; progress: { next?: bigint } },
+): Promise<{ hash: Hex; batchId: bigint } | "none" | "not yet"> {
+  const head = await baseHead(c);
+  // the device clock made both times, so their difference is the time since, whatever the clock says
+  const age = Math.max(0, s.nowMs - s.sentAtMs);
+  const blocks = (ms: number) => BigInt(Math.ceil(ms / BASE_BLOCK_MS));
+  const sent = head > blocks(age) ? head - blocks(age) : 0n;
+  const start = sent > STAKE_SEARCH_MARGIN ? sent - STAKE_SEARCH_MARGIN : 0n;
+  const passed = age >= REPLACEMENT_SPAN_MS;
+  const settled = head > BASE_SETTLE ? head - BASE_SETTLE : 0n;
+  const spanEnd = sent + blocks(REPLACEMENT_SPAN_MS) + STAKE_SEARCH_MARGIN;
+  const end = passed && spanEnd < settled ? spanEnd : settled;
+  const from = s.progress.next !== undefined && s.progress.next > start ? s.progress.next : start;
   const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { user: s.account } });
   const skip = new Set([...s.skip].map((h) => h.toLowerCase()));
-  return searchBaseSince(c, s, { address: d.frontDoor, topics }, (raw) => {
-    const hit = parseEventLogs({ abi: FRONT_DOOR, logs: raw as never, eventName: "RedeemRequested", strict: false }).find(
+  const hit = await searchBase(c, from, end, { address: d.frontDoor, topics }, s.progress, (raw) => {
+    const request = parseEventLogs({ abi: FRONT_DOOR, logs: raw as never, eventName: "RedeemRequested", strict: false }).find(
       (l) =>
         same(l.address, d.frontDoor) &&
         !!l.args.user &&
@@ -967,8 +989,37 @@ export async function findRequestTx(
         !!l.transactionHash &&
         !skip.has(l.transactionHash.toLowerCase()),
     );
-    return hit ? { hash: hit.transactionHash as Hex, batchId: hit.args.batchId as bigint } : undefined;
+    return request ? { hash: request.transactionHash as Hex, batchId: request.args.batchId as bigint } : undefined;
   });
+  return hit ?? (passed ? "none" : "not yet");
+}
+
+/** Base's newest block as the newer of the logs server's head and Base's own: a logs server that is
+ * behind then fails its window check instead of answering "none" for blocks it hasn't seen. */
+async function baseHead(c: Pick<Clients, "base" | "baseLogs">): Promise<bigint> {
+  const [logsHead, own] = await Promise.all([c.baseLogs.request({ method: "eth_blockNumber" }).then((h) => BigInt(h as string)), c.base.getBlockNumber()]);
+  return logsHead > own ? logsHead : own;
+}
+
+/** Searches Base's logs matching `filter` from block `from` to `to`, oldest first, for the first window
+ * `pick` finds something in; `progress.next` is the first block not read yet after each window. Null
+ * when none does; throws when a window can't be read (or its server is behind), which must never be
+ * taken for "none". */
+async function searchBase<T>(
+  c: Pick<Clients, "baseLogs">,
+  from: bigint,
+  to: bigint,
+  filter: { address: Address; topics: (Hex | Hex[] | null)[] },
+  progress: { next?: bigint },
+  pick: (raw: RawLog[]) => T | undefined,
+): Promise<T | null> {
+  for (let a = from; a <= to; a += BASE_LOG_WINDOW) {
+    const b = a + BASE_LOG_WINDOW - 1n < to ? a + BASE_LOG_WINDOW - 1n : to;
+    const hit = pick(await baseWindowLogs(c, filter, a, b));
+    if (hit !== undefined) return hit;
+    progress.next = b + 1n;
+  }
+  return null;
 }
 
 /** Searches Base's logs matching `filter`, oldest first, from a little before `sinceMs` up to the head,
@@ -980,22 +1031,10 @@ async function searchBaseSince<T>(
   filter: { address: Address; topics: (Hex | Hex[] | null)[] },
   pick: (raw: RawLog[]) => T | undefined,
 ): Promise<T | null> {
-  // up to the newer of two servers' heads: a logs server that is behind then fails its window check
-  // instead of answering "none" for blocks it hasn't seen
-  const [logsHead, baseHead] = await Promise.all([
-    c.baseLogs.request({ method: "eth_blockNumber" }).then((h) => BigInt(h as string)),
-    c.base.getBlockNumber(),
-  ]);
-  const head = logsHead > baseHead ? logsHead : baseHead;
+  const head = await baseHead(c);
   // the device clock made both times, so their difference is the time since, whatever the clock says
   const back = BigInt(Math.ceil(Math.max(0, s.nowMs - s.sinceMs) / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
-  const start = head > back ? head - back : 0n;
-  for (let from = start; from <= head; from += BASE_LOG_WINDOW) {
-    const to = from + BASE_LOG_WINDOW - 1n < head ? from + BASE_LOG_WINDOW - 1n : head;
-    const hit = pick(await baseWindowLogs(c, filter, from, to));
-    if (hit !== undefined) return hit;
-  }
-  return null;
+  return searchBase(c, head > back ? head - back : 0n, head, filter, {}, pick);
 }
 
 /** The account's deposits as the vault recorded them, with when they arrived and whether staking followed. */

@@ -53,6 +53,9 @@ export interface WithdrawalOp extends OpBase {
    * nonce is at least this. A request Base doesn't know is taken for dropped only once the account's
    * mined nonce is past it (facts.ts, requestBatch); records made before it was kept have none. */
   nonce?: number;
+  /** The last Base block read so far in the search for what took this request's place, when its hash
+   * can't be mined: the next search reads on from there (facts.ts, requestReplacement). */
+  searchedTo?: bigint;
   batchId?: bigint;
   cancelled?: { hash: Hex; at: number };
 }

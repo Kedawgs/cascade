@@ -71,7 +71,7 @@ function decode(x: unknown, scan: Pick<VaultScan, "vault" | "from">) {
   const account = (e: Record<string, unknown>): AccountEvent => ({ key: e.key as Hex, txHash: e.txHash as Hex, block: block(e), assets: BigInt(e.assets as string), unconfirmed: true });
   return {
     next,
-    delivered: list("delivered").map((e) => ({ batchId: e.batchId as string, key: e.key as Hex, txHash: e.txHash as Hex, block: block(e) })),
+    delivered: list("delivered").map((e) => ({ batchId: e.batchId as string, key: e.key as Hex, txHash: e.txHash as Hex, block: block(e), unconfirmed: true as const })),
     staked: list("staked").map((e) => ({ block: block(e), txHash: e.txHash as Hex })),
     payouts: list("payouts").map((e) => ({ key: e.key as Hex, chunk: e.chunk as number, taken: e.taken as number, txHash: e.txHash as Hex, block: block(e) })),
     deposited: list("deposited").map(account),
@@ -85,8 +85,8 @@ const byBlock = <T extends { block: bigint }>(xs: T[]) => [...xs].sort((a, b) =>
 
 /** Carries `scan` forward with a saved or published state that reaches further than it has read: the
  * state's events from where the scan stopped up to the state's `next` are added, and the scan resumes
- * from there. The account's Deposited and Redeemed come in unconfirmed (their amounts wait for their
- * receipts). A state that isn't valid for this scan's deployment, or doesn't reach past it, changes
+ * from there. The account's Deposited and Redeemed, and the deliveries, come in unconfirmed (they wait
+ * for their receipts before an amount is summed or a delivery relied on). A state that isn't valid for this scan's deployment, or doesn't reach past it, changes
  * nothing. True when the scan moved forward. */
 export function seedScan(scan: VaultScan, seed: unknown): boolean {
   const s = decode(seed, scan);

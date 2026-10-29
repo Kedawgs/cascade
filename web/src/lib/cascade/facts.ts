@@ -23,8 +23,9 @@ export interface VaultScan {
   from: bigint;
   /** The first block not read yet. */
   next: bigint;
-  /** BatchDelivered from our front door, by batch id. */
-  delivered: Map<string, { key: Hex; txHash: Hex; block: bigint }>;
+  /** BatchDelivered from our front door, by batch id. `unconfirmed` when it came from storage or a seed:
+   * what can be unstaked relies on it only once its receipt confirms it (confirmDelivery). */
+  delivered: Map<string, { key: Hex; txHash: Hex; block: bigint; unconfirmed?: true }>;
   staked: { block: bigint; txHash: Hex }[];
   /** PayoutChunkSent by batch key: each chunk's number and how many of the batch's payout entries it took. */
   payouts: Map<Hex, PayoutChunk[]>;
@@ -221,6 +222,32 @@ export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Dep
   }
   scan.deposited.splice(0, scan.deposited.length, ...(deposited as AccountEvent[]));
   scan.redeemed.splice(0, scan.redeemed.length, ...(redeemed as AccountEvent[]));
+}
+
+/** Confirms a saved delivery of batch `batchId` by its receipt before anything relies on it: the vault's
+ * BatchDelivered for that batch from our front door must be in it. As with saved amounts, a receipt that
+ * can't be read (or a server behind its block) throws and changes nothing, and one that shows otherwise
+ * sends the scan back to the deploy block (HistoryMismatchError). */
+export async function confirmDelivery(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchId: string): Promise<void> {
+  const hit = scan.delivered.get(batchId);
+  if (!hit?.unconfirmed) return;
+  const r = await receiptAt(c, scan, hit.txHash, hit.block);
+  const shown =
+    mined(r) &&
+    parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "BatchDelivered", strict: false }).some(
+      (l) =>
+        same(l.address, d.vault) &&
+        String(l.args.batchId) === batchId &&
+        l.args.sourceChain === BASE_CHAIN_ID &&
+        !!l.args.frontDoor &&
+        same(l.args.frontDoor, d.frontDoor) &&
+        same(l.args.key as string, hit.key),
+    );
+  if (!shown) {
+    restart(scan);
+    throw new HistoryMismatchError();
+  }
+  scan.delivered.set(batchId, { key: hit.key, txHash: hit.txHash, block: hit.block });
 }
 
 /** A Bittensor receipt, asked together with the server's head (one request to one server, as windowLogs

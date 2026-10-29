@@ -235,17 +235,39 @@ describe("the vault's history", () => {
     expect(p).not.toHaveProperty("rewardsEarnedTao");
   });
 
-  it("holds up what is free to unstake only while an unstake's arrival isn't known", async () => {
-    // nothing of this browser's in a closed batch: the open batch's request is the front door's own figure
-    expect((await createLiveCascadeData(D, deps({ scan: never })).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
-    // a closed batch the saved scan already saw arrive
+  /** A saved scan that read to block 1,000 and saw batch 3 arrive at block 500 (transaction H(4)). */
+  function savedDelivery(extra?: (s: ReturnType<ReturnType<typeof createScanStore>["load"]>) => void) {
     const storage = memory();
     const saved = createScanStore(storage, D);
     const s = saved.load(ME);
     s.delivered.set("3", { key: H(3), txHash: H(4), block: 500n });
     s.next = 1_000n;
+    extra?.(s);
     saved.save(ME, s);
-    const known = deps({ scan: never, scanStore: createScanStore(storage, D) });
+    return storage;
+  }
+  /** Bittensor from a node at `head`, answering H(4)'s receipt: batch 3's delivery from our front door, unless `shows` is false. */
+  const deliveryAt = (head: bigint, shows = true) => ({
+    request: async () => `0x${head.toString(16)}`,
+    getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+      if (hash !== H(4) || head < 500n) throw new TransactionReceiptNotFoundError({ hash });
+      const delivered = {
+        address: D.vault,
+        topics: encodeEventTopics({ abi: VAULT, eventName: "BatchDelivered", args: { key: H(3), sourceChain: 8453n, frontDoor: D.frontDoor } }),
+        data: encodeAbiParameters(parseAbiParameters("uint64, uint256"), [3n, 10n ** 16n]),
+        blockNumber: 500n,
+        transactionHash: H(4),
+        logIndex: 0,
+      };
+      return { status: "success", logs: shows ? [delivered] : [] };
+    },
+  });
+
+  it("holds up what is free to unstake only while an unstake's arrival isn't known", async () => {
+    // nothing of this browser's in a closed batch: the open batch's request is the front door's own figure
+    expect((await createLiveCascadeData(D, deps({ scan: never })).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    // a closed batch the saved scan already saw arrive (its receipt confirms it)
+    const known = deps({ scan: never, scanStore: createScanStore(savedDelivery(), D), clients: { bittensor: deliveryAt(2_000n) } as never });
     known.opLog.put(unstake(3n));
     expect((await createLiveCascadeData(D, known).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
     // one it hasn't: the scan says whether it is still on the bridge
@@ -254,6 +276,44 @@ describe("the vault's history", () => {
     unknown.opLog.put(unstake(3n));
     expect((await createLiveCascadeData(D, unknown).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
     expect(scans).toBe(1);
+  });
+
+  it("relies on a saved delivery only once its receipt shows it, and reads the history again when it doesn't", async () => {
+    const storage = savedDelivery();
+    const visit = (bittensor: unknown) => {
+      const d = deps({ scan: never, scanStore: createScanStore(storage, D), clients: { bittensor } as never });
+      d.opLog.put(unstake(3n));
+      return createLiveCascadeData(D, d).getAvailable(ME);
+    };
+    // a node behind the delivery can't say: nothing rather than a guess, and the save stands
+    await expect(visit(deliveryAt(300n))).rejects.toThrow();
+    expect(createScanStore(storage, D).load(ME).delivered.has("3")).toBe(true);
+    // a node past it shows a transaction with no such delivery: the saved history is read again from the start
+    await expect(visit(deliveryAt(2_000n, false))).rejects.toThrow();
+    expect(createScanStore(storage, D).load(ME).delivered.size).toBe(0);
+  });
+
+  it("reads the vault again after waiting for the scan, so a delivery it finds isn't counted twice", async () => {
+    // batch 3 arrives while the scan runs: the vault burns the 2e21 shares asked for
+    let delivered = false;
+    const d = deps({
+      readVault: async () => (delivered ? { ...vault, shares: vault.shares - 2n * 10n ** 21n } : vault),
+      scan: async (_c, _d, s) => {
+        delivered = true;
+        s.delivered.set("3", { key: H(3), txHash: H(4), block: 1n });
+      },
+    });
+    d.opLog.put(unstake(3n));
+    expect((await createLiveCascadeData(D, d).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 2n * 10n ** 21n - 10n ** 21n);
+  });
+
+  it("isn't held up by a saved deposit or redeem whose receipt can't be read: it needs only the deliveries", async () => {
+    const storage = savedDelivery((s) => s.deposited.push({ key: H(5), txHash: H(6), block: 600n, assets: 10n ** 16n }));
+    // the deposit's receipt isn't there yet; batch 4 (closed) needs the scan, which finds nothing new
+    const d = deps({ scanStore: createScanStore(storage, D), clients: { bittensor: deliveryAt(2_000n) } as never, readFrontDoor: async () => ({ ...fd, openBatchId: 5n }) });
+    d.opLog.put(unstake(4n));
+    expect((await createLiveCascadeData(D, d).getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);
+    await expect(createLiveCascadeData(D, { ...d }).getPositionHistory(ME)).rejects.toThrow();
   });
 
   it("works out TAO on its way and rewards earned once the scan has read the account's deposits and redeems", async () => {

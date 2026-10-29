@@ -1,7 +1,19 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
 import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
-import { cancelTook, chainDeposits, confirmAccountEvents, depositFacts, type Placed, requestBatch, scanVault, type VaultScan, withdrawalFacts } from "./facts";
+import {
+  cancelTook,
+  chainDeposits,
+  confirmAccountEvents,
+  confirmDelivery,
+  depositFacts,
+  HistoryMismatchError,
+  type Placed,
+  requestBatch,
+  scanVault,
+  type VaultScan,
+  withdrawalFacts,
+} from "./facts";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore } from "./scan-store";
@@ -99,6 +111,31 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   /** One scan of an account at a time: overlapping scans would read the same blocks twice and
    * double-count events. Callers arriving while one runs share it. */
   const inFlight = new Map<string, Promise<VaultScan>>();
+  /** Each account's scan changes one step at a time (a read, a confirmation, a start over): a start over
+   * in the middle of a read would leave it claiming blocks whose events it no longer holds. */
+  const queues = new Map<string, Promise<unknown>>();
+
+  function serial<T>(account: Address, step: (scan: VaultScan) => Promise<T>): Promise<T> {
+    const key = account.toLowerCase();
+    const p = (queues.get(key) ?? Promise.resolve()).then(() => step(known(account)));
+    queues.set(
+      key,
+      p.catch(() => undefined),
+    );
+    return p;
+  }
+
+  /** A confirmation of saved history by the chain: when the chain shows it was wrong, the scan has gone
+   * back to the deploy block, and that is saved at once. */
+  async function confirming(account: Address, scan: VaultScan, confirm: () => Promise<void>): Promise<VaultScan> {
+    try {
+      await confirm();
+    } catch (e) {
+      if (e instanceof HistoryMismatchError) deps.scanStore.save(account, scan);
+      throw e;
+    }
+    return scan;
+  }
 
   /** The account's scan as far as it has been read: this visit's, or the one saved by an earlier visit. */
   function known(account: Address): VaultScan {
@@ -112,30 +149,37 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   }
 
   /** The account's scan brought up to the chain's newest blocks, from where it stopped (this visit, or
-   * an earlier one: progress is saved every few seconds and when a read stops). Saved amounts are
-   * confirmed by their receipts before anything sums them. */
+   * an earlier one: progress is saved every few seconds and when a read stops). Its deliveries, stakes
+   * and payout chunks are then as current as the chain; its saved amounts may still wait to be
+   * confirmed (historyFor). */
   function scanFor(account: Address): Promise<VaultScan> {
     const key = account.toLowerCase();
     const running = inFlight.get(key);
     if (running) return running;
-    const scan = known(account);
-    let saved = deps.now();
-    const save = () => {
-      deps.scanStore.save(account, scan);
-      saved = deps.now();
-    };
-    const p = deps
-      .scan(c, d, scan, account, () => {
-        if (deps.now() - saved >= SAVE_EVERY_MS) save();
-      })
-      .then(() => confirmAccountEvents(c, d, scan, account))
-      // saved also when a read stops, and after a scan put back to the deploy block
-      .finally(save)
-      .then(() => scan);
+    const p = serial(account, (scan) => {
+      let saved = deps.now();
+      const save = () => {
+        deps.scanStore.save(account, scan);
+        saved = deps.now();
+      };
+      return deps
+        .scan(c, d, scan, account, () => {
+          if (deps.now() - saved >= SAVE_EVERY_MS) save();
+        })
+        .finally(save)
+        .then(() => scan);
+    });
     inFlight.set(key, p);
     const clear = () => void inFlight.delete(key);
     p.then(clear, clear);
     return p;
+  }
+
+  /** The scan brought up to date, with the account's saved amounts confirmed by their receipts: what
+   * anything that sums them needs. What can be unstaked needs only scanFor, so an old deposit's receipt
+   * that can't be read never holds it up. */
+  function historyFor(account: Address): Promise<VaultScan> {
+    return scanFor(account).then(() => serial(account, (scan) => confirming(account, scan, () => confirmAccountEvents(c, d, scan, account))));
   }
 
   /** Settled cancels never change: each answer is kept, so a read asks Base only about new ones. */
@@ -221,10 +265,17 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * read places most of them; only one it hasn't seen arrive waits for the scan to catch up. */
   async function getAvailable(account: string): Promise<Available> {
     const a = account as Address;
-    const [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
+    let [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
     const withdrawals = await placedWithdrawals(a, deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal"));
     let scan = known(a);
-    if (withdrawals.some((w) => onTheBridge(w, fd, scan))) scan = await scanFor(a);
+    // a saved delivery is relied on only once its receipt shows it
+    const arrived = withdrawals.filter((w) => w.batchId !== undefined && w.batchId < fd.openBatchId && scan.delivered.get(String(w.batchId))?.unconfirmed);
+    for (const w of arrived) await serial(a, (s) => confirming(a, s, () => confirmDelivery(c, d, s, String(w.batchId))));
+    if (withdrawals.some((w) => onTheBridge(w, fd, scan))) {
+      scan = await scanFor(a);
+      // a delivery the scan found may have burned the shares since the first reads: read them again
+      [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
+    }
     const asked = fd.redeemOf + sum(withdrawals.filter((w) => onTheBridge(w, fd, scan)).map((w) => w.shares));
     const availableShares = v.shares > asked ? v.shares - asked : 0n;
     return { availableShares, availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply) };
@@ -233,7 +284,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   /** What needs the vault's history: TAO on its way in, rewards earned, the average entry price. */
   async function getPositionHistory(account: string): Promise<PositionHistory> {
     const a = account as Address;
-    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
+    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), historyFor(a)]);
     const deposits = await countedDeposits(a, fd);
     const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
     const pendingWei = fd.depositOf + sum(deposits.filter((o) => onTheBridge(o, fd, scan)).map((o) => o.targetTao));
@@ -285,7 +336,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   async function listDeposits(account: string): Promise<DepositRecord[]> {
     const a = account as Address;
-    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), scanFor(a)]);
+    const [fd, v, scan] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a), historyFor(a)]);
     const out: DepositRecord[] = [];
     const seen = new Set<string>();
     const found = [];

@@ -45,7 +45,7 @@ describe("scan store", () => {
     createScanStore(storage, D).save(ME, scanned());
     const back = createScanStore(storage, D).load(ME);
     expect(back.next).toBe(4_990n);
-    expect(back.delivered.get("3")).toEqual({ key: H(77), txHash: H(9), block: 1_500n });
+    expect(back.delivered.get("3")).toEqual({ key: H(77), txHash: H(9), block: 1_500n, unconfirmed: true });
     expect(back.staked).toEqual([{ block: 1_600n, txHash: H(10) }]);
     expect(back.payouts.get(H(77))).toEqual(scanned().payouts.get(H(77)));
     expect(back.deposited).toEqual([{ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true }]);

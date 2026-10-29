@@ -2,7 +2,7 @@ import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpReque
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, requestBatch, scanVault, withdrawalFacts } from "./facts";
+import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, requestBatch, requestReplacement, scanVault, withdrawalFacts } from "./facts";
 import { StaleChainError } from "./fresh";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
@@ -1252,8 +1252,12 @@ describe("the batch an unstake request with no receipt joined", () => {
     };
     return { clients: { base, baseLogs } as never, windows, asked, nonceAsks };
   }
-  const place = (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set()) =>
-    requestBatch(b.clients, D, request({ shares: SHARES, ...over }), { now: NOW, skip });
+  /** Where it stands, searched for (as live.ts does) once its hash is dead. */
+  const place = async (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set()) => {
+    const op = request({ shares: SHARES, ...over });
+    const p = await requestBatch(b.clients, op, NOW);
+    return p.dead ? requestReplacement(b.clients, D, op, { now: NOW, skip }) : p;
+  };
   /** The old hash can never be mined: pending, its nonce taken by another transaction. */
   const replaced = { tx: { nonce: 5, blockNumber: null }, nonce: 6 };
   const HOUR = 60 * MIN;
@@ -1290,6 +1294,12 @@ describe("the batch an unstake request with no receipt joined", () => {
     const b = onBase({ nonce: 9 });
     expect(await place(b, { sentAt: NOW - 3 * HOUR + MIN })).toEqual({ unsure: true });
     expect(await place(b, { sentAt: undefined, createdAt: NOW - 3 * HOUR + MIN })).toEqual({ unsure: true });
+    expect(b.windows).toEqual([]);
+  });
+
+  it("only says the hash is dead, reading no logs, until its replacement is searched for", async () => {
+    const b = onBase({ ...replaced, logs: [redeemRequested(ME, SHARES, 7n, HEAD - 50n, H(88))] });
+    expect(await requestBatch(b.clients, request({ shares: SHARES }), NOW)).toEqual({ dead: true });
     expect(b.windows).toEqual([]);
   });
 

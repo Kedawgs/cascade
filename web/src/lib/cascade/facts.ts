@@ -354,27 +354,21 @@ const batchIdFrom = (r: Receipt | null, eventName: "DepositRequested" | "RedeemR
   requestIn(r, eventName, account)?.args.batchId as bigint | undefined;
 
 /** Where an unstake request stands on Base. `unsure` while its batch can't be known right now (it still
- * counts as asked); `replacedBy` the request a speed-up or replacement put in place of its hash, with
- * that one's batch; `dropped` when nothing took its place, so it asked for nothing. */
+ * counts as asked); `dead` when its hash can't be mined as sent, so what took its place is still to be
+ * searched for (requestReplacement); `replacedBy` the request a speed-up or replacement put in place of
+ * its hash, with that one's batch; `dropped` when nothing took its place, so it asked for nothing. */
 export interface RequestPlace {
   batchId?: bigint;
   unsure?: true;
+  dead?: true;
   replacedBy?: Hex;
   dropped?: true;
 }
 
 /** The batch an unstake joined: as recorded, or from its request's receipt (one that shows no request,
  * as when it reverted, joined none). With no receipt it is `unsure` until its hash can't be mined as
- * sent (requestHashDead); then the front door's logs are searched for the same request in its place
- * (findRequestTx: a speed-up made while no tab of this site watched looks exactly like a drop). Found,
- * it is that one's batch; a search that finds nothing makes it `dropped`; one that can't be completed
- * leaves it `unsure`, still counted. `skip`: the hashes other records own. */
-export async function requestBatch(
-  c: Pick<Clients, "base" | "baseLogs">,
-  d: Deployment,
-  op: WithdrawalOp,
-  ctx: { now: number; skip: ReadonlySet<string> },
-): Promise<RequestPlace> {
+ * sent (requestHashDead), then `dead`: requestReplacement takes it from there. */
+export async function requestBatch(c: Pick<Clients, "base">, op: WithdrawalOp, now: number): Promise<RequestPlace> {
   if (op.batchId !== undefined) return { batchId: op.batchId };
   if (!op.hash) return {};
   const r = await baseReceipt(c, op.hash);
@@ -382,7 +376,21 @@ export async function requestBatch(
     const batchId = batchIdFrom(r, "RedeemRequested", op.account);
     return batchId !== undefined ? { batchId } : {};
   }
-  if (!(await requestHashDead(c, op, op.hash, ctx.now))) return { unsure: true };
+  return (await requestHashDead(c, op, op.hash, now)) ? { dead: true } : { unsure: true };
+}
+
+/** What took the place of a `dead` request: the front door's logs are searched for the same request
+ * since it was sent (findRequestTx: a speed-up made while no tab of this site watched looks exactly like
+ * a drop). Found, it is that one's batch; a search that finds nothing makes it `dropped`; one that can't
+ * be completed leaves it `unsure`, still counted. `skip`: the hashes other records own, or have taken
+ * for theirs (two dead records asking for the same shares are searched for one at a time, oldest first,
+ * so they never take the same request). */
+export async function requestReplacement(
+  c: Pick<Clients, "base" | "baseLogs">,
+  d: Deployment,
+  op: WithdrawalOp,
+  ctx: { now: number; skip: ReadonlySet<string> },
+): Promise<RequestPlace> {
   let found: { hash: Hex; batchId: bigint } | null;
   try {
     found = await findRequestTx(c, d, { account: op.account, shares: op.shares, sinceMs: op.sentAt ?? op.createdAt, nowMs: ctx.now, skip: ctx.skip });

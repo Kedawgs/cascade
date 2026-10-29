@@ -706,6 +706,45 @@ describe("unstakes sharing a batch", () => {
       expect(back.error).toBeUndefined();
     });
 
+    describe("two of them asking for the same shares", () => {
+      const requestedIn = (tx: `0x${string}`, block: bigint) => ({ ...requested(3n), transactionHash: tx, blockNumber: block });
+      const twoDead = (logs: unknown[]) => {
+        const b = base({ nonce: 4, logs });
+        const d = deps({ clients: b.clients as never });
+        const w = (id: string, createdAt: number, hash: `0x${string}`): WithdrawalOp => ({
+          id,
+          kind: "withdrawal",
+          account: ME,
+          createdAt,
+          shares: SHARES,
+          taoEstimate: 0n,
+          usdcEstimate: 0n,
+          fee: 0n,
+          hash,
+          sentAt: NOW - 20 * 60_000,
+          nonce: 3,
+          state: "sent",
+        });
+        d.opLog.put(w("older", 1, H(20)));
+        d.opLog.put(w("newer", 2, H(21)));
+        return { d, data: createLiveCascadeData(D, d) };
+      };
+
+      it("never take the same request for their replacement: the older one takes it, and the other is dropped", async () => {
+        const { d, data } = twoDead([requestedIn(H(88), HEAD - 50n)]);
+        expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
+        expect(d.opLog.get(ME, "older")).toMatchObject({ hash: H(88), batchId: 3n, state: "sent" });
+        expect(d.opLog.get(ME, "newer")).toMatchObject({ hash: H(21), state: "failed" });
+      });
+
+      it("each take one of two such requests, oldest first", async () => {
+        const { d, data } = twoDead([requestedIn(H(88), HEAD - 50n), requestedIn(H(89), HEAD - 40n)]);
+        expect((await data.getAvailable(ME)).availableShares).toBe(all - 2n * SHARES);
+        expect(d.opLog.get(ME, "older")).toMatchObject({ hash: H(88), batchId: 3n, state: "sent" });
+        expect(d.opLog.get(ME, "newer")).toMatchObject({ hash: H(89), batchId: 3n, state: "sent" });
+      });
+    });
+
     it("stay failed if the request itself turns up reverted, or with no request in it", async () => {
       const receipts: Record<string, unknown> = {};
       const { d, data } = setUp(base({ nonce: 4, receipts }), NOW - 10 * 60_000, { nonce: 3 });

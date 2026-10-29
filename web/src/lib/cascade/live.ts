@@ -11,6 +11,7 @@ import {
   HistoryMismatchError,
   type Placed,
   requestBatch,
+  requestReplacement,
   scanVault,
   type VaultScan,
   withdrawalFacts,
@@ -279,19 +280,25 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         return { ...o, state: "sent", error: undefined, batchId };
       }),
     );
-    const placed = await Promise.all(
-      [...withdrawals.filter((o) => o.state !== "failed"), ...revived.filter((o) => o !== undefined)]
-        .map(async (o) => {
-          // a request another record already owns is never taken for this one's replacement
-          const skip = new Set(all.filter((x) => x.id !== o.id && x.hash).map((x) => x.hash as string));
-          const p = await requestBatch(c, d, o, { now: deps.now(), skip });
-          if (p.replacedBy) deps.opLog.update(a, o.id, { hash: p.replacedBy, batchId: p.batchId });
-          else if (p.batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId: p.batchId });
-          // still running in this tab: its own flow is waiting on it
-          if (p.dropped && !deps.opLog.isActive(o.id)) deps.opLog.update(a, o.id, { state: "failed", error: REQUEST_DROPPED });
-          return { ...o, batchId: p.batchId, unsure: p.unsure, dropped: p.dropped };
-        }),
-    );
+    const open = [...withdrawals.filter((o) => o.state !== "failed"), ...revived.filter((o) => o !== undefined)];
+    const places = await Promise.all(open.map((o) => requestBatch(c, o, deps.now())));
+    // those whose hash can't be mined, one at a time and oldest first: a request one takes for its
+    // replacement is never another's, nor one another record already owns
+    const adopted = new Set<string>();
+    const byAge = (i: number, j: number) => open[i].createdAt - open[j].createdAt || (open[i].id < open[j].id ? -1 : 1);
+    for (const i of open.flatMap((_, i) => (places[i].dead ? [i] : [])).sort(byAge)) {
+      const skip = new Set([...all.filter((x) => x.id !== open[i].id && x.hash).map((x) => x.hash as string), ...adopted]);
+      places[i] = await requestReplacement(c, d, open[i], { now: deps.now(), skip });
+      if (places[i].replacedBy) adopted.add(places[i].replacedBy);
+    }
+    const placed = open.map((o, i) => {
+      const p = places[i];
+      if (p.replacedBy) deps.opLog.update(a, o.id, { hash: p.replacedBy, batchId: p.batchId });
+      else if (p.batchId !== undefined && o.batchId === undefined) deps.opLog.update(a, o.id, { batchId: p.batchId });
+      // still running in this tab: its own flow is waiting on it
+      if (p.dropped && !deps.opLog.isActive(o.id)) deps.opLog.update(a, o.id, { state: "failed", error: REQUEST_DROPPED });
+      return { ...o, batchId: p.batchId, unsure: p.unsure, dropped: p.dropped };
+    });
     const gone = await cancelledIn(placed);
     return placed
       .filter((o) => !gone.has(o.id) && !o.dropped)

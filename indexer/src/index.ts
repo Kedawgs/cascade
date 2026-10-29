@@ -49,7 +49,7 @@ async function scheduled(controller: ScheduledController, env: Env, _ctx: Execut
   const nowS = Math.floor(controller.scheduledTime / 1000);
   if (controller.cron === CRONS.site) {
     // its own invocation: its subrequests and CPU are its own, and it never touches the tick's lease
-    const r = await runSiteJob({ db: env.DB, cfg, fetch: (input, init) => globalThis.fetch(input, init), nowS });
+    const r = await runSiteJob({ db: env.DB, cfg, fetch: (input, init) => globalThis.fetch(input, init), nowS, clock: () => Math.floor(Date.now() / 1000) });
     console.log(`site check: ${JSON.stringify(r)}`);
   }
 }

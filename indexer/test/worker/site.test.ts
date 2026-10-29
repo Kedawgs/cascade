@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ruleCtx } from "./rule-ctx.ts";
-import { siteIntegrity, siteUnreachable } from "../../src/rules/site.ts";
+import { siteIntegrity, siteNoApprovedLists, siteUnreachable } from "../../src/rules/site.ts";
 import { ADDRESS_RE, readCapped, scanScript } from "../../src/site.ts";
-import { runSiteJob, type SiteJobOptions } from "../../src/site-job.ts";
+import { MAX_FILES, runSiteJob, type SiteJobOptions, siteRunMaxS } from "../../src/site-job.ts";
 import { loadTickState } from "../../src/store.ts";
 import { rowCounts, wipe } from "./d1-count.ts";
 import { testConfig } from "./fixtures.ts";
@@ -61,7 +61,7 @@ function server(files: Record<string, string | { bytes: number }>) {
 const job = (s: ReturnType<typeof server>, nowS: number, o: Partial<SiteJobOptions> = {}) => runSiteJob({ db, cfg, fetch: s.fetch, nowS, approved: APPROVED, ...o });
 const findings = async (nowS: number) => {
   const st = await loadTickState(db, nowS);
-  return [...siteIntegrity.run(ruleCtx({ meta: st.meta, nowS })), ...siteUnreachable.run(ruleCtx({ meta: st.meta, nowS }))];
+  return [siteIntegrity, siteUnreachable, siteNoApprovedLists].flatMap((r) => r.run(ruleCtx({ meta: st.meta, nowS })));
 };
 async function fullPass(s: ReturnType<typeof server>, from = NOW) {
   for (let i = 0; i < 3; i++) await job(s, from + i * 120);
@@ -76,6 +76,11 @@ describe("the address and host scan", () => {
     expect(`a ${d.vault} ${HASH} 0x${"1".repeat(41)}`.match(ADDRESS_RE)).toEqual([d.vault]);
     const s = scanScript(`x="${d.vault.toUpperCase().replace("0X", "0x")}";u="https://Mainnet.Base.org/x";import("/_next/static/chunks/abc-123.js")`);
     expect(s).toEqual({ addresses: [d.vault], hosts: ["mainnet.base.org"], chunks: ["/_next/static/chunks/abc-123.js"] });
+  });
+
+  it("finds hosts behind http://, wss:// and protocol-relative //host, but not in a // comment", () => {
+    const text = `a="http://plain.example/x";b="wss://sock.example";c="//relative.example/y.js";d=url(//css.example/f.woff)// a comment//not.a.host`;
+    expect(scanScript(text).hosts).toEqual(["css.example", "plain.example", "relative.example", "sock.example"]);
   });
 
   it("reads a body as a stream and stops at the cap, never buffering more", async () => {
@@ -150,15 +155,72 @@ describe("the site job", () => {
     expect(f[0].facts.why).toContain("stopped");
   });
 
-  it("takes the first 80 files of a bigger site", async () => {
-    const many = Object.fromEntries(Array.from({ length: 90 }, (_, i) => [chunk(`c${i}`), "const z=0"]));
+  it("reports a site with more script files than a pass may take as a critical, and the pass incomplete", async () => {
+    // the real build has 32 scripts; MAX_FILES is far above that, so a padded site stands out
+    expect(MAX_FILES).toBeGreaterThanOrEqual(10 * 32);
+    const many = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [chunk(`c${i}`), "const z=0"]));
     const index = `<html><script>a="${OURS.join('","')}"</script>${Object.keys(many).map((p) => `<script src="${p}"></script>`).join("")}</html>`;
     const s = server({ "/": index, "/stake/": "<html></html>", ...many });
     const big = { ...cfg, budgets: { ...cfg.budgets, siteFilesPerRun: 80 } };
-    await runSiteJob({ db, cfg: big, fetch: s.fetch, nowS: NOW, approved: APPROVED });
+    await runSiteJob({ db, cfg: big, fetch: s.fetch, nowS: NOW, approved: APPROVED, maxFiles: 10 });
     const result = JSON.parse((await loadTickState(db, NOW)).meta.site_result);
-    expect(result.files).toHaveLength(80);
+    expect(result.files).toHaveLength(10);
     expect(result.capped).toBe(true);
+    expect(result.complete).toBe(false);
+    const f = await findings(NOW + 60);
+    expect(f.map((x) => [x.rule, x.key])).toEqual([["site.integrity", "site.integrity:capped"]]);
+  });
+
+  it("scans the whole page: addresses and hosts in attributes, any same-origin script, and a cross-origin script's host", async () => {
+    const extra = "0x00000000000000000000000000000000000000e6";
+    const page = site()["/"].replace(
+      "</html>",
+      `<a href="https://basescan.org/address/${extra}">x</a><script src="/cdn-cgi/evil.js"></script><script src="https://cdn.evil.example/x.js"></script><link rel="modulepreload" href="//preload.evil.example/m.js"><link rel="preload" as="script" href="https://preload2.evil.example/p.js"></html>`,
+    );
+    const s = server(site({ "/": page, "/cdn-cgi/evil.js": `const e="${d.vault}";fetch("wss://sock.evil.example/x")` }));
+    for (let i = 0; i < 4; i++) await job(s, NOW + i * 120);
+    expect(s.calls).toContain("/cdn-cgi/evil.js");
+    // never fetched from elsewhere: only reported
+    expect(s.calls.some((c) => c === "/x.js" || c === "/m.js")).toBe(false);
+    const keys = (await findings(NOW + 600)).map((f) => f.key).sort();
+    expect(keys).toEqual(
+      [
+        `site.integrity:address:${extra}`,
+        "site.integrity:host:basescan.org",
+        "site.integrity:host:cdn.evil.example",
+        "site.integrity:host:preload.evil.example",
+        "site.integrity:host:preload2.evil.example",
+        "site.integrity:host:sock.evil.example",
+      ].sort(),
+    );
+  });
+
+  it("follows turbopack's chunk names (static/chunks/… without /_next/)", async () => {
+    const s = server(site({ [chunk("lazy2")]: 'const y=2;load("static/chunks/turbo-1.js")', [chunk("turbo-1")]: "const t=3" }));
+    for (let i = 0; i < 4; i++) await job(s, NOW + i * 120);
+    expect(s.calls).toContain(chunk("turbo-1"));
+  });
+
+  it("with no approved lists judges nothing on them, and says so once", async () => {
+    await fullPass(server(site()));
+    const st = await loadTickState(db, NOW + 300);
+    const ctx = ruleCtx({ meta: st.meta, nowS: NOW + 300 });
+    expect(siteIntegrity.run(ctx)).toHaveLength(0);
+    await wipe(db);
+    for (let i = 0; i < 3; i++) await job(server(site()), NOW + i * 120, { approved: { addresses: [], hosts: [] } });
+    expect((await findings(NOW + 300)).map((f) => [f.rule, f.key])).toEqual([["site.no_approved_lists", "site.no_approved_lists"]]);
+  });
+
+  it("warns when a pass completes with files it couldn't read", async () => {
+    const files = site();
+    delete files[chunk("vendor")];
+    await fullPass(server(files));
+    expect((await findings(NOW + 300)).map((f) => [f.rule, f.key])).toEqual([["site.unreachable", "site.unreachable:files"]]);
+  });
+
+  it("times a run from the files it may take: a sibling with more files per run is waited for longer", () => {
+    expect(siteRunMaxS({ ...cfg.site, pages: ["/", "/stake/"] }, 2)).toBe((2 + 2) * 15 + 120);
+    expect(siteRunMaxS(cfg.site, 20)).toBeGreaterThan(siteRunMaxS(cfg.site, 2));
   });
 
   it("starts a new pass only an hour after the last finished", async () => {

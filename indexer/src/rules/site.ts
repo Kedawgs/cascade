@@ -32,6 +32,14 @@ export const siteIntegrity: Rule = {
         facts: { [u.kind]: u.value, file: u.file, pass },
       });
     }
+    if (r.capped) {
+      out.push({
+        rule: "site.integrity",
+        key: "site.integrity:capped",
+        subject: "The live site has more script files than a pass checks",
+        facts: { checked: String(r.files.length), why: "a site padded with files can hide a script past the end of the pass: the pass is incomplete", pass },
+      });
+    }
     for (const a of r.missing) {
       out.push({ rule: "site.integrity", key: `site.integrity:missing:${a}`, subject: "A Cascade address is missing from the live site", facts: { address: a, pass } });
     }
@@ -48,14 +56,37 @@ export const siteIntegrity: Rule = {
   },
 };
 
-/** site.unreachable (warning): no successful fetch of the site for siteUnreachableS. */
+/** site.unreachable (warning): no successful fetch of the site for siteUnreachableS; or the last pass
+ * completed with files it couldn't read (they were not checked). */
 export const siteUnreachable: Rule = {
   name: "site.unreachable",
   run(ctx) {
+    const out: Finding[] = [];
     const since = ctx.meta.site_fail_since ? Number(ctx.meta.site_fail_since) : undefined;
-    if (since === undefined || ctx.nowS - since < ctx.t.siteUnreachableS) return [];
-    return [{ rule: "site.unreachable", key: "site.unreachable", subject: "The site check can't fetch the site", facts: { since: utc(since), site: ctx.cfg.site.url } }];
+    if (since !== undefined && ctx.nowS - since >= ctx.t.siteUnreachableS) {
+      out.push({ rule: "site.unreachable", key: "site.unreachable", subject: "The site check can't fetch the site", facts: { since: utc(since), site: ctx.cfg.site.url } });
+    }
+    const unread = (json<SiteResult>(ctx.meta.site_result)?.problems ?? []).filter((p) => p.kind === "unreadable");
+    if (unread.length) {
+      out.push({
+        rule: "site.unreachable",
+        key: "site.unreachable:files",
+        subject: `The last site check couldn't read ${unread.length} file${unread.length === 1 ? "" : "s"}`,
+        facts: { files: unread.map((p) => `${p.file} (${p.detail})`).join(", ") },
+      });
+    }
+    return out;
   },
 };
 
-export const SITE_RULES: Rule[] = [siteIntegrity, siteUnreachable];
+/** site.no_approved_lists (warning): the approved lists are empty (src/site-approved.ts not generated), so
+ * the site check judges nothing against them. */
+export const siteNoApprovedLists: Rule = {
+  name: "site.no_approved_lists",
+  run(ctx) {
+    if (!json<SiteResult>(ctx.meta.site_result)?.noApprovedLists) return [];
+    return [{ rule: "site.no_approved_lists", key: "site.no_approved_lists", subject: "The site check has no approved lists", facts: { site: ctx.cfg.site.url } }];
+  },
+};
+
+export const SITE_RULES: Rule[] = [siteIntegrity, siteUnreachable, siteNoApprovedLists];

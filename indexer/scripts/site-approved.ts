@@ -61,6 +61,9 @@ export async function main(argv: string[], o: { target: string; print: (l: strin
   writeFileSync(o.target, renderApproved(lists, o.today()));
   o.print(`${files.length} files: ${lists.addresses.length} addresses, ${lists.hosts.length} hosts written to ${o.target}`);
   o.print(`largest file: ${lists.largest.path} (${lists.largest.bytes} bytes); on Workers Free keep it well under SITE_MAX_BYTES or set SITE_FILES_PER_RUN=1`);
+  o.print(
+    "The live site also carries what Cloudflare injects (the Web Analytics beacon's host, /cdn-cgi/ scripts): if the site check reports one, check it is Cloudflare's and add it to the lists by hand.",
+  );
   return 0;
 }
 

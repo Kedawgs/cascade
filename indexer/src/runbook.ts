@@ -37,7 +37,9 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
   "bridge.duplicate": (f) =>
     `One message delivered twice under different content. As ${f.side === "base" ? "bridge.payout_mismatch (guardian pause the front door; keep the hold)" : `bridge.batch_mismatch (guardian pause the vault; owner cancelPayoutBatch before ${or(f.deadline, "the payout delay ends")})`}.`,
   "site.integrity": () =>
-    "The site may be tampered with. Take it down (Pages: roll back or disable the project), then check DNS, the build and the Pages project. If the file is a legitimate large chunk, raise SITE_MAX_BYTES (or, if it stopped a run, the CPU limit: Workers Paid).",
+    "The site may be tampered with. Take it down (Pages: roll back or disable the project), then check DNS, the build and the Pages project. If the file is a legitimate large chunk, raise SITE_MAX_BYTES (or, if it stopped a run, the CPU limit: Workers Paid). A host Cloudflare itself injects (the Web Analytics beacon, /cdn-cgi/) must be approved too. The limit of this check: a site that serves the monitor a clean copy and users a tampered one can't be caught from outside.",
+  "site.no_approved_lists": () =>
+    "The site check is running without approved lists, so it judges nothing. Run pnpm site:approved ../web/out on the build you deploy, review the lists, and redeploy the Worker.",
   "indexer.blind": () => "The monitor can't see a chain and the keeper is holding: fix the RPC (quota, outage, switch URLs).",
   "checks.owner_approved": () =>
     "Confirm it was you: a hand approval lets the keeper pay that batch. If it wasn't, rotate Cloudflare access now and hold the keeper (ops/hold.json).",

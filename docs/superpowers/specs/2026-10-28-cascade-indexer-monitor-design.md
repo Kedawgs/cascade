@@ -859,21 +859,28 @@ invocation doesn't send it twice. Its arrival is itself a heartbeat: no digest m
 by `pnpm site:approved ../web/out` from the static export the owner is about to deploy: every 0x-address and
 every `https://` host found in its HTML and JavaScript.
 
-- **What is checked.** A pass starts from the pages in `SITE_PAGES` (default `/` and `/stake/`): their inline
-  scripts and every `<script src>` under `/_next/static/`, then every further `/_next/static/chunks/….js` path
-  named inside the files fetched (the lazily loaded chunks), up to 80 files. Addresses are matched with hex
-  boundaries (`(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])`), so 64-digit hashes don't match.
+- **What is checked.** A pass starts from the pages in `SITE_PAGES` (default `/` and `/stake/`): the whole page
+  (inline scripts, and addresses and hosts in attributes), every same-origin `<script src>` and
+  `<link rel=modulepreload>` or `<link rel=preload as=script>` wherever it is, then every further chunk path
+  named inside the files fetched (the lazily loaded chunks, `/_next/static/chunks/….js` or turbopack's
+  `static/chunks/….js`), up to 400 files (the build has about 32; a capped pass is incomplete and critical, so
+  padding can't hide a script past the end). A cross-origin script is never fetched: its host is reported for
+  approval. Hosts are those of `https://`, `http://`, `wss://` and protocol-relative `//host` URLs. Addresses are
+  matched with hex boundaries (`(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])`), so 64-digit hashes don't
+  match. Anything Cloudflare injects into the served pages (the Web Analytics beacon, `/cdn-cgi/` scripts) is
+  seen too, so it must be approved like the build's own hosts.
 - **Findings.** Critical `site.integrity` when a configured Cascade address (front door, staker, vault, adapters,
   oracle) is missing from a complete pass, an address or host appears that isn't approved (a new RPC endpoint
-  counts), or a file couldn't be checked (below); warning `site.unreachable` after 30 minutes without a fetch.
+  counts), a file couldn't be checked (below), or a pass was capped; warning `site.unreachable` after 30 minutes
+  without a fetch, or when a pass completes with files it couldn't read. While the approved lists are empty (not
+  generated yet) nothing is judged against them: one warning `site.no_approved_lists` says so.
 - **Its own cron, never the tick** (*call*). The site is outside our control: a tampered site could serve a huge
   or hostile file. The check therefore runs in its own invocation every two minutes (`*/2 * * * *`), so the worst
   a file can do is stop a site-check invocation, never the security tick. It writes only its own progress and
   findings to D1 (`meta`); the next tick turns findings into alerts and emails.
 - **Bounded per file.** Each file is read as a stream and abandoned at `SITE_MAX_BYTES` (2 MB); an oversized file
-  is reported, not scanned. Each invocation handles up to `SITE_FILES_PER_RUN` files (20 on Paid, 2 on Free), so a pass of
-  up to 80 files completes in well under 2 hours on the free plan; on Workers Paid the files per run can be
-  raised.
+  is reported, not scanned. Each invocation handles up to `SITE_FILES_PER_RUN` files (20 on Paid, 2 on Free), so a
+  pass of the real build's files completes in minutes on Paid and well under an hour on Free.
 - **A file that kills the check is skipped and reported.** Before fetching a file, the invocation records it as
   "being tried" in `meta`; it clears the mark when the file is done. An invocation that finds a mark left by an
   earlier one (that invocation died on that file: CPU, memory, wall time) skips the file, marks the pass
@@ -884,7 +891,8 @@ every `https://` host found in its HTML and JavaScript.
 - **Limits, stated.** An address assembled at run time, or code fetched from elsewhere at run time, is not seen;
   content hashes are not compared (they change with every build, while the address and host lists change only
   when dependencies or the deployment do, so the owner refreshes them rarely and reviews them in git). The check
-  runs from Cloudflare, so it guards against DNS and build tampering more than against an account takeover.
+  runs from Cloudflare, so it guards against DNS and build tampering more than against an account takeover. And
+  no outside check can catch a site that serves the monitor a clean copy and its users a tampered one.
 
 ### 7. Email
 

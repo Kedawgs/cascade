@@ -8,13 +8,16 @@ import { setMeta } from "./store.ts";
 // (its own small writes): the pass under way, the file being tried, and the last complete pass's result,
 // which the tick turns into alerts. It sends no email and never touches the tick's lease.
 
-/** A run can last at most this long (files per run × the fetch timeout, and a margin): a mark younger than
- * this may be a sibling run still working, not a dead one (build note: a `*\/2` run can overlap the last). */
-export const SITE_RUN_MAX_S = 300;
 /** A new pass starts this long after the last one finished. */
 const PASS_EVERY_S = 3600;
-const MAX_FILES = 80;
-const FETCH_TIMEOUT_MS = 15_000;
+/** The most script files a pass takes. The real build has 32; a site with more than this is padded to hide a
+ * script past the end, so a capped pass is a critical, never a quiet truncation. */
+export const MAX_FILES = 400;
+const FETCH_TIMEOUT_S = 15;
+
+/** How long a run can last: its pages and files, each up to the fetch timeout, and a margin. A mark younger
+ * than this may be a sibling run still working, not a dead one (a `*\/2` run can overlap the last). */
+export const siteRunMaxS = (site: Pick<Config["site"], "pages">, filesPerRun: number): number => (site.pages.length + filesPerRun) * FETCH_TIMEOUT_S + 120;
 
 export interface SiteProblem {
   file: string;
@@ -42,7 +45,10 @@ export interface SiteResult {
   /** configured Cascade addresses found nowhere (judged on a complete pass only) */
   missing: string[];
   problems: SiteProblem[];
+  /** more script files than a pass takes: the pass is incomplete, and it is a critical */
   capped: boolean;
+  /** the approved lists are empty (not generated yet): nothing was judged against them */
+  noApprovedLists?: boolean;
 }
 
 export interface SiteJobOptions {
@@ -53,6 +59,10 @@ export interface SiteJobOptions {
   approved?: { addresses: readonly string[]; hosts: readonly string[] };
   /** how a file's text is scanned (a test replaces it to simulate a file that kills a run) */
   scanText?: (text: string) => ScanResult;
+  /** the most files a pass takes (MAX_FILES) */
+  maxFiles?: number;
+  /** the time a mark is written at, seconds (the Worker's clock; the run's start time by default) */
+  clock?: () => number;
 }
 
 const json = <T>(s: string | undefined): T | undefined => {
@@ -75,7 +85,10 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
   const put = (k: string, v: string) => setMeta(db, k, v).run();
   const meta = await readMeta(db);
   const scan = o.scanText ?? scanScript;
-  const get = async (path: string) => o.fetch(new URL(path, cfg.site.url).toString(), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: { accept: "text/html, application/javascript, */*" } });
+  const maxFiles = o.maxFiles ?? MAX_FILES;
+  const clock = o.clock ?? (() => nowS);
+  const get = async (path: string) =>
+    o.fetch(new URL(path, cfg.site.url).toString(), { signal: AbortSignal.timeout(FETCH_TIMEOUT_S * 1000), headers: { accept: "text/html, application/javascript, */*" } });
   const ok = async () => {
     if (meta.site_fail_since) {
       meta.site_fail_since = "";
@@ -92,7 +105,7 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
   let pass = json<Pass>(meta.site_pass);
   const trying = json<{ file: string; at: number }>(meta.site_trying);
   if (trying) {
-    if (nowS - trying.at < SITE_RUN_MAX_S) return { skipped: "another run is working" };
+    if (nowS - trying.at < siteRunMaxS(cfg.site, cfg.budgets.siteFilesPerRun)) return { skipped: "another run is working" };
     // an earlier run died on this file (CPU, memory or wall time): skip it, report it, go on
     if (pass) {
       pass.queue = pass.queue.filter((f) => f !== trying.file);
@@ -108,8 +121,7 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
   };
   const enqueue = (p: Pass, file: string) => {
     if (p.done.includes(file) || p.queue.includes(file)) return;
-    if (p.done.length + p.queue.length >= MAX_FILES) {
-      if (!p.capped) console.warn(`site check: more than ${MAX_FILES} files; checking the first ${MAX_FILES}`);
+    if (p.done.length + p.queue.length >= maxFiles) {
       p.capped = true;
       return;
     }
@@ -138,9 +150,12 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
         p.problems.push({ file: page, kind: "too_large", detail: `over the byte cap (${cfg.budgets.siteMaxBytes} bytes)` });
         continue;
       }
-      const { inline, srcs } = pageScripts(r.text);
-      for (const s of inline) add(p, `${page} (inline script)`, scan(s));
+      // the whole page: inline scripts, and addresses and hosts in attributes too
+      add(p, page, scan(r.text));
+      const { srcs, foreignHosts } = pageScripts(r.text, cfg.site.url);
       for (const s of srcs) enqueue(p, s);
+      // a script from elsewhere is never fetched: its host is reported for approval
+      for (const h of foreignHosts) p.hosts[h] ??= page;
     }
     await ok();
     pass = p;
@@ -150,7 +165,7 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
   while (pass.queue.length > 0 && checked < cfg.budgets.siteFilesPerRun) {
     const file = pass.queue[0];
     // marked before fetching: a run that dies on this file leaves the mark for the next to find
-    await put("site_trying", JSON.stringify({ file, at: nowS }));
+    await put("site_trying", JSON.stringify({ file, at: clock() }));
     let res: Response | undefined;
     try {
       res = await get(file);
@@ -180,26 +195,31 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     return { checked, finished: false };
   }
   const approved = o.approved ?? { addresses: APPROVED_ADDRESSES, hosts: APPROVED_HOSTS };
+  // lists not generated yet: judging against them would report everything, so nothing is judged
+  const noApprovedLists = approved.addresses.length === 0 && approved.hosts.length === 0;
   const okAddresses = new Set(approved.addresses.map((a) => a.toLowerCase()));
   const okHosts = new Set(approved.hosts.map((h) => h.toLowerCase()));
-  const complete = pass.problems.length === 0;
+  const complete = pass.problems.length === 0 && !pass.capped;
   const d = cfg.deployment;
   const ours = [...new Set([d.frontDoor, d.staker, d.vault, d.baseAdapter, d.bitAdapter, d.oracle].map((a) => a.toLowerCase()))];
   const result: SiteResult = {
     finishedAt: nowS,
     complete,
     files: pass.done,
-    unapproved: [
-      ...Object.entries(pass.addresses)
-        .filter(([a]) => !okAddresses.has(a))
-        .map(([value, file]) => ({ kind: "address" as const, value, file })),
-      ...Object.entries(pass.hosts)
-        .filter(([h]) => !okHosts.has(h))
-        .map(([value, file]) => ({ kind: "host" as const, value, file })),
-    ],
+    unapproved: noApprovedLists
+      ? []
+      : [
+          ...Object.entries(pass.addresses)
+            .filter(([a]) => !okAddresses.has(a))
+            .map(([value, file]) => ({ kind: "address" as const, value, file })),
+          ...Object.entries(pass.hosts)
+            .filter(([h]) => !okHosts.has(h))
+            .map(([value, file]) => ({ kind: "host" as const, value, file })),
+        ],
     missing: complete ? ours.filter((a) => pass.addresses[a] === undefined) : [],
     problems: pass.problems,
     capped: pass.capped,
+    noApprovedLists,
   };
   await db.batch([setMeta(db, "site_result", JSON.stringify(result)), setMeta(db, "site_pass", "")]);
   return { checked, finished: true };

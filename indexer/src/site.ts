@@ -3,10 +3,12 @@
 
 /** A 40-hex address with hex boundaries, so a 64-hex hash never matches. */
 export const ADDRESS_RE = /(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/g;
-/** The host of an https URL. */
-export const HOST_RE = /https:\/\/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?=[/:"'`\s)?#]|$)/g;
-/** A Next.js chunk path. */
-export const CHUNK_RE = /\/_next\/static\/chunks\/[A-Za-z0-9_./-]+?\.js(?![A-Za-z0-9_])/g;
+/** The host of a URL: https, http, wss, ws, or protocol-relative `//host` (after a quote, `(`, `=` or a
+ * space, so a `// comment` doesn't count). */
+export const HOST_RE = /(?:(?:https?|wss?):|(?<=["'(\s=`]))\/\/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?=[/:"'`\s)?#]|$)/g;
+/** A Next.js chunk path, with or without /_next/ (turbopack names its lazy chunks `static/chunks/….js`). */
+export const CHUNK_RE = /\/_next\/static\/chunks\/[A-Za-z0-9_./-]+?\.js(?![A-Za-z0-9_])|(?<![A-Za-z0-9_/])static\/chunks\/[A-Za-z0-9_./-]+?\.js(?![A-Za-z0-9_])/g;
+const chunkPath = (m: string) => (m.startsWith("/_next/") ? m : `/_next/${m}`);
 
 export interface ScanResult {
   addresses: string[];
@@ -21,31 +23,40 @@ export function scanScript(text: string): ScanResult {
   return {
     addresses: uniq([...text.matchAll(ADDRESS_RE)].map((m) => m[0].toLowerCase())),
     hosts: uniq([...text.matchAll(HOST_RE)].map((m) => m[1].toLowerCase())),
-    chunks: uniq([...text.matchAll(CHUNK_RE)].map((m) => m[0])),
+    chunks: uniq([...text.matchAll(CHUNK_RE)].map((m) => chunkPath(m[0]))),
   };
 }
 
-/** A page's inline scripts, and its `<script src>` paths under /_next/static/. */
-export function pageScripts(html: string): { inline: string[]; srcs: string[] } {
-  const inline: string[] = [];
-  const srcs: string[] = [];
-  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(m[1])?.[1];
-    if (src) {
-      const path = src.startsWith("http") ? safePath(src) : src;
-      if (path?.startsWith("/_next/static/")) srcs.push(path);
-    } else if (m[2].trim()) inline.push(m[2]);
+/** The scripts a page loads: every `<script src>` and `<link rel=modulepreload>` or `<link rel=preload
+ * as=script>`. A same-origin one is a path to fetch and scan (wherever it is: /_next/static/, /cdn-cgi/, …);
+ * a cross-origin one is never fetched, its host is reported for approval. */
+export function pageScripts(html: string, origin: string): { srcs: string[]; foreignHosts: string[] } {
+  const srcs = new Set<string>();
+  const foreign = new Set<string>();
+  const take = (ref: string) => {
+    let u: URL;
+    try {
+      u = new URL(ref, origin);
+    } catch {
+      return;
+    }
+    if (u.origin === new URL(origin).origin) srcs.add(u.pathname);
+    else foreign.add(u.hostname.toLowerCase());
+  };
+  for (const m of html.matchAll(/<script\b([^>]*)>/gi)) {
+    const src = attr(m[1], "src");
+    if (src) take(src);
   }
-  return { inline, srcs: [...new Set(srcs)] };
+  for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
+    const rel = (attr(m[1], "rel") ?? "").toLowerCase().split(/\s+/);
+    const as = (attr(m[1], "as") ?? "").toLowerCase();
+    const href = attr(m[1], "href");
+    if (href && (rel.includes("modulepreload") || (rel.includes("preload") && as === "script"))) take(href);
+  }
+  return { srcs: [...srcs], foreignHosts: [...foreign].sort() };
 }
 
-const safePath = (u: string) => {
-  try {
-    return new URL(u).pathname;
-  } catch {
-    return undefined;
-  }
-};
+const attr = (attrs: string, name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(attrs)?.slice(1).find((x) => x !== undefined);
 
 /** The body as text, read as a stream and cancelled once past `maxBytes` (never buffering more). */
 export async function readCapped(res: Response, maxBytes: number): Promise<{ text: string } | { tooLarge: true }> {

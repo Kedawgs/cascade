@@ -67,6 +67,7 @@ export const RULES = {
   "bridge.check_stuck": warning("condition"),
   "indexer.reorg": warning("event"),
   "site.unreachable": warning("condition"),
+  "site.no_approved_lists": warning("condition"),
   "monitor.chain_unreadable": warning("condition"),
   "monitor.email_failing": warning("condition"),
   "monitor.rule_failed": warning("condition"),

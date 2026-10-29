@@ -1,0 +1,13 @@
+{
+  "base": { "chainId": 8453, "startBlock": "37000000", "baselineBlock": "37000050" },
+  "bittensor": { "chainId": 964, "startBlock": "6900000", "baselineBlock": "6900040" },
+  "frontDoor": "0x8A825738D0287D0959957A0f6ec18bA1276d209d",
+  "baseAdapter": "0x019c592aFe36E17f71866FeF0BC09508b3714450",
+  "staker": "0x51D233584210133De458DC45c0BcA0698D31396d",
+  "oracle": "0x9788d195AecE108638d519bFa3a09004b3005E4D",
+  "vault": "0x44CeaCE0b097D9d5eF01e08b12029Ad2762cbDC6",
+  "bitAdapter": "0x51D233584210133De458DC45c0BcA0698D31396d",
+  "vaultColdkey": "0x2c9db4bedc1653813af5e5156519a6982e5c499348ffbdbedd1fc07ffa777f41",
+  "stakeHotkey": "0x358cae921ebeb5f9e82d096d664ce8840b2f36e5ba6c59ac22ded1528bfab0a7",
+  "batchMaxWaitS": 0
+}

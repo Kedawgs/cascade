@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
@@ -14,8 +15,14 @@ export default defineConfig({
         plugins: [
           cloudflareTest(async () => ({
             wrangler: { configPath: "./wrangler.jsonc", environment: "test" },
-            // the migrations, handed to the setup file, which applies them to each test file's D1
-            miniflare: { bindings: { TEST_MIGRATIONS: await readD1Migrations(here("./migrations")) } },
+            miniflare: {
+              bindings: {
+                // the migrations, handed to the setup file, which applies them to each test file's D1
+                TEST_MIGRATIONS: await readD1Migrations(here("./migrations")),
+                // a fixed fake deployment in place of wrangler.jsonc's placeholder (plan Task 29 fills that)
+                DEPLOYMENT: readFileSync(here("./test/fixtures/deployment.json"), "utf8"),
+              },
+            },
           })),
         ],
         test: {

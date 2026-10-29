@@ -10,7 +10,7 @@ import { pauseCommand, pauseSigner } from "./pause.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
-import { keeperSigner, requireKeeperKey } from "./keeper/signer.ts";
+import { keeperSigner, requireKeeperKey, separateKeeper } from "./keeper/signer.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
 import { preflight } from "./preflight.ts";
@@ -50,6 +50,10 @@ function ctxFor(live: boolean): Ctx {
  * OPS_KEEPER_PASSWORD_FILE, else as the test wallet (keeperSigner); requireReady refuses a mismatch. */
 const keeperCtx = (live: boolean, rec: DeploymentRecord): Ctx => ({ ...ctxFor(live), signer: keeperSigner(env, paths(env), rec.plan) });
 
+/** A separate keeper key for budget and preflight to price and check (separateKeeper): the live record's
+ * keeper, else a launch's from the environment. */
+const budgetKeeper = () => separateKeeper(env, loadRecordFor(recordPath(true), true)?.plan);
+
 /** The record of the deployment OPS_DEPLOYMENT names (without it, the v2 test deployment's). */
 const recordPath = (live: boolean) => recordFor(env, live);
 
@@ -63,7 +67,7 @@ async function run(a: Args): Promise<number> {
     case "preflight": {
       const ctx = ctxFor(true);
       const rehearsal = loadRecordFor(recordPath(false), false);
-      const budget = rehearsal ? computeBudget(await gatherBudgetInputs(ctx, rehearsal, claimPolicy(env))) : undefined;
+      const budget = rehearsal ? computeBudget(await gatherBudgetInputs(ctx, rehearsal, claimPolicy(env), budgetKeeper())) : undefined;
       const r = await preflight(ctx, loadRecordFor(recordPath(true), true), budget);
       for (const line of r.lines) log(line);
       log(r.ok ? "Pre-flight: all clear" : "Pre-flight: fix the problems above before deploying");
@@ -72,7 +76,7 @@ async function run(a: Args): Promise<number> {
     case "budget": {
       const rehearsal = loadRecordFor(recordPath(false), false);
       if (!rehearsal) throw new Error("run `pnpm ops rehearse` first: the budget uses its measured gas");
-      for (const line of formatBudget(computeBudget(await gatherBudgetInputs(ctxFor(true), rehearsal, claimPolicy(env))))) log(line);
+      for (const line of formatBudget(computeBudget(await gatherBudgetInputs(ctxFor(true), rehearsal, claimPolicy(env), budgetKeeper())))) log(line);
       return 0;
     }
     case "deploy":

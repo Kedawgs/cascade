@@ -5,12 +5,12 @@ import { type Address, type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import { paths, WALLET } from "../src/config.ts";
 import { claim, close, deliver, payouts, requireReady, roll, stake } from "../src/keeper/actions.ts";
-import { keeperSigner, requireKeeperKey } from "../src/keeper/signer.ts";
+import { keeperSigner, requireKeeperKey, separateKeeper } from "../src/keeper/signer.ts";
 import { DELIVERY_READ_ABIS, keeperDeps, REWARD_READ_ABIS } from "../src/keeper/state.ts";
 import { buildPlanV3 } from "../src/plan.ts";
 import type { Ctx } from "../src/send.ts";
 import { type Answer, COLDKEY, fakeChain, stubDeps, v3Record } from "./fake-keeper.ts";
-import { ROLES } from "./launch-roles.ts";
+import { ROLES, ROLES_ENV } from "./launch-roles.ts";
 
 const KEEPER = ROLES.keeper;
 const launch = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
@@ -98,5 +98,15 @@ describe("the keeper's reads follow its signer", () => {
     expect(nonceOf).toEqual([KEEPER]);
     expect(balanceOf).toEqual([KEEPER]);
     expect(callsFrom).toEqual([KEEPER]);
+  });
+});
+
+describe("the separate keeper key budget and preflight check", () => {
+  it("is the record's keeper (else a launch's from the environment) when OPS_KEEPER_KEYSTORE is set and it isn't the test wallet", () => {
+    expect(separateKeeper({}, launch.plan)).toBeUndefined();
+    expect(separateKeeper(KEYS, launch.plan)).toBe(KEEPER);
+    expect(separateKeeper(KEYS, v3Record().plan)).toBeUndefined();
+    expect(separateKeeper({ ...KEYS, ...ROLES_ENV, OPS_CADENCE: "launch" }, undefined)).toBe(KEEPER);
+    expect(separateKeeper(KEYS, undefined)).toBeUndefined();
   });
 });

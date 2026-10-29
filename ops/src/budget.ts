@@ -1,4 +1,4 @@
-import { encodeDeployData, formatEther, getContractAddress, type Hex, hexToBigInt } from "viem";
+import { type Address, encodeDeployData, formatEther, getContractAddress, type Hex, hexToBigInt } from "viem";
 import { loadArtifact } from "./artifacts.ts";
 import { CLAIM_POLICY, type ClaimPolicy, SETTINGS, WALLET, WALLET_SS58 } from "./config.ts";
 import { readColdkey } from "./deploy.ts";
@@ -29,6 +29,9 @@ export interface BudgetInputs {
   claimGasLimit?: bigint;
   /** v3: what one claim costs (the claim policy's, so OPS_CLAIM_COST_TAO applies) */
   claimCostTao?: bigint;
+  /** A separate keeper key (OPS_KEEPER_KEYSTORE): it pays the keeper's running costs, the test wallet only
+   * the deployment's */
+  keeper?: { address: Address; taoBalance: bigint; ethBalance: bigint };
 }
 
 export interface Budget {
@@ -42,6 +45,9 @@ export interface Budget {
   baseTxs: { deploy: number; closes: number; deliveries: number };
   /** v3: a reward claim, which the test run doesn't need and the totals above leave out */
   claim?: { gasLimit: bigint; upfront: bigint; cost: bigint; taoToSendWith: bigint };
+  /** A separate keeper key's share: its stakes, payouts and claims on Bittensor, its closes and deliveries
+   * on Base. The test wallet's needs above are then the deployment's alone. */
+  keeper?: { address: Address; taoNeed: bigint; ethNeed: bigint; taoBalance: bigint; ethBalance: bigint; taoToSend: bigint; ethToSend: bigint };
 }
 
 /** What the keeper spends on Bittensor during the test: two stakes, one payout batch, the sweep. */
@@ -59,15 +65,32 @@ const roundUp = (x: bigint, step: bigint) => ((x + step - 1n) / step) * step;
 const toSend = (need: bigint, have: bigint, step: bigint) => (need > have ? roundUp(need - have, step) : 0n);
 
 export function computeBudget(i: BudgetInputs): Budget {
-  const bitGas = i.bitCreateGas.bitAdapter + i.bitCreateGas.vault + i.bitConfigGas + KEEPER_BIT_GAS;
-  const taoNeed = ceil13(bitGas * i.bitGasPrice + SETTINGS.adapterReserve + SETTINGS.vaultReserve);
   const deliveries = i.deliverGas === undefined ? 0n : DELIVERIES;
-  const baseGas = i.baseDeployGas + CLOSES * i.closeGas + deliveries * (i.deliverGas ?? 0n);
-  const baseTxs = BigInt(i.baseDeploySteps) + CLOSES + deliveries;
-  const ethNeed = ceil13(baseGas * i.baseGasPrice + (CLOSES * i.baseFeeQuote * 125n) / 100n) + baseTxs * L1_PER_TX;
+  const reserves = SETTINGS.adapterReserve + SETTINGS.vaultReserve;
+  const deployBitGas = i.bitCreateGas.bitAdapter + i.bitCreateGas.vault + i.bitConfigGas;
+  const keeperBaseGas = CLOSES * i.closeGas + deliveries * (i.deliverGas ?? 0n);
+  const closeFees = (CLOSES * i.baseFeeQuote * 125n) / 100n;
+  const keeperTxs = CLOSES + deliveries;
+  const baseTxs = BigInt(i.baseDeploySteps) + keeperTxs;
+  // one key pays everything; a separate keeper key pays its running costs and the test wallet the deployment
+  const taoNeed = i.keeper
+    ? ceil13(deployBitGas * i.bitGasPrice + reserves)
+    : ceil13((deployBitGas + KEEPER_BIT_GAS) * i.bitGasPrice + reserves);
+  const ethNeed = i.keeper
+    ? ceil13(i.baseDeployGas * i.baseGasPrice) + BigInt(i.baseDeploySteps) * L1_PER_TX
+    : ceil13((i.baseDeployGas + keeperBaseGas) * i.baseGasPrice + closeFees) + baseTxs * L1_PER_TX;
+  const keeper = i.keeper && {
+    address: i.keeper.address,
+    taoNeed: ceil13(KEEPER_BIT_GAS * i.bitGasPrice),
+    ethNeed: ceil13(keeperBaseGas * i.baseGasPrice + closeFees) + keeperTxs * L1_PER_TX,
+    taoBalance: i.keeper.taoBalance,
+    ethBalance: i.keeper.ethBalance,
+  };
   const taoToSend = toSend(taoNeed, i.taoBalance, 10n ** 15n);
   // the same 30% margin as the rest of the TAO need, for a gas price that rises before the claim
   const upfront = i.claimGasLimit === undefined ? undefined : ceil13(i.claimGasLimit * i.bitGasPrice);
+  // a claim is the keeper's call: its up-front TAO is on the keeper key when there is one
+  const claimer = keeper ?? { taoNeed, taoBalance: i.taoBalance };
   return {
     taoNeed,
     ethNeed,
@@ -84,10 +107,29 @@ export function computeBudget(i: BudgetInputs): Budget {
             upfront,
             cost: i.claimCostTao ?? CLAIM_POLICY.claimCostTao,
             // the claim comes after the deployment's and the keeper's spending, so it needs its up-front sum on top
-            taoToSendWith: toSend(taoNeed + upfront, i.taoBalance, 10n ** 15n),
+            taoToSendWith: toSend(claimer.taoNeed + upfront, claimer.taoBalance, 10n ** 15n),
           },
         }),
+    ...(keeper
+      ? { keeper: { ...keeper, taoToSend: toSend(keeper.taoNeed, keeper.taoBalance, 10n ** 15n), ethToSend: toSend(keeper.ethNeed, keeper.ethBalance, 10n ** 14n) } }
+      : {}),
   };
+}
+
+/** Preflight's balance checks: the test wallet against its need, and a separate keeper key against its
+ * share: [label, problem or null]. */
+export function budgetChecks(b: Budget): [string, string | null][] {
+  const short = (have: bigint, need: bigint) => (have < need ? `it holds ${have} wei, the budget needs ${need}` : null);
+  return [
+    ["the test wallet holds enough TAO", short(b.taoBalance, b.taoNeed)],
+    ["the test wallet holds enough ETH on Base", short(b.ethBalance, b.ethNeed)],
+    ...(b.keeper
+      ? ([
+          [`the keeper key ${b.keeper.address} holds enough TAO on Bittensor`, short(b.keeper.taoBalance, b.keeper.taoNeed)],
+          [`the keeper key ${b.keeper.address} holds enough ETH on Base`, short(b.keeper.ethBalance, b.keeper.ethNeed)],
+        ] as [string, string | null][])
+      : []),
+  ];
 }
 
 export function formatBudget(b: Budget): string[] {
@@ -103,13 +145,24 @@ export function formatBudget(b: Budget): string[] {
       ? `Send ${formatEther(b.ethToSend)} ETH on Base to ${WALLET}`
       : "No ETH needed: the test wallet already holds enough on Base",
   ];
+  const k = b.keeper;
+  if (k) {
+    lines.push(
+      "The test wallet's needs above are the deployment's; the separate keeper key (OPS_KEEPER_KEYSTORE) pays its own running costs:",
+      `Keeper ${k.address}: about ${formatEther(k.taoNeed)} TAO needed on Bittensor (its stakes, payouts and claims); it holds ${formatEther(k.taoBalance)} TAO`,
+      k.taoToSend > 0n ? `Send ${formatEther(k.taoToSend)} TAO to the keeper's address ${k.address} on Bittensor EVM` : "No TAO needed: the keeper already holds enough on Bittensor",
+      `Keeper ${k.address}: about ${formatEther(k.ethNeed)} ETH needed on Base (its batch closes and deliveries); it holds ${formatEther(k.ethBalance)} ETH`,
+      k.ethToSend > 0n ? `Send ${formatEther(k.ethToSend)} ETH on Base to the keeper ${k.address}` : "No ETH needed: the keeper already holds enough on Base",
+    );
+  }
   const c = b.claim;
   if (c) {
+    const who = k ? "keeper" : "wallet";
     lines.push(
-      `Optional, not counted above: a reward claim is sent with a ${c.gasLimit.toLocaleString("en-US")} gas limit, so the wallet must hold about ${formatEther(c.upfront)} TAO up front when it claims (that limit at today's gas price, plus 30%); Bittensor refunds the unused gas, and a claim costs about ${formatEther(c.cost)} TAO`,
-      c.taoToSendWith > b.taoToSend
-        ? `To be able to claim during the test, send ${formatEther(c.taoToSendWith)} TAO in all instead`
-        : "The wallet already holds enough TAO to claim as well",
+      `Optional, not counted above: a reward claim is sent with a ${c.gasLimit.toLocaleString("en-US")} gas limit, so the ${who} must hold about ${formatEther(c.upfront)} TAO up front when it claims (that limit at today's gas price, plus 30%); Bittensor refunds the unused gas, and a claim costs about ${formatEther(c.cost)} TAO`,
+      c.taoToSendWith > (k ? k.taoToSend : b.taoToSend)
+        ? `To be able to claim during the test, send ${formatEther(c.taoToSendWith)} TAO in all ${k ? "to the keeper " : ""}instead`
+        : `The ${who} already holds enough TAO to claim as well`,
     );
   }
   return lines;
@@ -154,7 +207,7 @@ const estimateCreate = async (ctx: Ctx, name: string, args: unknown[]) => {
  * every Bittensor configuration call and, for v3, its round trip's USDC delivery and the claim policy's
  * cost of a claim. `ctx` points at the live chains. An unfinished rehearsal is refused before anything is
  * read, so budget and preflight never price the deployment from partial data. */
-export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord, policy: ClaimPolicy = CLAIM_POLICY): Promise<BudgetInputs> {
+export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord, policy: ClaimPolicy = CLAIM_POLICY, keeper?: Address): Promise<BudgetInputs> {
   const unfinished = unfinishedRehearsal(rehearsal);
   if (unfinished.length) {
     throw new Error(`the rehearsal record is unfinished (${unfinished.join("; ")}), so it can't price the live deployment: run \`pnpm ops rehearse\` again; nothing read`);
@@ -185,6 +238,7 @@ export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord, 
     baseGasPrice: await gasPriceOf(ctx.rpc, "base"),
     taoBalance: await balanceOf(ctx.rpc, "bittensor", WALLET),
     ethBalance: await balanceOf(ctx.rpc, "base", WALLET),
+    ...(keeper ? { keeper: { address: keeper, taoBalance: await balanceOf(ctx.rpc, "bittensor", keeper), ethBalance: await balanceOf(ctx.rpc, "base", keeper) } } : {}),
     ...(v3
       ? { deliverGas: delivery?.gasUsed ?? DEFAULT_DELIVER_GAS, claimGasLimit: claimGasLimit(VAULT_CLAIM_GAS_REQUIRED), claimCostTao: policy.claimCostTao }
       : {}),

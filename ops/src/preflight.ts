@@ -1,12 +1,12 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { type Address, getContractAddress, parseAbi } from "viem";
-import type { Budget } from "./budget.ts";
+import { type Budget, budgetChecks } from "./budget.ts";
 import { poolProblems } from "./cardinality.ts";
 import { type ChainName, LIVE, SETTINGS, WALLET } from "./config.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { windowOf } from "./keeper/state.ts";
-import { balanceOf, nonceOf, read } from "./rpc.ts";
+import { nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, logsOf } from "./send.ts";
 
 const ROUTER = parseAbi([
@@ -117,10 +117,8 @@ export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?:
   }
 
   if (budget) {
-    const tao = await balanceOf(ctx.rpc, "bittensor", WALLET);
-    const eth = await balanceOf(ctx.rpc, "base", WALLET);
-    check("the test wallet holds enough TAO", tao < budget.taoNeed ? `it holds ${tao} wei, the budget needs ${budget.taoNeed}` : null);
-    check("the test wallet holds enough ETH on Base", eth < budget.ethNeed ? `it holds ${eth} wei, the budget needs ${budget.ethNeed}` : null);
+    // the balances the budget just read: the test wallet's, and a separate keeper key's against its share
+    for (const [label, problem] of budgetChecks(budget)) check(label, problem);
   }
 
   const remote = rec?.plan.addresses.baseAdapter ?? getContractAddress({ from: WALLET, nonce: BigInt(nonces.base) });

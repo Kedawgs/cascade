@@ -1,4 +1,6 @@
-import { type Env, type Paths, WALLET } from "../config.ts";
+import type { Address } from "viem";
+import { cadenceFromEnv, type Env, type Paths, WALLET } from "../config.ts";
+import { launchRolesFromEnv } from "../roles.ts";
 import { type Plan, type PlanV3, rolesOf } from "../plan.ts";
 import { type Ctx, type Signer, signerOf, signingAccount } from "../send.ts";
 
@@ -17,6 +19,15 @@ export function keeperSigner(env: Env, p: Pick<Paths, "keystore" | "passwordFile
     throw new Error(`set both ${KEEPER_KEY_VARS} (the keeper's key), or neither (the test wallet's); nothing sent`);
   }
   return { address: rolesOf(plan).keeper, keystore, passwordFile, name: "the keeper" };
+}
+
+/** The separate keeper key that budget and preflight check, when OPS_KEEPER_KEYSTORE is set: the record's
+ * keeper, else (before any deployment) a launch's from OPS_LAUNCH_KEEPER. None when it is the test
+ * wallet: one key, which they already check. */
+export function separateKeeper(env: Env, plan: Plan | PlanV3 | undefined): Address | undefined {
+  if (!env.OPS_KEEPER_KEYSTORE?.trim()) return undefined;
+  const keeper = plan ? rolesOf(plan).keeper : cadenceFromEnv(env) === "launch" ? launchRolesFromEnv(env).keeper : WALLET;
+  return keeper.toLowerCase() === WALLET.toLowerCase() ? undefined : keeper;
 }
 
 /** What requireReady says when the keeper commands would sign as someone other than the record's keeper. */

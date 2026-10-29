@@ -1,6 +1,6 @@
 import { type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
-import { type BudgetInputs, computeBudget, formatBudget, gatherBudgetInputs } from "../src/budget.ts";
+import { type BudgetInputs, budgetChecks, computeBudget, formatBudget, gatherBudgetInputs } from "../src/budget.ts";
 import { claimPolicy, paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
@@ -38,6 +38,49 @@ describe("budget", () => {
   it("asks for nothing when the wallet already holds enough", () => {
     const b = computeBudget({ ...inputs, taoBalance: 10n ** 18n, ethBalance: 10n ** 18n });
     expect([b.taoToSend, b.ethToSend]).toEqual([0n, 0n]);
+  });
+
+  it("with a separate keeper key, splits the keeper's running costs from the deployment's", () => {
+    const KEEPER = "0x000000000000000000000000000000000000c0c1" as const;
+    const b = computeBudget({ ...inputs, keeper: { address: KEEPER, taoBalance: 0n, ethBalance: 0n } });
+    // the keeper: two stakes, a payout batch and the sweep's 4,030,000 gas × 5 gwei × 1.3; three closes
+    // (1,200,000 gas × 0.006 gwei + 3 × 6.19e14 × 1.25) × 1.3, + 3 × 4e13 L1
+    expect(b.keeper).toEqual({
+      address: KEEPER,
+      taoNeed: 26_195_000_000_000_000n,
+      ethNeed: 3_146_985_000_000_000n,
+      taoBalance: 0n,
+      ethBalance: 0n,
+      taoToSend: 27_000_000_000_000_000n,
+      ethToSend: 3_200_000_000_000_000n,
+    });
+    // the test wallet: only the deployment, which with the keeper's share adds up to the one-key total
+    expect(b.taoNeed).toBe(53_133_918_500_000_000n);
+    expect(b.ethNeed).toBe(119_000_000_000_000n);
+    const one = computeBudget(inputs);
+    expect(b.taoNeed + b.keeper!.taoNeed).toBe(one.taoNeed);
+    expect(b.ethNeed + b.keeper!.ethNeed).toBe(one.ethNeed);
+    const lines = formatBudget(b);
+    expect(lines).toContain(`Keeper ${KEEPER}: about 0.026195 TAO needed on Bittensor (its stakes, payouts and claims); it holds 0 TAO`);
+    expect(lines).toContain(`Send 0.027 TAO to the keeper's address ${KEEPER} on Bittensor EVM`);
+    expect(lines).toContain(`Keeper ${KEEPER}: about 0.003146985 ETH needed on Base (its batch closes and deliveries); it holds 0 ETH`);
+    expect(lines).toContain(`Send 0.0032 ETH on Base to the keeper ${KEEPER}`);
+  });
+
+  it("preflight checks each key's balances against its share", () => {
+    const KEEPER = "0x000000000000000000000000000000000000c0c1" as const;
+    const funded = computeBudget({ ...inputs, taoBalance: 10n ** 18n, ethBalance: 10n ** 18n });
+    expect(budgetChecks(funded)).toEqual([
+      ["the test wallet holds enough TAO", null],
+      ["the test wallet holds enough ETH on Base", null],
+    ]);
+    const short = computeBudget({ ...inputs, taoBalance: 10n ** 18n, ethBalance: 10n ** 18n, keeper: { address: KEEPER, taoBalance: 1n, ethBalance: 10n ** 18n } });
+    expect(budgetChecks(short)).toEqual([
+      ["the test wallet holds enough TAO", null],
+      ["the test wallet holds enough ETH on Base", null],
+      [`the keeper key ${KEEPER} holds enough TAO on Bittensor`, "it holds 1 wei, the budget needs 26195000000000000"],
+      [`the keeper key ${KEEPER} holds enough ETH on Base`, null],
+    ]);
   });
 
   it("names each destination with its chain", () => {

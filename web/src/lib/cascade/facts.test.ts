@@ -610,8 +610,8 @@ describe("facts", () => {
     expect(await went(H(21))).toBe(true);
     expect(await went(H(22))).toBe(false);
     expect(await went(H(23))).toBe(false);
-    // never mined (dropped) is not through; a receipt that can't be read is never taken for an answer
-    expect(await went(H(24))).toBe(false);
+    // not found (a node that is behind, or not mined yet) is no answer, nor is a receipt that can't be read
+    expect(await went(H(24))).toBeUndefined();
     await expect(went(H(25))).rejects.toThrow();
     expect(await claimWentThrough(c.clients, { account: ME, hashes: {} })).toBe(false);
   });

@@ -566,15 +566,16 @@ async function claimResult(c: Pick<Clients, "base">, k: ClaimOp): Promise<Withdr
 }
 
 /** Whether a claim went through on Base: its receipt succeeded and shows the account's Claimed event (a
- * smart account can mine a transaction in which the claim itself reverted). One never mined isn't;
- * throws when the receipt can't be read, which must never be taken for "no". */
-export async function claimWentThrough(c: Pick<Clients, "base">, k: Pick<ClaimOp, "account" | "hashes">): Promise<boolean> {
+ * smart account can mine a transaction in which the claim itself reverted). False with no claim sent, or
+ * a receipt that shows it didn't; undefined while Base has no receipt to show (a node that is behind, or
+ * not mined yet), and throws when it can't be read: neither may ever be taken for "no". */
+export async function claimWentThrough(c: Pick<Clients, "base">, k: Pick<ClaimOp, "account" | "hashes">): Promise<boolean | undefined> {
   if (!k.hashes.claim) return false;
   let r: Receipt;
   try {
     r = (await c.base.getTransactionReceipt({ hash: k.hashes.claim })) as unknown as Receipt;
   } catch (e) {
-    if ((e as { name?: string }).name === "TransactionReceiptNotFoundError") return false;
+    if ((e as { name?: string }).name === "TransactionReceiptNotFoundError") return undefined;
     throw e;
   }
   return (

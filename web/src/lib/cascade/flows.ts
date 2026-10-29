@@ -376,12 +376,16 @@ export function retryPatch(op: Pick<DepositOp, "state" | "hashes" | "callsId" | 
   };
 }
 
+const CLAIM_UNCHECKED = "We couldn't check your claim on Base just now, so nothing was sent. Try again in a moment.";
+
 /** Carrying on a claim that stopped. The claim is kept only when Base shows it went through
- * (`claimed`, from its receipt), so only the steps after it are sent again; anything else, like a
- * wallet batch that failed whole (its hash recorded under every step), is forgotten with its batch id.
- * Either way the rest goes one step at a time, as retryPatch does for a deposit. */
-export function claimRetryPatch(op: Pick<ClaimOp, "hashes">, claimed: boolean): Partial<ClaimOp> {
+ * (`claimed`, from its receipt), so only the steps after it are sent again; one Base shows didn't, like
+ * a wallet batch that failed whole (its hash recorded under every step), is forgotten with its batch id.
+ * Either way the rest goes one step at a time, as retryPatch does for a deposit. A claim Base can't
+ * show yet (`claimed` undefined) stops here: forgetting it could send a second claim. */
+export function claimRetryPatch(op: Pick<ClaimOp, "hashes">, claimed: boolean | undefined): Partial<ClaimOp> {
   const { claim } = op.hashes;
+  if (claim && claimed === undefined) throw new FlowError(CLAIM_UNCHECKED, "needs-you");
   return {
     hashes: claimed && claim ? { claim } : {},
     callsId: undefined,

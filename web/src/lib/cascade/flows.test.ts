@@ -390,6 +390,19 @@ describe("claimRetryPatch", () => {
     expect(t.states.at(-1)).toBe("sent");
   });
 
+  it("never forgets a claim Base can't find yet: it asks to try again, so a second claim is never sent", () => {
+    const recorded = { hashes: { claim: H(1) }, mode: "sequential" as const, state: "failed" as const };
+    expect(() => claimRetryPatch(recorded, undefined)).toThrow(FlowError);
+    try {
+      claimRetryPatch(recorded, undefined);
+    } catch (e) {
+      expect((e as FlowError).state).toBe("needs-you");
+      expect((e as FlowError).message).toMatch(/try again/i);
+    }
+    // with no claim sent there is nothing to find
+    expect(claimRetryPatch({ hashes: {} }, undefined)).toMatchObject({ hashes: {}, mode: "sequential" });
+  });
+
   it("keeps a claim that went through, so only what follows it is sent again", () => {
     const sequential = { hashes: { claim: H(1), approveTao: H(2), swap: H(3) }, mode: "sequential" as const, state: "failed" as const };
     expect(claimRetryPatch(sequential, true)).toEqual({ hashes: { claim: H(1) }, callsId: undefined, mode: "sequential", state: "running", error: undefined });

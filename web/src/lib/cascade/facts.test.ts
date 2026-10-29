@@ -1,4 +1,4 @@
-import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, TransactionReceiptNotFoundError } from "viem";
+import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
@@ -61,6 +61,9 @@ function chains(
     executionState?: number;
     /** What each successive request's server reports as its head (defaults to `latest`). */
     heads?: bigint[];
+    /** Base transactions by hash (still waiting when `blockNumber` is null), and the account's nonce on Base. */
+    baseTxs?: Record<string, { nonce: number; blockNumber: bigint | null }>;
+    nonce?: number;
   } = {},
 ) {
   const windows: [bigint, bigint][] = [];
@@ -95,6 +98,12 @@ function chains(
       return r;
     },
     readContract: async () => opts.executionState ?? 0,
+    getTransaction: async ({ hash }: { hash: Hex }) => {
+      const tx = opts.baseTxs?.[hash];
+      if (!tx) throw new TransactionNotFoundError({ hash });
+      return tx;
+    },
+    getTransactionCount: async () => opts.nonce ?? 0,
   };
   return { clients: { base, bittensor } as never, windows };
 }
@@ -676,16 +685,26 @@ describe("facts", () => {
       expect(f.delivered?.outcome).toBe("deposited");
     }
     const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, hash: H(3), batchId: 3n, state: "sent" };
-    // a cancel Base can't show yet is pending, not "didn't go through"
+    // a cancel Base doesn't know at all is unseen: just sent, or dropped
     const pending = await depositWith(H(16));
     expect(pending.cancelMined).toBe(false);
-    expect(pending.cancelPending).toBe(true);
+    expect(pending.cancelPending).toBe("unseen");
     expect(took.cancelPending).toBeUndefined();
     expect((await depositWith(H(14))).cancelPending).toBeUndefined();
     const cancelled = await withdrawalFacts(c.clients, D, { ...w, cancelled: { hash: H(15), at: 1 } }, { fd, vault, scan, claims: [] });
     expect(cancelled.facts.cancelMined).toBe(true);
     expect(cancelled.facts.delivered).toBeUndefined();
     expect(cancelled.facts.payout).toBeUndefined();
+  });
+
+  it("knows whether a cancel with no receipt can still go through: still waiting, or its nonce taken by another transaction", async () => {
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: {}, batchId: 4n, state: "sent", cancelled: { hash: H(16), at: 1 } };
+    const pendingWith = async (nonce: number) =>
+      (await depositFacts(chains({ baseTxs: { [H(16)]: { nonce: 7, blockNumber: null } }, nonce }).clients, D, dep, { fd, vault, scan: newScan(D) })).facts.cancelPending;
+    // waiting to be mined: the account hasn't used nonce 7 yet
+    expect(await pendingWith(7)).toBe("known");
+    // the account's nonce is past it: another transaction took nonce 7, so this cancel can never be mined
+    expect(await pendingWith(8)).toBeUndefined();
   });
 
   it("says a claim went through only when its receipt succeeded and shows the account's Claimed event", async () => {

@@ -134,15 +134,19 @@ describe("deposit trail", () => {
 
   it("says it is cancelling, and offers no second cancel, while Base hasn't settled the one sent", () => {
     const sent = { ...op, cancelled: { hash: H(12), at: T0.getTime() + 4 * 60_000 } };
-    const r = depositRecord(sent, { ...base, cancelPending: true });
+    const r = depositRecord(sent, { ...base, cancelPending: "unseen" });
     expect(r.steps[2]).toMatchObject({ status: "active", detail: "Cancelling…" });
     expect(r.steps[2].txUrl).toContain(H(12));
     expect(r.cancellableWei).toBeUndefined();
     expect(r.status).toBe("in_progress");
-    // ten minutes on and still nothing on Base: taken for dropped, and Cancel is offered again
-    const later = depositRecord(sent, { ...base, cancelPending: true, now: new Date(T0.getTime() + 15 * 60_000) });
+    // ten minutes on and Base still doesn't know it: dropped, and Cancel is offered again
+    const later = depositRecord(sent, { ...base, cancelPending: "unseen", now: new Date(T0.getTime() + 15 * 60_000) });
     expect(later.cancellableWei).toBe(78_000_000_000_000_000n);
     expect(later.steps[2].detail).not.toBe("Cancelling…");
+    // a cancel Base has, still waiting to be mined, is on its way however long it takes
+    const waiting = depositRecord(sent, { ...base, cancelPending: "known", now: new Date(T0.getTime() + 60 * 60_000) });
+    expect(waiting.steps[2].detail).toBe("Cancelling…");
+    expect(waiting.cancellableWei).toBeUndefined();
   });
 
   it("stays cancelled after its batch is delivered with other people's deposits", () => {
@@ -436,10 +440,11 @@ describe("withdrawal trail", () => {
 
   it("says it is cancelling, and offers no second cancel, while Base hasn't settled the one sent", () => {
     const sent = { ...wop, cancelled: { hash: H(13), at: T0.getTime() + 4 * 60_000 } };
-    const r = withdrawalRecord(sent, { ...wbase, cancelPending: true });
+    const r = withdrawalRecord(sent, { ...wbase, cancelPending: "unseen" });
     expect(r.steps[1]).toMatchObject({ status: "active", detail: "Cancelling…" });
     expect(r.cancellableShares).toBeUndefined();
-    expect(withdrawalRecord(sent, { ...wbase, cancelPending: true, now: new Date(T0.getTime() + 15 * 60_000) }).cancellableShares).toBe(10n ** 22n);
+    expect(withdrawalRecord(sent, { ...wbase, cancelPending: "unseen", now: new Date(T0.getTime() + 15 * 60_000) }).cancellableShares).toBe(10n ** 22n);
+    expect(withdrawalRecord(sent, { ...wbase, cancelPending: "known", now: new Date(T0.getTime() + 60 * 60_000) }).cancellableShares).toBeUndefined();
   });
 
   it("stays cancelled when its batch is delivered with another request of the account's", () => {

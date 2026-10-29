@@ -11,8 +11,9 @@ export interface DepositFacts {
   depositMined: boolean;
   /** The cancel (taking it back out of the open batch) went through. */
   cancelMined?: boolean;
-  /** A cancel was sent and Base doesn't show it settled yet (not mined, or not readable). */
-  cancelPending?: true;
+  /** A cancel was sent and has no receipt yet: Base has the transaction and it can still be mined
+   * ("known"), or Base doesn't know it ("unseen": just sent, or dropped). */
+  cancelPending?: "known" | "unseen";
   /** USDC the swap really took (its receipt), when known. */
   usdcSpent?: bigint;
   /** v3: the TAO the front door recorded for this stake (the swap's output, at least the floor), when known. */
@@ -46,7 +47,7 @@ export interface DepositFacts {
 export interface WithdrawalFacts {
   requestMined: boolean;
   cancelMined?: boolean;
-  cancelPending?: true;
+  cancelPending?: "known" | "unseen";
   now: Date;
   /** When the unstake was asked for, when its batch left Base (if known), and where to watch the bridge. */
   requestedAt?: Date;
@@ -161,11 +162,12 @@ function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "
  * wherever the record shows or counts. */
 export const isCancelled = (op: { cancelled?: unknown }, f: { cancelMined?: boolean }): boolean => op.cancelled !== undefined && f.cancelMined === true;
 
-/** A cancel sent from here that Base doesn't show settled yet: "Cancelling…", with no second cancel
- * offered. Still nothing on Base this long after it was sent, it is taken for dropped and Cancel is
- * offered again. */
-const isCancelling = (op: { cancelled?: { at: number } }, f: { cancelPending?: true; now: Date }): boolean =>
-  op.cancelled !== undefined && f.cancelPending === true && f.now.getTime() - op.cancelled.at < STALE_MS;
+/** A cancel sent from here with no receipt yet that can still go through: "Cancelling…", with no second
+ * cancel offered. One Base has and can still mine stays so however long it takes; one Base doesn't know
+ * is given ten minutes to appear, then taken for dropped, and Cancel is offered again. (One whose nonce
+ * the account used for another transaction can never be mined: Cancel is offered at once.) */
+const isCancelling = (op: { cancelled?: { at: number } }, f: { cancelPending?: "known" | "unseen"; now: Date }): boolean =>
+  op.cancelled !== undefined && (f.cancelPending === "known" || (f.cancelPending === "unseen" && f.now.getTime() - op.cancelled.at < STALE_MS));
 const CANCELLING = "Cancelling…";
 
 /** The status of a wallet step: done once mined, otherwise whatever the operation says. */

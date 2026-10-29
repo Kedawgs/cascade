@@ -85,7 +85,8 @@ contract CcipAdapterBaseTest is Test {
             remoteSelector: 2135107236357186872,
             remoteAdapter: makeAddr("remoteAdapter"),
             gasBase: base,
-            gasPerEntry: perEntry
+            gasPerEntry: perEntry,
+            maxMessageValue: 5_000e18
         });
     }
 
@@ -220,6 +221,45 @@ contract CcipAdapterBaseTest is Test {
         vm.prank(frontDoor);
         h.send{value: 2e15}(964, recipient, message, 5_000e18);
         assertEq(fakeRouter.sends(), 1);
+    }
+
+    /// The per-message cap is set at deployment, at most the lane's MAX_MESSAGE_VALUE (5,000 TAO), so a
+    /// launch can deploy with a cap near its real batch size; send and quoteFee both refuse more.
+    function test_deployedMessageCapBoundsSendAndQuote() public {
+        CcipAdapterBase.Config memory c = cfgWith(1_000_000, 25_000);
+        c.router = address(fakeRouter);
+        c.token = address(tao);
+        c.maxMessageValue = 20e18;
+        AdapterHarness small = new AdapterHarness(c);
+        assertEq(small.maxMessageValue(), 20e18);
+        assertEq(small.MAX_MESSAGE_VALUE(), 5_000e18);
+        assertEq(h.maxMessageValue(), 5_000e18);
+        vm.prank(frontDoor);
+        tao.approve(address(small), type(uint256).max);
+        bytes memory message = oneEntryBatch();
+
+        vm.expectRevert(CcipAdapterBase.MessageTooLarge.selector);
+        small.quoteFee(964, recipient, message, 20e18 + 1);
+        vm.prank(frontDoor);
+        vm.expectRevert(CcipAdapterBase.MessageTooLarge.selector);
+        small.send{value: 2e15}(964, recipient, message, 20e18 + 1);
+
+        small.quoteFee(964, recipient, message, 20e18);
+        vm.prank(frontDoor);
+        small.send{value: 2e15}(964, recipient, message, 20e18);
+        assertEq(fakeRouter.sends(), 1);
+    }
+
+    function test_constructorRejectsMessageCapOutOfRange() public {
+        CcipAdapterBase.Config memory c = cfgWith(1_000_000, 25_000);
+        c.maxMessageValue = 0;
+        vm.expectRevert(CcipAdapterBase.MessageCapOutOfRange.selector);
+        new AdapterHarness(c);
+        c.maxMessageValue = 5_000e18 + 1;
+        vm.expectRevert(CcipAdapterBase.MessageCapOutOfRange.selector);
+        new AdapterHarness(c);
+        c.maxMessageValue = 5_000e18;
+        assertEq(new AdapterHarness(c).maxMessageValue(), 5_000e18);
     }
 
     function test_send_insufficientFeeReverts() public {

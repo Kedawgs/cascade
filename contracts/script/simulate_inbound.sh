@@ -32,6 +32,8 @@
 #   AMOUNT          bridged TAO to deliver, in wei; whole rao and at least the staking floor (default 1e18)
 #   GAS_BASE, GAS_PER_ENTRY  the Bittensor adapter's gas model toward Base (default 120000 / 29900,
 #                   the deployment values); they only change the bytecode's immutables
+#   MAX_MESSAGE     the Bittensor adapter's per-message cap in wei (default 5000e18, the lane's
+#                   limit); an immutable that limits sends only, so a delivery ignores it
 #   RESERVE         the adapter's native reserve in wei (default 1e12, the deployment value; 0 shows the
 #                   ConversionShort failure of an unfunded adapter)
 #   FUNDER          any address holding at least RESERVE, used as the eth_call's sender (default: the
@@ -46,6 +48,7 @@ REMOTE_ADAPTER="${REMOTE_ADAPTER:-0x1111111111111111111111111111111111111111}"
 AMOUNT="${AMOUNT:-1000000000000000000}"
 GAS_BASE="${GAS_BASE:-120000}"
 GAS_PER_ENTRY="${GAS_PER_ENTRY:-29900}"
+MAX_MESSAGE="${MAX_MESSAGE:-5000000000000000000000}"
 RESERVE="${RESERVE:-1000000000000}"
 
 # Live addresses on Bittensor EVM (chain 964); the same values as test/fork/ForkBase.sol.
@@ -104,7 +107,7 @@ cast chain-id --rpc-url "$LOCAL_RPC" >/dev/null 2>&1 || {
 }
 echo "anvil pid $ANVIL_PID on $LOCAL_RPC"
 
-CONFIG="($BIT_ROUTER,$BIT_TAO,964,8453,$BASE_SELECTOR,$REMOTE_ADAPTER,$GAS_BASE,$GAS_PER_ENTRY)"
+CONFIG="($BIT_ROUTER,$BIT_TAO,964,8453,$BASE_SELECTOR,$REMOTE_ADAPTER,$GAS_BASE,$GAS_PER_ENTRY,$MAX_MESSAGE)"
 echo "CcipBittensorAdapter($CONFIG, $ALPHA_VAULT)"
 forge create src/adapters/CcipBittensorAdapter.sol:CcipBittensorAdapter --rpc-url "$LOCAL_RPC" \
   --mnemonic "$MNEMONIC" --mnemonic-index 0 --broadcast \

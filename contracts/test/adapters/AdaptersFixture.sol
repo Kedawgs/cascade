@@ -85,7 +85,8 @@ abstract contract AdaptersFixture is Test {
                 remoteSelector: BITTENSOR_SELECTOR,
                 remoteAdapter: pAdapterBit,
                 gasBase: 1_000_000,
-                gasPerEntry: 25_000
+                gasPerEntry: 25_000,
+                maxMessageValue: 5_000e18
             }),
             0.01e18
         );
@@ -98,7 +99,8 @@ abstract contract AdaptersFixture is Test {
                 remoteSelector: BASE_SELECTOR,
                 remoteAdapter: pAdapterBase,
                 gasBase: 1_000_000,
-                gasPerEntry: 25_000
+                gasPerEntry: 25_000,
+                maxMessageValue: 5_000e18
             }),
             IAlphaVault(address(av))
         );

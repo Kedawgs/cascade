@@ -16,7 +16,9 @@ contract CcipBaseAdapter is CcipAdapterBase {
     /// @notice Smallest non-zero token amount a send may carry.
     uint256 public immutable minSendAmount;
 
+    /// @dev A minimum above the per-message cap would leave no amount sendable.
     constructor(Config memory c, uint256 minSendAmount_) CcipAdapterBase(c) {
+        if (minSendAmount_ > c.maxMessageValue) revert MessageCapOutOfRange();
         minSendAmount = minSendAmount_;
     }
 

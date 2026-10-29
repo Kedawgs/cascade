@@ -87,7 +87,8 @@ upgrade) lands there. An adapter must:
   anyone re-executes it. In that fallback the token check is pooled across chunks, so a chunk whose
   tokens the rail loses makes the *last* chunk's data fail, not its own.
 - **Enforce the lane's limits before sending:** at most 5,000 TAO per message (ForeverMoney's pool
-  rate limit, refilling at 0.6 TAO/s and shared with every ForeverMoney user), at most 32,000 bytes
+  rate limit, refilling at 0.6 TAO/s and shared with every ForeverMoney user; each adapter is
+  deployed with its own lower cap, `maxMessageValue`), at most 32,000 bytes
   of data, and a delivery gas budget within about 7.2M on Bittensor and about 13M on Base. The
   contracts' defaults are set to stay under these: 4,000 TAO per batch and per payout chunk, 50 + 50
   entries per batch, and at most 100 entries in any list.
@@ -114,10 +115,12 @@ the fee rule.
 
 - **Immutables only.** `router`, `token` (ForeverMoney's TAO on that chain), `localChainId`,
   `remoteChainId`, `remoteSelector`, `remoteAdapter` (the only CCIP sender a delivery accepts), and
-  the gas model `gasBase` and `gasPerEntry`; plus `minSendAmount` on Base and `alphaVault` on
-  Bittensor. No owner, pause, upgrade or rescue function, and no stored balance anyone can
-  withdraw. A change is a new adapter through the 7-day bridge registry. The constructor rejects
-  zero addresses, equal chain ids, and a gas model whose largest message does not fit the cap.
+  the gas model `gasBase` and `gasPerEntry`, and the per-message cap `maxMessageValue`; plus
+  `minSendAmount` on Base and `alphaVault` on Bittensor. No owner, pause, upgrade or rescue
+  function, and no stored balance anyone can withdraw. A change is a new adapter through the
+  7-day bridge registry. The constructor rejects zero addresses, equal chain ids, a gas model
+  whose largest message does not fit the cap, a `maxMessageValue` of 0 or above 5,000 TAO, and
+  (Base) a `minSendAmount` above `maxMessageValue`.
 - **A pipe, not a peer.** The CCIP data is `abi.encode(recipient, sender, message)`: who called
   `send` and who should receive. A delivery checks that the message came from the Router, from
   `remoteSelector` and from `remoteAdapter` (exactly 32 bytes), and carries at most one token, ours.
@@ -156,9 +159,16 @@ the fee rule.
   delivery gas is unmeasured until the first live batch, which should therefore be the single-entry
   batch of the checklist (item 28), with the re-execution path and its `verifierResults` source
   ready.
-- **Send limits.** At most 5,000 TAO per message (`MAX_MESSAGE_VALUE`, the pools' bucket capacity;
-  `MessageTooLarge`). The adapters do not read the pools' rate-limit bucket: a short bucket makes
-  `ccipSend` revert, so `closeBatch` or `processPayouts` reverts and the batch waits.
+- **Send limits.** At most `maxMessageValue` per message (`MessageTooLarge`), a constructor
+  argument at most `MAX_MESSAGE_VALUE`, 5,000 TAO, the pools' bucket capacity. Deploy it near the
+  real sizes: the Base adapter's must be at least the front door's `maxBatchValue` (a batch above it
+  cannot close), and the Bittensor adapter's at least the largest payout entry, which is the larger
+  of the vault's `maxMessageValue` and the front door's `maxBatchValue` (a bounced deposit can be a
+  whole batch). An entry above the Bittensor adapter's cap can never be sent, and a batch holding
+  a bounced deposit must not be cancelled (note 7), so raising those limits past the caps needs new
+  adapters (7 days) first. Deliveries are not checked against the cap. The adapters do not read the
+  pools' rate-limit bucket: a short bucket makes `ccipSend` revert, so `closeBatch` or
+  `processPayouts` reverts and the batch waits.
 - **The reserve.** The Bittensor adapter's `receive()` accepts TAO only from the `AlphaVault` (the
   `withdrawLiquid` proceeds), so TAO sent to it by mistake bounces. `fundReserve()` adds TAO the
   adapter never spends. Bittensor EVM reports a balance net of the chain's 500-rao existential
@@ -297,7 +307,8 @@ overrides, that the adapter answers `alphaVault()` and the sink `reverting()`, b
 silently ignores some overrides and calls to an empty account succeed. Success prints
 `SIMULATION OK`; a revert is named (the adapter's, the sink's or ForeverMoney's error). Nothing is
 broadcast. It makes about 14 requests to the node. Options: `BITTENSOR_RPC`, `REMOTE_ADAPTER` (the Base adapter's address),
-`AMOUNT` (wei), `GAS_BASE` and `GAS_PER_ENTRY` (the Bittensor adapter's gas model), `RESERVE`
+`AMOUNT` (wei), `GAS_BASE` and `GAS_PER_ENTRY` (the Bittensor adapter's gas model), `MAX_MESSAGE`
+(its per-message cap, which a delivery does not check), `RESERVE`
 (0 shows the unfunded adapter's `ConversionShort`) and `FUNDER`. Run on 2026-10-24 against the lite
 node: 1 TAO and exactly 0.002 TAO (the floor) delivered; `RESERVE=0` reverted `ConversionShort`;
 20,000 TAO, more than ForeverMoney's position, reverted their `Insolvent()`.
@@ -538,7 +549,7 @@ Soft spots:
   | `setOutflowLimits` | at most 50% of the base a day; a floor of at most 100 TAO | A rogue front door takes at most half the base a window; the floor exists only so a small vault can exit, and 100 TAO is the spec's default. |
   | `setPayoutDelay` | 1 hour to 7 days | The delay is the guardian's window to hold a rogue batch; 1 hour is what the test cadence uses (see open decisions). |
   | `setFeeLimits` | at most 5% of a chunk, or 0.1 TAO | What the primary adapter can quote, and keep, per chunk; the live fee is about 0.001 TAO. |
-  | `setMessageLimits` | `maxMessageValue` at most 5,000 TAO | The lane's per-message limit (the adapters' `MAX_MESSAGE_VALUE`): above it chunks are unsendable. |
+  | `setMessageLimits` | `maxMessageValue` at most 5,000 TAO | The lane's per-message limit (the adapters' `MAX_MESSAGE_VALUE`): above it chunks are unsendable. Keep it at or below the Bittensor adapter's deployed `maxMessageValue()` too. |
   | `setUnstakeMarginRao` | at most 1 TAO per removal | A huge margin turns every exit into a full unstake and re-stake, which also ramps back into the allowance base. |
   | `setRedeemRequestFee` (front door, and its constructor) | at most 0.001 ETH | Ten times the launch fee: no setting can price every exit out. |
   | `setMaxBatchValue` (front door) | at most 5,000 TAO | A batch above the lane's limit can never be sent, and its redeems wait with it. |
@@ -736,8 +747,10 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
 5. **Batch limits.** Keep 50 deposits + 50 redeems per batch until a fork measurement confirms that
    100 + 100 fits the lane's delivery gas (with as many hotkeys in the set as you use). The adapters
    size each delivery's gas to its entry count (unused gas is not refunded); check the pools'
-   rate-limit allowance before closing. `maxMessageValue` cannot exceed the lane's 5,000 TAO (the
-   code refuses more).
+   rate-limit allowance before closing. Keep the vault's `maxMessageValue` and the front door's
+   `maxBatchValue` at or below the deployed adapters' `maxMessageValue()` (see the send limits in
+   [Bridge adapters](#bridge-adapters-ccip-20)); the code refuses more than the lane's 5,000 TAO,
+   but cannot read the adapters' caps.
 6. **ETH receivers.** `closeBatch` pays the rest of the budget to the caller with a plain call, and
    so does a `requestRedeem` that self-closes a full batch. A keeper, router or wallet contract that
    cannot receive ETH cannot close a batch whose pot exceeds the fee; give it a payable `receive`.
@@ -840,7 +853,8 @@ Defaults at deploy:
 | `minSendAmount` | 0.01 TAO (1e16 wei; constructor argument; keep `minDeposit` at or above it) | Base adapter |
 | adapter reserve | 1e12 wei, funded by the deployer through `fundReserve()` before the first delivery | Bittensor adapter |
 | `GAS_CAP` | 7,000,000 (constant) | both adapters |
-| `MAX_MESSAGE_VALUE` | 5,000 TAO (constant) | both adapters |
+| `MAX_MESSAGE_VALUE` | 5,000 TAO (constant): the most `maxMessageValue` may be | both adapters |
+| `maxMessageValue` | constructor argument (`Config`), 0 < value <= 5,000 TAO; see the send limits | both adapters |
 
 ## Static analysis
 

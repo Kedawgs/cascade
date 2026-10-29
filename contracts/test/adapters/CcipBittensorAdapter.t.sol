@@ -62,7 +62,8 @@ contract CcipBittensorAdapterTest is Test {
                 remoteSelector: BASE_SELECTOR,
                 remoteAdapter: adapterBase,
                 gasBase: 1_000_000,
-                gasPerEntry: 25_000
+                gasPerEntry: 25_000,
+                maxMessageValue: 5_000e18
             }),
             IAlphaVault(address(av))
         );

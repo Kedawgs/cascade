@@ -27,11 +27,14 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
         address remoteAdapter;
         uint256 gasBase;
         uint256 gasPerEntry;
+        uint256 maxMessageValue;
     }
 
     // ---- constants and immutables ----
 
     uint256 public constant GAS_CAP = 7_000_000;
+    /// @notice The lane's per-message limit (ForeverMoney's pool bucket capacity): the most
+    /// `maxMessageValue` may be.
     uint256 public constant MAX_MESSAGE_VALUE = 5_000e18;
     bytes4 public constant EXTRA_ARGS_V3_TAG = 0xa69dd4aa;
     uint256 internal constant RAO = 1e9;
@@ -44,6 +47,9 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
     address public immutable remoteAdapter;
     uint256 public immutable gasBase;
     uint256 public immutable gasPerEntry;
+    /// @notice The most one send may carry, chosen at deployment (near the real batch and payout size),
+    /// at most MAX_MESSAGE_VALUE.
+    uint256 public immutable maxMessageValue;
 
     // ---- events and errors ----
 
@@ -65,6 +71,7 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
     error GasModelTooLarge();
     error WrongDestination();
     error MessageTooLarge();
+    error MessageCapOutOfRange();
     error BelowSendMinimum(uint256 amount, uint256 minimum);
     error BelowConversionFloor(uint256 amount, uint256 floor);
     error InsufficientFee();
@@ -82,6 +89,7 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
         if (c.localChainId == c.remoteChainId) revert SameChain();
         // The largest legal message holds 2 * MAX_ENTRIES entries and must still fit under the cap.
         if (c.gasBase + 2 * CascadeMessages.MAX_ENTRIES * c.gasPerEntry > GAS_CAP) revert GasModelTooLarge();
+        if (c.maxMessageValue == 0 || c.maxMessageValue > MAX_MESSAGE_VALUE) revert MessageCapOutOfRange();
         router = IRouterClient(c.router);
         token = IERC20(c.token);
         localChainId = c.localChainId;
@@ -90,6 +98,7 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
         remoteAdapter = c.remoteAdapter;
         gasBase = c.gasBase;
         gasPerEntry = c.gasPerEntry;
+        maxMessageValue = c.maxMessageValue;
     }
 
     // ---- helpers ----
@@ -178,7 +187,7 @@ abstract contract CcipAdapterBase is ICascadeBridge, IAny2EVMMessageReceiver, IE
     function _checkSend(uint64 destChain, address recipient, uint256 amount) internal view {
         if (destChain != remoteChainId) revert WrongDestination();
         if (recipient == address(0)) revert ZeroAddress();
-        if (amount > MAX_MESSAGE_VALUE) revert MessageTooLarge();
+        if (amount > maxMessageValue) revert MessageTooLarge();
         _checkAmount(amount);
     }
 

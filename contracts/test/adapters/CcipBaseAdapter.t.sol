@@ -31,19 +31,7 @@ contract CcipBaseAdapterTest is Test {
         tao = new MockTAO(18);
         router = new MockRouter(tao);
         router.setFee(1e15);
-        adapter = new CcipBaseAdapter(
-            CcipAdapterBase.Config({
-                router: address(router),
-                token: address(tao),
-                localChainId: 8453,
-                remoteChainId: BITTENSOR,
-                remoteSelector: BITTENSOR_SELECTOR,
-                remoteAdapter: adapterBit,
-                gasBase: 1_000_000,
-                gasPerEntry: 25_000
-            }),
-            0.01e18
-        );
+        adapter = new CcipBaseAdapter(config(5_000e18), 0.01e18);
         fd = new CascadeFrontDoor(
             tao, adapter, BITTENSOR, vaultAddr, owner, guardian, 12 hours, 0.01e18, 10_000e18, 1e14, new MockUSDC()
         );
@@ -52,6 +40,29 @@ contract CcipBaseAdapterTest is Test {
         tao.approve(address(fd), type(uint256).max);
         vm.deal(alice, 1 ether);
         vm.deal(keeper, 1 ether);
+    }
+
+    function config(uint256 maxMessageValue) internal view returns (CcipAdapterBase.Config memory) {
+        return CcipAdapterBase.Config({
+            router: address(router),
+            token: address(tao),
+            localChainId: 8453,
+            remoteChainId: BITTENSOR,
+            remoteSelector: BITTENSOR_SELECTOR,
+            remoteAdapter: adapterBit,
+            gasBase: 1_000_000,
+            gasPerEntry: 25_000,
+            maxMessageValue: maxMessageValue
+        });
+    }
+
+    /// A send minimum above the per-message cap would leave no amount sendable.
+    function test_constructorRejectsMinimumAboveCap() public {
+        vm.expectRevert(CcipAdapterBase.MessageCapOutOfRange.selector);
+        new CcipBaseAdapter(config(1e18), 1e18 + 1);
+        CcipBaseAdapter ok = new CcipBaseAdapter(config(1e18), 1e18);
+        assertEq(ok.maxMessageValue(), 1e18);
+        assertEq(ok.minSendAmount(), 1e18);
     }
 
     function _approvedSender(uint256 amount) internal returns (address) {

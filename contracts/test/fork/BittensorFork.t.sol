@@ -89,7 +89,8 @@ contract BittensorForkTest is ForkBase {
                 remoteSelector: BASE_SELECTOR,
                 remoteAdapter: remoteAdapter,
                 gasBase: 1_000_000,
-                gasPerEntry: 25_000
+                gasPerEntry: 25_000,
+                maxMessageValue: 5_000e18
             }),
             IAlphaVault(ALPHA_VAULT)
         );

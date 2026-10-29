@@ -28,8 +28,10 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint16 public constant MAX_REWARD_CUT_BPS = 2_000;
     /// Stake added by stakeIdle enters the outflow allowance's base linearly over this period.
     uint256 internal constant STAKE_RAMP = 1 days;
-    // Hard bounds on the owner's exit-safety parameters, so no setting removes the outflow cap, the
-    // payout delay or the fee ceiling, or makes payouts unsendable.
+    // Hard bounds on the owner's exit-safety parameters, so no setting raises the outflow cap, cuts the
+    // payout delay or lifts the fee ceiling past them, or sends a payout message above the lane's limit.
+    // The owner can still freeze exits by setting them low (a zero fee ceiling, zero outflow limits, a
+    // zero maxEntryValue), as it can with pause.
     uint64 internal constant MIN_PAYOUT_DELAY = 1 hours;
     uint256 internal constant MAX_OUTFLOW_BPS = 5_000;
     uint256 internal constant MAX_MIN_DAILY_OUTFLOW = 100e18;
@@ -39,7 +41,8 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     uint256 internal constant MAX_FEE_ABS = 0.1e18;
     uint256 internal constant MAX_UNSTAKE_MARGIN_RAO = 1e9;
     /// The smallest front-door redeem burned: anything smaller could, after its share of the payout fee,
-    /// fall below the bridge's conversion floor (0.002 TAO today) and never be sent.
+    /// fall below the Bittensor adapter's conversion floor (0.002 TAO today) and never be sent. A
+    /// constant: it leaves room for a fee up to about 0.008 TAO, and does not follow a raised floor.
     uint256 internal constant MIN_REDEEM_VALUE = 0.01e18;
     IStaking public constant STAKING = IStaking(ISTAKING_ADDRESS);
     IAddressMapping public constant ADDRESS_MAPPING = IAddressMapping(ADDRESS_MAPPING_ADDRESS);

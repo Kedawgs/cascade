@@ -224,7 +224,7 @@ forge fmt --check
 forge lint
 ```
 
-- **Suite:** 438 tests (unit, end-to-end, fuzz, and 10 invariants at 128 runs × 64 depth, set in
+- **Suite:** 444 tests (unit, end-to-end, fuzz, and 10 invariants at 128 runs × 64 depth, set in
   `foundry.toml`), plus 18 fork tests that report as skipped unless `FORK` is set (below). The
   invariants also held at 3,000 × 64 (re-run on the pre-audit changes, 2026-10-29).
 - **Stale artifacts:** running `forge lint` right after an edit can leave test artifacts without
@@ -259,8 +259,8 @@ forge lint
   2,398,165 (bound 3,500,000), both with one hotkey in the set. A delivery reads the stake once
   (one `getStake` per hotkey in the set). The lane gives about 7.2M. Operator limits default to
   50 + 50; raise them to 100 only after a fork measurement.
-- **Sizes:** `CascadeVault` is 24,509 B of runtime code at `optimizer_runs = 200` (limit 24,576;
-  67 B of headroom, so any post-audit change must watch `forge build --sizes`, and pay for any
+- **Sizes:** `CascadeVault` is 24,565 B of runtime code at `optimizer_runs = 200` (limit 24,576;
+  11 B of headroom, so any post-audit change must watch `forge build --sizes`, and pay for any
   growth). `CascadeFrontDoor` is 17,677 B, `CcipBaseAdapter` 6,852 B, `CcipBittensorAdapter`
   7,989 B.
 
@@ -540,8 +540,14 @@ Soft spots:
   open at the floor and through `redeemDirect`; it takes nothing.
 - **Dust cannot leave through a front door.** A holder whose shares are worth less than 0.01 TAO,
   or whose request the window's last sliver of allowance would clip below 0.01 TAO, is deferred
-  (`RedeemDeferred`) and keeps the shares; `redeemDirect` pays any amount. The minimum is a
-  constant (`MIN_REDEEM_VALUE`) matching the Base adapter's 0.01 TAO `minSendAmount`.
+  (`RedeemDeferred`) and keeps the shares; `redeemDirect` pays any amount. Why 0.01 TAO: what binds
+  a payout is the Bittensor adapter's conversion floor (`getDefaultMinStake()`, 0.002 TAO today) on
+  a chunk's net, after the entry's share of the bridge fee (about 0.001 TAO). An entry of at least
+  0.01 TAO sent alone still nets above the floor for any fee up to about 0.008 TAO. The minimum
+  (`MIN_REDEEM_VALUE`) is a constant: it does not follow a floor the root key raises (a raise past
+  about 0.008 TAO brings the stall back for entries near the minimum), and the web app must ask for
+  a little more than it (about 0.011 TAO), since the vault values a request at the batch's price,
+  rounded down.
 - **First come, first served.** A front door's allowance goes to redeems in delivery order, so one
   large holder can take a door's whole window. Deferred users must request again and pay the
   redeem-request fee again.
@@ -572,7 +578,11 @@ Soft spots:
   keeper lapse.
 - **The limits are owner parameters, within hard bounds.** They change without the 7-day registry
   delay, behind only the owner's timelock (an operational setting, 48 hours in the beta), but the
-  code bounds each one, so even a captured owner cannot remove layers 2 and 3:
+  code bounds each one, so even a captured owner cannot loosen layers 2 and 3 past these bounds. The
+  bounds are upper bounds on risk, not a guarantee of liveness: the owner can still freeze exits by
+  setting limits low, as it can with `pause`. `setFeeLimits(0, 0)` refuses every payout chunk's fee
+  (`FeeTooHigh`), and `setOutflowLimits(0, 0)` or a `maxEntryValue` of 0 defers every front-door
+  redeem. Direct redeems stay open, and the guardian cannot undo it.
 
   | Setter | Bound in the code | Why this bound |
   |---|---|---|
@@ -969,7 +979,7 @@ Rails and ForeverMoney:
 Measurements and policy:
 
 17. Fork-measure delivery gas before raising batch limits above 50 + 50.
-18. Watch `forge build --sizes` after any post-audit change (67 B of headroom in the vault at
+18. Watch `forge build --sizes` after any post-audit change (11 B of headroom in the vault at
     `optimizer_runs = 200`).
 19. Decide the `setClaimGasRequired` bounds policy: 0 disables the guard and too high blocks claims.
     It is owner discipline, behind the timelock.

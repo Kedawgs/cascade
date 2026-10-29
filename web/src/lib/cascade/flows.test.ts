@@ -157,12 +157,52 @@ describe("call builders", () => {
       d: D,
       v3: true,
       frontDoor: async () => (order.push("frontDoor"), { redeemOf: 0n, redeemRequestFee: 10n ** 14n }),
+      // a plain key account: no code
+      accountCode: async () => (order.push("code"), undefined),
       pendingNonce: async () => (order.push("nonce"), 41),
       record: (patch) => void recorded.push(patch),
     });
     expect(calls).toEqual([unstakeV3Call(q.shares, 0n, 10n ** 14n, q, D)]);
-    expect(order).toEqual(["frontDoor", "nonce"]);
+    expect(order).toEqual(["frontDoor", "code", "nonce"]);
     expect(recorded).toEqual([{ fee: 10n ** 14n, nonce: 41 }]);
+  });
+
+  describe("the nonce an unstake's record keeps, by what is at the account", () => {
+    const planWith = async (accountCode: () => Promise<Hex | undefined>) => {
+      const recorded: unknown[] = [];
+      const pendingNonce = vi.fn(async () => 41);
+      await planUnstake({
+        q: { shares: 10n ** 22n } as WithdrawalQuote,
+        d: D,
+        v3: false,
+        frontDoor: async () => ({ redeemOf: 5n, redeemRequestFee: 10n ** 14n }),
+        accountCode,
+        pendingNonce,
+        record: (patch) => void recorded.push(patch),
+      });
+      return { recorded, pendingNonce };
+    };
+
+    it("keeps it for a plain key account, and for an EIP-7702 account (its own key's nonce, delegated code)", async () => {
+      expect((await planWith(async () => undefined)).recorded).toEqual([{ fee: 0n, nonce: 41 }]);
+      expect((await planWith(async () => "0x")).recorded).toEqual([{ fee: 0n, nonce: 41 }]);
+      expect((await planWith(async () => `0xef0100${"ab".repeat(20)}`)).recorded).toEqual([{ fee: 0n, nonce: 41 }]);
+    });
+
+    it("keeps none for a contract account, like a Base Account, whose nonce doesn't move with its own operations", async () => {
+      const contract = await planWith(async () => "0x363d3d373d3d3d363d73bebebebebebebebebebebebebebebebebebebebe5af43d82803e903d91602b57fd5bf3");
+      expect(contract.recorded).toEqual([{ fee: 0n }]);
+      expect(contract.pendingNonce).not.toHaveBeenCalled();
+      // code that only starts like a delegation isn't one
+      expect((await planWith(async () => `0xef0100${"ab".repeat(21)}`)).recorded).toEqual([{ fee: 0n }]);
+    });
+
+    it("keeps none when the account's code can't be read", async () => {
+      const unread = await planWith(async () => {
+        throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
+      });
+      expect(unread.recorded).toEqual([{ fee: 0n }]);
+    });
   });
 
   it("still sends an unstake when Base can't give the nonce, recording none", async () => {
@@ -172,6 +212,7 @@ describe("call builders", () => {
       d: D,
       v3: false,
       frontDoor: async () => ({ redeemOf: 5n, redeemRequestFee: 10n ** 14n }),
+      accountCode: async () => undefined,
       pendingNonce: async () => {
         throw new HttpRequestError({ url: "https://mainnet.base.org", status: 503 });
       },

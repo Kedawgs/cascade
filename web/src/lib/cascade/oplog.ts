@@ -51,7 +51,8 @@ export interface WithdrawalOp extends OpBase {
   sentAt?: number;
   /** The account's pending nonce on Base, read just before the request was sent: the request's own
    * nonce is at least this. A request Base doesn't know is taken for dropped only once the account's
-   * mined nonce is past it (facts.ts, requestBatch); records made before it was kept have none. */
+   * mined nonce is past it (facts.ts, requestBatch). None for a contract account, whose own nonce
+   * doesn't move with what it sends (flows.ts, planUnstake), nor on records made before it was kept. */
   nonce?: number;
   /** The last Base block read so far in the search for what took this request's place, when its hash
    * can't be mined: the next search reads on from there (facts.ts, requestReplacement). */

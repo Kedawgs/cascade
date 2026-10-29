@@ -346,22 +346,31 @@ export function unstakeV3Call(shares: bigint, redeemOf: bigint, fee: bigint, q: 
   );
 }
 
+/** Code at an account that leaves its nonce its own key's: none (a plain key account), or an EIP-7702
+ * delegation (0xef0100 and the 20-byte address it delegates to). */
+const ownNonce = (code: Hex | undefined) => code === undefined || code === "0x" || (size(code) === 23 && code.toLowerCase().startsWith("0xef0100"));
+
 /** An unstake's request, with what its record keeps before it is sent: the fee it pays and the
  * account's pending nonce on Base, read last so it is as close to the send as it can be (the request's
- * own nonce is at least this; facts.ts tells a dropped request from one Base can't see by it). A nonce
- * Base can't give is left out and the request still goes: its record just waits longer before a drop
- * is believed. */
+ * own nonce is at least this; facts.ts tells a dropped request from one Base can't see by it). Only for
+ * an account whose nonce is its own key's (ownNonce): a contract account, like a Base Account, sends
+ * through others whose nonces move instead, so its record keeps none, as does one whose code can't be
+ * read. A nonce left out never stops the request: its record just waits longer before a drop is
+ * believed. */
 export async function planUnstake(x: {
   q: Pick<WithdrawalQuote, "shares" | "minUsdcPerTao" | "deliveryDeadline">;
   d: Deployment;
   v3: boolean;
   frontDoor: () => Promise<Pick<FrontDoorState, "redeemOf" | "redeemRequestFee">>;
+  /** The code at the account on Base (undefined or "0x" when there is none). */
+  accountCode: () => Promise<Hex | undefined>;
   pendingNonce: () => Promise<number>;
   record: (patch: { fee: bigint; nonce?: number }) => void;
 }): Promise<FlowCall[]> {
   const fd = await x.frontDoor();
   const c = x.v3 ? unstakeV3Call(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.q, x.d) : unstakeCall(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.d);
-  const nonce = await x.pendingNonce().catch(() => undefined);
+  const own = await x.accountCode().then(ownNonce, () => false);
+  const nonce = own ? await x.pendingNonce().catch(() => undefined) : undefined;
   x.record({ fee: c.value ?? 0n, ...(nonce !== undefined ? { nonce } : {}) });
   return [c];
 }

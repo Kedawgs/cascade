@@ -319,6 +319,7 @@ export function useFlows(account: string | null) {
             d: d(),
             v3,
             frontDoor: () => readFrontDoor(data.clients, d(), a),
+            accountCode: () => data.clients.base.getCode({ address: a }),
             pendingNonce: () => data.clients.base.getTransactionCount({ address: a, blockTag: "pending" }),
             record: (patch) => data.opLog.update(a, op.id, patch),
           }),

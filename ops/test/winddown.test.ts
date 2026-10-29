@@ -4,12 +4,13 @@ import { WALLET } from "../src/config.ts";
 import type { KeeperState } from "../src/keeper/actions.ts";
 import type { PayoutLog } from "../src/keeper/payouts.ts";
 import { KEEPER_READ_ABIS } from "../src/keeper/state.ts";
-import { buildPlan } from "../src/plan.ts";
+import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { type Ctx, SendRefused } from "../src/send.ts";
 import type { CallRequest } from "../src/types.ts";
 import { ethSweepValue, sweep, sweepDestinations, sweepLegs, taoSweepValue, windDown, windDownBlockers } from "../src/winddown.ts";
-import { fakeChain, SENT, stubDeps, v3Record } from "./fake-keeper.ts";
+import { COLDKEY, fakeChain, SENT, stubDeps, v3Record } from "./fake-keeper.ts";
+import { ROLES } from "./launch-roles.ts";
 
 const KEY = `0x${"aa".repeat(32)}` as const;
 const SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
@@ -199,6 +200,24 @@ describe("sweep", () => {
     expect(err).toBeInstanceOf(SendRefused);
     expect(err.message).toMatch(/needs 40,001 gas, more than the 40,000 it is sent with/);
     expect(over.sends).toEqual([]);
+  });
+});
+
+describe("a launch record is not wound down or swept here", () => {
+  const launch = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
+
+  it("wind-down refuses before reading anything: it acts as the test wallet, and a launch's contracts are its owners'", async () => {
+    await expect(windDown(stubDeps({}), launch)).rejects.toThrow(
+      /wind-down is for a test deployment: it pauses and caps as the test wallet, the owner only until a launch's hand-off.*pnpm ops pause.*nothing sent/,
+    );
+  });
+
+  it("sweep refuses before reading anything", async () => {
+    const f = fakeChain([], {});
+    await expect(sweep(f.ctx, launch, "5FxSW9dM8DbAWUFtADJPX5Wb7DctrJHadkJ3TB1GpBGvxQH2", WALLET)).rejects.toThrow(
+      /sweep is for a test deployment: it empties the test wallet.*nothing sent/,
+    );
+    expect(f.calls).toEqual([]);
   });
 });
 

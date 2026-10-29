@@ -3,6 +3,7 @@ import { read } from "./rpc.ts";
 import { PRECOMPILE, WALLET } from "./config.ts";
 import type { KeeperDeps } from "./keeper/actions.ts";
 import { uniqueUsers } from "./keeper/delivery.ts";
+import { cadenceOf } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
 import { type Ctx, type Sent, sendCall, sendValue } from "./send.ts";
@@ -66,6 +67,11 @@ async function everyClaim(deps: KeeperDeps, named: readonly { user: Address; amo
  * out, delivered to Base and claimed by everyone the vault paid out to. Skips whichever is already done,
  * so it can be run again after a stop. */
 export async function windDown(deps: KeeperDeps, rec: DeploymentRecord): Promise<Sent[]> {
+  if (cadenceOf(rec.plan) === "launch") {
+    throw new Error(
+      "wind-down is for a test deployment: it pauses and caps as the test wallet, the owner only until a launch's hand-off. A launch's contracts are its final owners': pause with pnpm ops pause, and change the caps through the owner's Safe or timelock; nothing sent",
+    );
+  }
   const s = await deps.readState();
   const claimable = await everyClaim(deps, s.detail.claimable);
   const inFlight = await payoutsInFlight(deps, rec);
@@ -125,6 +131,11 @@ export function sweepDestinations(taoTo: string, ethTo: string): { taoKey: Hex; 
 /** Sends the test wallet's leftover TAO (through the transfer precompile) and ETH home; a leg already
  * swept is skipped, so it can be run again after a stop. */
 export async function sweep(ctx: Ctx, rec: DeploymentRecord, taoTo: string, ethToRaw: string): Promise<void> {
+  if (cadenceOf(rec.plan) === "launch") {
+    throw new Error(
+      "sweep is for a test deployment: it empties the test wallet after a test's wind-down, and a launch's test wallet is its deployer and perhaps its keeper, still paying gas. Move its funds by hand; nothing sent",
+    );
+  }
   const { taoKey, ethTo } = sweepDestinations(taoTo, ethToRaw);
   const tao = taoSweepValue(await balanceOf(ctx.rpc, "bittensor", WALLET), TAO_SWEEP_GAS, await gasPriceOf(ctx.rpc, "bittensor"));
   const eth = ethSweepValue(await balanceOf(ctx.rpc, "base", WALLET), 26_250n, await gasPriceOf(ctx.rpc, "base"));

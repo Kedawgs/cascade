@@ -41,10 +41,11 @@ export function rereadRange(chain: ChainName, cursor: { scannedTo: bigint | null
 }
 
 /** A chain's head time for this tick (written every tick, so lag = head_time − settled_time grows when
- * the logs can't be read): the scan head's block time, else the reading's block time, else the Worker's
- * clock; never earlier than before. */
+ * the logs can't be read): the newer of the scan head's block time and the reading's block time (the two
+ * can come from nodes at different heights), else the Worker's clock; never earlier than before. */
 export function headTimeOf(o: { scanHeadTime?: number; readingTime?: number; nowS: number; previous: number | null | undefined }): number {
-  const t = o.scanHeadTime ?? o.readingTime ?? o.nowS;
+  const known = [o.scanHeadTime, o.readingTime].filter((t): t is number => t !== undefined);
+  const t = known.length > 0 ? Math.max(...known) : o.nowS;
   return o.previous !== null && o.previous !== undefined && o.previous > t ? o.previous : t;
 }
 
@@ -153,8 +154,8 @@ export async function scanChain(o: {
 
   scan: {
     if (start > known) {
-      // nothing read before: learn the head (and its time) before asking for any window
-      if (o.reserve && o.reserve.budget.left <= o.reserve.keep) {
+      // nothing read before: learn the head (and its time) before asking for any window (one request)
+      if (o.reserve && o.reserve.budget.left < o.reserve.keep + 1) {
         stop("budget");
         break scan;
       }
@@ -183,7 +184,8 @@ export async function scanChain(o: {
         stop("wall");
         break;
       }
-      if (o.reserve && o.reserve.budget.left <= o.reserve.keep) {
+      // a window can cost two requests (a lagging node is asked again): never let it dip into the reserve
+      if (o.reserve && o.reserve.budget.left < o.reserve.keep + 2) {
         stop("budget");
         break;
       }

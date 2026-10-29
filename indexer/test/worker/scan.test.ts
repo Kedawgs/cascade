@@ -174,10 +174,38 @@ describe("scanChain on Bittensor", () => {
 
   it("stops before a window that would eat into the reserve left for the reads and emails", async () => {
     const { budget, scan } = setup({ bittensor: { head: 3500n } }, { subrequests: 10 });
-    const r = await scan("bittensor", FIRST, { reserve: 8 });
+    const r = await scan("bittensor", FIRST, { reserve: 7 });
     expect(r.stopped).toBe("budget");
     expect(r.cursor.scannedTo).toBe(1999n);
     expect(budget.left).toBe(8);
+  });
+
+  it("never lets a lagging node's second asking dip into the reserve", async () => {
+    const spec: ChainSpec = { head: 3500n };
+    // one left above the reserve: a window could cost two (asked again when the node is behind)
+    const { budget, scan } = setup({ bittensor: spec }, { subrequests: 10, onFetch: (f) => void (f.methods.includes("eth_getLogs") && (spec.behindFor = { answers: 1, head: 1500n })) });
+    const r = await scan("bittensor", FIRST, { reserve: 8 });
+    expect(r.stopped).toBe("budget");
+    expect(budget.left).toBeGreaterThanOrEqual(8);
+  });
+
+  it("stops at the last whole window when a node answers a malformed log", async () => {
+    const spec: ChainSpec = {
+      head: 3500n,
+      logs: [vlog(1500n, 1)],
+      calls: {
+        eth_getLogs: ([f]) => {
+          const from = BigInt((f as { fromBlock: Hex }).fromBlock);
+          if (from === 2000n) return [{ ...vlog(2100n, 2), blockNumber: null }];
+          return from === 1000n ? [vlog(1500n, 1)] : [];
+        },
+      },
+    };
+    const r = await setup({ bittensor: spec }).scan("bittensor", FIRST);
+    expect(r.stopped).toBe("error");
+    expect(r.error).toMatch(/malformed log/);
+    expect(r.cursor.scannedTo).toBe(1999n);
+    expect(r.upserts.map((l) => l.block)).toEqual([1500n]);
   });
 
   it("cuts at a block boundary once the decode budget is spent, keeping the blocks it finished", async () => {
@@ -366,8 +394,10 @@ describe("the scan's numbers", () => {
 });
 
 describe("headTimeOf", () => {
-  it("takes the scan's head time, else the reading's, else the clock, and never goes back", () => {
+  it("takes the newer of the scan's head time and the reading's, else the clock, and never goes back", () => {
     expect(headTimeOf({ scanHeadTime: 500, readingTime: 400, nowS: 900, previous: 100 })).toBe(500);
+    // a scan whose head came from a node behind the reading's
+    expect(headTimeOf({ scanHeadTime: 400, readingTime: 500, nowS: 900, previous: 100 })).toBe(500);
     expect(headTimeOf({ readingTime: 400, nowS: 900, previous: 100 })).toBe(400);
     expect(headTimeOf({ nowS: 900, previous: 100 })).toBe(900);
     expect(headTimeOf({ scanHeadTime: 50, nowS: 900, previous: 100 })).toBe(100);

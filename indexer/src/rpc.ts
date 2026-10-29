@@ -142,6 +142,31 @@ export interface RpcOptions {
 const isObject = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+const HEX = /^0x[0-9a-fA-F]*$/;
+const QUANTITY = /^0x[0-9a-fA-F]{1,16}$/;
+const WORD = /^0x[0-9a-fA-F]{64}$/;
+/** A log as eth_getLogs must answer it (and not one the node says a reorg removed). */
+function isRawLog(x: unknown): x is RawLog {
+  if (!isObject(x) || x.removed === true) return false;
+  const { address, topics, data, blockNumber, logIndex, transactionHash } = x;
+  return (
+    typeof address === "string" &&
+    /^0x[0-9a-fA-F]{40}$/.test(address) &&
+    Array.isArray(topics) &&
+    topics.length <= 4 &&
+    topics.every((t) => typeof t === "string" && WORD.test(t)) &&
+    typeof data === "string" &&
+    HEX.test(data) &&
+    data.length % 2 === 0 &&
+    typeof blockNumber === "string" &&
+    QUANTITY.test(blockNumber) &&
+    typeof logIndex === "string" &&
+    QUANTITY.test(logIndex) &&
+    typeof transactionHash === "string" &&
+    WORD.test(transactionHash)
+  );
+}
+
 /** JSON-RPC over fetch: the Worker's one way to a chain. Requests to one endpoint run one at a time,
  * spaced; a batch is one fetch; answers are matched by id; HTTP 429 and 5xx are retried with backoff;
  * every fetch spends the invocation's budget and has a timeout. */
@@ -262,6 +287,9 @@ export function createRpc(o: RpcOptions): Rpc {
       if (opts.headTime) calls.push({ method: "eth_getBlockByNumber", params: ["latest", false] });
       const [logs, head, block] = await batchAt(ep, chain, calls, deadlineOf(opts));
       if (!Array.isArray(logs)) throw new RpcError(chain, "eth_getLogs", o.urls[ep], "answered with something that isn't a list of logs");
+      // every log whole, before anything reads it: a malformed one fails the window (the scan keeps the windows before)
+      const bad = logs.findIndex((l) => !isRawLog(l));
+      if (bad !== -1) throw new RpcError(chain, "eth_getLogs", o.urls[ep], `answered a malformed log (log ${bad + 1} of ${logs.length})`);
       if (typeof head !== "string") throw new RpcError(chain, "eth_blockNumber", o.urls[ep], "answered with something that isn't a block number");
       const time = isObject(block) && typeof block.timestamp === "string" ? hexToNumber(block.timestamp as Hex) : undefined;
       return { logs: logs as RawLog[], head: hexToBigInt(head as Hex), ...(time === undefined ? {} : { headTime: time }) };

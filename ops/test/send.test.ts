@@ -310,3 +310,35 @@ describe("send", () => {
     expect(castArg([{ user: WALLET, shares: 5n, assets: 7n }], payouts)).toBe(`[(${WALLET},5,7)]`);
   });
 });
+
+describe("send as another signer (the guardian, the owner)", () => {
+  const GUARDIAN: Address = "0x000000000000000000000000000000000000B0b1";
+  const guardian = { address: GUARDIAN, keystore: "/keys/guardian.json", passwordFile: "/keys/guardian.pw", name: "the guardian" };
+
+  it("reads its nonces, estimates from it and signs with its own keystore", async () => {
+    const f = fixture({ signer: GUARDIAN });
+    f.ctx.signer = guardian;
+    await sendCall(f.ctx, call);
+    expect(new Set(f.calls.filter((c) => c.method === "eth_getTransactionCount").map((c) => c.params[0]))).toEqual(new Set([GUARDIAN]));
+    expect((f.calls.find((c) => c.method === "eth_estimateGas")!.params[0] as { from: Address }).from).toBe(GUARDIAN);
+    for (const args of [f.runs.find((r) => r.args[0] === "wallet")!.args, f.sends()[0].args]) {
+      expect(args[args.indexOf("--keystore") + 1]).toBe("/keys/guardian.json");
+      expect(args[args.indexOf("--password-file") + 1]).toBe("/keys/guardian.pw");
+    }
+  });
+
+  it("refuses a keystore that signs as anyone else, naming the signer", async () => {
+    const f = fixture();
+    f.ctx.signer = guardian;
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err).toBeInstanceOf(SendRefused);
+    expect(err.message).toBe(`the keystore signs as ${WALLET}, not the guardian ${GUARDIAN}; nothing sent`);
+    expect(f.sends()).toHaveLength(0);
+  });
+
+  it("without one, signs as the test wallet as before", async () => {
+    const f = fixture({ signer: GUARDIAN });
+    const err = await sendCall(f.ctx, call).catch((e) => e);
+    expect(err.message).toBe(`the keystore signs as ${GUARDIAN}, not the test wallet ${WALLET}; nothing sent`);
+  });
+});

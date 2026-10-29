@@ -6,6 +6,7 @@ import { cardinalityReport } from "./cardinality.ts";
 import { baseLogsTarget, cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
 import { handoff, ownershipStatus } from "./handoff.ts";
+import { pauseCommand, pauseSigner } from "./pause.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
 import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
@@ -154,6 +155,21 @@ async function run(a: Args): Promise<number> {
       });
       for (const line of out.lines) log(line);
       return 0;
+    }
+    case "pause":
+    case "unpause": {
+      // an emergency command: always the live deployment; --live sends, otherwise a dry run that only reads
+      const r = await pauseCommand({ ...ctxFor(true), live: a.live }, needRecord(true), {
+        action: a.cmd,
+        target: a.target ?? "both",
+        send: a.live,
+        signer: (role, address) => pauseSigner(env, paths(env), role, address),
+        outDir: join(paths(env).deploymentsDir, "safe"),
+        name: deploymentName(env),
+        now: Date.now(),
+      });
+      for (const line of r.lines) log(line);
+      return r.ok ? 0 : 1;
     }
     case "cardinality":
       // always the live Base pools: the transactions are for mainnet; reads only

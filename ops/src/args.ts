@@ -23,6 +23,8 @@ export const COMMANDS = [
   "handoff",
   "ownership",
   "cardinality",
+  "pause",
+  "unpause",
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];
@@ -35,7 +37,11 @@ export interface Args {
   messageId?: string;
   taoTo?: string;
   ethTo?: string;
+  /** pause and unpause: which contracts */
+  target?: "front-door" | "vault" | "both";
 }
+
+const PAUSE_TARGETS = ["front-door", "vault", "both"] as const;
 
 export const USAGE = `usage: pnpm ops <command> [--live]
 
@@ -60,6 +66,11 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   ownership                  each contract's owner and pending owner, against the plan
   cardinality                the oracle's pools' observation slots (reads Base), and the exact
                              increaseObservationCardinalityNext transactions to send from any wallet
+  pause [front-door|vault|both]    EMERGENCY: pause as the guardian (both by default). Always the live
+                             deployment: a dry run (estimate and keystore check) unless --live, which
+                             sends. Signs with OPS_GUARDIAN_KEYSTORE and OPS_GUARDIAN_PASSWORD_FILE; a
+                             Safe guardian gets a Transaction Builder file in deployments/safe/ instead
+  unpause [front-door|vault|both]  the same, as the owner (OPS_OWNER_KEYSTORE, OPS_OWNER_PASSWORD_FILE)
 
 Without --live, deploy and the keeper commands use the local forks.
 Live, Base's logs are read from OPS_BASE_LOGS_RPC (default https://base-rpc.publicnode.com): the default
@@ -84,10 +95,12 @@ export function parseArgs(argv: readonly string[]): Args {
     else if (a === "--tao-to" && cmd === "sweep") out.taoTo = value();
     else if (a === "--eth-to" && cmd === "sweep") out.ethTo = value();
     else if (cmd === "track" && !a.startsWith("--") && !out.messageId) out.messageId = a;
+    else if ((cmd === "pause" || cmd === "unpause") && (PAUSE_TARGETS as readonly string[]).includes(a) && !out.target) out.target = a as Args["target"];
     else throw new UsageError(`unexpected argument ${a}`);
   }
   if (cmd === "deploy" && out.newPlan === undefined) out.newPlan = false;
   if (cmd === "track" && !out.messageId) throw new UsageError("track needs a message id");
+  if ((cmd === "pause" || cmd === "unpause") && !out.target) out.target = "both";
   if (cmd === "sweep" && (!out.taoTo || !out.ethTo)) throw new UsageError("sweep needs both --tao-to and --eth-to");
   // deliver sends a transaction naming each user
   const bad = cmd === "deliver" ? out.users.find((u) => !isAddress(u, { strict: false })) : undefined;

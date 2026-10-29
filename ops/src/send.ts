@@ -41,6 +41,8 @@ export interface Ctx {
   /** Where log scans go (rpc.ts logsRpc): the live tools' own Base logs server. Absent = `rpc` (the
    * local forks, and tests). Every eth_getLogs, and the head a scan reads first, goes through logsOf. */
   logs?: Rpc;
+  /** Who sends: absent = the test wallet with paths.keystore (every command but pause and unpause). */
+  signer?: Signer;
   runner: Runner;
   paths: Paths;
   log(line: string): void;
@@ -94,6 +96,19 @@ export class ReceiptTimeout extends Error {
   }
 }
 
+/** An account the tool signs as: its address, its Foundry keystore and password file (by path only), and
+ * how messages name it. */
+export interface Signer {
+  address: Address;
+  keystore: string;
+  passwordFile: string;
+  name: string;
+}
+
+/** The context's signer, else the test wallet with the default keystore. */
+export const signerOf = (ctx: Pick<Ctx, "signer" | "paths">): Signer =>
+  ctx.signer ?? { address: WALLET, keystore: ctx.paths.keystore, passwordFile: ctx.paths.passwordFile, name: "the test wallet" };
+
 /** The RPC for log scans and their heads: the context's logs server, else its main RPC. */
 export const logsOf = (ctx: Pick<Ctx, "rpc" | "logs">): Rpc => ctx.logs ?? ctx.rpc;
 
@@ -145,12 +160,13 @@ async function guard(ctx: Ctx, chain: ChainName, nonce: number): Promise<void> {
   if (id !== ctx.targets[chain].chainId) {
     throw new SendRefused("chain-id", `${chainLabel(chain)}: the RPC reports chain id ${id}, expected ${ctx.targets[chain].chainId}`);
   }
-  const current = await nonceOf(ctx.rpc, chain, WALLET);
-  const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [WALLET, "latest"])) as Hex);
+  const from = signerOf(ctx);
+  const current = await nonceOf(ctx.rpc, chain, from.address);
+  const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [from.address, "latest"])) as Hex);
   if (mined !== current) {
     throw new SendRefused(
       "waiting",
-      `${chainLabel(chain)}: an earlier transaction from the test wallet (nonce ${mined}) is still waiting to be mined; nothing sent — try again once it is`,
+      `${chainLabel(chain)}: an earlier transaction from ${from.name} (nonce ${mined}) is still waiting to be mined; nothing sent — try again once it is`,
     );
   }
   if (current !== nonce) {
@@ -158,19 +174,25 @@ async function guard(ctx: Ctx, chain: ChainName, nonce: number): Promise<void> {
   }
 }
 
+/** The account a keystore signs as (Foundry's `cast wallet address`; the password by file only), or
+ * undefined when it can't be opened. */
+export async function signingAccount(ctx: Pick<Ctx, "runner" | "paths">, s: Pick<Signer, "keystore" | "passwordFile">): Promise<Address | undefined> {
+  const out = await ctx.runner.run(bin(ctx as Ctx, "cast"), ["wallet", "address", "--keystore", s.keystore, "--password-file", s.passwordFile], {
+    cwd: ctx.paths.contractsDir,
+  });
+  return out.code === 0 ? (out.stdout.match(/0x[0-9a-fA-F]{40}/)?.[0] as Address | undefined) : undefined;
+}
+
 const signerChecked = new WeakSet<Ctx>();
 
-/** Once per run: the keystore must sign as the test wallet, or a send would come from another account. */
+/** Once per run: the keystore must sign as the context's signer (the test wallet unless the context names
+ * another), or a send would come from another account. */
 async function checkSigner(ctx: Ctx): Promise<void> {
   if (signerChecked.has(ctx)) return;
-  const out = await ctx.runner.run(
-    bin(ctx, "cast"),
-    ["wallet", "address", "--keystore", ctx.paths.keystore, "--password-file", ctx.paths.passwordFile],
-    { cwd: ctx.paths.contractsDir },
-  );
-  const signer = out.stdout.match(/0x[0-9a-fA-F]{40}/)?.[0];
-  if (out.code !== 0 || !signer || signer.toLowerCase() !== WALLET.toLowerCase()) {
-    throw new SendRefused("signer", `the keystore signs as ${signer ?? "an unknown account"}, not the test wallet ${WALLET}; nothing sent`);
+  const s = signerOf(ctx);
+  const signer = await signingAccount(ctx, s);
+  if (!signer || signer.toLowerCase() !== s.address.toLowerCase()) {
+    throw new SendRefused("signer", `the keystore signs as ${signer ?? "an unknown account"}, not ${s.name} ${s.address}; nothing sent`);
   }
   signerChecked.add(ctx);
 }
@@ -222,13 +244,14 @@ async function prepare(ctx: Ctx, chain: ChainName, label: string, gas: bigint, g
   ctx.log(`${chainLabel(chain)}: ${label} — est. ${gas.toLocaleString("en-US")} gas ≈ ${formatEther(gas * price)} ${unit(chain)}`);
   const limit = gasLimit ?? (gas * 125n + 99n) / 100n;
   const t = ctx.targets[chain];
+  const s = signerOf(ctx);
   return [
     "--rpc-url",
     t.rpcUrl,
     "--keystore",
-    ctx.paths.keystore,
+    s.keystore,
     "--password-file",
-    ctx.paths.passwordFile,
+    s.passwordFile,
     "--gas-limit",
     limit.toString(),
     ...(t.legacy ? ["--legacy", "--gas-price", price.toString()] : []),
@@ -262,8 +285,8 @@ async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex)
 /** Foundry gave no hash. If the wallet's nonce moved past this one (pending or mined), the node took
  * the transaction: report it as waiting, never as a failure to retry. Otherwise the send failed. */
 async function noHash(ctx: Ctx, chain: ChainName, nonce: number, label: string, out: { stdout: string; stderr: string }) {
-  const pending = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [WALLET, "pending"])) as Hex);
-  const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [WALLET, "latest"])) as Hex);
+  const pending = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [signerOf(ctx).address, "pending"])) as Hex);
+  const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [signerOf(ctx).address, "latest"])) as Hex);
   if (pending > nonce || mined > nonce) return new ReceiptTimeout(chain, nonce);
   return new Error(`${chainLabel(chain)}: ${label} failed: ${redact(ctx.targets, out.stderr.trim() || out.stdout.trim())}`);
 }
@@ -282,7 +305,7 @@ export async function sendCreate(ctx: Ctx, req: CreateRequest, predicted: Addres
   const name = req.contract.split(":")[1];
   const artifact = loadArtifact(ctx.paths.contractsDir, name);
   const data = encodeDeployData({ abi: artifact.abi, bytecode: artifact.bytecode, args: req.args } as never);
-  const gas = await estimate(ctx, req.chain, { from: WALLET, data }, req.label);
+  const gas = await estimate(ctx, req.chain, { from: signerOf(ctx).address, data }, req.label);
   const common = await prepare(ctx, req.chain, req.label, gas);
   const inputs = (artifact.abi.find((i) => i.type === "constructor") as { inputs: readonly AbiParameter[] } | undefined)?.inputs ?? [];
   const args = [
@@ -320,7 +343,7 @@ export async function sendCreate(ctx: Ctx, req: CreateRequest, predicted: Addres
 export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   await guard(ctx, req.chain, req.nonce);
   const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args } as never);
-  const gas = await estimate(ctx, req.chain, { from: WALLET, to: req.to, data, value: numberToHex(req.value ?? 0n) }, req.label);
+  const gas = await estimate(ctx, req.chain, { from: signerOf(ctx).address, to: req.to, data, value: numberToHex(req.value ?? 0n) }, req.label);
   if (req.gasLimit !== undefined && gas > req.gasLimit) {
     throw new SendRefused(
       "estimate",
@@ -353,7 +376,7 @@ export async function sendValue(
   req: { chain: ChainName; nonce: number; label: string; to: Address; value: bigint },
 ): Promise<Sent> {
   await guard(ctx, req.chain, req.nonce);
-  const gas = await estimate(ctx, req.chain, { from: WALLET, to: req.to, data: "0x", value: numberToHex(req.value) }, req.label);
+  const gas = await estimate(ctx, req.chain, { from: signerOf(ctx).address, to: req.to, data: "0x", value: numberToHex(req.value) }, req.label);
   const common = await prepare(ctx, req.chain, req.label, gas);
   const args = ["send", req.to, "--value", req.value.toString(), ...common, "--nonce", String(req.nonce), "--async"];
   await checkSigner(ctx);

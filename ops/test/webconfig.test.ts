@@ -71,6 +71,12 @@ describe("web-config", () => {
     expect(webEnv(rec)).not.toContain("PAYOUT_DELAY");
   });
 
+  it("takes a recovered Bittensor adapter's block as deploy found it, and refuses one without", () => {
+    expect(webEnv({ ...rec, done: { ...rec.done, bitAdapter: { recovered: true, block: 9_357_490 } } })).toContain("\nNEXT_PUBLIC_CASCADE_BIT_BLOCK=9357490\n");
+    expect(() => webEnv({ ...rec, done: { ...rec.done, bitAdapter: { recovered: true } } })).toThrow(/deploy block is not in the record/);
+    expect(() => webEnv({ ...rec, done: { ...rec.done, bitAdapter: { recovered: true, block: undefined } } })).toThrow(/deploy block is not in the record/);
+  });
+
   it("refuses a deployment whose read-back has not passed", () => {
     expect(() => webEnv({ ...rec, verify: undefined })).toThrow(/verify/);
     expect(() => webEnv({ ...rec, verify: { ok: false, failures: ["x"], checkedAt: "" } })).toThrow(/verify/);

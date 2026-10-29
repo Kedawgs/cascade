@@ -13,7 +13,7 @@ export function webEnv(rec: DeploymentRecord): string {
   const plan = rec.plan;
   const a = plan.addresses;
   const bit = rec.done.bitAdapter;
-  if (!bit || !("block" in bit)) throw new Error("the Bittensor adapter's deploy block is not in the record");
+  if (!bit || !("block" in bit) || bit.block === undefined) throw new Error("the Bittensor adapter's deploy block is not in the record");
   const [coldkey, hotkey] = plan.steps.find((s) => s.id === "vault")!.args as [Hex, Hex];
   return [
     "# Written by `pnpm ops web-config`: the live " + cadenceOf(plan) + " deployment. Local only (git-ignored).",

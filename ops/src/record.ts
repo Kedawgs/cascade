@@ -13,8 +13,9 @@ export interface VerifyResult {
   checkedAt: string;
 }
 
-/** A step found already done on-chain whose transaction was never recorded. */
-export type DoneStep = Sent | { recovered: true };
+/** A step found already done on-chain whose transaction was never recorded. A create on Bittensor keeps
+ * the block it was created in (found from its code), since the keeper's log scans start there. */
+export type DoneStep = Sent | { recovered: true; block?: number };
 
 export interface DeploymentRecord {
   target: "live" | "rehearsal";

@@ -13,8 +13,8 @@ import {
   settingsOf,
   settingsV3Of,
 } from "./plan.ts";
-import { archiveRecord, type DeploymentRecord, loadRecordFor, saveRecord } from "./record.ts";
-import { balanceOf, codeAt, nonceOf, read } from "./rpc.ts";
+import { archiveRecord, type DeploymentRecord, type DoneStep, loadRecordFor, saveRecord } from "./record.ts";
+import { balanceOf, codeAt, firstBlockWithCode, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
 import type { CallRequest, CreateRequest, PlannedStep, StepId } from "./types.ts";
 import { refuseV2Verify, verifyAndSave } from "./verify.ts";
@@ -24,6 +24,8 @@ export interface DeployDeps {
   sendCall(ctx: Ctx, req: CallRequest): Promise<Sent>;
   effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep): Promise<boolean>;
   readColdkey(ctx: Ctx, vault: Address): Promise<Hex>;
+  /** The block a contract was created in, from its code */
+  deployBlock(ctx: Ctx, chain: ChainName, address: Address): Promise<number>;
 }
 
 const VIEWS = parseAbi([
@@ -126,7 +128,29 @@ export const readColdkey = async (ctx: Ctx, vault: Address): Promise<Hex> =>
     args: [vault],
   })) as Hex;
 
-const realDeps: DeployDeps = { sendCreate, sendCall, effectPresent, readColdkey };
+const realDeps: DeployDeps = {
+  sendCreate,
+  sendCall,
+  effectPresent,
+  readColdkey,
+  deployBlock: (ctx, chain, address) => firstBlockWithCode(ctx.rpc, chain, address),
+};
+
+/** A create on Bittensor: the keeper's log scans start at the Bittensor adapter's block (startBlock). */
+const keepsBlock = (step: PlannedStep) => step.kind === "create" && step.chain === "bittensor";
+
+/** A step found done on-chain, as the record keeps it: a create on Bittensor with the block it was
+ * created in. A block that can't be found stops the run; nothing is recorded on a guess. */
+async function recovered(ctx: Ctx, plan: Plan | PlanV3, step: PlannedStep, deps: DeployDeps): Promise<DoneStep> {
+  if (!keepsBlock(step)) return { recovered: true };
+  try {
+    return { recovered: true, block: await deps.deployBlock(ctx, step.chain, createdAt(plan, step.id)) };
+  } catch (e) {
+    throw new Error(
+      `${chainLabel(step.chain)}: ${step.label} is already on-chain, but the block it was created in could not be found (${(e as Error).message}); nothing sent — run deploy again`,
+    );
+  }
+}
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -246,6 +270,13 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
   await settlePending(ctx, rec, path);
 
   for (const step of rec.plan.steps) {
+    const done = rec.done[step.id];
+    // recovered by an earlier run that didn't keep its block
+    if (done && "recovered" in done && done.block === undefined && keepsBlock(step)) {
+      rec.done[step.id] = await recovered(ctx, rec.plan, step, deps);
+      saveRecord(path, rec);
+      ctx.log(`${chainLabel(step.chain)}: ${step.label} — found the block it was created in, recorded`);
+    }
     if (rec.done[step.id]) continue;
     let present: boolean;
     try {
@@ -256,7 +287,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
       );
     }
     if (present) {
-      rec.done[step.id] = { recovered: true };
+      rec.done[step.id] = await recovered(ctx, rec.plan, step, deps);
       saveRecord(path, rec);
       ctx.log(`${chainLabel(step.chain)}: ${step.label} — already done on-chain, recorded`);
       continue;
@@ -270,7 +301,7 @@ export async function deploy(ctx: Ctx, path: string, opts: { newPlan: boolean; v
     }
     // creates must land at their predicted addresses; a configuration call can go at any nonce
     if (step.kind === "create" && current > step.nonce && (await landedAfterAll(ctx, rec.plan, step, deps))) {
-      rec.done[step.id] = { recovered: true };
+      rec.done[step.id] = await recovered(ctx, rec.plan, step, deps);
       saveRecord(path, rec);
       ctx.log(`${chainLabel(step.chain)}: ${step.label} — already done on-chain, recorded`);
       continue;

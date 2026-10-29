@@ -103,6 +103,24 @@ describe("keeper reads", () => {
     expect(s.detail.messages).toEqual([{ id: MSG, direction: "Base → Bittensor", state: "SUCCESS" }]);
   });
 
+  it("scans Bittensor from the block its adapter was created in, recorded or recovered, and refuses a record without one", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    const froms: bigint[] = [];
+    const f = fakeChains((_chain, from) => (froms.push(from), []));
+    const recovered: DeploymentRecord = { ...rec, done: { ...rec.done, bitAdapter: { recovered: true, block: 500 } } };
+    await keeperDeps(f.ctx, recovered, recordPath).readState();
+    await keeperDeps(f.ctx, recovered, recordPath).payoutLogs();
+    expect(Math.min(...froms.map(Number))).toBe(500);
+    expect(froms.filter((b) => b === 500n)).toHaveLength(3);
+    // a window counted back from the head would slide with it, losing older payout batches: refused instead
+    const unknown: DeploymentRecord = { ...rec, done: { ...rec.done, bitAdapter: { recovered: true } } };
+    const g = fakeChains();
+    const refused = /no block for the Bittensor adapter's creation \(it was recovered, not recorded\).*run deploy again/;
+    await expect(keeperDeps(g.ctx, unknown, recordPath).readState()).rejects.toThrow(refused);
+    await expect(keeperDeps(g.ctx, unknown, recordPath).payoutLogs()).rejects.toThrow(refused);
+    expect(g.calls.some((c) => c.method === "eth_getLogs")).toBe(false);
+  });
+
   it("adds a bridge message to the record as it is on disk now, never writing back the copy the command loaded", async () => {
     const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
     saveRecord(recordPath, { ...rec, verify: { ok: true, failures: [], checkedAt: "" } });

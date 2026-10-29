@@ -227,7 +227,7 @@ export async function activationLogs(ctx: Ctx, rec: DeploymentRecord): Promise<{
     return r.logs;
   }
   const ev = ACTIVATED[0];
-  const logs = await scanLogs(ctx, "bittensor", rec.plan.addresses.vault, ev, await startBlock(ctx, rec, "bittensor"));
+  const logs = await scanLogs(ctx, "bittensor", rec.plan.addresses.vault, ev, startBlock(rec));
   return logs.map((l) => l.raw);
 }
 

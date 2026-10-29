@@ -239,7 +239,8 @@ describe("activationLogs", () => {
         throw new Error(method);
       },
     };
-    const rec = { target: "live" as const, wallet: WALLET, createdAt: "", plan, done: { vault: { recovered: true as const } } };
+    // the scan starts at the Bittensor adapter's block
+    const rec = { target: "live" as const, wallet: WALLET, createdAt: "", plan, done: { bitAdapter: { recovered: true as const, block: 5 }, vault: { recovered: true as const, block: 5 } } };
     const logs = await activationLogs({ rpc } as never, rec);
     expect(frontDoorActivationFailures(logs, plan)).toEqual([]);
   });

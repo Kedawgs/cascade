@@ -169,12 +169,16 @@ export async function scanLogs(
   return out;
 }
 
-/** The block each chain's contracts were deployed in (a recovered step falls back to the last 10,000 blocks). */
-export async function startBlock(ctx: Ctx, rec: DeploymentRecord, chain: ChainName): Promise<bigint> {
-  const first = rec.done[chain === "base" ? "baseAdapter" : "bitAdapter"];
-  if (first && "block" in first) return BigInt(first.block);
-  const latest = hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
-  return latest > 10_000n ? latest - 10_000n : 0n;
+/** The block the deployment's Bittensor contracts start at, where every Bittensor log scan starts: its
+ * Bittensor adapter's (the first created there), recorded with its transaction or, when its creation was
+ * recovered, found by deploy from its code. A record without one is refused: a window counted back from
+ * the head would slide with it and lose older events. */
+export function startBlock(rec: DeploymentRecord): bigint {
+  const first = rec.done.bitAdapter;
+  if (first && "block" in first && first.block !== undefined) return BigInt(first.block);
+  throw new Error(
+    `the record has no block for the Bittensor adapter's creation${first ? " (it was recovered, not recorded)" : ""}, where every Bittensor log scan starts: run deploy again to find it; nothing scanned`,
+  );
 }
 
 /** The keeper's reads and sends. Base is never scanned for logs here (its public RPC allows 200
@@ -219,7 +223,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const pending = (await r("bittensor", a.vault, VAULT, "pendingPayouts")) as bigint;
       const balance = await balanceOf(ctx.rpc, "bittensor", a.vault);
       const payoutDelay = Number(await r("bittensor", a.vault, VAULT, "payoutDelay"));
-      const queued = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "PayoutBatchQueued"), await startBlock(ctx, rec, "bittensor"));
+      const queued = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "PayoutBatchQueued"), startBlock(rec));
       const batches = [];
       for (const q of queued) {
         const key = q.args.key as Hex;
@@ -265,7 +269,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     nonce: (chain) => nonceOf(ctx.rpc, chain, WALLET),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
-      const from = await startBlock(ctx, rec, "bittensor");
+      const from = startBlock(rec);
       const bounced = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "DepositBounced"), from);
       const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), from);
       const shape = (kind: PayoutLog["kind"]) => (l: ScannedLog): PayoutLog => ({
@@ -306,7 +310,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     async deliveryCandidates() {
       if (!isPlanV3(rec.plan)) return [];
       const latest = hexToBigInt((await ctx.rpc.request("bittensor", "eth_blockNumber", [])) as Hex);
-      const start = await startBlock(ctx, rec, "bittensor");
+      const start = startBlock(rec);
       const from = scannedTo === undefined || scannedTo + 1n - OVERLAP < start ? start : scannedTo + 1n - OVERLAP;
       if (from <= latest) {
         const redeemed = await scanLogs(ctx, "bittensor", a.vault, event(VAULT, "Redeemed"), from, [], latest);
@@ -463,7 +467,7 @@ export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opt
   const a = rec.plan.addresses;
   const known = rec.messages?.find((m) => m.id.toLowerCase() === id.toLowerCase());
   let dst: ChainName | undefined = known ? (known.direction === "Base → Bittensor" ? "bittensor" : "base") : undefined;
-  if (!dst && (await scanLogs(ctx, "bittensor", a.bitAdapter, event(ADAPTER, "Sent"), await startBlock(ctx, rec, "bittensor"), [id])).length) {
+  if (!dst && (await scanLogs(ctx, "bittensor", a.bitAdapter, event(ADAPTER, "Sent"), startBlock(rec), [id])).length) {
     dst = "base";
   }
   if (!dst) {

@@ -6,6 +6,7 @@ import {
   type Hex,
   hexToBigInt,
   hexToNumber,
+  numberToHex,
 } from "viem";
 import type { ChainName, ChainTarget } from "./config.ts";
 
@@ -95,6 +96,30 @@ export const balanceOf = async (rpc: Rpc, chain: ChainName, addr: Address): Prom
 
 export const codeAt = async (rpc: Rpc, chain: ChainName, addr: Address): Promise<Hex> =>
   (await rpc.request(chain, "eth_getCode", [addr, "latest"])) as Hex;
+
+/** The block `addr`'s code first appears in: steps back from the head, doubling the step, to a block
+ * without it, then halves the gap. A recent creation costs few reads, and state is asked for only about
+ * twice its age back (Bittensor's archive node keeps it all). */
+export async function firstBlockWithCode(rpc: Rpc, chain: ChainName, addr: Address): Promise<number> {
+  const has = async (block: bigint) => ((await rpc.request(chain, "eth_getCode", [addr, numberToHex(block)])) as Hex) !== "0x";
+  let hi = hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex);
+  if (!(await has(hi))) throw new Error(`no code at ${addr} at block ${hi}`);
+  // hi always has the code; lo never does (-1: before the first block)
+  let lo = -1n;
+  for (let step = 1n; hi - step >= 0n; step *= 2n) {
+    if (!(await has(hi - step))) {
+      lo = hi - step;
+      break;
+    }
+    hi -= step;
+  }
+  while (hi - lo > 1n) {
+    const mid = (lo + hi) / 2n;
+    if (await has(mid)) hi = mid;
+    else lo = mid;
+  }
+  return Number(hi);
+}
 
 export const chainIdOf = async (rpc: Rpc, chain: ChainName): Promise<number> =>
   hexToNumber((await rpc.request(chain, "eth_chainId", [])) as Hex);

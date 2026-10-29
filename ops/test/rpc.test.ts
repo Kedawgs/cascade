@@ -1,6 +1,7 @@
+import { numberToHex } from "viem";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { targets } from "../src/config.ts";
-import { createRpc, nonceOf } from "../src/rpc.ts";
+import { createRpc, firstBlockWithCode, nonceOf, type Rpc } from "../src/rpc.ts";
 
 const live = targets({}).live;
 
@@ -45,5 +46,44 @@ describe("createRpc", () => {
     expect(await nonceOf(rpc, "base", "0x770932787DD3bcE64f14E31f4746bCe22E214fFF")).toBe(7);
     expect(seen[0].body.method).toBe("eth_getTransactionCount");
     expect(seen[0].body.params[1]).toBe("pending");
+  });
+});
+
+describe("firstBlockWithCode", () => {
+  const ADDR = "0x00000000000000000000000000000000000000c0";
+  /** A chain whose head is `head` and where ADDR has code from block `created` on; records each block read. */
+  function chain(head: bigint, created: bigint) {
+    const read: bigint[] = [];
+    const rpc: Rpc = {
+      async request(_chain, method, params) {
+        if (method === "eth_blockNumber") return numberToHex(head);
+        if (method !== "eth_getCode") throw new Error(`unexpected ${method}`);
+        expect(params[0]).toBe(ADDR);
+        const at = BigInt(params[1] as string);
+        read.push(at);
+        return at >= created ? "0x6080" : "0x";
+      },
+    };
+    return { rpc, read };
+  }
+
+  it("finds the block a contract was created in, asking only for blocks back to about twice its age", async () => {
+    for (const [head, created] of [
+      [6_000_000n, 5_999_990n],
+      [6_000_000n, 4_123_457n],
+      [6_000_000n, 6_000_000n],
+      [6_000_000n, 1n],
+      [6_000_000n, 0n],
+    ]) {
+      const c = chain(head, created);
+      expect(await firstBlockWithCode(c.rpc, "bittensor", ADDR)).toBe(Number(created));
+      const age = head - created;
+      expect(c.read.every((b) => b >= 0n && head - b <= 2n * age + 1n)).toBe(true);
+      expect(c.read.length).toBeLessThanOrEqual(2 * Math.ceil(Math.log2(Number(age) + 2)) + 2);
+    }
+  });
+
+  it("refuses an address with no code at the head", async () => {
+    await expect(firstBlockWithCode(chain(1_000n, 2_000n).rpc, "bittensor", ADDR)).rejects.toThrow(/no code at 0x0+c0/);
   });
 });

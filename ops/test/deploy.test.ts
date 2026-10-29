@@ -60,6 +60,7 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
     sendCall: (_c, req) => fakeSend(req as PlannedStep),
     effectPresent: async (_c, _p, step) => effects.has(step.id),
     readColdkey: async () => COLDKEY,
+    deployBlock: async () => 777,
   };
   return { ctx, deps, nonce, receipts, sent, sentNonces, effects, dir, recordPath, logs };
 }
@@ -101,6 +102,42 @@ describe("deploy", () => {
     const rec = await deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps);
     expect(w.sent).toEqual(ALL.slice(1));
     expect(rec.done.baseAdapter).toEqual({ recovered: true });
+  });
+
+  it("a recovered Bittensor create keeps the block it was created in, where the keeper's log scans start", async () => {
+    const w = world({ base: 2, bittensor: 1 });
+    saveRecord(w.recordPath, recordWith(["baseAdapter", "frontDoor"]));
+    w.effects.add("bitAdapter");
+    const asked: string[] = [];
+    w.deps.deployBlock = async (_c, chain, address) => (asked.push(`${chain} ${address}`), 9_357_492);
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps);
+    expect(rec.done.bitAdapter).toEqual({ recovered: true, block: 9_357_492 });
+    expect(loadRecord(w.recordPath)!.done.bitAdapter).toEqual({ recovered: true, block: 9_357_492 });
+    expect(asked).toEqual([`bittensor ${rec.plan.addresses.bitAdapter}`]);
+    expect(w.sent).toEqual(ALL.slice(3));
+  });
+
+  it("a recovered Bittensor create whose block can't be found stops the run, recording nothing and sending nothing", async () => {
+    const w = world({ base: 2, bittensor: 1 });
+    saveRecord(w.recordPath, recordWith(["baseAdapter", "frontDoor"]));
+    w.effects.add("bitAdapter");
+    w.deps.deployBlock = async () => {
+      throw new Error("missing trie node");
+    };
+    await expect(deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps)).rejects.toThrow(
+      /deploy the Bittensor bridge adapter is already on-chain, but the block it was created in could not be found \(missing trie node\); nothing sent — run deploy again/,
+    );
+    expect(loadRecord(w.recordPath)!.done.bitAdapter).toBeUndefined();
+    expect(w.sent).toEqual([]);
+  });
+
+  it("finds the block of a Bittensor create recovered by an earlier run that didn't keep it", async () => {
+    const w = world({ base: 2, bittensor: 4 });
+    saveRecord(w.recordPath, { ...recordWith(ALL.filter((id) => id !== "bitAdapter")), done: { ...recordWith(ALL).done, bitAdapter: { recovered: true } } });
+    const rec = await deploy(w.ctx, w.recordPath, { newPlan: false }, w.deps);
+    expect(loadRecord(w.recordPath)!.done.bitAdapter).toEqual({ recovered: true, block: 777 });
+    expect(rec.done.bitAdapter).toEqual({ recovered: true, block: 777 });
+    expect(w.sent).toEqual([]);
   });
 
   it("a nonce mismatch stops before sending", async () => {

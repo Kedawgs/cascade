@@ -281,11 +281,11 @@ describe("delivery reads", () => {
     // the failed round is scanned again, from the same block
     expect(await deps.deliveryCandidates()).toEqual([alice, carol]);
     expect(await deps.deliveryCandidates()).toEqual([alice, carol]);
-    // each later round starts 10 blocks back, so a block a lagging node hadn't indexed is read again
+    // each later round starts 400 blocks back, so a block a lagging node hadn't indexed is read again
     expect(windows).toEqual([
       [1n, 900n],
-      [891n, 1_200n],
-      [1_191n, 1_200n],
+      [501n, 1_200n],
+      [801n, 1_200n],
     ]);
     // a new deps (a new run) starts over from the deploy block
     windows.length = 0;

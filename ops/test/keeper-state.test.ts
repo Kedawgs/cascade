@@ -128,13 +128,21 @@ describe("keeper reads", () => {
     expect(g.calls.some((c) => c.method === "eth_getLogs")).toBe(false);
   });
 
-  it("scans the vault's payout events incrementally: each later round reads only the new blocks, from 10 back, keeping each log once", async () => {
+  const VAULT_EVENTS = KEEPER_READ_ABIS.VAULT.filter((i) => i.type === "event");
+  const KEY: Hex = `0x${"ab".repeat(32)}`;
+  const bob: Address = "0x000000000000000000000000000000000000b0b0";
+  const topics = (eventName: string, args?: Record<string, unknown>) => encodeEventTopics({ abi: VAULT_EVENTS, eventName, args } as never) as Hex[];
+  const at = (block: number, t: Hex[], data: Hex, tx: Hex = `0x${"bb".repeat(32)}`, logIndex = 0) => ({
+    address: plan.addresses.vault,
+    topics: t,
+    data,
+    blockNumber: numberToHex(block),
+    logIndex: numberToHex(logIndex),
+    transactionHash: tx,
+  });
+
+  it("scans the vault's payout events incrementally: each later round reads only the new blocks, from 400 back, keeping each log once", async () => {
     const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
-    const VAULT_EVENTS = KEEPER_READ_ABIS.VAULT.filter((i) => i.type === "event");
-    const KEY: Hex = `0x${"ab".repeat(32)}`;
-    const bob: Address = "0x000000000000000000000000000000000000b0b0";
-    const topics = (eventName: string, args?: Record<string, unknown>) => encodeEventTopics({ abi: VAULT_EVENTS, eventName, args } as never) as Hex[];
-    const at = (block: number, t: Hex[], data: Hex) => ({ address: plan.addresses.vault, topics: t, data, blockNumber: numberToHex(block), logIndex: "0x0", transactionHash: `0x${"bb".repeat(32)}` });
     // one payout batch, queued with its one bounced deposit in block 2,595: inside the next round's overlap
     const logs = [
       at(2_595, topics("PayoutBatchQueued", { key: KEY, sourceChain: 8453n }), encodeAbiParameters(parseAbiParameters("uint64, uint32, uint256, uint256"), [7n, 1, 5n, 1n])),
@@ -163,16 +171,50 @@ describe("keeper reads", () => {
     head = 2_650;
     await deps.readState();
     const second = await deps.payoutLogs();
+    // still one query a round on Bittensor's 1,000-block window
     expect(scans).toEqual([
-      ["PayoutBatchQueued", 2_591n, 2_650n],
-      ["DepositBounced", 2_591n, 2_650n],
-      ["Redeemed", 2_591n, 2_650n],
+      ["PayoutBatchQueued", 2_201n, 2_650n],
+      ["DepositBounced", 2_201n, 2_650n],
+      ["Redeemed", 2_201n, 2_650n],
     ]);
     // read again in the overlap, the bounced deposit is listed once: twice, the rebuilt list would not match the vault's
     expect(second).toEqual(first);
     expect(rebuildPayouts(second, KEY)).toEqual([{ user: bob, shares: 0n, assets: 5n }]);
     // and its batch is read once a round
     expect(f.calls.filter((c) => c.fn === "getPayoutBatch")).toHaveLength(2);
+  });
+
+  it("finds a log a lagging node or a reorg hid, and never keeps one twice or from a dropped block", async () => {
+    const recordPath = join(mkdtempSync(join(tmpdir(), "ops-state-")), "rec.json");
+    const [carol, dave]: Address[] = ["0x000000000000000000000000000000000000ca01", "0x000000000000000000000000000000000000dA0E"];
+    const tx = (n: number): Hex => numberToHex(n, { size: 32 });
+    const bounced = (user: Address, block: number, t: Hex, logIndex = 0) => at(block, topics("DepositBounced", { key: KEY, user }), encodeAbiParameters(parseAbiParameters("uint256"), [5n]), t, logIndex);
+    let head = 2_600;
+    // the node reports 2,600 as its head, but hasn't indexed dave's block (2,300) yet; bob's and carol's are near the head
+    let chainLogs = [bounced(bob, 2_595, tx(1)), bounced(carol, 2_598, tx(2))];
+    const f = fakeChains(
+      (_chain, from, to, t) => chainLogs.filter((l) => l.topics[0] === t[0] && BigInt(l.blockNumber) >= from && BigInt(l.blockNumber) <= to),
+      () => head,
+    );
+    const deps = keeperDeps(f.ctx, rec, recordPath);
+    const users = async () => (await deps.payoutLogs()).map((l) => [l.user, l.blockNumber]);
+    expect(await users()).toEqual([
+      [bob, 2_595n],
+      [carol, 2_598n],
+    ]);
+    // a reorg: carol's block is dropped and her transaction not mined again; bob's is mined again in a
+    // later block at another index; dave's block, 300 below the last head, is indexed now
+    head = 2_650;
+    chainLogs = [bounced(dave, 2_300, tx(3)), bounced(bob, 2_601, tx(1), 4)];
+    expect(await users()).toEqual([
+      [dave, 2_300n],
+      [bob, 2_601n],
+    ]);
+    head = 2_700;
+    expect(await users()).toEqual([
+      [dave, 2_300n],
+      [bob, 2_601n],
+    ]);
   });
 
   it("adds a bridge message to the record as it is on disk now, never writing back the copy the command loaded", async () => {
@@ -330,12 +372,12 @@ describe("the open batch and its close's economics", () => {
     expect(queries.every((q) => q.topics[1] === numberToHex(7n, { size: 32 }))).toBe(true);
     expect(queries).toHaveLength(36);
     expect([queries[0].from, queries.at(-1)!.to]).toEqual([BigInt(BASE_HEAD - 3_599), BigInt(BASE_HEAD)]);
-    // the next round reads only the new blocks, from 10 back: the stake read again there is counted once
+    // the next round reads only the new blocks, from 70 back: the stake read again there is counted once
     queries.length = 0;
     logs.push(requested(STAKER_AT, 10n ** 17n, BASE_HEAD + 25));
     head = BASE_HEAD + 30;
     expect((await deps.readState()).frontDoor.closeEconomics).toEqual({ feesUsdc: 150_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
-    expect(queries.map((q) => [q.from, q.to])).toEqual([[BigInt(BASE_HEAD - 9), BigInt(BASE_HEAD + 30)]]);
+    expect(queries.map((q) => [q.from, q.to])).toEqual([[BigInt(BASE_HEAD - 69), BigInt(BASE_HEAD + 30)]]);
     // the next batch starts over, with its own id
     queries.length = 0;
     batchId = 8n;

@@ -129,6 +129,26 @@ export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n
  * blocks, 36 queries. Fees decide a close only once the batch can close (an hour in at the launch
  * cadence), and `run` then looks again each round. */
 const REQUESTED_LOOKBACK = 3_600n;
+/** Each later scan of an event starts this many blocks before the last head it reached, so a log a
+ * lagging (load-balanced) node or a reorg hid is found on a later round; still one query a round (about
+ * 70 + 30 new blocks of Base's 100-block window, 400 + 5 of Bittensor's 1,000). */
+const REREAD: Record<ChainName, bigint> = { base: 70n, bittensor: 400n };
+/** Logs this close to the head are returned but not kept: they are read again next round, so one from a
+ * block that is then dropped never sticks. */
+const SETTLE: Record<ChainName, bigint> = { base: 30n, bittensor: 10n };
+
+/** Each log with an id from its transaction and content, numbered when one transaction logs the same
+ * thing twice: the same in every read of its block, and the same when a reorg mines the transaction
+ * again in another block or at another index, so that copy is not taken for a second log. */
+function identified(logs: readonly ScannedLog[]): [string, ScannedLog][] {
+  const count = new Map<string, number>();
+  return logs.map((l) => {
+    const what = `${l.transactionHash}:${l.raw.topics.join(",")}:${l.raw.data}`;
+    const n = count.get(what) ?? 0;
+    count.set(what, n + 1);
+    return [`${what}#${n}`, l];
+  });
+}
 
 const event = (abi: readonly unknown[], name: string) =>
   (abi as AbiEvent[]).find((i) => i.type === "event" && i.name === name) as AbiEvent;
@@ -190,37 +210,43 @@ export function startBlock(rec: DeploymentRecord): bigint {
  * last blocks, when its fees decide its close (its public RPC allows 200 blocks a query): bridge messages
  * come from the record, which the keeper fills as it sends. The vault's payout events (and with them the
  * delivery candidates) and the open batch's deposits are kept for the life of these deps (one `run`
- * loop), so each round scans only the blocks since the last, and a few before them (OVERLAP). */
+ * loop), so each round scans only the blocks since the last, and some before them (REREAD). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
-  /** Each later scan starts this many blocks back, so a block a lagging (load-balanced) node hadn't
-   * indexed yet is read again rather than skipped for the whole run; a log read twice is kept once. */
-  const OVERLAP = 10n;
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
-  /** One of the vault's events since the deploy block, kept as it is found: each call scans from the last
-   * block it finished (less OVERLAP) to the head, so a failed scan is retried from the same block. */
-  function vaultLogs(name: string): () => Promise<readonly ScannedLog[]> {
-    const found: ScannedLog[] = [];
+  /** One event's logs found so far, for the life of these deps. Each call scans to the head from REREAD
+   * blocks before the last head it reached (the first time from `first(head)`, and never before it), and
+   * moves on only once the whole range is in, so a failed scan is retried. Logs SETTLE blocks below the
+   * head are kept; nearer ones are returned and read again next round. */
+  function logCursor(chain: ChainName, address: Address, ev: AbiEvent, topics: (Hex | null)[] = []) {
+    const kept: ScannedLog[] = [];
     const seen = new Set<string>();
     let scannedTo: bigint | undefined;
-    return async () => {
-      const latest = hexToBigInt((await ctx.rpc.request("bittensor", "eth_blockNumber", [])) as Hex);
-      const start = startBlock(rec);
-      const from = scannedTo === undefined || scannedTo + 1n - OVERLAP < start ? start : scannedTo + 1n - OVERLAP;
-      if (from <= latest) {
-        for (const l of await scanLogs(ctx, "bittensor", a.vault, event(VAULT, name), from, [], latest)) {
-          const id = `${l.blockNumber}:${l.transactionHash}:${l.logIndex}`;
-          if (!seen.has(id)) found.push(l);
-          seen.add(id);
+    return async (first: (head: bigint) => bigint): Promise<{ logs: ScannedLog[]; head: bigint }> => {
+      const head = hexToBigInt((await ctx.rpc.request(chain, "eth_blockNumber", [])) as Hex);
+      const earliest = first(head);
+      const back = scannedTo === undefined ? earliest : scannedTo + 1n - REREAD[chain];
+      const from = back > earliest ? back : earliest;
+      const fresh: ScannedLog[] = [];
+      if (from <= head) {
+        for (const [id, l] of identified(await scanLogs(ctx, chain, address, ev, from, topics, head))) {
+          if (seen.has(id)) continue;
+          if (l.blockNumber + SETTLE[chain] <= head) {
+            seen.add(id);
+            kept.push(l);
+          } else fresh.push(l);
         }
       }
-      // only once the whole range is in
-      scannedTo = latest;
-      return found;
+      scannedTo = head;
+      return { logs: [...kept, ...fresh], head };
     };
   }
+  const vaultLogs = (name: string) => {
+    const read = logCursor("bittensor", a.vault, event(VAULT, name));
+    return () => read(() => startBlock(rec));
+  };
   const queuedLogs = vaultLogs("PayoutBatchQueued");
   const bouncedLogs = vaultLogs("DepositBounced");
   const redeemedLogs = vaultLogs("Redeemed");
@@ -252,7 +278,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const pending = (await r("bittensor", a.vault, VAULT, "pendingPayouts")) as bigint;
       const balance = await balanceOf(ctx.rpc, "bittensor", a.vault);
       const payoutDelay = Number(await r("bittensor", a.vault, VAULT, "payoutDelay"));
-      const queued = await queuedLogs();
+      const { logs: queued } = await queuedLogs();
       const batches = [];
       for (const q of queued) {
         const key = q.args.key as Hex;
@@ -298,8 +324,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     nonce: (chain) => nonceOf(ctx.rpc, chain, WALLET),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
-      const bounced = await bouncedLogs();
-      const redeemed = await redeemedLogs();
+      const { logs: bounced } = await bouncedLogs();
+      const { logs: redeemed } = await redeemedLogs();
       const shape = (kind: PayoutLog["kind"]) => (l: ScannedLog): PayoutLog => ({
         kind,
         key: l.args.key as Hex,
@@ -337,7 +363,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     async deliveryCandidates() {
       if (!isPlanV3(rec.plan)) return [];
-      return uniqueUsers((await redeemedLogs()).map((l) => l.args.user as Address));
+      return uniqueUsers((await redeemedLogs()).logs.map((l) => l.args.user as Address));
     },
     async readDelivery(user) {
       if (!isPlanV3(rec.plan)) throw new Error("USDC delivery needs a v3 deployment");
@@ -450,32 +476,20 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     return { frontDoor, closeMaxWaitS };
   }
 
-  /** The open batch's deposits as DepositRequested logged them on Base, kept for one batch across
-   * rounds: each later scan reads only the blocks since the last, from OVERLAP before them. */
-  let requested: { batchId: bigint; scannedTo?: bigint; seen: Set<string>; logs: { payer: Address; amount: bigint }[] } | undefined;
+  /** The open batch's DepositRequested logs on Base, kept for one batch across rounds. */
+  let requested: { batchId: bigint; read: ReturnType<typeof logCursor> } | undefined;
 
   /** The open batch's deposits the staker made (DepositRequested names it as the payer): only those paid
    * the staker's deposit and swap fees; TAO deposited straight into the front door (deposit, depositFor)
    * paid neither. Found by the batch's id over Base's logs, the first look reaching back REQUESTED_LOOKBACK
    * blocks at most: an older deposit (a batch the keeper first sees late) counts as unpaid. */
   async function stakerDeposits(batchId: bigint, staker: Address): Promise<{ count: number; tao: bigint }> {
-    if (requested?.batchId !== batchId) requested = { batchId, seen: new Set(), logs: [] };
-    const q = requested;
-    const latest = hexToBigInt((await ctx.rpc.request("base", "eth_blockNumber", [])) as Hex);
-    const back = q.scannedTo === undefined ? latest + 1n - REQUESTED_LOOKBACK : q.scannedTo + 1n - OVERLAP;
-    const from = back > 0n ? back : 0n;
-    if (from <= latest) {
-      const id = numberToHex(batchId, { size: 32 });
-      for (const l of await scanLogs(ctx, "base", a.frontDoor, event(FRONT, "DepositRequested"), from, [id], latest)) {
-        const key = `${l.blockNumber}:${l.transactionHash}:${l.logIndex}`;
-        if (!q.seen.has(key)) q.logs.push({ payer: l.args.payer as Address, amount: l.args.amount as bigint });
-        q.seen.add(key);
-      }
+    if (requested?.batchId !== batchId) {
+      requested = { batchId, read: logCursor("base", a.frontDoor, event(FRONT, "DepositRequested"), [numberToHex(batchId, { size: 32 })]) };
     }
-    // only once the whole range is in: a failed scan is retried from the same block
-    q.scannedTo = latest;
-    const staked = q.logs.filter((l) => l.payer.toLowerCase() === staker.toLowerCase());
-    return { count: staked.length, tao: staked.reduce((t, l) => t + l.amount, 0n) };
+    const { logs } = await requested.read((head) => (head + 1n > REQUESTED_LOOKBACK ? head + 1n - REQUESTED_LOOKBACK : 0n));
+    const staked = logs.filter((l) => (l.args.payer as Address).toLowerCase() === staker.toLowerCase());
+    return { count: staked.length, tao: staked.reduce((t, l) => t + (l.args.amount as bigint), 0n) };
   }
 
   /** The batch's estimated fees and its close's bridge fee, in USDC units, at the front door's oracle's

@@ -92,6 +92,8 @@ export async function pauseCommand(
           stem: `${o.name}-${o.action}-${chain}`,
           title: `Cascade ${o.name}: ${o.action} the ${what} on ${chainLabel(chain)}`,
           now: o.now,
+          // pause and unpause happen more than once: a timelock needs a new operation id each time
+          saltLabel: `${o.name}-${o.action}-${chain}:${o.now}`,
         });
         lines.push(...out.lines);
         files.push(...out.files);

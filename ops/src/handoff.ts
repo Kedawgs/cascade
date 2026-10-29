@@ -30,6 +30,9 @@ export interface EmitOpts {
   title: string;
   /** createdAt, in ms */
   now: number;
+  /** What a timelock's salt is hashed from (default: the stem). A call that can be made again (pause,
+   * unpause) needs a new one each time: the timelock refuses an operation id it has seen. */
+  saltLabel?: string;
 }
 
 /** `calls` for `signer` on `chain` to make, in the form it can use: a plain account gets the transactions
@@ -55,12 +58,12 @@ export async function emitCalls(ctx: Pick<Ctx, "rpc" | "targets">, chain: ChainN
     return { lines, files };
   }
   if (kind.kind === "timelock") {
-    const salt = keccak256(stringToBytes(`cascade:${o.stem}`));
+    const salt = keccak256(stringToBytes(`cascade:${o.saltLabel ?? o.stem}`));
     const t = timelockCalls(signer, calls, salt, kind.minDelay);
     const s = write(`${o.stem}-1-schedule`, `${o.title} (1 of 2: schedule)`, [t.schedule]);
     const e = write(`${o.stem}-2-execute`, `${o.title} (2 of 2: execute)`, [t.execute]);
     lines.push(
-      `${where}: ${signer} is a timelock (minimum delay ${kind.minDelay} s). Its proposer's Safe loads ${s} in the Transaction Builder; once the delay has passed, its executor loads ${e}.`,
+      `${where}: ${signer} is a timelock (minimum delay ${kind.minDelay} s). Its proposer's Safe loads ${s} in the Transaction Builder; once the delay has passed, its executor loads ${e}. The batch's salt ${salt}, operation id ${t.id}.`,
     );
     return { lines, files };
   }

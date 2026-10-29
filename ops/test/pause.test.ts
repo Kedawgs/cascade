@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Address, decodeFunctionData, encodeFunctionData, getAddress, type Hex, numberToHex, parseAbi } from "viem";
+import { type Address, decodeFunctionData, encodeAbiParameters, encodeFunctionData, getAddress, type Hex, keccak256, numberToHex, parseAbi, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
 import { parseArgs, UsageError } from "../src/args.ts";
 import { type ChainName, paths, WALLET } from "../src/config.ts";
@@ -194,6 +194,37 @@ describe("pause with a Safe guardian, unpause by the owner", () => {
     expect(args?.[2]).toEqual([encodeFunctionData({ abi: parseAbi(["function unpause()"]), functionName: "unpause" })]);
     expect(r.lines.join("\n")).toMatch(/timelock/);
     expect(w.sends).toEqual([]);
+  });
+
+  it("each unpause through a timelock is a new operation: the timelock refuses an id it has seen, even an executed one", async () => {
+    const owner = getAddress(ROLES.owner.base);
+    const w = world({ paused: { base: true } });
+    const f = fakeChain(
+      [PAUSE_ABI, SAFE_PROBE_ABI, TIMELOCK_ABI],
+      { paused: () => true, owner: () => owner, getMinDelay: () => 172_800n, guardian: () => ROLES.guardian.base },
+      { eth_getCode: () => "0x6080" },
+    );
+    /** The operation id OpenZeppelin's TimelockController gives a batch: hashOperationBatch. */
+    const idOf = (file: string) => {
+      const data = JSON.parse(readFileSync(file, "utf8")).transactions[0].data as Hex;
+      const { args } = decodeFunctionData({ abi: TIMELOCK_ABI, data });
+      const [targets, values, payloads, predecessor, salt] = args as [Address[], bigint[], Hex[], Hex, Hex];
+      return {
+        salt,
+        id: keccak256(encodeAbiParameters(parseAbiParameters("address[], uint256[], bytes[], bytes32, bytes32"), [targets, values, payloads, predecessor, salt])),
+      };
+    };
+    const ops = [];
+    for (const now of [1_800_000_000_000, 1_800_000_060_000]) {
+      const o = opts({ action: "unpause", target: "front-door", now });
+      const r = await pauseCommand({ ...w.ctx, rpc: f.ctx.rpc }, rec, o, w.deps);
+      const op = idOf(join(o.outDir, "v3-launch-unpause-base-1-schedule.json"));
+      expect(idOf(join(o.outDir, "v3-launch-unpause-base-2-execute.json"))).toEqual(op);
+      // printed, so the operator can find the operation on the timelock
+      expect(r.lines.join("\n")).toContain(`salt ${op.salt}, operation id ${op.id}`);
+      ops.push(op);
+    }
+    expect(ops[0].id).not.toBe(ops[1].id);
   });
 
   it("a test deployment pauses the same way, the test wallet being its guardian", async () => {

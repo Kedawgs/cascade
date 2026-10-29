@@ -1,4 +1,4 @@
-import { type Address, encodeFunctionData, type Hex, keccak256, parseAbi, stringToBytes } from "viem";
+import { type Address, encodeAbiParameters, encodeFunctionData, type Hex, keccak256, parseAbi, parseAbiParameters, stringToBytes } from "viem";
 import type { ChainName } from "./config.ts";
 import { codeAt, read } from "./rpc.ts";
 import type { Ctx } from "./send.ts";
@@ -77,13 +77,16 @@ export const SAFE_PROBE_ABI = parseAbi(["function getThreshold() view returns (u
 const NO_PREDECESSOR: Hex = `0x${"00".repeat(32)}`;
 
 /** `calls` made by the timelock at `timelock`: its proposer schedules them in one batch with `delay` (the
- * timelock's minimum), and once that has passed its executor runs them. The same `salt` in both. */
-export function timelockCalls(timelock: Address, calls: SafeCall[], salt: Hex, delay: bigint): { schedule: SafeCall; execute: SafeCall } {
+ * timelock's minimum), and once that has passed its executor runs them. The same `salt` in both, and `id`
+ * the operation id the timelock gives them (hashOperationBatch). The timelock refuses to schedule an id it
+ * has seen, even one already executed, so a call made more than once needs a new salt each time. */
+export function timelockCalls(timelock: Address, calls: SafeCall[], salt: Hex, delay: bigint): { schedule: SafeCall; execute: SafeCall; id: Hex } {
   const targets = calls.map((c) => c.to);
   const values = calls.map((c) => c.value ?? 0n);
   const payloads = calls.map((c) => c.data);
   const what = calls.map((c) => c.description).join("; ");
   return {
+    id: keccak256(encodeAbiParameters(parseAbiParameters("address[], uint256[], bytes[], bytes32, bytes32"), [targets, values, payloads, NO_PREDECESSOR, salt])),
     schedule: {
       to: timelock,
       data: encodeFunctionData({ abi: TIMELOCK_ABI, functionName: "scheduleBatch", args: [targets, values, payloads, NO_PREDECESSOR, salt, delay] }),

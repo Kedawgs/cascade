@@ -90,6 +90,7 @@ export function stubDeps(over: Partial<KeeperDeps>): KeeperDeps {
     quoteClose: missing("quoteClose"),
     payoutLogs: missing("payoutLogs"),
     batchInfo: missing("batchInfo"),
+    readClaimable: missing("readClaimable"),
     recordMessage: () => undefined,
     readRewards: missing("readRewards"),
     deliveryCandidates: async () => [],

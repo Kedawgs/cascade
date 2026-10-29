@@ -49,7 +49,7 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   deliver [--user 0x…]       sell redeemed users' TAO for USDC where their minimum allows
   track <messageId>          follow a bridge message to its destination
   run                        do whatever is due, every minute, until stopped (Ctrl-C); never claims
-  wind-down --user 0x…       pause the front door once everything is paid out
+  wind-down [--user 0x…]     pause the front door once everything is paid out and claimed
   sweep --tao-to <SS58> --eth-to <0x…>   send the test wallet's leftovers home
   web-config                 write web/.env.local with the deployment's addresses for the site
 

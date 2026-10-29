@@ -78,6 +78,7 @@ function deps(
     quoteClose: async () => 619_000_000_000_000n,
     payoutLogs: async () => [],
     batchInfo: async () => ({ payoutsHash: payoutsHash([]), count: 0 }),
+    readClaimable: async () => 0n,
     // v2: no deliveries, and the rewards read is not part of these tests
     deliveryCandidates: async () => [],
     readDelivery: async () => {

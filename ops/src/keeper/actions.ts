@@ -24,6 +24,8 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   quoteClose(s: KeeperState): Promise<bigint>;
   payoutLogs(): Promise<PayoutLog[]>;
   batchInfo(key: Hex): Promise<{ payoutsHash: Hex; count: number }>;
+  /** The TAO the front door holds for `user` to claim (or the keeper to deliver) */
+  readClaimable(user: Address): Promise<bigint>;
   recordMessage(m: Message): void;
   log(line: string): void;
 }

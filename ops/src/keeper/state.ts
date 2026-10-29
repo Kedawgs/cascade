@@ -283,6 +283,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const b = (await r("bittensor", a.vault, VAULT, "getPayoutBatch", [key])) as { payoutsHash: Hex; count: number };
       return { payoutsHash: b.payoutsHash, count: b.count };
     },
+    readClaimable: async (user) => (await r("base", a.frontDoor, FRONT, "claimable", [user])) as bigint,
     recordMessage(m) {
       rec.messages = [...(rec.messages ?? []), { ...m, at: new Date().toISOString() }];
       saveRecord(recordPath, rec);

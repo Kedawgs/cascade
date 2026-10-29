@@ -1,7 +1,8 @@
-import { numberToHex } from "viem";
+import { type Address, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import { WALLET } from "../src/config.ts";
 import type { KeeperState } from "../src/keeper/actions.ts";
+import type { PayoutLog } from "../src/keeper/payouts.ts";
 import { KEEPER_READ_ABIS } from "../src/keeper/state.ts";
 import { buildPlan } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
@@ -56,6 +57,33 @@ describe("wind-down", () => {
       expect(sent.map((r) => r.functionName)).toEqual(["pause", "setCaps"]);
       expect(sent[1].args).toEqual([minDeposit, 0n]);
     }
+  });
+
+  it("checks every account the vault paid out to, not only the ones named with --user", async () => {
+    const bob: Address = "0x000000000000000000000000000000000000b0b0";
+    const carol: Address = "0x000000000000000000000000000000000000ca01";
+    const paid = (kind: PayoutLog["kind"], user: Address, blockNumber: bigint): PayoutLog => ({ kind, key: KEY, user, shares: 0n, assets: 1n, blockNumber, logIndex: 0 });
+    const logs = [paid("redeemed", bob, 5n), paid("bounced", carol, 6n), paid("redeemed", WALLET, 7n), paid("redeemed", bob, 8n)];
+    const run = (owed: Record<string, bigint>) => {
+      const sent: CallRequest[] = [];
+      const asked: Address[] = [];
+      const deps = stubDeps({
+        readState: async () => quiet(),
+        payoutLogs: async () => logs,
+        readClaimable: async (user) => (asked.push(user), owed[user] ?? 0n),
+        sendCall: async (req) => (sent.push(req), SENT),
+      });
+      return { done: windDown(deps, v3Record()), sent, asked };
+    };
+    // bob was never named, and still has TAO to claim or be delivered
+    const owing = run({ [bob]: 5n * 10n ** 15n });
+    await expect(owing.done).rejects.toThrow(new RegExp(`0\\.005 TAO is still claimable on Base for ${bob}`));
+    expect(owing.sent).toEqual([]);
+    // each account read once; the wallet's claim was already read with the state
+    expect(owing.asked).toEqual([bob, carol]);
+    const settled = run({});
+    await settled.done;
+    expect(settled.sent.map((r) => r.functionName)).toEqual(["pause", "setCaps"]);
   });
 });
 

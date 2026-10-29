@@ -2,6 +2,7 @@ import { type Address, formatEther, type Hex, isAddress, parseAbi } from "viem";
 import { read } from "./rpc.ts";
 import { PRECOMPILE, WALLET } from "./config.ts";
 import type { KeeperDeps } from "./keeper/actions.ts";
+import { uniqueUsers } from "./keeper/delivery.ts";
 import { settingsOf } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
@@ -34,11 +35,24 @@ export function windDownBlockers(s: {
   return out;
 }
 
-/** Pauses the front door and sets its cap to 0, once everything is paid out and claimed. Skips
- * whichever is already done, so it can be run again after a stop. */
+/** The named accounts' claims (the wallet and --user), with every other account the vault has paid out
+ * to (its DepositBounced and Redeemed events): the front door credits claimable TAO only from those
+ * payouts, so this is everyone who can still hold some. */
+async function everyClaim(deps: KeeperDeps, named: readonly { user: Address; amount: bigint }[]) {
+  const out = [...named];
+  const seen = new Set(named.map((c) => c.user.toLowerCase()));
+  for (const user of uniqueUsers((await deps.payoutLogs()).map((l) => l.user))) {
+    if (!seen.has(user.toLowerCase())) out.push({ user, amount: await deps.readClaimable(user) });
+  }
+  return out;
+}
+
+/** Pauses the front door and sets its cap to 0, once everything is paid out and claimed by everyone
+ * the vault paid out to. Skips whichever is already done, so it can be run again after a stop. */
 export async function windDown(deps: KeeperDeps, rec: DeploymentRecord): Promise<Sent[]> {
   const s = await deps.readState();
-  const blockers = windDownBlockers({ frontDoor: s.frontDoor, batches: s.vault.batches, claimable: s.detail.claimable });
+  const claimable = await everyClaim(deps, s.detail.claimable);
+  const blockers = windDownBlockers({ frontDoor: s.frontDoor, batches: s.vault.batches, claimable });
   if (blockers.length) throw new Error(`not yet — finish these first:\n  ${blockers.join("\n  ")}`);
   const fd = rec.plan.addresses.frontDoor;
   const base = { chain: "base" as const, to: fd, abi: ABI };

@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { ROLES } from "./launch-roles.ts";
-import { CADENCE, cadenceFromEnv, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "../src/config.ts";
+import { CADENCE, cadenceFromEnv, LAUNCH_VAULT_LIMITS, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3, cadenceOf, closeMaxWaitS, settingsOf, settingsV3Of } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { expectations } from "../src/verify.ts";
@@ -40,9 +40,9 @@ describe("cadence", () => {
     expect(get("CascadeVault", "rewardCutBps")).toBe(SETTINGS_V3_LAUNCH.rewardCutBps);
   });
 
-  it("launch settings change the batch interval and the payout delay, and take no treasury from the test settings", () => {
+  it("launch settings change the batch interval, the payout delay and the vault's limits, and take no treasury from the test settings", () => {
     const { treasury: _, ...rest } = SETTINGS_V3;
-    expect(SETTINGS_V3_LAUNCH).toEqual({ ...rest, batchInterval: 3_600, payoutDelay: 86_400 });
+    expect(SETTINGS_V3_LAUNCH).toEqual({ ...rest, batchInterval: 3_600, payoutDelay: 86_400, vaultLimits: LAUNCH_VAULT_LIMITS });
     expect("treasury" in SETTINGS_V3_LAUNCH).toBe(false);
     expect(CADENCE.launch.closeMaxWaitS).toBe(86_400);
   });
@@ -80,9 +80,10 @@ describe("cadence", () => {
     // the treasury is the launch's own (roles), not the test wallet
     expect(field(plan, "CascadeStaker", "treasury")).toBe(ROLES.treasury);
     expect(field(plan, "CascadeStaker", "treasury")).not.toBe(WALLET);
-    // the test plan's steps, in order, then each chain's hand-off of ownership; the same addresses
+    // the test plan's steps, in order, then the vault's limits and each chain's hand-off of ownership; the same addresses
     const test = buildPlanV3(2, 40, COLDKEY);
-    expect(plan.steps.map((s) => s.id).filter((id) => !id.endsWith("TransferOwnership"))).toEqual(test.steps.map((s) => s.id));
+    const launchOnly = ["setOutflowLimits", "setMaxTotalAssets", "setMessageLimits", "setFeeLimits"];
+    expect(plan.steps.map((s) => s.id).filter((id) => !id.endsWith("TransferOwnership") && !launchOnly.includes(id))).toEqual(test.steps.map((s) => s.id));
     expect(plan.addresses).toEqual(test.addresses);
   });
 

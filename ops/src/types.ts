@@ -45,6 +45,11 @@ export type StepId =
   | "stakerSetDeliveryRoute"
   | "stakerSetFees"
   | "setRewardCut"
+  // a launch: the vault's limits (LAUNCH_VAULT_LIMITS)
+  | "setOutflowLimits"
+  | "setMaxTotalAssets"
+  | "setMessageLimits"
+  | "setFeeLimits"
   // a launch: offer ownership to the final owner, the last step on each contract
   | "fdTransferOwnership"
   | "stakerTransferOwnership"

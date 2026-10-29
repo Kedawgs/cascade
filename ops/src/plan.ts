@@ -4,12 +4,14 @@ import {
   CADENCE,
   type Cadence,
   type DeploySettings,
+  LAUNCH_VAULT_LIMITS,
   LIVE,
   PRECOMPILE,
   SETTINGS,
   SETTINGS_V3,
   SETTINGS_V3_LAUNCH,
   VAULT_DEFAULTS,
+  type VaultLimits,
   WALLET,
 } from "./config.ts";
 import { roleProblems, type Roles, TEST_ROLES } from "./roles.ts";
@@ -62,8 +64,9 @@ export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS
   return cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
 }
 
-/** The vault limits a v3 plan runs with: the contract's defaults. */
-export const vaultLimitsOf = (_plan: PlanV3): typeof VAULT_DEFAULTS => VAULT_DEFAULTS;
+/** The vault limits a v3 plan runs with: a launch's own (set during deploy) over the contract's defaults,
+ * which a test plan keeps. */
+export const vaultLimitsOf = (plan: PlanV3): VaultLimits => (cadenceOf(plan) === "launch" ? { ...VAULT_DEFAULTS, ...LAUNCH_VAULT_LIMITS } : VAULT_DEFAULTS);
 
 /** Who holds each role: a launch plan's roles, else the test wallet in every one. */
 export const rolesOf = (plan: Plan | PlanV3): Roles => (isPlanV3(plan) && plan.roles ? plan.roles : TEST_ROLES);
@@ -96,7 +99,46 @@ export const CONFIG_ABI = {
   setFees: parseAbi(["function setFees(uint16 swapFeeBps_, uint256 depositFeeUsdc_)"]),
   setRewardCut: parseAbi(["function setRewardCut(address treasury_, uint16 bps)"]),
   transferOwnership: parseAbi(["function transferOwnership(address newOwner)"]),
+  setOutflowLimits: parseAbi(["function setOutflowLimits(uint256 bps, uint256 minDaily)"]),
+  setMaxTotalAssets: parseAbi(["function setMaxTotalAssets(uint256 amount)"]),
+  setMessageLimits: parseAbi(["function setMessageLimits(uint256 maxEntryValue_, uint256 maxMessageValue_, uint32 minChunk_)"]),
+  setFeeLimits: parseAbi(["function setFeeLimits(uint256 bps, uint256 abs_)"]),
 };
+
+/** A launch's vault limits, set after the reward cut and before the vault's hand-off. */
+function vaultLimitSteps(nonce: number, vault: Address): PlannedStep[] {
+  const L = LAUNCH_VAULT_LIMITS;
+  const call = (id: PlannedStep["id"], n: number, label: string, functionName: keyof typeof CONFIG_ABI, args: unknown[]): PlannedStep => ({
+    id,
+    kind: "call",
+    chain: "bittensor",
+    nonce: n,
+    label,
+    to: vault,
+    abi: CONFIG_ABI[functionName],
+    functionName,
+    args,
+  });
+  const tao = (wei: bigint) => formatEther(wei);
+  return [
+    call(
+      "setOutflowLimits",
+      nonce,
+      `let redeems burn at most ${Number(L.maxDailyOutflowBps) / 100}% of the vault a day, or ${tao(L.minDailyOutflow)} TAO when that is more`,
+      "setOutflowLimits",
+      [L.maxDailyOutflowBps, L.minDailyOutflow],
+    ),
+    call("setMaxTotalAssets", nonce + 1, `stop direct deposits once the vault holds ${tao(L.maxTotalAssets)} TAO`, "setMaxTotalAssets", [L.maxTotalAssets]),
+    call(
+      "setMessageLimits",
+      nonce + 2,
+      `limit a redeem entry to ${tao(L.maxEntryValue)} TAO and a payout message to ${tao(L.maxMessageValue)} TAO (chunks of at least ${L.minChunk})`,
+      "setMessageLimits",
+      [L.maxEntryValue, L.maxMessageValue, L.minChunk],
+    ),
+    call("setFeeLimits", nonce + 3, `cap a payout's bridge fee at ${Number(L.maxFeeBps) / 100}% or ${tao(L.maxFeeAbs)} TAO`, "setFeeLimits", [L.maxFeeBps, L.maxFeeAbs]),
+  ];
+}
 
 /** A Uniswap v3 path: token | fee (3 bytes) | token | fee | token. */
 const uniswapPath = (a: Address, ab: number, b: Address, bc: number, c: Address): Hex =>
@@ -384,7 +426,9 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
       functionName: "setRewardCut",
       args: [r.treasury, s.rewardCutBps],
     },
-    ...(launch ? [handOff("vaultTransferOwnership", "bittensor", bitNonce + 7, "the vault", addresses.vault, r.owner.bittensor)] : []),
+    ...(launch
+      ? [...vaultLimitSteps(bitNonce + 7, addresses.vault), handOff("vaultTransferOwnership", "bittensor", bitNonce + 11, "the vault", addresses.vault, r.owner.bittensor)]
+      : []),
   ];
   return { version: 3, build: CONTRACTS_BUILD, ...(launch ? { cadence, roles: r } : {}), baseNonce, bitNonce, addresses, steps };
 }

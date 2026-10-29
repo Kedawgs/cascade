@@ -129,9 +129,27 @@ export const SETTINGS_V3 = {
   deliveryRouteId: 0,
 } as const;
 
-/** The vault's limits as CascadeVault.sol's state defaults leave them (config.test checks them against the
- * source): what a test deployment runs with, and what verify reads back. Amounts in wei, floors in rao. */
-export const VAULT_DEFAULTS = {
+/** The vault's owner-set limits, each read back by verify under its view's name. Amounts in wei, the
+ * floors and dust in rao. */
+export interface VaultLimits {
+  maxDailyOutflowBps: bigint;
+  minDailyOutflow: bigint;
+  maxEntryValue: bigint;
+  maxMessageValue: bigint;
+  minChunk: number;
+  maxFeeBps: bigint;
+  maxFeeAbs: bigint;
+  maxTotalAssets: bigint;
+  hotkeyDustRao: bigint;
+  claimGasRequired: bigint;
+  fallbackMinStakeRao: bigint;
+  fallbackMinRemainRao: bigint;
+  unstakeMarginRao: bigint;
+}
+
+/** The vault's limits as CascadeVault.sol's state defaults leave them (readback.test checks them against
+ * the source): what a test deployment runs with, and what verify reads back. */
+export const VAULT_DEFAULTS: VaultLimits = {
   maxDailyOutflowBps: 2_000n,
   minDailyOutflow: 100n * 10n ** 18n,
   maxEntryValue: 2_000n * 10n ** 18n,
@@ -145,7 +163,44 @@ export const VAULT_DEFAULTS = {
   fallbackMinStakeRao: 2_000_000n,
   fallbackMinRemainRao: 20_000_000n,
   unstakeMarginRao: 0n,
-} as const;
+};
+
+const TAO = 10n ** 18n;
+
+/** The vault limits a launch sets during deploy (before the vault's hand-off) and verify checks, sized
+ * for the 40 TAO deposit cap: a vault of about 40-60 TAO. The defaults were sized for a 1,000 TAO beta.
+ * The reasoning, and which are product decisions, is in ops/LAUNCH-SETTINGS.md. The others keep their
+ * defaults. */
+export const LAUNCH_VAULT_LIMITS = {
+  /** setOutflowLimits: each 24-hour window, a front door's redeems burn at most the larger of 20% of the
+   * vault and 10 TAO. The default floor, 100 TAO, is more than the whole vault: a forged bridge message
+   * could force-exit everyone in one day. At 10 TAO a forced exit takes at most 25% of a 40 TAO vault a
+   * day (20% of 50 or 60), and the payout delay (24 h) leaves the guardian time to pull the front door
+   * and the owner to cancel. The cost: one holder of the whole 40 TAO cap needs 4 windows to leave (10
+   * TAO each, asking again each day), and when many leave at once the first come are served first. A
+   * lower floor exits a big holder slower (5 TAO: 8 windows); a higher one bounds a forced exit worse. */
+  maxDailyOutflowBps: 2_000n,
+  minDailyOutflow: 10n * TAO,
+  /** setMessageLimits: one redeem entry burns at most 10 TAO per delivery (the floor: the allowance
+   * binds first anyway); one payout message to Base carries at most 15 TAO (default 4,000), near the 10
+   * TAO batch and above the most a day's allowance can be at 60 TAO (12), so a day's redeems still go
+   * home in one message and one bridge fee. A single entry above it still goes, alone. Chunks of at least
+   * 10 entries, as before. */
+  maxEntryValue: 10n * TAO,
+  maxMessageValue: 15n * TAO,
+  minChunk: 10,
+  /** setFeeLimits: a payout pays its bridge fee only up to the larger of 1% of the chunk and 0.005 TAO
+   * (default 0.02). The live fee is about 0.00105 TAO, so this leaves about 5 times for fee swings and a
+   * TAO price drop; above it the payout waits (nothing is lost) until fees fall or the owner raises it.
+   * 0.02 TAO could take half of a 0.04 TAO minimum deposit; 0.005 at most an eighth. */
+  maxFeeBps: 100n,
+  maxFeeAbs: 5n * 10n ** 15n,
+  /** setMaxTotalAssets: direct deposits on Bittensor stop once the vault holds 44 TAO (default 1,000):
+   * 10% above the 40 TAO deposit cap, some room for rewards (it never stops a front-door batch, which it
+   * doesn't check). It bounds what a direct deposit can add
+   * to the outflow allowance's base (a README soft spot) and to a mispriced deposit after a hotkey swap. */
+  maxTotalAssets: 44n * TAO,
+} as const satisfies Partial<VaultLimits>;
 
 /** The front door's batch limits as its constructor sets them. */
 export const FRONT_DOOR_DEFAULTS = { maxDeposits: 50, maxRedeems: 50 } as const;
@@ -156,9 +211,16 @@ export type Cadence = "test" | "launch";
 
 const { treasury: _testTreasury, ...SETTINGS_V3_NO_TREASURY } = SETTINGS_V3;
 
-/** The launch: hourly batches and a day's payout delay. It has no treasury: a launch plan takes its
- * treasury, like its owner, guardian and keeper, from its roles (roles.ts), never the test wallet. */
-export const SETTINGS_V3_LAUNCH = { ...SETTINGS_V3_NO_TREASURY, batchInterval: 3_600, payoutDelay: 86_400 } as const;
+/** The launch: hourly batches, a day's payout delay and the launch's vault limits (LAUNCH_VAULT_LIMITS);
+ * the rest as the test settings, the 40 TAO deposit cap, 10 TAO batches and the 0.0001 ETH redeem
+ * request fee included. It has no treasury: a launch plan takes its treasury, like its owner, guardian
+ * and keeper, from its roles (roles.ts), never the test wallet. */
+export const SETTINGS_V3_LAUNCH = {
+  ...SETTINGS_V3_NO_TREASURY,
+  batchInterval: 3_600,
+  payoutDelay: 86_400,
+  vaultLimits: LAUNCH_VAULT_LIMITS,
+} as const;
 
 /** The keeper's longest wait before closing a batch with entries: null = no extra wait, close as soon as
  * the contract allows (closeMaxWaitS returns 0). */

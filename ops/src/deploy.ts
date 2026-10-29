@@ -1,5 +1,5 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
-import { type Cadence, type ChainName, PRECOMPILE, WALLET } from "./config.ts";
+import { type Cadence, type ChainName, PRECOMPILE, type VaultLimits, WALLET } from "./config.ts";
 import {
   buildOf,
   buildPlan,
@@ -13,6 +13,7 @@ import {
   rolesOf,
   settingsOf,
   settingsV3Of,
+  vaultLimitsOf,
 } from "./plan.ts";
 import { archiveRecord, type DeploymentRecord, type DoneStep, loadRecordFor, saveRecord } from "./record.ts";
 import type { VerifyAllow } from "./registry.ts";
@@ -45,6 +46,14 @@ const VIEWS = parseAbi([
   "function rewardCutBps() view returns (uint16)",
   "function owner() view returns (address)",
   "function pendingOwner() view returns (address)",
+  "function maxDailyOutflowBps() view returns (uint256)",
+  "function minDailyOutflow() view returns (uint256)",
+  "function maxTotalAssets() view returns (uint256)",
+  "function maxEntryValue() view returns (uint256)",
+  "function maxMessageValue() view returns (uint256)",
+  "function minChunk() view returns (uint32)",
+  "function maxFeeBps() view returns (uint256)",
+  "function maxFeeAbs() view returns (uint256)",
 ]);
 
 const eq = (x: unknown, y: unknown) => typeof x === "string" && typeof y === "string" && x.toLowerCase() === y.toLowerCase();
@@ -74,6 +83,13 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
   const offered = async (chain: ChainName, at: Address) => {
     const final = roles.owner[chain];
     return (await hasCode(chain, at)) && (eq(await view(chain, at, "pendingOwner"), final) || eq(await view(chain, at, "owner"), final));
+  };
+  /** Every named vault limit already reads as the plan's. */
+  const limitsAre = async (...names: (keyof VaultLimits)[]) => {
+    if (!(await hasCode("bittensor", a.vault))) return false;
+    const want = vaultLimitsOf((v3(), plan as PlanV3));
+    for (const n of names) if (BigInt((await view("bittensor", a.vault, n)) as bigint | number) !== BigInt(want[n])) return false;
+    return true;
   };
   switch (step.id) {
     case "baseAdapter":
@@ -128,6 +144,14 @@ export async function effectPresent(ctx: Ctx, plan: Plan | PlanV3, step: Planned
         (await view("base", v3().staker, "swapFeeBps")) === sv3().swapFeeBps &&
         (await view("base", v3().staker, "depositFeeUsdc")) === sv3().depositFeeUsdc
       );
+    case "setOutflowLimits":
+      return limitsAre("maxDailyOutflowBps", "minDailyOutflow");
+    case "setMaxTotalAssets":
+      return limitsAre("maxTotalAssets");
+    case "setMessageLimits":
+      return limitsAre("maxEntryValue", "maxMessageValue", "minChunk");
+    case "setFeeLimits":
+      return limitsAre("maxFeeBps", "maxFeeAbs");
     case "fdTransferOwnership":
       return offered("base", a.frontDoor);
     case "stakerTransferOwnership":

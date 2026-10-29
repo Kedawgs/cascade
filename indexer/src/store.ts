@@ -1,5 +1,5 @@
 import type { Hex } from "viem";
-import type { ChainName, Role } from "./config.ts";
+import type { ChainName, Deployment, Role } from "./config.ts";
 import type { StoredLog, StoredRef } from "./logs.ts";
 import { appendPages, rebuildPages, type SeedEvent, type SeedPage } from "./seed.ts";
 
@@ -404,6 +404,18 @@ export const pruneHours = (db: D1Database, nowS: number, days = 35): D1PreparedS
 
 export const setMeta = (db: D1Database, k: string, v: string): D1PreparedStatement =>
   db.prepare("INSERT INTO meta (k, v) VALUES (?1, ?2) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(k, v);
+
+/** Marks the database as holding this deployment (its "<frontDoor>:<vault>" id): every commit includes
+ * it, the first one writes it, and it is never changed after. */
+export const deploymentStatement = (db: D1Database, d: Pick<Deployment, "id">): D1PreparedStatement =>
+  db.prepare("INSERT INTO meta (k, v) VALUES ('deployment', ?1) ON CONFLICT (k) DO NOTHING").bind(d.id);
+
+/** Whether the database holds the configured deployment: "new" before the first commit, "other" when
+ * DEPLOYMENT has changed under it (the tick then refuses to run, and the API to serve). */
+export function checkDeployment(meta: Readonly<Record<string, string>>, d: Pick<Deployment, "id">): "new" | "same" | "other" {
+  const v = meta.deployment;
+  return v === undefined ? "new" : v === d.id ? "same" : "other";
+}
 
 /** One delivery's cross-check row (one per batch id and delivered key). An owner's approval is never
  * overwritten by a later check. */

@@ -4,9 +4,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { handleScan } from "../../src/api.ts";
 import type { StoredLog } from "../../src/logs.ts";
 import { type ScanState, type SeedEvent, sharedHalf } from "../../src/seed.ts";
-import { appendStatements, markRemoved, setCursor, upsertLogs } from "../../src/store.ts";
+import { createExecutionContext } from "cloudflare:test";
+import worker from "../../src/index.ts";
+import { appendStatements, deploymentStatement, markRemoved, setCursor, setMeta, upsertLogs } from "../../src/store.ts";
 import { countingDb, wipe } from "./d1-count.ts";
-import { testConfig, tx } from "./fixtures.ts";
+import { testConfig, testVars, tx } from "./fixtures.ts";
 import { assertValidScanState } from "./scan-state-rules.ts";
 
 const cfg = testConfig();
@@ -48,7 +50,7 @@ const mine = {
 };
 const theirs = accountLog("Deposited", OTHER, FROM + 100n, "7");
 
-async function seed(o: { cursor?: boolean; scannedTo?: bigint | null } = {}) {
+async function seed(o: { cursor?: boolean; scannedTo?: bigint | null; fromBlock?: bigint; deployment?: string | null } = {}) {
   const db = env.DB;
   await wipe(db);
   const statements = [
@@ -56,9 +58,12 @@ async function seed(o: { cursor?: boolean; scannedTo?: bigint | null } = {}) {
     ...markRemoved(db, [mine.removed.uid]),
     ...appendStatements(db, null, SHARED_EVENTS),
   ];
+  // the mark the tick's first commit writes: which deployment this database holds
+  if (o.deployment === undefined) statements.push(deploymentStatement(db, cfg.deployment));
+  else if (o.deployment !== null) statements.push(setMeta(db, "deployment", o.deployment));
   if (o.cursor !== false) {
     statements.push(
-      setCursor(db, { chain: "bittensor", fromBlock: FROM, scannedTo: o.scannedTo === undefined ? SETTLED + 10n : o.scannedTo, settledTo: o.scannedTo === null ? FROM - 1n : SETTLED, settledTime: 1_800_000_000, headTime: 1_800_000_120, nowS: 1_800_000_130 }),
+      setCursor(db, { chain: "bittensor", fromBlock: o.fromBlock ?? FROM, scannedTo: o.scannedTo === undefined ? SETTLED + 10n : o.scannedTo, settledTo: o.scannedTo === null ? FROM - 1n : SETTLED, settledTime: 1_800_000_000, headTime: 1_800_000_120, nowS: 1_800_000_130 }),
     );
   }
   await db.batch(statements);
@@ -161,6 +166,35 @@ describe("what is refused", () => {
     await seed({ scannedTo: null });
     r = await get(`/v1/scan/${VAULT}/${USER}`);
     expect([r.status, r.headers.get("Retry-After")]).toEqual([503, "60"]);
+  });
+
+  it("answers 503 when the database belongs to another deployment, or doesn't say", async () => {
+    const cases: Parameters<typeof seed>[0][] = [{ fromBlock: FROM + 1n }, { deployment: `0x${"1".repeat(40)}:0x${"2".repeat(40)}` }, { deployment: null }];
+    for (const o of cases) {
+      await seed(o);
+      const r = await get(`/v1/scan/${VAULT}`);
+      expect([r.status, r.headers.get("Retry-After"), r.headers.get("Access-Control-Allow-Origin")]).toEqual([503, "60", ORIGIN]);
+      await r.text();
+    }
+  });
+
+  it("answers 503, with CORS, when a stored row can't be read", async () => {
+    await env.DB.prepare("UPDATE logs SET args = 'not json' WHERE uid = ?").bind(mine.deposit.uid).run();
+    let r = await get(`/v1/scan/${VAULT}/${USER}`);
+    expect([r.status, r.headers.get("Retry-After"), r.headers.get("Access-Control-Allow-Origin")]).toEqual([503, "60", ORIGIN]);
+    await r.text();
+    // a page across next's edge is parsed: a broken one answers the same
+    await env.DB.prepare("UPDATE seed_pages SET staked = '{broken', last_block = ?").bind(Number(SETTLED + 5n)).run();
+    r = await get(`/v1/scan/${VAULT}`);
+    expect([r.status, r.headers.get("Retry-After"), r.headers.get("Access-Control-Allow-Origin")]).toEqual([503, "60", ORIGIN]);
+    await r.text();
+  });
+
+  it("answers 503, with CORS for the site, when the Worker isn't configured", async () => {
+    const vars = { ...testVars(), DEPLOYMENT: "not configured", DB: env.DB } as unknown as Env;
+    const r = await worker.fetch(new Request(`https://api.test/v1/scan/${VAULT}`), vars, createExecutionContext());
+    expect([r.status, r.headers.get("Retry-After"), r.headers.get("Access-Control-Allow-Origin"), r.headers.get("Cache-Control")]).toEqual([503, "60", ORIGIN, "no-store"]);
+    await r.text();
   });
 
   it("answers 503 when the D1 read fails", async () => {

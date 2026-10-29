@@ -19,7 +19,12 @@ async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promis
   const path = new URL(request.url).pathname;
   if (path === "/v1/scan" || path.startsWith("/v1/scan/")) {
     const cfg = configOf(env);
-    if (!cfg) return new Response("not available", { status: 503, headers: { "Retry-After": "60", "Cache-Control": "no-store" } });
+    if (!cfg) {
+      // the site still gets a readable 503 (and falls back to its own scan) when its origin is set
+      const headers: Record<string, string> = { "Retry-After": "60", "Cache-Control": "no-store" };
+      if (typeof env.SITE_ORIGIN === "string" && /^https:\/\/[^/]+$/.test(env.SITE_ORIGIN)) headers["Access-Control-Allow-Origin"] = env.SITE_ORIGIN;
+      return new Response("not available", { status: 503, headers });
+    }
     return handleScan(request, env, cfg);
   }
   return new Response("Not found", { status: 404 });

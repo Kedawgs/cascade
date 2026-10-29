@@ -3,6 +3,8 @@ import { type Hex, keccak256, pad, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import {
+  checkDeployment,
+  deploymentStatement,
   guardStatement,
   insertHold,
   insertReading,
@@ -261,6 +263,19 @@ describe("loadTickState", () => {
     ]);
     const s = await loadTickState(db, 1_000_100);
     expect(s.payoutUsers).toEqual([USER]);
+  });
+});
+
+describe("which deployment the database holds", () => {
+  const d = { id: "0xaa:0xbb" };
+  it("is written once, by the first commit, and checked against the configured one", async () => {
+    expect(checkDeployment({}, d)).toBe("new");
+    await deploymentStatement(db, d).run();
+    await deploymentStatement(db, { id: "0xcc:0xdd" }).run();
+    const meta = (await loadTickState(db, 1)).meta;
+    expect(meta.deployment).toBe("0xaa:0xbb");
+    expect(checkDeployment(meta, d)).toBe("same");
+    expect(checkDeployment(meta, { id: "0xcc:0xdd" })).toBe("other");
   });
 });
 

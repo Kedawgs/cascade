@@ -139,12 +139,26 @@ export function sessionCache(): SessionCache {
   };
 }
 
-/** Where a pass of this deployment's check is kept: by a hash of every read and the answer it must
- * give, so a pass of another deployment, or of a check since changed, is never taken for this one's. */
-export function wiringKey(d: Deployment): string {
+/** Every read of the check as its pass is keyed: the chain it is made on, the contract, the function, its
+ * arguments and the answer it must give (the v2 deployment has the same addresses on both chains, so
+ * without the chain a read on one could pass for a read on the other). */
+export function wiringReads(d: Deployment): [chain: "base" | "bittensor", address: string, functionName: string, args: string[], want: string][] {
   const { base, bittensor } = links(d);
-  const reads = [...base, ...bittensor].map((l) => [l.address.toLowerCase(), l.functionName, (l.args ?? []).map(String), String(l.want).toLowerCase()]);
-  return `cascade:wiring:${keccak256(toHex(JSON.stringify(reads)))}`;
+  const read = (chain: "base" | "bittensor") => (l: Link): [typeof chain, string, string, string[], string] => [
+    chain,
+    l.address.toLowerCase(),
+    l.functionName,
+    (l.args ?? []).map(String),
+    String(l.want).toLowerCase(),
+  ];
+  return [...base.map(read("base")), ...bittensor.map(read("bittensor"))];
+}
+
+/** Where a pass of this deployment's check is kept: by a hash of every read and the answer it must
+ * give (wiringReads), so a pass of another deployment, or of a check since changed, is never taken for
+ * this one's. */
+export function wiringKey(d: Deployment): string {
+  return `cascade:wiring:${keccak256(toHex(JSON.stringify(wiringReads(d))))}`;
 }
 
 /** The wiring check, as the site asks it: an answer (pass or mismatch) is kept for WIRING_TTL_MS, a pass

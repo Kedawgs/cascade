@@ -11,15 +11,17 @@ import {
   getAddress,
   type Hex,
   HttpRequestError,
+  keccak256,
   multicall3Abi,
   RpcRequestError,
   TimeoutError,
+  toHex,
 } from "viem";
 import { base } from "viem/chains";
 import { describe, expect, it, vi } from "vitest";
 import { ADAPTER, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import { type Deployment, EXPECTED_DEPLOYMENTS, readDeployment, TOKENS } from "./config";
-import { checkWiring, createWiringCheck, peerId, type Wiring, wiringKey } from "./wiring";
+import { checkWiring, createWiringCheck, peerId, type Wiring, wiringKey, wiringReads } from "./wiring";
 
 /** What viem gives for a call a contract reverted, as multicall reports it per call. */
 const reverted = (functionName: string) =>
@@ -275,6 +277,20 @@ describe("createWiringCheck", () => {
     // a pass stored before passes were dated (or anything else there) is no pass
     s.set(wiringKey(D3), "ok");
     expect(await createWiringCheck({} as never, D3, check, s, clock().now)()).toBe("mismatch");
+  });
+
+  it("hashes each read with the chain it is made on, so reads alike on both chains (v2 shares its addresses) stay apart", () => {
+    for (const d of [D2, D3]) {
+      const reads = wiringReads(d);
+      expect(new Set(reads.map((r) => JSON.stringify(r))).size, d.frontDoor).toBe(reads.length);
+      expect(wiringKey(d)).toBe(`cascade:wiring:${keccak256(toHex(JSON.stringify(reads)))}`);
+    }
+    const reads = wiringReads(D2);
+    const fd = D2.frontDoor.toLowerCase();
+    const adapter = D2.baseAdapter.toLowerCase();
+    expect(reads).toContainEqual(["base", fd, "primaryBridge", [], adapter]);
+    expect(reads).toContainEqual(["bittensor", fd, "primaryBridge", [], adapter]);
+    expect(reads.every(([chain]) => chain === "base" || chain === "bittensor")).toBe(true);
   });
 
   it("checks again after forget(), as after each flow, and drops the stored pass", async () => {

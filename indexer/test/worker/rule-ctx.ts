@@ -38,7 +38,7 @@ export function ruleCtx(over: Partial<RuleCtx> & { logs?: RuleCtx["logs"]; store
     t: DEFAULTS,
     holdActive: false,
     meta: {},
-    writes: { batchChecks: [], chunkChecks: [], nonces: [] },
+    writes: { batchChecks: [], chunkChecks: [], nonces: [], meta: [] },
     ...rest,
   };
 }

@@ -15,13 +15,14 @@ export function runRules(rules: readonly Rule[], ctx: RuleCtx): Finding[] {
   const out: Finding[] = [];
   const w = ctx.writes;
   for (const r of rules) {
-    const sizes = { batchChecks: w.batchChecks.length, chunkChecks: w.chunkChecks.length, nonces: w.nonces.length };
+    const sizes = { batchChecks: w.batchChecks.length, chunkChecks: w.chunkChecks.length, nonces: w.nonces.length, meta: w.meta.length };
     try {
       out.push(...r.run(ctx));
     } catch (e) {
       w.batchChecks.length = sizes.batchChecks;
       w.chunkChecks.length = sizes.chunkChecks;
       w.nonces.length = sizes.nonces;
+      w.meta.length = sizes.meta;
       const error = e instanceof Error ? e.message : String(e);
       const facts = { rule: r.name, error };
       if (r.name.startsWith("bridge.")) {

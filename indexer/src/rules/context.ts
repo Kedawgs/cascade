@@ -74,9 +74,10 @@ export interface RuleCtx {
   hours: HourAgg[];
   /** how far each chain's logs are stored, and that block's time */
   settled: Record<ChainName, { block: bigint; time: number; headTime?: number }>;
-  /** the uids of the logs this tick stores for the first time (the scan's `fresh`), wherever their
-   * block: an event rule reports a log once, on the tick it is first stored, so a log a re-read finds
-   * late, below what was settled before, is still reported */
+  /** the uids this tick upserts that weren't stored before: settled logs stored for the first time,
+   * wherever their block (a log a re-read finds late, below what was settled before, is one). Not the
+   * scan's `fresh` (logs within SETTLE of the head, not stored), and not re-mined logs coming back. An
+   * event rule reports a log once, on the tick it is first stored. */
   newUids: ReadonlySet<Hex>;
   payoutDelayS: number;
   lagLimitS: number;
@@ -95,7 +96,7 @@ export interface RuleCtx {
   holdActive: boolean;
   meta: Record<string, string>;
   /** rows the rules decided this tick, committed with everything else */
-  writes: { batchChecks: BatchCheckWrite[]; chunkChecks: ChunkCheckWrite[]; nonces: NonceRow[] };
+  writes: { batchChecks: BatchCheckWrite[]; chunkChecks: ChunkCheckWrite[]; nonces: NonceRow[]; meta: { k: string; v: string }[] };
 }
 
 const EXPLORER: Record<ChainName, string> = { base: "https://basescan.org", bittensor: "https://evm.taostats.io" };

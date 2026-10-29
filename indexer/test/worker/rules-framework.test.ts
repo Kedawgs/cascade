@@ -40,13 +40,14 @@ describe("runRules", () => {
           c.writes.batchChecks.push(row);
           c.writes.chunkChecks.push({ landedUid: h("l"), batchKey: h("k"), chunk: 0, landedTx: h("t"), landedBlock: 1n, status: "mismatch" });
           c.writes.nonces.push({ chain: "base", address: h("a").slice(0, 42) as Hex, roles: [], baseline: 0, seen: 0, nonce: 0, changedAt: 0 });
+          c.writes.meta.push({ k: "x", v: "1" });
           throw new Error("after the writes");
         },
       },
     ];
     const ctx = ruleCtx();
     runRules(rules, ctx);
-    expect(ctx.writes).toEqual({ batchChecks: [{ ...row, batchId: 7n }], chunkChecks: [], nonces: [] });
+    expect(ctx.writes).toEqual({ batchChecks: [{ ...row, batchId: 7n }], chunkChecks: [], nonces: [], meta: [] });
   });
 
   it("raises a bridge rule's failure as the critical monitor.bridge_rule_failed: its checks stay waiting", () => {

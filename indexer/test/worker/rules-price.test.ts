@@ -18,7 +18,11 @@ const bit = (block: bigint, price: bigint, over: Partial<BitState> = {}): ChainR
   reading(block, NOW - Number(200n - block) * 12, bitState({ price, totalSupply: SUPPLY, ...over }));
 
 /** A context whose newest reading is `s` and whose stored ones are `history` (newest first). */
-function ctx(s: ChainReading<BitState> | undefined, history: ChainReading<BitState>[], o: { logs?: StoredLog[]; hours?: HourAgg[]; holds?: HoldRow[]; settledBlock?: bigint } = {}) {
+function ctx(
+  s: ChainReading<BitState> | undefined,
+  history: ChainReading<BitState>[],
+  o: { logs?: StoredLog[]; hours?: HourAgg[]; holds?: HoldRow[]; settledBlock?: bigint; meta?: Record<string, string> } = {},
+) {
   const base = ruleCtx();
   return ruleCtx({
     snap: { ...base.snap, at: NOW, bittensor: s },
@@ -27,6 +31,7 @@ function ctx(s: ChainReading<BitState> | undefined, history: ChainReading<BitSta
     logs: logQuery(o.logs ?? []),
     hours: o.hours ?? [],
     holds: o.holds ?? [],
+    meta: o.meta ?? {},
     settled: { base: base.settled.base, bittensor: { block: o.settledBlock ?? 10n ** 9n, time: NOW } },
   });
 }
@@ -89,6 +94,18 @@ describe("price.drop", () => {
     // the drop is between 110 and 115, and 115 isn't settled: nothing yet
     const flat = [bit(110n, E18), bit(105n, E18), bit(100n, E18)];
     expect(priceDrop.run(ctx(X, flat, { settledBlock: 112n }))).toEqual([]);
+  });
+
+  it("judges every settled triple, so settlement jumping two readings in one tick skips none", () => {
+    // 100, 105 flat; the drop at 110, still down at 115 and 120
+    const rs = [bit(120n, E18 - DROP), bit(115n, E18 - DROP), bit(110n, E18 - DROP), bit(105n, E18), bit(100n, E18)];
+    const X = bit(125n, E18 - DROP);
+    // last tick Bittensor was settled to 112 (the triple 100, 105, 110: dropped, not confirmed yet); this
+    // tick it jumps to 122: the newest settled triple (110, 115, 120) has no drop, but 105, 110, 115 does
+    expect(priceDrop.run(ctx(X, rs.slice(1), { settledBlock: 112n }))).toEqual([]);
+    const found = priceDrop.run(ctx(X, rs, { settledBlock: 122n }));
+    expect(found.map((f) => f.key)).toEqual(["price.drop:110"]);
+    expect(found[0].facts).toMatchObject({ from: "105", to: "110", confirmed: "115" });
   });
 
   it("holds on a drop 10 bps or more below the 24-hour high, and not again once that hold is cleared", () => {
@@ -179,6 +196,22 @@ describe("stake.hotkey_changed", () => {
     const blank = (block: bigint) => bit(block, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], hotkeyOwner: null });
     expect(stakeHotkeyChanged.run(ctx(blank(105n), [blank(100n), blank(95n)]))).toEqual([]);
     expect(stakeHotkeyChanged.run(ctx(blank(100n), [blank(95n)]))).toEqual([]);
+  });
+
+  it("remembers an owner it has read, in meta, so an owner gone after the readings that showed it is still found", () => {
+    const has = bit(105n, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], hotkeyOwner: OWNER });
+    const seen = ctx(has, [bit(100n, E18, { stakeHotkey: HOTKEY, hotkeyOwner: OWNER })]);
+    stakeHotkeyChanged.run(seen);
+    expect(seen.writes.meta).toEqual([{ k: `hotkey_owner_seen:${HOTKEY}`, v: OWNER }]);
+    // already remembered: nothing to write
+    const again = ctx(has, [bit(100n, E18, { stakeHotkey: HOTKEY, hotkeyOwner: OWNER })], { meta: { [`hotkey_owner_seen:${HOTKEY}`]: OWNER } });
+    stakeHotkeyChanged.run(again);
+    expect(again.writes.meta).toEqual([]);
+    // the monitor starts again with readings that never showed the owner (it vanished meanwhile)
+    const blank = (block: bigint) => bit(block, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], hotkeyOwner: null });
+    const [f] = stakeHotkeyChanged.run(ctx(blank(205n), [blank(200n)], { meta: { [`hotkey_owner_seen:${HOTKEY}`]: OWNER } }));
+    expect(f.key).toBe(`stake.hotkey_changed:owner_gone:${HOTKEY}`);
+    expect(f.hold?.id).toBe(`stake.hotkey_changed:owner_gone:${HOTKEY}:200`);
   });
 
   it("finds an owner changed and confirmed by the next reading, without a hold", () => {

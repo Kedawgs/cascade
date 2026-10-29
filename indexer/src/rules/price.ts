@@ -58,41 +58,48 @@ const series = (ctx: RuleCtx) => [...[...ctx.history.bittensor].reverse(), ...(c
 
 /** price.drop: the price fell, between readings from increasing blocks, by more than rounding explains,
  * and the next reading confirms it (it is still down). Holds when the price is holdPriceDropBps or more
- * below the day's high. Keyed by the reading that first showed it. Judged on the newest three readings
- * Bittensor is settled past: the vault's rounding logs are stored only once settled, so a newer reading
- * would see honest rounding as unexplained. */
+ * below the day's high. Keyed by the reading that first showed it. Judged on every three readings in a
+ * row that Bittensor is settled past: the vault's rounding logs are stored only once settled, so a newer
+ * reading would see honest rounding as unexplained, and settlement can jump two readings in one tick, so
+ * judging only the newest triple would skip one. A triple judged again finds the same key and hold id. */
 export const priceDrop: Rule = {
   name: "price.drop",
   run(ctx) {
-    const rs = series(ctx);
-    let i = rs.length - 1;
-    while (i >= 0 && rs[i].block > ctx.settled.bittensor.block) i--;
-    if (i < 2) return [];
-    const [e, p, s] = [rs[i - 2], rs[i - 1], rs[i]];
-    if (!(e.block < p.block && p.block < s.block)) return [];
-    const first = unexplainedDrop(ctx, e, p);
-    if (first === undefined || unexplainedDrop(ctx, e, s) === undefined) return [];
-    const high = dayHigh(ctx, s);
-    const now = s.state.price as bigint;
-    const below = high === undefined ? 0n : bps(high - now, high);
-    const f: Finding = {
-      rule: "price.drop",
-      key: `price.drop:${p.block}`,
-      subject: `The share price fell ${bps(first, e.state.price as bigint)} bps more than rounding explains`,
-      facts: {
-        from: String(e.block),
-        to: String(p.block),
-        confirmed: String(s.block),
-        before: String(e.state.price),
-        after: String(now),
-        "below the 24-hour high (bps)": String(below),
-        vault: `https://evm.taostats.io/address/${ctx.cfg.deployment.vault}`,
-      },
-    };
-    if (below >= BigInt(ctx.t.holdPriceDropBps)) f.hold = { id: `price.drop:${p.block}`, summary: `the share price is ${below} bps below its 24-hour high, unexplained` };
-    return [f];
+    const rs = series(ctx).filter((r) => r.block <= ctx.settled.bittensor.block);
+    const out: Finding[] = [];
+    for (let i = 2; i < rs.length; i++) {
+      const f = dropIn(ctx, rs[i - 2], rs[i - 1], rs[i]);
+      if (f) out.push(f);
+    }
+    return out;
   },
 };
+
+/** A drop from `e` to `p` that `s` confirms, in increasing blocks. */
+function dropIn(ctx: RuleCtx, e: ChainReading<BitState>, p: ChainReading<BitState>, s: ChainReading<BitState>): Finding | undefined {
+  if (!(e.block < p.block && p.block < s.block)) return undefined;
+  const first = unexplainedDrop(ctx, e, p);
+  if (first === undefined || unexplainedDrop(ctx, e, s) === undefined) return undefined;
+  const high = dayHigh(ctx, s);
+  const now = s.state.price as bigint;
+  const below = high === undefined ? 0n : bps(high - now, high);
+  const f: Finding = {
+    rule: "price.drop",
+    key: `price.drop:${p.block}`,
+    subject: `The share price fell ${bps(first, e.state.price as bigint)} bps more than rounding explains`,
+    facts: {
+      from: String(e.block),
+      to: String(p.block),
+      confirmed: String(s.block),
+      before: String(e.state.price),
+      after: String(now),
+      "below the 24-hour high (bps)": String(below),
+      vault: `https://evm.taostats.io/address/${ctx.cfg.deployment.vault}`,
+    },
+  };
+  if (below >= BigInt(ctx.t.holdPriceDropBps)) f.hold = { id: `price.drop:${p.block}`, summary: `the share price is ${below} bps below its 24-hour high, unexplained` };
+  return f;
+}
 
 /** The vault events that move a hotkey's stake on purpose, and the arg naming the hotkey they take from. */
 const STAKE_MOVES: Readonly<Record<string, string>> = { Unstaked: "hotkey", StakeMoved: "from", HotkeyRemoved: "hotkey" };
@@ -136,10 +143,14 @@ export const stakeHotkeyChanged: Rule = {
   name: "stake.hotkey_changed",
   run(ctx) {
     const s = ctx.snap.bittensor;
+    const hk = (s?.state.stakeHotkey ?? ctx.cfg.deployment.stakeHotkey).toLowerCase() as Hex;
+    // an owner read is remembered in meta, so an owner gone after the readings that showed it (a monitor
+    // started again with readings that never had it) is still found
+    const seenKey = `hotkey_owner_seen:${hk}`;
+    if (typeof s?.state.hotkeyOwner === "string" && ctx.meta[seenKey] === undefined) ctx.writes.meta.push({ k: seenKey, v: s.state.hotkeyOwner });
     const [p, e] = ctx.history.bittensor;
     if (!s || !p || p.block >= s.block) return [];
     const out: Finding[] = [];
-    const hk = s.state.stakeHotkey ?? ctx.cfg.deployment.stakeHotkey;
     if (s.state.stakeHotkey && p.state.stakeHotkey && s.state.stakeHotkey !== p.state.stakeHotkey) {
       out.push({
         rule: "stake.hotkey_changed",
@@ -158,9 +169,9 @@ export const stakeHotkeyChanged: Rule = {
       });
     }
     const ownerGone = (r: Readings) => r.bittensor?.hotkeyOwner === null;
-    // only once an owner has been read: a precompile answer we can't decode reads as null on every tick,
-    // and must not hold the keeper on the second
-    const ownerSeen = ctx.history.bittensor.some((r) => typeof r.state.hotkeyOwner === "string");
+    // only once an owner has been read (now, or remembered): a precompile answer we can't decode reads as
+    // null on every tick, and must not hold the keeper on the second
+    const ownerSeen = ctx.meta[seenKey] !== undefined || ctx.history.bittensor.some((r) => typeof r.state.hotkeyOwner === "string");
     if (ownerSeen && twice(ctx, "bittensor", ownerGone)) {
       // found every tick while it lasts (one alert); the hold is raised once, on its first tick
       const f: Finding = {

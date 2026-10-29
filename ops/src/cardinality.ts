@@ -9,14 +9,20 @@ import type { Ctx } from "./send.ts";
 export const ORACLE_TWAP_WINDOW_S = 1800;
 /** Base makes a block every 2 seconds. */
 export const BASE_BLOCK_TIME_S = 2;
-/** What the owner grows the TAO/WETH pool to: twice what the window needs, so a busy stretch can't
- * empty it. */
-export const CARDINALITY_TARGET = 1800;
+/** What the owner grows the TAO/WETH pool to: more than twice what the window needs, so a busy stretch
+ * can't empty it. */
+export const CARDINALITY_TARGET = 2000;
 /** New observation slots per transaction. Each costs about 22,500 gas (a cold storage write): 600 new slots
  * from 600 measured 13,479,008 gas on Base (2026-10-28), and Base refuses any transaction above 16,777,216
- * gas (EIP-7825; 1,800 from 600 in one call needs about 27M and can't be mined). */
+ * gas (EIP-7825; 2,000 from 600 in one call needs about 31M and can't be mined). Two steps of 700 would
+ * each need about 15.7M, within 6% of the cap: a wallet padding its gas limit would push them over. At
+ * 600 a step stays near 13.5M, so from 600 it takes three: 1,200, 1,800, 2,000. */
 export const MAX_NEW_SLOTS_PER_TX = 600;
 const GAS_PER_SLOT = 22_500;
+
+/** The gas limit to send a step of `newSlots` with: 25,000 a slot (11% over the measured cost) and 100,000
+ * more, so a full 600-slot step is 15.1M, under the cap whatever a wallet would pad. */
+export const gasLimitFor = (newSlots: number) => newSlots * 25_000 + 100_000;
 
 /** The two pools the oracle reads, as deployed. */
 export const ORACLE_POOLS = [
@@ -113,11 +119,14 @@ export async function cardinalityReport(ctx: Pick<Ctx, "rpc">): Promise<string[]
     );
     let from = s.next;
     cardinalityTxs(p.address, steps).forEach((t, i) => {
-      lines.push(`  ${i + 1}. to ${t.to} data ${t.data}  (increaseObservationCardinalityNext(${t.next}), about ${(((t.next - from) * GAS_PER_SLOT) / 1e6).toFixed(1)}M gas)`);
+      const slots = t.next - from;
+      lines.push(
+        `  ${i + 1}. to ${t.to} data ${t.data}  (increaseObservationCardinalityNext(${t.next}), about ${((slots * GAS_PER_SLOT) / 1e6).toFixed(1)}M gas; gas limit ${gasLimitFor(slots).toLocaleString("en-US")})`,
+      );
       from = t.next;
     });
     lines.push(
-      `  With Foundry: cast send ${p.address} "increaseObservationCardinalityNext(uint16)" ${steps[0]} --rpc-url <Base RPC> --keystore <your keystore>, then the next value.`,
+      `  With Foundry: cast send ${p.address} "increaseObservationCardinalityNext(uint16)" ${steps[0]} --gas-limit ${gasLimitFor(steps[0] - s.next)} --rpc-url <Base RPC> --keystore <your keystore>, then the next value with its own gas limit. Set the gas limit as given: a wallet that pads it could go over Base's cap.`,
       `Then the pool's history grows as it trades; run this again (or pnpm ops preflight) until it reads at least ${need} slots in use.`,
     );
   }

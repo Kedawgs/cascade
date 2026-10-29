@@ -10,6 +10,7 @@ import {
   cardinalityReport,
   cardinalitySteps,
   cardinalityTxs,
+  gasLimitFor,
   MAX_NEW_SLOTS_PER_TX,
   ORACLE_POOLS,
   ORACLE_TWAP_WINDOW_S,
@@ -38,7 +39,7 @@ describe("the oracle's pools need 30 minutes of observations on Base's 2-second 
     expect(oracleSource).toMatch(new RegExp(`TWAP_WINDOW = ${ORACLE_TWAP_WINDOW_S};`));
     expect(BASE_BLOCK_TIME_S).toBe(2);
     expect(cardinalityNeeded()).toBe(901);
-    expect(CARDINALITY_TARGET).toBe(1_800);
+    expect(CARDINALITY_TARGET).toBe(2_000);
     expect(ORACLE_POOLS.map((p) => p.address)).toEqual([BASE_V3.TAO_WETH_POOL, BASE_V3.WETH_USDC_POOL]);
   });
 
@@ -79,12 +80,17 @@ describe("growing the TAO/WETH pool", () => {
   it("takes at most 600 new slots a transaction: Base caps a transaction at 16,777,216 gas and a slot costs about 22,500", () => {
     expect(MAX_NEW_SLOTS_PER_TX).toBe(600);
     expect(MAX_NEW_SLOTS_PER_TX * 22_500).toBeLessThan(16_777_216);
-    expect(cardinalitySteps(600)).toEqual([1_200, 1_800]);
-    expect(cardinalitySteps(1_200)).toEqual([1_800]);
-    expect(cardinalitySteps(1_300)).toEqual([1_800]);
-    expect(cardinalitySteps(100)).toEqual([700, 1_300, 1_800]);
-    expect(cardinalitySteps(1_800)).toEqual([]);
+    // the gas limit printed for a full step is under the cap too, with room over the measured cost
+    expect(gasLimitFor(MAX_NEW_SLOTS_PER_TX)).toBeLessThan(16_777_216);
+    expect(gasLimitFor(MAX_NEW_SLOTS_PER_TX)).toBeGreaterThan(13_479_008);
+    // to 2,000 from today's 600: three steps, the last a short one
+    expect(cardinalitySteps(600)).toEqual([1_200, 1_800, 2_000]);
+    expect(cardinalitySteps(1_200)).toEqual([1_800, 2_000]);
+    expect(cardinalitySteps(1_300)).toEqual([1_900, 2_000]);
+    expect(cardinalitySteps(100)).toEqual([700, 1_300, 1_900, 2_000]);
+    expect(cardinalitySteps(1_800)).toEqual([2_000]);
     expect(cardinalitySteps(2_000)).toEqual([]);
+    expect(cardinalitySteps(2_100)).toEqual([]);
   });
 
   it("encodes each step as increaseObservationCardinalityNext on the pool", () => {
@@ -99,17 +105,20 @@ describe("growing the TAO/WETH pool", () => {
   it("prints the exact transactions to send from any wallet, and sends nothing", async () => {
     const chain = pools({ cardinality: 600, next: 600 });
     const lines = await cardinalityReport(chain.ctx);
-    const [first, second] = cardinalityTxs(BASE_V3.TAO_WETH_POOL, [1_200, 1_800]);
-    expect(lines).toContain(`  1. to ${first.to} data ${first.data}  (increaseObservationCardinalityNext(1200), about 13.5M gas)`);
-    expect(lines).toContain(`  2. to ${second.to} data ${second.data}  (increaseObservationCardinalityNext(1800), about 13.5M gas)`);
+    const [first, second, third] = cardinalityTxs(BASE_V3.TAO_WETH_POOL, [1_200, 1_800, 2_000]);
+    expect(lines).toContain(`  1. to ${first.to} data ${first.data}  (increaseObservationCardinalityNext(1200), about 13.5M gas; gas limit 15,100,000)`);
+    expect(lines).toContain(`  2. to ${second.to} data ${second.data}  (increaseObservationCardinalityNext(1800), about 13.5M gas; gas limit 15,100,000)`);
+    expect(lines).toContain(`  3. to ${third.to} data ${third.data}  (increaseObservationCardinalityNext(2000), about 4.5M gas; gas limit 5,100,000)`);
     expect(lines.join("\n")).toMatch(/16,777,216 gas/);
+    // a wallet that pads its own gas limit could push a step over the cap: the cast line sets it
+    expect(lines.join("\n")).toMatch(/cast send 0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A "increaseObservationCardinalityNext\(uint16\)" 1200 --gas-limit 15100000/);
     expect(lines.join("\n")).toMatch(/WETH\/USDC 0\.05% pool .*5000 observation slots .*: enough/);
     expect(chain.calls.every((c) => c.method === "eth_call" && c.fn === "slot0")).toBe(true);
   });
 
   it("says when there is nothing to send", async () => {
-    const lines = await cardinalityReport(pools({ cardinality: 1_800, next: 1_800 }).ctx);
-    expect(lines.join("\n")).toMatch(/TAO\/WETH 0\.3% pool .*1800 observation slots .*: enough/);
+    const lines = await cardinalityReport(pools({ cardinality: 2_000, next: 2_000 }).ctx);
+    expect(lines.join("\n")).toMatch(/TAO\/WETH 0\.3% pool .*2000 observation slots .*: enough/);
     expect(lines.join("\n")).not.toMatch(/ to 0x/);
   });
 });

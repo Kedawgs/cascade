@@ -88,10 +88,14 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
 
 - **Grow the TAO/WETH pool's observation slots.** `pnpm ops cardinality` prints the exact
   transactions. The oracle's 30-minute TWAP needs 901 slots on Base's 2-second blocks, and the pool has
-  600 (read 2026-10-28). Base refuses any transaction above 16,777,216 gas, and one call from 600 to
-  1,800 needs about 27M. So it takes two transactions from any wallet: `increaseObservationCardinalityNext(1200)`
-  (measured: 13,479,008 gas), then `(1800)`. verify fails a launch, and preflight flags a problem, until
-  the pool has enough slots.
+  600 (read 2026-10-28). The target is 2,000, for margin.
+  - Base refuses any transaction above 16,777,216 gas, and one call from 600 to 2,000 needs about 31M.
+    Two steps of 700 would each need about 15.7M, within 6% of the cap.
+  - So it takes three transactions, from any wallet: `increaseObservationCardinalityNext(1200)` (a
+    600-slot step measured 13,479,008 gas), then `(1800)`, then `(2000)` (about 4.5M).
+  - Send each with the gas limit printed (15.1M, 15.1M, 5.1M): a wallet that pads its own limit could
+    go over the cap.
+  - verify fails a launch, and preflight flags a problem, until the pool has enough slots.
 - **Base logs.** Every Base log scan reads from `OPS_BASE_LOGS_RPC`. Without it, the scans use
   `OPS_BASE_RPC` (your keyed provider), unless that is `mainnet.base.org`, which refuses `eth_getLogs`.
   Failing both, they use `https://base-rpc.publicnode.com`. The tools print the host they use, its

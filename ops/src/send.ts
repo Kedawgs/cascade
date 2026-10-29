@@ -149,10 +149,23 @@ export function redact(targets: Ctx["targets"], text: string): string {
   return out.replace(/((?:d|api_?)?key|token|secret)=[^&\s)"']+/gi, "$1=…");
 }
 
-/** Which server the live tools read Base's logs from: its origin only (a provider's key, in its path or
- * query, never printed). */
-export const baseLogsLine = (target: ChainTarget) =>
-  `Reading Base's logs from ${redact({ base: target, bittensor: target }, target.rpcUrl)} (set OPS_BASE_LOGS_RPC to change it)`;
+/** A URL's registrable domain, the last two labels of its host (drpc.org, publicnode.com): never a
+ * subdomain, path or query, where a provider's key can sit. An IP address or a one-label host as it is.
+ * (No public-suffix list: a host under e.g. co.uk shows as co.uk, which says less but leaks nothing.) */
+export function hostDomain(url: string): string {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return "an RPC that isn't a URL";
+  }
+  if (/^[\d.]+$/.test(host) || host.startsWith("[") || !host.includes(".")) return host;
+  return host.split(".").slice(-2).join(".");
+}
+
+/** Which server the live tools read Base's logs from: its registrable domain only (a provider's key, in a
+ * subdomain, path or query, never printed). */
+export const baseLogsLine = (target: ChainTarget) => `Reading Base's logs from ${hostDomain(target.rpcUrl)} (set OPS_BASE_LOGS_RPC to change it)`;
 
 const isLocal = (url: string) => ["127.0.0.1", "localhost"].includes(new URL(url).hostname);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

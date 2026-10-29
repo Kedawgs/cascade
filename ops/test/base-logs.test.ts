@@ -50,8 +50,15 @@ describe("Base's log scans have their own RPC", () => {
 
   it("says which host it reads Base's logs from, its origin only, once and only when Base's logs are read", async () => {
     const line = baseLogsLine(baseLogsTarget({ OPS_BASE_RPC: "https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY" }));
-    expect(line).toBe("Reading Base's logs from https://lb.drpc.org/… (set OPS_BASE_LOGS_RPC to change it)");
+    expect(line).toBe("Reading Base's logs from drpc.org (set OPS_BASE_LOGS_RPC to change it)");
     expect(line).not.toContain("SECRET");
+    // the registrable domain only: a key in a subdomain is never printed
+    const domainOf = (url: string) => baseLogsLine({ ...baseLogsTarget({}), rpcUrl: url });
+    expect(domainOf("https://SECRETKEY.base-mainnet.quiknode.pro/x")).toBe("Reading Base's logs from quiknode.pro (set OPS_BASE_LOGS_RPC to change it)");
+    expect(domainOf("https://base-rpc.publicnode.com")).toContain(" from publicnode.com ");
+    expect(domainOf("https://lb.drpc.live/base/SECRETKEY")).toContain(" from drpc.live ");
+    expect(domainOf("http://127.0.0.1:8545")).toContain(" from 127.0.0.1 ");
+    expect(domainOf("not a url")).toContain(" from an RPC that isn't a URL ");
     const said: string[] = [];
     const logs = logsRpc(logsServer(1_000).rpc, logsServer(BASE_HEAD).rpc, { announce: () => said.push("base logs") });
     await logs.request("bittensor", "eth_blockNumber", []);

@@ -99,7 +99,7 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
 - **Base logs.** Every Base log scan reads from `OPS_BASE_LOGS_RPC`. Without it, the scans use
   `OPS_BASE_RPC` (your keyed provider), unless that is `mainnet.base.org`, which refuses `eth_getLogs`.
   Failing both, they use `https://base-rpc.publicnode.com`. The tools print the host they use, its
-  origin only (no key). Each query asks for `OPS_BASE_LOGS_WINDOW`
+  domain only (e.g. `drpc.org`), so no key in it is ever shown. Each query asks for `OPS_BASE_LOGS_WINDOW`
   blocks (default 10,000). publicnode accepted 50,000-block ranges and answered 1M blocks deep
   (probed 2026-10-28), so verify's first registry scan of a month-old deployment takes about 130
   queries. Each later scan resumes from the last. If the logs server refuses part of a scan, verify

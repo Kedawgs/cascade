@@ -101,3 +101,74 @@ export async function handleScan(request: Request, env: { DB: D1Database }, cfg:
   if (cursor.settled_time !== null && cursor.settled_time !== undefined) headers["Cascade-Settled-Time"] = String(cursor.settled_time);
   return new Response(body, { status: 200, headers });
 }
+
+const iso = (s: unknown): string | null => (s === null || s === undefined ? null : new Date(Number(s) * 1000).toISOString());
+
+/** GET /v1/status: what the keeper reads (spec section 8): whether a hold is on (by the holds' opaque
+ * public ids only: no rule, batch, summary or alert reaches it), the delivered keys it may pay out
+ * (`ok` or `ok_by_owner`, payouts queued and not yet done), and each chain's settled block, time and
+ * lag (head_time − settled_time, head_time being moved every tick even when no logs could be read).
+ * Never cached; no query string; 503 when D1 fails or the database holds another deployment (or none
+ * yet), which the keeper treats as an outage and holds on. */
+export async function handleStatus(request: Request, env: { DB: D1Database }, cfg: Config, nowS: number): Promise<Response> {
+  const noStore = { "Cache-Control": "no-store" };
+  if (request.method !== "GET") return plain(405, "method not allowed", { Allow: "GET" });
+  if (request.url.includes("?")) return plain(400, "no query string");
+  let rows: Row[][];
+  try {
+    const db = env.DB;
+    rows = (
+      await db.batch<Row>([
+        db.prepare("SELECT public_id FROM holds WHERE cleared_at IS NULL ORDER BY raised_at, public_id"),
+        db.prepare(
+          `SELECT DISTINCT delivered_key FROM batch_checks
+           WHERE queued_block IS NOT NULL AND payout_done_block IS NULL AND status IN ('ok', 'ok_by_owner') ORDER BY delivered_key`,
+        ),
+        db.prepare("SELECT chain, settled_to, settled_time, head_time FROM cursors"),
+        db.prepare("SELECT k, v FROM meta WHERE k IN ('deployment', 'last_complete_tick')"),
+      ])
+    ).map((r) => r.results);
+  } catch (e) {
+    console.error(`status read failed: ${e instanceof Error ? e.message : String(e)}`);
+    return plain(503, "not available", noStore);
+  }
+  const meta = Object.fromEntries(rows[3].map((r) => [r.k as string, r.v as string]));
+  if (meta.deployment !== cfg.deployment.id) {
+    console.error("the database holds another deployment than DEPLOYMENT (or none yet): no status");
+    return plain(503, "not available", noStore);
+  }
+  const chain = (name: "base" | "bittensor") => {
+    const c = rows[2].find((r) => r.chain === name);
+    if (!c) return null;
+    const settled = c.settled_time === null ? null : Number(c.settled_time);
+    const head = c.head_time === null ? null : Number(c.head_time);
+    return { settledTo: Number(c.settled_to), settledTime: iso(settled), lagS: settled === null || head === null ? null : head - settled };
+  };
+  const ids = rows[0].map((r) => r.public_id as string);
+  const body = {
+    v: 1,
+    deployment: { frontDoor: cfg.deployment.frontDoor, vault: cfg.deployment.vault, baseChainId: 8453, bittensorChainId: 964 },
+    hold: { active: ids.length > 0, ids },
+    payouts: { okKeys: rows[1].map((r) => r.delivered_key as string) },
+    indexer: { base: chain("base"), bittensor: chain("bittensor") },
+    monitor: { lastCompleteTickAt: iso(meta.last_complete_tick) },
+    generatedAt: iso(nowS),
+  };
+  return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json", ...noStore } });
+}
+
+/** A tick must have completed this recently for /v1/health to be ok. */
+export const HEALTHY_WITHIN_S = 300;
+
+/** GET /v1/health: 200 "ok" while the last complete tick is under 5 minutes old, else 503 (for an
+ * outside uptime check). Never cached. */
+export async function handleHealth(env: { DB: D1Database }, nowS: number): Promise<Response> {
+  const noStore = { "Cache-Control": "no-store" };
+  try {
+    const v = await env.DB.prepare("SELECT v FROM meta WHERE k = 'last_complete_tick'").first<string>("v");
+    if (v !== null && nowS - Number(v) < HEALTHY_WITHIN_S) return plain(200, "ok", noStore);
+    return plain(503, "no complete tick in the last 5 minutes", noStore);
+  } catch {
+    return plain(503, "not available", noStore);
+  }
+}

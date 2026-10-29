@@ -1,4 +1,4 @@
-import { handleScan } from "./api.ts";
+import { handleHealth, handleScan, handleStatus } from "./api.ts";
 import { type Config, parseConfig } from "./config.ts";
 
 /** Cascade's history indexer and monitor. `fetch` serves read-only routes; `scheduled` runs the jobs in
@@ -26,6 +26,17 @@ async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promis
       return new Response("not available", { status: 503, headers });
     }
     return handleScan(request, env, cfg);
+  }
+  const nowS = Math.floor(Date.now() / 1000);
+  if (path === "/v1/status") {
+    const cfg = configOf(env);
+    // unconfigured: the keeper reads an outage and holds
+    if (!cfg) return new Response("not available", { status: 503, headers: { "Cache-Control": "no-store" } });
+    return handleStatus(request, env, cfg, nowS);
+  }
+  if (path === "/v1/health") {
+    if (request.method !== "GET") return new Response("method not allowed", { status: 405, headers: { Allow: "GET" } });
+    return handleHealth(env, nowS);
   }
   return new Response("Not found", { status: 404 });
 }

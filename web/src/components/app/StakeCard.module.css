@@ -1,6 +1,7 @@
 .summary {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* halves that never grow to fit a long figure (see .v) */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   row-gap: 18px;
   padding: 20px 24px 22px;
   background: var(--mist);
@@ -24,12 +25,18 @@
   font-size: 19px;
   font-weight: 700;
   letter-spacing: -0.02em;
+  /* one line, as its "–" placeholder is, so nothing moves when a figure arrives */
+  white-space: nowrap;
 }
 
 .v small {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink-3);
+  /* on a narrow screen the smaller figure gives way, cut short rather than wrapped */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .apr {

@@ -37,7 +37,9 @@ The oracle and the adapters have no owner. Then:
   record's keeper. With `OPS_KEEPER_KEYSTORE` and `OPS_KEEPER_PASSWORD_FILE` set, they use that key.
   Without them they sign as the test wallet, so `OPS_LAUNCH_KEEPER` can be the test wallet with no more
   setup. If the record's keeper isn't who the commands sign as, they refuse before sending, and `run`
-  also checks the keystore before it starts. The keeper can time and route but never take funds. A
+  also checks the keystore before it starts. With a separate key, `budget` says what to send it and
+  `preflight` checks its TAO and ETH. A launch rehearsal's keeper steps still sign as the test wallet,
+  so rehearse with `OPS_LAUNCH_KEEPER` set to it. The keeper can time and route but never take funds. A
   separate keeper key keeps the deployer's key off the always-on keeper machine.
 - **Decision: the owners.** Is the owner a Safe, or a timelock behind a Safe? The README assumes a
   48-hour timelock. With a timelock, every limit change and every unpause waits for it. Check that

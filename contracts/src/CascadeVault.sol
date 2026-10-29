@@ -61,11 +61,13 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     address public keeper;
     uint64 public lastStakeAt;
     bool internal _unstaking;
-    /// Wei staked by stakeIdle, still entering the allowance base over STAKE_RAMP from lastStakeAt.
+    /// Wei still entering the allowance base over STAKE_RAMP from lastStakeAt: what stakeIdle staked and
+    /// any stake it found unbooked, less what unstakes paid since.
     uint256 internal rampingStake;
-    /// The stake the vault put there itself, in wei: what stakeIdle staked and reward claims measured,
-    /// less what unstakes paid. Caps the allowance base, so stake moved onto the vault's hotkeys from
-    /// outside (a gift its depositors get back through their shares) cannot raise it.
+    /// The stake the vault accounts for, in wei: set to the root stake plus what it adds at each stakeIdle,
+    /// plus what reward claims measure, less what unstakes pay. Caps the allowance base, so stake moved
+    /// onto the vault's hotkeys from outside (a gift its depositors get back through their shares) counts
+    /// only once a stakeIdle has booked it, and then ramps in.
     uint256 internal bookedStake;
 
     // accounting
@@ -411,8 +413,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
     }
 
     /// Stakes the liquid balance not reserved for queued payouts or the existential deposit. Keeper
-    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake (or the deploy). What it
-    /// stakes, with what is still ramping from earlier stakes, enters the outflow allowance's base
+    /// only, or anyone once KEEPER_FALLBACK has passed since the last stake (or the deploy). It books the
+    /// vault's root stake again: what it stakes, and any stake it finds unbooked (a gift, a credit no
+    /// claim measured), join what is still ramping, and all of it enters the outflow allowance's base
     /// linearly over STAKE_RAMP from now.
     function stakeIdle() external whenNotPaused nonReentrant {
         uint64 last = lastStakeAt;
@@ -421,13 +424,14 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         uint256 rao = _available() / RAO;
         if (rao < minStakeRao()) revert NothingToStake();
 
+        uint256 root = rootStakeRao() * RAO;
         bytes32 h = stakeHotkey;
         uint256 before = _stakeOf(h);
         STAKING.addStake(h, rao, NETUID_ROOT);
         uint256 measured = _sub0(_stakeOf(h), before);
         uint256 added = rao * RAO;
-        rampingStake = _unspent(rampingStake, last, STAKE_RAMP) + added;
-        bookedStake += added;
+        rampingStake = _unspent(rampingStake, last, STAKE_RAMP) + added + _sub0(root, bookedStake);
+        bookedStake = root + added;
         lastStakeAt = uint64(block.timestamp);
         emit Staked(h, rao, measured);
     }
@@ -1028,7 +1032,9 @@ contract CascadeVault is ERC20, CascadeBase, ICascadeReceiver {
         if (full) STAKING.removeStakeFull(h, NETUID_ROOT);
         else STAKING.removeStake(h, want, NETUID_ROOT);
         received = _sub0(address(this).balance, before);
+        // off both, so an unstake leaves the base where it was, and cycled stake nets to nothing
         bookedStake = _sub0(bookedStake, received);
+        rampingStake = _sub0(rampingStake, received);
         emit Unstaked(h, want, received);
     }
 }

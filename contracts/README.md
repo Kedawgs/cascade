@@ -490,34 +490,49 @@ The four layers:
 Soft spots:
 
 - **The allowance base trusts capital that stays a day.** The base is the vault's root stake, at
-  most the stake the vault booked itself, less what `stakeIdle` added and has not yet ramped in
-  (each stake re-spreads what is still ramping, plus the new stake, linearly over the next 24 hours,
-  like reward vesting). Liquid TAO never counts: a delivery's deposits, an earlier delivery's, a
-  direct deposit, payouts reserved in the balance. So borrowed or short-lived capital cannot raise
-  the base. Measured: a rogue adapter that delivers
-  4,000 TAO of its own as a deposit-only batch, then a redeem batch naming a 1,000-TAO holder, burns
-  that holder for 200 TAO, not 1,000, whether in the same transaction (the adapter then takes its
-  4,000 back with `redeemDirect`), a block later, or a block after the keeper staked the 4,000
-  (about 200.1 TAO). The ramp applies whoever calls `stakeIdle` (the keeper, or anyone after
-  `KEEPER_FALLBACK`), so a stolen keeper key cannot shortcut it. Stake can also rise without
-  `stakeIdle`: another coldkey can move stake onto the vault's hotkeys, and depositors get such a
-  gift back through their shares (measured: next to a borrowed 100,000-TAO deposit, a 4,000-TAO gift
-  costs its giver about 40 TAO). The booked-stake cap (what `stakeIdle` staked and reward claims
-  measured, less what unstakes paid) keeps it out: the allowance stays 200 TAO. Booked stake can
-  overstate the real stake by rewards paid out as balance and by any chain fee on unstakes (none
-  today), which a gift could then fill. Capital that stays staked raises the base as it ramps in: half after 12 hours,
-  all after 24. To the vault that is a holder like any other, and a percentage cap cannot tell them
-  apart; the backstop is unchanged (the 24-hour payout delay, the guardian's hold and the owner's
-  cancel). Flagged for the auditor.
-- **New stake waits a day to count.** The cost to honest users: deposits count in the base only as
-  they ramp in after the keeper stakes them, so a new vault, or one that grew fast, has a lower
-  allowance for about a day (never below `minDailyOutflow`). A keeper that stops staking freezes the
-  base at the stake it last ramped in; anyone may stake after `KEEPER_FALLBACK`.
-- **Cycling capital lowers the base for a day.** Someone who deposits, waits for the keeper to stake
-  it, then redeems directly adds to what is ramping without adding stake, so the base falls (to the
-  `minDailyOutflow` floor at worst) for up to a day. It costs them the capital for a keeper round and
-  gas, takes nothing, and leaves exits open at the floor and through `redeemDirect`. A keeper that
-  stakes less often (say daily) makes each cycle hold its capital longer.
+  most the stake the vault has booked, less what is still ramping in (each stake re-spreads what is
+  still ramping, plus what it adds, linearly over the next 24 hours, like reward vesting). Liquid TAO
+  never counts: a delivery's deposits, an earlier delivery's, a direct deposit, payouts reserved in
+  the balance. So borrowed or short-lived capital cannot raise the base. Measured: a rogue adapter
+  that delivers 4,000 TAO of its own as a deposit-only batch, then a redeem batch naming a
+  1,000-TAO holder, burns that holder for 200 TAO, not 1,000, whether in the same transaction (the
+  adapter then takes its 4,000 back with `redeemDirect`), a block later, or a block after the keeper
+  staked the 4,000 (about 200.1 TAO). The ramp applies whoever calls `stakeIdle` (the keeper, or
+  anyone after `KEEPER_FALLBACK`), so a stolen keeper key cannot shortcut it. Stake can also rise
+  without `stakeIdle`: another coldkey can move stake onto the vault's hotkeys, and depositors get
+  such a gift back through their shares (measured: next to a borrowed 100,000-TAO deposit, a
+  4,000-TAO gift costs its giver about 40 TAO). The booked-stake cap keeps it out: each `stakeIdle`
+  books the root stake it finds plus what it adds, and puts any stake it found unbooked on the ramp;
+  a reward claim books what it measures; an unstake takes what it pays off the booked stake and off
+  what is ramping. So a gift counts only once a stake has booked it, and then ramps in like a
+  deposit, and capital cycled through the keeper (deposit, the keeper stakes it, redeem directly)
+  nets to nothing (measured: 20 TAO cycled every minute for 12 hours leaves the base where it was).
+  Capital that stays staked raises the base as it ramps in: half after 12 hours, all after 24. To
+  the vault that is a holder like any other, and a percentage cap cannot tell them apart; the
+  backstop is unchanged (the 24-hour payout delay, the guardian's hold and the owner's cancel).
+  Flagged for the auditor.
+- **New stake counts over a day, or more slowly.** The cost to honest users: deposits count in the
+  base only as they ramp in after the keeper stakes them, so a new vault, or one that grew fast, has
+  a lower allowance for a while (never below `minDailyOutflow`). Because every stake re-spreads what
+  is still ramping, frequent stakes (the ops keeper stakes whenever TAO is idle, and anyone can make
+  it stake with a small direct deposit) turn the linear day into an exponential with a one-day time
+  constant: about 63% counts after a day, 86% after two, 95% after three (measured: a 0.01-TAO
+  direct deposit every minute leaves a 1,000-TAO stake about 64% counted after a day). That is the
+  slowest it can get, and it never lets stake count sooner. Keeping each stake's own schedule needs
+  per-stake state the vault has no bytes for, and a single weighted schedule would let parked capital
+  count faster than a day, so it is left conservative. A keeper that stops staking leaves the base at
+  what has ramped in; anyone may stake after `KEEPER_FALLBACK`.
+- **A gift taken back out drains the base until the next stake.** Someone who holds most of the
+  shares (through a large direct deposit) can move stake onto the vault's hotkey and redeem it all
+  again: the unstake that pays the gift back takes it off the booked stake, which never held it, so
+  the base falls toward the floor until the keeper next stakes. That stake books the real stake again
+  and ramps the drained part back in over a day. Measured: in a 10,000-TAO vault, a 990,000-TAO
+  deposit and a 10,000-TAO gift cost about 100 TAO (the gift times the other holders' share) and hold
+  the base at the floor until the next stake, then let it recover over a day. `maxTotalAssets` bounds
+  the deposit (44 TAO at launch), so there the gift goes almost entirely to the other holders. The
+  same reconciliation un-books stake the hotkey set does not show when the keeper stakes (a swapped
+  hotkey not yet re-added, a misread): when it shows again it ramps back in over a day. Exits stay
+  open at the floor and through `redeemDirect`; it takes nothing.
 - **Dust cannot leave through a front door.** A holder whose shares are worth less than 0.01 TAO,
   or whose request the window's last sliver of allowance would clip below 0.01 TAO, is deferred
   (`RedeemDeferred`) and keeps the shares; `redeemDirect` pays any amount. The minimum is a

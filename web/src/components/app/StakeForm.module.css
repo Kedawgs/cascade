@@ -221,10 +221,6 @@
   text-align: center;
 }
 
-.yield {
-  color: var(--water-deep) !important;
-}
-
 .foot {
   margin: 12px 0 0;
   font-size: 13px;

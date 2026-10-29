@@ -10,8 +10,9 @@ html:has(.app) {
   background: var(--mist);
 }
 
-/* The home navbar's sizes (SiteNav's .nav): as tall, with its content edges on the same lines as the
-   home page's .wrap (at most 1280px with 40px sides; the app's own 20px sides count towards them). */
+/* The home navbar's sizes (SiteNav's .nav) on wide screens: as tall, with its content edges on the same
+   lines as the home page's .wrap (at most 1280px with 40px sides; the app's own 20px sides count
+   towards them). */
 .bar {
   display: flex;
   align-items: center;
@@ -206,8 +207,8 @@ html:has(.app) {
   }
 }
 
-/* Below 1000px, where the home navbar folds its links away: the logo and the wallet share the first
-   row, the tabs take the whole second row; the bar is shorter and the pills 44px, as there. */
+/* Below 1000px, where the home navbar moves its links to a second row: the logo and the wallet share the
+   first row, the tabs take the whole second row; the pills are 44px, as there. */
 @media (max-width: 999px) {
   .bar {
     flex-wrap: wrap;

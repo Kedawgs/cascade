@@ -34,7 +34,7 @@ into the site.
 | `/stake/` | Stake tab. Without a wallet it shows a connect state instead of redirecting |
 | `/unstake/` | Unstake tab (TAO back to Base, then claimed as USDC in the same wallet) |
 | `/rewards/` | What the staked TAO has earned |
-| `/activity/` | Deposits and unstakes; `?deposit=<id>` or `?withdrawal=<id>` opens one receipt trail with its actions (continue, cancel, claim) |
+| `/activity/` | Deposits or unstakes, one tab at a time (`?tab=unstakes` opens the second); `?deposit=<id>` or `?withdrawal=<id>` opens one receipt trail with its actions (continue, cancel, claim) |
 | `/deposit/`, `/withdraw/` | The old pages, redirecting to the tabs |
 
 ## How it reads the chains

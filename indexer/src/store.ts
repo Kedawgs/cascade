@@ -155,7 +155,7 @@ export interface TickState {
   holds: HoldRow[];
   /** the last 6 readings with each chain's block, newest first (price.drop needs three settled ones) */
   lastReadings: Reading[];
-  /** the last 25 hour rows, newest first */
+  /** the last 170 hour rows (a week), newest first */
   hours: HourRow[];
   /** the watched addresses */
   nonces: NonceRow[];

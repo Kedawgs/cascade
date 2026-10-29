@@ -14,6 +14,9 @@ export interface VerifyResult {
   /** Worth knowing but not wrong (a hand-off not yet accepted, a pause, a proposal the owner expects):
    * they don't fail the read-back. Absent in results saved before warnings existed. */
   warnings?: string[];
+  /** What couldn't be read and so wasn't checked (a registry scan the logs server refused): printed
+   * loudly, but it doesn't fail the read-back, which would stop the keeper. */
+  unchecked?: string[];
   checkedAt: string;
   /** Where the registry scan reached and what it found, so the next read-back scans only newer blocks. */
   registryScan?: RegistryScan;

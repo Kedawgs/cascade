@@ -5,7 +5,7 @@ import type { Budget } from "./budget.ts";
 import { poolProblems } from "./cardinality.ts";
 import { type ChainName, LIVE, SETTINGS, WALLET } from "./config.ts";
 import type { DeploymentRecord } from "./record.ts";
-import { WINDOW } from "./keeper/state.ts";
+import { windowOf } from "./keeper/state.ts";
 import { balanceOf, nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, logsOf } from "./send.ts";
 
@@ -44,16 +44,16 @@ export function checkAlphaVault(s: { isPaused: boolean; migrationReadyAt: bigint
 
 /** One eth_getLogs over the keeper's window on `chain`, through the logs server the scans use (Base:
  * OPS_BASE_LOGS_RPC), its head from there too: null if it accepts it. */
-export async function logProbe(ctx: Pick<Ctx, "rpc" | "logs">, chain: ChainName): Promise<string | null> {
+export async function logProbe(ctx: Pick<Ctx, "rpc" | "logs" | "logsWindow">, chain: ChainName): Promise<string | null> {
   try {
     const rpc = logsOf(ctx);
     const latest = BigInt((await rpc.request(chain, "eth_blockNumber", [])) as string);
     await rpc.request(chain, "eth_getLogs", [
-      { address: LIVE[chain].ROUTER, fromBlock: `0x${(latest - WINDOW[chain] + 1n).toString(16)}`, toBlock: `0x${latest.toString(16)}` },
+      { address: LIVE[chain].ROUTER, fromBlock: `0x${(latest - windowOf(ctx, chain) + 1n).toString(16)}`, toBlock: `0x${latest.toString(16)}` },
     ]);
     return null;
   } catch (e) {
-    return `the RPC refused a ${WINDOW[chain]}-block log query (${(e as Error).message})`;
+    return `the RPC refused a ${windowOf(ctx, chain)}-block log query (${(e as Error).message})`;
   }
 }
 

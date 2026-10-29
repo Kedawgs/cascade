@@ -41,6 +41,9 @@ export interface Ctx {
   /** Where log scans go (rpc.ts logsRpc): the live tools' own Base logs server. Absent = `rpc` (the
    * local forks, and tests). Every eth_getLogs, and the head a scan reads first, goes through logsOf. */
   logs?: Rpc;
+  /** The block range one eth_getLogs asks `logs` for, per chain: the live Base logs server's own
+   * (OPS_BASE_LOGS_WINDOW). Absent = WINDOW (keeper/state.ts), what any public RPC accepts. */
+  logsWindow?: Partial<Record<ChainName, bigint>>;
   /** Who sends: absent = the test wallet with paths.keystore (every command but pause and unpause). */
   signer?: Signer;
   runner: Runner;

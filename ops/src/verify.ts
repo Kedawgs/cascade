@@ -9,6 +9,7 @@ import {
   type Findings,
   guardianChecks,
   NO_ALLOW,
+  NO_CANDIDATES,
   type RegistryScan,
   registryChecks,
   scanRegistry,
@@ -343,6 +344,8 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
   const failures = compare(exp, actual);
 
   const warnings: string[] = [];
+  /** What couldn't be read and so wasn't checked, without failing the read-back (the registries). */
+  const unchecked: string[] = [];
   /** A check whose reads fail is a failure that says so, as an unreadable expectation is. */
   const findings = async (label: string, check: () => Promise<Findings>) => {
     try {
@@ -365,10 +368,24 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
       return o;
     });
     await findings("the guardian proposals", () => guardianChecks(ctx, plan, allow));
-    await findings("the bridge, front-door and route registries", async () => {
-      registryScan = await scanRegistry(ctx, rec, rec.verify?.registryScan);
-      return registryChecks(ctx, plan, registryScan, allow);
-    });
+    // the registries: what can't be read is unchecked, never a failure (a failed read-back stops the
+    // keeper); only something found (an unexpected bridge, front door, route or proposal) fails
+    const prev = rec.verify?.registryScan;
+    registryScan = prev;
+    try {
+      const r = await scanRegistry(ctx, rec, prev);
+      registryScan = r.scan;
+      unchecked.push(...r.unchecked);
+    } catch (e) {
+      unchecked.push(`the registry scan couldn't run (${(e as Error).message.split("\n")[0]}), so bridges, front doors and routes beyond the plan's are NOT checked`);
+    }
+    try {
+      const f = await registryChecks(ctx, plan, registryScan ?? NO_CANDIDATES, allow);
+      failures.push(...f.failures);
+      warnings.push(...f.warnings);
+    } catch (e) {
+      unchecked.push(`the bridges', front doors' and routes' state couldn't be read (${(e as Error).message.split("\n")[0]}), so they are NOT checked`);
+    }
     await findings("the pause and hotkey state", async () => ({ failures: [], warnings: await stateWarnings(ctx, plan) }));
     await findings("the oracle's pools", () => cardinalityChecks(ctx, plan));
     const treasuries = new Map<string, Address>();
@@ -416,6 +433,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
     ok: failures.length === 0,
     failures,
     ...(warnings.length ? { warnings } : {}),
+    ...(unchecked.length ? { unchecked } : {}),
     checkedAt: new Date().toISOString(),
     ...(registryScan ? { registryScan } : {}),
     ...(handoff ? { handoff } : {}),
@@ -434,5 +452,10 @@ export async function verifyAndSave(ctx: Ctx, path: string, rec: DeploymentRecor
   if (rec.verify.ok) ctx.log("Read-back check: everything matches the plan");
   else ctx.log(`Read-back check FAILED:\n  ${rec.verify.failures.join("\n  ")}`);
   if (rec.verify.warnings?.length) ctx.log(`Warnings (not failures):\n  ${rec.verify.warnings.join("\n  ")}`);
+  if (rec.verify.unchecked?.length) {
+    ctx.log(
+      `NOT CHECKED — the read-back passes without these, but nothing vouches for them until a verify reads them:\n  ${rec.verify.unchecked.join("\n  ")}`,
+    );
+  }
   return rec.verify.ok;
 }

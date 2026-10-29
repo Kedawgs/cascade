@@ -3,7 +3,7 @@ import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
 import { cardinalityReport } from "./cardinality.ts";
-import { baseLogsTarget, cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
+import { baseLogsTarget, baseLogsWindow, cadenceFromEnv, claimPolicy, deploymentName, isV3Deployment, paths, recordPath as recordFor, targets } from "./config.ts";
 import { deployAndVerify } from "./deploy.ts";
 import { handoff, ownershipStatus } from "./handoff.ts";
 import { pauseCommand, pauseSigner } from "./pause.ts";
@@ -33,7 +33,16 @@ function ctxFor(live: boolean): Ctx {
   // the live tools read Base's logs from their own server (mainnet.base.org refuses eth_getLogs); the
   // forks serve their own
   const logs = live ? logsRpc(rpc, createRpc({ ...t, base: baseLogsTarget(env) })) : undefined;
-  return { live, targets: t, rpc, ...(logs ? { logs } : {}), runner: execFileRunner, paths: paths(env), log, receiptTimeoutMs: 300_000 };
+  return {
+    live,
+    targets: t,
+    rpc,
+    ...(logs ? { logs, logsWindow: { base: baseLogsWindow(env) } } : {}),
+    runner: execFileRunner,
+    paths: paths(env),
+    log,
+    receiptTimeoutMs: 300_000,
+  };
 }
 
 /** The keeper commands' context: their sends sign as the record's keeper with OPS_KEEPER_KEYSTORE and

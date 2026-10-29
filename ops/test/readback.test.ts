@@ -143,7 +143,8 @@ describe("the registry scan finds every bridge, front door and route the contrac
       { base: 1_250, bittensor: 2_100 },
     );
     expect(baseStartBlock(rec)).toBe(1_000);
-    const scan = await scanRegistry(c.ctx, rec);
+    const { scan, unchecked } = await scanRegistry(c.ctx, rec);
+    expect(unchecked).toEqual([]);
     expect(scan).toEqual({
       base: { to: 1_220, bridges: [OTHER], routes: [0, 2] },
       bittensor: { to: 2_090, bridges: [a.bitAdapter], frontDoors: [`8453:${OTHER2}`] },
@@ -165,12 +166,35 @@ describe("the registry scan finds every bridge, front door and route the contrac
   it("a later scan starts where the last one settled and keeps what it found", async () => {
     const c = logChain({ base: [log(a.frontDoor, 1_230, "BridgeProposed", { bridge: OTHER2 })] }, { base: 1_300, bittensor: 2_100 });
     const prev: RegistryScan = { base: { to: 1_220, bridges: [OTHER], routes: [0] }, bittensor: { to: 2_090, bridges: [], frontDoors: [] } };
-    const scan = await scanRegistry(c.ctx, rec, prev);
+    const { scan } = await scanRegistry(c.ctx, rec, prev);
     expect(scan.base).toEqual({ to: 1_270, bridges: [OTHER, OTHER2], routes: [0] });
     expect(c.queries.map((q) => [q.chain, q.from, q.to])).toEqual([
       ["base", 1_221, 1_300],
       ["bittensor", 2_091, 2_100],
     ]);
+  });
+
+  it("a query the logs server refuses stops the scan there: what came before is kept, and it says what isn't checked", async () => {
+    const c = logChain({ base: [log(a.frontDoor, 1_050, "BridgeProposed", { bridge: OTHER })] }, { base: 1_250, bittensor: 2_100 });
+    const request = c.ctx.rpc.request;
+    const refusing = {
+      request: (chain: ChainName, m: string, p: unknown[]) =>
+        chain === "base" && m === "eth_getLogs" && Number((p[0] as { fromBlock: Hex }).fromBlock) >= 1_100 ? Promise.reject(new Error("archive requests need a token")) : request(chain, m, p),
+    };
+    const { scan, unchecked } = await scanRegistry({ ...c.ctx, rpc: refusing }, rec);
+    // the first window's bridge is kept; the next scan resumes at the refused window
+    expect(scan.base).toEqual({ to: 1_099, bridges: [OTHER], routes: [] });
+    expect(unchecked).toEqual([
+      "Base: the front door's and the staker's registry events from block 1100 (archive requests need a token) couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back",
+    ]);
+    // Bittensor still scanned in full
+    expect(scan.bittensor.to).toBe(2_090);
+  });
+
+  it("asks the logs server for its own window: one query where the public window takes three", async () => {
+    const c = logChain({}, { base: 1_250, bittensor: 2_100 });
+    await scanRegistry({ ...c.ctx, logsWindow: { base: 10_000n } }, rec);
+    expect(c.queries.filter((q) => q.chain === "base").map((q) => [q.from, q.to])).toEqual([[1_000, 1_250]]);
   });
 
   it("the topics are the build's own events", () => {

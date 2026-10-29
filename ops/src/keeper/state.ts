@@ -126,6 +126,8 @@ const ED_RESERVE = 10n ** 12n;
 /** eth_getLogs block ranges the public RPCs accept. Base's go to OPS_BASE_LOGS_RPC (mainnet.base.org
  * refuses eth_getLogs altogether); some public Base endpoints refuse more than 200 blocks. */
 export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
+/** One eth_getLogs's block range on `chain`: the logs server's own (live Base: OPS_BASE_LOGS_WINDOW), else WINDOW. */
+export const windowOf = (ctx: Pick<Ctx, "logsWindow">, chain: ChainName): bigint => ctx.logsWindow?.[chain] ?? WINDOW[chain];
 /** The furthest the keeper's first look at a batch's deposits reaches back on Base: four hours of its
  * 2-second blocks, 72 queries. Fees decide a close only once the batch can close (an hour in at the launch
  * cadence), and `run` then looks again each round, so it sees a batch's whole life unless it starts late. */
@@ -176,11 +178,12 @@ export async function scanLogs(
   to?: bigint,
 ) {
   const rpc = logsOf(ctx);
+  const step = windowOf(ctx, chain);
   const latest = to ?? hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex);
   const topic0 = encodeEventTopics({ abi: [ev], eventName: ev.name } as never)[0];
   const out: ScannedLog[] = [];
-  for (let start = from; start <= latest; start += WINDOW[chain]) {
-    const end = start + WINDOW[chain] - 1n < latest ? start + WINDOW[chain] - 1n : latest;
+  for (let start = from; start <= latest; start += step) {
+    const end = start + step - 1n < latest ? start + step - 1n : latest;
     const logs = (await rpc.request(chain, "eth_getLogs", [
       { address, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topic0, ...topics] },
     ])) as { address: Address; topics: Hex[]; data: Hex; blockNumber: Hex; logIndex: Hex; transactionHash: Hex }[];
@@ -610,7 +613,7 @@ export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opt
     if (state === "FAILURE") {
       // the change happened since the last poll: a recent window is enough
       const latest = hexToBigInt((await logsOf(ctx).request(dst, "eth_blockNumber", [])) as Hex);
-      const changed = await scanLogs(ctx, dst, offRamp, event(OFFRAMP, "ExecutionStateChanged"), latest - WINDOW[dst] + 1n, [null, null, id]);
+      const changed = await scanLogs(ctx, dst, offRamp, event(OFFRAMP, "ExecutionStateChanged"), latest - windowOf(ctx, dst) + 1n, [null, null, id]);
       ctx.log(`The delivery failed; the OffRamp returned ${(changed.at(-1)?.args.returnData as Hex) ?? "nothing"}`);
       return state;
     }

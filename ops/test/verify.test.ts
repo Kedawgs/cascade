@@ -8,6 +8,7 @@ import {
   encodeEventTopics,
   encodeFunctionResult,
   type Hex,
+  getAddress,
   numberToHex,
   parseAbi,
   toFunctionSelector,
@@ -484,19 +485,54 @@ describe("verify reads back the registries, the pending proposals and the state"
     expect(chains.calls.filter((m) => m === "eth_getLogs")).toHaveLength(2);
   });
 
-  it("a check it cannot read is a failure that says so, not a crash; Base's names the logs RPC", async () => {
+  it("a registry scan the logs server refuses is unchecked, said loudly, and doesn't fail the read-back (which would stop the keeper)", async () => {
     const chains = chainsFor(recordOf(plan), THIS_CODE);
     const request = chains.ctx.rpc.request;
     const refusing = (chain: string): Rpc => ({
       request: (c, m, p) => (m === "eth_getLogs" && c === chain ? Promise.reject(new Error("range too large")) : request(c, m, p)),
     });
     const base = await verify({ ...chains.ctx, rpc: refusing("base") }, recordOf(plan));
-    expect(base.ok).toBe(false);
-    expect(base.failures).toEqual([
-      "the bridge, front-door and route registries: could not be read (Base's logs from block 1 (range too large): OPS_BASE_LOGS_RPC must serve eth_getLogs that far back; run verify often (each one scans only from the last), or use an archive-capable endpoint)",
+    expect(base).toMatchObject({ ok: true, failures: [] });
+    expect(base.unchecked).toEqual([
+      "Base: the front door's and the staker's registry events from block 1 (range too large) couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back",
     ]);
+    // nothing was read on Base: the next verify starts there again; Bittensor moved on
+    expect(base.registryScan).toEqual({ base: { to: 0, bridges: [], routes: [] }, bittensor: { to: 90, bridges: [], frontDoors: [] } });
     const bit = await verify({ ...chains.ctx, rpc: refusing("bittensor") }, recordOf(plan));
-    expect(bit.failures).toEqual(["the bridge, front-door and route registries: could not be read (range too large)"]);
+    expect(bit).toMatchObject({ ok: true, failures: [] });
+    expect(bit.unchecked).toEqual([expect.stringMatching(/^Bittensor: the vault's registry events from block 1 \(range too large\) couldn't be read/)]);
+    // printed loudly when saved
+    const lines: string[] = [];
+    const path = join(mkdtempSync(join(tmpdir(), "ops-verify-")), "v3-test.json");
+    saveRecord(path, recordOf(plan));
+    await verifyAndSave({ ...chains.ctx, rpc: refusing("base"), log: (l) => void lines.push(l) }, path, recordOf(plan));
+    expect(lines.join("\n")).toMatch(/NOT CHECKED — the read-back passes without these.*\n {2}Base: the front door's and the staker's registry events/);
+  });
+
+  it("while the scan is refused, an extra bridge it found before still fails", async () => {
+    const extra = getAddress("0x00000000000000000000000000000000000000e1");
+    const prev = { base: { to: 50, bridges: [extra], routes: [0] }, bittensor: { to: 99, bridges: [], frontDoors: [] } };
+    const rec = { ...recordOf(plan), verify: { ok: true, failures: [], checkedAt: "", registryScan: prev } };
+    const chains = chainsFor(rec, THIS_CODE);
+    const request = chains.ctx.rpc.request;
+    const rpc: Rpc = { request: (c, m, p) => (m === "eth_getLogs" ? Promise.reject(new Error("refused")) : request(c, m, p)) };
+    const r = await verify({ ...chains.ctx, rpc }, rec);
+    // the fake chain reads every bridge as enabled
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([`Base CascadeFrontDoor: an extra bridge ${extra} is enabled, beyond the plan's (if meant, add it to OPS_VERIFY_ALLOW)`]);
+    expect(r.unchecked).toHaveLength(2);
+    expect(r.registryScan).toEqual(prev);
+  });
+
+  it("other checks it cannot read still fail, saying so", async () => {
+    const chains = chainsFor(recordOf(plan), THIS_CODE);
+    const request = chains.ctx.rpc.request;
+    const pendingOwner = toFunctionSelector("pendingOwner()");
+    const rpc: Rpc = {
+      request: (c, m, p) => (m === "eth_call" && (p[0] as { data: Hex }).data.startsWith(pendingOwner) ? Promise.reject(new Error("node down")) : request(c, m, p)),
+    };
+    const r = await verify({ ...chains.ctx, rpc }, recordOf(plan));
+    expect(r.failures).toEqual(["the owners: could not be read (node down)"]);
   });
 
   it("names a wrong limit like any other setting", async () => {

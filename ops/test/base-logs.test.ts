@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, numberToHex, parseAbi, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
-import { BASE_V3, baseLogsTarget, type ChainName } from "../src/config.ts";
+import { BASE_V3, baseLogsTarget, baseLogsWindow, type ChainName } from "../src/config.ts";
 import { KEEPER_READ_ABIS, keeperDeps, scanLogs } from "../src/keeper/state.ts";
 import { buildPlanV3 } from "../src/plan.ts";
 import { logProbe } from "../src/preflight.ts";
@@ -41,6 +41,16 @@ describe("Base's log scans have their own RPC", () => {
   it("OPS_BASE_LOGS_RPC, by default publicnode (mainnet.base.org refuses eth_getLogs)", () => {
     expect(baseLogsTarget({})).toEqual({ name: "base", rpcUrl: "https://base-rpc.publicnode.com", chainId: 8453, legacy: false });
     expect(baseLogsTarget({ OPS_BASE_LOGS_RPC: "https://logs.example" }).rpcUrl).toBe("https://logs.example");
+  });
+
+  it("asks it for 10,000 blocks a query (OPS_BASE_LOGS_WINDOW): the 100-block window was mainnet.base.org's", async () => {
+    expect(baseLogsWindow({})).toBe(10_000n);
+    expect(baseLogsWindow({ OPS_BASE_LOGS_WINDOW: " 2000 " })).toBe(2_000n);
+    for (const bad of ["0", "-5", "1e4", "lots"]) expect(() => baseLogsWindow({ OPS_BASE_LOGS_WINDOW: bad }), bad).toThrow(/OPS_BASE_LOGS_WINDOW/);
+    const base = logsServer(BASE_HEAD);
+    const ev = parseAbi(["event DepositRequested(uint64 indexed batchId, address indexed user, uint256 amount, address payer)"])[0];
+    await scanLogs({ ...fakeChain([], {}).ctx, logs: base.rpc, logsWindow: { base: 10_000n } }, "base", BASE_V3.USDC, ev, BigInt(BASE_HEAD - 7_200));
+    expect(base.asked.filter((a) => a.method === "eth_getLogs")).toHaveLength(1);
   });
 
   it("routes Base to the logs server and Bittensor to the main RPC, after checking the logs server is Base", async () => {

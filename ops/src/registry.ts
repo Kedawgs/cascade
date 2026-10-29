@@ -1,6 +1,6 @@
 import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, hexToBigInt, isAddress, keccak256, numberToHex, parseAbi } from "viem";
 import { type ChainName, type Env, LIVE } from "./config.ts";
-import { WINDOW, startBlock } from "./keeper/state.ts";
+import { startBlock, windowOf } from "./keeper/state.ts";
 import type { PlanV3 } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { firstBlockWithCode, read } from "./rpc.ts";
@@ -70,53 +70,108 @@ export function baseStartBlock(rec: DeploymentRecord): number | undefined {
 
 type RawLog = { address: Address; topics: Hex[] };
 
-/** `addresses`' logs with any of `topics` as topic0, from `from` to the head, in the RPC's windows; the head
- * and the logs both from the logs server (Base: OPS_BASE_LOGS_RPC). */
-async function scan(ctx: Pick<Ctx, "rpc" | "logs">, chain: ChainName, addresses: Address[], topics: Hex[], from: number) {
+const firstLine = (e: unknown) => (e as Error).message.split("\n")[0];
+
+/** `addresses`' logs with any of `topics` as topic0, from `from` to the head, in the logs server's windows
+ * (Base: OPS_BASE_LOGS_RPC and its window); the head from the same server. A query that fails stops the
+ * scan there: what came before it is kept, `to` stops short of it, and `error` says where and why, so the
+ * next scan resumes from it. */
+async function scan(
+  ctx: Pick<Ctx, "rpc" | "logs" | "logsWindow">,
+  chain: ChainName,
+  addresses: Address[],
+  topics: Hex[],
+  from: number,
+): Promise<{ logs: RawLog[]; to: number; error?: string }> {
   const rpc = logsOf(ctx);
-  const head = Number(hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex));
   const logs: RawLog[] = [];
-  const step = Number(WINDOW[chain]);
+  let head: number;
+  try {
+    head = Number(hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex));
+  } catch (e) {
+    return { logs, to: from - 1, error: `from block ${from} (${firstLine(e)})` };
+  }
+  const settled = head - SETTLE[chain];
+  const step = Number(windowOf(ctx, chain));
   for (let start = from; start <= head; start += step) {
     const end = Math.min(start + step - 1, head);
-    const got = (await rpc.request(chain, "eth_getLogs", [{ address: addresses, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topics] }])) as RawLog[];
-    logs.push(...got);
+    try {
+      logs.push(...((await rpc.request(chain, "eth_getLogs", [{ address: addresses, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topics] }])) as RawLog[]));
+    } catch (e) {
+      return { logs, to: Math.max(from - 1, Math.min(start - 1, settled)), error: `from block ${start} (${firstLine(e)})` };
+    }
   }
-  return { logs, to: Math.max(from - 1, head - SETTLE[chain]) };
+  return { logs, to: Math.max(from - 1, settled) };
 }
 
 const addressTopic = (t: Hex): Address => getAddress(`0x${t.slice(-40)}`);
 const union = <T>(a: readonly T[], b: readonly T[]) => [...new Set([...a, ...b])];
 
+/** No candidates beyond the plan's own: what the registry checks read when no scan has ever finished. */
+export const NO_CANDIDATES: RegistryScan = { base: { to: -1, bridges: [], routes: [] }, bittensor: { to: -1, bridges: [], frontDoors: [] } };
+
 /** Scans the front door's and the staker's registry events on Base, and the vault's on Bittensor, from
- * where `prev` settled (else the deployment's first block on each chain). */
-export async function scanRegistry(ctx: Pick<Ctx, "rpc" | "logs">, rec: DeploymentRecord, prev?: RegistryScan): Promise<RegistryScan> {
+ * where `prev` settled (else the deployment's first block on each chain; `to` -1 means not started).
+ * What it could not read is in `unchecked`, never thrown: the scan keeps what came before and the next
+ * one resumes from the gap. */
+export async function scanRegistry(
+  ctx: Pick<Ctx, "rpc" | "logs" | "logsWindow">,
+  rec: DeploymentRecord,
+  prev?: RegistryScan,
+): Promise<{ scan: RegistryScan; unchecked: string[] }> {
   const plan = rec.plan as PlanV3;
   const a = plan.addresses;
-  const baseFrom = prev ? prev.base.to + 1 : (baseStartBlock(rec) ?? (await firstBlockWithCode(ctx.rpc, "base", a.baseAdapter)));
-  const base = await scan(ctx, "base", [a.frontDoor, a.staker], [...BRIDGE_TOPICS, ROUTE_TOPIC], baseFrom).catch((e: Error) => {
-    throw new Error(
-      `Base's logs from block ${baseFrom} (${e.message.split("\n")[0]}): OPS_BASE_LOGS_RPC must serve eth_getLogs that far back; run verify often (each one scans only from the last), or use an archive-capable endpoint`,
-    );
-  });
-  const bitFrom = prev ? prev.bittensor.to + 1 : Number(startBlock(rec));
-  const bit = await scan(ctx, "bittensor", [a.vault], [...BRIDGE_TOPICS, ...FRONT_DOOR_TOPICS], bitFrom);
+  const was = prev ?? NO_CANDIDATES;
+  const unchecked: string[] = [];
+  const empty = (to: number) => ({ logs: [] as RawLog[], to });
+
+  let base = empty(was.base.to);
+  try {
+    const from = was.base.to >= 0 ? was.base.to + 1 : (baseStartBlock(rec) ?? (await firstBlockWithCode(ctx.rpc, "base", a.baseAdapter)));
+    const s = await scan(ctx, "base", [a.frontDoor, a.staker], [...BRIDGE_TOPICS, ROUTE_TOPIC], from);
+    base = s;
+    if (s.error) {
+      unchecked.push(
+        `Base: the front door's and the staker's registry events ${s.error} couldn't be read, so bridges and routes proposed or enabled since then are NOT checked; the next verify resumes there. OPS_BASE_LOGS_RPC must serve eth_getLogs that far back`,
+      );
+    }
+  } catch (e) {
+    unchecked.push(`Base: where the deployment starts couldn't be found (${firstLine(e)}), so its bridges and routes beyond the plan's are NOT checked`);
+  }
+
+  let bit = empty(was.bittensor.to);
+  try {
+    const from = was.bittensor.to >= 0 ? was.bittensor.to + 1 : Number(startBlock(rec));
+    const s = await scan(ctx, "bittensor", [a.vault], [...BRIDGE_TOPICS, ...FRONT_DOOR_TOPICS], from);
+    bit = s;
+    if (s.error) {
+      unchecked.push(
+        `Bittensor: the vault's registry events ${s.error} couldn't be read, so bridges and front doors proposed or enabled since then are NOT checked; the next verify resumes there`,
+      );
+    }
+  } catch (e) {
+    unchecked.push(`Bittensor: where the deployment starts couldn't be found (${firstLine(e)}), so its bridges and front doors beyond the plan's are NOT checked`);
+  }
+
   const ours = (l: RawLog, x: Address) => l.address.toLowerCase() === x.toLowerCase();
   const bridgesIn = (logs: RawLog[], at: Address) => logs.filter((l) => ours(l, at) && BRIDGE_TOPICS.includes(l.topics[0])).map((l) => addressTopic(l.topics[1]));
   return {
-    base: {
-      to: base.to,
-      bridges: union(prev?.base.bridges ?? [], bridgesIn(base.logs, a.frontDoor)),
-      routes: union(prev?.base.routes ?? [], base.logs.filter((l) => ours(l, a.staker) && l.topics[0] === ROUTE_TOPIC).map((l) => Number(hexToBigInt(l.topics[1])))).sort((x, y) => x - y),
+    scan: {
+      base: {
+        to: base.to,
+        bridges: union(was.base.bridges, bridgesIn(base.logs, a.frontDoor)),
+        routes: union(was.base.routes, base.logs.filter((l) => ours(l, a.staker) && l.topics[0] === ROUTE_TOPIC).map((l) => Number(hexToBigInt(l.topics[1])))).sort((x, y) => x - y),
+      },
+      bittensor: {
+        to: bit.to,
+        bridges: union(was.bittensor.bridges, bridgesIn(bit.logs, a.vault)),
+        frontDoors: union(
+          was.bittensor.frontDoors,
+          bit.logs.filter((l) => ours(l, a.vault) && FRONT_DOOR_TOPICS.includes(l.topics[0])).map((l) => `${hexToBigInt(l.topics[1])}:${addressTopic(l.topics[2])}`),
+        ),
+      },
     },
-    bittensor: {
-      to: bit.to,
-      bridges: union(prev?.bittensor.bridges ?? [], bridgesIn(bit.logs, a.vault)),
-      frontDoors: union(
-        prev?.bittensor.frontDoors ?? [],
-        bit.logs.filter((l) => ours(l, a.vault) && FRONT_DOOR_TOPICS.includes(l.topics[0])).map((l) => `${hexToBigInt(l.topics[1])}:${addressTopic(l.topics[2])}`),
-      ),
-    },
+    unchecked,
   };
 }
 

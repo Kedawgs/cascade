@@ -88,10 +88,12 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
   (measured: 13,479,008 gas), then `(1800)`. verify fails a launch, and preflight flags a problem, until
   the pool has enough slots.
 - **Base logs.** `OPS_BASE_LOGS_RPC` (default `https://base-rpc.publicnode.com`) serves every Base log
-  scan, because `mainnet.base.org` refuses `eth_getLogs`. publicnode answered a query 86,400 blocks
-  (about 2 days) back. Archive-depth ranges need a token. verify's registry scan starts at the deploy,
-  then each run continues from the last. Run verify at least every day or two, or point the variable
-  at an archive-capable endpoint.
+  scan, because `mainnet.base.org` refuses `eth_getLogs`. Each query asks for `OPS_BASE_LOGS_WINDOW`
+  blocks (default 10,000). publicnode accepted 50,000-block ranges and answered 1M blocks deep
+  (probed 2026-10-28), so verify's first registry scan of a month-old deployment takes about 130
+  queries. Each later scan resumes from the last. If the logs server refuses part of a scan, verify
+  prints what is NOT CHECKED but still passes, so the keeper keeps running. Only something it finds
+  fails verify: an unexpected bridge, front door, route or proposal.
 - **Expected extras.** If you register a standby adapter or a second route on purpose, list it in
   `OPS_VERIFY_ALLOW` (for example `0xAdapter, route:1`), or verify fails on it. Pending proposals
   always show as warnings.

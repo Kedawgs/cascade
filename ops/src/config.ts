@@ -310,6 +310,16 @@ export function baseLogsTarget(env: Env): ChainTarget {
   return { name: "base", rpcUrl: env.OPS_BASE_LOGS_RPC ?? "https://base-rpc.publicnode.com", chainId: 8453, legacy: false };
 }
 
+/** The block range of one eth_getLogs to the Base logs server: OPS_BASE_LOGS_WINDOW, by default 10,000
+ * (publicnode accepted 50,000-block ranges, 2026-10-28; the old 100-block window was mainnet.base.org's).
+ * Lower it for a provider that caps ranges lower. */
+export function baseLogsWindow(env: Env): bigint {
+  const v = env.OPS_BASE_LOGS_WINDOW?.trim();
+  if (!v) return 10_000n;
+  if (!/^[1-9]\d*$/.test(v)) throw new Error(`OPS_BASE_LOGS_WINDOW "${v}" is not a number of blocks (e.g. 10000)`);
+  return BigInt(v);
+}
+
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 export function paths(env: Env) {

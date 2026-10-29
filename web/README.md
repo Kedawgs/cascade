@@ -66,7 +66,12 @@ for display only (`units.ts`).
 `flows.ts` builds the calls and runs them; `use-flows.ts` binds them to the connected wallet through
 wagmi. Every flow is recorded in the operation log before the first signature.
 
-A deployment with a staker and price oracle in `.env.local` runs the v3 flows; one without keeps v2.
+A deployment with a staker and price oracle in `.env.local` runs the v3 flows; one with neither keeps
+v2. An env that names a v3 deployment (a staker, an oracle or a payout delay) without both a valid
+staker and oracle fails the build rather than falling back to v2.
+
+Every approval the site asks for is for exactly what the call after it spends (a test checks every
+flow); none is ever open-ended.
 
 - **Stake (v3):** one signature plus one transaction. The wallet signs a USDC permit (EIP-2612, exactly
   the amount, valid 30 minutes) and the site sends `CascadeStaker.stakeWithPermit`, which swaps the
@@ -82,7 +87,7 @@ A deployment with a staker and price oracle in `.env.local` runs the v3 flows; o
   (price below the floor, deadline passed) or more than an hour has passed since the TAO landed on
   Base ("It's taking longer than usual").
 - **Cancel:** `cancelDeposit` / `cancelRedeem` while the batch is still open.
-- **Stake (v2):** approve USDC to Uniswap's SwapRouter02 if needed, `exactOutput` along
+- **Stake (v2):** approve exactly the swap's most USDC to Uniswap's SwapRouter02 if needed, `exactOutput` along
   TAO←WETH←USDC for exactly the deposit's TAO (0.5% slippage), approve that TAO to the front door,
   `deposit`. v2 unstakes pay nothing automatically and always end in a claim.
 

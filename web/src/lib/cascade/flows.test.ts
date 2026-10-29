@@ -77,7 +77,8 @@ describe("call builders", () => {
   it("stakes with approve USDC, exact-output swap, approve TAO, deposit", () => {
     const calls = stakeCalls(quote, none, D, ME);
     expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "swap", "approveTao", "deposit"]);
-    expect(calls[0]).toMatchObject({ to: TOKENS.usdc, functionName: "approve", args: [UNISWAP.router, maxUint256] });
+    // exactly the most the swap may spend, never an open approval
+    expect(calls[0]).toMatchObject({ to: TOKENS.usdc, functionName: "approve", args: [UNISWAP.router, quote.usdcIn] });
     expect(calls[1]).toMatchObject({
       to: UNISWAP.router,
       functionName: "exactOutput",
@@ -107,6 +108,36 @@ describe("call builders", () => {
       value: 10n ** 14n,
     });
     expect(unstakeV3Call(10n ** 22n, 5n, 10n ** 14n, q, D).value).toBe(0n);
+  });
+
+  it("approves only ever exactly what the next call spends, from that call's own arguments, and never an open amount", () => {
+    /** What a call takes from the account under the approval before it. */
+    const spends = (c: FlowCall): bigint => {
+      if (c.functionName === "exactOutput") return (c.args[0] as { amountInMaximum: bigint }).amountInMaximum;
+      if (c.functionName === "exactInput") return (c.args[0] as { amountIn: bigint }).amountIn;
+      if (c.functionName === "deposit") return c.args[0] as bigint;
+      if (c.functionName === "stake") return c.args[1] as bigint;
+      throw new Error(`${c.functionName} spends nothing under an approval`);
+    };
+    const flows: [string, FlowCall[]][] = [
+      ["v2 stake", stakeCalls(quote, none, D, ME)],
+      ["v2 stake, odd amount", stakeCalls({ usdcIn: 20_000_001n, targetTao: 78_000_000_123_456_789n }, none, D, ME)],
+      ["v3 stake by approval", stakeV3Calls({ usdcIn: 20_000_000n, minTaoOut: 1n }, none, { ...D, staker: D.baseAdapter, oracle: D.vault }, ME, undefined, 1n)],
+      ["wallet TAO deposit", depositTaoCalls(12_345_678_912_345_678n, none, D)],
+      ["wallet TAO sale", sellTaoCalls(10n ** 16n, 2_400_000n, none, ME)],
+      ["claim as USDC", claimCalls(10n ** 16n, 2_400_000n, none, D, ME, false)],
+    ];
+    for (const [name, calls] of flows) {
+      const approvals = calls.flatMap((c, i) => (c.functionName === "approve" ? [i] : []));
+      expect(approvals.length, name).toBeGreaterThan(0);
+      for (const i of approvals) {
+        const [spender, amount] = calls[i].args as [string, bigint];
+        const next = calls[i + 1];
+        expect(amount, name).not.toBe(maxUint256);
+        expect(next?.to, name).toBe(spender);
+        expect(amount, name).toBe(spends(next));
+      }
+    }
   });
 
   it("claims, then swaps back to USDC unless asked to keep TAO", () => {

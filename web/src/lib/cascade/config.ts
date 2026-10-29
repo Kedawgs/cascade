@@ -23,13 +23,18 @@ export interface Deployment {
 export const batchCloseAt = (openStart: number, batchInterval: number, batchMaxWaitS?: number): Date =>
   new Date((openStart + Math.max(batchInterval, batchMaxWaitS ?? 0)) * 1000);
 
-/** A v3 deployment has both the staker and the oracle; otherwise the site keeps the v2 flows. */
+/** A v3 deployment has both the staker and the oracle; a v2 one has neither (readDeployment refuses any
+ * other mix), and only then does the site keep the v2 flows. */
 export const isV3 = (d: Deployment): boolean => Boolean(d.staker && d.oracle);
 
 type Env = Record<string, string | undefined>;
 
 const address = (v: string | undefined): Address | null => (v && isAddress(v, { strict: true }) && v !== v.toLowerCase() ? v : null);
 
+/** The deployment the env names, or null when it names none (the site then shows it isn't connected).
+ * Throws for an env that names a v3 deployment (a staker, an oracle or a payout delay, which only a v3
+ * deployment writes) without both a valid staker and oracle: the build fails there, rather than the
+ * site quietly running the v2 flows against v3 contracts. */
 export function readDeployment(env: Env): Deployment | null {
   const frontDoor = address(env.NEXT_PUBLIC_CASCADE_FRONT_DOOR);
   const baseAdapter = address(env.NEXT_PUBLIC_CASCADE_BASE_ADAPTER);
@@ -43,6 +48,13 @@ export function readDeployment(env: Env): Deployment | null {
   }
   const staker = address(env.NEXT_PUBLIC_CASCADE_STAKER);
   const oracle = address(env.NEXT_PUBLIC_CASCADE_ORACLE);
+  const namesV3 = [env.NEXT_PUBLIC_CASCADE_STAKER, env.NEXT_PUBLIC_CASCADE_ORACLE, env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S].some((v) => !!v);
+  if (namesV3 && (!staker || !oracle)) {
+    throw new Error(
+      "The env names a v3 deployment but not both its staker and its oracle as checksummed addresses " +
+        "(NEXT_PUBLIC_CASCADE_STAKER, NEXT_PUBLIC_CASCADE_ORACLE). Refusing to fall back to the v2 flows: run `pnpm ops web-config` again.",
+    );
+  }
   const maxWait = env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S;
   const batchMaxWaitS = maxWait && /^[1-9]\d*$/.test(maxWait) ? Number(maxWait) : undefined;
   // 0 is a real setting (no delay), so it is kept; anything but plain digits is left out

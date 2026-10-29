@@ -53,12 +53,14 @@ describe("readDeployment", () => {
   });
 
   it("reads the vault's payout delay when it is a whole number of seconds (0 included), else leaves it out", () => {
-    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "86400" })?.payoutDelayS).toBe(86_400);
-    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "3600" })?.payoutDelayS).toBe(3_600);
-    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "0" })?.payoutDelayS).toBe(0);
-    expect(readDeployment(ENV)).not.toHaveProperty("payoutDelayS");
+    // only a v3 deployment has a payout delay
+    const v3 = { ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR };
+    expect(readDeployment({ ...v3, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "86400" })?.payoutDelayS).toBe(86_400);
+    expect(readDeployment({ ...v3, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "3600" })?.payoutDelayS).toBe(3_600);
+    expect(readDeployment({ ...v3, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "0" })?.payoutDelayS).toBe(0);
+    expect(readDeployment(v3)).not.toHaveProperty("payoutDelayS");
     for (const bad of ["", "-5", "1.5", "abc", "0x10", "007", " 3600", "1e5"]) {
-      expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: bad }), bad).not.toHaveProperty("payoutDelayS");
+      expect(readDeployment({ ...v3, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: bad }), bad).not.toHaveProperty("payoutDelayS");
     }
   });
 
@@ -83,8 +85,21 @@ describe("v3 deployment", () => {
     expect(both?.staker).toBe(STAKER_ADDR);
     expect(both?.oracle).toBe(ORACLE_ADDR);
     expect(isV3(both!)).toBe(true);
-    expect(isV3(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR })!)).toBe(false);
-    expect(isV3(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR })!)).toBe(false);
+  });
+
+  it("refuses, loudly, a v3 env missing its staker or oracle, rather than falling back to the v2 flows", () => {
+    const v3 = { ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "3600" };
+    const broken: Record<string, Record<string, string | undefined>> = {
+      "no oracle": { ...v3, NEXT_PUBLIC_CASCADE_ORACLE: undefined },
+      "no staker": { ...v3, NEXT_PUBLIC_CASCADE_STAKER: "" },
+      "staker not checksummed": { ...v3, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR.toLowerCase() },
+      "oracle not an address": { ...v3, NEXT_PUBLIC_CASCADE_ORACLE: "0x1234" },
+      // the payout delay is only ever written for a v3 deployment
+      "only the payout delay": { ...ENV, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "3600" },
+    };
+    for (const [name, env] of Object.entries(broken)) {
+      expect(() => readDeployment(env), name).toThrow(/v3 deployment.*staker and its oracle/);
+    }
   });
 
   it("a v2 env still reads and is not v3", () => {

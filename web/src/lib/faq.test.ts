@@ -18,6 +18,9 @@ const ENV = {
   NEXT_PUBLIC_CASCADE_BIT_BLOCK: "9357492",
   NEXT_PUBLIC_CASCADE_VAULT_SS58: "5FNEuRkKZvg2jFjhY3DWpC3TBSH51AC3FKQpLyC1xesTBwLu",
   NEXT_PUBLIC_CASCADE_HOTKEY_SS58: "5E4z3h9yVhmQyCFWNbY9BPpwhx4xFiPwq3eeqmBgVF6KULde",
+  // a v3 deployment, as web-config writes one (a payout delay comes only with a staker and an oracle)
+  NEXT_PUBLIC_CASCADE_STAKER: "0x221Cc4cF9c72EA7270f90E8C0756F8f003b6887b",
+  NEXT_PUBLIC_CASCADE_ORACLE: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
 };
 const TEST = readDeployment(ENV) as Deployment;
 const LAUNCH = readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: "86400" }) as Deployment;

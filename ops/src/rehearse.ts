@@ -43,6 +43,7 @@ import {
   type StepReport,
   standInDebits,
 } from "./roundtrip.ts";
+import { cardinalitySteps, cardinalityTxs, readPool } from "./cardinality.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { balanceOf, chainIdOf, createRpc, nonceOf, read, type Rpc } from "./rpc.ts";
 import { type Ctx, describeRevert, execFileRunner } from "./send.ts";
@@ -570,6 +571,15 @@ export async function rehearse(env: Env, log: (l: string) => void): Promise<bool
     // a launch rehearsal takes its roles from the environment like the real one; its round trip's keeper
     // steps sign as the test wallet, so they need OPS_LAUNCH_KEEPER to be the test wallet
     const rec = await deploy(r.ctx, path, { newPlan: true, v3: true, cadence, roles: () => launchRolesFromEnv(env) });
+    if (cadence === "launch") {
+      // what the owner sends on Base before launch (pnpm ops cardinality): a launch's read-back fails
+      // until the TAO/WETH pool has the oracle's 30 minutes of slots reserved
+      const pool = BASE_V3.TAO_WETH_POOL;
+      for (const t of cardinalityTxs(pool, cardinalitySteps((await readPool(r.ctx, pool)).next))) {
+        const grown = await sendAs(r.ctx, "base", WALLET, t.to, t.data, `increaseObservationCardinalityNext(${t.next}) on the TAO/WETH pool`);
+        log(`Base: the TAO/WETH pool reserves ${t.next} observation slots (${hexToBigInt(grown.gasUsed).toLocaleString("en-US")} gas)`);
+      }
+    }
     rec.verify = await verify(r.ctx, rec);
     saveRecord(path, rec);
     if (!rec.verify.ok) {

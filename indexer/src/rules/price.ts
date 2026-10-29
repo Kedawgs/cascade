@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import type { BitState, ChainReading } from "../snapshot.ts";
-import { type RuleCtx, twice } from "./context.ts";
+import { onset, type Readings, type RuleCtx, twice } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.1: the share price and the stake behind it.
@@ -149,17 +149,16 @@ export const stakeHotkeyChanged: Rule = {
         facts: { before: set(p) as string, after: set(s) as string, block: String(s.block) },
       });
     }
-    if (twice(ctx, "bittensor", (r) => r.bittensor?.hotkeyOwner === null)) {
-      // found every tick while it lasts (one alert); the hold is raised once, on the tick it is first
-      // confirmed, under an id of that occurrence (a cleared hold id is never raised again)
+    const ownerGone = (r: Readings) => r.bittensor?.hotkeyOwner === null;
+    if (twice(ctx, "bittensor", ownerGone)) {
+      // found every tick while it lasts (one alert); the hold is raised once, on its first tick
       const f: Finding = {
         rule: "stake.hotkey_changed",
         key: `stake.hotkey_changed:owner_gone:${hk}`,
         subject: "The stake hotkey has no owner in SubtensorModule any more",
         facts: { hotkey: hk, block: String(s.block), taostats: `https://taostats.io/hotkey/${hk}` },
       };
-      const onset = !(e && e.block < p.block && e.state.hotkeyOwner === null);
-      if (onset) f.hold = { id: `stake.hotkey_changed:owner_gone:${hk}:${p.block}`, summary: `the stake hotkey ${hk} lost its owner` };
+      if (onset(ctx, "bittensor", ownerGone)) f.hold = { id: `stake.hotkey_changed:owner_gone:${hk}:${p.block}`, summary: `the stake hotkey ${hk} lost its owner` };
       out.push(f);
     }
     const owner = (r?: ChainReading<BitState>) => r?.state.hotkeyOwner;

@@ -127,6 +127,16 @@ export function twice(ctx: RuleCtx, chains: ChainName | readonly ChainName[], co
   return cond(now) && cond(before);
 }
 
+/** `twice` holds on one chain and this is its first tick: the reading before the previous one (if older)
+ * didn't hold. A rule that holds raises its hold only then, under an id of that occurrence (a cleared
+ * hold id is never raised again), and keeps finding the same alert while the condition lasts. */
+export function onset(ctx: RuleCtx, chain: ChainName, cond: (r: Readings) => boolean): boolean {
+  if (!twice(ctx, chain, cond)) return false;
+  const [p, e] = ctx.history[chain];
+  if (!p || !e || e.block >= p.block) return true;
+  return !cond({ [chain]: e.state });
+}
+
 /** The other chain's stored history reaches past `time`: a cross-chain rule may judge an event then, and
  * never before its other side could be stored. */
 export const afterSettled = (ctx: RuleCtx, chain: ChainName, time: number): boolean => ctx.settled[chain].time >= time;

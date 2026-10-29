@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Hex } from "viem";
 import { cadenceOf, closeMaxWaitS, isPlanV3, settingsV3Of } from "./plan.ts";
-import type { DeploymentRecord } from "./record.ts";
+import { type DeploymentRecord, requireHandoff } from "./record.ts";
 import { encodeSs58 } from "./ss58.ts";
 
 /** The site's settings for a verified deployment, as `web/.env.local` lines (all public values). A v3
@@ -10,6 +10,8 @@ import { encodeSs58 } from "./ss58.ts";
  * validator is the one the vault was deployed with. */
 export function webEnv(rec: DeploymentRecord): string {
   if (!rec.verify?.ok) throw new Error("the deployment's read-back has not passed: run verify first");
+  // a launch goes public only once its final owners hold it, not the test wallet
+  requireHandoff(rec);
   const plan = rec.plan;
   const a = plan.addresses;
   const bit = rec.done.bitAdapter;

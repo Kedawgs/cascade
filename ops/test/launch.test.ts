@@ -7,13 +7,15 @@ import { loadArtifact } from "../src/artifacts.ts";
 import { paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
 import { type DeployDeps, deploy, effectPresent } from "../src/deploy.ts";
 import { buildPlanV3, type PlanV3, rolesOf } from "../src/plan.ts";
-import { loadRecord } from "../src/record.ts";
+import { requireReady } from "../src/keeper/actions.ts";
+import { type DeploymentRecord, loadRecord } from "../src/record.ts";
+import { webEnv } from "../src/webconfig.ts";
 import { launchRolesFromEnv, roleProblems, type Roles, TEST_ROLES } from "../src/roles.ts";
 import type { Rpc } from "../src/rpc.ts";
 import type { Ctx, Sent } from "../src/send.ts";
 import type { PlannedStep } from "../src/types.ts";
 import { expectations, ownershipChecks } from "../src/verify.ts";
-import { fakeChain } from "./fake-keeper.ts";
+import { fakeChain, v3Record } from "./fake-keeper.ts";
 import { ROLES, ROLES_ENV } from "./launch-roles.ts";
 
 const COLDKEY: Hex = `0x${"22".repeat(32)}`;
@@ -320,7 +322,7 @@ describe("verify checks a launch against its roles", () => {
   });
 
   it("an accepted hand-off passes quietly; the owner may be a contract (verify reads no code)", async () => {
-    expect(await ownershipChecks(owners(each((c) => ({ owner: ROLES.owner[c], pendingOwner: zeroAddress }))), launch)).toEqual({ failures: [], warnings: [] });
+    expect(await ownershipChecks(owners(each((c) => ({ owner: ROLES.owner[c], pendingOwner: zeroAddress }))), launch)).toEqual({ failures: [], warnings: [], accepted: true });
   });
 
   it("anything else fails: no offer, an offer to someone else, or a new offer after acceptance", async () => {
@@ -346,5 +348,43 @@ describe("verify checks a launch against its roles", () => {
     expect(encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never)).toBe(
       encodeFunctionData({ abi: parseAbi(["function transferOwnership(address newOwner)"]), functionName: "transferOwnership", args: [ROLES.owner.base] }),
     );
+  });
+});
+
+describe("a launch goes public, and its keeper runs, only once the final owners have accepted", () => {
+  // the keeper is the test wallet here, as the ops keeper signs by default
+  const plan = buildPlanV3(4, 9, COLDKEY, "launch", { ...ROLES, keeper: WALLET });
+  const done = Object.fromEntries(plan.steps.map((s) => [s.id, { hash: `0x${"cd".repeat(32)}` as Hex, block: 5, gasUsed: 1n, costWei: 1n }]));
+  const rec = (handoff?: "accepted" | "pending"): DeploymentRecord => ({
+    target: "live",
+    wallet: WALLET,
+    createdAt: "",
+    plan,
+    done,
+    verify: { ok: true, failures: [], checkedAt: "", ...(handoff ? { handoff } : {}) },
+  });
+  const NOT_YET = /the final owners haven't accepted ownership yet.*pnpm ops handoff.*pnpm ops ownership.*pnpm ops verify/;
+
+  it("verify records the hand-off: pending while offered, accepted once every owner has taken it", async () => {
+    const a = plan.addresses;
+    const chainOf = (to: string) => (to.toLowerCase() === a.vault.toLowerCase() ? "bittensor" : "base");
+    const state = (owner: (c: "base" | "bittensor") => Address, pending: (c: "base" | "bittensor") => Address) =>
+      fakeChain([VIEWS], { owner: (_x, c) => owner(chainOf(c.to)), pendingOwner: (_x, c) => pending(chainOf(c.to)) }).ctx;
+    expect((await ownershipChecks(state(() => WALLET, (c) => ROLES.owner[c]), plan)).accepted).toBe(false);
+    expect((await ownershipChecks(state((c) => ROLES.owner[c], () => zeroAddress), plan)).accepted).toBe(true);
+    expect((await ownershipChecks(state(() => WALLET, () => zeroAddress), buildPlanV3(4, 9, COLDKEY))).accepted).toBeUndefined();
+  });
+
+  it("the keeper refuses a launch whose hand-off isn't accepted, naming handoff and ownership", () => {
+    expect(() => requireReady(rec())).toThrow(NOT_YET);
+    expect(() => requireReady(rec("pending"))).toThrow(NOT_YET);
+    expect(() => requireReady(rec("accepted"))).not.toThrow();
+    // a test record has no hand-off
+    expect(() => requireReady(v3Record())).not.toThrow();
+  });
+
+  it("web-config refuses it too", () => {
+    expect(() => webEnv(rec("pending"))).toThrow(NOT_YET);
+    expect(webEnv(rec("accepted"))).toContain(`NEXT_PUBLIC_CASCADE_FRONT_DOOR=${plan.addresses.frontDoor}`);
   });
 });

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
 import type { ChainName } from "./config.ts";
-import type { Plan, PlanV3 } from "./plan.ts";
+import { cadenceOf, type Plan, type PlanV3 } from "./plan.ts";
 import type { RegistryScan } from "./registry.ts";
 import type { StepReport } from "./roundtrip.ts";
 import type { Sent } from "./send.ts";
@@ -17,6 +17,9 @@ export interface VerifyResult {
   checkedAt: string;
   /** Where the registry scan reached and what it found, so the next read-back scans only newer blocks. */
   registryScan?: RegistryScan;
+  /** A launch only: whether every owned contract is now its final owner's ("accepted"), or the hand-off is
+   * still offered ("pending"). The keeper and web-config refuse a launch until it is accepted. */
+  handoff?: "accepted" | "pending";
 }
 
 /** A step found already done on-chain whose transaction was never recorded. The Bittensor adapter keeps
@@ -43,6 +46,17 @@ export interface DeploymentRecord {
 const replacer = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);
 const reviver = (_k: string, v: unknown) =>
   v && typeof v === "object" && "$bigint" in v ? BigInt((v as { $bigint: string }).$bigint) : v;
+
+/** What the keeper and web-config say of a launch whose saved read-back hasn't seen every contract
+ * accepted by its final owner: until then the test wallet, a hot key, still owns them and could hand
+ * them elsewhere. */
+export const HANDOFF_NOT_ACCEPTED =
+  "the final owners haven't accepted ownership yet (or no read-back has seen it since), so the test wallet still owns the contracts: run pnpm ops handoff, have each owner accept, check with pnpm ops ownership, then run pnpm ops verify to record it; nothing sent";
+
+/** Throws HANDOFF_NOT_ACCEPTED for a launch record whose read-back hasn't recorded the hand-off accepted. */
+export function requireHandoff(rec: DeploymentRecord): void {
+  if (cadenceOf(rec.plan) === "launch" && rec.verify?.handoff !== "accepted") throw new Error(HANDOFF_NOT_ACCEPTED);
+}
 
 export function loadRecord(path: string): DeploymentRecord | null {
   return existsSync(path) ? JSON.parse(readFileSync(path, "utf8"), reviver) : null;

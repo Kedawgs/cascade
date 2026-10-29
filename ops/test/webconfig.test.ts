@@ -66,7 +66,8 @@ describe("web-config", () => {
     const launch3 = buildPlanV3(0, 40, COLDKEY, "launch", ROLES);
     expect(webEnv({ ...rec, plan: test3 })).toContain(`\nNEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=${settingsV3Of(test3).payoutDelay}\n`);
     expect(settingsV3Of(test3).payoutDelay).toBe(3_600);
-    const launch = webEnv({ ...rec, plan: launch3 }).split("\n");
+    // a launch goes public once its final owners have accepted
+    const launch = webEnv({ ...rec, plan: launch3, verify: { ok: true, failures: [], checkedAt: "", handoff: "accepted" } }).split("\n");
     expect(launch).toContain("NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S=86400");
     expect(launch).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400");
     expect(webEnv(rec)).not.toContain("PAYOUT_DELAY");

@@ -19,7 +19,8 @@ import type { Ctx, Sent } from "../src/send.ts";
 export const COLDKEY: Hex = `0x${"44".repeat(32)}`;
 export const SENT: Sent = { hash: `0x${"cc".repeat(32)}`, block: 1, gasUsed: 1n, costWei: 1n };
 
-/** A complete, verified v3 deployment: the test plan, or `plan` with every one of its steps done. */
+/** A complete, verified v3 deployment: the test plan, or `plan` with every one of its steps done (a
+ * launch's hand-off accepted). */
 export function v3Record(target: DeploymentRecord["target"] = "live", plan = buildPlanV3(0, 0, COLDKEY)): DeploymentRecord {
   return {
     target,
@@ -27,7 +28,7 @@ export function v3Record(target: DeploymentRecord["target"] = "live", plan = bui
     createdAt: "",
     plan,
     done: Object.fromEntries(plan.steps.map((s) => [s.id, SENT])),
-    verify: { ok: true, failures: [], checkedAt: "" },
+    verify: { ok: true, failures: [], checkedAt: "", ...(plan.cadence === "launch" ? { handoff: "accepted" as const } : {}) },
   };
 }
 

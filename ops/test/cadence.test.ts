@@ -94,7 +94,8 @@ describe("cadence", () => {
       createdAt: "",
       plan,
       done: { bitAdapter: { hash: `0x${"ab".repeat(32)}` as Hex, block: 5, gasUsed: 1n, costWei: 1n } },
-      verify: { ok: true, failures: [], checkedAt: "" },
+      // a launch's hand-off accepted, as web-config needs
+      verify: { ok: true, failures: [], checkedAt: "", handoff: "accepted" },
     });
     expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY, "launch", ROLES)))).toContain("NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S=86400\n");
     expect(webEnv(rec(buildPlanV3(0, 40, COLDKEY)))).not.toContain("MAX_WAIT");

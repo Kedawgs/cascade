@@ -170,7 +170,7 @@ export const ownedContracts = (plan: PlanV3): [ChainName, string, Address][] => 
  * the final owner accepts in its own time. Anything else fails. The final owner may be a contract (a
  * Safe or a timelock): no code is read. A test plan's owners are in its expectations; here it must have
  * no pending owner. */
-export async function ownershipChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3): Promise<{ failures: string[]; warnings: string[] }> {
+export async function ownershipChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3): Promise<{ failures: string[]; warnings: string[]; accepted?: boolean }> {
   const failures: string[] = [];
   const warnings: string[] = [];
   if (cadenceOf(plan) !== "launch") {
@@ -193,7 +193,8 @@ export async function ownershipChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3): Prom
     }
     failures.push(`${where}: owner ${owner}, pendingOwner ${pending}; the plan hands it to ${final}`);
   }
-  return { failures, warnings };
+  // every contract is the final owner's, nothing pending: the keeper and web-config wait for this
+  return { failures, warnings, accepted: failures.length === 0 && warnings.length === 0 };
 }
 
 /** Reads each expectation's view into a map by `keyOf`, calling a view once per address and arguments.
@@ -353,10 +354,16 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
     }
   };
   let registryScan: RegistryScan | undefined;
+  /** A launch's hand-off as read now; unset when the owners couldn't be read (so not accepted). */
+  let handoff: "accepted" | "pending" | undefined;
   if (isPlanV3(plan)) {
     failures.push(...v3AddressFailures(plan, actual));
     const allow = opts.allow ?? NO_ALLOW;
-    await findings("the owners", () => ownershipChecks(ctx, plan));
+    await findings("the owners", async () => {
+      const o = await ownershipChecks(ctx, plan);
+      if (o.accepted !== undefined) handoff = o.accepted ? "accepted" : "pending";
+      return o;
+    });
     await findings("the guardian proposals", () => guardianChecks(ctx, plan, allow));
     await findings("the bridge, front-door and route registries", async () => {
       registryScan = await scanRegistry(ctx, rec, rec.verify?.registryScan);
@@ -411,6 +418,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
     ...(warnings.length ? { warnings } : {}),
     checkedAt: new Date().toISOString(),
     ...(registryScan ? { registryScan } : {}),
+    ...(handoff ? { handoff } : {}),
   };
 }
 

@@ -1,7 +1,7 @@
 import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, parseAbi } from "viem";
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy } from "../config.ts";
 import { isPlanV3, type PlanV3 } from "../plan.ts";
-import type { DeploymentRecord } from "../record.ts";
+import { type DeploymentRecord, requireHandoff } from "../record.ts";
 import { RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
@@ -58,7 +58,8 @@ export function messageIdFrom(logs: Sent["logs"], adapter: Hex): Hex | undefined
   return l?.topics[1];
 }
 
-/** Keeper sends need the whole deployment in place and its read-back passed. */
+/** Keeper sends need the whole deployment in place and its read-back passed; a launch, its hand-off
+ * accepted by the final owners too. */
 export function requireReady(rec: DeploymentRecord): void {
   const missing = rec.plan.steps.filter((s) => !rec.done[s.id]);
   if (missing.length || !rec.verify?.ok) {
@@ -66,6 +67,7 @@ export function requireReady(rec: DeploymentRecord): void {
       `the deployment is not complete and verified yet (${missing.length ? `${missing.length} step(s) to go` : "the read-back has not passed"}): run deploy, then verify`,
     );
   }
+  requireHandoff(rec);
 }
 
 async function withMessage(deps: KeeperDeps, sent: Sent, adapter: Hex, direction: Message["direction"]): Promise<Done> {

@@ -28,7 +28,10 @@ The oracle and the adapters have no owner. Then:
    two files: `scheduleBatch`, then `executeBatch` after the timelock's delay.
 2. Each owner loads its file and executes it.
 3. `pnpm ops ownership --live` shows each contract's owner and pending owner. Until acceptance, verify
-   reports the hand-off as a warning, not a failure.
+   reports the hand-off as a warning, not a failure, so deploy can finish.
+4. `pnpm ops verify --live` records the hand-off once every contract is accepted. Until a read-back has
+   recorded that, the keeper commands and `web-config` refuse the launch: the test wallet, a hot key,
+   still owns everything and could hand it elsewhere.
 
 - **Decision: the keeper.** The ops keeper commands (close, stake, payouts, claim, deliver) still sign
   as the test wallet. Set `OPS_LAUNCH_KEEPER` to the test wallet (allowed), or the contracts refuse

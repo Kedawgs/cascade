@@ -11,7 +11,7 @@
     "dev": "wrangler dev --env test --test-scheduled",
     "wrangler": "wrangler",
     "smoke": "node -e \"console.error('smoke: not built yet (plan Task 30)'); process.exit(1)\"",
-    "fixtures": "node -e \"console.error('fixtures: not built yet (plan Task 10)'); process.exit(1)\"",
+    "fixtures": "node scripts/write-seed-fixtures.ts",
     "config:from-record": "node -e \"console.error('config:from-record: not built yet (plan Task 29)'); process.exit(1)\"",
     "site:approved": "node -e \"console.error('site:approved: not built yet (plan Task 27)'); process.exit(1)\"",
     "hold:clear": "node -e \"console.error('hold:clear: not built yet (plan Task 24)'); process.exit(1)\"",

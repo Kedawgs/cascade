@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "vault": "0x44ceace0b097d9d5ef01e08b12029ad2762cbdc6",
+  "from": "6900000",
+  "next": "6905001",
+  "delivered": [],
+  "staked": [],
+  "payouts": [],
+  "deposited": [
+    {
+      "key": "0x2287fc22c46a1e12c71be3cb49588376faf45ff397760901444cb81c497d864b",
+      "txHash": "0xfc4109b7c1554af28ba4336020585d05b1ec5f97c558702d5b02c6c76428a681",
+      "block": "6900100",
+      "assets": "40000000000000000"
+    }
+  ],
+  "redeemed": [
+    {
+      "key": "0x0cc0c669fba03f7f1065898a55a8e357f1b61b280980b9223b3c2cd7adef21ad",
+      "txHash": "0x8aba7a5d2fdd31153ae0821250bf4ae1847a7629797107f54a32eb84a9b34e4a",
+      "block": "6901000",
+      "assets": "39999999999999990"
+    }
+  ]
+}

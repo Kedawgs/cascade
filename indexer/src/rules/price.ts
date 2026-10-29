@@ -53,15 +53,23 @@ function dayHigh(ctx: RuleCtx, current: ChainReading<BitState>): bigint | undefi
 
 const bps = (drop: bigint, of: bigint) => (of === 0n ? 0n : (drop * 10_000n) / of);
 
+/** The readings of Bittensor, oldest first: the stored ones and this tick's. */
+const series = (ctx: RuleCtx) => [...[...ctx.history.bittensor].reverse(), ...(ctx.snap.bittensor ? [ctx.snap.bittensor] : [])];
+
 /** price.drop: the price fell, between readings from increasing blocks, by more than rounding explains,
  * and the next reading confirms it (it is still down). Holds when the price is holdPriceDropBps or more
- * below the day's high. Keyed by the reading that first showed it. */
+ * below the day's high. Keyed by the reading that first showed it. Judged on the newest three readings
+ * Bittensor is settled past: the vault's rounding logs are stored only once settled, so a newer reading
+ * would see honest rounding as unexplained. */
 export const priceDrop: Rule = {
   name: "price.drop",
   run(ctx) {
-    const s = ctx.snap.bittensor;
-    const [p, e] = ctx.history.bittensor;
-    if (!s || !p || !e || !(e.block < p.block && p.block < s.block)) return [];
+    const rs = series(ctx);
+    let i = rs.length - 1;
+    while (i >= 0 && rs[i].block > ctx.settled.bittensor.block) i--;
+    if (i < 2) return [];
+    const [e, p, s] = [rs[i - 2], rs[i - 1], rs[i]];
+    if (!(e.block < p.block && p.block < s.block)) return [];
     const first = unexplainedDrop(ctx, e, p);
     if (first === undefined || unexplainedDrop(ctx, e, s) === undefined) return [];
     const high = dayHigh(ctx, s);
@@ -86,12 +94,12 @@ export const priceDrop: Rule = {
   },
 };
 
-/** The readings of Bittensor, oldest first: the stored ones and this tick's. */
-const series = (ctx: RuleCtx) => [...[...ctx.history.bittensor].reverse(), ...(ctx.snap.bittensor ? [ctx.snap.bittensor] : [])];
+/** The vault events that move a hotkey's stake on purpose, and the arg naming the hotkey they take from. */
+const STAKE_MOVES: Readonly<Record<string, string>> = { Unstaked: "hotkey", StakeMoved: "from", HotkeyRemoved: "hotkey" };
 
 /** stake.unexplained_drop: a set hotkey's stake fell by more than stakeDustRao between two readings with
- * no vault Unstaked, StakeMoved or HotkeyRemoved in those blocks; judged once Bittensor is settled past
- * the later reading. Holds. */
+ * no vault Unstaked, StakeMoved (from it) or HotkeyRemoved of that hotkey in those blocks; judged once
+ * Bittensor is settled past the later reading. Holds. */
 export const stakeUnexplainedDrop: Rule = {
   name: "stake.unexplained_drop",
   run(ctx) {
@@ -101,12 +109,12 @@ export const stakeUnexplainedDrop: Rule = {
       const a = rs[i - 1];
       const b = rs[i];
       if (a.block >= b.block || b.block > ctx.settled.bittensor.block) continue;
-      const explained = ctx.logs.range("bittensor", "vault", ["Unstaked", "StakeMoved", "HotkeyRemoved"], a.block + 1n, b.block).length > 0;
-      if (explained) continue;
+      const moves = ctx.logs.range("bittensor", "vault", Object.keys(STAKE_MOVES), a.block + 1n, b.block);
       for (const [hk, was] of Object.entries(a.state.stakes) as [Hex, bigint][]) {
         const now = b.state.stakes[hk];
         if (now === undefined || (a.state.hotkeys && !a.state.hotkeys.includes(hk))) continue;
         if (was - now <= ctx.t.stakeDustRao) continue;
+        if (moves.some((l) => String(l.args[STAKE_MOVES[l.event]]).toLowerCase() === hk.toLowerCase())) continue;
         const id = `stake.unexplained_drop:${hk}:${b.block}`;
         out.push({
           rule: "stake.unexplained_drop",
@@ -122,8 +130,8 @@ export const stakeUnexplainedDrop: Rule = {
 };
 
 /** stake.hotkey_changed: the vault's stake hotkey or hotkey set differs from the last reading; or the
- * stake hotkey's owner in SubtensorModule changed (confirmed by the next reading) or vanished on two
- * readings, which holds. */
+ * stake hotkey's owner in SubtensorModule changed (confirmed by the next reading) or, after an owner was
+ * read, vanished on two readings, which holds. */
 export const stakeHotkeyChanged: Rule = {
   name: "stake.hotkey_changed",
   run(ctx) {
@@ -150,7 +158,10 @@ export const stakeHotkeyChanged: Rule = {
       });
     }
     const ownerGone = (r: Readings) => r.bittensor?.hotkeyOwner === null;
-    if (twice(ctx, "bittensor", ownerGone)) {
+    // only once an owner has been read: a precompile answer we can't decode reads as null on every tick,
+    // and must not hold the keeper on the second
+    const ownerSeen = ctx.history.bittensor.some((r) => typeof r.state.hotkeyOwner === "string");
+    if (ownerSeen && twice(ctx, "bittensor", ownerGone)) {
       // found every tick while it lasts (one alert); the hold is raised once, on its first tick
       const f: Finding = {
         rule: "stake.hotkey_changed",

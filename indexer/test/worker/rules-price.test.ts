@@ -75,6 +75,22 @@ describe("price.drop", () => {
     expect(priceDrop.run(ctx(S, [P, E], { logs: [{ ...staked, block: 100n }] }))).toHaveLength(1);
   });
 
+  it("waits until the confirming reading is settled, so a rounding log not stored yet can't read as unexplained", () => {
+    // the Staked of block 103 is stored only once Bittensor is settled past it
+    expect(priceDrop.run(ctx(S, [P, E], { settledBlock: 107n }))).toEqual([]);
+    expect(priceDrop.run(ctx(S, [P, E], { settledBlock: 110n, logs: [staked] }))).toEqual([]);
+    expect(priceDrop.run(ctx(S, [P, E], { settledBlock: 110n })).map((f) => f.key)).toEqual(["price.drop:105"]);
+  });
+
+  it("judges the newest triple of readings that is settled", () => {
+    // readings 100, 105, 110 settled; 115 not yet
+    const X = bit(115n, E18 - DROP);
+    expect(priceDrop.run(ctx(X, [S, P, E], { settledBlock: 112n })).map((f) => f.key)).toEqual(["price.drop:105"]);
+    // the drop is between 110 and 115, and 115 isn't settled: nothing yet
+    const flat = [bit(110n, E18), bit(105n, E18), bit(100n, E18)];
+    expect(priceDrop.run(ctx(X, flat, { settledBlock: 112n }))).toEqual([]);
+  });
+
   it("holds on a drop 10 bps or more below the 24-hour high, and not again once that hold is cleared", () => {
     const low = E18 - (E18 * 11n) / 10_000n;
     const hours: HourAgg[] = [{ hour: NOW - 3 * 3600, ticks: 60, priceHigh: E18, spotSum: 0, spotCount: 0 }];
@@ -101,10 +117,25 @@ describe("stake.unexplained_drop", () => {
     expect(f.hold?.id).toBe(`stake.unexplained_drop:${HOTKEY}:105`);
   });
 
-  it("is explained by a vault Unstaked, StakeMoved or HotkeyRemoved in its blocks", () => {
-    for (const event of ["Unstaked", "StakeMoved", "HotkeyRemoved"]) {
-      const l = vault(event, 103n, {});
+  it("is explained by a vault Unstaked, StakeMoved or HotkeyRemoved of that hotkey in its blocks", () => {
+    for (const [event, arg] of [
+      ["Unstaked", "hotkey"],
+      ["StakeMoved", "from"],
+      ["HotkeyRemoved", "hotkey"],
+    ]) {
+      const l = vault(event, 103n, { [arg]: HOTKEY });
       expect(stakeUnexplainedDrop.run(ctx(bit(110n, E18), [after, before], { logs: [l], settledBlock: 106n })), event).toEqual([]);
+    }
+  });
+
+  it("isn't explained by the same events for another hotkey", () => {
+    for (const [event, arg] of [
+      ["Unstaked", "hotkey"],
+      ["StakeMoved", "from"],
+      ["HotkeyRemoved", "hotkey"],
+    ]) {
+      const l = vault(event, 103n, { [arg]: h("another hotkey") });
+      expect(stakeUnexplainedDrop.run(ctx(bit(110n, E18), [after, before], { logs: [l], settledBlock: 106n })), event).toHaveLength(1);
     }
   });
 
@@ -142,6 +173,12 @@ describe("stake.hotkey_changed", () => {
     const [g] = stakeHotkeyChanged.run(ctx(gone3, [gone2, gone1, has]));
     expect(g.key).toBe(f.key);
     expect(g.hold).toBeUndefined();
+  });
+
+  it("never counts an owner gone before an owner was ever seen (an answer it can't read)", () => {
+    const blank = (block: bigint) => bit(block, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], hotkeyOwner: null });
+    expect(stakeHotkeyChanged.run(ctx(blank(105n), [blank(100n), blank(95n)]))).toEqual([]);
+    expect(stakeHotkeyChanged.run(ctx(blank(100n), [blank(95n)]))).toEqual([]);
   });
 
   it("finds an owner changed and confirmed by the next reading, without a hold", () => {

@@ -240,22 +240,22 @@ describe("checks and holds", () => {
 });
 
 describe("loadTickState", () => {
-  it("is one query, reading at most 4 readings per chain and 25 hour rows", async () => {
+  it("is one query, reading at most 6 readings per chain and 25 hour rows", async () => {
     const readings = Array.from({ length: 200 }, (_, i) => insertReading(db, { at: 1000 + i * 60, baseBlock: BigInt(37_000_000 + i * 30), bitBlock: i % 2 ? BigInt(6_900_000 + i * 5) : null, json: "{}" }));
     const hours = Array.from({ length: 100 }, (_, i) => upsertHour(db, 3600 * i, `{"i":${i}}`));
     await db.batch([...readings, ...hours]);
     const c = countingDb(db);
     const s = await loadTickState(c.db, 20_000);
     expect(c.stats.queries).toBe(1);
-    // four rows per chain, newest first (a row read for one chain can carry the other's block too): enough
-    // to look two ticks past SETTLE and to confirm a change on the next reading
-    expect(s.lastReadings.length).toBeLessThanOrEqual(8);
-    expect(s.lastReadings.filter((r) => r.baseBlock !== null).slice(0, 4).map((r) => r.at)).toEqual([199, 198, 197, 196].map((i) => 1000 + i * 60));
-    expect(s.lastReadings.filter((r) => r.bitBlock !== null).map((r) => r.at)).toEqual([199, 197, 195, 193].map((i) => 1000 + i * 60));
+    // six rows per chain, newest first (a row read for one chain can carry the other's block too): enough
+    // for price.drop to find three settled readings behind SETTLE, with a lagging tick or two to spare
+    expect(s.lastReadings.length).toBeLessThanOrEqual(12);
+    expect(s.lastReadings.filter((r) => r.baseBlock !== null).slice(0, 6).map((r) => r.at)).toEqual([199, 198, 197, 196, 195, 194].map((i) => 1000 + i * 60));
+    expect(s.lastReadings.filter((r) => r.bitBlock !== null).map((r) => r.at)).toEqual([199, 197, 195, 193, 191, 189].map((i) => 1000 + i * 60));
     expect(s.hours).toHaveLength(25);
     expect(s.hours[0].hour).toBe(3600 * 99);
     expect(c.stats.rowsRead).toBeGreaterThan(25);
-    expect(c.stats.rowsRead).toBeLessThan(70);
+    expect(c.stats.rowsRead).toBeLessThan(80);
   });
 
   it("loads open alerts, holds, nonces, pending messages, awaiting reads, pending payout keys and meta", async () => {

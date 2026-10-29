@@ -151,7 +151,7 @@ export interface TickState {
   holdIds: string[];
   /** every hold, cleared or not (the price rule resets its high when its hold is cleared) */
   holds: HoldRow[];
-  /** the last 4 readings with each chain's block, newest first */
+  /** the last 6 readings with each chain's block, newest first (price.drop needs three settled ones) */
   lastReadings: Reading[];
   /** the last 25 hour rows, newest first */
   hours: HourRow[];
@@ -302,8 +302,8 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     db.prepare("SELECT chain, from_block, scanned_to, settled_to, settled_time, head_time, updated_at FROM cursors"),
     db.prepare("SELECT * FROM alerts WHERE resolved_at IS NULL ORDER BY id"),
     db.prepare("SELECT * FROM holds ORDER BY raised_at, id"),
-    db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 4"),
-    db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 4"),
+    db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 6"),
+    db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 6"),
     db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 25"),
     db.prepare("SELECT chain, address, roles, baseline, seen, nonce, changed_at FROM nonces"),
     db.prepare("SELECT * FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' ORDER BY src_block LIMIT 100"),

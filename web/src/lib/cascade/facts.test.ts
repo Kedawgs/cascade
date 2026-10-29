@@ -113,6 +113,8 @@ const fd: FrontDoorState = {
   redeemRequestFee: 0n,
   canClose: false,
   batchInterval: 600,
+  maxBatchValue: 0n,
+  maxDeposits: 50,
 };
 const vault: VaultState = {
   shares: 10n ** 22n,

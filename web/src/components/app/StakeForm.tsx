@@ -8,7 +8,7 @@ import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
 import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
 import { useFlows } from "@/lib/cascade/use-flows";
-import { formatUsd, formatUsdShort, parseAmount } from "@/lib/format";
+import { formatUsd, parseAmount } from "@/lib/format";
 import {
   breakEvenDays,
   breakEvenText,
@@ -19,6 +19,7 @@ import {
   stakeAmountText,
   stakeButtonLabel,
   stakeFootText,
+  stakeLimitsNote,
   validateStakeAmount,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
@@ -105,7 +106,7 @@ export function StakeForm({
     );
   }
 
-  const note = error ?? (lim ? `From ${formatUsdShort(lim.minUsd)} to ${formatUsdShort(lim.maxUsd)}` : limits.isError ? "Limits unavailable right now" : "Checking the limits…");
+  const note = error ?? (lim ? stakeLimitsNote(lim) : limits.isError ? "Limits unavailable right now" : "Checking the limits…");
 
   return (
     <form className={styles.form} onSubmit={onSubmit} noValidate>

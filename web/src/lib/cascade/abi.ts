@@ -17,6 +17,8 @@ export const FRONT_DOOR = parseAbi([
   "function redeemRequestFee() view returns (uint256)",
   "function canClose() view returns (bool)",
   "function batchInterval() view returns (uint64)",
+  "function maxBatchValue() view returns (uint256)",
+  "function maxDeposits() view returns (uint32)",
   "function usdc() view returns (address)",
   "function deliveryOf(address user) view returns (uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
   "function setDelivery(uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",

@@ -28,6 +28,14 @@ export function capFree(f: { depositCap: bigint; netForwarded: bigint; openTotal
   return f.depositCap > used ? f.depositCap - used : 0n;
 }
 
+/** How much more the open batch takes: none once its list is full (someone already on it could still
+ * add to their entry, but the form can't tell who) or its value is at the limit, which the owner may
+ * have lowered below what it holds. */
+export function batchFree(f: { maxBatchValue: bigint; openTotal: bigint; openDeposits: number; maxDeposits: number }): bigint {
+  if (f.openDeposits >= f.maxDeposits) return 0n;
+  return f.maxBatchValue > f.openTotal ? f.maxBatchValue - f.openTotal : 0n;
+}
+
 /** Why an unstake can't go, so the form can say it in the unit it shows. */
 export type UnstakeRefusal = "empty" | "tooMuch" | "stakeBelowMin" | "belowMin" | "leavesDust";
 

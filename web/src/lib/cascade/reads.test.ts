@@ -55,6 +55,8 @@ describe("reads", () => {
       redeemRequestFee: 10n ** 14n,
       canClose: false,
       batchInterval: 600n,
+      maxBatchValue: 10n ** 19n,
+      maxDeposits: 50,
     });
     const fd = await readFrontDoor({ base: base.client }, D, ME);
     expect(fd).toEqual({
@@ -72,6 +74,8 @@ describe("reads", () => {
       redeemRequestFee: 10n ** 14n,
       canClose: false,
       batchInterval: 600,
+      maxBatchValue: 10n ** 19n,
+      maxDeposits: 50,
     });
   });
 

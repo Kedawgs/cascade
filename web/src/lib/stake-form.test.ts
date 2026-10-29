@@ -17,6 +17,7 @@ import {
   maxUnstakeInput,
   maxUnstakeInputIn,
   stakeButtonLabel,
+  stakeLimitsNote,
   switchUnstakeUnit,
   unstakeErrorText,
   unstakeLabelUsd,
@@ -28,7 +29,7 @@ import {
 } from "./stake-form";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
-const limits = { minUsd: 10, maxUsd: 50_000 };
+const limits = { minUsd: 10, maxUsd: 50_000, full: null };
 
 describe("validateStakeAmount", () => {
   it("accepts amounts within limits", () => {
@@ -46,6 +47,21 @@ describe("validateStakeAmount", () => {
     expect(parseAmount(sanitizeAmountInput("1e5", 2))).toBe(15);
     expect(parseAmount(sanitizeAmountInput("0.", 2))).toBe(0);
     expect(validateStakeAmount(0, limits)).toBe("The smallest stake is $10.");
+  });
+
+  it("says why no amount fits when a limit is reached, rather than a maximum under the minimum", () => {
+    const batch = { minUsd: 10, maxUsd: 4, full: "batch" as const };
+    expect(validateStakeAmount(20, batch)).toBe("This batch is full. A new one opens once it leaves, so try again soon.");
+    expect(validateStakeAmount(5, batch)).toBe("This batch is full. A new one opens once it leaves, so try again soon.");
+    expect(validateStakeAmount(20, { ...batch, full: "cap" })).toBe("Cascade is full for now. Try again later.");
+    expect(validateStakeAmount(null, batch)).toBeNull();
+  });
+});
+
+describe("stakeLimitsNote", () => {
+  it("gives the range, or why there is none", () => {
+    expect(stakeLimitsNote({ minUsd: 10.33, maxUsd: 2_450, full: null })).toBe("From $10.33 to $2,450");
+    expect(stakeLimitsNote({ minUsd: 10, maxUsd: 4, full: "batch" })).toBe("This batch is full. A new one opens once it leaves, so try again soon.");
   });
 });
 

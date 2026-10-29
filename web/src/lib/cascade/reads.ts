@@ -24,11 +24,14 @@ export interface FrontDoorState {
   redeemRequestFee: bigint;
   canClose: boolean;
   batchInterval: number;
+  /** The most one batch carries, in TAO wei, and how many deposits its list holds. */
+  maxBatchValue: bigint;
+  maxDeposits: number;
 }
 
 export async function readFrontDoor(c: Pick<Clients, "base">, d: Deployment, account: Address = ZERO): Promise<FrontDoorState> {
   const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
-  const [depositOf, redeemOf, claimable, open, netForwarded, depositCap, minDeposit, redeemRequestFee, canClose, interval] =
+  const [depositOf, redeemOf, claimable, open, netForwarded, depositCap, minDeposit, redeemRequestFee, canClose, interval, maxBatchValue, maxDeposits] =
     await c.base.multicall({
       allowFailure: false,
       contracts: [
@@ -42,6 +45,8 @@ export async function readFrontDoor(c: Pick<Clients, "base">, d: Deployment, acc
         { ...fd, functionName: "redeemRequestFee" },
         { ...fd, functionName: "canClose" },
         { ...fd, functionName: "batchInterval" },
+        { ...fd, functionName: "maxBatchValue" },
+        { ...fd, functionName: "maxDeposits" },
       ],
     });
   const [id, start, total, , nDeposits, nRedeems] = open as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
@@ -60,6 +65,8 @@ export async function readFrontDoor(c: Pick<Clients, "base">, d: Deployment, acc
     redeemRequestFee,
     canClose,
     batchInterval: Number(interval),
+    maxBatchValue,
+    maxDeposits,
   };
 }
 

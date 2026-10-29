@@ -114,6 +114,9 @@ export interface Limits {
   maxTao: bigint;
   minUsd: number;
   maxUsd: number;
+  /** Which limit leaves no room for even the smallest deposit: the deposit cap, or the open batch
+   * (which frees up once it leaves). */
+  full: "cap" | "batch" | null;
 }
 
 export interface Balances {

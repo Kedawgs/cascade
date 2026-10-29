@@ -30,6 +30,8 @@ const fd: FrontDoorState = {
   redeemRequestFee: 10n ** 14n,
   canClose: false,
   batchInterval: 600,
+  maxBatchValue: 4_000n * 10n ** 18n,
+  maxDeposits: 50,
 };
 const vault: VaultState = {
   shares: 8n * 10n ** 22n,
@@ -206,6 +208,26 @@ describe("live data", () => {
     expect(l.maxTao).toBe(7n * 10n ** 16n);
     expect(l.minUsd).toBeGreaterThan(2.5);
     expect(l.maxUsd).toBeLessThan(17.5);
+    expect(l.full).toBeNull();
+  });
+
+  it("caps a stake at the room left in the open batch when that is less than the cap's", async () => {
+    const roomy = { ...fd, depositCap: 40n * 10n ** 18n, netForwarded: 0n, maxBatchValue: 10n * 10n ** 18n, openTotal: 3n * 10n ** 18n };
+    const l = await createLiveCascadeData(D, deps({ readFrontDoor: async () => roomy })).getLimits();
+    expect(l.maxTao).toBe(7n * 10n ** 18n);
+    expect(l.maxUsd).toBeLessThan(7 * 250);
+    expect(l.maxUsd).toBeGreaterThan(7 * 250 * 0.97);
+    expect(l.full).toBeNull();
+  });
+
+  it("says which limit leaves no room for even the smallest stake", async () => {
+    const limitsWith = async (over: Partial<FrontDoorState>) =>
+      (await createLiveCascadeData(D, deps({ readFrontDoor: async () => ({ ...fd, ...over }) })).getLimits()).full;
+    // the open batch: less than the minimum left under its value limit, or its list at 50
+    expect(await limitsWith({ maxBatchValue: 10n ** 16n * 5n, openTotal: 10n ** 16n * 4n + 10n ** 9n, netForwarded: 0n })).toBe("batch");
+    expect(await limitsWith({ openDeposits: 50 })).toBe("batch");
+    // the deposit cap, which won't free up by waiting for the next batch
+    expect(await limitsWith({ netForwarded: 15n * 10n ** 16n })).toBe("cap");
   });
 
   it("v2's minimum stays as it was: the pools' fees, the 0.5% slippage and a 2% margin", async () => {

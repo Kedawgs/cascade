@@ -1,6 +1,6 @@
 import { formatUnits, parseUnits } from "viem";
 import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
-import type { DepositQuote, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
+import type { DepositQuote, Limits, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
 import { isDelivering, offersClaim } from "./cascade/trail";
 import { floorRao, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
@@ -26,13 +26,22 @@ export type StakeState = {
   pending: boolean;
 };
 
+/** Why no stake fits right now, by the limit that is reached. */
+const FULL_TEXT = {
+  cap: "Cascade is full for now. Try again later.",
+  batch: "This batch is full. A new one opens once it leaves, so try again soon.",
+} as const;
+
+type StakeLimits = Pick<Limits, "minUsd" | "maxUsd" | "full">;
+
 export function validateStakeAmount(
   amount: number | null,
-  limits: { minUsd: number; maxUsd: number },
+  limits: StakeLimits,
   /** The wallet's USDC balance when known; null skips the check. */
   balance: number | null = null,
 ): string | null {
   if (amount === null) return null;
+  if (limits.full) return FULL_TEXT[limits.full];
   if (amount < limits.minUsd) return `The smallest stake is ${formatUsdShort(limits.minUsd)}.`;
   if (amount > limits.maxUsd) {
     return `The most you can stake right now is ${formatUsdShort(limits.maxUsd)}.`;
@@ -41,6 +50,11 @@ export function validateStakeAmount(
     return `You have ${formatUsdc(balance)} USDC on Base.`;
   }
   return null;
+}
+
+/** Under the amount before anything is typed: the range a stake can be, or why there is none. */
+export function stakeLimitsNote(limits: StakeLimits): string {
+  return limits.full ? FULL_TEXT[limits.full] : `From ${formatUsdShort(limits.minUsd)} to ${formatUsdShort(limits.maxUsd)}`;
 }
 
 /** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds. */

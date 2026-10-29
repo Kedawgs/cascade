@@ -6,7 +6,7 @@ import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUs
 import * as reads from "./reads";
 import { chainOnlyDeposit, depositRecord, withdrawalRecord } from "./trail";
 import type { CascadeData, DepositQuote, DepositRecord, Limits, Position, WithdrawalRecord } from "./types";
-import { capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
+import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
 
 export class NotConfiguredError extends Error {
   constructor() {
@@ -169,7 +169,10 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   async function getLimits(): Promise<Limits> {
     const [fd, price, fees] = await Promise.all([deps.readFrontDoor(c, d), deps.taoPriceUsd(c), isV3(d) ? deps.readStakerFees(c, d) : undefined]);
-    const maxTao = floorRao(capFree({ depositCap: fd.depositCap, netForwarded: fd.netForwarded, openTotal: fd.openTotal }));
+    // a deposit must fit under the deposit cap and in the open batch, or the front door refuses it
+    const capRoom = capFree(fd);
+    const batchRoom = batchFree(fd);
+    const maxTao = floorRao(capRoom < batchRoom ? capRoom : batchRoom);
     const kept = (1 - POOL_FEE) * (1 - SLIPPAGE);
     const minTaoUsd = toDisplay(fd.minDeposit, 18) * price * (1 + LIMIT_MARGIN);
     // v3: the stake's floor (0.5% under the quote) must still reach minDeposit after Cascade's fees come
@@ -182,6 +185,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       maxTao,
       minUsd: Math.ceil(minUsd * 100) / 100,
       maxUsd: Math.floor(toDisplay(maxTao, 18) * price * (1 - LIMIT_MARGIN) * 100) / 100,
+      full: capRoom < fd.minDeposit ? "cap" : batchRoom < fd.minDeposit ? "batch" : null,
     };
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capFree, ceilRao, checkUnstake, floorRao, lessSlippage, sharesFor, taoFor, toDisplay } from "./units";
+import { batchFree, capFree, ceilRao, checkUnstake, floorRao, lessSlippage, sharesFor, taoFor, toDisplay } from "./units";
 
 const TAO = 10n ** 18n;
 const milli = (n: bigint) => (n * TAO) / 1000n;
@@ -29,6 +29,14 @@ describe("units", () => {
   it("says how much room the deposit cap has left, never below zero", () => {
     expect(capFree({ depositCap: 15n * 10n ** 16n, netForwarded: 0n, openTotal: 0n })).toBe(15n * 10n ** 16n);
     expect(capFree({ depositCap: 10n, netForwarded: 8n, openTotal: 5n })).toBe(0n);
+  });
+
+  it("says how much room the open batch has left: none once its value or its list is full", () => {
+    const open = { maxBatchValue: 10n * TAO, openTotal: 3n * TAO, openDeposits: 4, maxDeposits: 50 };
+    expect(batchFree(open)).toBe(7n * TAO);
+    // the owner may lower the limit below what the batch already holds
+    expect(batchFree({ ...open, maxBatchValue: 2n * TAO })).toBe(0n);
+    expect(batchFree({ ...open, openDeposits: 50 })).toBe(0n);
   });
 
   it("refuses unstakes that would strand a payout or a remainder", () => {

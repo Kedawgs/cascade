@@ -175,8 +175,11 @@ export const LAUNCH_VAULT_LIMITS = {
   /** setOutflowLimits: each 24-hour window, a front door's redeems burn at most the larger of 20% of the
    * vault and 10 TAO. The default floor, 100 TAO, is more than the whole vault: a forged bridge message
    * could force-exit everyone in one day. At 10 TAO a forced exit takes at most 25% of a 40 TAO vault a
-   * day (20% of 50 or 60), and the payout delay (24 h) leaves the guardian time to pull the front door
-   * and the owner to cancel. The cost: one holder of the whole 40 TAO cap needs 4 windows to leave (10
+   * day (20% of 50 or 60). What holds a forged batch is the guardian, within the 24 h payout delay: its
+   * pause() stops processPayouts, as does removeFrontDoor or disableBridge. The owner can't act in that
+   * time behind a 48 h timelock: cancelPayoutBatch (re-minting the shares) is owner-only, so it goes
+   * through the timelock, once the guardian holds the batch (it works while paused). The cost: one
+   * holder of the whole 40 TAO cap needs 4 windows to leave (10
    * TAO each, asking again each day), and when many leave at once the first come are served first. A
    * lower floor exits a big holder slower (5 TAO: 8 windows); a higher one bounds a forced exit worse. */
   maxDailyOutflowBps: 2_000n,

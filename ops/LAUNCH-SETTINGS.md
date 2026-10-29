@@ -67,10 +67,15 @@ In each 24-hour window, a front door's redeems burn at most the larger of 20% of
 floor. With the default floor of 100 TAO, larger than the whole vault, a forged bridge message could
 force-exit everyone in one day.
 
-At 10 TAO, a forced exit takes at most 25% of a 40 TAO vault per day (20% of a 50 or 60 TAO one). The
-24-hour payout delay gives the guardian time to pause or remove the front door, and the owner time to
-cancel the batch, which re-mints the shares. Windows are fixed, not rolling, so two windows back to
-back can take about twice that within minutes.
+At 10 TAO, a forced exit takes at most 25% of a 40 TAO vault per day (20% of a 50 or 60 TAO one).
+Windows are fixed, not rolling, so two windows back to back can take about twice that within minutes.
+
+What holds a forged batch is the guardian, inside the 24-hour payout delay. Its `pause` stops
+`processPayouts`, and so does `removeFrontDoor` or `disableBridge` (the registry's disable). The owner
+can't act in that time: behind a 48-hour timelock, anything it schedules lands a day after the payout
+could go. Undoing the batch is `cancelPayoutBatch`, which re-mints the burned shares. It is owner-only,
+so it goes through the timelock, after the guardian has paused (it works while paused). So the
+guardian's key, and someone watching, are what stop a forged batch in time.
 
 The cost: one holder of the whole 40 TAO cap needs 4 windows to leave, 10 TAO a day. A request asks
 for everything, burns at most the window's allowance, and the holder asks again the next day (the

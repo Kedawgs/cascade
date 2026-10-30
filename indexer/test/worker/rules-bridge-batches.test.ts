@@ -6,6 +6,9 @@ import { bridgeBatches } from "../../src/rules/bridge.ts";
 import type { BatchCheckRow, BatchCheckWrite } from "../../src/store.ts";
 import { type BatchFixture, D, h, honestBatch, withArgs } from "./bridge-fixtures.ts";
 import { ruleCtx } from "./rule-ctx.ts";
+import { checkBatch } from "../../src/crosscheck/batches.ts";
+import { groupDelivered, pairSent } from "../../src/crosscheck/pairing.ts";
+import { batches, V3, v3Logs } from "./v3-test-fixtures.ts";
 
 const E18 = 10n ** 18n;
 const A = "0x00000000000000000000000000000000000000a1" as Hex;
@@ -335,5 +338,22 @@ describe("bridge.duplicate and ccip.unexpected_source, vault side", () => {
     const t2 = tick(all(x), { rows: t1.writes.batchChecks.map(rowOf) });
     expect(bridgeBatches.run(t2)).toEqual([]);
     expect(t2.writes.batchChecks).toEqual([]);
+  });
+});
+
+describe("real bytes (v3-test batches 1 and 2, recorded)", () => {
+  it("pairs each close with its Sent, groups each delivery's outcomes, and passes both batches", () => {
+    const { base, bittensor } = v3Logs();
+    const frontDoorLogs = base.filter((l) => l.contract === "frontDoor");
+    for (const b of batches.batches) {
+      const closeTx = base.filter((l) => l.txHash === b.closeTx);
+      const close = closeTx.find((l) => l.event === "BatchClosed");
+      expect(pairSent(closeTx, { closer: "frontDoor:BatchClosed", adapter: "baseAdapter", sender: V3.frontDoor }).get(close!.uid)?.args.messageId).toBe(b.messageId);
+      const deliveryTx = bittensor.filter((l) => l.txHash === b.deliveryTx);
+      const [group] = groupDelivered(deliveryTx, { opener: "vault:BatchDelivered", adapter: "bitAdapter", recipient: V3.vault });
+      expect(group.delivered?.args.messageId).toBe(b.messageId);
+      const v = checkBatch({ d: V3, delivery: group.opener, group, frontDoorLogs, baseTx: (hash) => base.filter((l) => l.txHash === hash) });
+      expect(v).toEqual({ status: "ok", closedTx: b.closeTx, messageId: b.messageId, expectedKey: b.deliveredKey });
+    }
   });
 });

@@ -1,7 +1,9 @@
 import { encodeAbiParameters, getAddress, type Hex, keccak256 } from "viem";
 import { describe, expect, it } from "vitest";
 import type { Config } from "../../src/config.ts";
-import { chunkEntries, deliveredChecks, encodePayoutsMessage, payoutList } from "../../src/crosscheck/payouts.ts";
+import { groupDelivered } from "../../src/crosscheck/pairing.ts";
+import { checkPayout, chunkEntries, deliveredChecks, encodePayoutsMessage, payoutList } from "../../src/crosscheck/payouts.ts";
+import { chunk, V3, v3Logs } from "./v3-test-fixtures.ts";
 import type { StoredLog } from "../../src/logs.ts";
 import { bridgePayouts } from "../../src/rules/bridge.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
@@ -367,7 +369,29 @@ describe("the payout list, a chunk's entries and the message", () => {
     ]);
   });
 
-  // Task 30 adds the fixture: v3-test batch 2 chunk 0 (net = 77877092e9 − 1061267e9), whose recomputed
-  // message hash is the one delivered(baseAdapter, …) reads true for.
-  it.todo("recomputes v3-test batch 2 chunk 0's message hash (real bytes)");
+  // the fixture (scripts/record-fixtures.ts): v3-test batch 2 chunk 0, its processPayouts transaction and its
+  // landing, with the front door's delivered(baseAdapter, hash) at the landing block
+  it("recomputes v3-test batch 2 chunk 0's message hash (real bytes)", () => {
+    const { base, bittensor } = v3Logs();
+    const landing = base.find((l) => l.contract === "frontDoor" && l.event === "PayoutsDelivered");
+    if (!landing) throw new Error("no landing in the fixture");
+    expect(landing.txHash).toBe(chunk.landingTx);
+    const sent = bittensor.find((l) => l.event === "PayoutChunkSent");
+    expect(sent?.args).toMatchObject({ key: chunk.key, chunk: 0, net: String(77_877_092n * 10n ** 9n - 1_061_267n * 10n ** 9n) });
+    // rebuilt from the vault's events alone (the delivery's Redeemed, the chunk's gross and fee), paired and
+    // grouped by log order in the real transactions
+    const group = groupDelivered(base.filter((l) => l.txHash === landing.txHash), { opener: "frontDoor:PayoutsDelivered", adapter: "baseAdapter", recipient: V3.frontDoor })[0];
+    const v = checkPayout({
+      d: V3,
+      bridges: [V3.baseAdapter],
+      landing,
+      group,
+      vaultLogs: bittensor.filter((l) => l.contract === "vault"),
+      bitTx: (hash) => bittensor.filter((l) => l.txHash === hash),
+    });
+    expect(v).toMatchObject({ status: "awaiting_read", sentTx: chunk.chunkTx, messageId: chunk.messageId });
+    // the hash the front door recorded: delivered() reads true for it at the landing block (and not before)
+    expect(v.expectedHash).toBe(chunk.delivered.hash);
+    expect(chunk.delivered).toMatchObject({ atLanding: true, beforeLanding: false });
+  });
 });

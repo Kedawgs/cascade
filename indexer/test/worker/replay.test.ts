@@ -4,6 +4,7 @@ import { batchKey, encodeBatchMessage, replayBatch } from "../../src/crosscheck/
 import type { StoredLog } from "../../src/logs.ts";
 import { tx } from "./fixtures.ts";
 import { slog } from "./rule-ctx.ts";
+import { batches, V3, v3Logs } from "./v3-test-fixtures.ts";
 
 const A = "0x00000000000000000000000000000000000000a1" as Hex;
 const B = "0x00000000000000000000000000000000000000b2" as Hex;
@@ -81,7 +82,22 @@ describe("encodeBatchMessage and batchKey", () => {
     expect(batchKey(8453n, FD, m)).toBe(want);
   });
 
-  // Task 30 adds the fixture: v3-test batches 1 and 2's front door logs, whose replayed lists give keys
-  // 0x07531aa4…39b48c and 0xc2645240…7fd49c, equal to their BatchDelivered.key.
-  it.todo("rebuilds v3-test batches 1 and 2 to their delivered keys (real bytes)");
+  // the fixture (scripts/record-fixtures.ts): v3-test batches 1 and 2's front door logs, as recorded
+  it("rebuilds v3-test batches 1 and 2 to their delivered keys (real bytes)", () => {
+    const { base, bittensor } = v3Logs();
+    const frontDoor = base.filter((l) => l.contract === "frontDoor");
+    expect(batches.batches.map((b) => b.deliveredKey)).toEqual([
+      "0x07531aa456a654de818d2e674cccb8589f9d5d9f42bb7a1af863fe1f4a39b48c",
+      "0xc2645240d4767096209bc1452708f0999ec2ff9f2d9b5ab0b0b0b6de067fd49c",
+    ]);
+    for (const b of batches.batches) {
+      const r = replayBatch(frontDoor, BigInt(b.id));
+      if ("error" in r) throw new Error(r.error);
+      expect(batchKey(8453n, V3.frontDoor, encodeBatchMessage(BigInt(b.id), r.deposits, r.redeems))).toBe(b.deliveredKey);
+      // and it is the key the vault logged in BatchDelivered
+      const delivered = bittensor.find((l) => l.event === "BatchDelivered" && l.args.batchId === b.id);
+      expect(delivered?.args.key).toBe(b.deliveredKey);
+      expect(r.closed.txHash).toBe(b.closeTx);
+    }
+  });
 });

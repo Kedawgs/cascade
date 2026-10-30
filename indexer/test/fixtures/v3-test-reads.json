@@ -1,0 +1,13 @@
+{
+  "note": "Recorded from the live chains by scripts/record-fixtures.ts (read-only).",
+  "stakeHotkey": "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748",
+  "ownerOfStakeHotkey": "0xd4b3efa00c7f20e8e94f39d1bed97ce0cacceb122a09a9ca24dfda401710391b",
+  "absentHotkey": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "ownerOfAbsentHotkey": "0x",
+  "fmTao": {
+    "baseSupply": "8778123109075199671498",
+    "baseBlock": "53266343",
+    "lockPool": "13912090881145429495505",
+    "bittensorBlock": "9393203"
+  }
+}

@@ -68,8 +68,10 @@ The local database lives in `.wrangler/state` (git-ignored). Emails stay in `ALE
 console). A local secret goes in `indexer/.dev.vars` (git-ignored, never committed). Never set `remote: true` on
 a binding.
 
-`pnpm smoke` runs one tick against the live v3 test deployment into a throwaway local D1 (read-only RPC calls)
-and prints the digest. It is not part of `pnpm test`.
+`pnpm smoke` runs one tick against the live v3 test deployment into a throwaway local D1 (read-only RPC calls,
+at most `SMOKE_BUDGET`, 40 by default) and prints the tick's report, the cross-checks and the digest. It is not
+part of `pnpm test`. `pnpm fixtures:record ../ops/deployments/v3-test.json` re-records the real-bytes fixtures
+the tests use (`test/fixtures/v3-test-*.json`, about 10 read-only requests).
 
 ## Configuration
 
@@ -186,11 +188,14 @@ On v3-test the owner, guardian and keeper are one address, so a reverted keeper 
   users a tampered one can't be caught from outside. A file that stopped a site-check run points to the CPU
   limit (Workers Paid, or `SITE_FILES_PER_RUN=1`), not the byte cap.
 - **FM-TAO's backing check is a weak backstop.** `fmtao.unbacked` compares FM-TAO's supply on Base with the
-  Bittensor lock pool, which also backs FM-TAO on other chains, so the lock is far above Base's supply (about
-  8,700 TAO on Base against about 13,500 locked) and only a large forged mint would cross it.
-- **CPU on Workers Free.** A batch delivery is one block of about 200 vault logs, which a tick hashes and
-  decodes while the block is within SETTLE of the head (about 3 ticks) and again when it settles. That is close
-  to Free's 10 ms per invocation; on Paid it is far inside the limit. See the measurements in Task 30's notes.
+  Bittensor lock pool, which also backs FM-TAO on other chains, so the lock is far above Base's supply (read
+  2026-10-29: 8,778 TAO on Base against 13,912 locked) and only a large forged mint would cross it.
+- **CPU on Workers Free.** Measured in local workerd (2026-10-29): hashing and decoding a log costs about
+  110–125 µs, so a full batch delivery (one block of about 205 vault logs) costs about 23–26 ms each time a tick
+  reads it, while it is within SETTLE of the head (about 3 ticks) and once more when it settles. That is over
+  Free's 10 ms per invocation, and nothing on Paid (30 s). A steady tick of the recorded v3-test scenario made 6
+  D1 queries and read 149 rows (a first, backfilling tick: 5 and 110). Check the real CPU per invocation in
+  Workers Observability in the first week.
 - **Re-running migration 0004** (`INSERT OR IGNORE` into the check tables): it silently skips any row that
   breaks a NOT NULL rule, not only duplicates. Check the counts by hand if it is ever re-run against real data.
 - **Every log write goes through `upsertLogs`** (`src/store.ts`), which also gives every delivery and landing its

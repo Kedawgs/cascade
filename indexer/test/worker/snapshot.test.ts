@@ -4,6 +4,7 @@ import { compact, compactHour, expand, expandHour, hourRollup, payoutsDone, peer
 import { decodeAccountId, OWNER_PREFIX, ownerStorageKey } from "../../src/subtensor.ts";
 import { deploymentState, fakeDeployment, GUARDIAN, KEEPER, OWNER, VALIDATOR_OWNER } from "./fake-deployment.ts";
 import { testConfig } from "./fixtures.ts";
+import { reads } from "./v3-test-fixtures.ts";
 
 const cfg = testConfig();
 const d = cfg.deployment;
@@ -253,6 +254,17 @@ describe("keys", () => {
         "56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748",
     );
     expect(OWNER_PREFIX).toBe("0x658faa385070e074c85bf6b568cf0555eca6b7a1fdc9f689184ecb4f359c0518");
+  });
+
+  it("reads a live hotkey's Owner as 32 bytes and an absent one as empty (recorded from the chain)", () => {
+    expect(ownerStorageKey(reads.stakeHotkey as Hex).length).toBe(2 + 2 * (32 + 16 + 32));
+    expect(decodeAccountId(reads.ownerOfStakeHotkey as Hex)).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(reads.ownerOfAbsentHotkey).toBe("0x");
+    expect(decodeAccountId(reads.ownerOfAbsentHotkey as Hex)).toBeNull();
+  });
+
+  it("FM-TAO's supply on Base was within its Bittensor lock when recorded", () => {
+    expect(BigInt(reads.fmTao.baseSupply)).toBeLessThanOrEqual(BigInt(reads.fmTao.lockPool));
   });
 
   it("decodes an account id, and empty storage as null", () => {

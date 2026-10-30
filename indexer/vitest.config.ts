@@ -41,6 +41,28 @@ export default defineConfig({
           include: ["test/node/**/*.test.ts"],
         },
       },
+      // pnpm smoke only (not in pnpm test): one tick against the live v3 test deployment, read-only, with
+      // wrangler.jsonc's own env.test vars (its real DEPLOYMENT) and a throwaway local D1
+      {
+        plugins: [
+          cloudflareTest(async () => ({
+            wrangler: { configPath: "./wrangler.jsonc", environment: "test" },
+            miniflare: {
+              bindings: {
+                TEST_MIGRATIONS: await readD1Migrations(here("./migrations")),
+                INDEXER_SMOKE: process.env.INDEXER_SMOKE ?? "",
+                SMOKE_BUDGET: process.env.SMOKE_BUDGET ?? "",
+              },
+            },
+          })),
+        ],
+        test: {
+          name: "smoke",
+          include: ["test/smoke/**/*.test.ts"],
+          setupFiles: ["test/worker/setup.ts"],
+          fsModuleCache: false,
+        },
+      },
     ],
   },
 });

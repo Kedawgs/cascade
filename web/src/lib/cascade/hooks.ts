@@ -7,7 +7,7 @@ import { shownFigure, STATS_KEEP_MS } from "../stats";
 import { isV3 } from "./config";
 import { useCascadeData, useSnapshotAt } from "./context";
 import type { Operation } from "./oplog";
-import { type PendingEntry, pendingEntries, pendingEntry } from "./pending";
+import { type PendingEntry, pendingEntries } from "./pending";
 import type { DepositRecord, WithdrawalRecord } from "./records";
 import type { Snapshot } from "./snapshot";
 import type { CascadeData } from "./types";
@@ -239,10 +239,13 @@ export function usePendingEntries(account: string, kind: "deposit" | "withdrawal
   return pendingEntries(opsOf(data, account), kind, listed, now);
 }
 
-/** This browser's own entry for its deposit (or unstake) `id`, if it sent it and it went through. */
+/** This browser's own entry for its deposit (or unstake) `id`, if it sent it, it went through, and it was
+ * sent in the last PENDING_SHOWN_MS, as in the list: an older one may well be staked or paid by now, so
+ * its receipt waits for the chain rather than call it unconfirmed. */
 export function usePendingEntry(account: string, kind: "deposit" | "withdrawal", id: string): PendingEntry | null {
-  const op = opsOf(useCascadeData(), account).find((o) => o.id === id && o.kind === kind);
-  return op ? pendingEntry(op) : null;
+  const data = useCascadeData();
+  const now = useNow(60_000);
+  return pendingEntries(opsOf(data, account), kind, undefined, now).find((e) => e.notice.id === id) ?? null;
 }
 
 export function useDepositQuote(usdcUnits: bigint | null) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXPECTED_DEPLOYMENTS } from "./cascade/config";
+import { BRIDGE_MINUTES, EXPECTED_DEPLOYMENTS, STAKE_MINUTES } from "./cascade/config";
 import { depositNotice, sentCopy, sentTiming, unstakeNotice, walletTaoNotice } from "./sent";
 
 const launch = EXPECTED_DEPLOYMENTS["v3-launch"];
@@ -25,22 +25,27 @@ describe("the panel after a deposit", () => {
   it("says what happens next by the launch's timing: hourly batches once their fees cover the bridge fee, 24 hours at the latest", () => {
     expect(LAUNCH).toEqual({ v3: true, batchMaxWaitS: 86_400, payoutDelayS: 86_400 });
     expect(copy.next).toBe(
-      "Next it crosses to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. It's staked about 20 minutes after it leaves.",
+      "Next it crosses to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. It's staked about 27 minutes after it leaves.",
     );
+  });
+
+  it("gives the time from leaving to staked as the stake form's estimate counts it: the crossing and the stake", () => {
+    expect(BRIDGE_MINUTES + STAKE_MINUTES).toBe(27);
+    expect(copy.next).toContain(`It's staked about ${BRIDGE_MINUTES + STAKE_MINUTES} minutes after it leaves.`);
   });
 
   it("names no cadence it hasn't read from the front door", () => {
     expect(sentCopy({ ...deposit, batchIntervalS: undefined }, LAUNCH).next).toBe(
-      "Next it crosses to Bittensor in a batch, which leaves once its fees cover the bridge fee, otherwise within 24 hours. It's staked about 20 minutes after it leaves.",
+      "Next it crosses to Bittensor in a batch, which leaves once its fees cover the bridge fee, otherwise within 24 hours. It's staked about 27 minutes after it leaves.",
     );
   });
 
   it("on a deployment without a max wait, batches leave on their interval", () => {
     const test = { v3: true };
     expect(sentCopy({ ...deposit, batchIntervalS: 600 }, test).next).toBe(
-      "Next it crosses to Bittensor in a batch: batches leave every 10 minutes. It's staked about 20 minutes after it leaves.",
+      "Next it crosses to Bittensor in a batch: batches leave every 10 minutes. It's staked about 27 minutes after it leaves.",
     );
-    expect(sentCopy({ ...deposit, batchIntervalS: undefined }, test).next).toBe("Next it crosses to Bittensor in a batch. It's staked about 20 minutes after it leaves.");
+    expect(sentCopy({ ...deposit, batchIntervalS: undefined }, test).next).toBe("Next it crosses to Bittensor in a batch. It's staked about 27 minutes after it leaves.");
   });
 
   it("a deposit of wallet TAO gives its exact TAO, with no USDC", () => {
@@ -61,9 +66,9 @@ describe("the panel after an unstake", () => {
     expect(copy.href).toBe("/activity?withdrawal=w1");
   });
 
-  it("v3: the batch, the 24-hour safety wait, then the USDC sent automatically", () => {
+  it("v3: the batch, the 24-hour safety wait, then the USDC sent automatically, or a claim if TAO falls below the minimum", () => {
     expect(sentCopy(unstake, LAUNCH).next).toBe(
-      "Next it goes to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. After the 24-hour safety wait it comes back to Base, where it's sold at your minimum price or better and the USDC is sent to your wallet.",
+      "Next it goes to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. After the 24-hour safety wait it comes back to Base, where it's sold at your minimum price or better and the USDC is sent to your wallet. If TAO's price falls below your minimum, it waits for you to claim it instead.",
     );
   });
 

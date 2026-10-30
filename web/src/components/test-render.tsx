@@ -3,8 +3,10 @@
 import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { renderToString } from "react-dom/server";
-import { CascadeDataProvider, SnapshotAtProvider } from "@/lib/cascade/context";
 import type { Address } from "viem";
+import { base } from "viem/chains";
+import { createConfig, http, WagmiProvider } from "wagmi";
+import { CascadeDataProvider, SnapshotAtProvider } from "@/lib/cascade/context";
 import type { Clients } from "@/lib/cascade/chain";
 import { type Deployment, EXPECTED_DEPLOYMENTS } from "@/lib/cascade/config";
 import { createLiveCascadeData, notConfiguredData } from "@/lib/cascade/live";
@@ -18,6 +20,10 @@ export interface Cached {
   at?: number;
   failed?: boolean;
 }
+
+/** A wallet config with no wallets, for components that send (useFlows needs one; a server render
+ * connects nothing). */
+const testWagmi = createConfig({ chains: [base], transports: { [base.id]: http() }, multiInjectedProviderDiscovery: false, ssr: true });
 
 /** `seededAt`: when the server's snapshot was read, as `Providers` passes it on (none by default).
  * `data`: the data source (its deployment, its op log); no deployment by default. */
@@ -33,11 +39,13 @@ export function renderWithCache(
     if (c.failed) query.setState({ status: "error", error: new Error("read failed"), errorUpdatedAt: Date.now() });
   }
   return renderToString(
-    <QueryClientProvider client={client}>
-      <SnapshotAtProvider at={seededAt}>
-        <CascadeDataProvider value={data}>{element}</CascadeDataProvider>
-      </SnapshotAtProvider>
-    </QueryClientProvider>,
+    <WagmiProvider config={testWagmi as never}>
+      <QueryClientProvider client={client}>
+        <SnapshotAtProvider at={seededAt}>
+          <CascadeDataProvider value={data}>{element}</CascadeDataProvider>
+        </SnapshotAtProvider>
+      </QueryClientProvider>
+    </WagmiProvider>,
   );
 }
 

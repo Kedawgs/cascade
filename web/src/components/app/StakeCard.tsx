@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useBalances, useIsV3, useLimits, usePosition, useTaoPrice, useWithdrawals } from "@/lib/cascade/hooks";
 import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
@@ -118,6 +118,8 @@ export function StakeCard({ account }: { account: string | null }) {
   const balance = useUsdcBalance();
   const avail = availableToStake(balance);
   const [sent, setSent] = useState<SentNotice | null>(null);
+  // the stake form's amount: where focus goes when the wallet TAO's panel closes (its button is gone by then)
+  const amountRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className={app.card}>
@@ -141,9 +143,9 @@ export function StakeCard({ account }: { account: string | null }) {
       {account && <ClaimReady account={account} />}
       {account && <WalletTao account={account} onSent={setSent} />}
       <div className={styles.form}>
-        <StakeForm account={account} maxUsdc={account ? avail.max : null} />
+        <StakeForm account={account} maxUsdc={account ? avail.max : null} amountRef={amountRef} />
       </div>
-      <SentDialog notice={sent} onClose={() => setSent(null)} />
+      <SentDialog notice={sent} onClose={() => setSent(null)} returnFocus={amountRef} />
     </div>
   );
 }

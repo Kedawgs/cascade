@@ -1,8 +1,8 @@
 import { createElement } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { depositNotice, type SentNotice, unstakeNotice } from "@/lib/sent";
 import { launchData, plainText, renderWithCache } from "../test-render";
-import { SentDialog } from "./SentDialog";
+import { closedThenFocus, SentDialog } from "./SentDialog";
 
 const html = (notice: SentNotice | null) => renderWithCache(createElement(SentDialog, { notice, onClose: () => undefined }), [], { data: launchData() });
 
@@ -27,7 +27,7 @@ describe("the panel that confirms a deposit", () => {
     expect(text).toContain("Amount50 USDC");
     expect(text).toContain("TAO (estimate)about 0.1946 TAO");
     expect(text).toContain(
-      "Next it crosses to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. It's staked about 20 minutes after it leaves.",
+      "Next it crosses to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. It's staked about 27 minutes after it leaves.",
     );
   });
 
@@ -51,6 +51,22 @@ describe("the panel that confirms an unstake", () => {
   it("follows it live on its receipt trail", () => {
     expect(h).toMatch(/<a[^>]*href="\/activity\?withdrawal=w1"[^>]*>Follow it live<\/a>/);
     expect(h).toMatch(/<button type="button"[^>]*>Done<\/button>/);
+  });
+});
+
+describe("closing the panel", () => {
+  it("tells the form, then puts focus back in the amount field (the button that opened it is disabled by then)", () => {
+    const order: string[] = [];
+    const amount = { current: { focus: vi.fn(() => order.push("focus")) } as unknown as HTMLElement };
+    closedThenFocus(() => order.push("closed"), amount)();
+    expect(order).toEqual(["closed", "focus"]);
+  });
+
+  it("does nothing more where there is no field to return to", () => {
+    const onClose = vi.fn();
+    closedThenFocus(onClose, undefined)();
+    closedThenFocus(onClose, { current: null })();
+    expect(onClose).toHaveBeenCalledTimes(2);
   });
 });
 

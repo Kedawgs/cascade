@@ -1,3 +1,4 @@
+import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import { createElement } from "react";
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
@@ -7,7 +8,7 @@ import { createOpLog, type DepositOp, type Operation, type WithdrawalOp } from "
 import { pendingEntry } from "@/lib/cascade/pending";
 import type { DepositRecord, WithdrawalRecord } from "@/lib/cascade/records";
 import { launchData, plainText, renderWithCache } from "../test-render";
-import { Lists, PendingReceipt } from "./ActivityScreen";
+import { DepositDetail, Lists, PendingReceipt } from "./ActivityScreen";
 
 const ME = "0x1234567890abcdef1234567890abcdef12345678";
 const at = new Date("2026-10-28T12:00:00Z");
@@ -164,11 +165,39 @@ describe("a deposit or unstake just sent, before Activity has read it", () => {
     expect(plainText(after)).not.toContain("Confirming");
   });
 
+  it("a failed read shows only the entries just sent above the error, never the records read before it", () => {
+    const text = plainText(list("deposits", [{ key: cascadeKeys.deposits(ME), data: [deposit], failed: true }], sentDeposit()));
+    expect(text).toContain("$50 from Base");
+    expect(text).toContain("We couldn't load your activity just now.");
+    expect(text).not.toContain("$25 from Base");
+  });
+
   it("shows nothing it can't stand behind: a stake that stopped, one taken back out, or one from last week", () => {
     const stopped = { ...sentDeposit(), state: "needs-you" as const };
     const cancelled = { ...sentDeposit(), cancelled: { hash: H(3), at: Date.now() } };
     const old = { ...sentDeposit(), createdAt: Date.now() - 8 * 24 * 60 * 60_000 };
     for (const op of [stopped, cancelled, old]) expect(plainText(list("deposits", [], op))).not.toContain("Confirming");
+  });
+});
+
+describe("a receipt page before its list is read", () => {
+  // a receipt can send the reader back to the list, so it asks for the router: a stub that goes nowhere
+  const router = { push: () => undefined, replace: () => undefined, back: () => undefined, forward: () => undefined, refresh: () => undefined, prefetch: () => undefined };
+  const page = (op: Operation) =>
+    plainText(
+      renderWithCache(createElement(AppRouterContext.Provider, { value: router as never }, createElement(DepositDetail, { account: ME, id: op.id })), [], {
+        data: withOps(op),
+      }),
+    );
+
+  it("shows a deposit sent in the last day as submitted and confirming", () => {
+    expect(page(sentDeposit())).toContain("Submitted, confirming…");
+  });
+
+  it("waits for the list for one sent more than a day ago: it may well be staked, so it isn't called unconfirmed", () => {
+    const text = page({ ...sentDeposit(), createdAt: Date.now() - 8 * 24 * 60 * 60_000 });
+    expect(text).toContain("Loading your deposit…");
+    expect(text).not.toContain("Submitted");
   });
 });
 

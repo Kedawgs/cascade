@@ -1,4 +1,4 @@
-import type { Deployment } from "./cascade/config";
+import { BRIDGE_MINUTES, type Deployment, STAKE_MINUTES } from "./cascade/config";
 import type { DepositQuote, WithdrawalQuote } from "./cascade/types";
 import { toDisplay } from "./cascade/units";
 import { waitText } from "./faq";
@@ -104,13 +104,17 @@ export function sentCopy(n: SentNotice, t: SentTiming): SentCopy {
     return {
       title: "Your deposit is on its way",
       rows: sentRows(n),
-      next: `Next it crosses to Bittensor in a batch${batch} It's staked about 20 minutes after it leaves.`,
+      // the crossing and the stake as the stake form's estimate counts them (live.ts, quoteDeposit)
+      next: `Next it crosses to Bittensor in a batch${batch} It's staked about ${BRIDGE_MINUTES + STAKE_MINUTES} minutes after it leaves.`,
       href: `/activity?deposit=${n.id}`,
     };
   }
   const wait =
     t.payoutDelayS === undefined ? "After a safety wait it" : t.payoutDelayS > 0 ? `After the ${waitText(t.payoutDelayS, true)} safety wait it` : "Then it";
-  const payout = t.v3 ? "it's sold at your minimum price or better and the USDC is sent to your wallet" : "you claim it as USDC from its receipt";
+  // v3 sells only at the minimum price or better: below it, the TAO waits for a claim by hand
+  const payout = t.v3
+    ? "it's sold at your minimum price or better and the USDC is sent to your wallet. If TAO's price falls below your minimum, it waits for you to claim it instead"
+    : "you claim it as USDC from its receipt";
   return {
     title: "Your unstake is requested",
     rows: sentRows(n),

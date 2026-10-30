@@ -20,6 +20,12 @@ export interface Deployment {
   payoutDelayS?: number;
 }
 
+/** Minutes from a batch leaving Base to its TAO staked: the crossing (Chainlink, at the slow end of its
+ * usual 20–30 minutes) and the stake. The stake form's estimate and the panel after a stake both count
+ * them. */
+export const BRIDGE_MINUTES = 25;
+export const STAKE_MINUTES = 2;
+
 /** When the open batch can be expected to close, by the latest: its interval, or the deployment's max wait if longer. */
 export const batchCloseAt = (openStart: number, batchInterval: number, batchMaxWaitS?: number): Date =>
   new Date((openStart + Math.max(batchInterval, batchMaxWaitS ?? 0)) * 1000);

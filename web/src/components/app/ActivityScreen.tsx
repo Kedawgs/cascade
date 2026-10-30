@@ -97,7 +97,7 @@ export function PendingReceipt({ entry, onRetry }: { entry: PendingEntry; onRetr
   );
 }
 
-function DepositDetail({ account, id }: { account: string; id: string }) {
+export function DepositDetail({ account, id }: { account: string; id: string }) {
   const { data: deposit, isPending, isFetching, isError, refetch } = useDeposit(account, id);
   const entry = usePendingEntry(account, "deposit", id);
   const v3 = useIsV3();
@@ -378,7 +378,12 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
       </nav>
       {open.isError ? (
         <>
-          {sent.length > 0 && <section className={styles.section}>{rows}</section>}
+          {/* only what was just sent: records kept from an earlier read never show above the error */}
+          {sent.length > 0 && (
+            <section className={styles.section}>
+              {tab === "deposits" ? <DepositList deposits={[]} pending={sent} /> : <WithdrawalList withdrawals={[]} pending={sent} />}
+            </section>
+          )}
           <LoadError
             what="your activity"
             onRetry={() => {

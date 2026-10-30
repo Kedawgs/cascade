@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useState, type FormEvent } from "react";
+import { type FormEvent, type RefObject, useId, useRef, useState } from "react";
 import { formatEther } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { useAvailable, useBalances, useIsV3, usePosition, useWithdrawalQuote } from "@/lib/cascade/hooks";
@@ -40,15 +40,24 @@ const GAS_WEI = 3n * 10n ** 13n;
  * shows) can't take the panel away. */
 export function UnstakeForm({ account }: { account: string | null }) {
   const [sent, setSent] = useState<SentNotice | null>(null);
+  // the amount input: where focus goes when the panel closes
+  const amountRef = useRef<HTMLInputElement>(null);
+  const sending: Sending = { onSent: setSent, amountRef };
   return (
     <>
-      {account ? <UnstakeWithBalance account={account} onSent={setSent} /> : <UnstakeFormBody account={null} position={null} onSent={setSent} />}
-      <SentDialog notice={sent} onClose={() => setSent(null)} />
+      {account ? <UnstakeWithBalance account={account} {...sending} /> : <UnstakeFormBody account={null} position={null} {...sending} />}
+      <SentDialog notice={sent} onClose={() => setSent(null)} returnFocus={amountRef} />
     </>
   );
 }
 
-function UnstakeWithBalance({ account, onSent }: { account: string; onSent: (n: SentNotice) => void }) {
+/** What the form needs from UnstakeForm: where an unstake that went through is confirmed, and its amount input. */
+interface Sending {
+  onSent: (n: SentNotice) => void;
+  amountRef: RefObject<HTMLInputElement | null>;
+}
+
+function UnstakeWithBalance({ account, ...sending }: { account: string } & Sending) {
   const position = usePosition(account);
   const available = useAvailable(account);
   if (position.isError || available.isError) {
@@ -75,18 +84,18 @@ function UnstakeWithBalance({ account, onSent }: { account: string; onSent: (n: 
     );
   }
   if (!available.data) return <Loading />;
-  return <UnstakeFormBody account={account} position={{ ...position.data, ...available.data }} onSent={onSent} />;
+  return <UnstakeFormBody account={account} position={{ ...position.data, ...available.data }} {...sending} />;
 }
 
 function UnstakeFormBody({
   account,
   position,
   onSent,
+  amountRef,
 }: {
   account: string | null;
   position: (Position & Available) | null;
-  onSent: (n: SentNotice) => void;
-}) {
+} & Sending) {
   const v3 = useIsV3();
   const flows = useFlows(account);
   const balances = useBalances(account);
@@ -179,6 +188,7 @@ function UnstakeFormBody({
       </label>
       <AmountField
         id={inputId}
+        inputRef={amountRef}
         value={raw}
         onChange={(v) => {
           setRaw(v);

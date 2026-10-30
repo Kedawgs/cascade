@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useReducer, useState, type FormEvent } from "react";
+import { type FormEvent, type RefObject, useId, useReducer, useRef, useState } from "react";
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
@@ -63,13 +63,18 @@ export function StakeForm({
   account,
   initialAmount = "",
   maxUsdc = null,
+  amountRef,
 }: {
   account: string | null;
   /** Pre-filled amount, as typed text. */
   initialAmount?: string;
   /** The wallet's USDC balance for the MAX button, when known. */
   maxUsdc?: number | null;
+  /** The amount input, when the owner wants focus there too (after its own panel closes). */
+  amountRef?: RefObject<HTMLInputElement | null>;
 }) {
+  const ownRef = useRef<HTMLInputElement>(null);
+  const amountInput = amountRef ?? ownRef;
   const v3 = useIsV3();
   const limits = useLimits();
   const balances = useBalances(account);
@@ -133,6 +138,7 @@ export function StakeForm({
       </label>
       <AmountField
         id={inputId}
+        inputRef={amountInput}
         value={raw}
         onChange={(v) => {
           setRaw(v);
@@ -227,7 +233,7 @@ export function StakeForm({
   return (
     <>
       {form}
-      <SentDialog notice={sent} onClose={() => dispatch({ type: "dismiss" })} />
+      <SentDialog notice={sent} onClose={() => dispatch({ type: "dismiss" })} returnFocus={amountInput} />
     </>
   );
 }

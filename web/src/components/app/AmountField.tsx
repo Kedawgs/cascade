@@ -1,5 +1,6 @@
 "use client";
 
+import type { Ref } from "react";
 import type { SourceChainInfo } from "@/lib/cascade/chains";
 import { sanitizeAmountInput } from "@/lib/format";
 import styles from "./StakeForm.module.css";
@@ -20,6 +21,7 @@ export function AmountField({
   onToggleUnit,
   toggleLabel,
   chain,
+  inputRef,
 }: {
   id: string;
   value: string;
@@ -33,6 +35,8 @@ export function AmountField({
   onToggleUnit?: () => void;
   toggleLabel?: string;
   chain?: SourceChainInfo;
+  /** The input itself, for focus to come back to (after the panel that confirms a send). */
+  inputRef?: Ref<HTMLInputElement>;
 }) {
   const on = unit === "USDC" ? chain : undefined;
   const token = (
@@ -64,6 +68,7 @@ export function AmountField({
         <span className={styles.tok}>{token}</span>
       )}
       <input
+        ref={inputRef}
         id={id}
         className={styles.input}
         inputMode="decimal"

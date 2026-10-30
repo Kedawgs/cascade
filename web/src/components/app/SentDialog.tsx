@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useId, useRef } from "react";
+import { type RefObject, useEffect, useId, useRef } from "react";
 import { useCascadeData } from "@/lib/cascade/context";
 import { useIsV3 } from "@/lib/cascade/hooks";
 import { sentCopy, type SentNotice, sentTiming, type SentTiming } from "@/lib/sent";
@@ -18,11 +18,30 @@ function useSentTiming(): SentTiming {
   }
 }
 
+/** What closing the panel does: tells its owner, then puts focus in `field` (the form's amount). The
+ * browser would put it back on the button that opened the panel, but that is disabled by then (the form
+ * was cleared), so focus would fall to the page. */
+export function closedThenFocus(onClose: () => void, field: RefObject<HTMLElement | null> | undefined): () => void {
+  return () => {
+    onClose();
+    field?.current?.focus();
+  };
+}
+
 /** Confirms a deposit or unstake that has just gone through, in place of a jump to Activity: what was
  * sent, what happens next, and its receipt trail to follow. A native modal dialog: the page behind it is
  * inert while it is open (focus stays inside), Esc closes it, and its title names it. Open while `notice`
- * is set; `onClose` hears it close (Done, Esc, the backdrop, or following it to Activity). */
-export function SentDialog({ notice, onClose }: { notice: SentNotice | null; onClose: () => void }) {
+ * is set; `onClose` hears it close (Done, Esc, the backdrop, or following it to Activity), after which
+ * focus goes to `returnFocus`, the form's amount field. */
+export function SentDialog({
+  notice,
+  onClose,
+  returnFocus,
+}: {
+  notice: SentNotice | null;
+  onClose: () => void;
+  returnFocus?: RefObject<HTMLElement | null>;
+}) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const nextId = useId();
@@ -43,7 +62,7 @@ export function SentDialog({ notice, onClose }: { notice: SentNotice | null; onC
       className={styles.dialog}
       aria-labelledby={titleId}
       aria-describedby={nextId}
-      onClose={onClose}
+      onClose={closedThenFocus(onClose, returnFocus)}
       // a click on the backdrop lands on the dialog itself (its body fills it): that closes it too
       onClick={(e) => {
         if (e.target === e.currentTarget) close();

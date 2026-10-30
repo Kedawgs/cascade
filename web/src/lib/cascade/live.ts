@@ -1,6 +1,16 @@
 import type { Address } from "viem";
 import { type Clients, createClients } from "./chain";
-import { batchCloseAt, DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, type Deployment, explorer, isV3, SLIPPAGE_BPS } from "./config";
+import {
+  batchCloseAt,
+  BRIDGE_MINUTES,
+  DELIVERY_TOLERANCE_BPS,
+  DELIVERY_VALIDITY_S,
+  type Deployment,
+  explorer,
+  isV3,
+  SLIPPAGE_BPS,
+  STAKE_MINUTES,
+} from "./config";
 import {
   cancelTook,
   chainDeposits,
@@ -71,8 +81,6 @@ const POOL_FEE = 1 - (1 - 0.0005) * (1 - 0.003);
 const SLIPPAGE = 0.005;
 /** Room for the price to move between the limit shown and the swap. */
 const LIMIT_MARGIN = 0.02;
-const BRIDGE_MINUTES = 25;
-const STAKE_MINUTES = 2;
 const ED_RESERVE = 10n ** 12n;
 /** The chain's smallest stake (getDefaultMinStake, 2e6 rao). */
 const MIN_STAKE_WEI = 2n * 10n ** 15n;

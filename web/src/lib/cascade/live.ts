@@ -564,9 +564,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     listRewards: async () => [],
 
     listDeposits,
-    getDeposit: async (account, id) => (await listDeposits(account)).find((r) => r.id === id) ?? null,
     listWithdrawals,
-    getWithdrawal: async (account, id) => (await listWithdrawals(account)).find((r) => r.id === id) ?? null,
 
     async quoteDeposit(usdcUnits) {
       if (isV3(d)) return quoteDepositV3(usdcUnits);
@@ -671,9 +669,7 @@ export function notConfiguredData(): CascadeData {
     getBalances: fail,
     listRewards: fail,
     listDeposits: fail,
-    getDeposit: fail,
     listWithdrawals: fail,
-    getWithdrawal: fail,
     quoteDeposit: fail,
     quoteWithdrawal: fail,
     quoteRoundTrip: fail,

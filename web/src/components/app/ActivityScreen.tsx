@@ -4,15 +4,28 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
-import { useBalances, useDeposit, useDeposits, useIsV3, usePosition, useWithdrawal, useWithdrawals } from "@/lib/cascade/hooks";
+import {
+  useBalances,
+  useDeposit,
+  useDeposits,
+  useIsV3,
+  usePendingEntries,
+  usePendingEntry,
+  usePosition,
+  useWithdrawal,
+  useWithdrawals,
+} from "@/lib/cascade/hooks";
 import { type ActivityTab, parseActivityParams } from "@/lib/activity-params";
+import { type PendingEntry, receiptShows } from "@/lib/cascade/pending";
 import { offersClaim } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
+import { sentRows } from "@/lib/sent";
 import { DepositList, WithdrawalList } from "../ActivityList";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
+import { ReceiptLink } from "../ReceiptLink";
 import { Trail } from "../Trail";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
@@ -40,15 +53,64 @@ function Actions({ children }: { children: ReactNode }) {
   return <div className={styles.actions}>{children}</div>;
 }
 
+/** A receipt Activity hasn't read from the chain yet: this browser's own entry for it, said plainly to be
+ * unconfirmed, with the figures it was sent with and its transaction, until the list read from the chain
+ * holds its record (pending.ts). `onRetry` when that read failed. */
+export function PendingReceipt({ entry, onRetry }: { entry: PendingEntry; onRetry?: () => void }) {
+  const n = entry.notice;
+  const deposit = n.kind === "deposit";
+  const title = deposit
+    ? `Where your ${n.usdc !== undefined ? formatUsdShort(n.usdc) : `${formatTao(n.tao, 4)} TAO`} is going`
+    : `Your unstake of about ${formatUsd(n.usdc)}`;
+  return (
+    <>
+      <BackLink href={deposit ? "/activity" : "/activity?tab=unstakes"} />
+      <div className={`${app.card} ${styles.panel}`}>
+        <p className={styles.kicker}>
+          {formatDay(entry.createdAt)} {deposit ? "deposit" : "unstake"}
+        </p>
+        <h2 className={styles.panelTitle}>{title}</h2>
+        <p className={styles.confirming} role="status">
+          <span className="loading-spinner" aria-hidden="true" />
+          Submitted, confirming…
+        </p>
+        <p className={styles.panelText}>
+          Sent from this browser, and not confirmed here yet: its steps show as soon as Base and Bittensor have been read. Until
+          then, these are the figures it was sent with.
+        </p>
+        <dl className={styles.rows}>
+          {sentRows(n).map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
+        {entry.txUrl && (
+          <ReceiptLink href={entry.txUrl} className={styles.tx}>
+            View the transaction on Base
+          </ReceiptLink>
+        )}
+      </div>
+      {onRetry && <LoadError what={deposit ? "this deposit" : "this unstake"} onRetry={onRetry} />}
+    </>
+  );
+}
+
 function DepositDetail({ account, id }: { account: string; id: string }) {
-  const { data: deposit, isPending, isError, refetch } = useDeposit(account, id);
+  const { data: deposit, isPending, isFetching, isError, refetch } = useDeposit(account, id);
+  const entry = usePendingEntry(account, "deposit", id);
   const v3 = useIsV3();
   const { data: position } = usePosition(account);
   const wallet = useBalances(account);
   const flows = useFlows(account);
   const router = useRouter();
-  if (isError) return <LoadError what="this deposit" onRetry={() => void refetch()} />;
-  if (isPending) return <Loading label="Loading your deposit…" />;
+  const shows = receiptShows({ record: deposit, entry, isPending, isFetching, isError });
+  if (entry && (shows === "pending" || shows === "pending-error")) {
+    return <PendingReceipt entry={entry} {...(shows === "pending-error" ? { onRetry: () => void refetch() } : {})} />;
+  }
+  if (shows === "error") return <LoadError what="this deposit" onRetry={() => void refetch()} />;
+  if (shows === "loading") return <Loading label="Loading your deposit…" />;
   if (!deposit) return <NotFound what="deposit" />;
 
   const staked = deposit.status === "staked";
@@ -142,7 +204,9 @@ function DepositDetail({ account, id }: { account: string; id: string }) {
 }
 
 function WithdrawalDetail({ account, id }: { account: string; id: string }) {
-  const { data: withdrawal, isPending, isError, refetch } = useWithdrawal(account, id);
+  const { data: withdrawal, isPending, isFetching, isError, refetch } = useWithdrawal(account, id);
+  const entry = usePendingEntry(account, "withdrawal", id);
+  // the same query as the receipt's: one read serves both
   const all = useWithdrawals(account);
   const flows = useFlows(account);
   // a claim whose swap failed (with a batching wallet both roll back): offer the TAO without the swap
@@ -150,8 +214,12 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   // one claim pays everything back on Base, so it settles every unstake that is ready
   const ready = (all.data ?? []).filter(offersClaim).map((w) => w.id);
   const claimIds = ready.includes(id) ? ready : [...ready, id];
-  if (isError) return <LoadError what="this unstake" onRetry={() => void refetch()} />;
-  if (isPending) return <Loading label="Loading your unstake…" />;
+  const shows = receiptShows({ record: withdrawal, entry, isPending, isFetching, isError });
+  if (entry && (shows === "pending" || shows === "pending-error")) {
+    return <PendingReceipt entry={entry} {...(shows === "pending-error" ? { onRetry: () => void refetch() } : {})} />;
+  }
+  if (shows === "error") return <LoadError what="this unstake" onRetry={() => void refetch()} />;
+  if (shows === "loading") return <Loading label="Loading your unstake…" />;
   if (!withdrawal) return <NotFound what="unstake" />;
 
   const paid = withdrawal.status === "paid";
@@ -262,12 +330,26 @@ const TABS: { key: ActivityTab; label: string; href: string }[] = [
 
 /** Deposits or unstakes, one at a time. Each tab shows its count once known, and Unstakes a dot while
  * money is ready to claim (`offersClaim`, which clears once it's claimed or delivered), so a claim
- * can't hide behind Deposits. */
+ * can't hide behind Deposits. The open tab shows as soon as its own list is read. Until then (and above a
+ * list read before them) this browser's deposits and unstakes of the last day show at once from its own
+ * records, said to be unconfirmed, each giving way to its record once the list holds it. */
 export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   const deposits = useDeposits(account);
   const withdrawals = useWithdrawals(account);
+  const pending = {
+    deposits: usePendingEntries(account, "deposit", deposits.data),
+    unstakes: usePendingEntries(account, "withdrawal", withdrawals.data),
+  };
   const lists = { deposits: deposits.data, unstakes: withdrawals.data };
-  const failed = deposits.isError || withdrawals.isError;
+  const open = tab === "deposits" ? deposits : withdrawals;
+  const list = lists[tab];
+  const sent = pending[tab];
+  const rows =
+    tab === "deposits" ? (
+      <DepositList deposits={deposits.data ?? []} pending={sent} />
+    ) : (
+      <WithdrawalList withdrawals={withdrawals.data ?? []} pending={sent} />
+    );
   return (
     <>
       <nav className={styles.switch} aria-label="Activity">
@@ -284,7 +366,7 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
             >
               {t.label}
               {items && <span className="sr-only">: </span>}
-              <span className={styles.count}>{items ? items.length : ""}</span>
+              <span className={styles.count}>{items ? items.length + pending[t.key].length : ""}</span>
               {t.key === "unstakes" && withdrawals.data?.some(offersClaim) && (
                 <span className={styles.attention}>
                   <span className="sr-only">, money ready to claim</span>
@@ -294,19 +376,23 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
           );
         })}
       </nav>
-      {failed ? (
-        <LoadError
-          what="your activity"
-          onRetry={() => {
-            void deposits.refetch();
-            void withdrawals.refetch();
-          }}
-        />
-      ) : !deposits.data || !withdrawals.data ? (
+      {open.isError ? (
+        <>
+          {sent.length > 0 && <section className={styles.section}>{rows}</section>}
+          <LoadError
+            what="your activity"
+            onRetry={() => {
+              void deposits.refetch();
+              void withdrawals.refetch();
+            }}
+          />
+        </>
+      ) : !list && sent.length === 0 ? (
         <Loading />
       ) : (
         <section className={styles.section} aria-label={tab === "deposits" ? "Your deposits" : "Your unstakes"}>
-          {tab === "deposits" ? <DepositList deposits={deposits.data} /> : <WithdrawalList withdrawals={withdrawals.data} />}
+          {rows}
+          {!list && <Loading inline label="Reading the rest from Base and Bittensor…" />}
         </section>
       )}
     </>

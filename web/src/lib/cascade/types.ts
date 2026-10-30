@@ -165,10 +165,10 @@ export interface CascadeData {
   getLimits(): Promise<Limits>;
   getBalances(account: string): Promise<Balances>;
   listRewards(account: string): Promise<RewardRecord[]>;
+  /** Every deposit of the account (a receipt picks its own from this list: hooks.ts, useDeposit). */
   listDeposits(account: string): Promise<DepositRecord[]>;
-  getDeposit(account: string, id: string): Promise<DepositRecord | null>;
+  /** Every unstake of the account (a receipt picks its own from this list: hooks.ts, useWithdrawal). */
   listWithdrawals(account: string): Promise<WithdrawalRecord[]>;
-  getWithdrawal(account: string, id: string): Promise<WithdrawalRecord | null>;
   quoteDeposit(usdcUnits: bigint): Promise<DepositQuote>;
   quoteWithdrawal(account: string, shares: bigint): Promise<WithdrawalQuote>;
   /** The costs of a later unstake of `taoWei`, and Cascade's reward cut. */

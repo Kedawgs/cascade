@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { chainInfo } from "@/lib/cascade/chains";
+import type { PendingEntry } from "@/lib/cascade/pending";
 import type { DepositRecord, WithdrawalRecord } from "@/lib/cascade/types";
 import { formatDateTime, formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { TRANSIT_PHRASE } from "@/lib/lane";
@@ -30,12 +31,53 @@ function Chip({ status }: { status: DepositRecord["status"] | WithdrawalRecord["
   return <span className={`${styles.chip} ${styles.busy}`}>On its way</span>;
 }
 
-export function DepositList({ deposits }: { deposits: DepositRecord[] }) {
-  if (deposits.length === 0) {
+/** A deposit or unstake this browser sent that Activity hasn't read from the chain yet: what its own record
+ * says (the amount sent, the estimate), said to be unconfirmed. Its record takes its place once read. */
+function PendingRow({ entry }: { entry: PendingEntry }) {
+  const n = entry.notice;
+  return (
+    <li>
+      <Link href={n.kind === "deposit" ? `/activity?deposit=${n.id}` : `/activity?withdrawal=${n.id}`} className={styles.row}>
+        <span>
+          <span className={styles.t}>
+            {n.kind === "unstake"
+              ? "Unstake"
+              : `${n.usdc !== undefined ? formatUsdShort(n.usdc) : `${formatTao(n.tao, 4)} TAO`} from ${chainInfo("base").label}`}
+          </span>
+          <span className={styles.d}>{when(entry.createdAt)}</span>
+        </span>
+        <span className={styles.c}>
+          {n.kind === "unstake" ? (
+            <>
+              about {formatUsdc(n.usdc)} USDC
+              <small>on Base</small>
+            </>
+          ) : (
+            `${n.usdc !== undefined ? "about " : ""}${formatTao(n.tao, 4)} TAO`
+          )}
+        </span>
+        <span>
+          <span className={`${styles.chip} ${styles.busy}`}>Confirming</span>
+          <span className={styles.sub}>sent, not confirmed yet</span>
+        </span>
+        <span className={styles.chev} aria-hidden="true">
+          ›
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+/** The deposits read from the chain, below any this browser sent that aren't among them yet (`pending`). */
+export function DepositList({ deposits, pending = [] }: { deposits: DepositRecord[]; pending?: PendingEntry[] }) {
+  if (deposits.length === 0 && pending.length === 0) {
     return <p className={styles.empty}>No deposits yet. Stake some USDC and it will show up here.</p>;
   }
   return (
     <ul className={styles.list}>
+      {pending.map((e) => (
+        <PendingRow key={e.notice.id} entry={e} />
+      ))}
       {deposits.map((d) => {
         const done = d.steps.filter((s) => s.status === "done").length;
         const current = d.steps.find((s) => s.status === "active" || s.status === "action" || s.status === "failed");
@@ -73,8 +115,9 @@ export function DepositList({ deposits }: { deposits: DepositRecord[] }) {
   );
 }
 
-export function WithdrawalList({ withdrawals }: { withdrawals: WithdrawalRecord[] }) {
-  if (withdrawals.length === 0) {
+/** The unstakes read from the chain, below any this browser sent that aren't among them yet (`pending`). */
+export function WithdrawalList({ withdrawals, pending = [] }: { withdrawals: WithdrawalRecord[]; pending?: PendingEntry[] }) {
+  if (withdrawals.length === 0 && pending.length === 0) {
     return (
       <p className={styles.empty}>
         No unstakes yet. When you <Link href="/unstake">unstake</Link>, it shows up here with a receipt for every step.
@@ -83,6 +126,9 @@ export function WithdrawalList({ withdrawals }: { withdrawals: WithdrawalRecord[
   }
   return (
     <ul className={styles.list}>
+      {pending.map((e) => (
+        <PendingRow key={e.notice.id} entry={e} />
+      ))}
       {withdrawals.map((w) => {
         const done = w.steps.filter((s) => s.status === "done").length;
         return (

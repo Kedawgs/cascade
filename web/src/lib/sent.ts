@@ -81,18 +81,29 @@ function batchText(interval: number | undefined, maxWaitS: number | undefined): 
   return interval !== undefined ? `: batches leave ${every(interval)}.` : ".";
 }
 
+/** What was sent, as the panel and an unconfirmed receipt show it: estimates are "about", a deposit of
+ * wallet TAO's exact TAO isn't. */
+export function sentRows(n: SentNotice): [string, string][] {
+  if (n.kind === "unstake") {
+    return [
+      ["Unstaking", `about ${formatTao(n.tao, 4)} TAO`],
+      ["You will receive", `about ${formatUsdcCents(n.usdc)} USDC`],
+    ];
+  }
+  return n.usdc !== undefined
+    ? [
+        ["Amount", `${formatUsdc(n.usdc)} USDC`],
+        ["TAO (estimate)", `about ${formatTao(n.tao, 4)} TAO`],
+      ]
+    : [["Amount", `${formatTao(n.tao, 4)} TAO`]];
+}
+
 export function sentCopy(n: SentNotice, t: SentTiming): SentCopy {
   const batch = batchText(n.batchIntervalS, t.batchMaxWaitS);
   if (n.kind === "deposit") {
     return {
       title: "Your deposit is on its way",
-      rows:
-        n.usdc !== undefined
-          ? [
-              ["Amount", `${formatUsdc(n.usdc)} USDC`],
-              ["TAO (estimate)", `about ${formatTao(n.tao, 4)} TAO`],
-            ]
-          : [["Amount", `${formatTao(n.tao, 4)} TAO`]],
+      rows: sentRows(n),
       next: `Next it crosses to Bittensor in a batch${batch} It's staked about 20 minutes after it leaves.`,
       href: `/activity?deposit=${n.id}`,
     };
@@ -102,10 +113,7 @@ export function sentCopy(n: SentNotice, t: SentTiming): SentCopy {
   const payout = t.v3 ? "it's sold at your minimum price or better and the USDC is sent to your wallet" : "you claim it as USDC from its receipt";
   return {
     title: "Your unstake is requested",
-    rows: [
-      ["Unstaking", `about ${formatTao(n.tao, 4)} TAO`],
-      ["You will receive", `about ${formatUsdcCents(n.usdc)} USDC`],
-    ],
+    rows: sentRows(n),
     next: `Next it goes to Bittensor in a batch${batch} ${wait} comes back to Base, where ${payout}.`,
     href: `/activity?withdrawal=${n.id}`,
   };

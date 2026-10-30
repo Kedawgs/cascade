@@ -1,10 +1,16 @@
 "use client";
 
-import { keepPreviousData, type QueryClient, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, type Query, type QueryClient, useQuery } from "@tanstack/react-query";
+import type { Address } from "viem";
+import { useNow } from "../client-state";
 import { shownFigure, STATS_KEEP_MS } from "../stats";
 import { isV3 } from "./config";
 import { useCascadeData, useSnapshotAt } from "./context";
+import type { Operation } from "./oplog";
+import { type PendingEntry, pendingEntries, pendingEntry } from "./pending";
+import type { DepositRecord, WithdrawalRecord } from "./records";
 import type { Snapshot } from "./snapshot";
+import type { CascadeData } from "./types";
 import { WIRING_TTL_MS } from "./wiring";
 
 /** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
@@ -27,9 +33,7 @@ export const cascadeKeys = {
   available: (account: string) => ["cascade", account, "available"] as const,
   history: (account: string) => ["cascade", account, "history"] as const,
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
-  deposit: (account: string, id: string) => ["cascade", account, "deposit", id] as const,
   withdrawals: (account: string) => ["cascade", account, "withdrawals"] as const,
-  withdrawal: (account: string, id: string) => ["cascade", account, "withdrawal", id] as const,
   depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
   withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
   roundTrip: (taoWei: bigint) => ["quote", "round-trip", taoWei.toString()] as const,
@@ -162,40 +166,66 @@ export function useProof(live = false) {
 
 const moving = (s: string) => s === "in_progress" || s === "needs_you";
 
+/** The account's deposits: one query for the list, the lane and each receipt. */
+const depositsQuery = (data: CascadeData, account: string) => ({
+  queryKey: cascadeKeys.deposits(account),
+  queryFn: () => data.listDeposits(account),
+  refetchInterval: (q: Query<DepositRecord[]>) => (q.state.data?.some((d) => moving(d.status)) ? LIVE_MS : IDLE_MS),
+});
+
+/** The account's unstakes: one query for the list, the claim banner and each receipt. */
+const withdrawalsQuery = (data: CascadeData, account: string) => ({
+  queryKey: cascadeKeys.withdrawals(account),
+  queryFn: () => data.listWithdrawals(account),
+  refetchInterval: (q: Query<WithdrawalRecord[]>) => (q.state.data?.some((w) => moving(w.status) || w.status === "ready") ? LIVE_MS : IDLE_MS),
+});
+
 export function useDeposits(account: string) {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.deposits(account),
-    queryFn: () => data.listDeposits(account),
-    refetchInterval: (q) => (q.state.data?.some((d) => moving(d.status)) ? LIVE_MS : IDLE_MS),
-  });
+  return useQuery(depositsQuery(data, account));
 }
 
+/** One deposit, picked from the account's list (null when the list doesn't hold it): a receipt reads
+ * nothing of its own, so one opened from the list shows at once, and a receipt and the list on screen
+ * together read the chain once, not twice. */
 export function useDeposit(account: string, id: string) {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.deposit(account, id),
-    queryFn: () => data.getDeposit(account, id),
-    refetchInterval: (q) => (q.state.data && moving(q.state.data.status) ? LIVE_MS : IDLE_MS),
-  });
+  return useQuery({ ...depositsQuery(data, account), select: (list: DepositRecord[]) => list.find((d) => d.id === id) ?? null });
 }
 
 export function useWithdrawals(account: string) {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.withdrawals(account),
-    queryFn: () => data.listWithdrawals(account),
-    refetchInterval: (q) => (q.state.data?.some((w) => moving(w.status) || w.status === "ready") ? LIVE_MS : IDLE_MS),
-  });
+  return useQuery(withdrawalsQuery(data, account));
 }
 
+/** One unstake, picked from the account's list (as useDeposit). */
 export function useWithdrawal(account: string, id: string) {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.withdrawal(account, id),
-    queryFn: () => data.getWithdrawal(account, id),
-    refetchInterval: (q) => (q.state.data && (moving(q.state.data.status) || q.state.data.status === "ready") ? LIVE_MS : IDLE_MS),
-  });
+  return useQuery({ ...withdrawalsQuery(data, account), select: (list: WithdrawalRecord[]) => list.find((w) => w.id === id) ?? null });
+}
+
+/** This browser's own records (the op log), or none where there is no deployment. Read from storage
+ * on each render: they are never the chain's word, only what this browser sent. */
+function opsOf(data: CascadeData, account: string): Operation[] {
+  try {
+    return data.opLog.list(account as Address);
+  } catch {
+    return [];
+  }
+}
+
+/** This browser's deposits or unstakes of the last day that `listed` (the list read from the chain, once
+ * read) doesn't hold yet: shown at once, unconfirmed, while Activity reads the chain (pending.ts). */
+export function usePendingEntries(account: string, kind: "deposit" | "withdrawal", listed: readonly { id: string }[] | undefined): PendingEntry[] {
+  const data = useCascadeData();
+  const now = useNow(60_000);
+  return pendingEntries(opsOf(data, account), kind, listed, now);
+}
+
+/** This browser's own entry for its deposit (or unstake) `id`, if it sent it and it went through. */
+export function usePendingEntry(account: string, kind: "deposit" | "withdrawal", id: string): PendingEntry | null {
+  const op = opsOf(useCascadeData(), account).find((o) => o.id === id && o.kind === kind);
+  return op ? pendingEntry(op) : null;
 }
 
 export function useDepositQuote(usdcUnits: bigint | null) {

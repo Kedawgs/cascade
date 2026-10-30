@@ -108,7 +108,12 @@ for display only (`units.ts`).
 - **Activity without an indexer:** `oplog.ts` keeps, in the browser, the transactions this site sent
   for each account; `facts.ts` follows each one through the site's own receipts, direct reads and the
   vault's Bittensor logs (1,000-block windows); `trail.ts` turns that into the receipt trails.
-  Deposits made from another browser still appear, from the vault's `Deposited` events.
+  Deposits made from another browser still appear, from the vault's `Deposited` events. Reading the
+  history waits on Bittensor, so until it is read, this browser's own deposits and unstakes of the last
+  day that went through show at once from the op log (`pending.ts`), marked "Confirming" and never with
+  more than the figures they were sent with; each gives way to its record, by id, once the list read from
+  the chain holds it. A receipt (`?deposit=` / `?withdrawal=`) picks its record from the same list query
+  as the list, so one opened from the list shows at once and the two never read the chain twice.
 - **Prices and fees:** TAO from Uniswap's quoter (what selling 0.01 TAO pays), swap fees from the
   route's pool fees, the bridge fee from the Bittensor adapter's own `quoteFee`.
 

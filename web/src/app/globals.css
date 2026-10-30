@@ -267,6 +267,21 @@ ul {
   font-size: 14px;
 }
 
+.loading-inline {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 0;
+  padding: 16px 0;
+  font-size: 13.5px;
+}
+
+.loading-inline .loading-spinner {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
 .loading-spinner {
   width: 22px;
   height: 22px;

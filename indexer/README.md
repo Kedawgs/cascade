@@ -83,7 +83,7 @@ it at the start of every invocation and refuses to run on a bad config, with a l
 - **`DEPLOYMENT`**: the deployment's addresses and blocks. `pnpm config:from-record <ops record>` prints it from
   a verified ops record (addresses checksummed, Bittensor starting at the Bittensor adapter's block, which is the
   site's `NEXT_PUBLIC_CASCADE_BIT_BLOCK`). `env.test` already holds the v3 test deployment's; `env.production`
-  is a placeholder until the launch record exists.
+  holds the launch's (v3-launch).
 - **RPC URLs**: `BASE_RPC_URL` (state reads), `BASE_LOGS_RPC_URL` (log scans) and `BITTENSOR_RPC_URL`. The Base
   logs URL must **not** be `https://mainnet.base.org`: it refuses `eth_getLogs`. The default,
   `https://base-rpc.publicnode.com`, answers 100-block windows. Bittensor must be an archive node
@@ -169,7 +169,8 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
 11. A rate-limiting rule on the API path (`api.cascadefi.xyz/v1/scan/*`).
 12. The site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). The keeper: set `OPS_HOLD_URL`
     (after the keeper tasks).
-13. Production: the same steps with `--env production` and the launch deployment's record, once it exists.
+13. Production: the same steps with `--env production` (its database `cascade-indexer-production`). Step 5 is
+    done: `env.production` already holds v3-launch's `DEPLOYMENT`.
 
 ## When an email arrives
 

@@ -105,9 +105,7 @@
         }
       }
     },
-    // The launch deployment, once it exists, in the same account as test. Until its DEPLOYMENT is
-    // pasted (`pnpm config:from-record ../ops/deployments/<launch record>.json`) the Worker refuses to
-    // run in it.
+    // The launch deployment (v3-launch), in the same account as test.
     "production": {
       "d1_databases": [
         {
@@ -118,9 +116,26 @@
         }
       ],
       "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
-      // As test's, with the launch deployment's own DEPLOYMENT (and, at launch, ALERT_MODE "send").
+      // As test's, with the launch deployment's own DEPLOYMENT (and, once the owner has chosen and verified
+      // a recipient after the first deploy, ALERT_MODE "send").
       "vars": {
-        "DEPLOYMENT": "not configured: paste the JSON printed by pnpm config:from-record",
+        // The v3-launch deployment's addresses and blocks, as `pnpm config:from-record
+        // ../ops/deployments/v3-launch.json` prints them (verified 2026-10-30): Bittensor starts at the
+        // Bittensor adapter's creation block, the site's NEXT_PUBLIC_CASCADE_BIT_BLOCK; the launch cadence's
+        // 24-hour close wait. BRIDGES isn't set: it defaults to these two adapters.
+        "DEPLOYMENT": {
+          "base": { "chainId": 8453, "startBlock": "53295800", "baselineBlock": "53295834" },
+          "bittensor": { "chainId": 964, "startBlock": "9398120", "baselineBlock": "9398130" },
+          "frontDoor": "0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA",
+          "baseAdapter": "0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92",
+          "staker": "0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E",
+          "oracle": "0xcAa85F00b6e470Dd28a31FBa982267B820736eBc",
+          "vault": "0x450cD94401B45c72C09734071fe683F6b74Aea72",
+          "bitAdapter": "0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1",
+          "vaultColdkey": "0x64697e140ee4cf255f1dd88ee3afaef243310ee8e87ce9334137947fa575040a",
+          "stakeHotkey": "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748",
+          "batchMaxWaitS": 86400
+        },
         "BASE_RPC_URL": "https://mainnet.base.org",
         "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",

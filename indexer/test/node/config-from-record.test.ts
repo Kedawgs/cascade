@@ -127,3 +127,22 @@ describe("the test environment in wrangler.jsonc", () => {
     expect(cfg.rpc.baseLogs).toBe("https://base-rpc.publicnode.com");
   });
 });
+
+describe("the production environment in wrangler.jsonc", () => {
+  const productionVars = () => (readJsonc(pkg("wrangler.jsonc")) as { env: { production: { vars: Record<string, unknown> } } }).env.production.vars;
+
+  it("holds the v3-launch deployment, as pnpm config:from-record printed it from the launch record, and the Worker parses it", () => {
+    const cfg = parseConfig(productionVars());
+    // the launch's addresses (web/src/lib/cascade/deployments.json "v3-launch") and the 24-hour close wait
+    expect(cfg.deployment.frontDoor).toBe("0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA".toLowerCase());
+    expect(cfg.deployment.vault).toBe("0x450cD94401B45c72C09734071fe683F6b74Aea72".toLowerCase());
+    expect(cfg.deployment.bitAdapter).toBe("0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1".toLowerCase());
+    expect(cfg.deployment.bittensor.startBlock).toBe(9398120n);
+    expect(cfg.deployment.base.startBlock).toBe(53295800n);
+    expect(cfg.deployment.batchMaxWaitS).toBe(86_400);
+  });
+
+  it("keeps writing alerts to the log until the owner chooses a recipient and deploys", () => {
+    expect(productionVars().ALERT_MODE).toBe("log");
+  });
+});

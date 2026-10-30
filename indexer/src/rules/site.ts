@@ -22,9 +22,10 @@ const UNAPPROVED: Record<SiteResult["unapproved"][number]["kind"], { subject: st
 };
 
 /** site.integrity (critical): in the last pass, an address or host not approved, a script loaded from a host
- * not approved as a script source, a configured Cascade address missing (a complete pass only), or a file it
- * couldn't check: over the byte cap, or one that stopped a site-check invocation. One alert per thing found,
- * for as long as passes keep finding it. */
+ * not approved as a script source, a page whose Content-Security-Policy is missing or isn't the build's, a
+ * configured Cascade address missing (a complete pass only), or a file it couldn't check: over the byte cap,
+ * or one that stopped a site-check invocation. One alert per thing found, for as long as passes keep finding
+ * it. */
 export const siteIntegrity: Rule = {
   name: "site.integrity",
   run(ctx) {
@@ -35,6 +36,14 @@ export const siteIntegrity: Rule = {
     for (const u of r.unapproved) {
       const k = UNAPPROVED[u.kind];
       out.push({ rule: "site.integrity", key: `site.integrity:${u.kind}:${u.value}`, subject: k.subject, facts: { [k.fact]: u.value, file: u.file, pass } });
+    }
+    for (const c of r.csp ?? []) {
+      out.push({
+        rule: "site.integrity",
+        key: `site.integrity:csp:${c.page}`,
+        subject: "A page of the live site doesn't carry the approved Content-Security-Policy",
+        facts: { page: c.page, csp: c.detail, pass },
+      });
     }
     if (r.capped) {
       out.push({

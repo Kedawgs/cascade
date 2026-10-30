@@ -155,15 +155,19 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
    environment's vars.
 6. The approved site lists: build the site you are about to deploy, then
    `pnpm --dir indexer site:approved ../web/out`, review the change to `indexer/src/site-approved.ts` and commit
-   it. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). It writes three
-   lists: the addresses; the **script hosts**, hosts the pages really load a script from (a cross-origin
-   `<script src>`, or a host in a `script-src` of `out/_headers`: none today); and the hosts **seen in the
-   bundle**, which a page or script may name but never load a script from (a dependency's gateways, such as
-   arweave.net and ipfs.io, are only seen). When the site check reports something Cloudflare itself injects into
-   the served pages, check it is Cloudflare's and run it again with `--extra-script-hosts <host>` for a script
-   loaded from it (the Web Analytics beacon, `static.cloudflareinsights.com`) or `--extra-hosts <host>` for a
-   host a `/cdn-cgi/` script names (comma-separated for several): the hand-added hosts are named in the file, so
-   they stay reviewable in git. Re-run this whenever the site is redeployed with new dependencies.
+   it. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). It writes the
+   addresses; the **script hosts**, hosts the pages really load a script from (a cross-origin `<script src>`, or
+   a host in a `script-src` of `out/_headers`: none today); the hosts **seen in the bundle**, which a page or
+   script may name but never load a script from (a dependency's gateways, such as arweave.net and ipfs.io, are
+   only seen); and each page's **Content-Security-Policy** from `out/_headers` (it refuses a build without one
+   for every page). When the site check reports something Cloudflare itself injects into the served pages, check
+   it is Cloudflare's and run it again with `--extra-script-hosts <host>` for a script loaded from it (the Web
+   Analytics beacon, `static.cloudflareinsights.com`) or `--extra-hosts <host>` for a host a `/cdn-cgi/` script
+   names (comma-separated for several): the hand-added hosts are named in the file, so they stay reviewable in
+   git. **Re-run this, commit it and redeploy the Worker on every site deploy**: each build changes its pages'
+   inline-script hashes, so their policies, and a live policy that isn't the approved one is a critical
+   `site.integrity` (it clears on the first pass after the Worker has the new lists, within the hour). Deploy the
+   site and the Worker back to back: a pass falls between them rarely, and then only until the next one.
 7. Deploy, still in log mode (`"ALERT_MODE": "log"` as shipped, which needs no `ALERT_TO`):
    `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascadefi.xyz`), or use the
    `workers.dev` URL to start.
@@ -217,9 +221,11 @@ On v3-test the owner, guardian and keeper are one address, so a reverted keeper 
 
 ## Limits worth knowing
 
-- **The site check is a tripwire over the scripts' text.** An address or host built at run time (by string
-  concatenation, or fetched from elsewhere) isn't seen, and a site that serves the monitor a clean copy and its
-  users a tampered one can't be caught from outside. A file that stopped a site-check run points to the CPU
+- **The site check is a tripwire over the scripts' text and the pages' policies.** An address or host built at
+  run time (by string concatenation, or fetched from elsewhere) isn't seen; what stops such a script loading is
+  the page's Content-Security-Policy (`script-src 'self'` and the build's own inline-script hashes), which the
+  check compares with the build's on every page. A site that serves the monitor a clean copy and its users a
+  tampered one can't be caught from outside. A file that stopped a site-check run points to the CPU
   limit (Workers Paid, or `SITE_FILES_PER_RUN=1`), not the byte cap.
 - **FM-TAO's backing check is a weak backstop.** `fmtao.unbacked` compares FM-TAO's supply on Base with the
   Bittensor lock pool, which also backs FM-TAO on other chains, so the lock is far above Base's supply (read

@@ -1,8 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { approvedLists, main, readHeaders, readOut, renderApproved, scriptSrcHosts } from "../../scripts/site-approved.ts";
+import { approvedLists, cspFor, headerRules, main, readHeaders, readOut, renderApproved, scriptSrcHosts } from "../../scripts/site-approved.ts";
+import { APPROVED_CSP } from "../../src/site-approved.ts";
+import { pkg, readJsonc } from "./files.ts";
 
 const A = "0x8A825738D0287D0959957A0f6ec18bA1276d209d";
 const B = "0x44CeaCE0b097D9d5eF01e08b12029Ad2762cbDC6";
@@ -18,9 +20,14 @@ function fixtureOut(): string {
   // a gateway host a dependency merely names (as viem's and the wallet SDK's chunks do): seen, never a script source
   writeFileSync(join(dir, "_next", "static", "chunks", "main.js"), `x="${A.toLowerCase()}";u="https://mainnet.base.org";g="https://arweave.net/";h="0x${"ab".repeat(32)}"`);
   writeFileSync(join(dir, "_next", "static", "chunks", "skip.css"), `u="https://not-scanned.example.com"`);
-  writeFileSync(join(dir, "_headers"), `# a comment: https://not-a-rule.example.com\n/*\n  Content-Security-Policy: ${POLICY}\n  X-Frame-Options: DENY\n`);
+  writeFileSync(join(dir, "404.html"), "<p>not found</p>");
+  writeFileSync(
+    join(dir, "_headers"),
+    `# a comment: https://not-a-rule.example.com\n/*\n  Content-Security-Policy: ${POLICY}\n  X-Frame-Options: DENY\n\n/stake/\n  Content-Security-Policy: ${STAKE}\n`,
+  );
   return dir;
 }
+const STAKE = "default-src 'self'; script-src 'self' 'sha256-stake='";
 
 const lists = (dir: string) => approvedLists(readOut(dir), readHeaders(dir));
 
@@ -49,6 +56,47 @@ describe("pnpm site:approved", () => {
     expect(lists(dir).scriptHosts).toEqual(["cdn.csp.example", "cdn.example.com"]);
   });
 
+  it("records each page's Content-Security-Policy: every policy of every _headers rule matching its path, in order", () => {
+    expect(lists(fixtureOut()).csp).toEqual({ "/": [POLICY], "/stake/": [POLICY, STAKE] });
+    const rules = headerRules(
+      [
+        "/*",
+        `  Content-Security-Policy: ${POLICY}`,
+        "/faq/*",
+        "  ! Content-Security-Policy",
+        "/faq/:part/",
+        `  content-security-policy:   ${STAKE};  `,
+        "/x.html",
+        "  Content-Security-Policy: default-src 'none'",
+      ].join("\n"),
+    );
+    expect(cspFor(rules, "/")).toEqual([POLICY]);
+    // a detached header drops what earlier rules set; a placeholder matches one segment
+    expect(cspFor(rules, "/faq/")).toEqual([]);
+    expect(cspFor(rules, "/faq/a/")).toEqual([STAKE]);
+    expect(cspFor(rules, "/faq/a/b/")).toEqual([]);
+    // a dot in a pattern is a dot
+    expect(cspFor(rules, "/xahtml")).toEqual([POLICY]);
+  });
+
+  it("refuses an export without _headers, a page without a policy, or a rule for another host", async () => {
+    const target = (dir: string) => join(dir, "site-approved.ts");
+    const lines: string[] = [];
+    const run = (dir: string) => main([dir], { target: target(dir), print: (l) => lines.push(l), today: () => "x" });
+    const none = fixtureOut();
+    rmSync(join(none, "_headers"));
+    expect(await run(none)).toBe(2);
+    expect(lines.pop()).toContain("no _headers");
+    const bare = fixtureOut();
+    writeFileSync(join(bare, "_headers"), `/stake/\n  Content-Security-Policy: ${STAKE}\n`);
+    expect(await run(bare)).toBe(2);
+    expect(lines.pop()).toContain("no Content-Security-Policy for /");
+    const host = fixtureOut();
+    writeFileSync(join(host, "_headers"), `/*\n  Content-Security-Policy: ${POLICY}\nhttps://other.example/*\n  X-Robots-Tag: noindex\n`);
+    expect(await run(host)).toBe(2);
+    expect(lines.pop()).toContain("https://other.example/*");
+  });
+
   it("writes src/site-approved.ts with the lists and the build date", async () => {
     const dir = fixtureOut();
     const target = join(dir, "site-approved.ts");
@@ -59,6 +107,7 @@ describe("pnpm site:approved", () => {
     expect(text).toContain(`"${A.toLowerCase()}"`);
     expect(text).toContain('APPROVED_SCRIPT_HOSTS: readonly string[] = [\n  "cdn.example.com",\n];');
     expect(text).toContain('SEEN_IN_BUNDLE_HOSTS: readonly string[] = [\n  "arweave.net",\n  "basescan.org",\n  "cdn.example.com",\n  "mainnet.base.org",\n];');
+    expect(text).toContain(`APPROVED_CSP: Readonly<Record<string, readonly string[]>> = {\n  "/": [\n    ${JSON.stringify(POLICY)},\n  ],\n  "/stake/": [`);
     expect(text).toBe(renderApproved(lists(dir), "2027-01-15"));
     expect(lines.join("\n")).toContain("largest file");
     expect(await main([], { target, print: () => undefined, today: () => "x" })).toBe(2);
@@ -82,5 +131,12 @@ describe("pnpm site:approved", () => {
       expect(await main([dir, flag, "*.example.com"], { target, print, today: () => "x" })).toBe(2);
       expect(await main([dir, flag], { target, print, today: () => "x" })).toBe(2);
     }
+  });
+});
+
+describe("src/site-approved.ts", () => {
+  it("has an approved Content-Security-Policy for every page each environment checks (else every pass reports it)", () => {
+    const env = (readJsonc(pkg("wrangler.jsonc")) as { env: Record<string, { vars: { SITE_PAGES: string[] } }> }).env;
+    for (const name of ["production", "test"]) for (const page of env[name].vars.SITE_PAGES) expect(APPROVED_CSP[page]?.length, `${name} ${page}`).toBeGreaterThan(0);
   });
 });

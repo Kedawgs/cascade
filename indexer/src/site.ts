@@ -62,6 +62,43 @@ export function pageScripts(html: string, origin: string): { srcs: string[]; for
   return { srcs: [...srcs], foreignHosts: [...foreign].sort(), embedded: [...embedded].sort() };
 }
 
+/** A Content-Security-Policy header's policies, each normalized (directives trimmed, their names lowercased,
+ * runs of spaces made one, empty ones dropped, joined by "; "). Several policies come comma-separated: Cloudflare
+ * sends one header per matching _headers rule, and fetch joins them with ", " (a policy holds no comma). */
+export function cspPolicies(header: string | null | undefined): string[] {
+  if (!header) return [];
+  return header
+    .split(",")
+    .map((p) =>
+      p
+        .split(";")
+        .map((d) => d.trim().split(/\s+/))
+        .filter((d) => d[0] !== "")
+        .map(([name, ...sources]) => [name.toLowerCase(), ...sources].join(" "))
+        .join("; "),
+    )
+    .filter((p) => p !== "");
+}
+
+/** How a page's live policies differ from the approved ones: undefined when they are the same (in any order),
+ * else a short line naming what differs (the header missing, or the directives that differ). */
+export function cspDifference(approved: readonly string[], live: readonly string[]): string | undefined {
+  const a = [...approved].sort();
+  const l = [...live].sort();
+  if (a.length === l.length && a.every((p, i) => p === l[i])) return undefined;
+  if (l.length === 0) return "the page has no Content-Security-Policy";
+  const count = (ps: readonly string[]) => {
+    const m = new Map<string, number>();
+    for (const d of ps.flatMap((p) => p.split("; "))) m.set(d, (m.get(d) ?? 0) + 1);
+    return m;
+  };
+  const ca = count(a);
+  const cl = count(l);
+  const names = [...new Set([...ca.keys(), ...cl.keys()].filter((d) => ca.get(d) !== cl.get(d)).map((d) => d.split(" ")[0]))].sort();
+  const policies = a.length === l.length ? "" : `${l.length} polic${l.length === 1 ? "y" : "ies"} where the build has ${a.length}; `;
+  return `${policies}${names.length ? `differs in ${names.join(", ")}` : "the same directives, split into other policies"}`;
+}
+
 /** Whether `host` (lowercase) is on `list`: by name, or below a `*.domain` wildcard (a CSP host source). */
 export const hostListed = (list: readonly string[], host: string): boolean =>
   list.some((x) => {

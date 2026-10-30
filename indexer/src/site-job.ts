@@ -1,6 +1,6 @@
 import type { Config } from "./config.ts";
-import { hostListed, pageScripts, readCapped, type ScanResult, scanScript } from "./site.ts";
-import { APPROVED_ADDRESSES, APPROVED_SCRIPT_HOSTS, SEEN_IN_BUNDLE_HOSTS } from "./site-approved.ts";
+import { cspDifference, cspPolicies, hostListed, pageScripts, readCapped, type ScanResult, scanScript } from "./site.ts";
+import { APPROVED_ADDRESSES, APPROVED_CSP, APPROVED_SCRIPT_HOSTS, SEEN_IN_BUNDLE_HOSTS } from "./site-approved.ts";
 import { setMeta } from "./store.ts";
 
 // The site check (spec 6.6), in its own cron every two minutes, never the tick: a tampered site could serve a
@@ -42,6 +42,8 @@ interface Pass {
   scriptHosts?: Record<string, string>;
   /** scripts whose source is a data: or blob: URL ("data: URL"), with the page that loads them */
   embedded?: Record<string, string>;
+  /** pages whose Content-Security-Policy header isn't the approved one, with how it differs */
+  csp?: Record<string, string>;
   problems: SiteProblem[];
   capped: boolean;
 }
@@ -54,6 +56,8 @@ export interface SiteResult {
   /** an address or host named that isn't approved, a host a page loads a script from that isn't approved as a
    * script source (`script_host`), or a script from a data: or blob: URL (`script`, never approved) */
   unapproved: { kind: "address" | "host" | "script_host" | "script"; value: string; file: string }[];
+  /** pages whose Content-Security-Policy header is missing or isn't the build's (out/_headers), with how */
+  csp?: { page: string; detail: string }[];
   /** configured Cascade addresses found nowhere (judged on a complete pass only) */
   missing: string[];
   problems: SiteProblem[];
@@ -70,9 +74,11 @@ export interface ApprovedLists {
   scriptHosts: readonly string[];
   /** hosts the bundle merely names: approved as a mention, never as a script source */
   bundleHosts: readonly string[];
+  /** each page's Content-Security-Policy policies (normalized, any order) */
+  csp: Readonly<Record<string, readonly string[]>>;
 }
 
-const APPROVED: ApprovedLists = { addresses: APPROVED_ADDRESSES, scriptHosts: APPROVED_SCRIPT_HOSTS, bundleHosts: SEEN_IN_BUNDLE_HOSTS };
+const APPROVED: ApprovedLists = { addresses: APPROVED_ADDRESSES, scriptHosts: APPROVED_SCRIPT_HOSTS, bundleHosts: SEEN_IN_BUNDLE_HOSTS, csp: APPROVED_CSP };
 
 export interface SiteJobOptions {
   db: D1Database;
@@ -110,6 +116,10 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
   const scan = o.scanText ?? scanScript;
   const maxFiles = o.maxFiles ?? MAX_FILES;
   const clock = o.clock ?? (() => nowS);
+  const approved = o.approved ?? APPROVED;
+  // lists not generated yet: judging against them would report everything, so nothing is judged
+  const noApprovedLists =
+    approved.addresses.length === 0 && approved.scriptHosts.length === 0 && approved.bundleHosts.length === 0 && Object.keys(approved.csp).length === 0;
   const get = async (path: string) =>
     o.fetch(new URL(path, cfg.site.url).toString(), { signal: AbortSignal.timeout(FETCH_TIMEOUT_S * 1000), headers: { accept: "text/html, application/javascript, */*" } });
   const ok = async () => {
@@ -170,6 +180,15 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
         continue;
       }
       answered++;
+      // the policy the browser enforces on the page (it decides which scripts run), judged before the body is
+      // read, so a page over the byte cap is judged on it too
+      if (!noApprovedLists) {
+        const want = approved.csp[page];
+        const differs = want
+          ? cspDifference(want, cspPolicies(res.headers.get("content-security-policy")))
+          : "no approved policy: the build approved has no such page (pnpm site:approved on the build deployed)";
+        if (differs) (p.csp ??= {})[page] = differs;
+      }
       const r = await readCapped(res, cfg.budgets.siteMaxBytes);
       if ("tooLarge" in r) {
         p.problems.push({ file: page, kind: "too_large", detail: `over the byte cap (${cfg.budgets.siteMaxBytes} bytes)` });
@@ -226,9 +245,6 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     await put("site_pass", JSON.stringify(pass));
     return { checked, finished: false };
   }
-  const approved = o.approved ?? APPROVED;
-  // lists not generated yet: judging against them would report everything, so nothing is judged
-  const noApprovedLists = approved.addresses.length === 0 && approved.scriptHosts.length === 0 && approved.bundleHosts.length === 0;
   const okAddresses = new Set(approved.addresses.map((a) => a.toLowerCase()));
   // a host may be named if the bundle names it or a page may load scripts from it; loaded from only if the latter
   const okNamed = [...approved.bundleHosts, ...approved.scriptHosts];
@@ -254,6 +270,7 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
             .map(([value, file]) => ({ kind: "host" as const, value, file })),
           ...Object.entries(pass.embedded ?? {}).map(([value, file]) => ({ kind: "script" as const, value, file })),
         ],
+    csp: Object.entries(pass.csp ?? {}).map(([page, detail]) => ({ page, detail })),
     missing: complete ? ours.filter((a) => pass.addresses[a] === undefined) : [],
     problems: pass.problems,
     capped: pass.capped,

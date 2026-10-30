@@ -864,9 +864,12 @@ invocation doesn't send it twice. Its arrival is itself a heartbeat: no digest m
 *call*: compare the live site against **approved lists** committed in `indexer/src/site-approved.ts`, generated
 by `pnpm site:approved ../web/out` from the static export the owner is about to deploy: every 0x-address found in
 its HTML and JavaScript; the **script hosts**, hosts its pages really load a script from (a cross-origin `<script
-src>`, modulepreload or preload, or a host in a `script-src` of `out/_headers`); and every host its text names,
+src>`, modulepreload or preload, or a host in a `script-src` of `out/_headers`); every host its text names,
 **seen in the bundle**: approved as a mention, never as a script source (a dependency names IPFS and Arweave
-gateways the site never loads a script from).
+gateways the site never loads a script from); and each page's **Content-Security-Policy**, the policies
+`out/_headers` gives it (the `/*` fallback's and the page's own), which the live page's header must carry exactly
+(in any order). The policies change with every build (the inline scripts' hashes), so the lists are regenerated,
+and the Worker redeployed, on every site deploy.
 
 - **What is checked.** A pass starts from the pages in `SITE_PAGES` (every page of the site, all 8): the whole page
   (inline scripts, and addresses and hosts in attributes), every same-origin `<script src>` and
@@ -880,7 +883,8 @@ gateways the site never loads a script from).
   seen too, so it must be approved like the build's own hosts.
 - **Findings.** Critical `site.integrity` when a configured Cascade address (front door, staker, vault, adapters,
   oracle) is missing from a complete pass, an address or host appears that isn't approved (a new RPC endpoint
-  counts), a file couldn't be checked (below), or a pass was capped; warning `site.unreachable` after 30 minutes
+  counts), a page loads a script from a host that isn't a script host, a page's Content-Security-Policy is
+  missing or isn't the build's, a file couldn't be checked (below), or a pass was capped; warning `site.unreachable` after 30 minutes
   without a fetch, or when a pass completes with files it couldn't read. While the approved lists are empty (not
   generated yet) nothing is judged against them: one warning `site.no_approved_lists` says so.
 - **Its own cron, never the tick** (*call*). The site is outside our control: a tampered site could serve a huge
@@ -901,9 +905,10 @@ gateways the site never loads a script from).
   So the cron is how often a run may work, not how often the site is judged: the real build (8 pages, 32
   scripts) is a pass of two runs, and a change to the live site is judged within about 64 minutes (40 minutes
   more at most for a pass at the 400-file cap).
-- **Limits, stated.** An address assembled at run time, or code fetched from elsewhere at run time, is not seen;
-  content hashes are not compared (they change with every build, while the address and host lists change only
-  when dependencies or the deployment do, so the owner refreshes them rarely and reviews them in git). The check
+- **Limits, stated.** An address assembled at run time, or code fetched from elsewhere at run time, is not seen
+  (the page's Content-Security-Policy, which is compared, is what keeps such code from loading); the scripts'
+  content hashes are not compared (the address and host lists change only when dependencies or the deployment
+  do, and the owner reviews them in git; the policies change with every build). The check
   runs from Cloudflare, so it guards against DNS and build tampering more than against an account takeover. And
   no outside check can catch a site that serves the monitor a clean copy and its users a tampered one.
 

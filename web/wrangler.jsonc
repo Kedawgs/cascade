@@ -2,6 +2,8 @@
 // Deploy from this folder (web/) only, after `pnpm build` with the deployment's NEXT_PUBLIC_* values:
 // wrangler reads the wrangler.jsonc of the folder it runs in, and indexer/ has its own.
 // out/_headers (security headers, per-page CSP hashes) is applied by Workers to every asset response.
+// Every build changes those hashes, and the monitor compares each page's live CSP with the build's: with each
+// deploy, run `pnpm --dir ../indexer site:approved ../web/out`, commit it and redeploy the indexer too.
 {
   "name": "cascade-site",
   "compatibility_date": "2026-10-28",

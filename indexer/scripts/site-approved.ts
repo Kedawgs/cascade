@@ -1,16 +1,16 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { pageScripts, scanScript } from "../src/site.ts";
+import { cspPolicies, pageScripts, scanScript } from "../src/site.ts";
 
 // pnpm site:approved ../web/out [--extra-hosts <host,…>] [--extra-script-hosts <host,…>]
 //
 // Writes src/site-approved.ts from the static export about to be deployed (its HTML, its _next/static
 // JavaScript and its _headers), which the site check compares the live site against (spec 6.6): every
-// 0x-address; the hosts its pages load scripts from (the only hosts a live page may load a script from); and
-// every host its text names (approved as a mention only). Run it on the build you deploy, review the lists in
-// git, then deploy the Worker with them. It also prints the largest file: on Workers Free a chunk near the
-// byte cap (SITE_MAX_BYTES) can use up a run's CPU.
+// 0x-address; the hosts its pages load scripts from (the only hosts a live page may load a script from); every
+// host its text names (approved as a mention only); and each page's Content-Security-Policy. Run it on the
+// build you deploy, review the lists in git, then deploy the Worker with them. It also prints the largest file:
+// on Workers Free a chunk near the byte cap (SITE_MAX_BYTES) can use up a run's CPU.
 
 const TARGET = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "site-approved.ts");
 /** Any origin will do for reading the export's pages: their own scripts are paths, so a script with a host is
@@ -34,19 +34,57 @@ export function readOut(dir: string): OutFile[] {
 /** The export's _headers file (written by the site's `pnpm build`), or "" when it has none. */
 export const readHeaders = (dir: string): string => (existsSync(join(dir, "_headers")) ? readFileSync(join(dir, "_headers"), "utf8") : "");
 
-/** A _headers file's rules, in order: each URL pattern with its headers (names lowercased). Comments and blank
- * lines are skipped. */
-export function headerRules(text: string): { pattern: string; headers: [string, string][] }[] {
-  const rules: { pattern: string; headers: [string, string][] }[] = [];
+type HeaderRule = { pattern: string; headers: [string, string][] };
+
+/** A _headers file's rules, in order: each URL pattern with its headers (names lowercased; `! Name`, which
+ * detaches a header earlier rules set, as `!name`). Comments and blank lines are skipped. */
+export function headerRules(text: string): HeaderRule[] {
+  const rules: HeaderRule[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (line.trim() === "" || line.trim().startsWith("#")) continue;
-    if (/^\S/.test(line)) rules.push({ pattern: line.trim(), headers: [] });
-    else {
-      const m = /^\s+([^:\s][^:]*):\s*(.*)$/.exec(line);
-      if (m && rules.length) rules[rules.length - 1].headers.push([m[1].trim().toLowerCase(), m[2].trim()]);
+    if (/^\S/.test(line)) {
+      rules.push({ pattern: line.trim(), headers: [] });
+      continue;
     }
+    const detach = /^\s+!\s*(\S+)\s*$/.exec(line);
+    const m = /^\s+([^:\s!][^:]*):\s*(.*)$/.exec(line);
+    if (rules.length && (detach || m)) rules[rules.length - 1].headers.push(detach ? [`!${detach[1].toLowerCase()}`, ""] : [m![1].trim().toLowerCase(), m![2].trim()]);
   }
   return rules;
+}
+
+/** A path pattern as a RegExp: `*` (the splat) matches anything, `:name` one path segment, the rest itself. A
+ * rule for an absolute URL (another host's) is refused: which host it applies to can't be told from here. */
+function patternRe(pattern: string): RegExp {
+  if (!pattern.startsWith("/")) throw new Error(`out/_headers has a rule for an absolute URL (${pattern}): this script only reads path rules`);
+  const re = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/:[A-Za-z]\w*/g, "[^/]+");
+  return new RegExp(`^${re}$`);
+}
+
+/** The Content-Security-Policy policies Workers sends for `path`: those of every rule whose pattern matches it,
+ * in the file's order (a detached header drops what came before). */
+export function cspFor(rules: readonly HeaderRule[], path: string): string[] {
+  let out: string[] = [];
+  for (const r of rules) {
+    if (!patternRe(r.pattern).test(path)) continue;
+    for (const [name, value] of r.headers) {
+      if (name === "!content-security-policy") out = [];
+      else if (name === "content-security-policy") out.push(...cspPolicies(value));
+    }
+  }
+  return out;
+}
+
+/** The path an exported page is served at (folder per route, trailing slash: faq/index.html → /faq/), or null
+ * for a file that isn't a page of its own (the 404 page). As web/scripts/csp-headers.mjs's routeOf. */
+export function routeOf(file: string): string | null {
+  if (file === "index.html") return "/";
+  const m = /^(.+)\/index\.html$/.exec(file);
+  if (!m || m[1] === "404" || m[1] === "_not-found") return null;
+  return `/${m[1]}/`;
 }
 
 /** The hosts a policy lets scripts load from: the host sources of its script-src (its default-src when it has
@@ -82,18 +120,24 @@ export function approvedLists(files: readonly OutFile[], headers = "") {
     if (f.path.endsWith(".html")) for (const h of pageScripts(f.text, BUILD_ORIGIN).foreignHosts) scriptHosts.add(h);
     if (f.bytes > largest.bytes) largest = { path: f.path, bytes: f.bytes };
   }
-  for (const r of headerRules(headers)) {
-    for (const [name, value] of r.headers) if (name === "content-security-policy") for (const p of value.split(",")) for (const h of scriptSrcHosts(p)) scriptHosts.add(h);
+  const rules = headerRules(headers);
+  for (const r of rules) {
+    for (const [name, value] of r.headers) if (name === "content-security-policy") for (const p of cspPolicies(value)) for (const h of scriptSrcHosts(p)) scriptHosts.add(h);
   }
-  return { addresses: [...addresses].sort(), scriptHosts: [...scriptHosts].sort(), bundleHosts: [...bundleHosts].sort(), largest };
+  // each page's policies, as the live page must carry them
+  const routes = files.map((f) => routeOf(f.path.slice(1))).filter((r): r is string => r !== null);
+  const csp = Object.fromEntries([...new Set(routes)].sort().map((r) => [r, cspFor(rules, r)]));
+  return { addresses: [...addresses].sort(), scriptHosts: [...scriptHosts].sort(), bundleHosts: [...bundleHosts].sort(), csp, largest };
 }
 
 export function renderApproved(
-  lists: { addresses: string[]; scriptHosts: string[]; bundleHosts: string[] },
+  lists: { addresses: string[]; scriptHosts: string[]; bundleHosts: string[]; csp: Record<string, string[]> },
   date: string,
   extra: { hosts?: readonly string[]; scriptHosts?: readonly string[] } = {},
 ): string {
-  const list = (xs: string[]) => (xs.length ? `[\n${xs.map((x) => `  "${x}",`).join("\n")}\n]` : "[]");
+  const list = (xs: string[], indent = "") => (xs.length ? `[\n${xs.map((x) => `${indent}  ${JSON.stringify(x)},`).join("\n")}\n${indent}]` : "[]");
+  const pages = Object.entries(lists.csp);
+  const record = pages.length ? `{\n${pages.map(([page, ps]) => `  ${JSON.stringify(page)}: ${list(ps, "  ")},`).join("\n")}\n}` : "{}";
   return [
     `// Generated by \`pnpm site:approved ../web/out\` (scripts/site-approved.ts), built ${date}, from the static export`,
     "// deployed. The site check reports anything else (spec 6.6). Review changes in git.",
@@ -110,6 +154,11 @@ export function renderApproved(
     "/** Every host the export's text names (RPCs, explorers, links, a dependency's gateways): approved as a mention",
     " * in a page or script, never as a script source. */",
     `export const SEEN_IN_BUNDLE_HOSTS: readonly string[] = ${list(lists.bundleHosts)};`,
+    "",
+    "/** Each page's Content-Security-Policy as out/_headers gives it, one string per policy (Workers sends a page",
+    " * the policy of every rule matching it: the /* fallback and the page's own). The live page must carry exactly",
+    " * these. They change with every build (the inline scripts' hashes): regenerate on every site deploy. */",
+    `export const APPROVED_CSP: Readonly<Record<string, readonly string[]>> = ${record};`,
     "",
   ].join("\n");
 }
@@ -139,13 +188,34 @@ export async function main(argv: string[], o: { target: string; print: (l: strin
     return 2;
   }
   const files = readOut(dir);
-  const lists = approvedLists(files, readHeaders(dir));
+  const headers = readHeaders(dir);
+  if (headers === "") {
+    o.print(`${dir} has no _headers: build the site with pnpm build (its last step writes each page's Content-Security-Policy)`);
+    return 2;
+  }
+  let lists: ReturnType<typeof approvedLists>;
+  try {
+    lists = approvedLists(files, headers);
+  } catch (e) {
+    o.print(e instanceof Error ? e.message : String(e));
+    return 2;
+  }
+  const bare = Object.entries(lists.csp).filter(([, ps]) => ps.length === 0);
+  if (bare.length) {
+    o.print(`out/_headers gives no Content-Security-Policy for ${bare.map(([p]) => p).join(", ")}: a page must have one`);
+    return 2;
+  }
   // hand-added hosts (what Cloudflare injects into the served pages) join their list, and are named in the file
   const add = (xs: string[], more: string[] = []) => [...new Set([...xs, ...more])].sort();
-  const out = { addresses: lists.addresses, scriptHosts: add(lists.scriptHosts, extra["--extra-script-hosts"]), bundleHosts: add(lists.bundleHosts, extra["--extra-hosts"]) };
+  const out = {
+    addresses: lists.addresses,
+    scriptHosts: add(lists.scriptHosts, extra["--extra-script-hosts"]),
+    bundleHosts: add(lists.bundleHosts, extra["--extra-hosts"]),
+    csp: lists.csp,
+  };
   writeFileSync(o.target, renderApproved(out, o.today(), { hosts: extra["--extra-hosts"], scriptHosts: extra["--extra-script-hosts"] }));
   o.print(
-    `${files.length} files: ${out.addresses.length} addresses, ${out.scriptHosts.length} script hosts, ${out.bundleHosts.length} hosts seen in the bundle written to ${o.target}`,
+    `${files.length} files: ${out.addresses.length} addresses, ${out.scriptHosts.length} script hosts, ${out.bundleHosts.length} hosts seen in the bundle, the Content-Security-Policy of ${Object.keys(out.csp).length} pages written to ${o.target}`,
   );
   o.print(`largest file: ${lists.largest.path} (${lists.largest.bytes} bytes); on Workers Free keep it well under SITE_MAX_BYTES or set SITE_FILES_PER_RUN=1`);
   o.print(

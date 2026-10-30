@@ -15,8 +15,17 @@ const NOW = 1_800_000_000;
 const cfg = testConfig({ SITE_FILES_PER_RUN: "2", SITE_PAGES: ["/", "/stake/"] });
 const d = cfg.deployment;
 const OURS = [d.frontDoor, d.staker, d.vault, d.baseAdapter, d.bitAdapter, d.oracle];
+/** A page's Content-Security-Policy, as out/_headers gives it: the /* fallback's policy and the page's own. */
+const FALLBACK = "default-src 'self'; script-src 'self' 'sha256-all='; connect-src 'self' https://mainnet.base.org";
+const policiesOf = (page: string) => [FALLBACK, FALLBACK.replace("'sha256-all='", `'sha256-${page.replaceAll("/", "") || "home"}='`)];
 // a gateway host merely named in the bundle (as a dependency's chunks name arweave.net) is seen, not a script source
-const APPROVED = { addresses: [...new Set(OURS)].sort(), scriptHosts: [] as string[], bundleHosts: ["arweave.net", "mainnet.base.org", "rpc.example.org"] };
+const APPROVED = {
+  addresses: [...new Set(OURS)].sort(),
+  scriptHosts: [] as string[],
+  bundleHosts: ["arweave.net", "mainnet.base.org", "rpc.example.org"],
+  // every page of the real site (a superset of the fixture's two)
+  csp: Object.fromEntries(testConfig().site.pages.map((p) => [p, policiesOf(p)])) as Record<string, string[]>,
+};
 const HASH = `0x${"ab".repeat(32)}`;
 const chunk = (name: string) => `/_next/static/chunks/${name}.js`;
 
@@ -36,8 +45,10 @@ function site(over: Record<string, string> = {}): Record<string, string> {
   };
 }
 
-/** A fetch serving the site; a `{ bytes }` entry is a stream of that many bytes, counting what is read. */
-function server(files: Record<string, string | { bytes: number }>) {
+/** A fetch serving the site; a `{ bytes }` entry is a stream of that many bytes, counting what is read. A page
+ * (a path ending in /) carries its policies as Workers sends them, one Content-Security-Policy header each,
+ * unless `csp` gives it others (one header per string; none for null). */
+function server(files: Record<string, string | { bytes: number }>, csp: Record<string, string[] | null> = {}) {
   const read = { bytes: 0 };
   const calls: string[] = [];
   const f = async (input: RequestInfo | URL) => {
@@ -45,7 +56,9 @@ function server(files: Record<string, string | { bytes: number }>) {
     calls.push(path);
     const body = files[path];
     if (body === undefined) return new Response("not found", { status: 404 });
-    if (typeof body === "string") return new Response(body);
+    const headers = new Headers();
+    if (path.endsWith("/")) for (const p of (path in csp ? csp[path] : policiesOf(path)) ?? []) headers.append("Content-Security-Policy", p);
+    if (typeof body === "string") return new Response(body, { headers });
     let sent = 0;
     const stream = new ReadableStream<Uint8Array>({
       pull(c) {
@@ -56,7 +69,7 @@ function server(files: Record<string, string | { bytes: number }>) {
         c.enqueue(new Uint8Array(n).fill(0x61));
       },
     });
-    return new Response(stream);
+    return new Response(stream, { headers });
   };
   return { fetch: f as typeof fetch, read, calls };
 }
@@ -222,6 +235,40 @@ describe("the site job", () => {
     }
   });
 
+  it("judges each page's Content-Security-Policy against the build's: the same policies in any order, however spaced, pass", async () => {
+    // Workers sends one header per matching _headers rule, which fetch joins with ", "
+    const [fallback, own] = policiesOf("/stake/");
+    const spaced = `${own.replaceAll("; ", " ;   ")};`.replace("default-src", "DEFAULT-SRC");
+    await fullPass(server(site(), { "/stake/": [spaced, fallback] }));
+    expect(await findings(NOW + 300)).toEqual([]);
+  });
+
+  it("reports a page whose Content-Security-Policy is missing or isn't the build's, naming the page and what differs", async () => {
+    const [fallback, own] = policiesOf("/");
+    const loosened = own.replace("script-src 'self'", "script-src 'self' https://cdn.evil.example");
+    await fullPass(server(site(), { "/": [fallback, loosened], "/stake/": null }));
+    const f = await findings(NOW + 300);
+    expect(f.map((x) => x.key).sort()).toEqual(["site.integrity:csp:/", "site.integrity:csp:/stake/"]);
+    const root = f.find((x) => x.key === "site.integrity:csp:/");
+    expect(root?.subject).toBe("A page of the live site doesn't carry the approved Content-Security-Policy");
+    expect(root?.facts).toMatchObject({ page: "/", csp: "differs in script-src" });
+    expect(f.find((x) => x.key === "site.integrity:csp:/stake/")?.facts.csp).toBe("the page has no Content-Security-Policy");
+    // one policy dropped (Cloudflare sending the fallback alone): the count is named
+    await wipe(db);
+    await fullPass(server(site(), { "/": [fallback] }));
+    expect((await findings(NOW + 300)).map((x) => [x.key, x.facts.csp])).toEqual([["site.integrity:csp:/", "1 policy where the build has 2; differs in connect-src, default-src, script-src"]]);
+  });
+
+  it("judges the policy of a page over the byte cap too, and reports a page the approved build doesn't have", async () => {
+    await fullPass(server({ ...site(), "/stake/": { bytes: 3_000_000 } }, { "/stake/": null }));
+    expect((await findings(NOW + 300)).map((x) => x.key).sort()).toEqual(["site.integrity:csp:/stake/", "site.integrity:file:/stake/"]);
+    await wipe(db);
+    const { "/stake/": _, ...others } = APPROVED.csp;
+    for (let i = 0; i < 3; i++) await job(server(site()), NOW + i * 120, { approved: { ...APPROVED, csp: others } });
+    const f = await findings(NOW + 300);
+    expect(f.map((x) => [x.key, x.facts.csp])).toEqual([["site.integrity:csp:/stake/", "no approved policy: the build approved has no such page (pnpm site:approved on the build deployed)"]]);
+  });
+
   it('follows any same-origin "/….js" a script names: a dynamic import(), new Worker, serviceWorker.register', async () => {
     expect(scanScript(`import("/assets/a.js");new Worker('/w/worker.mjs');navigator.serviceWorker.register(\`/sw.js\`);x="//cdn.example/no.js";y="/not-a-script.json"`).chunks).toEqual([
       "/assets/a.js",
@@ -263,7 +310,7 @@ describe("the site job", () => {
     const ctx = ruleCtx({ meta: st.meta, nowS: NOW + 300 });
     expect(siteIntegrity.run(ctx)).toHaveLength(0);
     await wipe(db);
-    for (let i = 0; i < 3; i++) await job(server(site()), NOW + i * 120, { approved: { addresses: [], scriptHosts: [], bundleHosts: [] } });
+    for (let i = 0; i < 3; i++) await job(server(site()), NOW + i * 120, { approved: { addresses: [], scriptHosts: [], bundleHosts: [], csp: {} } });
     expect((await findings(NOW + 300)).map((f) => [f.rule, f.key])).toEqual([["site.no_approved_lists", "site.no_approved_lists"]]);
   });
 

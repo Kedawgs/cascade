@@ -168,6 +168,13 @@ export function formatBudget(b: Budget): string[] {
   return lines;
 }
 
+/** The vault's own payout delay (CascadeVault.sol: `payoutDelay = 24 hours`). A plan that sets it to
+ * that (a launch) finds it already set on a fresh vault, on the forks and live alike, so deploy records
+ * the step without sending it and it costs nothing. */
+const VAULT_DEFAULT_PAYOUT_DELAY = 86_400n;
+const setByDefault = (s: DeploymentRecord["plan"]["steps"][number]) =>
+  s.id === "setPayoutDelay" && "args" in s && s.args?.[0] === VAULT_DEFAULT_PAYOUT_DELAY;
+
 /** Why a rehearsal record can't price the live deployment, or nothing when it can: every step landed
  * with its gas measured and nothing pending, the read-back passed, a batch close was measured and, for
  * v3, the round trip finished. A rehearsal that stops partway leaves such a record (the previous one is
@@ -176,7 +183,7 @@ export function unfinishedRehearsal(rec: DeploymentRecord): string[] {
   const out: string[] = [];
   const unmeasured = rec.plan.steps.filter((s) => {
     const d = rec.done[s.id];
-    return !d || !("gasUsed" in d);
+    return !d || (!("gasUsed" in d) && !setByDefault(s));
   });
   if (unmeasured.length) out.push(`${unmeasured.length} deployment step(s) with no measured gas (${unmeasured.map((s) => s.id).join(", ")})`);
   if (rec.pending) out.push("a transaction still pending");

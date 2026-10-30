@@ -5,6 +5,7 @@ import { claimPolicy, paths, SETTINGS_V3, targets, WALLET } from "../src/config.
 import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
 import { ROUND_TRIP, type StepReport } from "../src/roundtrip.ts";
+import { ROLES } from "./launch-roles.ts";
 import type { Ctx, Sent } from "../src/send.ts";
 
 const inputs: BudgetInputs = {
@@ -232,6 +233,20 @@ describe("gatherBudgetInputs", () => {
     }
     // v2 has no round trip to finish
     await expect(gatherBudgetInputs(liveChains().ctx, rehearsalOf(buildPlan(0, 0, COLDKEY)))).resolves.toMatchObject({ baseDeploySteps: 2 });
+  });
+
+  it("prices a launch whose payout delay is the vault's own 24 hours: deploy finds it set and sends nothing, live too", async () => {
+    const launch = rehearsalOf(buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
+    const defaulted = { ...launch, done: { ...launch.done, setPayoutDelay: { recovered: true as const } } };
+    const i = await gatherBudgetInputs(liveChains().ctx, defaulted);
+    // costs nothing: the same Bittensor configuration gas as the launch with that step left out
+    const full = await gatherBudgetInputs(liveChains().ctx, launch);
+    expect(i.bitConfigGas).toBe(full.bitConfigGas - (launch.done.setPayoutDelay as Sent).gasUsed);
+    // a test plan's 1 hour is a real transaction: recovered without its gas, it is still unfinished
+    const test = rehearsalOf(buildPlanV3(0, 0, COLDKEY));
+    await expect(gatherBudgetInputs(liveChains().ctx, { ...test, done: { ...test.done, setPayoutDelay: { recovered: true } } })).rejects.toThrow(
+      /no measured gas \(setPayoutDelay\)/,
+    );
   });
 
   it("leaves a v2 rehearsal's budget as it was: two Base steps, no deliveries, no claim", async () => {

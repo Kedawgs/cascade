@@ -1,0 +1,20 @@
+// The public site: the static export in out/ served as Workers Static Assets on cascadefi.xyz.
+// Deploy from this folder (web/) only, after `pnpm build` with the deployment's NEXT_PUBLIC_* values:
+// wrangler reads the wrangler.jsonc of the folder it runs in, and indexer/ has its own.
+// out/_headers (security headers, per-page CSP hashes) is applied by Workers to every asset response.
+{
+  "name": "cascade-site",
+  "compatibility_date": "2026-10-28",
+  "send_metrics": false,
+  // Served only on cascadefi.xyz: no workers.dev or preview URL a copy of the site could be reached on.
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./out",
+    // next.config.ts exports folder-per-route pages (faq/index.html) with trailingSlash
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  // A route on the zone's existing proxied apex record, so no DNS record has to change
+  "routes": [{ "pattern": "cascadefi.xyz/*", "zone_name": "cascadefi.xyz" }]
+}

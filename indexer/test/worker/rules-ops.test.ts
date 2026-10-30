@@ -132,11 +132,13 @@ describe("batches and payouts", () => {
 });
 
 describe("keeper and vault housekeeping", () => {
-  it("keeper.low_eth below 0.002 ETH and keeper.low_tao below 0.1 TAO", () => {
+  it("keeper.low_eth below 0.002 ETH and keeper.low_tao below 0.01 TAO", () => {
     expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 19n * 10n ** 14n } }))).toEqual(["keeper.low_eth"]);
     expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 21n * 10n ** 14n } }))).toEqual([]);
-    expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 9n * 10n ** 16n } }))).toEqual(["keeper.low_tao"]);
-    expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 11n * 10n ** 16n } }))).toEqual([]);
+    expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 9n * 10n ** 15n } }))).toEqual(["keeper.low_tao"]);
+    expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 11n * 10n ** 15n } }))).toEqual([]);
+    // the launch keeper's 0.06 TAO (about 0.0002-0.0008 TAO an action) is no warning
+    expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 6n * 10n ** 16n } }))).toEqual([]);
   });
 
   it("keeper.idle_unstaked: stakeable idle at least the minimum stake for more than 2 hours", () => {

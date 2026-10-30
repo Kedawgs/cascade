@@ -819,7 +819,7 @@ a few minutes of arriving, far inside `payoutDelay`; and if the monitor can't se
 | `batch.past_max_wait` | the open batch has entries and Base time > `openStart + max(batchInterval, batchMaxWaitS) + 15 min` (muted while held) | readings | 15 min | The keeper isn't closing: check that it runs, its ETH, and the front door's state. |
 | `payout.overdue` | a queued payout batch still pending (`getPayoutBatch(key).count > cursor`) at `queuedAt + payoutDelay + 60 min` (muted while held) | logs, readings | 60 min | The keeper isn't paying out: check it runs and its TAO; `processPayouts` is open to anyone after the delay. |
 | `delivery.overdue` | a user with `claimable > 0` and a live `deliveryOf` preference (both in the readings), 120 min after their `PayoutReceived` | logs, readings | 120 min | The keeper can't deliver USDC: check the TWAP oracle and the floors in the keeper's log; the user can still claim. |
-| `keeper.low_eth` / `keeper.low_tao` | keeper ETH on Base < 0.002; keeper TAO on Bittensor < 0.1 | readings | 0.002 ETH, 0.1 TAO | Top up the keeper wallet. |
+| `keeper.low_eth` / `keeper.low_tao` | keeper ETH on Base < 0.002; keeper TAO on Bittensor < 0.01 | readings | 0.002 ETH, 0.01 TAO | Top up the keeper wallet. |
 | `keeper.idle_unstaked` | the vault's stakeable idle balance (balance − 1e12 − pendingPayouts) has been at least the chain's minimum stake for more than 2 h | readings | 2 h | The keeper isn't staking (or isn't running): check it. |
 | `adapter.low_reserve` | the Bittensor adapter's native balance < 5e11 wei | readings | 5e11 | Top up with `fundReserve()`. |
 | `twap.divergence` | `oracle.usdcValue(1e18)` differs by more than 3% from the mean of this monitor's own spot readings over the same 30 minutes ×2, or the oracle call reverts ×2 | readings | 300 bps | Deliveries may stall (or the pool is being pushed). Watch the pool; users can claim by hand. |
@@ -1193,7 +1193,7 @@ Tasks that depend on an answer are marked in the plan.
    for users is arguably right (they get USDC) or wrong (we sell into a depeg). The floors protect the price
    either way.
 5. **Thresholds:** sharp drop 10 bps from the 24-hour high; depeg 5%; TWAP divergence 3% against our own 30-minute
-   spot mean; keeper floors 0.002 ETH and 0.1 TAO; the tiny-unstake and one-wallet numbers. Any to change? Keep
+   spot mean; keeper floors 0.002 ETH and 0.01 TAO (0.1 TAO at first: lowered for the launch keeper, which spends about 0.0002–0.0008 TAO an action and holds 0.06); the tiny-unstake and one-wallet numbers. Any to change? Keep
    production values in the `THRESHOLDS` secret?
 6. **Price references:** OK to call CoinGecko and Coinbase's public price endpoints from the Worker (no keys)?
    Without them `fmtao.depeg` doesn't run.

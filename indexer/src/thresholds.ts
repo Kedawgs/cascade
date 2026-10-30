@@ -32,8 +32,11 @@ export const DEFAULTS = {
   checkStuckS: 3600,
   /** delivery.overdue: this long after a user's PayoutReceived */
   deliveryGraceS: 7200,
+  /** keeper.low_eth: 0.002 ETH on Base */
   keeperMinEthWei: 2n * 10n ** 15n,
-  keeperMinTaoWei: 10n ** 17n,
+  /** keeper.low_tao: 0.01 TAO on Bittensor. The launch keeper spends about 0.0002-0.0008 TAO an action and
+   * holds 0.06 TAO, so 0.1 would warn from the first day. */
+  keeperMinTaoWei: 10n ** 16n,
   /** keeper.idle_unstaked: stakeable TAO idle this long */
   idleUnstakedS: 7200,
   adapterMinReserveWei: 5n * 10n ** 11n,

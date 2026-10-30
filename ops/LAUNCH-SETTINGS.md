@@ -73,7 +73,10 @@ MetaMask, one call per click.
    MetaMask's selected account is that call's sender. It asks MetaMask to switch to the call's
    network, adding Bittensor EVM (chain 964) if MetaMask doesn't have it. Then check the call before
    you approve (below). The page shows the hash, waits for the receipt, and then checks that the mined
-   transaction is the call it sent.
+   transaction is the call it sent. It reads a receipt only while MetaMask is on that call's network:
+   if MetaMask moves to another, the call says to switch back to see its result (or gives its explorer
+   link), and carries on once MetaMask is back. While a call waits for its receipt, the page won't send
+   a call on the other network: send it once the waiting call shows Done.
 4. Disconnect the site in MetaMask (Connected sites), then press Ctrl-C to stop the server. Check the
    result with `pnpm ops ownership --live` and then `pnpm ops verify --live` (hand-off), the pause dry
    run, or `pnpm ops cardinality`.

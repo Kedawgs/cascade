@@ -45,6 +45,27 @@ const handoffView = (): WalletView =>
     knownContracts(launch),
     NOW,
   );
+/** One Ledger owning both chains, as at the launch. */
+const LEDGER = getAddress("0x00000000000000000000000000000000000a0b03");
+const ledgerLaunch = v3Record("live", buildPlanV3(4, 9, COLDKEY, "launch", { ...ROLES, owner: { base: LEDGER, bittensor: LEDGER } }));
+const la = ledgerLaunch.plan.addresses as ReturnType<typeof buildPlanV3>["addresses"];
+/** The launch's hand-off file as pnpm ops handoff --for-wallet writes it: two Base calls, then one on
+ * Bittensor, from the same Ledger, in no required order. */
+const acceptAllView = (): WalletView =>
+  checkCalls(
+    walletFile({
+      title: "Cascade v3-launch: accept ownership",
+      deployment: "v3-launch",
+      now: NOW,
+      calls: [
+        { chainId: 8453, to: la.frontDoor, data: ACCEPT, label: "acceptOwnership() on the front door", from: LEDGER },
+        { chainId: 8453, to: la.staker, data: ACCEPT, label: "acceptOwnership() on the staker", from: LEDGER },
+        { chainId: 964, to: la.vault, data: ACCEPT, label: "acceptOwnership() on the vault", from: LEDGER },
+      ],
+    }),
+    knownContracts(ledgerLaunch),
+    NOW,
+  );
 /** Two cardinality steps, which must go in order, from the account given with --from. */
 const stepsView = (): WalletView =>
   checkCalls(
@@ -124,6 +145,21 @@ describe("the page's checks before it sends (its pure logic)", () => {
     expect(L.canSend(["confirmed", "ready"], 1, true, false)).toBe(true);
   });
 
+  it("holds back a call on another chain while one waits for its receipt, and says to switch back to see a result", () => {
+    const calls = [{ chainId: 8453 }, { chainId: 8453 }, { chainId: 964 }];
+    // call 2 waits on Base: call 3 (Bittensor) is held back, call 1 (Base) isn't
+    expect(L.waitingOn(calls, ["ready", "sent", "ready"], 2)).toBe(1);
+    expect(L.waitingOn(calls, ["ready", "sent", "ready"], 0)).toBeNull();
+    // nothing waits once it is mined, nor before it is sent
+    for (const s of ["ready", "confirmed", "reverted", "mismatch"]) expect(L.waitingOn(calls, ["ready", s, "ready"], 2), s).toBeNull();
+    expect(L.waitRefusal(1, 8453, 964, HASH)).toBe(
+      `Not sent: call 2 is still waiting for its receipt on Base (chain id 8453), and this call would switch MetaMask to Bittensor EVM (chain id 964), where that receipt can't be read. Send it once call 2 shows Done. Call 2 on the explorer: https://basescan.org/tx/${HASH}`,
+    );
+    expect(L.awayText(8453, HASH)).toBe(`Sent; switch MetaMask back to Base (chain id 8453) to see its result (or check https://basescan.org/tx/${HASH})`);
+    expect(L.buttonText("sent")).toBe("Waiting for the receipt…");
+    expect(L.buttonText("sent", 8453)).toBe("Sent: switch MetaMask back to Base");
+  });
+
   it("reads a receipt and an error the way MetaMask gives them", () => {
     expect(L.receiptStatus({ status: "0x1" })).toBe("success");
     expect(L.receiptStatus({ status: "0x0" })).toBe("reverted");
@@ -192,12 +228,25 @@ interface WalletOpts {
 function fakeWallet(o: WalletOpts) {
   const s = { connected: false, chainId: o.chainId, known: new Set(o.known ?? ["0x2105", "0x3c4"]), mined: !o.pending };
   const requests: { method: string; params?: unknown[] }[] = [];
-  let sent: Record<string, string> | undefined;
+  /** each request with the chain MetaMask was on when it came in */
+  const asked: { method: string; chainId: string }[] = [];
+  const listeners: Record<string, ((x: unknown) => void)[]> = {};
+  /** MetaMask moves to another network and tells the page (EIP-1193 chainChanged) */
+  const moveTo = (chainId: string) => {
+    if (s.chainId === chainId) return;
+    s.chainId = chainId;
+    for (const f of listeners.chainChanged ?? []) f(chainId);
+  };
+  /** what each hash sent: the first send's hash is HASH, each later one its own */
+  const sent = new Map<string, Record<string, string>>();
   const eth = {
     isMetaMask: true,
-    on: () => undefined,
+    on: (event: string, f: (x: unknown) => void) => {
+      listeners[event] = [...(listeners[event] ?? []), f];
+    },
     request: async ({ method, params }: { method: string; params?: unknown[] }) => {
       requests.push(params === undefined ? { method } : { method, params });
+      asked.push({ method, chainId: s.chainId });
       const p = (params ?? []) as { chainId: string }[];
       switch (method) {
         case "eth_accounts":
@@ -210,19 +259,23 @@ function fakeWallet(o: WalletOpts) {
         case "wallet_switchEthereumChain":
           if (o.declineSwitch) throw { code: 4001, message: "User rejected the request." };
           if (!s.known.has(p[0].chainId)) throw { code: 4902, message: `Unrecognized chain ID "${p[0].chainId}"` };
-          if (!o.stuck) s.chainId = p[0].chainId;
+          if (!o.stuck) moveTo(p[0].chainId);
           return null;
         case "wallet_addEthereumChain":
           s.known.add(p[0].chainId);
-          s.chainId = p[0].chainId;
+          moveTo(p[0].chainId);
           return null;
-        case "eth_sendTransaction":
-          sent = params?.[0] as Record<string, string>;
-          return HASH;
+        case "eth_sendTransaction": {
+          const hash = sent.size === 0 ? HASH : `0x${String(sent.size + 1).padStart(64, "0")}`;
+          sent.set(hash, params?.[0] as Record<string, string>);
+          return hash;
+        }
         case "eth_getTransactionReceipt":
           return s.mined ? { status: o.reverts ? "0x0" : "0x1", blockNumber: "0x10" } : null;
-        case "eth_getTransactionByHash":
-          return sent ? { from: sent.from.toLowerCase(), to: sent.to.toLowerCase(), input: sent.data, value: sent.value, chainId: sent.chainId, ...o.mined } : null;
+        case "eth_getTransactionByHash": {
+          const tx = sent.get(String(params?.[0]));
+          return tx ? { from: tx.from.toLowerCase(), to: tx.to.toLowerCase(), input: tx.data, value: tx.value, chainId: tx.chainId, ...o.mined } : null;
+        }
       }
       throw new Error(`unexpected ${method}`);
     },
@@ -230,10 +283,13 @@ function fakeWallet(o: WalletOpts) {
   return {
     eth,
     requests,
+    asked,
     sends: () => requests.filter((r) => r.method === "eth_sendTransaction"),
     mine: () => {
       s.mined = true;
     },
+    /** the owner switches MetaMask's network by hand */
+    switchTo: moveTo,
   };
 }
 
@@ -396,6 +452,61 @@ describe("the page (its script, against a fake MetaMask)", () => {
     p.w.mine();
     await sending;
     expect(p.el("status-0").textContent).toMatch(/^Done: mined in block 16/);
+  });
+
+  it("never asks Bittensor for a Base call's receipt: off Base it says to switch back, and shows Done once MetaMask is back", async () => {
+    const p = await openPage(acceptAllView(), { wallet: { accounts: [LEDGER], chainId: "0x2105", pending: true } });
+    const sending = p.el("send-1").click();
+    await settle();
+    expect(p.el("send-1").textContent).toBe("Waiting for the receipt…");
+    // MetaMask goes over to Bittensor (as sending call 3 once made it), and the Base call is mined meanwhile
+    p.w.switchTo("0x3c4");
+    p.w.mine();
+    await settle(50);
+    const awayText = `Sent; switch MetaMask back to Base (chain id 8453) to see its result (or check https://basescan.org/tx/${HASH})`;
+    expect(p.el("status-1").textContent).toBe(awayText);
+    expect(p.el("status-1").className).toBe("status wait");
+    expect(p.el("send-1").textContent).toBe("Sent: switch MetaMask back to Base");
+    const offBase = () => p.w.asked.filter((r) => (r.method === "eth_getTransactionReceipt" || r.method === "eth_getTransactionByHash") && r.chainId !== "0x2105");
+    expect(offBase()).toEqual([]);
+    // back on Base: the receipt is read there, and the call is done
+    p.w.switchTo("0x2105");
+    await sending;
+    expect(p.el("status-1").textContent).toBe(
+      `Done: mined in block 16, and the mined transaction matches this call (from, to, data, value, chain). Transaction ${HASH} (https://basescan.org/tx/${HASH})`,
+    );
+    expect(p.el("send-1").textContent).toBe("Done");
+    expect(offBase()).toEqual([]);
+  });
+
+  it("won't send a Bittensor call while a Base call waits for its receipt: it says why and links the waiting call", async () => {
+    const p = await openPage(acceptAllView(), { wallet: { accounts: [LEDGER], chainId: "0x2105", pending: true } });
+    const sending = p.el("send-1").click();
+    await settle();
+    // call 3 can be clicked, and is refused before MetaMask is asked anything
+    expect(p.el("send-2").disabled).toBe(false);
+    await p.el("send-2").click();
+    expect(p.w.sends()).toHaveLength(1);
+    expect(p.w.asked.map((r) => r.method)).not.toContain("wallet_switchEthereumChain");
+    expect(p.w.asked.filter((r) => r.chainId !== "0x2105")).toEqual([]);
+    expect(p.el("status-2").textContent).toBe(
+      `Not sent: call 2 is still waiting for its receipt on Base (chain id 8453), and this call would switch MetaMask to Bittensor EVM (chain id 964), where that receipt can't be read. Send it once call 2 shows Done. Call 2 on the explorer: https://basescan.org/tx/${HASH}`,
+    );
+    expect(p.el("status-2").className).toBe("status bad");
+    expect(p.el("send-2").textContent).toBe("Send");
+    // another Base call still goes
+    const other = p.el("send-0").click();
+    await settle();
+    expect(p.w.sends()).toHaveLength(2);
+    // once call 2 is done, call 3 goes: MetaMask switches to Bittensor and sends it
+    p.w.mine();
+    await sending;
+    await other;
+    expect(p.el("send-1").textContent).toBe("Done");
+    await p.el("send-2").click();
+    expect(p.w.sends()).toHaveLength(3);
+    expect(p.w.requests).toContainEqual({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x3c4" }] });
+    expect(p.el("status-2").textContent).toMatch(/^Done: mined in block 16, and the mined transaction matches this call/);
   });
 
   it("says so when the transaction reverts, and keeps the next ordered step waiting", async () => {

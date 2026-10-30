@@ -107,6 +107,19 @@ export function signLogic() {
     return true;
   }
 
+  /** The call still waiting for its receipt on another chain than call `i`'s, if any: sending `i` would
+   * move MetaMask off that chain, where alone that receipt can be read, so `i` waits for it. */
+  function waitingOn(calls: readonly { chainId: number }[], states: CallState[] | string[], i: number): number | null {
+    for (let j = 0; j < calls.length; j++) if (j !== i && states[j] === "sent" && calls[j].chainId !== calls[i].chainId) return j;
+    return null;
+  }
+  /** Why call `j`'s wait holds back a call for `chainId` (0-based `j`), with `j`'s transaction on the explorer. */
+  const waitRefusal = (j: number, waitingChainId: number, chainId: number, hash: string): string =>
+    `Not sent: call ${j + 1} is still waiting for its receipt on ${networkName(waitingChainId)}, and this call would switch MetaMask to ${networkName(chainId)}, where that receipt can't be read. Send it once call ${j + 1} shows Done. Call ${j + 1} on the explorer: ${explorerTx(waitingChainId, hash)}`;
+  /** A sent call's status while MetaMask is on another chain than the call's: nothing is asked about it there. */
+  const awayText = (chainId: number, hash: string): string =>
+    `Sent; switch MetaMask back to ${networkName(chainId)} to see its result (or check ${explorerTx(chainId, hash)})`;
+
   /** MetaMask by its EIP-6963 announcement (rdns io.metamask), whichever wallet holds window.ethereum;
    * else window.ethereum, with a note naming which wallet that is; else null. */
   function pickProvider(announced: readonly unknown[], fallback: unknown): { provider: unknown; metamask: boolean; note: string } | null {
@@ -153,11 +166,14 @@ export function signLogic() {
     return typeof m === "string" && m ? m : String(e);
   }
   const walletText = (w: WalletState): string => (w.accounts.length ? `Connected: ${w.accounts[0]} on ${networkName(w.chainId)}.` : "Not connected.");
-  const buttonText = (s: string): string =>
+  /** `away`: a sent call's chain id while MetaMask is on another chain. */
+  const buttonText = (s: string, away?: number): string =>
     s === "busy"
       ? "Sending…"
       : s === "sent"
-        ? "Waiting for the receipt…"
+        ? away !== undefined
+          ? `Sent: switch MetaMask back to ${NETWORKS[away] ? NETWORKS[away].name : `chain id ${away}`}`
+          : "Waiting for the receipt…"
         : s === "confirmed"
           ? "Done"
           : s === "reverted"
@@ -175,6 +191,9 @@ export function signLogic() {
     addChainParams,
     isUnknownChain,
     canSend,
+    waitingOn,
+    waitRefusal,
+    awayText,
     pickProvider,
     txMismatch,
     receiptStatus,
@@ -205,8 +224,14 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
   const win = window as unknown as Win;
   const el = (id: string) => document.getElementById(id) as HTMLButtonElement;
   const states: string[] = D.calls.map(() => "ready");
+  /** Each sent call's hash. */
+  const hashes: string[] = D.calls.map(() => "");
+  /** A sent call whose receipt waits because MetaMask is on another chain (its button says so). */
+  const away: boolean[] = D.calls.map(() => false);
+  /** MetaMask's chain changes so far (chainChanged): an answer asked across one is dropped. */
+  let chainChanges = 0;
   /** The call between its click and its hash, if any: one at a time. The wait for a receipt holds only
-   * its own call. */
+   * its own call, and the calls on other chains (waitingOn). */
   let sending: number | null = null;
   let eth: Eth | undefined;
   let looking = true;
@@ -228,7 +253,7 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
     D.calls.forEach((_c, i) => {
       const b = el(`send-${i}`);
       b.disabled = !eth || !L.canSend(states, i, D.ordered, busy());
-      b.textContent = L.buttonText(states[i]);
+      b.textContent = L.buttonText(states[i], away[i] ? D.calls[i].chainId : undefined);
     });
   };
   const refresh = async () => {
@@ -247,27 +272,70 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
       await e.request({ method: "wallet_addEthereumChain", params: add });
     }
   };
+  const tick = () => new Promise((r) => setTimeout(r, L.POLL_MS));
+  /** One read about call `c`'s transaction through MetaMask, made only while MetaMask is on `c`'s chain
+   * (MetaMask asks whichever chain it is on): null when it is on another, and nothing is asked; null too
+   * when the chain changed while it was asked, since the answer may be another chain's. */
+  const readOnChain = async (e: Eth, c: PageCall, method: string, hash: string): Promise<{ value: unknown } | null> => {
+    const changes = chainChanges;
+    if (!L.isChain(await e.request({ method: "eth_chainId" }), c.chainId)) return null;
+    const value = await e.request({ method, params: [hash] });
+    if (changes !== chainChanges || !L.isChain(await e.request({ method: "eth_chainId" }), c.chainId)) return null;
+    return { value };
+  };
+  /** Call `i`'s wait while MetaMask is on another chain (`isAway`), on its button and in its status. */
+  const setAway = (i: number, isAway: boolean) => {
+    if (away[i] === isAway) return;
+    away[i] = isAway;
+    render();
+  };
+  /** Each poll tick: off the call's chain it says to switch back and asks nothing until MetaMask is back. */
   const receipt = async (e: Eth, i: number, c: PageCall, hash: string) => {
     for (let polls = 1; ; polls++) {
-      await new Promise((r) => setTimeout(r, L.POLL_MS));
-      const late = polls >= L.STUCK_POLLS ? ` Still not mined after 5 minutes or more: check it on the explorer, ${L.explorerTx(c.chainId, hash)}. This page keeps checking.` : "";
+      await tick();
       try {
-        if (!L.isChain(await e.request({ method: "eth_chainId" }), c.chainId)) {
-          say(i, `Sent: ${hash}. MetaMask is on another network now: switch it back to ${L.networkName(c.chainId)} to see the receipt here, or look the hash up at ${L.explorerTx(c.chainId, hash)}.${late}`, "wait");
+        const r = await readOnChain(e, c, "eth_getTransactionReceipt", hash);
+        if (!r) {
+          setAway(i, true);
+          say(i, L.awayText(c.chainId, hash), "wait");
           continue;
         }
-        const r = await e.request({ method: "eth_getTransactionReceipt", params: [hash] });
-        if (r) return r;
+        setAway(i, false);
+        if (r.value) return r.value;
       } catch {
         // MetaMask's node didn't answer: ask again
       }
-      if (late) say(i, `Sent: ${hash}.${late}`, "bad");
+      if (polls >= L.STUCK_POLLS) say(i, `Sent: ${hash}. Still not mined after 5 minutes or more: check it on the explorer, ${L.explorerTx(c.chainId, hash)}. This page keeps checking.`, "bad");
+      else say(i, `Sent: ${hash}. Waiting for it to be mined…`, "wait");
+    }
+  };
+  /** The mined transaction, read on the call's chain like its receipt; null when MetaMask can't give it. */
+  const minedTx = async (e: Eth, i: number, c: PageCall, hash: string) => {
+    for (;;) {
+      try {
+        const t = await readOnChain(e, c, "eth_getTransactionByHash", hash);
+        if (t) {
+          setAway(i, false);
+          return t.value;
+        }
+      } catch {
+        return null;
+      }
+      setAway(i, true);
+      say(i, L.awayText(c.chainId, hash), "wait");
+      await tick();
     }
   };
   const send = async (i: number) => {
     const e = eth;
     if (!e || !L.canSend(states, i, D.ordered, busy())) return;
     const c = D.calls[i];
+    // a call waiting for its receipt on another chain keeps MetaMask there until it is done
+    const waiting = L.waitingOn(D.calls, states, i);
+    if (waiting !== null) {
+      say(i, L.waitRefusal(waiting, D.calls[waiting].chainId, c.chainId, hashes[waiting]), "bad");
+      return;
+    }
     const before = states[i];
     sending = i;
     states[i] = "busy";
@@ -291,6 +359,7 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
       }
       say(i, "Compare the selector, the parameter words and the To address with the Ledger (Debug data on) or MetaMask's Hex tab, then approve or reject…", "wait");
       hash = String(await e.request({ method: "eth_sendTransaction", params: [L.txParams(c)] }));
+      hashes[i] = hash;
       states[i] = "sent";
     } catch (err) {
       states[i] = before;
@@ -303,12 +372,7 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
     }
     say(i, `Sent: ${hash}. Waiting for it to be mined…`, "wait");
     const done = await receipt(e, i, c, hash);
-    let tx: unknown = null;
-    try {
-      tx = await e.request({ method: "eth_getTransactionByHash", params: [hash] });
-    } catch {
-      tx = null;
-    }
+    const tx = await minedTx(e, i, c, hash);
     const diff = L.txMismatch(c, tx);
     const block = L.blockText(done);
     const link = L.explorerTx(c.chainId, hash);
@@ -366,7 +430,10 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
       refresh().catch(() => undefined);
     };
     eth.on?.("accountsChanged", quietly);
-    eth.on?.("chainChanged", quietly);
+    eth.on?.("chainChanged", () => {
+      chainChanges++;
+      quietly();
+    });
     quietly();
   }, 300);
 }

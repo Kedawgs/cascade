@@ -1,5 +1,5 @@
 import { encodeAbiParameters, type Hex, hexToBigInt, keccak256 } from "viem";
-import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, EXECUTION_STATES, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, UNISWAP_POOL, VAULT_VIEWS } from "./abi.ts";
+import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, EXECUTION_STATES, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "./abi.ts";
 import type { ChainName, Config } from "./config.ts";
 import { multicall, newerThan, type Read } from "./multicall.ts";
 import type { Rpc } from "./rpc.ts";
@@ -28,6 +28,8 @@ export interface BitState {
   guardian?: Hex;
   pendingGuardian?: Hex;
   keeper?: Hex;
+  /** where the reward cut is minted */
+  treasury?: Hex;
   stakeHotkey?: Hex;
   /** the vault's hotkey set now (hotkeys(0..3)) */
   hotkeys?: Hex[];
@@ -76,6 +78,8 @@ export interface BaseState {
   oracle?: Hex;
   stakerOwner?: Hex;
   stakerPendingOwner?: Hex;
+  /** where the staker's fees go */
+  stakerTreasury?: Hex;
   /** FM-TAO the front door holds */
   frontDoorTao?: bigint;
   frontDoorEth?: bigint;
@@ -103,6 +107,8 @@ export interface Snapshot {
   messageStates: Record<Hex, string>;
   /** delivered(bridge, keccak256(message)) for each landing awaiting that read, at the Base reading's block */
   deliveredReads: { landedUid: Hex; key: Hex; chunk: number; block: bigint; value: boolean }[];
+  /** eth_getCode of the role wallets and Safe candidates asked (lowercase hex; "0x" for an account) */
+  codes?: Record<ChainName, Record<Hex, Hex>>;
 }
 
 export interface SnapshotInputs {
@@ -116,6 +122,8 @@ export interface SnapshotInputs {
   oracle?: Hex;
   pendingMessages: { messageId: Hex; direction: "base>bittensor" | "bittensor>base" }[];
   watched: { chain: ChainName; address: Hex; isSafe?: boolean }[];
+  /** addresses whose code to read (the role wallets, for keys.delegated), in the same batch as the counts */
+  codesOf?: { chain: ChainName; address: Hex }[];
   /** at most 50 */
   payoutUsers: Hex[];
   deliveredChecks: { landedUid: Hex; key: Hex; chunk: number; bridge: Hex; hash: Hex }[];
@@ -183,6 +191,8 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   const t = cfg.tokens;
   const stakeHotkey = i.stakeHotkey ?? d.stakeHotkey;
   const safes = (chain: ChainName) => i.watched.filter((w) => w.chain === chain && w.isSafe).map((w) => w.address);
+  /** the code to read: each Safe candidate's (a nonce() counts only from code of its own) and each role wallet's */
+  const coded = (chain: ChainName) => [...new Set([...safes(chain), ...(i.codesOf ?? []).filter((w) => w.chain === chain).map((w) => w.address.toLowerCase() as Hex)])];
   const counted = (chain: ChainName) => i.watched.filter((w) => w.chain === chain && !w.isSafe).map((w) => w.address);
   const safeNonces: Record<Hex, bigint> = {};
   const messageStates: Record<Hex, string> = {};
@@ -199,6 +209,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   vault("rootStakeRao", (v) => (bit.rootStakeRao = v));
   vault("pendingPayouts", (v) => (bit.pendingPayouts = v));
   vault("keeper", (v) => (bit.keeper = lc(v)));
+  vp.add({ address: d.vault, abi: TREASURY, functionName: "treasury" }, (v) => (bit.treasury = lc(v)));
   vault("stakeHotkey", (v) => (bit.stakeHotkey = lc(v)));
   vault("payoutDelay", (v) => (bit.payoutDelay = Number(v)));
   vault("maxDailyOutflowBps", (v) => (bit.maxDailyOutflowBps = v));
@@ -261,6 +272,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   fadmin("paused", (v) => (base.paused = v));
   bp.add({ address: d.staker, abi: ADMIN_VIEWS, functionName: "owner" }, (v) => (base.stakerOwner = lc(v)));
   bp.add({ address: d.staker, abi: ADMIN_VIEWS, functionName: "pendingOwner" }, (v) => (base.stakerPendingOwner = lc(v)));
+  bp.add({ address: d.staker, abi: TREASURY, functionName: "treasury" }, (v) => (base.stakerTreasury = lc(v)));
   bp.add({ address: t.base.fmTao, abi: ERC20, functionName: "totalSupply" }, (v) => (base.fmTaoSupply = v));
   bp.add({ address: t.base.fmTao, abi: ERC20, functionName: "balanceOf", args: [d.frontDoor] }, (v) => (base.frontDoorTao = v));
   bp.add({ address: t.base.fmTao, abi: ERC20, functionName: "balanceOf", args: [t.base.taoWethPool] }, (v) => (base.taoWethPool.tao = v));
@@ -293,8 +305,8 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   const [bitReading, baseReading, baseCounts, bitCounts] = await Promise.all([
     readChain(rpc, "bittensor", vp, t.multicall3, i.last.bittensor, bit),
     readChain(rpc, "base", bp, t.multicall3, i.last.base, base),
-    countsAndCodes(rpc, "base", counted("base"), safes("base")),
-    countsAndCodes(rpc, "bittensor", counted("bittensor"), safes("bittensor")),
+    countsAndCodes(rpc, "base", counted("base"), coded("base")),
+    countsAndCodes(rpc, "bittensor", counted("bittensor"), coded("bittensor")),
   ]);
   // a nonce() answer counts only from contract code of the address's own (never a 7702 delegation)
   for (const [own, codes] of [
@@ -304,7 +316,14 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
     for (const a of Object.keys(own) as Hex[]) if (!isContractCode(codes[a])) delete own[a];
   }
 
-  const snap: Snapshot = { at: nowS, nonces: { base: baseCounts.counts, bittensor: bitCounts.counts }, safeNonces, messageStates, deliveredReads: [] };
+  const snap: Snapshot = {
+    at: nowS,
+    nonces: { base: baseCounts.counts, bittensor: bitCounts.counts },
+    safeNonces,
+    messageStates,
+    deliveredReads: [],
+    codes: { base: baseCounts.codes, bittensor: bitCounts.codes },
+  };
   if (bitReading) {
     // the set now: from hotkeys(0) on, up to the first index past its end (unknown if hotkeys(0) failed)
     const set: Hex[] = [];

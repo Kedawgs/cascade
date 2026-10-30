@@ -20,6 +20,8 @@ export const RULES = {
   "stake.hotkey_changed": critical("event", true),
   "admin.event": critical("event"),
   "keys.unexplained_tx": critical("event"),
+  // a role wallet delegated (EIP-7702) or its code changed: assume the key is compromised
+  "keys.delegated": critical("event", true),
   "frontdoor.solvency": critical("condition", true),
   "vault.solvency": critical("condition", true),
   "ccip.failure": critical("condition"),

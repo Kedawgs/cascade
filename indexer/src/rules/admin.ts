@@ -1,4 +1,4 @@
-import type { Hex } from "viem";
+import { type Hex, keccak256 } from "viem";
 import { ADMIN_EVENTS } from "../abi.ts";
 import type { Finding } from "../alerts.ts";
 import type { ChainName } from "../config.ts";
@@ -54,6 +54,90 @@ export function watchedRoles(snap: Snapshot): { chain: ChainName; address: Hex; 
   if (v) for (const r of ["owner", "pendingOwner", "guardian", "pendingGuardian", "keeper"] as const) add("bittensor", v[r], `vault.${r}`);
   return out;
 }
+
+/** Every role wallet whose code keys.delegated watches: the role holders, and the staker's and the vault's
+ * treasuries. */
+export function roleWallets(snap: Snapshot): { chain: ChainName; address: Hex; roles: string[] }[] {
+  const out = watchedRoles(snap);
+  const add = (chain: ChainName, a: Hex | undefined, role: string) => {
+    if (!a || lower(a) === ZERO) return;
+    const w = out.find((x) => x.chain === chain && x.address === lower(a));
+    if (w) w.roles.push(role);
+    else out.push({ chain, address: lower(a), roles: [role] });
+  };
+  add("base", snap.base?.state.stakerTreasury, "staker.treasury");
+  add("bittensor", snap.bittensor?.state.treasury, "vault.treasury");
+  return out;
+}
+
+/** What a code is, as an email says it. */
+function codeIs(code: Hex): string {
+  if (code === "0x") return "no code (an account)";
+  if (DELEGATION.test(code)) return `an EIP-7702 delegation to 0x${code.slice(8)}`;
+  return `contract code (${(code.length - 2) / 2} bytes, hash ${keccak256(code).slice(0, 10)}…)`;
+}
+/** An EIP-7702 delegation designator: 0xef0100 and the delegate's 20-byte address. */
+const DELEGATION = /^0xef0100[0-9a-f]{40}$/;
+
+interface CodeSeen {
+  /** the code first seen (its hash, and what it was) */
+  first?: { hash: Hex; what: string };
+  /** a code differing from the first, read on the last tick (a change counts once read twice in a row) */
+  pending?: { hash: Hex; what: string };
+}
+
+/** keys.delegated (critical, holds): a role wallet's code (read every tick, in the same batch as the
+ * transaction counts) differs from the first code the monitor saw for it, on two readings in a row: an
+ * account that shows an EIP-7702 delegation designator, a delegation to another target, any code on an
+ * account, or a Safe whose code changed. A wallet already delegated when first seen fires too (the monitor may
+ * start after the delegation). One alert per wallet and code, found every tick while it lasts. Kept in meta
+ * (code_seen:{chain}:{address}), written only when it changes. */
+export const keysDelegated: Rule = {
+  name: "keys.delegated",
+  run(ctx) {
+    const out: Finding[] = [];
+    for (const w of roleWallets(ctx.snap)) {
+      const read = ctx.snap.codes?.[w.chain]?.[w.address];
+      if (read === undefined) continue;
+      const code = read.toLowerCase() as Hex;
+      const now = { hash: keccak256(code), what: codeIs(code) };
+      const k = `code_seen:${w.chain}:${w.address}`;
+      let s: CodeSeen = {};
+      try {
+        s = ctx.meta[k] ? (JSON.parse(ctx.meta[k]) as CodeSeen) : {};
+      } catch {
+        s = {};
+      }
+      const save = (next: CodeSeen) => ctx.writes.meta.push({ k, v: JSON.stringify(next) });
+      const fire = (before: string) => {
+        const id = `keys.delegated:${w.chain}:${w.address}:${now.hash}`;
+        out.push({
+          rule: "keys.delegated",
+          key: id,
+          subject: `A Cascade role wallet's code changed (${w.roles.join(", ")}): assume its key is compromised`,
+          facts: { address: w.address, chain: w.chain, roles: w.roles.join(", "), before, now: now.what, explorer: addressLink(w.chain, w.address) },
+          hold: { id, summary: `the role wallet ${w.address} (${w.roles.join(", ")}) was delegated or its code changed` },
+        });
+      };
+      const twice = s.pending?.hash === now.hash;
+      if (!s.first) {
+        // first sight: an account or a contract is the baseline; a delegation is confirmed on the next read
+        if (!DELEGATION.test(code)) save({ first: now });
+        else if (twice) {
+          fire("not seen before");
+          save({ first: now });
+        } else save({ pending: now });
+      } else if (now.hash === s.first.hash) {
+        if (s.pending) save({ first: s.first });
+      } else if (twice) {
+        fire(s.first.what);
+      } else {
+        save({ first: s.first, pending: now });
+      }
+    }
+    return out;
+  },
+};
 
 const sameRoles = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 const keeperOnly = (roles: readonly string[]) => roles.every((r) => r.endsWith(".keeper"));
@@ -125,4 +209,4 @@ export const keys: Rule = {
   },
 };
 
-export const ADMIN_RULES: Rule[] = [adminEvent, keys];
+export const ADMIN_RULES: Rule[] = [adminEvent, keys, keysDelegated];

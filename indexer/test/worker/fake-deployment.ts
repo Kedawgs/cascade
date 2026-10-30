@@ -1,5 +1,5 @@
 import type { Hex } from "viem";
-import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
+import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
 import type { Config } from "../../src/config.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
 import { STAKING_PRECOMPILE, STORAGE_QUERY } from "../../src/subtensor.ts";
@@ -9,6 +9,7 @@ const ZERO = "0x0000000000000000000000000000000000000000" as Hex;
 export const OWNER = "0x00000000000000000000000000000000000000a1" as Hex;
 export const GUARDIAN = "0x00000000000000000000000000000000000000a2" as Hex;
 export const KEEPER = "0x00000000000000000000000000000000000000a3" as Hex;
+export const TREASURY_WALLET = "0x00000000000000000000000000000000000000a4" as Hex;
 export const VALIDATOR_OWNER = "0x2222222222222222222222222222222222222222222222222222222222222222" as Hex;
 
 /** Everything both chains answer, as plain values a test can change between reads. A view listed in
@@ -43,6 +44,7 @@ export function deploymentState(cfg: Config) {
       hotkeyOwner: VALIDATOR_OWNER as Hex | null,
       minStakeRao: 2_000_000n,
       rewardCutBps: 1000,
+      treasury: TREASURY_WALLET,
       lockPoolFmTao: 100n * 10n ** 18n,
       adapterBalance: 10n ** 13n,
       keeperBalance: 10n ** 18n,
@@ -69,6 +71,7 @@ export function deploymentState(cfg: Config) {
       oracle: d.oracle,
       stakerOwner: OWNER,
       stakerPendingOwner: ZERO,
+      stakerTreasury: TREASURY_WALLET,
       frontDoorTao: 0n,
       frontDoorEth: 0n,
       fmTaoSupply: 100n * 10n ** 18n,
@@ -140,7 +143,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
               delivered: ([bridge, hash]) => b.delivered[`${lc(bridge)}:${lc(hash)}`] ?? false,
             },
           },
-          [d.staker]: { abi: ADMIN_VIEWS, fns: { owner: () => b.stakerOwner, pendingOwner: () => b.stakerPendingOwner } },
+          [d.staker]: { abi: [...ADMIN_VIEWS, ...TREASURY], fns: { owner: () => b.stakerOwner, pendingOwner: () => b.stakerPendingOwner, treasury: () => b.stakerTreasury } },
           [t.base.fmTao]: {
             abi: ERC20,
             fns: { totalSupply: v("fmTao", "totalSupply", () => b.fmTaoSupply), balanceOf: ([a]) => (lc(a) === d.frontDoor ? b.frontDoorTao : lc(a) === t.base.taoWethPool ? b.taoWeth.tao : 0n) },
@@ -164,8 +167,9 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
       eth_call: ethCall(
         {
           [d.vault]: {
-            abi: [...VAULT_VIEWS, ...ADMIN_VIEWS],
+            abi: [...VAULT_VIEWS, ...ADMIN_VIEWS, ...TREASURY],
             fns: {
+              treasury: () => x.treasury,
               price: v("vault", "price", () => x.price),
               totalAssets: v("vault", "totalAssets", () => x.totalAssets),
               totalSupply: v("vault", "totalSupply", () => x.totalSupply),

@@ -9,7 +9,7 @@ import { getJson } from "./http.ts";
 import type { StoredLog, StoredRef } from "./logs.ts";
 import { arrivals, arrivalStatements, messagesFrom, messageStatements, stateStatements } from "./messages.ts";
 import { poolPriceUsd, type Reference, referencePrice } from "./prices.ts";
-import { ADMIN_RULES, watchedRoles } from "./rules/admin.ts";
+import { ADMIN_RULES, roleWallets, watchedRoles } from "./rules/admin.ts";
 import { APPROVAL_RULES } from "./rules/approvals.ts";
 import { BRIDGE_RULES } from "./rules/bridge.ts";
 import { CCIP_RULES } from "./rules/ccip.ts";
@@ -386,7 +386,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   // 6. the readings: from the last reading, the hotkeys, keepers, oracle and role holders to read
   const history = historyOf(state);
   const previous = { base: history.base[0], bittensor: history.bittensor[0] };
-  const holders = watchedRoles({ at: 0, base: previous.base, bittensor: previous.bittensor, nonces: { base: {}, bittensor: {} }, safeNonces: {}, messageStates: {}, deliveredReads: [] });
+  const last: Snapshot = { at: 0, base: previous.base, bittensor: previous.bittensor, nonces: { base: {}, bittensor: {} }, safeNonces: {}, messageStates: {}, deliveredReads: [] };
+  const holders = watchedRoles(last);
   const watched = new Map<string, { chain: ChainName; address: Hex }>();
   for (const w of [...state.nonces.filter((r) => r.roles.length > 0), ...holders]) watched.set(`${w.chain}:${lower(w.address)}`, { chain: w.chain, address: lower(w.address) });
   const blockTimesKnown = new Map<string, number>();
@@ -407,6 +408,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       // delegate may answer, is judged by its transaction count
       // (snapshot.ts isContractCode)
       watched: [...watched.values()].flatMap((w) => [w, { ...w, isSafe: true }]),
+      // every role wallet's code, the treasuries' too, for keys.delegated (in the same batch as the counts)
+      codesOf: roleWallets(last).map((w) => ({ chain: w.chain, address: w.address })),
       payoutUsers: state.payoutUsers,
       deliveredChecks: deliveredChecks(state.awaitingReads),
       pendingPayoutKeys: state.pendingPayoutKeys,

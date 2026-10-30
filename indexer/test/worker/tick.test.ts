@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { countingDb, wipe } from "./d1-count.ts";
 import { BIT_ADAPTER } from "../../src/abi.ts";
 import { catchingUpChains } from "../../src/tick.ts";
+import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog } from "./fixtures.ts";
 import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, tickWorld } from "./tick-world.ts";
@@ -302,6 +303,52 @@ describe("the lag sees a stuck scan", () => {
     w.advance();
     await w.tick();
     expect(await alertKeys()).toEqual([]);
+  });
+});
+
+describe("role wallets' code (keys.delegated)", () => {
+  it("raises keys.delegated and its hold when the keeper's wallet takes a 7702 delegation, read with no extra request", async () => {
+    const w = tickWorld();
+    await w.tick();
+    w.advance();
+    await w.tick();
+    const fetchesBefore = w.net.fetches.length;
+    w.advance();
+    await w.tick();
+    const steady = w.net.fetches.slice(fetchesBefore);
+    // the role wallets' code rides in the transaction-count batch of each chain: never a request of its own
+    expect(steady.filter((f) => f.methods.includes("eth_getCode")).every((f) => f.methods.includes("eth_getTransactionCount"))).toBe(true);
+    expect(steady.some((f) => f.chain === "base" && f.methods.includes("eth_getCode"))).toBe(true);
+    expect(steady.some((f) => f.chain === "bittensor" && f.methods.includes("eth_getCode"))).toBe(true);
+    expect(await alertKeys()).toEqual([]);
+    // the keeper's key is stolen and delegated
+    w.specs.base.code = { [KEEPER]: `0xef0100${"ee".repeat(20)}` };
+    w.advance();
+    await w.tick();
+    expect(await alertKeys()).toEqual([]);
+    w.advance();
+    await w.tick();
+    const keys = await alertKeys();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(new RegExp(`^keys\\.delegated:base:${KEEPER}:0x[0-9a-f]{64}$`));
+    expect((await w.status()).hold.active).toBe(true);
+  });
+
+  it("watches the treasuries' wallets too (not watched for unexplained transactions), on both chains", async () => {
+    const w = tickWorld();
+    for (let i = 0; i < 2; i++) {
+      await w.tick();
+      w.advance();
+    }
+    w.specs.base.code = { [TREASURY_WALLET]: "0x6000" };
+    w.specs.bittensor.code = { [TREASURY_WALLET]: `0xef0100${"ee".repeat(20)}` };
+    for (let i = 0; i < 2; i++) {
+      await w.tick();
+      w.advance();
+    }
+    expect((await alertKeys()).map((k) => k.split(":").slice(0, 3).join(":"))).toEqual([`keys.delegated:base:${TREASURY_WALLET}`, `keys.delegated:bittensor:${TREASURY_WALLET}`]);
+    // the treasury isn't a watched key: its own transactions raise nothing
+    expect(await rows(`SELECT address FROM nonces WHERE address = '${TREASURY_WALLET}'`)).toEqual([]);
   });
 });
 

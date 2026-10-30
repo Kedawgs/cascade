@@ -18,6 +18,8 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
     `An admin action on a Cascade contract${f.sender ? `, sent by ${f.sender}` : ""}. If it was a planned change, acknowledge it. If not: guardian pause() both contracts now, then rotate keys.`,
   "keys.unexplained_tx": (f) =>
     `A transaction left a Cascade admin key that didn't touch Cascade (or reverted). Open the address on the explorer${f.explorer ? ` (${f.explorer})` : ""}. If it isn't yours, treat the key as compromised: guardian pause, rotate. The rule is quiet only while these keys are used for Cascade alone; acknowledge your own other transactions. On v3-test owner, guardian and keeper are one address, so a reverted keeper call pages here: expect that noise there.`,
+  "keys.delegated": (f) =>
+    `A role wallet was delegated or its code changed: assume its key is compromised. Guardian pauses; rotate the role.${f.address ? ` The wallet: ${f.address} (${or(f.roles, "a role")}), ${or(f.before, "before unknown")} then ${or(f.now, "now unknown")}${f.explorer ? `; ${f.explorer}` : ""}.` : ""} If the guardian itself is the wallet, pause from the owner, and the other way round. Clear the hold only once the role is rotated.`,
   "frontdoor.solvency": () =>
     "The front door holds less than it owes. Guardian: pause() the front door (claims and cancels still work); find the transfer that broke the identity.",
   "vault.solvency": () => "The vault can't cover its queued payouts. Guardian: pause the vault; do not process payouts.",

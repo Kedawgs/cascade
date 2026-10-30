@@ -239,3 +239,6 @@ export const MULTICALL3 = parseAbi([
 
 /** A Safe's nonce counts its executed transactions (an owner that is a Safe sends none of its own). */
 export const SAFE = parseAbi(["function nonce() view returns (uint256)"]);
+
+/** The staker's and the vault's treasury (fees, the reward cut): a role wallet keys.delegated watches. */
+export const TREASURY = parseAbi(["function treasury() view returns (address)"]);

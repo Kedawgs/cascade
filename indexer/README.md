@@ -45,7 +45,7 @@ what the outside uptime check on `/v1/health` is for (deploy step 10).
 | `GET /v1/scan/{vault}` | the site: the deployment-wide half of its scan (cached 30 s, CORS for `SITE_ORIGIN`) |
 | `GET /v1/scan/{vault}/{account}` | the site: one account's half |
 | `GET /v1/status` | the keeper: the hold (opaque ids only), confirmed payout keys, each chain's lag |
-| `GET /v1/health` | an uptime checker: 200 while a tick completed in the last 5 minutes |
+| `GET /v1/health` | an uptime checker: 200 while a tick completed in the last 5 minutes and no chain lags past the lag limit; else 503 and why |
 
 The vault and account must be lowercase and there must be no query string (one spelling per resource, so the
 cache can't be sidestepped).
@@ -185,8 +185,11 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
 10. **An outside uptime check on `/v1/health`** (required): a free checker that emails you when it stops
     answering 200. The Worker can't watch itself for everything: if it refuses its config (a bad value after an
     edit, a missing secret in `send` mode), no job runs at all, the watchdog and the digest included, and it
-    stays silent. `/v1/health` answers 503 then (no tick has completed), which only an outside check sees. A
-    missing daily digest is the weaker sign.
+    stays silent. `/v1/health` answers 503 then (no tick has completed), which only an outside check sees. It
+    answers 503 too while a chain's settled history lags past the lag limit (the keeper's: 30 minutes at launch),
+    e.g. `base is 61 minutes behind (limit 30 minutes)`: ticks completing while an RPC refuses a chain is a blind
+    monitor, and the outside check sees it even when email is broken. A chain catching up in the first backfill
+    isn't counted (one stuck then is). A missing daily digest is the weaker sign.
 11. A rate-limiting rule on the API path (`api.cascadefi.xyz/v1/scan/*`).
 12. The site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). The keeper: set `OPS_HOLD_URL`
     (after the keeper tasks).

@@ -3,6 +3,7 @@ import { type Hex, keccak256, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleHealth, handleStatus } from "../../src/api.ts";
 import { deploymentStatement, insertHold, setCursor, setMeta, upsertBatchCheck } from "../../src/store.ts";
+import { DEFAULTS } from "../../src/thresholds.ts";
 import { rowCounts, wipe } from "./d1-count.ts";
 import { testConfig } from "./fixtures.ts";
 
@@ -124,6 +125,60 @@ describe("GET /v1/health", () => {
     const r = await handleHealth({ DB: db }, NOW);
     expect(r.status).toBe(503);
     await r.text();
+  });
+
+  const health = async (t?: Parameters<typeof handleHealth>[2]) => {
+    const r = await handleHealth({ DB: db }, NOW, t);
+    return [r.status, await r.text(), r.headers.get("Cache-Control")];
+  };
+  const settledAt = (chain: "base" | "bittensor", s: number | null) => db.prepare("UPDATE cursors SET settled_time = ? WHERE chain = ?").bind(s, chain).run();
+  const caughtUp = () => setMeta(db, "caught_up", String(NOW - 86_400)).run();
+
+  it("is not ok while a chain's settled history lags past the lag limit, though ticks complete (a blind chain)", async () => {
+    await caughtUp();
+    // a 24-hour payout delay: the limit is 30 minutes (a quarter of it, at most 30 minutes), as the keeper's
+    await setMeta(db, "payout_delay", "86400").run();
+    await settledAt("base", NOW - 1800);
+    expect(await health()).toEqual([200, "ok", "no-store"]);
+    await settledAt("base", NOW - 3700);
+    expect(await health()).toEqual([503, "base is 61 minutes behind (limit 30 minutes)", "no-store"]);
+    await settledAt("bittensor", NOW - 10 - 2000);
+    expect((await health())[1]).toBe("base is 61 minutes behind (limit 30 minutes); bittensor is 33 minutes behind (limit 30 minutes)");
+  });
+
+  it("takes the limit from the payout delay the tick last read (v3-test's hour before any) and the thresholds", async () => {
+    await caughtUp();
+    await settledAt("base", NOW - 1000);
+    // no payout delay read yet: the tick's default hour, so a 15-minute limit
+    expect((await health())[1]).toBe("base is 16 minutes behind (limit 15 minutes)");
+    await setMeta(db, "payout_delay", "86400").run();
+    expect(await health()).toEqual([200, "ok", "no-store"]);
+    expect((await health({ ...DEFAULTS, lagCapS: 600 }))[1]).toBe("base is 16 minutes behind (limit 10 minutes)");
+  });
+
+  it("counts no chain catching up in the first backfill (its lag alerts are quiet), but one stuck then", async () => {
+    await settledAt("base", NOW - 7200);
+    await setMeta(db, "catching_up", "base").run();
+    expect(await health()).toEqual([200, "ok", "no-store"]);
+    // stuck: the tick no longer counts it as catching up
+    await setMeta(db, "catching_up", "").run();
+    expect((await health())[0]).toBe(503);
+    // nor after the first catch-up, whatever catching_up says
+    await setMeta(db, "catching_up", "base").run();
+    await caughtUp();
+    expect((await health())[0]).toBe(503);
+    // a chain that never settled a block (its RPC refused it from the first tick) isn't catching up either
+    await setMeta(db, "caught_up", "").run();
+    await setMeta(db, "catching_up", "").run();
+    await settledAt("base", null);
+    expect(await health()).toEqual([503, "base has settled no block yet", "no-store"]);
+  });
+
+  it("is served by the Worker at /v1/health with the configured thresholds, and reads only D1", async () => {
+    await caughtUp();
+    await settledAt("base", NOW - 7200);
+    const r = await exports.default.fetch("https://api.test/v1/health");
+    expect([r.status, await r.text()]).toEqual([503, "base is 120 minutes behind (limit 15 minutes)"]);
   });
 });
 

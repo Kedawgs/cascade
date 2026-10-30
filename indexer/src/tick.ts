@@ -99,7 +99,7 @@ const TX_BACKLOG_MAX = 500;
 const MAX_TX_TRIES = 10;
 /** The payout delay used before any reading has given one: v3-test's, the shortest (the earliest deadline,
  * the tightest lag limit). */
-const DEFAULT_PAYOUT_DELAY_S = 3600;
+export const DEFAULT_PAYOUT_DELAY_S = 3600;
 
 export interface TickDeps {
   env: { DB: D1Database; EMAIL?: SendEmail };

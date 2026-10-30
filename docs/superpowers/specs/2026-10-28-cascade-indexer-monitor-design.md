@@ -602,7 +602,9 @@ Four routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404 
 rule names, batch ids or summaries, and no alert details: the reasons go only to the owner's email (*call*, so an
 attacker reading it learns no more than "a hold is on"). Query strings are refused here too.
 
-**`GET /v1/health`** — `200 ok` while the last complete tick is under 5 minutes old, else `503`;
+**`GET /v1/health`** — `200 ok` while the last complete tick is under 5 minutes old and no chain's settled lag
+(`head_time − settled_time`) is past the lag limit (a chain catching up in the first backfill excepted), else
+`503` with the reason, from D1 alone;
 `Cache-Control: no-store` (Workers Cache is on). For an outside uptime checker (open question 9).
 
 ### 5. How the site verifies, and how it falls back

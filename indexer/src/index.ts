@@ -41,7 +41,9 @@ async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promis
   }
   if (path === "/v1/health") {
     if (request.method !== "GET") return new Response("method not allowed", { status: 405, headers: { Allow: "GET" } });
-    return handleHealth(env, nowS);
+    // the configured thresholds' lag limit (the defaults' when the config can't be read: no tick runs then, and
+    // the last complete tick ages past 5 minutes anyway)
+    return handleHealth(env, nowS, configOf(env)?.thresholds);
   }
   return new Response("Not found", { status: 404 });
 }

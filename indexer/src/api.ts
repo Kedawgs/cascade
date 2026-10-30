@@ -1,7 +1,10 @@
 import { type Hex, pad } from "viem";
 import type { Config } from "./config.ts";
+import { lagLimitOf } from "./rules/ops.ts";
 import { type AccountEvent, accountHalf, sharedHalfJson } from "./seed.ts";
 import { seedPageOf } from "./store.ts";
+import { DEFAULTS, type Thresholds } from "./thresholds.ts";
+import { DEFAULT_PAYOUT_DELAY_S } from "./tick.ts";
 
 // The read-only HTTP routes (spec section 4). Nothing here writes: every route reads D1 through fixed
 // prepared statements, and every parameter is checked before D1 is touched.
@@ -160,15 +163,38 @@ export async function handleStatus(request: Request, env: { DB: D1Database }, cf
 /** A tick must have completed this recently for /v1/health to be ok. */
 export const HEALTHY_WITHIN_S = 300;
 
-/** GET /v1/health: 200 "ok" while the last complete tick is under 5 minutes old, else 503 (for an
- * outside uptime check). Never cached. */
-export async function handleHealth(env: { DB: D1Database }, nowS: number): Promise<Response> {
+/** GET /v1/health, for an outside uptime check: 200 "ok" while the last complete tick is under 5 minutes old
+ * and no chain's settled history lags (head_time − settled_time) past the lag limit, the keeper's (a quarter of
+ * the payout delay the tick last read, at most 30 minutes); else 503 with the reason. So a chain the monitor
+ * can't see (its RPC refusing it) is seen from outside even when email is broken. A chain catching up in the
+ * first backfill (meta catching_up, before caught_up) isn't counted, as its lag alerts are quiet; one stuck
+ * then is. Two D1 reads, no RPC. Never cached. */
+export async function handleHealth(env: { DB: D1Database }, nowS: number, t: Pick<Thresholds, "lagCapS" | "lagPayoutDelayDivisor"> = DEFAULTS): Promise<Response> {
   const noStore = { "Cache-Control": "no-store" };
+  let rows: Row[][];
   try {
-    const v = await env.DB.prepare("SELECT v FROM meta WHERE k = 'last_complete_tick'").first<string>("v");
-    if (v !== null && nowS - Number(v) < HEALTHY_WITHIN_S) return plain(200, "ok", noStore);
-    return plain(503, "no complete tick in the last 5 minutes", noStore);
+    const db = env.DB;
+    rows = (
+      await db.batch<Row>([
+        db.prepare("SELECT k, v FROM meta WHERE k IN ('last_complete_tick', 'caught_up', 'catching_up', 'payout_delay')"),
+        db.prepare("SELECT chain, settled_time, head_time FROM cursors ORDER BY chain"),
+      ])
+    ).map((r) => r.results);
   } catch {
     return plain(503, "not available", noStore);
   }
+  const meta = Object.fromEntries(rows[0].map((r) => [r.k as string, r.v as string]));
+  if (meta.last_complete_tick === undefined || !(nowS - Number(meta.last_complete_tick) < HEALTHY_WITHIN_S)) {
+    return plain(503, "no complete tick in the last 5 minutes", noStore);
+  }
+  const delay = Number(meta.payout_delay);
+  const limit = lagLimitOf(meta.payout_delay && delay > 0 ? delay : DEFAULT_PAYOUT_DELAY_S, t);
+  const catchingUp = meta.caught_up ? [] : (meta.catching_up ?? "").split(",");
+  const behind = rows[1].flatMap((c) => {
+    if (c.head_time === null || c.head_time === undefined || catchingUp.includes(c.chain as string)) return [];
+    if (c.settled_time === null || c.settled_time === undefined) return [`${c.chain} has settled no block yet`];
+    const lag = Number(c.head_time) - Number(c.settled_time);
+    return lag > limit ? [`${c.chain} is ${Math.floor(lag / 60)} minutes behind (limit ${Math.floor(limit / 60)} minutes)`] : [];
+  });
+  return behind.length ? plain(503, behind.join("; "), noStore) : plain(200, "ok", noStore);
 }

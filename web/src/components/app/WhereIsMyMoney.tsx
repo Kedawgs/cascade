@@ -1,6 +1,6 @@
 "use client";
 
-import { useBalances, useDeposits, usePosition, useProof } from "@/lib/cascade/hooks";
+import { depositMoving, movingOffBase, useBalances, useDeposits, usePosition, useProof } from "@/lib/cascade/hooks";
 import { toDisplay } from "@/lib/cascade/units";
 import { useNow } from "@/lib/client-state";
 import { formatRelative } from "@/lib/format";
@@ -13,7 +13,8 @@ import styles from "./WhereIsMyMoney.module.css";
 /** The three-stop lane: wallet, in transit, staked. */
 export function WhereIsMyMoney({ account }: { account: string }) {
   const deposits = useDeposits(account);
-  const live = deposits.data?.some((d) => d.status === "in_progress" || d.status === "needs_you") ?? false;
+  // the vault's figures move only once a deposit has left Base: not while each waits in its open batch
+  const live = movingOffBase(deposits.data, depositMoving);
   const proof = useProof(live);
   const position = usePosition(account, live);
   const balance = useUsdcBalance();

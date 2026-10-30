@@ -13,8 +13,8 @@ import type { Snapshot } from "./snapshot";
 import type { CascadeData } from "./types";
 import { WIRING_TTL_MS } from "./wiring";
 
-/** Chain reads: every 10 s while something is moving (Bittensor makes a block every 12 s, and the
- * public nodes rate-limit), every 30 s otherwise. */
+/** Chain reads: every 10 s while something is moving beyond its open batch on Base (Bittensor makes a
+ * block every 12 s, and the public nodes rate-limit: see movingOffBase), every 30 s otherwise. */
 const LIVE_MS = 10_000;
 const IDLE_MS = 30_000;
 
@@ -165,19 +165,36 @@ export function useProof(live = false) {
 }
 
 const moving = (s: string) => s === "in_progress" || s === "needs_you";
+export const depositMoving = (d: DepositRecord): boolean => moving(d.status);
+export const withdrawalMoving = (w: WithdrawalRecord): boolean => moving(w.status) || w.status === "ready";
+
+/** Mined into its batch, which is still open on Base: it can still be taken back out (trail.ts). */
+const inOpenBatch = (r: { cancellableWei?: bigint; cancellableShares?: bigint }) => r.cancellableWei !== undefined || r.cancellableShares !== undefined;
+
+/** Whether a moving record has left Base (or isn't in its batch yet), so Bittensor is worth reading every
+ * 10 s. While each moving one still waits in its open batch, nothing about it changes on Bittensor until
+ * the batch leaves (up to 24 hours on the launch), and reading every 10 s only spends the archive node's
+ * requests per minute (past them it answers 429 with a 60-second Retry-After, which stalls every read). */
+export function movingOffBase<T extends { cancellableWei?: bigint; cancellableShares?: bigint }>(records: T[] | undefined, isMoving: (r: T) => boolean): boolean {
+  return records?.some((r) => isMoving(r) && !inOpenBatch(r)) ?? false;
+}
+
+/** How often a list of deposits or unstakes is read again: 10 s while one has left Base, else 30 s. */
+export const listPollMs = <T extends { cancellableWei?: bigint; cancellableShares?: bigint }>(records: T[] | undefined, isMoving: (r: T) => boolean): number =>
+  movingOffBase(records, isMoving) ? LIVE_MS : IDLE_MS;
 
 /** The account's deposits: one query for the list, the lane and each receipt. */
 const depositsQuery = (data: CascadeData, account: string) => ({
   queryKey: cascadeKeys.deposits(account),
   queryFn: () => data.listDeposits(account),
-  refetchInterval: (q: Query<DepositRecord[]>) => (q.state.data?.some((d) => moving(d.status)) ? LIVE_MS : IDLE_MS),
+  refetchInterval: (q: Query<DepositRecord[]>) => listPollMs(q.state.data, depositMoving),
 });
 
 /** The account's unstakes: one query for the list, the claim banner and each receipt. */
 const withdrawalsQuery = (data: CascadeData, account: string) => ({
   queryKey: cascadeKeys.withdrawals(account),
   queryFn: () => data.listWithdrawals(account),
-  refetchInterval: (q: Query<WithdrawalRecord[]>) => (q.state.data?.some((w) => moving(w.status) || w.status === "ready") ? LIVE_MS : IDLE_MS),
+  refetchInterval: (q: Query<WithdrawalRecord[]>) => listPollMs(q.state.data, withdrawalMoving),
 });
 
 export function useDeposits(account: string) {

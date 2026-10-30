@@ -2,7 +2,8 @@ import { QueryClient } from "@tanstack/react-query";
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { type Cached, plainText, renderWithCache } from "@/components/test-render";
-import { cascadeKeys, seedSnapshot, useTaoPrice } from "./hooks";
+import { cascadeKeys, depositMoving, listPollMs, movingOffBase, seedSnapshot, useTaoPrice, withdrawalMoving } from "./hooks";
+import type { DepositRecord, WithdrawalRecord } from "./records";
 
 describe("seedSnapshot", () => {
   it("puts the snapshot's figures in the cache, dated when they were read", () => {
@@ -20,6 +21,38 @@ describe("seedSnapshot", () => {
     expect(client.getQueryState(cascadeKeys.apy())).toBeUndefined();
     seedSnapshot(client, { at: 1 });
     expect(client.getQueryData(cascadeKeys.stats())).toEqual({ taoPriceUsd: 255 });
+  });
+});
+
+describe("how often Activity's lists are read again", () => {
+  const at = new Date("2026-10-30T12:00:00Z");
+  const dep = (over: Partial<DepositRecord>): DepositRecord => ({ id: "d", createdAt: at, sourceChain: "base", status: "in_progress", steps: [], taoWei: 1n, taoAmount: 1, ...over });
+  const uns = (over: Partial<WithdrawalRecord>): WithdrawalRecord => ({ id: "w", createdAt: at, status: "in_progress", steps: [], shares: 1n, taoAmount: 1, claimable: 0n, ...over });
+  const waiting = dep({ cancellableWei: 1n });
+  const crossing = dep({});
+
+  it("every 30 s while each moving deposit still waits in its open batch on Base: nothing changes on Bittensor until it leaves", () => {
+    expect(listPollMs([waiting], depositMoving)).toBe(30_000);
+    expect(listPollMs([waiting, dep({ status: "staked" })], depositMoving)).toBe(30_000);
+    expect(movingOffBase([waiting], depositMoving)).toBe(false);
+  });
+
+  it("every 10 s again once one has left Base (or isn't in its batch yet)", () => {
+    expect(listPollMs([waiting, crossing], depositMoving)).toBe(10_000);
+    expect(listPollMs([dep({ status: "needs_you" })], depositMoving)).toBe(10_000);
+    expect(movingOffBase([waiting, crossing], depositMoving)).toBe(true);
+  });
+
+  it("every 30 s with nothing moving, or nothing read yet", () => {
+    expect(listPollMs([dep({ status: "staked" })], depositMoving)).toBe(30_000);
+    expect(listPollMs(undefined, depositMoving)).toBe(30_000);
+  });
+
+  it("an unstake: 30 s while its request waits in the open batch, 10 s once it has left, or is back on Base to be paid", () => {
+    expect(listPollMs([uns({ cancellableShares: 1n })], withdrawalMoving)).toBe(30_000);
+    expect(listPollMs([uns({ cancellableShares: 1n }), uns({})], withdrawalMoving)).toBe(10_000);
+    expect(listPollMs([uns({ status: "ready" })], withdrawalMoving)).toBe(10_000);
+    expect(listPollMs([uns({ status: "paid" })], withdrawalMoving)).toBe(30_000);
   });
 });
 

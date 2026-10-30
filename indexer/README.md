@@ -156,7 +156,10 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
    environment's vars.
 6. The approved site lists: build the site you are about to deploy, then
    `pnpm --dir indexer site:approved ../web/out`, review the change to `indexer/src/site-approved.ts` and commit
-   it. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). It writes the
+   it. **Run it on the exact `web/out` that was (or is about to be) deployed, never on a rebuild**: Next gives
+   every build a new random build id, so a rebuild of the same commit has different inline scripts, so different
+   CSP hashes, and the lists would match no live page. If `web/out` has been rebuilt since the deploy, rebuild
+   and redeploy the site too, then run this on that `out`. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). It writes the
    addresses; the **script hosts**, hosts the pages really load a script from (a cross-origin `<script src>`, or
    a host in a `script-src` of `out/_headers`: none today); the hosts **seen in the bundle**, which a page or
    script may name but never load a script from (a dependency's gateways, such as arweave.net and ipfs.io, are

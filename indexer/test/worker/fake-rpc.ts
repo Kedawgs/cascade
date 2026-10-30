@@ -32,8 +32,8 @@ export interface ChainSpec {
   behindFor?: { answers: number; head: bigint };
   /** the next `count` fetches answer this HTTP status */
   failNext?: { count: number; status: number };
-  /** eth_getCode's answer per address (lowercase); "0x" for any other */
-  code?: Record<Hex, Hex>;
+  /** eth_getCode's answer per address (lowercase), as given (null or malformed too); "0x" for any other */
+  code?: Record<Hex, Hex | string | null>;
 }
 
 export interface FetchRecord {
@@ -77,8 +77,10 @@ export function fakeChains(specs: Partial<Record<ChainName, ChainSpec>>, opts: {
         return numberToHex(nodeHead);
       case "eth_chainId":
         return "0x1";
-      case "eth_getCode":
-        return spec.code?.[String(params[0]).toLowerCase() as Hex] ?? "0x";
+      case "eth_getCode": {
+        const a = String(params[0]).toLowerCase() as Hex;
+        return spec.code && a in spec.code ? spec.code[a] : "0x";
+      }
       case "eth_getBlockByNumber": {
         const n = at(params[0]);
         if (n > nodeHead) return null;

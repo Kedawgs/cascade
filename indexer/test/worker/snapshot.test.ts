@@ -132,6 +132,14 @@ describe("readSnapshot", () => {
     expect(net.count()).toBe(4);
   });
 
+  it("keeps a code only from a well-formed answer: null, odd-length or non-hex is unread", async () => {
+    const at = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Hex;
+    const { rpc, specs } = fakeDeployment(cfg, deploymentState(cfg));
+    specs.base.code = { [at(1)]: null, [at(2)]: "0xabc", [at(3)]: "0xzz", [at(4)]: "0x", [at(5)]: "0x6080" };
+    const s = await readSnapshot(rpc, cfg, inputs({ codesOf: [1, 2, 3, 4, 5].map((n) => ({ chain: "base" as const, address: at(n) })) }), 1);
+    expect(s.codes?.base).toEqual({ [at(4)]: "0x", [at(5)]: "0x6080" });
+  });
+
   it("never takes an EIP-7702 delegated account (code 0xef0100…) for a Safe, though its delegate answers nonce()", async () => {
     const DELEGATED = "0x0000000000000000000000000000000000007702" as Hex;
     const state = deploymentState(cfg);

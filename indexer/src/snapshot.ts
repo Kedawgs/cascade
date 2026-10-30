@@ -160,6 +160,9 @@ async function readChain<T>(rpc: Rpc, chain: ChainName, plan: Plan, multicall3: 
   return { block: r.block, time: r.time, state: s };
 }
 
+/** An eth_getCode answer: whole bytes of hex. */
+const CODE = /^0x([0-9a-f]{2})*$/;
+
 /** The watched accounts' transaction counts, and the code of the addresses read as Safes, in one batch. */
 async function countsAndCodes(rpc: Rpc, chain: ChainName, counted: Hex[], coded: Hex[]): Promise<{ counts: Record<Hex, bigint>; codes: Record<Hex, Hex> }> {
   if (counted.length + coded.length === 0) return { counts: {}, codes: {} };
@@ -168,10 +171,13 @@ async function countsAndCodes(rpc: Rpc, chain: ChainName, counted: Hex[], coded:
       ...counted.map((a) => ({ method: "eth_getTransactionCount", params: [a, "latest"] })),
       ...coded.map((a) => ({ method: "eth_getCode", params: [a, "latest"] })),
     ]);
-    return {
-      counts: Object.fromEntries(counted.map((a, i) => [a, hexToBigInt(out[i] as Hex)])),
-      codes: Object.fromEntries(coded.map((a, i) => [a, String(out[counted.length + i]).toLowerCase() as Hex])),
-    };
+    // a code counts only when the answer is whole bytes of hex: anything else (null, an odd length) is unread
+    const codes: Record<Hex, Hex> = {};
+    coded.forEach((a, i) => {
+      const c = out[counted.length + i];
+      if (typeof c === "string" && CODE.test(c.toLowerCase())) codes[a] = c.toLowerCase() as Hex;
+    });
+    return { counts: Object.fromEntries(counted.map((a, i) => [a, hexToBigInt(out[i] as Hex)])), codes };
   } catch (e) {
     console.warn(`${chain} transaction counts failed: ${e instanceof Error ? e.message : String(e)}`);
     return { counts: {}, codes: {} };

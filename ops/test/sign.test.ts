@@ -6,14 +6,15 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
-import { encodeFunctionData, getAddress, type Hex, numberToHex } from "viem";
+import { type Address, encodeFunctionData, getAddress, type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import { BASE_V3 } from "../src/config.ts";
 import { buildPlanV3 } from "../src/plan.ts";
-import { knownContracts, prepareSign, servePage } from "../src/sign.ts";
+import { PAUSE_ABI } from "../src/pause.ts";
+import { knownContracts, liveRoles, prepareSign, servePage } from "../src/sign.ts";
 import { renderPage, signLogic } from "../src/sign-page.ts";
 import { checkCalls, KNOWN_ABI, type WalletView, walletFile } from "../src/wallet.ts";
-import { COLDKEY, v3Record } from "./fake-keeper.ts";
+import { COLDKEY, fakeChain, v3Record } from "./fake-keeper.ts";
 import { ROLES } from "./launch-roles.ts";
 
 const launch = v3Record("live", buildPlanV3(4, 9, COLDKEY, "launch", ROLES));
@@ -608,24 +609,34 @@ describe("pnpm ops sign's server", () => {
   });
 });
 
-describe("pnpm ops sign <file>", () => {
-  const write = (body: unknown) => {
-    const path = join(tmp(), "calls.json");
-    writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
-    return path;
-  };
-  const handoffFile = () =>
-    walletFile({
-      title: "Cascade v3-launch: accept ownership",
-      deployment: "v3-launch",
-      now: NOW,
-      calls: [{ chainId: 964, to: a.vault, data: ACCEPT, label: "acceptOwnership() on the vault", from: OWNER }],
-    });
-  const opts = (o: Partial<Parameters<typeof prepareSign>[1]> = {}): Parameters<typeof prepareSign>[1] => ({ deployment: "v3-launch", recordOf: () => launch, now: NOW, ...o });
+const write = (body: unknown) => {
+  const path = join(tmp(), "calls.json");
+  writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+  return path;
+};
+const handoffFile = () =>
+  walletFile({
+    title: "Cascade v3-launch: accept ownership",
+    deployment: "v3-launch",
+    now: NOW,
+    calls: [{ chainId: 964, to: a.vault, data: ACCEPT, label: "acceptOwnership() on the vault", from: OWNER }],
+  });
+/** A reader of the contracts' live roles that no test expects to be called unless it gives its own. */
+const noReads = async (): Promise<never> => {
+  throw new Error("no live read expected");
+};
+const opts = (o: Partial<Parameters<typeof prepareSign>[1]> = {}): Parameters<typeof prepareSign>[1] => ({
+  deployment: "v3-launch",
+  recordOf: () => launch,
+  now: NOW,
+  readRoles: noReads,
+  ...o,
+});
 
-  it("reads the file, checks it against its deployment's live record, and renders the page", () => {
+describe("pnpm ops sign <file>", () => {
+  it("reads the file, checks it against its deployment's live record, and renders the page", async () => {
     const asked: string[] = [];
-    const p = prepareSign(write(handoffFile()), opts({ recordOf: (name) => (asked.push(name), launch) }));
+    const p = await prepareSign(write(handoffFile()), opts({ recordOf: (name) => (asked.push(name), launch) }));
     expect(asked).toEqual(["v3-launch"]);
     expect(p.view.calls[0].heading).toBe("acceptOwnership() on the Vault (Bittensor)");
     expect(p.lines[1]).toBe(`  1. acceptOwnership() on the Vault (Bittensor) ${a.vault}`);
@@ -633,8 +644,8 @@ describe("pnpm ops sign <file>", () => {
     expect(p.page.csp).toMatch(/^default-src 'none'/);
   });
 
-  it("refuses a file for another deployment than OPS_DEPLOYMENT (or --deployment)", () => {
-    expect(() => prepareSign(write(handoffFile()), opts({ deployment: "v3-test" }))).toThrow(
+  it("refuses a file for another deployment than OPS_DEPLOYMENT (or --deployment)", async () => {
+    await expect(prepareSign(write(handoffFile()), opts({ deployment: "v3-test" }))).rejects.toThrow(
       /this file is for deployment v3-launch, but this run's deployment is v3-test \(OPS_DEPLOYMENT, or --deployment\): run it with OPS_DEPLOYMENT=v3-launch or --deployment v3-launch/,
     );
     // the pool steps name no deployment: any run may serve them
@@ -644,23 +655,110 @@ describe("pnpm ops sign <file>", () => {
       now: NOW,
       calls: [{ chainId: 8453, to: BASE_V3.TAO_WETH_POOL, data: enc("increaseObservationCardinalityNext", [1_200]), gas: 15_100_000, label: "increaseObservationCardinalityNext(1200)", from: OWNER }],
     });
-    expect(prepareSign(write(pools), opts({ deployment: "v3-test", recordOf: () => null })).view.calls).toHaveLength(1);
+    expect((await prepareSign(write(pools), opts({ deployment: "v3-test", recordOf: () => null }))).view.calls).toHaveLength(1);
   });
 
-  it("warns of a file more than a day old, in the terminal and on the page", () => {
-    const p = prepareSign(write(handoffFile()), opts({ now: NOW + 48 * 3_600_000 }));
+  it("warns of a file more than a day old, in the terminal and on the page", async () => {
+    const p = await prepareSign(write(handoffFile()), opts({ now: NOW + 48 * 3_600_000 }));
     expect(p.lines[1]).toMatch(/^WARNING: This file was prepared 48 hours ago/);
     expect(p.page.html).toContain('<p class="warning">WARNING: This file was prepared 48 hours ago');
   });
 
-  it("refuses a file whose deployment has no live record, one edited to call something else, one with a hidden character, and one that isn't JSON", () => {
-    expect(() => prepareSign(write(handoffFile()), opts({ recordOf: () => null }))).toThrow(/deployment v3-launch, but there's no live record for it/);
+  it("refuses a file whose deployment has no live record, one edited to call something else, one with a hidden character, and one that isn't JSON", async () => {
+    await expect(prepareSign(write(handoffFile()), opts({ recordOf: () => null }))).rejects.toThrow(/deployment v3-launch, but there's no live record for it/);
     const edited = handoffFile();
     edited.calls[0].to = getAddress("0x00000000000000000000000000000000000bad01");
-    expect(() => prepareSign(write(edited), opts())).toThrow(/is not one of this deployment's contracts/);
+    await expect(prepareSign(write(edited), opts())).rejects.toThrow(/is not one of this deployment's contracts/);
     const hidden = handoffFile();
     hidden.calls[0].label = `acceptOwnership()${char(0x200b)} on the vault`;
-    expect(() => prepareSign(write(hidden), opts())).toThrow(/call 1: label .*printable ASCII/);
-    expect(() => prepareSign(write("{ not json"), opts())).toThrow(/can't read .* as a call file/);
+    await expect(prepareSign(write(hidden), opts())).rejects.toThrow(/call 1: label .*printable ASCII/);
+    await expect(prepareSign(write("{ not json"), opts())).rejects.toThrow(/can't read .* as a call file/);
+  });
+});
+
+describe("pause and unpause after the guardian or owner is replaced on-chain: the contracts' live roles", () => {
+  const NEW_GUARDIAN = getAddress("0x00000000000000000000000000000000000b0b99");
+  const NEW_OWNER = getAddress("0x00000000000000000000000000000000000a0b99");
+  const fileOf = (calls: Parameters<typeof walletFile>[0]["calls"]) => walletFile({ title: "t", deployment: "v3-launch", now: NOW, calls });
+  const on = (fn: "pause" | "unpause", from: Address, to = a.frontDoor, chainId = 8453) => ({ chainId, to, data: enc(fn), label: `${fn}()`, from });
+  /** The contracts' answers now: the front door's roles as given (else the record's), the vault's as the
+   * record says. Each read is recorded. */
+  const live = (frontDoor: { guardian?: Address; owner?: Address } = {}) => {
+    const reads: [string, string][] = [];
+    const readRoles = async (chain: string, address: Address) => {
+      reads.push([chain, address]);
+      return address === a.frontDoor
+        ? { guardian: frontDoor.guardian ?? ROLES.guardian.base, owner: frontDoor.owner ?? ROLES.owner.base }
+        : { guardian: ROLES.guardian.bittensor, owner: ROLES.owner.bittensor };
+    };
+    return { reads, readRoles };
+  };
+  const failing = async (): Promise<never> => {
+    throw new Error("RPC down");
+  };
+
+  it("accepts a rotated guardian's pause when the contract says it is the guardian now, reading each target once", async () => {
+    const l = live({ guardian: NEW_GUARDIAN });
+    const p = await prepareSign(write(fileOf([on("pause", NEW_GUARDIAN), on("pause", ROLES.guardian.bittensor, a.vault, 964)])), opts({ readRoles: l.readRoles }));
+    expect(l.reads).toEqual([
+      ["base", a.frontDoor],
+      ["bittensor", a.vault],
+    ]);
+    const role = `the guardian on Base, read from the contract now (the record says ${ROLES.guardian.base})`;
+    expect(p.view.calls.map((c) => c.senderRole)).toEqual([role, "the guardian on Bittensor, from the deployment record"]);
+    expect(p.lines).toContain(`     Base (chain id 8453), value 0 ETH, from ${NEW_GUARDIAN} (${role})`);
+    expect(p.page.html).toContain(`<dt>Send from</dt><dd><code>${NEW_GUARDIAN}</code> (${role})</dd>`);
+    expect(p.view.warnings).toEqual([]);
+  });
+
+  it("refuses that file when the live read fails, saying why, or when the contract names someone else", async () => {
+    await expect(prepareSign(write(fileOf([on("pause", NEW_GUARDIAN)])), opts({ readRoles: failing }))).rejects.toThrow(
+      new RegExp(
+        `call 1: ${NEW_GUARDIAN} is not a role in the deployment record nor read from the contract now that may send pause\\(\\) to the Front door on Base .*; the contract's live guardian and owner couldn't be read \\(RPC down\\), so only the record's roles count`,
+      ),
+    );
+    await expect(prepareSign(write(fileOf([on("pause", NEW_GUARDIAN)])), opts({ readRoles: live({ guardian: OTHER }).readRoles }))).rejects.toThrow(
+      /is not a role in the deployment record nor read from the contract now that may send pause\(\)/,
+    );
+  });
+
+  it("falls back to the record's roles when the read fails, and says so", async () => {
+    const p = await prepareSign(write(fileOf([on("pause", ROLES.guardian.base)])), opts({ readRoles: failing }));
+    expect(p.view.calls[0].senderRole).toBe("the guardian on Base, from the deployment record");
+    const warning = "Couldn't read the Front door's guardian and owner on Base now (RPC down): its pause() and unpause() are checked against the deployment record's roles only.";
+    expect(p.view.warnings).toEqual([warning]);
+    expect(p.lines).toContain(`WARNING: ${warning}`);
+    expect(p.page.html).toContain('<p class="warning">WARNING: Couldn&#39;t read the Front door&#39;s guardian and owner on Base now (RPC down)');
+  });
+
+  it("takes unpause from the owner the contract names now, and never from a guardian", async () => {
+    const rotated = live({ guardian: NEW_GUARDIAN, owner: NEW_OWNER });
+    const p = await prepareSign(write(fileOf([on("unpause", NEW_OWNER)])), opts({ readRoles: rotated.readRoles }));
+    expect(p.view.calls[0].senderRole).toBe(`the owner on Base, read from the contract now (the record says ${ROLES.owner.base})`);
+    // unpause is onlyOwner: the guardian, live or recorded, is refused
+    await expect(prepareSign(write(fileOf([on("unpause", NEW_GUARDIAN)])), opts({ readRoles: rotated.readRoles }))).rejects.toThrow(/may send unpause\(\) to the Front door on Base/);
+    await expect(prepareSign(write(fileOf([on("unpause", ROLES.guardian.base)])), opts({ readRoles: rotated.readRoles }))).rejects.toThrow(/may send unpause\(\)/);
+    // pause takes the live owner too
+    expect((await prepareSign(write(fileOf([on("pause", NEW_OWNER)])), opts({ readRoles: rotated.readRoles }))).view.calls[0].senderRole).toBe(
+      `the owner on Base, read from the contract now (the record says ${ROLES.owner.base})`,
+    );
+  });
+
+  it("keeps acceptOwnership to the record's owner: nothing is read, and an owner only the contract names is refused", async () => {
+    const l = live({ owner: NEW_OWNER });
+    const accept = { chainId: 8453, to: a.frontDoor, data: ACCEPT, label: "acceptOwnership()", from: NEW_OWNER };
+    await expect(prepareSign(write(fileOf([accept])), opts({ readRoles: l.readRoles }))).rejects.toThrow(
+      /is not a role in the deployment record that may send acceptOwnership\(\) to the Front door on Base/,
+    );
+    expect(l.reads).toEqual([]);
+  });
+
+  it("reads each contract's guardian() and owner() through the chain's RPC", async () => {
+    const f = fakeChain([PAUSE_ABI], { guardian: () => NEW_GUARDIAN, owner: () => NEW_OWNER });
+    expect(await liveRoles(f.ctx, "base", a.frontDoor)).toEqual({ guardian: NEW_GUARDIAN, owner: NEW_OWNER });
+    expect(f.calls.map((c) => [c.chain, c.fn, c.to])).toEqual([
+      ["base", "guardian", a.frontDoor],
+      ["base", "owner", a.frontDoor],
+    ]);
   });
 });

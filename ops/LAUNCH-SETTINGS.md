@@ -98,18 +98,24 @@ work, and what the Ledger displays.
 **Keep a pause file ready.** After the rehearsal, keep `deployments/wallet/<name>-pause.json`:
 - In an emergency, `pnpm ops sign` on it is one command away. `sign` checks it against the record again,
   and `pause()`'s data never changes. The warning that it is over a day old is expected.
-- Make it again with `pnpm ops pause --for-wallet` whenever the guardian changes. It writes nothing
-  while the contracts are already paused.
+- If the guardian is replaced (`proposeGuardian`, then `acceptGuardian` after the delay), make it again
+  with `pnpm ops pause --for-wallet`. That writes the new guardian, read from the contract, and writes
+  nothing while the contracts are already paused.
+- For pause and unpause, `sign` reads each target contract's `guardian()` and `owner()` when it serves
+  the file. It accepts the record's roles or those, and shows a role found only on the contract as "read
+  from the contract now (the record says 0x…)".
+- If that read fails, only the record's roles count, and `sign` says so. A replaced guardian's file is
+  then refused until the RPC answers (`OPS_BASE_RPC`, `OPS_BITTENSOR_RPC`).
 
 What it guards:
 - `sign` refuses anything but the known functions (`acceptOwnership`, `pause`, `unpause`,
   `increaseObservationCardinalityNext`). There is no `transferOwnership`, the call that would hand a
   contract away. Each function is allowed only on the contracts it is for: the deployment's front door,
   staker and vault from its live record, and the oracle's two pools.
-- Each sender must be the record's role for the function:
-  - `acceptOwnership`: the chain's owner;
-  - `pause`: the guardian or the owner;
-  - `unpause`: the owner;
+- Each sender must hold the role the function needs:
+  - `acceptOwnership`: the chain's owner, from the record only;
+  - `pause`: the guardian or the owner, from the record or as the contract names them now;
+  - `unpause`: the owner, from the record or as the contract names it now (never a guardian);
   - the pool steps: one `--from` account.
 - It refuses value, a gas limit on anything but a pool step, any character outside printable ASCII, and
   a file for another deployment.

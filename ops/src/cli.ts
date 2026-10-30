@@ -20,7 +20,7 @@ import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { createRpc, logsRpc } from "./rpc.ts";
 import { baseLogsLine, type Ctx, execFileRunner, unit } from "./send.ts";
-import { prepareSign, servePage } from "./sign.ts";
+import { liveRoles, prepareSign, servePage } from "./sign.ts";
 import { verifyAndSave } from "./verify.ts";
 import { writeWebEnv } from "./webconfig.ts";
 import { sweep, windDown } from "./winddown.ts";
@@ -211,11 +211,14 @@ async function run(a: Args): Promise<number> {
     }
     case "sign": {
       // reads no chain and sends nothing: the page asks MetaMask to send, one click per call
-      // the file must be for this run's deployment: OPS_DEPLOYMENT, or --deployment
-      const p = prepareSign(resolve(a.file as string), {
+      // the file must be for this run's deployment: OPS_DEPLOYMENT, or --deployment. pause and unpause
+      // targets' guardian and owner are read from the live chains (reads only)
+      const live = ctxFor(true);
+      const p = await prepareSign(resolve(a.file as string), {
         deployment: a.deployment ?? deploymentName(env),
         recordOf: (name) => loadRecordFor(recordFor({ ...env, OPS_DEPLOYMENT: name }, true), true),
         now: Date.now(),
+        readRoles: (chain, address) => liveRoles(live, chain, address),
       });
       for (const line of p.lines) log(line);
       const server = await servePage(p.page);

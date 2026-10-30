@@ -1,15 +1,36 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { type Address, toFunctionSelector, zeroAddress } from "viem";
 import type { ChainName } from "./config.ts";
 import { ORACLE_POOLS } from "./cardinality.ts";
+import { PAUSE_ABI } from "./pause.ts";
 import { isPlanV3, rolesOf } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
-import { chainLabel } from "./send.ts";
+import { read } from "./rpc.ts";
+import { type Ctx, chainLabel } from "./send.ts";
 import { renderPage } from "./sign-page.ts";
-import { checkCalls, describeCalls, type KnownCall, type KnownContract, parseWalletFile, type WalletView } from "./wallet.ts";
+import { checkCalls, describeCalls, type KnownCall, type KnownContract, parseWalletFile, type Sender, type WalletView } from "./wallet.ts";
 
 const CHAIN_ID: Record<ChainName, number> = { base: 8453, bittensor: 964 };
+const CHAIN_NAME: Record<number, ChainName> = { 8453: "base", 964: "bittensor" };
+const PAUSE_SELECTORS = [toFunctionSelector("function pause()"), toFunctionSelector("function unpause()")];
+
+/** A contract's guardian and owner as it names them now. */
+export interface LiveRoles {
+  guardian: Address;
+  owner: Address;
+}
+/** Each pause/unpause target's live roles, or why they couldn't be read, by `${chainId}:${address}`. */
+export type LiveReads = ReadonlyMap<string, LiveRoles | { problem: string }>;
+const liveKey = (chainId: number, address: string) => `${chainId}:${address.toLowerCase()}`;
+
+/** The contract's guardian() and owner() now, through the chain's RPC. */
+export async function liveRoles(ctx: Pick<Ctx, "rpc">, chain: ChainName, address: Address): Promise<LiveRoles> {
+  const guardian = (await read(ctx.rpc, chain, { address, abi: PAUSE_ABI, functionName: "guardian" })) as Address;
+  const owner = (await read(ctx.rpc, chain, { address, abi: PAUSE_ABI, functionName: "owner" })) as Address;
+  return { guardian, owner };
+}
 
 /** The contracts the signing page may call, the calls it may make to each, who may send each (the
  * record's roles), and what each does:
@@ -18,8 +39,11 @@ const CHAIN_ID: Record<ChainName, number> = { base: 8453, bittensor: 964 };
  *   acceptOwnership from the chain's owner (the pending owner the deployer offered it to); on the front
  *   door and the vault also pause, from the guardian or the owner (onlyOwnerOrGuardian), and unpause,
  *   from the owner (onlyOwner).
+ * `live` adds, for pause and unpause only, the guardian and owner each contract names now where they
+ * differ from the record's (one replaced on-chain since, with proposeGuardian/acceptGuardian or an
+ * ownership transfer), or carries why the read failed. acceptOwnership stays the record's owner's.
  * A v2 record has no owner or guardian roles, so it is refused. */
-export function knownContracts(rec: DeploymentRecord | null): KnownContract[] {
+export function knownContracts(rec: DeploymentRecord | null, live: LiveReads = new Map()): KnownContract[] {
   const pools = ORACLE_POOLS.map(
     (p): KnownContract => ({
       chainId: 8453,
@@ -43,6 +67,14 @@ export function knownContracts(rec: DeploymentRecord | null): KnownContract[] {
     const owner = { address: roles.owner[chain], role: `the owner on ${where}` };
     const guardian = { address: roles.guardian[chain], role: `the guardian on ${where}` };
     const accept: KnownCall = { senders: [owner], effect: (from) => `makes ${from} the owner of the ${name} on ${where}` };
+    // what the contract says now, for pause and unpause: only a role that differs from the record's
+    const now = live.get(liveKey(CHAIN_ID[chain], address));
+    const read = now && !("problem" in now) ? now : undefined;
+    const liveRole = (role: "guardian" | "owner", recorded: Address): Sender[] =>
+      read && read[role] !== zeroAddress && read[role].toLowerCase() !== recorded.toLowerCase()
+        ? [{ address: read[role], role: `the ${role} on ${where}, read from the contract now (the record says ${recorded})` }]
+        : [];
+    const liveFor = (senders: Sender[]) => (read ? { live: senders } : now && "problem" in now ? { liveProblem: now.problem } : {});
     return {
       chainId: CHAIN_ID[chain],
       address,
@@ -50,8 +82,8 @@ export function knownContracts(rec: DeploymentRecord | null): KnownContract[] {
       calls: paused
         ? {
             acceptOwnership: accept,
-            pause: { senders: [guardian, owner], effect: () => paused },
-            unpause: { senders: [owner], effect: () => `lets the ${name} on ${where} run again (undoes pause())` },
+            pause: { senders: [guardian, owner], ...liveFor([...liveRole("guardian", guardian.address), ...liveRole("owner", owner.address)]), effect: () => paused },
+            unpause: { senders: [owner], ...liveFor(liveRole("owner", owner.address)), effect: () => `lets the ${name} on ${where} run again (undoes pause())` },
           }
         : { acceptOwnership: accept },
     };
@@ -66,13 +98,20 @@ export function knownContracts(rec: DeploymentRecord | null): KnownContract[] {
 
 /** `pnpm ops sign <file>`, up to serving: the call file read and checked (parseWalletFile); its
  * deployment must be this run's (`deployment`: OPS_DEPLOYMENT, or sign's --deployment), and each call is
- * checked against that deployment's live record (`recordOf`) and the oracle's pools (checkCalls). Then the
- * page and the terminal's description of the same calls, with a warning for a file over a day old at
- * `now`. Reads no chain. */
-export function prepareSign(
+ * checked against that deployment's live record (`recordOf`) and the oracle's pools (checkCalls). For
+ * pause and unpause only, each target contract's guardian and owner are also read now, once each
+ * (`readRoles`), so a role replaced on-chain since the record can still send them; a read that fails
+ * leaves the record's roles alone and says so. Then the page and the terminal's description of the same
+ * calls, with a warning for a file over a day old at `now`. */
+export async function prepareSign(
   path: string,
-  o: { deployment: string; recordOf: (deployment: string) => DeploymentRecord | null; now: number },
-): { view: WalletView; page: { html: string; csp: string }; lines: string[] } {
+  o: {
+    deployment: string;
+    recordOf: (deployment: string) => DeploymentRecord | null;
+    now: number;
+    readRoles: (chain: ChainName, address: Address) => Promise<LiveRoles>;
+  },
+): Promise<{ view: WalletView; page: { html: string; csp: string }; lines: string[] }> {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -89,7 +128,27 @@ export function prepareSign(
   if (file.deployment && !rec) {
     throw new Error(`the call file is for deployment ${file.deployment}, but there's no live record for it (deployments/${file.deployment}.json): refusing to show calls to contracts it can't name`);
   }
-  const view = checkCalls(file, knownContracts(rec), o.now);
+  // the pause and unpause targets among the record's contracts, each read once
+  const pausable = knownContracts(rec).filter((k) => k.calls.pause);
+  const targets = new Map<string, KnownContract>();
+  for (const c of file.calls) {
+    const k = pausable.find((x) => x.chainId === c.chainId && x.address.toLowerCase() === c.to.toLowerCase());
+    if (k && PAUSE_SELECTORS.includes(c.data.slice(0, 10) as `0x${string}`)) targets.set(liveKey(k.chainId, k.address), k);
+  }
+  const live = new Map<string, LiveRoles | { problem: string }>();
+  const unread: string[] = [];
+  for (const [key, k] of targets) {
+    const chain = CHAIN_NAME[k.chainId];
+    try {
+      live.set(key, await o.readRoles(chain, k.address));
+    } catch (e) {
+      const problem = (e as Error).message.split("\n")[0];
+      live.set(key, { problem });
+      unread.push(`Couldn't read the ${k.name}'s guardian and owner on ${chainLabel(chain)} now (${problem}): its pause() and unpause() are checked against the deployment record's roles only.`);
+    }
+  }
+  const view = checkCalls(file, knownContracts(rec, live), o.now);
+  view.warnings.push(...unread);
   return { view, page: renderPage(view), lines: describeCalls(view) };
 }
 

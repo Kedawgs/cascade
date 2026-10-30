@@ -202,9 +202,13 @@ export interface Sender {
 }
 
 /** A call this tool makes to a contract: who may send it (the record's role holders, or anyone, for the
- * pools), and what it does, in a line. */
+ * pools), and what it does, in a line. pause and unpause may also come from the role holders the contract
+ * names now (`live`, read when the file is served: a guardian or owner replaced on-chain since the
+ * record), or carry why that read failed (`liveProblem`), in which case only the record's count. */
 export interface KnownCall {
   senders: readonly Sender[] | "anyone";
+  live?: readonly Sender[];
+  liveProblem?: string;
   effect: (from: Address, fn: DecodedCall) => string;
 }
 
@@ -248,7 +252,8 @@ const same = (x: string, y: string) => x.toLowerCase() === y.toLowerCase();
 
 /** Each call checked against `known`, built from the record: its `to` must be a known contract on its
  * chain, its function one this tool makes to that contract, and its `from` the record's role for that
- * function (the pool steps: anyone, but one account for the whole file). The label must start with the
+ * function, or for pause and unpause the role the contract names now (KnownCall.live, labelled so), and
+ * nothing else (the pool steps: anyone, but one account for the whole file). The label must start with the
  * function the data calls; only a pool step may set a gas limit. What the page and terminal show comes
  * from here: the file's title and labels are only notes. */
 export function checkCalls(file: WalletFile, known: readonly KnownContract[], now = Date.now()): WalletView {
@@ -279,12 +284,17 @@ export function checkCalls(file: WalletFile, known: readonly KnownContract[], no
       poolFrom = c.from;
       senderRole = "the account given with --from; anyone may send this";
     } else {
-      const roles = call.senders.filter((s) => same(s.address, c.from)).map((s) => s.role);
-      if (!roles.length) {
-        const expected = call.senders.map((s) => `${s.role}, ${s.address}`).join("; or ");
-        throw new Error(`${at}: ${c.from} is not a role in the deployment record that may send ${fn.name}() to the ${contract} (${expected})`);
+      const matching = (list: readonly Sender[]) => list.filter((s) => same(s.address, c.from)).map((s) => s.role);
+      const recorded = matching(call.senders);
+      const now = matching(call.live ?? []);
+      if (recorded.length) senderRole = `${recorded.join(" and ")}, from the deployment record`;
+      else if (now.length) senderRole = now.join(" and ");
+      else {
+        const read = call.live !== undefined || call.liveProblem !== undefined;
+        const expected = [...call.senders, ...(call.live ?? [])].map((s) => `${s.role}, ${s.address}`).join("; or ");
+        const unread = call.liveProblem ? `; the contract's live guardian and owner couldn't be read (${call.liveProblem}), so only the record's roles count` : "";
+        throw new Error(`${at}: ${c.from} is not a role in the deployment record${read ? " nor read from the contract now" : ""} that may send ${fn.name}() to the ${contract} (${expected})${unread}`);
       }
-      senderRole = `${roles.join(" and ")}, from the deployment record`;
     }
     const from = getAddress(c.from);
     return {

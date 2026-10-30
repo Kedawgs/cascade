@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ruleCtx } from "./rule-ctx.ts";
 import { RULES } from "../../src/rules/ids.ts";
 import { SITE_RULES, siteIntegrity } from "../../src/rules/site.ts";
-import { ADDRESS_RE, readCapped, scanScript } from "../../src/site.ts";
+import { ADDRESS_RE, pageScripts, readCapped, scanScript } from "../../src/site.ts";
 import { MAX_FILES, runSiteJob, type SiteJobOptions, siteRunMaxS } from "../../src/site-job.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import { loadTickState } from "../../src/store.ts";
@@ -28,6 +28,7 @@ const APPROVED = {
   csp: Object.fromEntries(testConfig().site.pages.map((p) => [p, policiesOf(p)])) as Record<string, string[]>,
 };
 const HASH = `0x${"ab".repeat(32)}`;
+const ORIGIN = "https://cascadefi.xyz";
 const chunk = (name: string) => `/_next/static/chunks/${name}.js`;
 
 /** The fixture site: two pages, six scripts (one named only inside another), every Cascade address and
@@ -98,6 +99,38 @@ describe("the address and host scan", () => {
   it("finds hosts behind http://, wss:// and protocol-relative //host, but not in a // comment", () => {
     const text = `a="http://plain.example/x";b="wss://sock.example";c="//relative.example/y.js";d=url(//css.example/f.woff)// a comment//not.a.host`;
     expect(scanScript(text).hosts).toEqual(["css.example", "plain.example", "relative.example", "sock.example"]);
+  });
+
+  it("reads a page's script tags as a browser does: a > inside a quoted value doesn't end the tag", () => {
+    expect(pageScripts(`<script data-x=">" src="https://arweave.net/x.js"></script>`, ORIGIN).foreignHosts).toEqual(["arweave.net"]);
+    expect(pageScripts(`<link data-x='>' rel="modulepreload" href="//evil.example/m.js">`, ORIGIN).foreignHosts).toEqual(["evil.example"]);
+    expect(pageScripts(`<SCRIPT\nsrc=https://bare.example/x.js></SCRIPT>`, ORIGIN).foreignHosts).toEqual(["bare.example"]);
+  });
+
+  it("decodes character references in attribute values before reading the URL", () => {
+    for (const src of [
+      "https&#58;//evil.example/x.js",
+      "https&#x3A;//evil.example/x.js",
+      "https&#X3a//evil.example/x.js",
+      "https&colon;&sol;&sol;evil.example/x.js",
+      "ht&Tab;tps://evil.example/x.js",
+      "&#47;/evil.example/x.js",
+      "&#x2f;&#0047;evil.example/x.js",
+    ]) {
+      expect(pageScripts(`<script src="${src}"></script>`, ORIGIN).foreignHosts, src).toEqual(["evil.example"]);
+    }
+    expect(pageScripts(`<link rel="module&#112;reload" href="https&colon;//evil.example/m.js">`, ORIGIN).foreignHosts).toEqual(["evil.example"]);
+    // a query string's &amp; is an ampersand, not a host
+    expect(pageScripts(`<script src="/_next/a.js?x=1&amp;y=2"></script>`, ORIGIN)).toEqual({ srcs: ["/_next/a.js"], foreignHosts: [], embedded: [] });
+  });
+
+  it("isn't fooled by a quote in an unquoted value, a src= inside another attribute's value, or a repeated src", () => {
+    // a browser ends <script src=/a'b.js> at its >: the second tag loads from evil.example
+    const html = `<script src=/a'b.js></script><script src="https://evil.example/x.js"></script><p title='x>`;
+    expect(pageScripts(html, ORIGIN).foreignHosts).toEqual(["evil.example"]);
+    expect(pageScripts(`<script data-x=" src=/ok.js" src="https://evil.example/x.js"></script>`, ORIGIN).foreignHosts).toEqual(["evil.example"]);
+    // the first of a repeated attribute is the one a browser keeps
+    expect(pageScripts(`<script src="https://evil.example/x.js" src="/ok.js"></script>`, ORIGIN).foreignHosts).toEqual(["evil.example"]);
   });
 
   it("reads a body as a stream and stops at the cap, never buffering more", async () => {
@@ -233,6 +266,14 @@ describe("the site job", () => {
       await wipe(db);
       for (let i = 0; i < 3; i++) await job(server({ ...named, "/": p }), NOW + i * 120, { approved: { ...APPROVED, scriptHosts } });
       expect(await findings(NOW + 300), scriptHosts[0]).toEqual([]);
+    }
+  });
+
+  it("catches a page's script hidden behind a quoted > or a character reference (the review's two bypasses)", async () => {
+    for (const tag of [`<script data-x=">" src="https://arweave.net/x.js"></script>`, `<script src="https&#58;//arweave.net/x.js"></script>`]) {
+      await wipe(db);
+      await fullPass(server(site({ "/": site()["/"].replace("</html>", `${tag}</html>`) })));
+      expect((await findings(NOW + 300)).map((x) => x.key), tag).toEqual(["site.integrity:script_host:arweave.net"]);
     }
   });
 

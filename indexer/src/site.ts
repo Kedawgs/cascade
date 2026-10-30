@@ -49,17 +49,125 @@ export function pageScripts(html: string, origin: string): { srcs: string[]; for
     else if (u.origin === new URL(origin).origin) srcs.add(u.pathname);
     else foreign.add(u.hostname.toLowerCase());
   };
-  for (const m of html.matchAll(/<script\b([^>]*)>/gi)) {
-    const src = attr(m[1], "src");
-    if (src) take(src);
-  }
-  for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
-    const rel = (attr(m[1], "rel") ?? "").toLowerCase().split(/\s+/);
-    const as = (attr(m[1], "as") ?? "").toLowerCase();
-    const href = attr(m[1], "href");
+  // every <script and <link start tag (one inside a comment, a script's text or another tag's value counts too:
+  // more findings, never fewer), its attributes read as the browser's tokenizer reads them
+  for (const m of html.matchAll(/<(script|link)(?=[\t\n\f\r />])/gi)) {
+    const a = tagAttrs(html, m.index + m[0].length);
+    if (m[1].toLowerCase() === "script") {
+      const src = a.get("src");
+      if (src) take(src);
+      continue;
+    }
+    const rel = (a.get("rel") ?? "").toLowerCase().split(/[\t\n\f\r ]+/);
+    const as = (a.get("as") ?? "").toLowerCase();
+    const href = a.get("href");
     if (href && (rel.includes("modulepreload") || (rel.includes("preload") && as === "script"))) take(href);
   }
   return { srcs: [...srcs], foreignHosts: [...foreign].sort(), embedded: [...embedded].sort() };
+}
+
+const SPACE = new Set(["\t", "\n", "\f", "\r", " "]);
+
+/** The attributes of the start tag whose name ends at `at`, read as the HTML tokenizer reads them: a name runs
+ * to a space, /, > or =, its ASCII letters lowercased; a value is quoted (a > inside doesn't end the tag) or runs
+ * to a space or > (a quote inside is part of it); character references in a value are decoded; the first of a
+ * repeated name is kept. It stops at the > that ends the tag. */
+function tagAttrs(html: string, at: number): Map<string, string> {
+  const out = new Map<string, string>();
+  const n = html.length;
+  let i = at;
+  for (;;) {
+    while (i < n && (SPACE.has(html[i]) || html[i] === "/")) i++;
+    if (i >= n || html[i] === ">") return out;
+    const start = i++;
+    while (i < n && !SPACE.has(html[i]) && html[i] !== "/" && html[i] !== ">" && html[i] !== "=") i++;
+    const name = html.slice(start, i).replace(/[A-Z]/g, (c) => c.toLowerCase());
+    while (i < n && SPACE.has(html[i])) i++;
+    let value = "";
+    if (html[i] === "=") {
+      i++;
+      while (i < n && SPACE.has(html[i])) i++;
+      const q = html[i];
+      if (q === '"' || q === "'") {
+        const end = html.indexOf(q, i + 1);
+        value = html.slice(i + 1, end === -1 ? n : end);
+        i = end === -1 ? n : end + 1;
+      } else {
+        const s = i;
+        while (i < n && !SPACE.has(html[i]) && html[i] !== ">") i++;
+        value = html.slice(s, i);
+      }
+    }
+    if (!out.has(name)) out.set(name, decodeRefs(value));
+  }
+}
+
+/** Every named character reference that decodes to ASCII: the characters that can change what a URL means
+ * (`&colon;`, `&sol;`, `&Tab;`, …). Any other named reference decodes to a character outside ASCII, which keeps a
+ * URL relative to the page, as it is left undecoded. */
+const NAMED_ASCII: Readonly<Record<string, string>> = {
+  Tab: "\t",
+  NewLine: "\n",
+  excl: "!",
+  quot: '"',
+  QUOT: '"',
+  num: "#",
+  dollar: "$",
+  percnt: "%",
+  amp: "&",
+  AMP: "&",
+  apos: "'",
+  lpar: "(",
+  rpar: ")",
+  ast: "*",
+  midast: "*",
+  plus: "+",
+  comma: ",",
+  period: ".",
+  sol: "/",
+  colon: ":",
+  semi: ";",
+  lt: "<",
+  LT: "<",
+  equals: "=",
+  gt: ">",
+  GT: ">",
+  quest: "?",
+  commat: "@",
+  lsqb: "[",
+  lbrack: "[",
+  bsol: "\\",
+  rsqb: "]",
+  rbrack: "]",
+  Hat: "^",
+  lowbar: "_",
+  UnderBar: "_",
+  grave: "`",
+  DiacriticalGrave: "`",
+  lcub: "{",
+  lbrace: "{",
+  verbar: "|",
+  vert: "|",
+  VerticalLine: "|",
+  rcub: "}",
+  rbrace: "}",
+  fjlig: "fj",
+};
+/** The ASCII ones a browser also decodes without the semicolon (unless = follows, in an attribute value). */
+const LEGACY = new Set(["amp", "AMP", "lt", "LT", "gt", "GT", "quot", "QUOT"]);
+
+/** An attribute value as a browser reads it: numeric character references (decimal or hex, the semicolon
+ * optional; an invalid one is U+FFFD) and the named ones in NAMED_ASCII decoded. */
+export function decodeRefs(v: string): string {
+  if (!v.includes("&")) return v;
+  return v.replace(/&(?:#([0-9]+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*))(;?)/g, (m, dec, hex, name, semi, at: number) => {
+    if (name !== undefined) {
+      if (semi) return NAMED_ASCII[name] ?? m;
+      return LEGACY.has(name) && v[at + m.length] !== "=" ? NAMED_ASCII[name] : m;
+    }
+    const cp = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex, 16);
+    return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "�";
+  });
 }
 
 /** A Content-Security-Policy header's policies, each normalized (directives trimmed, their names lowercased,
@@ -122,8 +230,6 @@ export const hostListed = (list: readonly string[], host: string): boolean =>
     const h = x.toLowerCase();
     return h === host || (h.startsWith("*.") && host.endsWith(h.slice(1)));
   });
-
-const attr = (attrs: string, name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(attrs)?.slice(1).find((x) => x !== undefined);
 
 /** The body as text, read as a stream and cancelled once past `maxBytes` (never buffering more). */
 export async function readCapped(res: Response, maxBytes: number): Promise<{ text: string } | { tooLarge: true }> {

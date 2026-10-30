@@ -50,6 +50,8 @@ export const RULES = {
   "keys.keeper_unexplained_tx": warning("event"),
   // a role wallet's code changed in a way no stolen key can: a contract deployed at an account, a delegation removed
   "keys.code_changed": warning("event"),
+  // a watched Safe's nonce() unread for many ticks: its transactions aren't being counted meanwhile
+  "keys.safe_unread": warning("condition"),
   "batch.past_max_wait": warning("condition", true),
   "payout.overdue": warning("condition", true),
   "delivery.overdue": warning("condition"),

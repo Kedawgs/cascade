@@ -192,7 +192,24 @@ export const keys: Rule = {
       for (const h of now) {
         const row = stored.get(`${chain}:${h.address}`);
         const isSafe = safes[h.address] !== undefined;
-        // a row once read as a Safe is judged only by its nonce(): a tick without it (its code misread) is skipped
+        // a row once read as a Safe is judged only by its nonce(): a tick without it (its code misread) is skipped,
+        // counted in meta, and safeUnreadTicks in a row of them is a warning (never skipped silently forever)
+        const unreadKey = `safe_unread:${chain}:${h.address}`;
+        const unread = Number(ctx.meta[unreadKey] || 0);
+        if (row?.safe && !isSafe) {
+          const n = unread + 1;
+          ctx.writes.meta.push({ k: unreadKey, v: String(n) });
+          if (n >= ctx.t.safeUnreadTicks) {
+            out.push({
+              rule: "keys.safe_unread",
+              key: `keys.safe_unread:${chain}:${h.address}`,
+              subject: `A watched Safe's nonce() hasn't answered for ${n} ticks`,
+              facts: { address: h.address, chain, roles: h.roles.join(", "), ticks: String(n), explorer: addressLink(chain, h.address) },
+            });
+          }
+        } else if (isSafe && unread > 0) {
+          ctx.writes.meta.push({ k: unreadKey, v: "" });
+        }
         const read = isSafe ? safes[h.address] : row?.safe ? undefined : counts[h.address];
         if (read === undefined) {
           if (row && !sameRoles(row.roles, h.roles)) ctx.writes.nonces.push({ ...row, roles: h.roles });

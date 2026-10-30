@@ -12,6 +12,8 @@ export const DEFAULTS = {
   stakeDustRao: 1000n,
   /** keys.unexplained_tx: how long an unexplained transaction may stay unexplained */
   unexplainedTxGraceS: 900,
+  /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */
+  safeUnreadTicks: 30,
   /** fmtao.unbacked: FM-TAO on Base may exceed the lock by this much */
   fmtaoBackingSlackWei: 10n ** 16n,
   /** fmtao.depeg: the pool's TAO price this far from the reference */

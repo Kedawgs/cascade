@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import { adminEvent, keys, watchedRoles } from "../../src/rules/admin.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
+import { RUNBOOK } from "../../src/runbook.ts";
 import type { BaseState, BitState } from "../../src/snapshot.ts";
 import type { NonceRow, TxRow } from "../../src/store.ts";
 import { tx } from "./fixtures.ts";
@@ -30,6 +31,7 @@ function ctx(o: {
   safeNonces?: Record<Hex, bigint>;
   nonces?: NonceRow[];
   nowS?: number;
+  meta?: Record<string, string>;
 }): RuleCtx {
   const c = ruleCtx({
     nowS: o.nowS ?? NOW,
@@ -47,6 +49,7 @@ function ctx(o: {
     txs: new Map((o.txs ?? []).map((t) => [`${t.chain}:${t.hash}`, t])),
     newTxs: o.newTxs ?? [],
     nonces: o.nonces ?? [],
+    meta: o.meta ?? {},
   });
   return c;
 }
@@ -197,6 +200,25 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     // and its nonce() back, unchanged: still nothing (the baseline wasn't reset to the count)
     const back = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, counts: { base: { [SAFE]: 1n } }, nonces: [safeRow], nowS: NOW + 3600 });
     expect(keys.run(back)).toEqual([]);
+  });
+
+  it("warns when a watched Safe's nonce() hasn't answered for 30 ticks in a row (it isn't skipped silently forever)", () => {
+    const k = `safe_unread:base:${SAFE}`;
+    const safeRow: NonceRow = { ...row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 }), safe: true };
+    const unread = (n: string | undefined) => ctx({ base: { owner: SAFE }, counts: { base: { [SAFE]: 1n } }, nonces: [safeRow], meta: n === undefined ? {} : { [k]: n } });
+    const first = unread(undefined);
+    expect(keys.run(first)).toEqual([]);
+    expect(first.writes.meta).toEqual([{ k, v: "1" }]);
+    const almost = unread("28");
+    expect(keys.run(almost)).toEqual([]);
+    expect(almost.writes.meta).toEqual([{ k, v: "29" }]);
+    const thirty = unread("29");
+    expect(keys.run(thirty).map((f) => [f.rule, f.key, f.facts.ticks])).toEqual([["keys.safe_unread", `keys.safe_unread:base:${SAFE}`, "30"]]);
+    // its nonce() back: the count starts again (and the warning, a condition, clears)
+    const back = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], meta: { [k]: "31" } });
+    expect(keys.run(back)).toEqual([]);
+    expect(back.writes.meta).toEqual([{ k, v: "" }]);
+    expect(RUNBOOK["keys.safe_unread"]({})).toContain("nonce()");
   });
 
   it("marks a watched account a Safe once its nonce() is read (a Safe deployed at it)", () => {

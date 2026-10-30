@@ -219,8 +219,10 @@ only; it never opens them.
 
 What `run` survives on its own: a failure inside one round is logged on one line (`Failed this round
 (…)`), and the next round tries again. The wait grows after each failure in a row (1, 2, 4, then 5
-minutes at most). After 10 failed rounds in a row, each line starts `STILL FAILING (n rounds)`. Nothing
-is retried within the round that failed, and every send passes the usual guards again.
+minutes at most). After 10 failed rounds in a row, each line starts `STILL FAILING (n rounds)`, and so
+does a skip of one action 10 rounds in a row (another caller beating the same close, a delivery the
+wallet's guard keeps refusing). Nothing is retried within the round that failed, and every send passes
+the usual guards again. Every line has any URL cut down to its domain, so no RPC key reaches the log.
 
 | Waits for the next round | Stops for good (exit code 3, never restarted) |
 |---|---|
@@ -229,8 +231,24 @@ is retried within the round that failed, and every send passes the usual guards 
 | The simulation refused the send (the chain changed) | The record isn't complete and verified, a read-back since has failed, or the hand-off isn't accepted |
 | No receipt yet (a slow block; the next send waits for it) | The record file is gone, or now holds another deployment |
 | A pause, or the chain changed since the round's read | An RPC answers for another chain |
-| An RPC error, a timeout, a dropped connection | A transaction reverted on chain and nothing explains it |
-| A delivery that reverted (held until the user's facts change) | Anything `run` refuses at start (no record, a bad setting) |
+| An RPC error, a timeout, a dropped connection | A transaction reverted on chain and nothing explains it (read again the next round if the first read fails) |
+| A delivery that reverted because the user claimed first or the price moved (held up to 30 minutes) | A user's delivery reverted 3 times while its simulation passed on the same facts |
+| A delivery that reverted for no reason it can see, the first and second time (the round counts as failed) | The payout list rebuilt from the vault's events doesn't match the vault's (it would block every other action) |
+| Anything else unexpected | 30 rounds in a row failed on something unexpected |
+| | Another keeper already runs for the deployment (`deployments/<name>.run.lock`) |
+| | Anything `run` refuses at start (no record, a bad setting) |
+
+Two lines need a look when they appear, though the keeper runs on:
+
+- `SENT, BUT NOT SAVED: transaction …, bridge message …`: the transaction went through, but the record
+  couldn't be saved. Follow the message with the `pnpm ops track` command the line gives, adding
+  `--live`.
+- `NO RECEIPT after 60 rounds for transaction …`: a transaction that timed out never showed a receipt,
+  so it was probably dropped or replaced. Check it on the chain's explorer. One that does land later is
+  logged as `Late receipt: …`, with its bridge message recorded.
+
+`run` takes `deployments/<name>.run.lock` while it runs, so a keeper started by hand can't run beside
+the supervised one. A lock left by a keeper that was killed is taken over once its process is gone.
 
 **Before the first start**, stop the keeper you started by hand. The supervisor refuses to start while
 any keeper runs. Windows can leave the keeper's `node` process running after its window or shell is
@@ -258,9 +276,17 @@ change them with `-Keystore` and `-PasswordFile`. `-Cadence` (default `launch`) 
 **Stop**: press Ctrl-C in its window, or from any PowerShell window run
 `powershell -NoProfile -ExecutionPolicy Bypass -File E:\projects\cascade\ops\scripts\keeper-supervised.ps1 -Stop`.
 `-Stop` asks the supervisor to stop, waits up to 30 seconds, then ends it. Either way it ends the
-keeper's whole process tree (cmd, pnpm's node, the keeper's node). Don't end it from Task Manager or with
-`Stop-ScheduledTask`: that ends PowerShell only and leaves the keeper running. If that happens, run
-`-Stop`: it finds the keeper the dead supervisor recorded in its lock and ends it.
+keeper's whole process tree (cmd, pnpm's node, the keeper's node).
+
+- **In an emergency, use `-Stop`, never Task Manager on `node.exe`.** The supervisor counts an ended
+  keeper as a crash and starts it again within seconds.
+- Don't end the supervisor from Task Manager or with `Stop-ScheduledTask` either: that ends PowerShell
+  only and leaves the keeper running. If that happens, run `-Stop`: it finds the keeper the dead
+  supervisor recorded in its lock and ends it.
+
+**Keep `main` checked out while it runs.** Each start and restart runs the code in the working tree as
+it is then, so switching branches makes the next restart run that branch. Pulled changes take effect
+only at the next restart: to run new code now, `-Stop` and start it again.
 
 **Logs**: `ops/logs/keeper-<deployment>-<yyyy-MM-dd>.log`, a new file each day. Every keeper line is
 timestamped, and the supervisor's own lines are marked `[supervisor]`. The folder is git-ignored, and
@@ -270,11 +296,15 @@ nothing deletes old files. To watch today's log:
 Get-Content "E:\projects\cascade\ops\logs\keeper-v3-launch-$(Get-Date -Format yyyy-MM-dd).log" -Wait -Tail 20
 ```
 
-**Restarts**: exit code 3 means the keeper stopped itself on something from the right-hand column. It is
-never restarted: its last lines say why, so fix that and start the supervisor again. Exit 0 or 2 is not
-restarted either. Any other exit is a crash: it restarts after 10 seconds, then 20, 40 and so on, at most
-5 minutes apart. A keeper that ran 10 minutes or more starts the count again. Before each restart the
-supervisor checks again that no other keeper is running.
+**Restarts**: exit code 3 with the keeper's line `THE KEEPER STOPPED ITSELF` means it stopped on
+something from the right-hand column. It is never restarted: its last lines say why, so fix that and
+start the supervisor again. Exit 2 with the usage text, or 0, is not restarted either. Any other exit is a
+crash, including a 3 or a 2 without that line (cmd's or pnpm's own code). A crash restarts after 10
+seconds, then 20, 40 and so on, at most 5 minutes apart, and a keeper that ran 10 minutes or more starts
+the count again. Before each start the supervisor checks that no other keeper is running, and it never
+starts one without that check succeeding: if Windows can't list the processes, it tries again every 10
+seconds. A passing failure to read the process list or write the log is only logged; it never ends a
+healthy keeper.
 
 **At logon (optional).** To have Windows start the supervisor when you log on, run this once yourself in
 PowerShell. It is a suggestion; nothing here registers it:

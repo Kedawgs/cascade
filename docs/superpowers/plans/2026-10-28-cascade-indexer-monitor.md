@@ -554,6 +554,8 @@ Each rule task: write the failing tests in `indexer/test/worker/rules-<group>.te
 - [ ] **Step 4: Run** `pnpm test && pnpm typecheck && pnpm bundle`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(indexer): the minute tick with a wall-time limit and a lag that sees a stuck scan, commit-then-send, the hourly and daily jobs and their watchdog`.
 
+*As built:* `runTick({ env, cfg, fetch, now, scheduledMs, holder?, sleep?, spacingMs? })` builds its own budgets and RPC client (deadline: the lease less 30 s). Bittensor is scanned with a reserve of 14 and three quarters of the wall time, Base with a reserve of 10 and the rest; Bittensor gets half the decode budget, Base the rest. Block times and transactions are fetched after the prefetch (which says what is stored): the new settled block first (settled_to moves only once its time is known), then the blocks the cross-checks wait on, then the new logs' blocks; transactions not fetched wait in `meta.tx_backlog`. Every watched address is read both ways (its count, and `nonce()` in case it is a Safe), from the stored rows and the last reading's role holders. Catching up = a chain more than an hour behind that moved this tick: the bridge rules don't run and its lag alerts are dropped; a chain that far behind that didn't move is stuck and alerts. The prefetch also loads the open batch's deposit transactions, adapters' `Delivered` by message id (an arrival stored before its `Sent`), and block times of the loaded transactions and recent ranges. Alert ids and raised holds' public ids come back from commit 1 (`RETURNING`). A failed commit 1 releases the lease when it can. The watchdog is in `src/hourly.ts` (`runHourly`), the digest job in `src/daily.ts` (`runDaily`, with the APY read the site's way); the digest counters are reset per UTC day together (`countStatements`). Tests: `tick.test.ts`, `jobs.test.ts`, `index.test.ts` (with the global fetch stubbed).
+
 ### Task 29: Config from the ops record, and the package README (Owner: Q1, Q2)
 
 **Files:** Create `indexer/scripts/config-from-record.ts`, `indexer/README.md`; test `indexer/test/node/config-from-record.test.ts`.
@@ -565,6 +567,8 @@ Each rule task: write the failing tests in `indexer/test/worker/rules-<group>.te
 - [ ] **Step 1: Failing tests** on a fixture record shaped like `ops/deployments/v3-test.json` (fake addresses): the output parses with `parseConfig`; the Bittensor start block equals `done.bitAdapter.block`; a record without `verify.ok` is refused; a v2 record is refused; a recovered Bittensor adapter without a block is refused with the keeper's `startBlock` advice.
 - [ ] **Steps 2–5.** Commit `feat(indexer): DEPLOYMENT config from a verified ops record; package README with the plan choice`.
 
+*As built:* Base starts at the Base adapter's block, else the first Base step recorded (said so); `batchMaxWaitS` is compared with ops' `CADENCE` by a node test. `env.test`'s `DEPLOYMENT` holds what the script prints for `ops/deployments/v3-test.json` (Bittensor from 9368744), as a JSON value; a node test parses the whole `env.test` config. The Task 27 polish came with it: quoted same-origin `"/….js"` paths are followed, a `data:`/`blob:` script is named as such, `site:approved --extra-hosts`, and the runbook's limits.
+
 ### Task 30: Recorded fixtures and the live smoke test
 
 **Files:** Create `indexer/scripts/record-fixtures.ts`, `indexer/test/fixtures/v3-test-batches.json`, `indexer/test/fixtures/v3-test-chunk.json`, `indexer/test/smoke/live.test.ts`; modify `indexer/package.json` (`smoke`: `INDEXER_SMOKE=1 vitest run --project smoke`), `indexer/vitest.config.ts` (a `smoke` project, not in `pnpm test`).
@@ -574,6 +578,8 @@ Each rule task: write the failing tests in `indexer/test/worker/rules-<group>.te
 - [ ] **Step 3: Run** `pnpm smoke` (network). Expected: PASS; skim the digest for nonsense values.
 - [ ] **Step 4: Run** `pnpm test && pnpm typecheck`. Expected: PASS.
 - [ ] **Step 5: Commit** `test(indexer): real-bytes fixtures of v3-test batches 1–2 and chunk 0; a live smoke run`.
+
+*As built:* the recorder (`pnpm fixtures:record`, 10 read-only requests) also records `test/fixtures/v3-test-reads.json` (the stake hotkey's Owner, 32 bytes; an absent one, empty; FM-TAO 8,778 on Base against 13,912 locked). `tick-v3.test.ts` runs the recorded scenario through whole ticks and measures (local workerd): a steady tick 6 D1 queries and 149 rows read; about 110–125 µs to hash and decode a log, 23–26 ms for a 204-log batch delivery. `pnpm smoke` runs through `scripts/smoke.ts` (any shell) with at most `SMOKE_BUDGET` (40) requests; in one tick both chains are still catching up, so it asserts batches 1 and 2 only once they are not (they are checked end to end by the recorded scenario instead). Its digest showed the share price at 1e-6: fixed (TAO per csTAO is `price / 1e12`).
 
 ## Part G — The site uses the seed (re-check main first)
 

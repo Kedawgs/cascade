@@ -155,11 +155,15 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
    environment's vars.
 6. The approved site lists: build the site you are about to deploy, then
    `pnpm --dir indexer site:approved ../web/out`, review the change to `indexer/src/site-approved.ts` and commit
-   it. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). When the site
-   check reports a host that Cloudflare itself injects into the served pages (the Web Analytics beacon,
-   `static.cloudflareinsights.com`, or a `/cdn-cgi/` script), check it is Cloudflare's and run it again with
-   `--extra-hosts static.cloudflareinsights.com` (comma-separated for several): the hand-added hosts are named in
-   the file, so they stay reviewable in git. Re-run this whenever the site is redeployed with new dependencies.
+   it. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). It writes three
+   lists: the addresses; the **script hosts**, hosts the pages really load a script from (a cross-origin
+   `<script src>`, or a host in a `script-src` of `out/_headers`: none today); and the hosts **seen in the
+   bundle**, which a page or script may name but never load a script from (a dependency's gateways, such as
+   arweave.net and ipfs.io, are only seen). When the site check reports something Cloudflare itself injects into
+   the served pages, check it is Cloudflare's and run it again with `--extra-script-hosts <host>` for a script
+   loaded from it (the Web Analytics beacon, `static.cloudflareinsights.com`) or `--extra-hosts <host>` for a
+   host a `/cdn-cgi/` script names (comma-separated for several): the hand-added hosts are named in the file, so
+   they stay reviewable in git. Re-run this whenever the site is redeployed with new dependencies.
 7. Deploy, still in log mode (`"ALERT_MODE": "log"` as shipped, which needs no `ALERT_TO`):
    `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascadefi.xyz`), or use the
    `workers.dev` URL to start.

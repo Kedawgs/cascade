@@ -1,6 +1,6 @@
 import type { Config } from "./config.ts";
-import { pageScripts, readCapped, type ScanResult, scanScript } from "./site.ts";
-import { APPROVED_ADDRESSES, APPROVED_HOSTS } from "./site-approved.ts";
+import { hostListed, pageScripts, readCapped, type ScanResult, scanScript } from "./site.ts";
+import { APPROVED_ADDRESSES, APPROVED_SCRIPT_HOSTS, SEEN_IN_BUNDLE_HOSTS } from "./site-approved.ts";
 import { setMeta } from "./store.ts";
 
 // The site check (spec 6.6), in its own cron every two minutes, never the tick: a tampered site could serve a
@@ -35,9 +35,11 @@ interface Pass {
   startedAt: number;
   queue: string[];
   done: string[];
-  /** each address and host, with the first file it was seen in */
+  /** each address and host named, with the first file it was seen in */
   addresses: Record<string, string>;
   hosts: Record<string, string>;
+  /** each host a page loads a script from (a cross-origin <script src>, modulepreload or preload), with the page */
+  scriptHosts?: Record<string, string>;
   /** scripts whose source is a data: or blob: URL ("data: URL"), with the page that loads them */
   embedded?: Record<string, string>;
   problems: SiteProblem[];
@@ -49,8 +51,9 @@ export interface SiteResult {
   /** every file was read and scanned */
   complete: boolean;
   files: string[];
-  /** an address or host not on the approved lists, or a script from a data: or blob: URL (never approved) */
-  unapproved: { kind: "address" | "host" | "script"; value: string; file: string }[];
+  /** an address or host named that isn't approved, a host a page loads a script from that isn't approved as a
+   * script source (`script_host`), or a script from a data: or blob: URL (`script`, never approved) */
+  unapproved: { kind: "address" | "host" | "script_host" | "script"; value: string; file: string }[];
   /** configured Cascade addresses found nowhere (judged on a complete pass only) */
   missing: string[];
   problems: SiteProblem[];
@@ -60,12 +63,23 @@ export interface SiteResult {
   noApprovedLists?: boolean;
 }
 
+/** What the live site is judged against (src/site-approved.ts, generated from the build deployed). */
+export interface ApprovedLists {
+  addresses: readonly string[];
+  /** the only hosts a page may load a script from (a `*.domain` wildcard from a script-src matches below it) */
+  scriptHosts: readonly string[];
+  /** hosts the bundle merely names: approved as a mention, never as a script source */
+  bundleHosts: readonly string[];
+}
+
+const APPROVED: ApprovedLists = { addresses: APPROVED_ADDRESSES, scriptHosts: APPROVED_SCRIPT_HOSTS, bundleHosts: SEEN_IN_BUNDLE_HOSTS };
+
 export interface SiteJobOptions {
   db: D1Database;
   cfg: Pick<Config, "site" | "budgets" | "deployment">;
   fetch: typeof fetch;
   nowS: number;
-  approved?: { addresses: readonly string[]; hosts: readonly string[] };
+  approved?: ApprovedLists;
   /** how a file's text is scanned (a test replaces it to simulate a file that kills a run) */
   scanText?: (text: string) => ScanResult;
   /** the most files a pass takes (MAX_FILES) */
@@ -165,8 +179,8 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
       add(p, page, scan(r.text));
       const { srcs, foreignHosts, embedded } = pageScripts(r.text, cfg.site.url);
       for (const s of srcs) enqueue(p, s);
-      // a script from elsewhere is never fetched: its host is reported for approval
-      for (const h of foreignHosts) p.hosts[h] ??= page;
+      // a script from elsewhere is never fetched: its host is judged as a script source (a mention isn't enough)
+      for (const h of foreignHosts) (p.scriptHosts ??= {})[h] ??= page;
       // code from a data: or blob: URL comes from no host: named as what it is
       for (const e of embedded) (p.embedded ??= {})[e] ??= page;
     }
@@ -212,11 +226,15 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     await put("site_pass", JSON.stringify(pass));
     return { checked, finished: false };
   }
-  const approved = o.approved ?? { addresses: APPROVED_ADDRESSES, hosts: APPROVED_HOSTS };
+  const approved = o.approved ?? APPROVED;
   // lists not generated yet: judging against them would report everything, so nothing is judged
-  const noApprovedLists = approved.addresses.length === 0 && approved.hosts.length === 0;
+  const noApprovedLists = approved.addresses.length === 0 && approved.scriptHosts.length === 0 && approved.bundleHosts.length === 0;
   const okAddresses = new Set(approved.addresses.map((a) => a.toLowerCase()));
-  const okHosts = new Set(approved.hosts.map((h) => h.toLowerCase()));
+  // a host may be named if the bundle names it or a page may load scripts from it; loaded from only if the latter
+  const okNamed = [...approved.bundleHosts, ...approved.scriptHosts];
+  const badScriptHosts = Object.entries(pass.scriptHosts ?? {}).filter(([h]) => !hostListed(approved.scriptHosts, h));
+  // a host reported as a script source isn't reported again for the page naming it in that <script src>
+  const reported = new Set(badScriptHosts.map(([h]) => h));
   const complete = pass.problems.length === 0 && !pass.capped;
   const d = cfg.deployment;
   const ours = [...new Set([d.frontDoor, d.staker, d.vault, d.baseAdapter, d.bitAdapter, d.oracle].map((a) => a.toLowerCase()))];
@@ -230,8 +248,9 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
           ...Object.entries(pass.addresses)
             .filter(([a]) => !okAddresses.has(a))
             .map(([value, file]) => ({ kind: "address" as const, value, file })),
+          ...badScriptHosts.map(([value, file]) => ({ kind: "script_host" as const, value, file })),
           ...Object.entries(pass.hosts)
-            .filter(([h]) => !okHosts.has(h))
+            .filter(([h]) => !reported.has(h) && !hostListed(okNamed, h))
             .map(([value, file]) => ({ kind: "host" as const, value, file })),
           ...Object.entries(pass.embedded ?? {}).map(([value, file]) => ({ kind: "script" as const, value, file })),
         ],

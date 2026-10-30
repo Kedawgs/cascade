@@ -862,16 +862,19 @@ invocation doesn't send it twice. Its arrival is itself a heartbeat: no digest m
 #### 6.6 Website integrity
 
 *call*: compare the live site against **approved lists** committed in `indexer/src/site-approved.ts`, generated
-by `pnpm site:approved ../web/out` from the static export the owner is about to deploy: every 0x-address and
-every `https://` host found in its HTML and JavaScript.
+by `pnpm site:approved ../web/out` from the static export the owner is about to deploy: every 0x-address found in
+its HTML and JavaScript; the **script hosts**, hosts its pages really load a script from (a cross-origin `<script
+src>`, modulepreload or preload, or a host in a `script-src` of `out/_headers`); and every host its text names,
+**seen in the bundle**: approved as a mention, never as a script source (a dependency names IPFS and Arweave
+gateways the site never loads a script from).
 
 - **What is checked.** A pass starts from the pages in `SITE_PAGES` (every page of the site, all 8): the whole page
   (inline scripts, and addresses and hosts in attributes), every same-origin `<script src>` and
   `<link rel=modulepreload>` or `<link rel=preload as=script>` wherever it is, then every further chunk path
   named inside the files fetched (the lazily loaded chunks, `/_next/static/chunks/….js` or turbopack's
   `static/chunks/….js`), up to 400 files (the build has about 32; a capped pass is incomplete and critical, so
-  padding can't hide a script past the end). A cross-origin script is never fetched: its host is reported for
-  approval. Hosts are those of `https://`, `http://`, `wss://` and protocol-relative `//host` URLs. Addresses are
+  padding can't hide a script past the end). A cross-origin script is never fetched: its host must be a script
+  host (a host merely seen in the bundle is not enough). Hosts are those of `https://`, `http://`, `wss://` and protocol-relative `//host` URLs. Addresses are
   matched with hex boundaries (`(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])`), so 64-digit hashes don't
   match. Anything Cloudflare injects into the served pages (the Web Analytics beacon, `/cdn-cgi/` scripts) is
   seen too, so it must be approved like the build's own hosts.

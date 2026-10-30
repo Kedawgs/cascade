@@ -62,6 +62,13 @@ export function pageScripts(html: string, origin: string): { srcs: string[]; for
   return { srcs: [...srcs], foreignHosts: [...foreign].sort(), embedded: [...embedded].sort() };
 }
 
+/** Whether `host` (lowercase) is on `list`: by name, or below a `*.domain` wildcard (a CSP host source). */
+export const hostListed = (list: readonly string[], host: string): boolean =>
+  list.some((x) => {
+    const h = x.toLowerCase();
+    return h === host || (h.startsWith("*.") && host.endsWith(h.slice(1)));
+  });
+
 const attr = (attrs: string, name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(attrs)?.slice(1).find((x) => x !== undefined);
 
 /** The body as text, read as a stream and cancelled once past `maxBytes` (never buffering more). */

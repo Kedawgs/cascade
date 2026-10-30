@@ -14,9 +14,17 @@ const json = <T>(s: string | undefined): T | undefined => {
   }
 };
 
-/** site.integrity (critical): in the last pass, an address or host not approved, a configured Cascade
- * address missing (a complete pass only), or a file it couldn't check: over the byte cap, or one that
- * stopped a site-check invocation. One alert per thing found, for as long as passes keep finding it. */
+const UNAPPROVED: Record<SiteResult["unapproved"][number]["kind"], { subject: string; fact: string }> = {
+  address: { subject: "The live site holds an address not on the approved list", fact: "address" },
+  host: { subject: "The live site holds a host not on the approved list", fact: "host" },
+  script_host: { subject: "The live site loads a script from a host the build doesn't", fact: "script host" },
+  script: { subject: "The live site loads a script from a data: or blob: URL", fact: "script" },
+};
+
+/** site.integrity (critical): in the last pass, an address or host not approved, a script loaded from a host
+ * not approved as a script source, a configured Cascade address missing (a complete pass only), or a file it
+ * couldn't check: over the byte cap, or one that stopped a site-check invocation. One alert per thing found,
+ * for as long as passes keep finding it. */
 export const siteIntegrity: Rule = {
   name: "site.integrity",
   run(ctx) {
@@ -25,13 +33,8 @@ export const siteIntegrity: Rule = {
     const pass = utc(r.finishedAt);
     const out: Finding[] = [];
     for (const u of r.unapproved) {
-      out.push({
-        rule: "site.integrity",
-        key: `site.integrity:${u.kind}:${u.value}`,
-        subject:
-          u.kind === "script" ? "The live site loads a script from a data: or blob: URL" : `The live site holds ${u.kind === "address" ? "an address" : "a host"} not on the approved list`,
-        facts: { [u.kind]: u.value, file: u.file, pass },
-      });
+      const k = UNAPPROVED[u.kind];
+      out.push({ rule: "site.integrity", key: `site.integrity:${u.kind}:${u.value}`, subject: k.subject, facts: { [k.fact]: u.value, file: u.file, pass } });
     }
     if (r.capped) {
       out.push({

@@ -15,7 +15,8 @@ const NOW = 1_800_000_000;
 const cfg = testConfig({ SITE_FILES_PER_RUN: "2", SITE_PAGES: ["/", "/stake/"] });
 const d = cfg.deployment;
 const OURS = [d.frontDoor, d.staker, d.vault, d.baseAdapter, d.bitAdapter, d.oracle];
-const APPROVED = { addresses: [...new Set(OURS)].sort(), hosts: ["mainnet.base.org", "rpc.example.org"] };
+// a gateway host merely named in the bundle (as a dependency's chunks name arweave.net) is seen, not a script source
+const APPROVED = { addresses: [...new Set(OURS)].sort(), scriptHosts: [] as string[], bundleHosts: ["arweave.net", "mainnet.base.org", "rpc.example.org"] };
 const HASH = `0x${"ab".repeat(32)}`;
 const chunk = (name: string) => `/_next/static/chunks/${name}.js`;
 
@@ -184,17 +185,41 @@ describe("the site job", () => {
     expect(s.calls).toContain("/cdn-cgi/evil.js");
     // never fetched from elsewhere: only reported
     expect(s.calls.some((c) => c === "/x.js" || c === "/m.js")).toBe(false);
-    const keys = (await findings(NOW + 600)).map((f) => f.key).sort();
-    expect(keys).toEqual(
+    const f = await findings(NOW + 600);
+    // a host a page loads a script from is reported once, as a script host (not again as a host it names)
+    expect(f.map((x) => x.key).sort()).toEqual(
       [
         `site.integrity:address:${extra}`,
         "site.integrity:host:basescan.org",
-        "site.integrity:host:cdn.evil.example",
-        "site.integrity:host:preload.evil.example",
-        "site.integrity:host:preload2.evil.example",
+        "site.integrity:script_host:cdn.evil.example",
+        "site.integrity:script_host:preload.evil.example",
+        "site.integrity:script_host:preload2.evil.example",
         "site.integrity:host:sock.evil.example",
       ].sort(),
     );
+    const cdn = f.find((x) => x.key === "site.integrity:script_host:cdn.evil.example");
+    expect([cdn?.subject, cdn?.facts["script host"], cdn?.facts.file]).toEqual(["The live site loads a script from a host the build doesn't", "cdn.evil.example", "/"]);
+  });
+
+  it("never approves a script source by a mere mention: a page loading a script from a host the bundle only names is a critical", async () => {
+    // arweave.net is seen in the bundle (a dependency names it): naming it is fine, loading a script from it is not
+    const named = site({ [chunk("vendor")]: 'const x=1,gw="https://arweave.net/"' });
+    await fullPass(server(named));
+    expect(await findings(NOW + 300)).toEqual([]);
+    await wipe(db);
+    const page = named["/"].replace("</html>", '<script src="https://arweave.net/tx/evil.js"></script></html>');
+    await fullPass(server({ ...named, "/": page }));
+    expect((await findings(NOW + 300)).map((x) => x.key)).toEqual(["site.integrity:script_host:arweave.net"]);
+    // approved as a script source (the build loads one from it, or its script-src names it): nothing to report,
+    // a wildcard from a script-src included
+    for (const [scriptHosts, p] of [
+      [["arweave.net"], page],
+      [["*.arweave.net"], page.replace("https://arweave.net/", "https://gw.arweave.net/")],
+    ] as const) {
+      await wipe(db);
+      for (let i = 0; i < 3; i++) await job(server({ ...named, "/": p }), NOW + i * 120, { approved: { ...APPROVED, scriptHosts } });
+      expect(await findings(NOW + 300), scriptHosts[0]).toEqual([]);
+    }
   });
 
   it('follows any same-origin "/….js" a script names: a dynamic import(), new Worker, serviceWorker.register', async () => {
@@ -238,7 +263,7 @@ describe("the site job", () => {
     const ctx = ruleCtx({ meta: st.meta, nowS: NOW + 300 });
     expect(siteIntegrity.run(ctx)).toHaveLength(0);
     await wipe(db);
-    for (let i = 0; i < 3; i++) await job(server(site()), NOW + i * 120, { approved: { addresses: [], hosts: [] } });
+    for (let i = 0; i < 3; i++) await job(server(site()), NOW + i * 120, { approved: { addresses: [], scriptHosts: [], bundleHosts: [] } });
     expect((await findings(NOW + 300)).map((f) => [f.rule, f.key])).toEqual([["site.no_approved_lists", "site.no_approved_lists"]]);
   });
 

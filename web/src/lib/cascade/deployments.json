@@ -10,7 +10,10 @@
     "bitAdapter": "0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1",
     "bitBlock": "9398120",
     "vaultSs58": "5ELMyza1QBFKY1K6bbJXoPSENaiJVVTSQZBgdkQujxKpsfQn",
-    "hotkeySs58": "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u"
+    "hotkeySs58": "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u",
+    "payoutDelayS": 86400,
+    "batchMaxWaitS": 86400,
+    "unstakeLimits": { "maxEntryTao": 10, "dailyOutflowPct": 20, "dailyFloorTao": 10 }
   },
   "v3-test": {
     "version": 3,

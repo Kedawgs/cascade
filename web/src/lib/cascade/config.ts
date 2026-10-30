@@ -81,6 +81,7 @@ export function readDeployment(env: Env): Deployment | null {
  * one hardware wallet, a separate guardian, no multisig or timelock yet), or "live" (a multisig owner
  * behind a timelock). */
 export type Stage = "testing" | "early" | "live";
+const STAGES: readonly string[] = ["testing", "early", "live"] satisfies Stage[];
 
 /** A deployment the site may be built for, as committed in deployments.json (reviewed in git). */
 export interface ExpectedDeployment {
@@ -96,6 +97,12 @@ export interface ExpectedDeployment {
   bitBlock: string;
   vaultSs58: string;
   hotkeySs58: string;
+  /** Pinned settings: a build whose env gives another value (or none) fails (checkedDeployment). */
+  payoutDelayS?: number;
+  batchMaxWaitS?: number;
+  /** The vault's unstake limits as the deployment set them (ops/src/config.ts; the FAQ quotes them): one
+   * unstake's most (maxEntryValue), and the daily outflow, a share of the stake or a floor if larger. */
+  unstakeLimits?: { maxEntryTao: number; dailyOutflowPct: number; dailyFloorTao: number };
 }
 
 /** Every deployment the site may be built for, by its ops name. A build env that names any other fails
@@ -121,21 +128,45 @@ export function knownDeployment(d: Deployment, list: Readonly<Record<string, Exp
   )?.[0];
 }
 
-/** The stage deployments.json gives `d`; "testing", the most careful wording, for no deployment or one not listed. */
-export function deploymentStage(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): Stage {
+/** The committed entry `d` is, or undefined for no deployment or one not listed. */
+export function deploymentEntry(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): ExpectedDeployment | undefined {
   const name = d ? knownDeployment(d, list) : undefined;
-  return name ? list[name].stage : "testing";
+  return name ? list[name] : undefined;
 }
 
-/** The env's deployment, only if it is one of the committed ones: anything else throws, so `next build`
- * (and `next dev`) fail rather than make a site that sends to contracts no one reviewed. */
-export function checkedDeployment(d: Deployment | null): Deployment | null {
-  if (d && !knownDeployment(d)) {
+/** The stage deployments.json gives `d`. It fails closed: "testing", the most careful wording, for no
+ * deployment, one not listed, or a stage that isn't exactly one of the three. */
+export function deploymentStage(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): Stage {
+  const stage: unknown = deploymentEntry(d, list)?.stage;
+  return typeof stage === "string" && STAGES.includes(stage) ? (stage as Stage) : "testing";
+}
+
+const PINNED = [
+  ["payoutDelayS", "NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S"],
+  ["batchMaxWaitS", "NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S"],
+] as const;
+
+/** The env's deployment, only if it is one of the committed ones, with the settings its entry pins: anything
+ * else throws, so `next build` (and `next dev`) fail rather than make a site that sends to contracts no one
+ * reviewed, or describes their timing wrongly. */
+export function checkedDeployment(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): Deployment | null {
+  if (!d) return d;
+  const name = knownDeployment(d, list);
+  if (!name) {
     throw new Error(
       "The env names a deployment that isn't in web/src/lib/cascade/deployments.json. Refusing to build a site " +
         "for contracts that aren't listed there: add the deployment to that file in a reviewed commit, or run " +
         "`pnpm ops web-config` for a listed one.",
     );
+  }
+  for (const [key, env] of PINNED) {
+    const pinned = list[name][key];
+    if (pinned !== undefined && d[key] !== pinned) {
+      throw new Error(
+        `The env's ${env} is ${d[key] ?? "not set"}, but deployments.json pins ${name}'s at ${pinned}. Refusing to build a site ` +
+          "that describes the deployment's timing wrongly: run `pnpm ops web-config` again.",
+      );
+    }
   }
   return d;
 }

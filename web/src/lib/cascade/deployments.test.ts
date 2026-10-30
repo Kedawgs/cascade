@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { getAddress, isAddress } from "viem";
 import { describe, expect, it } from "vitest";
-import { checkedDeployment, type Deployment, deploymentStage, EXPECTED_DEPLOYMENTS, knownDeployment, readDeployment } from "./config";
+import { checkedDeployment, type Deployment, deploymentEntry, deploymentStage, EXPECTED_DEPLOYMENTS, knownDeployment, readDeployment } from "./config";
 
 /** The env `pnpm ops web-config` writes for a committed deployment. */
 function envOf(name: string): Record<string, string> {
@@ -15,7 +15,8 @@ function envOf(name: string): Record<string, string> {
     NEXT_PUBLIC_CASCADE_BIT_BLOCK: e.bitBlock,
     NEXT_PUBLIC_CASCADE_VAULT_SS58: e.vaultSs58,
     NEXT_PUBLIC_CASCADE_HOTKEY_SS58: e.hotkeySs58,
-    ...(e.version === 3 ? { NEXT_PUBLIC_CASCADE_STAKER: e.staker!, NEXT_PUBLIC_CASCADE_ORACLE: e.oracle!, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "3600" } : {}),
+    ...(e.version === 3 ? { NEXT_PUBLIC_CASCADE_STAKER: e.staker!, NEXT_PUBLIC_CASCADE_ORACLE: e.oracle!, NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: String(e.payoutDelayS ?? 3600) } : {}),
+    ...(e.batchMaxWaitS !== undefined ? { NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: String(e.batchMaxWaitS) } : {}),
   };
 }
 
@@ -98,6 +99,36 @@ describe("the committed deployments", () => {
     // no deployment, or one not listed (the build refuses it anyway): the most careful wording
     expect(deploymentStage(null)).toBe("testing");
     expect(deploymentStage({ ...(readDeployment(envOf("v3-launch")) as Deployment), frontDoor: OTHER })).toBe("testing");
+  });
+
+  it("fail closed: a stage that isn't exactly testing, early or live reads as testing", () => {
+    const launch = readDeployment(envOf("v3-launch")) as Deployment;
+    const listed = (stage: string) => ({ "v3-launch": { ...EXPECTED_DEPLOYMENTS["v3-launch"], stage } }) as unknown as Parameters<typeof deploymentStage>[1];
+    for (const stage of ["Live", "live ", "launch", "", "LIVE", "early\n"]) expect(deploymentStage(launch, listed(stage)), JSON.stringify(stage)).toBe("testing");
+    expect(deploymentStage(launch, listed("live"))).toBe("live");
+    expect(deploymentStage(launch, listed("early"))).toBe("early");
+  });
+
+  it("pin the launch's 24-hour payout delay and batch wait: a build whose env says otherwise fails", () => {
+    expect(EXPECTED_DEPLOYMENTS["v3-launch"]).toMatchObject({ payoutDelayS: 86_400, batchMaxWaitS: 86_400 });
+    const launch = readDeployment(envOf("v3-launch")) as Deployment;
+    expect(checkedDeployment(launch)).toBe(launch);
+    expect(() => checkedDeployment({ ...launch, payoutDelayS: 3_600 })).toThrow(
+      /NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S is 3600, but deployments\.json pins v3-launch's at 86400/,
+    );
+    expect(() => checkedDeployment({ ...launch, batchMaxWaitS: 600 })).toThrow(/NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S is 600, but deployments\.json pins v3-launch's at 86400/);
+    // left out of the env: refused too
+    const { payoutDelayS: _p, ...noDelay } = launch;
+    expect(() => checkedDeployment(noDelay)).toThrow(/NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S is not set, but deployments\.json pins v3-launch's at 86400/);
+    // a deployment that pins nothing keeps whatever the env says
+    const test = readDeployment(envOf("v3-test")) as Deployment;
+    expect(checkedDeployment({ ...test, payoutDelayS: 7_200 })).toMatchObject({ payoutDelayS: 7_200 });
+  });
+
+  it("give the launch's unstake limits, as its vault was set up (the FAQ quotes them)", () => {
+    expect(EXPECTED_DEPLOYMENTS["v3-launch"].unstakeLimits).toEqual({ maxEntryTao: 10, dailyOutflowPct: 20, dailyFloorTao: 10 });
+    expect(deploymentEntry(readDeployment(envOf("v3-launch")))?.unstakeLimits).toEqual({ maxEntryTao: 10, dailyOutflowPct: 20, dailyFloorTao: 10 });
+    expect(deploymentEntry(null)).toBeUndefined();
   });
 
   it("include the deployment this checkout builds with (web/.env.local), when there is one", () => {

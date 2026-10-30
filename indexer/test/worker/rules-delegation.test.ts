@@ -111,6 +111,16 @@ describe("keys.delegated", () => {
     expect(back.findings[0].key).toBe(keyOf(back.findings[0], "keys.code_changed", OWNER, evil, "0x"));
   });
 
+  it("confirms a delegation whose target switches every read, reporting the latest (a treasury isn't count-watched)", () => {
+    const d1 = delegation("d1");
+    const d2 = delegation("d2");
+    const { findings } = ticks([{ [TREASURY]: "0x" }, { [TREASURY]: d1 }, { [TREASURY]: d2 }]);
+    expect(findings.map((f) => [f.rule, f.key, f.facts.now])).toEqual([["keys.delegated", keyOf(findings[0], "keys.delegated", TREASURY, "0x", d2), `an EIP-7702 delegation to 0x${"d2".repeat(20)}`]]);
+    // and when first seen switching too
+    const fresh = ticks([{ [OWNER]: d1 }, { [OWNER]: d2 }]).findings;
+    expect(fresh.map((f) => [f.rule, f.facts.before, f.facts.now])).toEqual([["keys.delegated", "not seen before", `an EIP-7702 delegation to 0x${"d2".repeat(20)}`]]);
+  });
+
   it("ignores one odd read that the next contradicts", () => {
     expect(ticks([{ [SAFE]: SAFE_CODE }, { [SAFE]: "0x" }, { [SAFE]: SAFE_CODE }, { [SAFE]: SAFE_CODE }]).findings).toEqual([]);
   });

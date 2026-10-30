@@ -82,7 +82,8 @@ const DELEGATION = /^0xef0100[0-9a-f]{40}$/;
 interface CodeSeen {
   /** the baseline: the code first seen, or since its last change (its hash, and what it was) */
   first?: { hash: Hex; what: string };
-  /** a code differing from the baseline, read on the last tick (a change counts once read twice in a row) */
+  /** the code read on the last tick, when it differed from the baseline (a change counts once the code differs on
+   * two reads in a row, the same code or not) */
   pending?: { hash: Hex; what: string };
 }
 
@@ -92,7 +93,7 @@ const kindOf = (what: string): CodeKind => (what.startsWith("no code") ? "accoun
 
 /** keys.delegated (critical, holds) and keys.code_changed (warning): a role wallet's code (read every tick, in the
  * same batch as the transaction counts) differs from its baseline, the code first seen or since its last change,
- * on two readings in a row. Critical: an EIP-7702 delegation designator appearing on an account, a delegation to
+ * on two readings in a row (the same differing code or not: the latest is reported). Critical: an EIP-7702 delegation designator appearing on an account, a delegation to
  * another target, a contract's code changing, and anything else unexpected; a wallet already delegated when first
  * seen too (the monitor may start after the delegation). Only a warning: plain contract code appearing on an
  * account (a counterfactual Safe deployed at a role address: no key can put contract code there), and a
@@ -133,7 +134,9 @@ export const keysDelegated: Rule = {
       };
       const warning = (before: string, beforeHash: Hex) =>
         out.push({ rule: "keys.code_changed", key: occurrence("keys.code_changed", beforeHash), subject: `A Cascade role wallet's code changed (${w.roles.join(", ")})`, facts: facts(before) });
-      const twice = s.pending?.hash === now.hash;
+      // confirmed when the code differed from the baseline on the last read too, whatever it was then: a target
+      // switched every read (D1, D2, D1…) still confirms, and the latest code is the one reported
+      const twice = s.pending !== undefined;
       if (!s.first) {
         // first sight: an account or a contract is the baseline; a delegation is confirmed on the next read
         if (!DELEGATION.test(code)) save({ first: now });

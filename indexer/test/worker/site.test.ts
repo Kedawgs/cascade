@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ruleCtx } from "./rule-ctx.ts";
-import { siteIntegrity, siteNoApprovedLists, siteUnreachable } from "../../src/rules/site.ts";
+import { RULES } from "../../src/rules/ids.ts";
+import { SITE_RULES, siteIntegrity } from "../../src/rules/site.ts";
 import { ADDRESS_RE, readCapped, scanScript } from "../../src/site.ts";
 import { MAX_FILES, runSiteJob, type SiteJobOptions, siteRunMaxS } from "../../src/site-job.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
@@ -77,7 +78,7 @@ function server(files: Record<string, string | { bytes: number }>, csp: Record<s
 const job = (s: ReturnType<typeof server>, nowS: number, o: Partial<SiteJobOptions> = {}) => runSiteJob({ db, cfg, fetch: s.fetch, nowS, approved: APPROVED, ...o });
 const findings = async (nowS: number) => {
   const st = await loadTickState(db, nowS);
-  return [siteIntegrity, siteUnreachable, siteNoApprovedLists].flatMap((r) => r.run(ruleCtx({ meta: st.meta, nowS })));
+  return SITE_RULES.flatMap((r) => r.run(ruleCtx({ meta: st.meta, nowS })));
 };
 async function fullPass(s: ReturnType<typeof server>, from = NOW) {
   for (let i = 0; i < 3; i++) await job(s, from + i * 120);
@@ -257,6 +258,34 @@ describe("the site job", () => {
     await wipe(db);
     await fullPass(server(site(), { "/": [fallback] }));
     expect((await findings(NOW + 300)).map((x) => [x.key, x.facts.csp])).toEqual([["site.integrity:csp:/", "1 policy where the build has 2; differs in connect-src, default-src, script-src"]]);
+  });
+
+  it("keeps a critical for anything but the inline scripts' hashes: unsafe-inline or unsafe-eval, a directive dropped", async () => {
+    const [fallback, own] = policiesOf("/");
+    const cases = [
+      [own.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'"), "differs in script-src"],
+      // a hash changed as well doesn't make it a stale list
+      [own.replace("script-src 'self'", "script-src 'self' 'unsafe-eval'").replace("'sha256-home='", "'sha256-new='"), "differs in script-src"],
+      [own.replace("; connect-src 'self' https://mainnet.base.org", ""), "differs in connect-src"],
+    ];
+    for (const [live, differs] of cases) {
+      await wipe(db);
+      await fullPass(server(site(), { "/": [fallback, live] }));
+      expect((await findings(NOW + 300)).map((x) => [x.rule, x.key, x.facts.csp]), live).toEqual([["site.integrity", "site.integrity:csp:/", differs]]);
+    }
+  });
+
+  it("warns that the lists are stale, not a critical, when the policies differ only in their hashes (a site deployed without new lists)", async () => {
+    // a rebuild: every page's hashes change (one more, none the same), nothing else
+    const rebuilt = (page: string) => policiesOf(page).map((p) => p.replace(/'sha256-[^']*'/, "'sha256-rebuilt=' 'sha384-extra='"));
+    await fullPass(server(site(), { "/": rebuilt("/"), "/stake/": rebuilt("/stake/") }));
+    const f = await findings(NOW + 300);
+    expect(f.map((x) => [x.rule, x.key])).toEqual([["site.stale_lists", "site.stale_lists"]]);
+    expect(f[0].subject).toBe("The site check's approved lists are out of date");
+    expect(f[0].facts.pages).toBe("/, /stake/");
+    expect(RULES["site.stale_lists"]).toMatchObject({ tier: "warning", kind: "condition" });
+    expect(RUNBOOK["site.stale_lists"]({})).toContain("pnpm --dir indexer site:approved");
+    expect(RUNBOOK["site.stale_lists"]({})).toContain("redeploy the monitor");
   });
 
   it("judges the policy of a page over the byte cap too, and reports a page the approved build doesn't have", async () => {

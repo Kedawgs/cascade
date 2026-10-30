@@ -44,6 +44,8 @@ interface Pass {
   embedded?: Record<string, string>;
   /** pages whose Content-Security-Policy header isn't the approved one, with how it differs */
   csp?: Record<string, string>;
+  /** pages whose Content-Security-Policy differs from the approved one only in the inline scripts' hashes */
+  cspHashes?: string[];
   problems: SiteProblem[];
   capped: boolean;
 }
@@ -58,6 +60,9 @@ export interface SiteResult {
   unapproved: { kind: "address" | "host" | "script_host" | "script"; value: string; file: string }[];
   /** pages whose Content-Security-Policy header is missing or isn't the build's (out/_headers), with how */
   csp?: { page: string; detail: string }[];
+  /** pages whose Content-Security-Policy differs from the build's only in the inline scripts' hashes: the
+   * approved lists are older than the site deployed (a warning, site.stale_lists) */
+  staleCsp?: string[];
   /** configured Cascade addresses found nowhere (judged on a complete pass only) */
   missing: string[];
   problems: SiteProblem[];
@@ -186,8 +191,10 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
         const want = approved.csp[page];
         const differs = want
           ? cspDifference(want, cspPolicies(res.headers.get("content-security-policy")))
-          : "no approved policy: the build approved has no such page (pnpm site:approved on the build deployed)";
-        if (differs) (p.csp ??= {})[page] = differs;
+          : { kind: "changed" as const, detail: "no approved policy: the build approved has no such page (pnpm site:approved on the build deployed)" };
+        // only the inline scripts' hashes: a site deployed without new lists (a warning); anything else: a critical
+        if (differs?.kind === "hashes") (p.cspHashes ??= []).push(page);
+        else if (differs) (p.csp ??= {})[page] = differs.detail;
       }
       const r = await readCapped(res, cfg.budgets.siteMaxBytes);
       if ("tooLarge" in r) {
@@ -271,6 +278,7 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
           ...Object.entries(pass.embedded ?? {}).map(([value, file]) => ({ kind: "script" as const, value, file })),
         ],
     csp: Object.entries(pass.csp ?? {}).map(([page, detail]) => ({ page, detail })),
+    staleCsp: pass.cspHashes ?? [],
     missing: complete ? ours.filter((a) => pass.addresses[a] === undefined) : [],
     problems: pass.problems,
     capped: pass.capped,

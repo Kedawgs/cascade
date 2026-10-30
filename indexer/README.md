@@ -166,9 +166,10 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
    Analytics beacon, `static.cloudflareinsights.com`) or `--extra-hosts <host>` for a host a `/cdn-cgi/` script
    names (comma-separated for several): the hand-added hosts are named in the file, so they stay reviewable in
    git. **Re-run this, commit it and redeploy the Worker on every site deploy**: each build changes its pages'
-   inline-script hashes, so their policies, and a live policy that isn't the approved one is a critical
-   `site.integrity` (it clears on the first pass after the Worker has the new lists, within the hour). Deploy the
-   site and the Worker back to back: a pass falls between them rarely, and then only until the next one.
+   inline-script hashes, so their policies. A live policy that differs from the approved one only in those
+   hashes is the warning `site.stale_lists` (the lists are out of date; it clears on the first pass after the
+   Worker has the new lists, within the hour); any other difference (a new host, `'unsafe-inline'`, a directive
+   or policy gone, the header missing) is a critical `site.integrity`.
 7. Deploy, still in log mode (`"ALERT_MODE": "log"` as shipped, which needs no `ALERT_TO`):
    `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascadefi.xyz`), or use the
    `workers.dev` URL to start.

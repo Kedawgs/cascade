@@ -886,7 +886,9 @@ and the Worker redeployed, on every site deploy.
 - **Findings.** Critical `site.integrity` when a configured Cascade address (front door, staker, vault, adapters,
   oracle) is missing from a complete pass, an address or host appears that isn't approved (a new RPC endpoint
   counts), a page loads a script from a host that isn't a script host, a page's Content-Security-Policy is
-  missing or isn't the build's, a file couldn't be checked (below), or a pass was capped; warning `site.unreachable` after 30 minutes
+  missing or differs from the build's in more than the inline scripts' hashes, a file couldn't be checked
+  (below), or a pass was capped; warning `site.stale_lists` when the policies differ only in those hashes (a
+  site deployed without new lists); warning `site.unreachable` after 30 minutes
   without a fetch, or when a pass completes with files it couldn't read. While the approved lists are empty (not
   generated yet) nothing is judged against them: one warning `site.no_approved_lists` says so.
 - **Its own cron, never the tick** (*call*). The site is outside our control: a tampered site could serve a huge

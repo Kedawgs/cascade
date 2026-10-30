@@ -80,13 +80,30 @@ export function cspPolicies(header: string | null | undefined): string[] {
     .filter((p) => p !== "");
 }
 
-/** How a page's live policies differ from the approved ones: undefined when they are the same (in any order),
- * else a short line naming what differs (the header missing, or the directives that differ). */
-export function cspDifference(approved: readonly string[], live: readonly string[]): string | undefined {
-  const a = [...approved].sort();
-  const l = [...live].sort();
-  if (a.length === l.length && a.every((p, i) => p === l[i])) return undefined;
-  if (l.length === 0) return "the page has no Content-Security-Policy";
+/** An inline script's hash source ('sha256-…', or sha384, sha512): every build changes them. */
+const HASH_SOURCE = /^'sha(?:256|384|512)-[A-Za-z0-9+/_=-]*'$/;
+/** A normalized policy without its hash sources. */
+const withoutHashes = (p: string) =>
+  p
+    .split("; ")
+    .map((d) => d.split(" ").filter((s) => !HASH_SOURCE.test(s)).join(" "))
+    .join("; ");
+const samePolicies = (x: readonly string[], y: readonly string[]) => {
+  const a = [...x].sort();
+  const b = [...y].sort();
+  return a.length === b.length && a.every((p, i) => p === b[i]);
+};
+
+/** How a page's live policies differ from the approved ones (normalized, in any order): undefined when they
+ * are the same; `hashes` when they differ only in the inline scripts' hashes (what a site deployed without new
+ * approved lists looks like); else `changed`, with a short line naming what differs (the header missing, a
+ * policy dropped, the directives that differ: a new host, 'unsafe-inline', a directive gone). */
+export function cspDifference(approved: readonly string[], live: readonly string[]): { kind: "changed" | "hashes"; detail: string } | undefined {
+  if (samePolicies(approved, live)) return undefined;
+  if (live.length === 0) return { kind: "changed", detail: "the page has no Content-Security-Policy" };
+  const a = approved.map(withoutHashes);
+  const l = live.map(withoutHashes);
+  if (samePolicies(a, l)) return { kind: "hashes", detail: "differs only in the inline scripts' hashes" };
   const count = (ps: readonly string[]) => {
     const m = new Map<string, number>();
     for (const d of ps.flatMap((p) => p.split("; "))) m.set(d, (m.get(d) ?? 0) + 1);
@@ -96,7 +113,7 @@ export function cspDifference(approved: readonly string[], live: readonly string
   const cl = count(l);
   const names = [...new Set([...ca.keys(), ...cl.keys()].filter((d) => ca.get(d) !== cl.get(d)).map((d) => d.split(" ")[0]))].sort();
   const policies = a.length === l.length ? "" : `${l.length} polic${l.length === 1 ? "y" : "ies"} where the build has ${a.length}; `;
-  return `${policies}${names.length ? `differs in ${names.join(", ")}` : "the same directives, split into other policies"}`;
+  return { kind: "changed", detail: `${policies}${names.length ? `differs in ${names.join(", ")}` : "the same directives, split into other policies"}` };
 }
 
 /** Whether `host` (lowercase) is on `list`: by name, or below a `*.domain` wildcard (a CSP host source). */

@@ -74,6 +74,8 @@ export const RULES = {
   "indexer.reorg": warning("event"),
   "site.unreachable": warning("condition"),
   "site.no_approved_lists": warning("condition"),
+  // a page's CSP differs from the approved one only in its inline-script hashes: a site deployed without new lists
+  "site.stale_lists": warning("condition"),
   "monitor.chain_unreadable": warning("condition"),
   "monitor.email_failing": warning("condition"),
   "monitor.rule_failed": warning("condition"),

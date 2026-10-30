@@ -102,4 +102,23 @@ export const siteNoApprovedLists: Rule = {
   },
 };
 
-export const SITE_RULES: Rule[] = [siteIntegrity, siteUnreachable, siteNoApprovedLists];
+/** site.stale_lists (warning): the last pass found pages whose Content-Security-Policy differs from the approved
+ * one only in the inline scripts' hashes, as when the site is deployed without regenerating the lists. Anything
+ * else in a policy that differs is a site.integrity critical. */
+export const siteStaleLists: Rule = {
+  name: "site.stale_lists",
+  run(ctx) {
+    const r = json<SiteResult>(ctx.meta.site_result);
+    if (!r?.staleCsp?.length) return [];
+    return [
+      {
+        rule: "site.stale_lists",
+        key: "site.stale_lists",
+        subject: "The site check's approved lists are out of date",
+        facts: { pages: r.staleCsp.join(", "), why: "each page's Content-Security-Policy differs from the approved one only in its inline scripts' hashes", pass: utc(r.finishedAt) },
+      },
+    ];
+  },
+};
+
+export const SITE_RULES: Rule[] = [siteIntegrity, siteUnreachable, siteNoApprovedLists, siteStaleLists];

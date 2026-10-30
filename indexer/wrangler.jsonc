@@ -139,7 +139,9 @@
           "stakeHotkey": "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748",
           "batchMaxWaitS": 86400
         },
-        "BASE_RPC_URL": "https://mainnet.base.org",
+        // mainnet.base.org answers HTTP 429 to Cloudflare's shared egress (seen on the first production
+        // ticks), so production reads Base through publicnode too; BASE_RPC_URL_SECRET (a keyed URL) overrides
+        "BASE_RPC_URL": "https://base-rpc.publicnode.com",
         "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
         "BASE_LOG_WINDOW": "100",

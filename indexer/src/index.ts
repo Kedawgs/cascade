@@ -1,10 +1,13 @@
 import { handleHealth, handleScan, handleStatus } from "./api.ts";
 import { type Config, parseConfig } from "./config.ts";
 import { CRONS } from "./crons.ts";
+import { runDaily } from "./daily.ts";
+import { runHourly } from "./hourly.ts";
 import { runSiteJob } from "./site-job.ts";
+import { runTick } from "./tick.ts";
 
 /** Cascade's history indexer and monitor. `fetch` serves read-only routes; `scheduled` runs the jobs in
- * src/crons.ts (filled in by later steps: for now a cron does nothing). */
+ * src/crons.ts. */
 
 /** The configuration, or null (with a log line only) when it can't be used: a Worker that isn't
  * configured must refuse to run, not fail loudly. */
@@ -43,14 +46,37 @@ async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promis
   return new Response("Not found", { status: 404 });
 }
 
+/** Each cron runs in its own invocation, with its own budgets and RPC client: the tick every minute, the site
+ * check every two minutes, the hourly job and the daily digest. Anything else is logged and ignored. */
 async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
   const cfg = configOf(env);
   if (!cfg) return;
-  const nowS = Math.floor(controller.scheduledTime / 1000);
-  if (controller.cron === CRONS.site) {
-    // its own invocation: its subrequests and CPU are its own, and it never touches the tick's lease
-    const r = await runSiteJob({ db: env.DB, cfg, fetch: (input, init) => globalThis.fetch(input, init), nowS, clock: () => Math.floor(Date.now() / 1000) });
-    console.log(`site check: ${JSON.stringify(r)}`);
+  const fetch = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
+  const clock = () => Math.floor(Date.now() / 1000);
+  switch (controller.cron) {
+    case CRONS.tick: {
+      const r = await runTick({ env, cfg, fetch, now: () => Date.now(), scheduledMs: controller.scheduledTime });
+      console.log(`tick: ${JSON.stringify(r)}`);
+      return;
+    }
+    case CRONS.site: {
+      // its own invocation: its subrequests and CPU are its own, and it never touches the tick's lease
+      const r = await runSiteJob({ db: env.DB, cfg, fetch, nowS: Math.floor(controller.scheduledTime / 1000), clock });
+      console.log(`site check: ${JSON.stringify(r)}`);
+      return;
+    }
+    case CRONS.hourly: {
+      const r = await runHourly({ env, cfg, nowS: clock() });
+      console.log(`hourly: ${JSON.stringify(r)}`);
+      return;
+    }
+    case CRONS.daily: {
+      const r = await runDaily({ env, cfg, nowS: clock(), fetch });
+      console.log(`daily: ${JSON.stringify(r)}`);
+      return;
+    }
+    default:
+      console.warn(`a cron this Worker doesn't run (${controller.cron}): nothing done`);
   }
 }
 

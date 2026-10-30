@@ -134,7 +134,6 @@ export async function cardinalityReport(ctx: Pick<Ctx, "rpc">, wallet?: { from: 
           gas: gasLimitFor(slots),
           label: `increaseObservationCardinalityNext(${t.next}) on the ${p.name}, step ${i + 1} of ${steps.length}`,
           from: getAddress(wallet.from),
-          sender: "the account you chose with --from",
         });
       }
       from = t.next;

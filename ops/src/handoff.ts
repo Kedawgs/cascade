@@ -132,7 +132,7 @@ export async function handoff(ctx: Pick<Ctx, "rpc" | "targets">, rec: Deployment
     files.push(...out.files);
     if (o.walletDir && out.kind.kind === "account") {
       const chainId = ctx.targets[chain].chainId;
-      wallet.push(...calls.map((c) => ({ chainId, to: c.to, data: c.data, label: c.description, from: final, sender: "the owner" })));
+      wallet.push(...calls.map((c) => ({ chainId, to: c.to, data: c.data, label: c.description, from: final })));
     }
   }
   if (o.walletDir) {

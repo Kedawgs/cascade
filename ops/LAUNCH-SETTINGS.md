@@ -67,23 +67,57 @@ MetaMask, one call per click.
    - `pnpm ops cardinality --for-wallet --from 0x…`: the pool steps, in order, from the account you
      name, each with its gas limit set.
 2. `pnpm ops sign deployments/wallet/<file>.json` prints the calls and a URL such as
-   `http://127.0.0.1:53114/`. Open it in the browser where MetaMask is.
+   `http://127.0.0.1:53114/`. The file must be for the deployment in `OPS_DEPLOYMENT` (or pass
+   `--deployment <name>`). Open the URL in the browser where MetaMask is.
 3. In MetaMask, select the Ledger account, then click Send on a call. The page refuses unless
    MetaMask's selected account is that call's sender. It asks MetaMask to switch to the call's
-   network, adding Bittensor EVM (chain 964) if MetaMask doesn't have it. Check the Ledger's screen
-   against the page (network, To, data) before you approve. The page then shows the hash and waits for
-   the receipt.
-4. Press Ctrl-C to stop the server. Check the result with `pnpm ops ownership --live` and then
-   `pnpm ops verify --live` (hand-off), the pause dry run, or `pnpm ops cardinality`.
+   network, adding Bittensor EVM (chain 964) if MetaMask doesn't have it. Then check the call before
+   you approve (below). The page shows the hash, waits for the receipt, and then checks that the mined
+   transaction is the call it sent.
+4. Disconnect the site in MetaMask (Connected sites), then press Ctrl-C to stop the server. Check the
+   result with `pnpm ops ownership --live` and then `pnpm ops verify --live` (hand-off), the pause dry
+   run, or `pnpm ops cardinality`.
+
+**Checking a call on the Ledger.** With Blind signing on, the Ledger signs a contract call without
+showing what it does. To see the call on the Ledger itself:
+- In the Ledger's Ethereum app settings, turn on Blind signing, and also Debug data (some versions call
+  it Contract data). The Ledger then shows the call's selector and each 32-byte parameter.
+- Compare the selector (for example `0x79ba5097` for `acceptOwnership()`), each parameter word and the
+  To address with the page.
+- Or compare them with the Hex (Data) tab of MetaMask's confirmation.
+- Turn Blind signing and Debug data off again afterwards.
+
+**Rehearse before launch.** On the launch deployment, before the hand-off:
+1. Run `pnpm ops pause --for-wallet` and `pnpm ops sign` on the file it writes.
+2. Connect MetaMask, click Send, and check what the Ledger shows.
+3. **Reject on the Ledger.**
+
+This proves, at no cost, that MetaMask is found, that the account and network checks and switching
+work, and what the Ledger displays.
+
+**Keep a pause file ready.** After the rehearsal, keep `deployments/wallet/<name>-pause.json`:
+- In an emergency, `pnpm ops sign` on it is one command away. `sign` checks it against the record again,
+  and `pause()`'s data never changes. The warning that it is over a day old is expected.
+- Make it again with `pnpm ops pause --for-wallet` whenever the guardian changes. It writes nothing
+  while the contracts are already paused.
 
 What it guards:
-- `sign` refuses a file with anything but the known functions (`acceptOwnership`, `transferOwnership`,
-  `pause`, `unpause`, `increaseObservationCardinalityNext`), on the contracts each is for (the
-  deployment's front door, staker and vault, from its live record, and the oracle's two pools), with
-  value 0. The page shows each call decoded and can't edit it.
+- `sign` refuses anything but the known functions (`acceptOwnership`, `pause`, `unpause`,
+  `increaseObservationCardinalityNext`). There is no `transferOwnership`, the call that would hand a
+  contract away. Each function is allowed only on the contracts it is for: the deployment's front door,
+  staker and vault from its live record, and the oracle's two pools.
+- Each sender must be the record's role for the function:
+  - `acceptOwnership`: the chain's owner;
+  - `pause`: the guardian or the owner;
+  - `unpause`: the owner;
+  - the pool steps: one `--from` account.
+- It refuses value, a gas limit on anything but a pool step, any character outside printable ASCII, and
+  a file for another deployment.
+- The page's headings, effects and roles come from the decoded data and the record. The file's title
+  and labels are shown only as notes, and a label must start with the function the data calls.
 - It listens on 127.0.0.1 only and loads nothing from anywhere (a strict CSP). It has nothing to type
-  into and never asks for seed words or keys.
-- The Ledger's Ethereum app may need "Blind signing" turned on to sign a contract call.
+  into and never asks for seed words or keys. It finds MetaMask by its EIP-6963 announcement; if it has
+  to use another wallet, it names that wallet on the page.
 - Reloading the page forgets what it sent: check on the explorer before sending a call again.
 
 ## Settings

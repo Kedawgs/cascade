@@ -211,10 +211,16 @@ async function run(a: Args): Promise<number> {
     }
     case "sign": {
       // reads no chain and sends nothing: the page asks MetaMask to send, one click per call
-      const p = prepareSign(resolve(a.file as string), (name) => loadRecordFor(recordFor({ ...env, OPS_DEPLOYMENT: name }, true), true));
+      // the file must be for this run's deployment: OPS_DEPLOYMENT, or --deployment
+      const p = prepareSign(resolve(a.file as string), {
+        deployment: a.deployment ?? deploymentName(env),
+        recordOf: (name) => loadRecordFor(recordFor({ ...env, OPS_DEPLOYMENT: name }, true), true),
+        now: Date.now(),
+      });
       for (const line of p.lines) log(line);
       const server = await servePage(p.page);
-      log(`Open ${server.url} in the browser where MetaMask is. Only this computer can reach it. Press Ctrl-C here when you're done.`);
+      log(`Open ${server.url} in the browser where MetaMask is. Only this computer can reach it.`);
+      log("When you're done: disconnect this site in MetaMask (Connected sites), then press Ctrl-C here.");
       await new Promise<void>((done) => process.once("SIGINT", () => done()));
       await server.close();
       return 0;

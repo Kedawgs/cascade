@@ -135,7 +135,7 @@ export async function pauseCommand(
       };
       if (o.walletDir) {
         // signed in MetaMask, not with a keystore: no keystore is opened, nothing is sent
-        wallet.push({ chainId: ctx.targets[chain].chainId, to: address, data, label: `${call} on the ${what}`, from: who, sender: `the ${role}` });
+        wallet.push({ chainId: ctx.targets[chain].chainId, to: address, data, label: `${call} on the ${what}`, from: who });
         lines.push(`${where}: ${call} from the ${role} ${who} would succeed (about ${gas.toLocaleString("en-US")} gas): added to the wallet file.`);
         await checkGasMoney();
         continue;

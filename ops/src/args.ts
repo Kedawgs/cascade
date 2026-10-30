@@ -46,6 +46,8 @@ export interface Args {
   from?: string;
   /** sign: the call file */
   file?: string;
+  /** sign: the deployment the file must be for, in place of OPS_DEPLOYMENT */
+  deployment?: string;
 }
 
 const PAUSE_TARGETS = ["front-door", "vault", "both"] as const;
@@ -79,8 +81,9 @@ export const USAGE = `usage: pnpm ops <command> [--live]
                              sends. Signs with OPS_GUARDIAN_KEYSTORE and OPS_GUARDIAN_PASSWORD_FILE; a
                              Safe guardian gets a Transaction Builder file in deployments/safe/ instead
   unpause [front-door|vault|both]  the same, as the owner (OPS_OWNER_KEYSTORE, OPS_OWNER_PASSWORD_FILE)
-  sign <file>                serve a call file on http://127.0.0.1 (this computer only) as a page that
-                             sends each call from MetaMask (a Ledger behind it), one per click; Ctrl-C stops
+  sign <file> [--deployment <name>]   serve a call file on http://127.0.0.1 (this computer only) as a
+                             page that sends each call from MetaMask (a Ledger behind it), one per click;
+                             Ctrl-C stops. The file must be for OPS_DEPLOYMENT's deployment, or --deployment's
 
   --for-wallet               with handoff --live, pause, unpause, or cardinality --from <0x…>: also write
                              a plain account's calls to deployments/wallet/<name>.json for pnpm ops sign.
@@ -115,6 +118,7 @@ export function parseArgs(argv: readonly string[]): Args {
     else if ((cmd === "pause" || cmd === "unpause") && (PAUSE_TARGETS as readonly string[]).includes(a) && !out.target) out.target = a as Args["target"];
     else if (a === "--for-wallet" && FOR_WALLET.includes(cmd)) out.forWallet = true;
     else if (a === "--from" && cmd === "cardinality") out.from = value();
+    else if (a === "--deployment" && cmd === "sign") out.deployment = value();
     else if (cmd === "sign" && !a.startsWith("--") && !out.file) out.file = a;
     else throw new UsageError(`unexpected argument ${a}`);
   }
@@ -124,6 +128,9 @@ export function parseArgs(argv: readonly string[]): Args {
   if (cmd === "sweep" && (!out.taoTo || !out.ethTo)) throw new UsageError("sweep needs both --tao-to and --eth-to");
   if (cmd === "sign" && !out.file) throw new UsageError("sign needs the call file (written by handoff, pause, unpause or cardinality with --for-wallet)");
   if (cmd === "sign" && out.live) throw new UsageError("sign sends nothing itself (MetaMask sends, one click per call): drop --live");
+  if (out.deployment !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(out.deployment)) {
+    throw new UsageError(`--deployment ${out.deployment} is not a plain name (e.g. v3-launch)`);
+  }
   // handoff reads the live record only with --live; on the forks the page couldn't send what it wrote
   if (cmd === "handoff" && out.forWallet && !out.live) throw new UsageError("handoff --for-wallet is for the live deployment: add --live (handoff only reads, it sends nothing)");
   if ((cmd === "pause" || cmd === "unpause") && out.forWallet && out.live) {

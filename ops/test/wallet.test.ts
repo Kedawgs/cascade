@@ -20,8 +20,13 @@ const a = launch.plan.addresses as ReturnType<typeof buildPlanV3>["addresses"];
 const enc = (functionName: string, args?: readonly unknown[]) => encodeFunctionData({ abi: KNOWN_ABI, functionName, args } as never) as Hex;
 const ACCEPT = enc("acceptOwnership");
 const NEW_OWNER = getAddress("0x00000000000000000000000000000000000a0b99");
+/** transferOwnership(NEW_OWNER): the one call that would hand a contract away. Nothing here may send it. */
+const TRANSFER_OWNERSHIP = encodeFunctionData({ abi: parseAbi(["function transferOwnership(address newOwner)"]), functionName: "transferOwnership", args: [NEW_OWNER] });
 const tmp = () => mkdtempSync(join(tmpdir(), "ops-wallet-"));
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
+const char = (code: number) => String.fromCharCode(code);
+/** 2027-01-15T08:00:00.000Z */
+const NOW = 1_800_000_000_000;
 
 describe("the known functions: what the signing page can show", () => {
   it("decodes each one, with its arguments", () => {
@@ -33,21 +38,15 @@ describe("the known functions: what the signing page can show", () => {
       signature: "increaseObservationCardinalityNext(uint16)",
       args: [{ name: "observationCardinalityNext", type: "uint16", value: "1200" }],
     });
-    expect(decodeKnownCall(enc("transferOwnership", [NEW_OWNER.toLowerCase()]))).toEqual({
-      name: "transferOwnership",
-      signature: "transferOwnership(address)",
-      args: [{ name: "newOwner", type: "address", value: NEW_OWNER }],
-    });
   });
 
   it("has the selectors every other tool uses", () => {
-    expect([ACCEPT, enc("pause"), enc("unpause"), enc("transferOwnership", [NEW_OWNER]).slice(0, 10), enc("increaseObservationCardinalityNext", [1]).slice(0, 10)]).toEqual([
-      "0x79ba5097",
-      "0x8456cb59",
-      "0x3f4ba83a",
-      "0xf2fde38b",
-      "0x32148f67",
-    ]);
+    expect([ACCEPT, enc("pause"), enc("unpause"), enc("increaseObservationCardinalityNext", [1]).slice(0, 10)]).toEqual(["0x79ba5097", "0x8456cb59", "0x3f4ba83a", "0x32148f67"]);
+  });
+
+  it("doesn't know transferOwnership, the one call that could hand a contract away", () => {
+    expect(KNOWN_ABI.map((f) => f.name)).toEqual(["acceptOwnership", "pause", "unpause", "increaseObservationCardinalityNext"]);
+    expect(() => decodeKnownCall(TRANSFER_OWNERSHIP)).toThrow(/0xf2fde38b is not one of the known functions/);
   });
 
   it("refuses an unknown function, extra bytes, a missing argument, or an argument out of its type's range", () => {
@@ -63,14 +62,20 @@ describe("the known functions: what the signing page can show", () => {
 });
 
 describe("the call file", () => {
-  const call = { chainId: 964, to: a.vault, data: ACCEPT, label: "acceptOwnership() on the vault", from: ROLES.owner.bittensor, sender: "the owner" };
+  const call = { chainId: 964, to: a.vault, data: ACCEPT, label: "acceptOwnership() on the vault", from: ROLES.owner.bittensor };
+  const good = () => walletFile({ title: "Cascade v3-launch: accept ownership", deployment: "v3-launch", now: NOW, calls: [call] });
+  const bad = (change: (f: WalletFile & Record<string, unknown>) => unknown) => {
+    const f = structuredClone(good()) as WalletFile & Record<string, unknown>;
+    change(f);
+    return () => parseWalletFile(f);
+  };
 
-  it("holds each call's chain id, to, data, value (always 0), label and expected sender", () => {
-    expect(walletFile({ title: "Cascade v3-launch: accept ownership", deployment: "v3-launch", now: 1_800_000_000_000, calls: [call] })).toEqual({
+  it("holds each call's chain id, to, data, value (always 0), the account that must send it, and a note", () => {
+    expect(good()).toEqual({
       format: "cascade-wallet-calls",
       version: 1,
       title: "Cascade v3-launch: accept ownership",
-      createdAt: 1_800_000_000_000,
+      createdAt: NOW,
       deployment: "v3-launch",
       ordered: false,
       calls: [{ ...call, value: "0" }],
@@ -86,19 +91,12 @@ describe("the call file", () => {
   });
 
   it("is written as JSON that reads back the same", () => {
-    const f = walletFile({ title: "t", deployment: "v3-launch", now: 1, calls: [call] });
-    const path = writeWalletFile(join(tmp(), "wallet"), "v3-launch-accept-ownership", f);
+    const path = writeWalletFile(join(tmp(), "wallet"), "v3-launch-accept-ownership", good());
     expect(path).toMatch(/[\\/]wallet[\\/]v3-launch-accept-ownership\.json$/);
-    expect(parseWalletFile(readJson(path))).toEqual(f);
+    expect(parseWalletFile(readJson(path))).toEqual(good());
   });
 
   it("refuses anything but a well-formed file", () => {
-    const good = walletFile({ title: "t", deployment: "v3-launch", now: 1, calls: [call] });
-    const bad = (change: (f: WalletFile & Record<string, unknown>) => unknown) => {
-      const f = structuredClone(good) as WalletFile & Record<string, unknown>;
-      change(f);
-      return () => parseWalletFile(f);
-    };
     expect(() => parseWalletFile(null)).toThrow(/not a call file/);
     expect(bad((f) => (f.format = "safe" as never))).toThrow(/not a call file/);
     expect(bad((f) => (f.version = 2 as never))).toThrow(/version/);
@@ -114,26 +112,110 @@ describe("the call file", () => {
     expect(bad((f) => (f.deployment = "../etc"))).toThrow(/deployment/);
     expect(bad((f) => (f.ordered = "yes" as never))).toThrow(/ordered/);
   });
+
+  it("takes calldata in lower-case hex only, as the tools write it", () => {
+    expect(bad((f) => (f.calls[0].data = "0x79BA5097"))).toThrow(/call 1: data must be lower-case hex/);
+  });
+
+  it("refuses fields it doesn't know, so nothing unchecked rides along", () => {
+    expect(bad((f) => (f.note = "trust me"))).toThrow(/the call file has fields this tool doesn't know: note/);
+    expect(bad((f) => ((f.calls[0] as unknown as Record<string, unknown>).sender = "the owner"))).toThrow(/call 1 has fields this tool doesn't know: sender/);
+  });
+
+  it("allows only printable ASCII in its text: no direction overrides, zero-width or C1 control characters", () => {
+    // U+202E RIGHT-TO-LEFT OVERRIDE, U+200B ZERO WIDTH SPACE, U+0085 NEXT LINE
+    for (const code of [0x202e, 0x200b, 0x85]) {
+      expect(bad((f) => (f.calls[0].label = `acceptOwnership() on the vault${char(code)}`))).toThrow(/call 1: label .*printable ASCII/);
+      expect(bad((f) => (f.title = `Cascade${char(code)} accept ownership`))).toThrow(/title .*printable ASCII/);
+    }
+    expect(bad((f) => (f.calls[0].label = "acceptOwnership()\ton the vault"))).toThrow(/printable ASCII/);
+  });
 });
 
-describe("checking each call against the contracts it may call", () => {
+describe("checking each call against the deployment record", () => {
   const known = knownContracts(launch);
-  const file = (calls: Parameters<typeof walletFile>[0]["calls"]) => walletFile({ title: "t", deployment: "v3-launch", now: 1_800_000_000_000, calls });
-  const accept = (chainId: number, to: `0x${string}`, from = ROLES.owner.base) => ({ chainId, to, data: ACCEPT, label: "accept", from, sender: "the owner" });
+  const file = (calls: Parameters<typeof walletFile>[0]["calls"], deployment: string | null = "v3-launch") => walletFile({ title: "t", deployment: deployment ?? undefined, now: NOW, calls });
+  const accept = (chainId: number, to: `0x${string}`, from = ROLES.owner.base) => ({ chainId, to, data: ACCEPT, label: "acceptOwnership()", from });
+  const at = (fn: "pause" | "unpause", from: `0x${string}`, to = a.frontDoor, chainId = 8453) => ({ chainId, to, data: enc(fn), label: `${fn}()`, from });
+  const step = (n: number, from: `0x${string}`) => ({
+    chainId: 8453,
+    to: BASE_V3.TAO_WETH_POOL,
+    data: enc("increaseObservationCardinalityNext", [n]),
+    gas: 15_100_000,
+    label: `increaseObservationCardinalityNext(${n})`,
+    from,
+  });
 
-  it("names each contract by its role and network, and decodes its function", () => {
-    const v = checkCalls(file([accept(8453, a.frontDoor), accept(8453, a.staker), accept(964, a.vault, ROLES.owner.bittensor)]), known);
-    expect(v.calls.map((c) => [c.network, c.contract, c.fn.signature, c.valueText])).toEqual([
-      ["Base", "Front door on Base", "acceptOwnership()", "0 ETH"],
-      ["Base", "Staker on Base", "acceptOwnership()", "0 ETH"],
-      ["Bittensor EVM", "Vault on Bittensor", "acceptOwnership()", "0 TAO"],
+  it("builds what is shown from the decoded call and the record: the heading, the sender's role, the effect", () => {
+    const v = checkCalls(file([accept(8453, a.frontDoor), accept(8453, a.staker), accept(964, a.vault, ROLES.owner.bittensor)]), known, NOW);
+    expect(v.heading).toBe("Cascade v3-launch: 3 calls to send from MetaMask");
+    expect(v.calls.map((c) => [c.heading, c.network, c.contract, c.senderRole, c.valueText])).toEqual([
+      ["acceptOwnership() on the Front door (Base)", "Base", "Front door on Base", "the owner on Base, from the deployment record", "0 ETH"],
+      ["acceptOwnership() on the Staker (Base)", "Base", "Staker on Base", "the owner on Base, from the deployment record", "0 ETH"],
+      ["acceptOwnership() on the Vault (Bittensor)", "Bittensor EVM", "Vault on Bittensor", "the owner on Bittensor, from the deployment record", "0 TAO"],
     ]);
-    const pool = checkCalls(
-      file([{ chainId: 8453, to: BASE_V3.TAO_WETH_POOL, data: enc("increaseObservationCardinalityNext", [1_200]), gas: 15_100_000, label: "step 1", from: NEW_OWNER, sender: "you" }]),
-      knownContracts(null),
+    expect(v.calls[2].effect).toBe(`acceptOwnership(): makes ${ROLES.owner.bittensor} the owner of the Vault on Bittensor`);
+    expect(v.warnings).toEqual([]);
+  });
+
+  it("gives each function a one-line effect, and the selector and 32-byte words a Ledger's debug screens show", () => {
+    const v = checkCalls(file([at("pause", ROLES.guardian.base), at("pause", ROLES.guardian.bittensor, a.vault, 964), at("unpause", ROLES.owner.bittensor, a.vault, 964)]), known, NOW);
+    expect(v.calls.map((c) => c.effect)).toEqual([
+      "pause(): stops deposits, redeem requests, batch closes and USDC deliveries on the Front door until the owner unpauses (claims stay open)",
+      "pause(): stops staking, direct deposits and redeems, incoming batches and payouts on the Vault until the owner unpauses",
+      "unpause(): lets the Vault on Bittensor run again (undoes pause())",
+    ]);
+    expect(v.calls.map((c) => [c.selector, c.words])).toEqual([
+      ["0x8456cb59", []],
+      ["0x8456cb59", []],
+      ["0x3f4ba83a", []],
+    ]);
+    const pool = checkCalls(file([step(1_200, NEW_OWNER)], null), knownContracts(null), NOW).calls[0];
+    expect(pool.heading).toBe("increaseObservationCardinalityNext(1200) on the TAO/WETH 0.3% pool (Base)");
+    expect(pool.effect).toBe("increaseObservationCardinalityNext(1200): pays gas to let the price pool remember more history (room for 1200 observations); changes no money");
+    expect(pool.selector).toBe("0x32148f67");
+    expect(pool.words).toEqual([`${"0".repeat(61)}4b0`]);
+  });
+
+  it("refuses transferOwnership whatever its label says", () => {
+    const disguised = { ...accept(964, a.vault, ROLES.owner.bittensor), data: TRANSFER_OWNERSHIP, label: "acceptOwnership() on the vault" };
+    expect(() => checkCalls(file([disguised]), known)).toThrow(/call 1: calldata 0xf2fde38b is not one of the known functions/);
+  });
+
+  it("shows the file's label only as a note, and refuses one that doesn't start with the decoded function", () => {
+    const pause = { ...at("pause", ROLES.guardian.base), label: "pause() is harmless: it only refreshes the page" };
+    const c = checkCalls(file([pause]), known).calls[0];
+    expect(c.heading).toBe("pause() on the Front door (Base)");
+    expect(c.label).toBe("pause() is harmless: it only refreshes the page");
+    expect(() => checkCalls(file([{ ...pause, label: "acceptOwnership() on the vault" }]), known)).toThrow(/call 1: its label "acceptOwnership\(\) on the vault" doesn't start with pause\(/);
+    expect(() => checkCalls(file([{ ...pause, label: "pauseAll()" }]), known)).toThrow(/doesn't start with pause\(/);
+  });
+
+  it("refuses a sender that isn't the record's role for that function", () => {
+    // acceptOwnership: only the chain's owner, whom the deployer offered it to
+    expect(() => checkCalls(file([accept(964, a.vault, ROLES.guardian.bittensor)]), known)).toThrow(
+      new RegExp(`call 1: ${ROLES.guardian.bittensor} is not a role in the deployment record that may send acceptOwnership\\(\\) to the Vault on Bittensor \\(the owner on Bittensor, ${ROLES.owner.bittensor}\\)`),
     );
-    expect(pool.calls[0].contract).toBe("TAO/WETH 0.3% pool on Base");
-    expect(pool.calls[0].fn.args).toEqual([{ name: "observationCardinalityNext", type: "uint16", value: "1200" }]);
+    expect(() => checkCalls(file([accept(964, a.vault, ROLES.owner.base)]), known)).toThrow(/not a role in the deployment record/);
+    // pause: the guardian or the owner; unpause: the owner only
+    expect(checkCalls(file([at("pause", ROLES.guardian.base), at("pause", ROLES.owner.base)]), known).calls.map((c) => c.senderRole)).toEqual([
+      "the guardian on Base, from the deployment record",
+      "the owner on Base, from the deployment record",
+    ]);
+    expect(() => checkCalls(file([at("unpause", ROLES.guardian.base)]), known)).toThrow(/not a role in the deployment record that may send unpause\(\)/);
+    // the deployer still owns everything until the hand-off is accepted, but it isn't the record's owner
+    expect(() => checkCalls(file([at("unpause", WALLET)]), known)).toThrow(/not a role in the deployment record/);
+  });
+
+  it("takes the pool steps from anyone, but all from the one account written with --from", () => {
+    expect(checkCalls(file([step(1_200, NEW_OWNER)], null), knownContracts(null)).calls[0].senderRole).toBe("the account given with --from; anyone may send this");
+    expect(() => checkCalls(file([step(1_200, NEW_OWNER), step(1_800, ROLES.owner.base)], null), knownContracts(null))).toThrow(
+      /call 2: comes from .*, but the file's other pool steps come from .*: they all come from the one --from account/,
+    );
+  });
+
+  it("sets a gas limit only on the pool steps", () => {
+    expect(() => checkCalls(file([{ ...accept(8453, a.frontDoor), gas: 100_000 }]), known)).toThrow(/call 1: a gas limit is set only on the pool steps; acceptOwnership\(\) takes MetaMask's estimate/);
   });
 
   it("refuses an address that is none of the deployment's contracts nor an oracle pool, or one on the wrong chain", () => {
@@ -145,20 +227,44 @@ describe("checking each call against the contracts it may call", () => {
   });
 
   it("refuses a function the contract isn't called with", () => {
-    expect(() => checkCalls(file([{ ...accept(8453, a.staker), data: enc("pause") }]), known)).toThrow(/call 1: pause\(\) is not a call this tool makes to the Staker on Base/);
-    expect(() => checkCalls(file([{ ...accept(964, a.vault), data: enc("increaseObservationCardinalityNext", [5]) }]), known)).toThrow(/not a call this tool makes to the Vault/);
+    expect(() => checkCalls(file([{ ...accept(8453, a.staker), data: enc("pause"), label: "pause()" }]), known)).toThrow(/call 1: pause\(\) is not a call this tool makes to the Staker on Base/);
+    expect(() => checkCalls(file([{ ...accept(964, a.vault), data: enc("increaseObservationCardinalityNext", [5]), label: "increaseObservationCardinalityNext(5)" }]), known)).toThrow(
+      /not a call this tool makes to the Vault/,
+    );
     expect(() => checkCalls(file([accept(8453, BASE_V3.TAO_WETH_POOL)]), known)).toThrow(/acceptOwnership\(\) is not a call this tool makes to the TAO\/WETH 0\.3% pool/);
   });
 
-  it("describes the calls in the terminal too, to compare with the page and the Ledger", () => {
-    const v = checkCalls(file([accept(964, a.vault, ROLES.owner.bittensor)]), known);
-    expect(describeCalls(v)).toEqual([
-      "t (prepared 2027-01-15T08:00:00.000Z, deployment v3-launch): 1 call",
-      `  1. Bittensor EVM (chain id 964): Vault on Bittensor ${a.vault}`,
-      `     acceptOwnership(), value 0 TAO, from ${ROLES.owner.bittensor} (the owner): accept`,
+  it("refuses a v2 record, which has no owner or guardian roles", () => {
+    const v2 = { ...launch, plan: { ...launch.plan, version: undefined } } as never;
+    expect(() => knownContracts(v2)).toThrow(/v2 plan, which has no owner or guardian roles/);
+  });
+
+  it("warns when the file is more than a day old", () => {
+    const f = file([accept(8453, a.frontDoor)]);
+    expect(checkCalls(f, known, NOW + 23 * 3_600_000).warnings).toEqual([]);
+    expect(checkCalls(f, known, NOW + 25 * 3_600_000).warnings).toEqual([
+      "This file was prepared 25 hours ago (2027-01-15T08:00:00.000Z): make it again with --for-wallet unless you know it is still right.",
     ]);
   });
+
+  it("describes the calls in the terminal too, to compare with the page and the Ledger", () => {
+    const f = file([{ ...accept(964, a.vault, ROLES.owner.bittensor), label: "acceptOwnership() on the vault" }]);
+    expect(describeCalls(checkCalls(f, known, NOW))).toEqual([
+      "Cascade v3-launch: 1 call to send from MetaMask (file prepared 2027-01-15T08:00:00.000Z)",
+      `  1. acceptOwnership() on the Vault (Bittensor) ${a.vault}`,
+      `     Bittensor EVM (chain id 964), value 0 TAO, from ${ROLES.owner.bittensor} (the owner on Bittensor, from the deployment record)`,
+      `     acceptOwnership(): makes ${ROLES.owner.bittensor} the owner of the Vault on Bittensor`,
+      "     Selector 0x79ba5097, no parameters",
+      "     The file's note: acceptOwnership() on the vault",
+    ]);
+    const pool = describeCalls(checkCalls(file([step(1_200, NEW_OWNER)], null), knownContracts(null), NOW + 30 * 3_600_000));
+    expect(pool[0]).toBe("Cascade: 1 call to send from MetaMask (file prepared 2027-01-15T08:00:00.000Z)");
+    expect(pool[1]).toMatch(/^WARNING: This file was prepared 30 hours ago/);
+    expect(pool).toContain(`     Selector 0x32148f67, parameter 1: ${"0".repeat(61)}4b0`);
+    expect(pool).toContain("     Gas limit 15,100,000, set by the file");
+  });
 });
+
 
 // ---- the commands that write the file ----
 
@@ -194,9 +300,9 @@ describe("handoff --for-wallet", () => {
     const f = parseWalletFile(readJson(path));
     expect(f).toMatchObject({ deployment: "v3-launch", ordered: false, createdAt: 1_800_000_000_000 });
     expect(f.calls).toEqual([
-      { chainId: 8453, to: a.frontDoor, data: ACCEPT, value: "0", label: "acceptOwnership() on the front door", from: ROLES.owner.base, sender: "the owner" },
-      { chainId: 8453, to: a.staker, data: ACCEPT, value: "0", label: "acceptOwnership() on the staker", from: ROLES.owner.base, sender: "the owner" },
-      { chainId: 964, to: a.vault, data: ACCEPT, value: "0", label: "acceptOwnership() on the vault", from: ROLES.owner.bittensor, sender: "the owner" },
+      { chainId: 8453, to: a.frontDoor, data: ACCEPT, value: "0", label: "acceptOwnership() on the front door", from: ROLES.owner.base },
+      { chainId: 8453, to: a.staker, data: ACCEPT, value: "0", label: "acceptOwnership() on the staker", from: ROLES.owner.base },
+      { chainId: 964, to: a.vault, data: ACCEPT, value: "0", label: "acceptOwnership() on the vault", from: ROLES.owner.bittensor },
     ]);
     // what it wrote passes the page's own checks
     expect(checkCalls(f, knownContracts(launch)).calls).toHaveLength(3);
@@ -279,8 +385,8 @@ describe("pause and unpause --for-wallet", () => {
     const f = parseWalletFile(readJson(path));
     const PAUSE = enc("pause");
     expect(f.calls).toEqual([
-      { chainId: 8453, to: a.frontDoor, data: PAUSE, value: "0", label: "pause() on the front door", from: ROLES.guardian.base, sender: "the guardian" },
-      { chainId: 964, to: a.vault, data: PAUSE, value: "0", label: "pause() on the vault", from: ROLES.guardian.bittensor, sender: "the guardian" },
+      { chainId: 8453, to: a.frontDoor, data: PAUSE, value: "0", label: "pause() on the front door", from: ROLES.guardian.base },
+      { chainId: 964, to: a.vault, data: PAUSE, value: "0", label: "pause() on the vault", from: ROLES.guardian.bittensor },
     ]);
     expect(f.ordered).toBe(false);
     expect(checkCalls(f, knownContracts(launch)).calls).toHaveLength(2);
@@ -298,9 +404,11 @@ describe("pause and unpause --for-wallet", () => {
     const w = pauseWorld({ paused: true });
     await pauseCommand(w.ctx, launch, pauseOpts(dir, "unpause"), w.deps);
     const f = parseWalletFile(readJson(join(dir, "wallet", "v3-launch-unpause.json")));
-    expect(f.calls.map((c) => [c.chainId, c.data, c.from, c.sender])).toEqual([
-      [8453, enc("unpause"), WALLET, "the owner"],
-      [964, enc("unpause"), WALLET, "the owner"],
+    // owner() as the contracts answer it: the deployer still, until the hand-off is accepted (sign then
+    // refuses it: the deployer isn't the record's owner)
+    expect(f.calls.map((c) => [c.chainId, c.data, c.from, c.label])).toEqual([
+      [8453, enc("unpause"), WALLET, "unpause() on the front door"],
+      [964, enc("unpause"), WALLET, "unpause() on the vault"],
     ]);
   });
 
@@ -340,9 +448,9 @@ describe("cardinality --for-wallet", () => {
     expect(f).toMatchObject({ ordered: true, createdAt: 1_800_000_000_000 });
     expect(f).not.toHaveProperty("deployment");
     expect(f.calls).toEqual([
-      { chainId: 8453, to: txs[0].to, data: txs[0].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1200) on the TAO/WETH 0.3% pool, step 1 of 3", from: NEW_OWNER, sender: "the account you chose with --from" },
-      { chainId: 8453, to: txs[1].to, data: txs[1].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1800) on the TAO/WETH 0.3% pool, step 2 of 3", from: NEW_OWNER, sender: "the account you chose with --from" },
-      { chainId: 8453, to: txs[2].to, data: txs[2].data, value: "0", gas: "5100000", label: "increaseObservationCardinalityNext(2000) on the TAO/WETH 0.3% pool, step 3 of 3", from: NEW_OWNER, sender: "the account you chose with --from" },
+      { chainId: 8453, to: txs[0].to, data: txs[0].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1200) on the TAO/WETH 0.3% pool, step 1 of 3", from: NEW_OWNER },
+      { chainId: 8453, to: txs[1].to, data: txs[1].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1800) on the TAO/WETH 0.3% pool, step 2 of 3", from: NEW_OWNER },
+      { chainId: 8453, to: txs[2].to, data: txs[2].data, value: "0", gas: "5100000", label: "increaseObservationCardinalityNext(2000) on the TAO/WETH 0.3% pool, step 3 of 3", from: NEW_OWNER },
     ]);
     expect(checkCalls(f, knownContracts(null)).calls).toHaveLength(3);
     expect(lines.at(-1)).toBe(`Wrote ${path} (3 calls): send them from MetaMask with: pnpm ops sign ${path}`);
@@ -364,6 +472,12 @@ describe("arguments: sign and --for-wallet", () => {
     expect(() => parseArgs(["sign"])).toThrow(/sign needs the call file/);
     expect(() => parseArgs(["sign", F, "--live"])).toThrow(/sign sends nothing itself/);
     expect(() => parseArgs(["sign", F, "other.json"])).toThrow(UsageError);
+  });
+
+  it("sign takes --deployment, a plain name, in place of OPS_DEPLOYMENT", () => {
+    expect(parseArgs(["sign", F, "--deployment", "v3-launch"])).toEqual({ cmd: "sign", live: false, users: [], file: F, deployment: "v3-launch" });
+    expect(() => parseArgs(["sign", F, "--deployment", "../etc"])).toThrow(/--deployment .* is not a plain name/);
+    expect(() => parseArgs(["pause", "--deployment", "v3-launch"])).toThrow(UsageError);
   });
 
   it("handoff, pause, unpause and cardinality take --for-wallet", () => {

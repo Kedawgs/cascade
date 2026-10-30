@@ -9,8 +9,9 @@ import {AdaptersFixture} from "./AdaptersFixture.sol";
 /// gas measured by calling `ccipReceive` directly as the router (the router's own overhead is excluded).
 contract AdapterGasTest is AdaptersFixture {
     // Deployment gas model, `gasLimit = min(gasBase + entries * gasPerEntry, 7_000_000)`, copied into the
-    // deployment spec. Raw receiver gas (mock alpha vault and mock staking precompile, `ccipReceive` called
-    // as the router):
+    // deployment spec (ops/src/config.ts: baseGas toward Bittensor, bitGas toward Base). The first
+    // calibration (the Bittensor side is recalibrated below). Raw receiver gas (mock alpha vault and mock
+    // staking precompile, `ccipReceive` called as the router):
     //   vault side:      1+0 = 134,606   50+50 = 2,447,691   100+100 = 4,630,863   (entries = deposits + redeems)
     //   front-door side: 1   = 128,115   50    = 1,380,682   100     = 2,660,606
     // Per entry: slope (g_max - g_1) / (entries_max - 1) rounded up to the next 1,000, then x1.15.
@@ -27,10 +28,25 @@ contract AdapterGasTest is AdaptersFixture {
     // 100+100 = 4,620,503 (main read 136,914 / 2,430,018 / 4,613,184; a delivery with redeems now reads the
     // booked and ramping stake, about 7,000 gas, and a deposit-only one does not). The real-AlphaVault 1+0
     // point is not re-measured offline, so the test carries the vault's own change since the calibration
-    // onto it: 187,450 + (136,763 - 134,606) = 189,607, and (189,607 + 300,000) x 1.15 = 563,048 <= 566,450,
-    // about 3,400 gas of slack. A batch with redeems has more: 50+50 is 3,147,707 <= 3,185,000.
-    uint256 public constant GAS_BASE_TO_BITTENSOR = 540_000;
-    uint256 public constant GAS_PER_ENTRY_TO_BITTENSOR = 26_450;
+    // onto it: 187,450 + (136,763 - 134,606) = 189,607.
+    //
+    // Recalibrated toward Bittensor (2026-10-29) on small and one-sided batches, each measured from a cold
+    // start in its own test. The first redeem of a delivery writes a payout batch and starts a burn window,
+    // about 105,000 gas a deposit does not cost (0+1 = 242,671 against 1+0 = 136,763), so the 540,000 /
+    // 26,450 model fell short of the 15% rule at every small batch with a redeem (1+1: 592,900 < 756,075),
+    // and deposits alone climb faster than its per-entry average (about 28,500 gas a deposit against 15,000
+    // a further redeem: 50+0: 1,862,500 < 2,168,560). Every point now counts the same way (`vaultNeed`): a
+    // message with tokens (any deposit) carries the real AlphaVault's 52,844 gas over the mock, a
+    // redeem-only one calls no AlphaVault; then + 300,000 and x 1.15.
+    //   Two points bind, 1+1 and 50+0; the base (a multiple of 10,000) and the per entry (of 500) cover both
+    //   with about 20,000 gas of slack: 1+1 (304,613 mock, 357,457 real) needs 756,075 of
+    //   720,000 + 2 x 29,500 = 779,000; 50+0 (1,532,861 mock) needs 2,168,560 of 720,000 + 50 x 29,500 =
+    //   2,195,000. The tests below log every point's slack.
+    //   Fits the cap: 720,000 + 200 x 29,500 = 6,620,000 <= 7,000,000. Not covered at 15%: deposit-heavy
+    //     batches beyond the operator's 50 deposits (100+0 needs about 3,808,000 of 3,670,000), which need
+    //     a fork measurement before the limits are raised anyway.
+    uint256 public constant GAS_BASE_TO_BITTENSOR = 720_000;
+    uint256 public constant GAS_PER_ENTRY_TO_BITTENSOR = 29_500;
     uint256 public constant GAS_BASE_TO_BASE = 120_000;
     uint256 public constant GAS_PER_ENTRY_TO_BASE = 29_900;
 
@@ -88,14 +104,23 @@ contract AdapterGasTest is AdaptersFixture {
     /// Gas of one `ccipReceive` on the vault side for `n` fresh deposits (0x2000 + i, 1e18) and `n` redeems
     /// of seeded holders (0x1000 + i, 1e24 each, batch id 2).
     function measureVault(uint256 n) internal returns (uint256 g) {
-        CascadeMessages.Entry[] memory d = new CascadeMessages.Entry[](n);
-        CascadeMessages.Entry[] memory r = new CascadeMessages.Entry[](n);
-        for (uint256 i; i < n; ++i) {
+        return measureVaultBatch(n, n);
+    }
+
+    /// Gas of one `ccipReceive` on the vault side for `nd` fresh deposits (0x2000 + i, 1e18 each) and `nr`
+    /// redeems of seeded holders (0x1000 + i, 1e24 shares each, 1 TAO), batch id 2. A batch with no
+    /// deposits carries no tokens, as a front door sends it.
+    function measureVaultBatch(uint256 nd, uint256 nr) internal returns (uint256 g) {
+        CascadeMessages.Entry[] memory d = new CascadeMessages.Entry[](nd);
+        CascadeMessages.Entry[] memory r = new CascadeMessages.Entry[](nr);
+        for (uint256 i; i < nd; ++i) {
             d[i] = CascadeMessages.Entry(addr(0x2000 + i), 1e18);
+        }
+        for (uint256 i; i < nr; ++i) {
             r[i] = CascadeMessages.Entry(addr(0x1000 + i), 1e24);
         }
-        uint256 value = n * 1e18;
-        taoBit.mint(address(adapterBit), value);
+        uint256 value = nd * 1e18;
+        if (value != 0) taoBit.mint(address(adapterBit), value);
         Client.Any2EVMMessage memory m = wrap(
             address(vault),
             address(fd),
@@ -109,8 +134,81 @@ contract AdapterGasTest is AdaptersFixture {
         g = gasleft();
         adapterBit.ccipReceive(m);
         g -= gasleft();
-        assertEq(vault.balanceOf(addr(0x2000 + n - 1)), 1e24, "deposit credited");
-        assertEq(vault.balanceOf(addr(0x1000 + n - 1)), 9e24, "redeem applied");
+        if (nd != 0) assertEq(vault.balanceOf(addr(0x2000 + nd - 1)), 1e24, "deposit credited");
+        if (nr != 0) assertEq(vault.balanceOf(addr(0x1000 + nr - 1)), 9e24, "redeem applied");
+    }
+
+    /// The gas the model must give a vault-side delivery of `nd` deposits that used `g` mock gas: the
+    /// real-AlphaVault cost carried on when the message carries tokens (any deposit; a redeem-only batch
+    /// carries none and never calls the AlphaVault), plus the precompile allowance, plus 15%.
+    function vaultNeed(uint256 g, uint256 nd) internal pure returns (uint256) {
+        uint256 real = nd == 0 ? g : g + REAL_ALPHAVAULT_1_0 - MOCK_1_0_AT_CALIBRATION;
+        return (real + PRECOMPILE_ALLOWANCE) * 115 / 100;
+    }
+
+    /// What the deployment model gives a delivery of `entries` entries.
+    function vaultModel(uint256 entries) internal pure returns (uint256) {
+        return GAS_BASE_TO_BITTENSOR + entries * GAS_PER_ENTRY_TO_BITTENSOR;
+    }
+
+    /// Measures one small point from a cold start (each in its own test), logs it and its slack, and
+    /// checks the model covers it.
+    function checkVaultPoint(uint256 nd, uint256 nr) internal {
+        uint256 g = measureVaultBatch(nd, nr);
+        uint256 need = vaultNeed(g, nd);
+        string memory point = string.concat(vm.toString(nd), "+", vm.toString(nr));
+        emit log_named_uint(string.concat("vault gas ", point), g);
+        emit log_named_uint(string.concat("vault need ", point), need);
+        emit log_named_int(string.concat("vault slack ", point), int256(vaultModel(nd + nr)) - int256(need));
+        assertGe(vaultModel(nd + nr), need, point);
+    }
+
+    // The first redeem of a delivery writes a payout batch and starts the front door's burn window: about
+    // 105,000 gas a deposit does not cost. These are the points where that fixed cost weighs most.
+    function test_gas_vault_0_1() public {
+        checkVaultPoint(0, 1);
+    }
+
+    function test_gas_vault_0_5() public {
+        checkVaultPoint(0, 5);
+    }
+
+    function test_gas_vault_1_1() public {
+        checkVaultPoint(1, 1);
+    }
+
+    function test_gas_vault_1_2() public {
+        checkVaultPoint(1, 2);
+    }
+
+    function test_gas_vault_1_3() public {
+        checkVaultPoint(1, 3);
+    }
+
+    function test_gas_vault_1_5() public {
+        checkVaultPoint(1, 5);
+    }
+
+    function test_gas_vault_1_10() public {
+        checkVaultPoint(1, 10);
+    }
+
+    function test_gas_vault_2_2() public {
+        checkVaultPoint(2, 2);
+    }
+
+    function test_gas_vault_0_50() public {
+        checkVaultPoint(0, 50);
+    }
+
+    // A deposit costs more than a redeem after the first (about 28,500 gas against 15,000), so a batch of
+    // deposits alone climbs faster than the per-entry average: up to the operator's 50 deposits.
+    function test_gas_vault_10_0() public {
+        checkVaultPoint(10, 0);
+    }
+
+    function test_gas_vault_50_0() public {
+        checkVaultPoint(50, 0);
     }
 
     /// Gas of one `ccipReceive` on the front-door side for a chunk of `n` payouts (0x3000 + i, 1e18 each).
@@ -148,41 +246,18 @@ contract AdapterGasTest is AdaptersFixture {
         emit log_named_uint("vault gas 1+0", g1);
         emit log_named_uint("vault gas 50+50", g50);
         emit log_named_uint("vault gas 100+100", g100);
-        assertGe(GAS_BASE_TO_BITTENSOR + 1 * GAS_PER_ENTRY_TO_BITTENSOR, (g1 + PRECOMPILE_ALLOWANCE) * 115 / 100, "1+0");
         // the real-AlphaVault 1+0 point, carried forward by the vault's change since the calibration
-        uint256 real1 = REAL_ALPHAVAULT_1_0 + g1 - MOCK_1_0_AT_CALIBRATION;
-        uint256 need1 = (real1 + PRECOMPILE_ALLOWANCE) * 115 / 100;
-        emit log_named_uint("real 1+0 (estimated)", real1);
-        emit log_named_uint("real 1+0 slack", GAS_BASE_TO_BITTENSOR + GAS_PER_ENTRY_TO_BITTENSOR - need1);
-        assertGe(GAS_BASE_TO_BITTENSOR + 1 * GAS_PER_ENTRY_TO_BITTENSOR, need1, "real 1+0");
-        assertGe(
-            GAS_BASE_TO_BITTENSOR + 100 * GAS_PER_ENTRY_TO_BITTENSOR, (g50 + PRECOMPILE_ALLOWANCE) * 115 / 100, "50+50"
-        );
-        assertGe(
-            GAS_BASE_TO_BITTENSOR + 200 * GAS_PER_ENTRY_TO_BITTENSOR,
-            (g100 + PRECOMPILE_ALLOWANCE) * 115 / 100,
-            "100+100"
-        );
-        assertLe(GAS_BASE_TO_BITTENSOR + 200 * GAS_PER_ENTRY_TO_BITTENSOR, 7_000_000, "within GAS_CAP");
+        uint256 need1 = vaultNeed(g1, 1);
+        emit log_named_uint("real 1+0 (estimated)", REAL_ALPHAVAULT_1_0 + g1 - MOCK_1_0_AT_CALIBRATION);
+        emit log_named_uint("real 1+0 slack", vaultModel(1) - need1);
+        assertGe(vaultModel(1), need1, "real 1+0");
+        assertGe(vaultModel(100), vaultNeed(g50, 50), "50+50");
+        assertGe(vaultModel(200), vaultNeed(g100, 100), "100+100");
+        assertLe(vaultModel(200), 7_000_000, "within GAS_CAP");
     }
 
     function measureVaultDepositOnly() internal returns (uint256 g) {
-        CascadeMessages.Entry[] memory d = entries1(addr(0x2000), 1e18);
-        taoBit.mint(address(adapterBit), 1e18);
-        Client.Any2EVMMessage memory m = wrap(
-            address(vault),
-            address(fd),
-            CascadeMessages.encodeBatch(2, d, noEntries()),
-            address(taoBit),
-            1e18,
-            BASE_SELECTOR,
-            address(adapterBase)
-        );
-        vm.prank(address(routerBit));
-        g = gasleft();
-        adapterBit.ccipReceive(m);
-        g -= gasleft();
-        assertEq(vault.balanceOf(addr(0x2000)), 1e24, "deposit credited");
+        return measureVaultBatch(1, 0);
     }
 
     function test_gas_frontDoorDeliveryModelHasHeadroom() public {

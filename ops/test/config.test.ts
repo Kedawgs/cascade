@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { BASE_V3, deploymentName, isV3Deployment, LIVE, paths, recordPath, SETTINGS, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
+import { BASE_V3, deploymentName, isV3Deployment, LIVE, paths, recordPath, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, targets, WALLET } from "../src/config.ts";
 import { decodeSs58, encodeSs58 } from "../src/ss58.ts";
 
 const forkBase = readFileSync(new URL("../../contracts/test/fork/ForkBase.sol", import.meta.url), "utf8");
@@ -44,11 +44,27 @@ describe("v3 config", () => {
     expect(SETTINGS_V3.swapFeeBps).toBe(15);
     expect(SETTINGS_V3.depositFeeUsdc).toBe(50_000n);
     expect(SETTINGS_V3.maxDeliverySlippageBps).toBe(150);
-    // unchanged from v2: the Base adapter's gas model and the reserves; the payout gas is raised
-    expect(SETTINGS_V3.baseGas).toEqual(SETTINGS.baseGas);
+    // unchanged from v2: the reserves; the payout gas and the delivery gas toward Bittensor are raised
+    expect(SETTINGS_V3.baseGas).toEqual({ base: 720_000n, perEntry: 29_500n });
+    expect(SETTINGS.baseGas).toEqual({ base: 540_000n, perEntry: 26_450n });
     expect(SETTINGS_V3.bitGas).toEqual({ base: 170_000n, perEntry: 29_900n });
     expect(SETTINGS.bitGas).toEqual({ base: 120_000n, perEntry: 29_900n });
     expect([SETTINGS_V3.adapterReserve, SETTINGS_V3.vaultReserve]).toEqual([SETTINGS.adapterReserve, SETTINGS.vaultReserve]);
+  });
+
+  it("asks for the delivery gas toward Bittensor that contracts/test/adapters/AdapterGas.t.sol calibrates, and at least its gas toward Base", () => {
+    const gasTest = readFileSync(new URL("../../contracts/test/adapters/AdapterGas.t.sol", import.meta.url), "utf8");
+    const calibrated = (name: string) => {
+      const m = gasTest.match(new RegExp(`constant ${name} = ([\\d_]+);`));
+      if (!m) throw new Error(name);
+      return BigInt(m[1].replaceAll("_", ""));
+    };
+    expect(SETTINGS_V3.baseGas).toEqual({ base: calibrated("GAS_BASE_TO_BITTENSOR"), perEntry: calibrated("GAS_PER_ENTRY_TO_BITTENSOR") });
+    expect(SETTINGS_V3.bitGas.base >= calibrated("GAS_BASE_TO_BASE")).toBe(true);
+    expect(SETTINGS_V3.bitGas.perEntry >= calibrated("GAS_PER_ENTRY_TO_BASE")).toBe(true);
+    // the launch asks the same
+    expect(SETTINGS_V3_LAUNCH.baseGas).toEqual(SETTINGS_V3.baseGas);
+    expect(SETTINGS_V3_LAUNCH.bitGas).toEqual(SETTINGS_V3.bitGas);
   });
 
   it("stakes with tao.bot's hotkey", () => {

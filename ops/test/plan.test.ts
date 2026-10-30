@@ -165,7 +165,7 @@ describe("buildPlanV3", () => {
     expect(plan.steps.map((s) => s.chain)).toEqual([...Array(11).fill("base"), ...Array(7).fill("bittensor")]);
   });
 
-  it("wires the Base adapter to the predicted Bittensor adapter, as in v2", () => {
+  it("wires the Base adapter to the predicted Bittensor adapter, as in v2, with the recalibrated delivery gas", () => {
     expect(step("baseAdapter").args).toEqual([
       {
         router: LIVE.base.ROUTER,
@@ -174,8 +174,8 @@ describe("buildPlanV3", () => {
         remoteChainId: 964n,
         remoteSelector: LIVE.bittensor.SELECTOR,
         remoteAdapter: plan.addresses.bitAdapter,
-        gasBase: 540_000n,
-        gasPerEntry: 26_450n,
+        gasBase: 720_000n,
+        gasPerEntry: 29_500n,
         // the test cadence keeps the lane's whole 5,000 TAO, as before the cap was a constructor argument
         maxMessageValue: 5_000n * 10n ** 18n,
       },

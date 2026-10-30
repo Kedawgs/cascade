@@ -114,10 +114,17 @@ export const SETTINGS = {
 
 /** The v3 test deployment: the spec's launch values, except the batch interval and the payout delay,
  * kept at 10 minutes and 1 hour so the owner's test run doesn't wait (at launch: 21_600 s, and the
- * vault's default of 24 hours). The reserves, direct-deposit minimum and Base adapter's gas model are
- * v2's; the Bittensor adapter's payout gas is raised (below). */
+ * vault's default of 24 hours). The reserves and direct-deposit minimum are v2's; both adapters' gas
+ * models are raised (below). */
 export const SETTINGS_V3 = {
   ...SETTINGS,
+  /** The gas a batch asks CCIP for on Bittensor, as contracts/test/adapters/AdapterGas.t.sol calibrates
+   * it (v2's was 540,000 + 26,450 per entry). A delivery's first redeem writes a payout batch and starts
+   * a burn window, about 105,000 gas a deposit doesn't cost, and a deposit costs about 28,500 gas against
+   * 15,000 for a further redeem, so 1+1 and 50+0 bind: each keeps the test's 15% headroom over the mock,
+   * the real AlphaVault's 52,844 and a 300,000 precompile allowance, with about 20,000 gas to spare. A
+   * delivery that runs short loses nothing but waits for a manual re-execution. */
+  baseGas: { base: 720_000n, perEntry: 29_500n },
   /** The gas a payout asks CCIP for on Base. The rehearsal, relaying with the limit enforced, measured
    * the Base receiver needing about 134.6k for one entry: 90% of v2's 149,900. 170,000 + 29,900 per
    * entry keeps one entry at about two thirds of its limit. */
@@ -222,6 +229,15 @@ export const FRONT_DOOR_DEFAULTS = { maxDeposits: 50, maxRedeems: 50 } as const;
 /** How fast a deployment runs: "test" is SETTINGS_V3 as is; "launch" batches hourly and pays out after a
  * day, and the keeper may wait a day before closing a thin batch. Chosen when a v3 plan is made. */
 export type Cadence = "test" | "launch";
+
+/** The v3 test settings as the a2b4412 build deployed them (the live v3-test record, whose plan has no
+ * `build`): v2's gas toward Bittensor, and adapters with no cap of their own, so the lane's 5,000 TAO.
+ * verify and deploy read a record with the settings it was deployed with. */
+export const SETTINGS_V3_A2B4412 = {
+  ...SETTINGS_V3,
+  baseGas: SETTINGS.baseGas,
+  adapterMaxMessageValue: { base: ADAPTER_MAX_MESSAGE_VALUE, bittensor: ADAPTER_MAX_MESSAGE_VALUE },
+} as const;
 
 const { treasury: _testTreasury, ...SETTINGS_V3_NO_TREASURY } = SETTINGS_V3;
 

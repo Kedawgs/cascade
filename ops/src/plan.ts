@@ -1,6 +1,5 @@
 import { type Address, encodePacked, formatEther, getContractAddress, type Hex, parseAbi } from "viem";
 import {
-  ADAPTER_MAX_MESSAGE_VALUE,
   BASE_V3,
   CADENCE,
   type Cadence,
@@ -10,6 +9,7 @@ import {
   PRECOMPILE,
   SETTINGS,
   SETTINGS_V3,
+  SETTINGS_V3_A2B4412,
   SETTINGS_V3_LAUNCH,
   VAULT_DEFAULTS,
   type VaultLimits,
@@ -63,10 +63,12 @@ export function buildOf(plan: PlanV3): ContractsBuild {
 /** The settings a plan was built with. */
 export const settingsOf = (plan: Plan | PlanV3): DeploySettings => (isPlanV3(plan) ? settingsV3Of(plan) : SETTINGS);
 
-/** A v3 plan's full settings, for its cadence. */
-export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS_V3_LAUNCH {
+/** A v3 plan's full settings, for its cadence and the build it was deployed from: an a2b4412 plan (the
+ * live v3-test record) keeps the settings that build deployed. */
+export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS_V3_LAUNCH | typeof SETTINGS_V3_A2B4412 {
   if (!isPlanV3(plan)) throw new Error("settingsV3Of: the plan is v2");
-  return cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
+  if (cadenceOf(plan) === "launch") return SETTINGS_V3_LAUNCH;
+  return buildOf(plan) === A2B4412_BUILD ? SETTINGS_V3_A2B4412 : SETTINGS_V3;
 }
 
 /** The vault limits a cadence runs with: a launch's own (set during deploy) over the contract's defaults,
@@ -128,8 +130,7 @@ export function checkAdapterCaps(
  * adapters (the live v3-test record) have no maxMessageValue(): their cap is the constant
  * MAX_MESSAGE_VALUE, 5,000 TAO. */
 export function adapterCapsOf(plan: PlanV3): { view: "maxMessageValue" | "MAX_MESSAGE_VALUE"; base: bigint; bittensor: bigint } {
-  if (buildOf(plan) === A2B4412_BUILD) return { view: "MAX_MESSAGE_VALUE", base: ADAPTER_MAX_MESSAGE_VALUE, bittensor: ADAPTER_MAX_MESSAGE_VALUE };
-  return { view: "maxMessageValue", ...settingsV3Of(plan).adapterMaxMessageValue };
+  return { view: buildOf(plan) === A2B4412_BUILD ? "MAX_MESSAGE_VALUE" : "maxMessageValue", ...settingsV3Of(plan).adapterMaxMessageValue };
 }
 
 /** Who holds each role: a launch plan's roles, else the test wallet in every one. */

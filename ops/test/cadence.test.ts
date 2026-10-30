@@ -57,6 +57,16 @@ describe("cadence", () => {
     expect(CADENCE.launch.closeMaxWaitS).toBe(86_400);
   });
 
+  it("an a2b4412 plan (the live v3-test record) keeps the settings it was deployed with: the old delivery gas and the adapters' 5,000 TAO", () => {
+    const { build: _, ...old } = buildPlanV3(0, 40, COLDKEY);
+    const s = settingsV3Of(old as ReturnType<typeof buildPlanV3>);
+    expect(s).toEqual({ ...SETTINGS_V3, baseGas: { base: 540_000n, perEntry: 26_450n } });
+    expect(s.adapterMaxMessageValue).toEqual({ base: 5_000n * 10n ** 18n, bittensor: 5_000n * 10n ** 18n });
+    expect(field(old as ReturnType<typeof buildPlanV3>, "CcipBaseAdapter", "gasBase")).toBe(540_000n);
+    expect(field(old as ReturnType<typeof buildPlanV3>, "CcipBaseAdapter", "gasPerEntry")).toBe(26_450n);
+    expect(field(buildPlanV3(0, 40, COLDKEY), "CcipBaseAdapter", "gasBase")).toBe(720_000n);
+  });
+
   it("a plan without a cadence is a test plan, v2 and v3 alike, and keeps SETTINGS_V3 exactly", () => {
     const v3 = buildPlanV3(0, 40, COLDKEY);
     expect("cadence" in v3).toBe(false);

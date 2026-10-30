@@ -135,7 +135,8 @@ until the next approval replaces it.
   request and a delivery preference in one call, a minimum USDC per TAO of today's price less 2%,
   valid 7 days. When the TAO is back on Base the keeper sells it and sends the
   USDC to the wallet (the form shows the floor). The request fee is only for the first request in the
-  open batch. At least 0.005 TAO, and never leaving less than that behind.
+  open batch. At least 0.011 TAO (the vault defers a redeem worth less than 0.01 TAO, so a little more),
+  and never leaving less than that behind.
 - **Claim by hand:** `claim()`, then (unless the user keeps TAO) `exactInput` back to USDC. On v3 the
   claim banner and the receipt's **Claim as USDC** appear only when automatic delivery can't happen
   (price below the floor, deadline passed) or more than an hour has passed since the TAO landed on

@@ -205,7 +205,7 @@ describe("the FAQ's answers say what the code does", () => {
   it("states the limits without a dollar figure that moves with TAO's price", () => {
     const a = answer(TEST, "limits");
     expect(a).toBe(
-      "The smallest stake is 0.04 TAO (the stake form shows it in dollars), the smallest unstake 0.005 TAO. One batch carries at most 10 TAO, and while Cascade is new the total it accepts is capped.",
+      "The smallest stake is 0.04 TAO (the stake form shows it in dollars), the smallest unstake 0.011 TAO. One batch carries at most 10 TAO, and while Cascade is new the total it accepts is capped.",
     );
   });
 

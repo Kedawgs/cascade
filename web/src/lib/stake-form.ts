@@ -2,7 +2,7 @@ import { formatUnits, parseUnits } from "viem";
 import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
 import type { DepositQuote, Limits, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
 import { isDelivering, offersClaim } from "./cascade/trail";
-import { floorRao, toDisplay, type UnstakeCheck } from "./cascade/units";
+import { floorRao, MIN_UNSTAKE_TEXT, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 
 /** What the unstake amount is typed in: TAO, or its value in USDC. */
@@ -307,9 +307,9 @@ const MIN_USD = (priceUsd: number) => `about ${formatUsd(Math.ceil(toDisplay(MIN
 /** The line under the unstake field: how much can go and the minimum, in the unit shown. */
 export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
   if (unit === "USDC" && priceUsd > 0) {
-    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd)} (0.005 TAO).`;
+    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
   }
-  return `You can unstake up to ${maxUnstakeInput(availableWei)} TAO. The minimum is 0.005 TAO.`;
+  return `You can unstake up to ${maxUnstakeInput(availableWei)} TAO. The minimum is ${MIN_UNSTAKE_TEXT}.`;
 }
 
 /** Why an amount can't be unstaked, in dollars when the user types dollars. */
@@ -319,11 +319,11 @@ export function unstakeErrorText(check: Extract<UnstakeCheck, { ok: false }>, av
     case "tooMuch":
       return `That's more than you can unstake (up to ${usdDown(availableWei, priceUsd)}).`;
     case "belowMin":
-      return `The minimum unstake is ${MIN_USD(priceUsd)} (0.005 TAO).`;
+      return `The minimum unstake is ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
     case "leavesDust":
       return `That would leave less than ${MIN_USD(priceUsd)} staked, too little to unstake later.`;
     case "stakeBelowMin":
-      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd)} (0.005 TAO).`;
+      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
     default:
       return check.reason;
   }

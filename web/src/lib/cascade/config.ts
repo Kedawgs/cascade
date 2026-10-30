@@ -185,8 +185,11 @@ export const USDC_PERMIT = { name: "USD Coin", version: "2" } as const;
 export const ROOT_YIELD_PCT = 5.9;
 
 export const SLIPPAGE_BPS = 50n;
-/** The smallest unstake (and remainder) that can always be paid out (see units.checkUnstake). */
-export const MIN_UNSTAKE_WEI = 5n * 10n ** 15n;
+/** The smallest unstake (and remainder) the form allows (see units.checkUnstake): 0.011 TAO. The vault
+ * defers, without burning, a front-door redeem worth less than 0.01 TAO at the batch's price
+ * (MIN_REDEEM_VALUE), and the user would have paid the request fee for nothing; 10% more covers the
+ * rounding between the form's price and the vault's. */
+export const MIN_UNSTAKE_WEI = 11n * 10n ** 15n;
 
 /** USDC –0.05%→ WETH –0.3%→ TAO, Uniswap v3 (the cheapest, deepest route on Base). */
 export const PATH_USDC_TO_TAO = encodePacked(

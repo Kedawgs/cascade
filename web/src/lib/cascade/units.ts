@@ -1,3 +1,4 @@
+import { formatUnits } from "viem";
 import { MIN_UNSTAKE_WEI, SLIPPAGE_BPS } from "./config";
 
 /** One rao in wei: Bittensor moves value in whole rao. */
@@ -41,20 +42,22 @@ export type UnstakeRefusal = "empty" | "tooMuch" | "stakeBelowMin" | "belowMin" 
 
 export type UnstakeCheck = { ok: true; all: boolean } | { ok: false; code: UnstakeRefusal; reason: string; offerAll: boolean };
 
-const MIN_TEXT = "0.005 TAO";
+/** "0.011 TAO" */
+export const MIN_UNSTAKE_TEXT = `${formatUnits(MIN_UNSTAKE_WEI, 18)} TAO`;
 
-/** Every payout must clear the bridge's 0.002-TAO floor after its fee, so an unstake is at least
- * 0.005 TAO and never leaves a smaller remainder behind (it could never be paid out). */
+/** The vault defers a front-door redeem worth less than 0.01 TAO (its payout could fall below the
+ * bridge's floor after its fee), so an unstake is at least MIN_UNSTAKE_WEI and never leaves a smaller
+ * remainder behind (it couldn't be unstaked later). */
 export function checkUnstake(requestWei: bigint, availableWei: bigint): UnstakeCheck {
   const canAll = availableWei >= MIN_UNSTAKE_WEI;
   if (requestWei <= 0n) return { ok: false, code: "empty", reason: "Enter an amount", offerAll: false };
   if (requestWei > availableWei) return { ok: false, code: "tooMuch", reason: "That's more than you can unstake", offerAll: canAll };
-  if (!canAll) return { ok: false, code: "stakeBelowMin", reason: `Unstakes start at ${MIN_TEXT}; your stake is below that`, offerAll: false };
+  if (!canAll) return { ok: false, code: "stakeBelowMin", reason: `Unstakes start at ${MIN_UNSTAKE_TEXT}; your stake is below that`, offerAll: false };
   if (requestWei === availableWei) return { ok: true, all: true };
-  if (requestWei < MIN_UNSTAKE_WEI) return { ok: false, code: "belowMin", reason: `Unstake at least ${MIN_TEXT}`, offerAll: false };
+  if (requestWei < MIN_UNSTAKE_WEI) return { ok: false, code: "belowMin", reason: `Unstake at least ${MIN_UNSTAKE_TEXT}`, offerAll: false };
   const rest = availableWei - requestWei;
   if (rest < MIN_UNSTAKE_WEI) {
-    return { ok: false, code: "leavesDust", reason: `That would leave less than ${MIN_TEXT}, too little to unstake later`, offerAll: true };
+    return { ok: false, code: "leavesDust", reason: `That would leave less than ${MIN_UNSTAKE_TEXT}, too little to unstake later`, offerAll: true };
   }
   return { ok: true, all: false };
 }

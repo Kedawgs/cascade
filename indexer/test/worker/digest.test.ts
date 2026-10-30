@@ -117,6 +117,14 @@ describe("buildDigest", () => {
     expect(text).toContain("ticks: 900 run, 2 failed, 1 skipped");
   });
 
+  it("shows the share price in TAO per csTAO (csTAO has 24 decimals: price() 1e12 is 1 TAO)", async () => {
+    await wipe(db);
+    const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [], meta: {} };
+    const text = async (price: bigint) => (await buildDigest({ ...o, bit: reading(1n, NOW, bitState({ price })) })).sections.map((s) => s.lines.join("\n")).join("\n");
+    expect(await text(10n ** 12n)).toContain("share price: 1 TAO per csTAO");
+    expect(await text(1_012_345_678_901n)).toContain("share price: 1.012345678901 TAO per csTAO");
+  });
+
   it("says when a chain is catching up, and that the cross-checks wait", async () => {
     await wipe(db);
     const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [] };

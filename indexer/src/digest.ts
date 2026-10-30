@@ -73,7 +73,8 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
   const hourAt = (s: number) => i.hours.find((r) => r.hour === Math.floor((i.nowS - s) / 3600) * 3600)?.priceLast;
   const staking = [
     `total staked: ${bit?.totalAssets === undefined ? "unknown" : amount(bit.totalAssets, "TAO")}`,
-    `share price: ${bit?.price === undefined ? "unknown" : formatUnits(bit.price, 18)} (24 h: ${bit?.price === undefined ? "unknown" : pct(bit.price, hourAt(DAY))}, 7 days: ${bit?.price === undefined ? "unknown" : pct(bit.price, hourAt(7 * DAY))})`,
+    // price() is TAO wei per share unit, scaled by 1e18; csTAO has 24 decimals, so TAO per csTAO is price / 1e12
+    `share price: ${bit?.price === undefined ? "unknown" : `${formatUnits(bit.price, 12)} TAO per csTAO`} (24 h: ${bit?.price === undefined ? "unknown" : pct(bit.price, hourAt(DAY))}, 7 days: ${bit?.price === undefined ? "unknown" : pct(bit.price, hourAt(7 * DAY))})`,
     `APY (30 days, after the cut): ${i.apyPercent === undefined ? "not available" : `${i.apyPercent.toFixed(2)}%`}`,
   ];
   const ob = base?.openBatch;

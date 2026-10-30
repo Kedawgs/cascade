@@ -152,8 +152,11 @@ describe("the page's checks before it sends (its pure logic)", () => {
     expect(L.waitingOn(calls, ["ready", "sent", "ready"], 0)).toBeNull();
     // nothing waits once it is mined, nor before it is sent
     for (const s of ["ready", "confirmed", "reverted", "mismatch"]) expect(L.waitingOn(calls, ["ready", s, "ready"], 2), s).toBeNull();
+    // nor once it has gone unmined for 5 minutes (STUCK_POLLS polls): it can't hold the other chain forever
+    expect(L.waitingOn(calls, ["ready", "sent", "ready"], 2, [0, L.STUCK_POLLS - 1, 0])).toBe(1);
+    expect(L.waitingOn(calls, ["ready", "sent", "ready"], 2, [0, L.STUCK_POLLS, 0])).toBeNull();
     expect(L.waitRefusal(1, 8453, 964, HASH)).toBe(
-      `Not sent: call 2 is still waiting for its receipt on Base (chain id 8453), and this call would switch MetaMask to Bittensor EVM (chain id 964), where that receipt can't be read. Send it once call 2 shows Done. Call 2 on the explorer: https://basescan.org/tx/${HASH}`,
+      `Not sent: call 2 is still waiting for its receipt on Base (chain id 8453), and this call would switch MetaMask to Bittensor EVM (chain id 964), where that receipt can't be read. Send it once call 2 shows Done, or after 5 minutes if it still isn't mined. Reloading this page also frees it, but the page then forgets call 2, so check it on the explorer first: https://basescan.org/tx/${HASH}`,
     );
     expect(L.awayText(8453, HASH)).toBe(`Sent; switch MetaMask back to Base (chain id 8453) to see its result (or check https://basescan.org/tx/${HASH})`);
     expect(L.buttonText("sent")).toBe("Waiting for the receipt…");
@@ -223,13 +226,17 @@ interface WalletOpts {
   pending?: boolean;
   /** what eth_getTransactionByHash reports, over what was sent */
   mined?: Record<string, unknown>;
+  /** on the first receipt request MetaMask moves to this chain and back, and answers it as reverted
+   * (an answer from whichever chain it was on meanwhile) */
+  flipDuringReceipt?: string;
 }
 
 function fakeWallet(o: WalletOpts) {
   const s = { connected: false, chainId: o.chainId, known: new Set(o.known ?? ["0x2105", "0x3c4"]), mined: !o.pending };
   const requests: { method: string; params?: unknown[] }[] = [];
   /** each request with the chain MetaMask was on when it came in */
-  const asked: { method: string; chainId: string }[] = [];
+  const asked: { method: string; chainId: string; params?: unknown[] }[] = [];
+  let flipped = false;
   const listeners: Record<string, ((x: unknown) => void)[]> = {};
   /** MetaMask moves to another network and tells the page (EIP-1193 chainChanged) */
   const moveTo = (chainId: string) => {
@@ -246,7 +253,7 @@ function fakeWallet(o: WalletOpts) {
     },
     request: async ({ method, params }: { method: string; params?: unknown[] }) => {
       requests.push(params === undefined ? { method } : { method, params });
-      asked.push({ method, chainId: s.chainId });
+      asked.push(params === undefined ? { method, chainId: s.chainId } : { method, chainId: s.chainId, params });
       const p = (params ?? []) as { chainId: string }[];
       switch (method) {
         case "eth_accounts":
@@ -271,6 +278,13 @@ function fakeWallet(o: WalletOpts) {
           return hash;
         }
         case "eth_getTransactionReceipt":
+          if (o.flipDuringReceipt && !flipped) {
+            flipped = true;
+            const home = s.chainId;
+            moveTo(o.flipDuringReceipt);
+            moveTo(home);
+            return { status: "0x0", blockNumber: "0x10" };
+          }
           return s.mined ? { status: o.reverts ? "0x0" : "0x1", blockNumber: "0x10" } : null;
         case "eth_getTransactionByHash": {
           const tx = sent.get(String(params?.[0]));
@@ -489,9 +503,7 @@ describe("the page (its script, against a fake MetaMask)", () => {
     expect(p.w.sends()).toHaveLength(1);
     expect(p.w.asked.map((r) => r.method)).not.toContain("wallet_switchEthereumChain");
     expect(p.w.asked.filter((r) => r.chainId !== "0x2105")).toEqual([]);
-    expect(p.el("status-2").textContent).toBe(
-      `Not sent: call 2 is still waiting for its receipt on Base (chain id 8453), and this call would switch MetaMask to Bittensor EVM (chain id 964), where that receipt can't be read. Send it once call 2 shows Done. Call 2 on the explorer: https://basescan.org/tx/${HASH}`,
-    );
+    expect(p.el("status-2").textContent).toBe(L.waitRefusal(1, 8453, 964, HASH));
     expect(p.el("status-2").className).toBe("status bad");
     expect(p.el("send-2").textContent).toBe("Send");
     // another Base call still goes
@@ -507,6 +519,31 @@ describe("the page (its script, against a fake MetaMask)", () => {
     expect(p.w.sends()).toHaveLength(3);
     expect(p.w.requests).toContainEqual({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x3c4" }] });
     expect(p.el("status-2").textContent).toMatch(/^Done: mined in block 16, and the mined transaction matches this call/);
+  });
+
+  it("lets a call on the other chain go once the waiting call has gone 5 minutes unmined", async () => {
+    const p = await openPage(acceptAllView(), { wallet: { accounts: [LEDGER], chainId: "0x2105", pending: true } });
+    void p.el("send-1").click();
+    await settle(L.STUCK_POLLS + 20);
+    expect(p.el("status-1").textContent).toMatch(/Still not mined after 5 minutes or more/);
+    const sending = p.el("send-2").click();
+    await settle();
+    expect(p.w.sends()).toHaveLength(2);
+    expect(p.w.requests).toContainEqual({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x3c4" }] });
+    // the stuck Base call now says to switch back, and asks Bittensor nothing about its hash
+    expect(p.el("status-1").textContent).toBe(L.awayText(8453, HASH));
+    expect(p.w.asked.filter((r) => r.method === "eth_getTransactionReceipt" && r.chainId === "0x3c4" && r.params?.[0] === HASH)).toEqual([]);
+    p.w.mine();
+    await sending;
+    expect(p.el("status-2").textContent).toMatch(/^Done: mined in block 16/);
+  });
+
+  it("drops a receipt answered while MetaMask's chain changed, even if it is back by the end, and asks again", async () => {
+    // during the first receipt request MetaMask flips to Bittensor and back, and that answer says reverted
+    const p = await openPage(handoffView(), { wallet: { accounts: [OWNER], chainId: "0x3c4", flipDuringReceipt: "0x2105" } });
+    await p.el("send-0").click();
+    expect(p.w.asked.filter((r) => r.method === "eth_getTransactionReceipt").length).toBeGreaterThanOrEqual(2);
+    expect(p.el("status-0").textContent).toMatch(/^Done: mined in block 16, and the mined transaction matches this call/);
   });
 
   it("says so when the transaction reverts, and keeps the next ordered step waiting", async () => {

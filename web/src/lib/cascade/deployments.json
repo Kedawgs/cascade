@@ -1,6 +1,7 @@
 {
   "v3-launch": {
     "version": 3,
+    "stage": "early",
     "frontDoor": "0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA",
     "baseAdapter": "0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92",
     "staker": "0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E",
@@ -13,6 +14,7 @@
   },
   "v3-test": {
     "version": 3,
+    "stage": "testing",
     "frontDoor": "0xDBe6aDCac889adcbE4D4230a82C8d719FB3C1f8B",
     "baseAdapter": "0x7c9Ceb476C50B4E4eCc1610d3cEe5d146c2bB9a0",
     "staker": "0x5659c5929Dfe7993f3db521582B0201d6bf246B7",
@@ -25,6 +27,7 @@
   },
   "test-2026-10": {
     "version": 2,
+    "stage": "testing",
     "frontDoor": "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
     "baseAdapter": "0x221Cc4cF9c72EA7270f90E8C0756F8f003b6887b",
     "vault": "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",

@@ -76,9 +76,16 @@ export function readDeployment(env: Env): Deployment | null {
   };
 }
 
+/** How the site describes a deployment (the FAQ's answers): "testing" (a test deployment: one key holds
+ * every role, and depositing isn't recommended), "early" (the launch: real deposits under a cap, the owner
+ * one hardware wallet, a separate guardian, no multisig or timelock yet), or "live" (a multisig owner
+ * behind a timelock). */
+export type Stage = "testing" | "early" | "live";
+
 /** A deployment the site may be built for, as committed in deployments.json (reviewed in git). */
 export interface ExpectedDeployment {
   version: 2 | 3;
+  stage: Stage;
   frontDoor: string;
   baseAdapter: string;
   vault: string;
@@ -112,6 +119,12 @@ export function knownDeployment(d: Deployment, list: Readonly<Record<string, Exp
       e.vaultSs58 === d.vaultSs58 &&
       e.hotkeySs58 === d.hotkeySs58,
   )?.[0];
+}
+
+/** The stage deployments.json gives `d`; "testing", the most careful wording, for no deployment or one not listed. */
+export function deploymentStage(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): Stage {
+  const name = d ? knownDeployment(d, list) : undefined;
+  return name ? list[name].stage : "testing";
 }
 
 /** The env's deployment, only if it is one of the committed ones: anything else throws, so `next build`

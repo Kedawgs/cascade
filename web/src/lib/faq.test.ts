@@ -32,7 +32,21 @@ const LIVE_LAUNCH = readDeployment({
   NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: "86400",
   NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "86400",
 }) as Deployment;
-const ALL = [TEST, LAUNCH, LIVE_TEST, LIVE_LAUNCH, null];
+/** The launch as the site is built for it (deployments.json "v3-launch", as pnpm ops web-config writes it). */
+const LAUNCH_SITE = readDeployment({
+  NEXT_PUBLIC_CASCADE_FRONT_DOOR: "0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA",
+  NEXT_PUBLIC_CASCADE_BASE_ADAPTER: "0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92",
+  NEXT_PUBLIC_CASCADE_STAKER: "0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E",
+  NEXT_PUBLIC_CASCADE_ORACLE: "0xcAa85F00b6e470Dd28a31FBa982267B820736eBc",
+  NEXT_PUBLIC_CASCADE_VAULT: "0x450cD94401B45c72C09734071fe683F6b74Aea72",
+  NEXT_PUBLIC_CASCADE_BIT_ADAPTER: "0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1",
+  NEXT_PUBLIC_CASCADE_BIT_BLOCK: "9398120",
+  NEXT_PUBLIC_CASCADE_VAULT_SS58: "5ELMyza1QBFKY1K6bbJXoPSENaiJVVTSQZBgdkQujxKpsfQn",
+  NEXT_PUBLIC_CASCADE_HOTKEY_SS58: TAO_BOT,
+  NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "86400",
+  NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: "86400",
+}) as Deployment;
+const ALL = [TEST, LAUNCH, LIVE_TEST, LIVE_LAUNCH, LAUNCH_SITE, null];
 
 const items = (d: Deployment | null, o?: FaqOptions) => faqSections(d, o).flatMap((s) => s.items);
 const answer = (d: Deployment | null, id: string, o?: FaqOptions) => {
@@ -89,8 +103,8 @@ describe("the FAQ", () => {
     expect(done).toMatch(/^Yes, by an independent firm\./);
     expect(done).toContain(`(${SITE_LINKS.security})`);
     expect(done).not.toContain(`(${SITE_LINKS.github})`);
-    // the shipped FAQ follows the shipped stage
-    expect(answer(TEST, "audited")).toBe(FAQ_FACTS.stage === "testing" ? testing : scheduled);
+    // the stage follows the deployment: one not listed (TEST) reads as testing
+    expect(answer(TEST, "audited")).toBe(testing);
   });
 
   it("links the deployment's own validator and stake", () => {
@@ -118,19 +132,20 @@ describe("the FAQ", () => {
 });
 
 describe("the FAQ's answers say what the code does", () => {
-  it("lists every Cascade fee, its cap, and the request fee's missing cap", () => {
+  it("lists every Cascade fee and its cap, the request fee's included", () => {
     const a = answer(TEST, "cascade-fees");
     expect(a).toContain("$0.05 plus 0.15% when you stake, 0.15% when your TAO is sold back to USDC, and 10% of staking rewards");
     expect(a).toContain("0.0001 ETH request fee");
-    expect(a).toContain("at 0.5% per swap, $0.25 per deposit and 20% of rewards");
-    expect(a).toContain("the request fee has no cap in the code");
+    expect(a).toContain("at 0.5% per swap, $0.25 per deposit and 20% of rewards, and the request fee at 0.001 ETH");
+    expect(a).not.toMatch(/no cap/);
     expect(a).toContain("the least TAO shown when you stake, and today's price less 2% when you unstake");
     expect(a).not.toMatch(/Nothing else|for good/);
   });
 
   it("says what the owner can change, what a pause holds, and that the launch setup is a plan", () => {
     const a = answer(TEST, "who-controls");
-    expect(a).toContain("the unstake request fee has no cap");
+    expect(a).toContain("An owner key can change settings: fees up to their caps, the limits");
+    expect(a).not.toMatch(/no cap/);
     expect(a).toMatch(/the limits, the safety delay and the validator/);
     expect(a).toContain("it holds exits until it's lifted");
     expect(a).toContain("cancelling a batch that hasn't left and claiming TAO already back on Base keep working");
@@ -225,7 +240,8 @@ describe("the FAQ's answers say what the code does", () => {
     expect(a).toContain("7 days' public notice");
     expect(a).toContain("time to unstake if you disagree");
     expect(a).toContain("During testing one key holds every role, so that veto isn't independent yet.");
-    expect(a).toContain("Fees are capped in the code, except the unstake request fee");
+    expect(a).toContain("Every fee is capped in the code, and you see each one before you confirm.");
+    expect(a).not.toMatch(/no cap|except the unstake request fee/);
     expect(answer(TEST, "take-funds", { stage: "live" })).not.toContain("During testing");
   });
 
@@ -248,6 +264,59 @@ describe("the FAQ's answers say what the code does", () => {
 
   it("bounds what leaving before a collection costs by a month plus the vesting week", () => {
     expect(answer(TEST, "leave-before-collection")).toContain("up to about 5 weeks of yield");
+  });
+});
+
+describe("the FAQ at the launch (early: real money, a Ledger owner, no multisig or timelock yet)", () => {
+  it("takes the early stage from the deployment the site is built for", () => {
+    expect(answer(LAUNCH_SITE, "audited")).toBe(answer(LAUNCH_SITE, "audited", { stage: "early" }));
+    expect(answer(LAUNCH_SITE, "audited")).not.toBe(answer(LAUNCH_SITE, "audited", { stage: "testing" }));
+  });
+
+  it("says who controls it as it is: the founder's Ledger, a separate guardian, no multisig or timelock, the code's hard limits", () => {
+    const a = answer(LAUNCH_SITE, "who-controls");
+    expect(a).toContain("Cascade's contracts are owned by the founder's hardware wallet (a Ledger) on Base and on Bittensor.");
+    expect(a).toContain("A separate emergency key, the guardian, can pause deposits and unstakes and veto a new route; it can never move anyone's money.");
+    expect(a).toContain(
+      "There is no multisig or timelock yet, so a settings change takes effect at once, but only within hard limits written into the contracts: every fee has a fixed maximum, the safety delay stays between 1 hour and 7 days, no batch can be set to carry more than 5,000 TAO, and unstakes through Cascade take at most half the staked TAO a day (or 100 TAO, if that's more).",
+    );
+  });
+
+  it("says there is no professional audit yet, and to deposit only what you could afford to lose", () => {
+    expect(answer(LAUNCH_SITE, "audited")).toBe(
+      `Not yet. Cascade has been reviewed many times, and its contracts are [public on GitHub](${SITE_LINKS.github}), but it hasn't had a professional audit yet. Only deposit what you could afford to lose.`,
+    );
+  });
+
+  it("names the deposit cap", () => {
+    expect(answer(LAUNCH_SITE, "limits")).toBe(
+      "The smallest stake is 0.04 TAO (the stake form shows it in dollars), the smallest unstake 0.011 TAO. One batch carries at most 10 TAO, and while Cascade is early, total deposits are capped at 40 TAO. Only deposit what you could afford to lose.",
+    );
+  });
+
+  it("names the control risk, and says the guardian's veto isn't independent yet", () => {
+    const risks = faqSections(LAUNCH_SITE)
+      .flatMap((s) => s.items)
+      .find((i) => i.id === "risks")!.a;
+    expect(risks.find((p) => p.startsWith("Control:"))).toBe(
+      "Control: the owner is one hardware wallet, with no multisig or timelock yet, so settings change at once, within the contracts' hard limits. [Who controls Cascade](/faq/#who-controls).",
+    );
+    expect(answer(LAUNCH_SITE, "take-funds")).toContain("The guardian is a separate key from the owner, but Cascade holds both for now, so that veto isn't independent yet.");
+  });
+
+  it("keeps the lines about the bridges, ForeverMoney and the validator", () => {
+    const risks = answer(LAUNCH_SITE, "risks");
+    expect(risks).toContain("Bridges: TAO crosses over Chainlink CCIP");
+    expect(risks).toContain("is issued by [ForeverMoney](https://forevermoney.ai/)");
+    expect(risks).toContain("Validator: if the validator moves its stake to a new key");
+    expect(answer(LAUNCH_SITE, "validator")).toContain("[tao.bot](");
+  });
+
+  it("says nothing of testing, of one key holding every role, or of a multi-signature owner or public delay it doesn't have", () => {
+    const text = items(LAUNCH_SITE)
+      .flatMap((i) => [i.q, ...i.a])
+      .join("\n");
+    expect(text).not.toMatch(/testing|one team key|every role|multi-signature|public delay|48-hour|we don't recommend depositing/i);
   });
 });
 
@@ -328,6 +397,7 @@ const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf
 const STAKER_SOL = read("../../../contracts/src/CascadeStaker.sol");
 const VAULT_SOL = read("../../../contracts/src/CascadeVault.sol");
 const BASE_SOL = read("../../../contracts/src/CascadeBase.sol");
+const FRONT_DOOR_SOL = read("../../../contracts/src/CascadeFrontDoor.sol");
 const OPS_CONFIG = read("../../../ops/src/config.ts");
 const OPS_REWARDS = read("../../../ops/src/keeper/rewards.ts");
 
@@ -338,6 +408,8 @@ function whole(expr: string): bigint {
   const unit = expr.trim().match(/^(.*?)\s+(seconds|minutes|hours|days)$/);
   if (unit) return whole(unit[1]) * UNITS[unit[2]];
   const e = expr.replace(/_/g, "").replace(/(\d)n\b/g, "$1").trim();
+  const sci = e.match(/^(\d+)e(\d+)$/);
+  if (sci) return BigInt(sci[1]) * 10n ** BigInt(sci[2]);
   if (!/^[\d\s*]+$/.test(e)) throw new Error(`not a whole-number expression: ${expr}`);
   return e
     .split(/(?<!\*)\*(?!\*)/)
@@ -411,6 +483,17 @@ describe("the FAQ's numbers match the code", () => {
     expect(decimals(field(v3, "redeemRequestFee"), 18)).toBe(FAQ_FACTS.requestFeeEth);
     expect(decimals(field(v3, "minDeposit"), 18)).toBe(FAQ_FACTS.minStakeTao);
     expect(decimals(field(v3, "maxBatchValue"), 18)).toBe(FAQ_FACTS.maxBatchTao);
+  });
+
+  it("the request fee's cap, the deposit cap and the hard limits the early answers name", () => {
+    expect(decimals(solConstant(FRONT_DOOR_SOL, "MAX_REDEEM_REQUEST_FEE"), 18)).toBe(FAQ_FACTS.caps.requestFeeEth);
+    expect(decimals(field(v3, "depositCap"), 18)).toBe(FAQ_FACTS.depositCapTao);
+    const h = FAQ_FACTS.hardLimits;
+    expect(solConstant(VAULT_SOL, "MIN_PAYOUT_DELAY")).toBe(BigInt(h.payoutDelayMinH) * 3_600n);
+    expect(VAULT_SOL).toContain(`if (delay < MIN_PAYOUT_DELAY || delay > ${h.payoutDelayMaxDays} days) revert InvalidParameter();`);
+    expect(decimals(solConstant(VAULT_SOL, "MAX_OUTFLOW_BPS"), 2)).toBe(h.outflowMaxPct);
+    expect(decimals(solConstant(VAULT_SOL, "MAX_MIN_DAILY_OUTFLOW"), 18)).toBe(h.outflowFloorMaxTao);
+    expect(decimals(solConstant(FRONT_DOOR_SOL, "MAX_BATCH_VALUE"), 18)).toBe(h.batchMaxTao);
   });
 
   it("the site's own minimum unstake and the pools' fees", () => {

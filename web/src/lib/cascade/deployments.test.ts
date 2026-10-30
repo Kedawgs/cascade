@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { getAddress, isAddress } from "viem";
 import { describe, expect, it } from "vitest";
-import { checkedDeployment, type Deployment, EXPECTED_DEPLOYMENTS, knownDeployment, readDeployment } from "./config";
+import { checkedDeployment, type Deployment, deploymentStage, EXPECTED_DEPLOYMENTS, knownDeployment, readDeployment } from "./config";
 
 /** The env `pnpm ops web-config` writes for a committed deployment. */
 function envOf(name: string): Record<string, string> {
@@ -85,6 +85,19 @@ describe("the committed deployments", () => {
     expect(d).toMatchObject({ batchMaxWaitS: 86_400, payoutDelayS: 86_400 });
     // the test deployments stay listed beside it
     expect(Object.keys(EXPECTED_DEPLOYMENTS)).toEqual(expect.arrayContaining(["v3-launch", "v3-test", "test-2026-10"]));
+    // early: real money, a Ledger owner, no multisig or timelock yet
+    expect(deploymentStage(d)).toBe("early");
+  });
+
+  it("give each deployment its stage: the launch early, the test deployments testing, anything else testing", () => {
+    for (const [name, e] of Object.entries(EXPECTED_DEPLOYMENTS)) expect(["testing", "early", "live"], name).toContain(e.stage);
+    expect(EXPECTED_DEPLOYMENTS["v3-launch"].stage).toBe("early");
+    expect(EXPECTED_DEPLOYMENTS["v3-test"].stage).toBe("testing");
+    expect(EXPECTED_DEPLOYMENTS["test-2026-10"].stage).toBe("testing");
+    expect(deploymentStage(readDeployment(envOf("v3-test")))).toBe("testing");
+    // no deployment, or one not listed (the build refuses it anyway): the most careful wording
+    expect(deploymentStage(null)).toBe("testing");
+    expect(deploymentStage({ ...(readDeployment(envOf("v3-launch")) as Deployment), frontDoor: OTHER })).toBe("testing");
   });
 
   it("include the deployment this checkout builds with (web/.env.local), when there is one", () => {

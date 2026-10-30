@@ -1,6 +1,15 @@
 import { formatUnits } from "viem";
 import { SOURCE_CHAINS, type SourceChainInfo } from "./cascade/chains";
-import { DELIVERY_TOLERANCE_BPS, DELIVERY_VALIDITY_S, DEPLOYMENT, type Deployment, explorer, MIN_UNSTAKE_WEI } from "./cascade/config";
+import {
+  DELIVERY_TOLERANCE_BPS,
+  DELIVERY_VALIDITY_S,
+  DEPLOYMENT,
+  type Deployment,
+  deploymentStage,
+  explorer,
+  MIN_UNSTAKE_WEI,
+  type Stage,
+} from "./cascade/config";
 import { AUDIT_STATUS, type AuditStatus, SITE_LINKS } from "./site";
 import { POOL_FEE_PCT, POOL_FEES_TEXT } from "./stake-form";
 
@@ -20,23 +29,27 @@ export interface FaqSection {
 }
 
 /** Shown at the foot of the FAQ page. Change it whenever an answer changes. */
-export const FAQ_UPDATED = "October 28, 2026";
+export const FAQ_UPDATED = "October 30, 2026";
 
-export type Stage = "testing" | "live";
+export type { Stage };
 
 /**
- * The numbers the answers quote. When a fee, the claim policy or the stage changes, change it here;
+ * The numbers the answers quote. When a fee, the claim policy or a limit changes, change it here;
  * faq.test.ts checks them against the contracts (contracts/src), the deployment settings and the
- * keeper's claim policy (ops/src/config.ts) and the site's own constants.
+ * keeper's claim policy (ops/src/config.ts) and the site's own constants. The stage comes from the
+ * deployment the site is built for (deployments.json).
  */
 export const FAQ_FACTS = {
-  /** "testing" until the owner moves behind a multisig and a timelock for the public launch. */
-  stage: "testing" as Stage,
   depositFeeUsd: 0.05,
   swapFeePct: 0.15,
   rewardCutPct: 10,
-  /** Hard caps written into the contracts. The unstake request fee has none. */
-  caps: { swapFeePct: 0.5, depositFeeUsd: 0.25, rewardCutPct: 20 },
+  /** Hard caps written into the contracts, the unstake request fee's included. */
+  caps: { swapFeePct: 0.5, depositFeeUsd: 0.25, rewardCutPct: 20, requestFeeEth: 0.001 },
+  /** The front door's cap on deposits in total (an owner setting): 40 TAO at launch. */
+  depositCapTao: 40,
+  /** Other hard limits written into the contracts, which no owner setting can pass: the payout delay's
+   * range, the daily outflow (the larger of a share of the stake and a floor), and one batch's value. */
+  hardLimits: { payoutDelayMinH: 1, payoutDelayMaxDays: 7, outflowMaxPct: 50, outflowFloorMaxTao: 100, batchMaxTao: 5_000 },
   /** Uniswap's 0.05% USDC/WETH and 0.3% WETH/TAO pools: the stake form's figure. */
   poolFeePct: POOL_FEE_PCT,
   requestFeeEth: 0.0001,
@@ -105,10 +118,12 @@ export interface FaqOptions {
   chains?: readonly SourceChainInfo[];
 }
 
-/** Every question, worded for the deployment the site talks to (its batch wait, payout delay, validator and vault). */
+/** Every question, worded for the deployment the site talks to (its stage, batch wait, payout delay, validator and vault). */
 export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {}): FaqSection[] {
-  const stage = o.stage ?? F.stage;
+  const stage = o.stage ?? deploymentStage(d);
   const testing = stage === "testing";
+  const early = stage === "early";
+  const H = F.hardLimits;
   const audit = o.audit ?? AUDIT_STATUS;
   const chains = o.chains ?? SOURCE_CHAINS;
 
@@ -249,7 +264,7 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
           inApp: true,
           a: [
             `$${F.depositFeeUsd.toFixed(2)} plus ${F.swapFeePct}% when you stake, ${F.swapFeePct}% when your TAO is sold back to USDC, and ${F.rewardCutPct}% of staking rewards when they're collected. To unstake there's also a ${F.requestFeeEth} ETH request fee, which goes toward the bridge fee.`,
-            `The contracts cap the first three at ${F.caps.swapFeePct}% per swap, $${F.caps.depositFeeUsd.toFixed(2)} per deposit and ${F.caps.rewardCutPct}% of rewards; the request fee has no cap in the code. Whatever the settings, a trade never goes below the minimum you approve: the least TAO shown when you stake, and today's price less ${pct(DELIVERY_TOLERANCE_BPS)} when you unstake.`,
+            `The contracts cap the first three at ${F.caps.swapFeePct}% per swap, $${F.caps.depositFeeUsd.toFixed(2)} per deposit and ${F.caps.rewardCutPct}% of rewards, and the request fee at ${F.caps.requestFeeEth} ETH. Whatever the settings, a trade never goes below the minimum you approve: the least TAO shown when you stake, and today's price less ${pct(DELIVERY_TOLERANCE_BPS)} when you unstake.`,
           ],
         },
         {
@@ -319,7 +334,11 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
           id: "limits",
           q: "Is there a minimum or a maximum?",
           a: [
-            `The smallest stake is ${F.minStakeTao} TAO (the stake form shows it in dollars), the smallest unstake ${F.minUnstakeTao} TAO. One batch carries at most ${F.maxBatchTao} TAO, and while Cascade is new the total it accepts is capped.`,
+            `The smallest stake is ${F.minStakeTao} TAO (the stake form shows it in dollars), the smallest unstake ${F.minUnstakeTao} TAO. One batch carries at most ${F.maxBatchTao} TAO, and ${
+              early
+                ? `while Cascade is early, total deposits are capped at ${F.depositCapTao} TAO. Only deposit what you could afford to lose.`
+                : "while Cascade is new the total it accepts is capped."
+            }`,
           ],
         },
       ],
@@ -336,7 +355,11 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
               ? [`Yes, by an independent firm. Our [security policy](${SITE_LINKS.security}) has the details.`]
               : testing
                 ? ["Not yet. Cascade is in testing and hasn't been independently audited, so we don't recommend depositing yet."]
-                : [
+                : early
+                  ? [
+                      `Not yet. Cascade has been reviewed many times, and its contracts are [public on GitHub](${SITE_LINKS.github}), but it hasn't had a professional audit yet. Only deposit what you could afford to lose.`,
+                    ]
+                  : [
                     `Not yet. The contracts have been through repeated reviews and are [public on GitHub](${SITE_LINKS.github}), but no independent audit has been done. One is planned before launch, and its report will be linked here. Until then, only stake what you can afford to lose.`,
                   ],
         },
@@ -344,18 +367,31 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
           id: "who-controls",
           q: "Who controls Cascade?",
           a: [
-            `An owner key can change settings: fees up to their caps (the unstake request fee has no cap), the limits, the safety delay and the validator. It can also pause deposits and unstakes in an emergency. A pause can't move anyone's funds, but it holds exits until it's lifted; cancelling a batch that hasn't left and claiming TAO already back${onLive} keep working.`,
-            testing
-              ? `Cascade is in testing: one team key holds every role, and its changes take effect at once. The plan for the public launch is a multi-signature owner, with changes behind a ${F.timelockH}-hour public delay.`
-              : `The owner is a multi-signature wallet, and its changes wait out a ${F.timelockH}-hour public delay.`,
+            `An owner key can change settings: fees up to their caps, the limits, the safety delay and the validator. It can also pause deposits and unstakes in an emergency. A pause can't move anyone's funds, but it holds exits until it's lifted; cancelling a batch that hasn't left and claiming TAO already back${onLive} keep working.`,
+            ...(testing
+              ? [
+                  `Cascade is in testing: one team key holds every role, and its changes take effect at once. The plan for the public launch is a multi-signature owner, with changes behind a ${F.timelockH}-hour public delay.`,
+                ]
+              : early
+                ? [
+                    "Cascade's contracts are owned by the founder's hardware wallet (a Ledger) on Base and on Bittensor. A separate emergency key, the guardian, can pause deposits and unstakes and veto a new route; it can never move anyone's money.",
+                    `There is no multisig or timelock yet, so a settings change takes effect at once, but only within hard limits written into the contracts: every fee has a fixed maximum, the safety delay stays between ${plural(H.payoutDelayMinH, "hour")} and ${plural(H.payoutDelayMaxDays, "day")}, no batch can be set to carry more than ${H.batchMaxTao.toLocaleString("en-US")} TAO, and unstakes through Cascade take at most ${H.outflowMaxPct === 50 ? "half" : `${H.outflowMaxPct}% of`} the staked TAO a day (or ${H.outflowFloorMaxTao} TAO, if that's more).`,
+                  ]
+                : [`The owner is a multi-signature wallet, and its changes wait out a ${F.timelockH}-hour public delay.`]),
           ],
         },
         {
           id: "take-funds",
           q: "Can Cascade take my funds?",
           a: [
-            `Not instantly, and not quietly. TAO leaves the vault only through the bridge and front door set up at launch, or when a share owner withdraws directly on Bittensor. Adding a new route needs ${F.registryDelayDays} days' public notice, in which the guardian can veto it and you have time to unstake if you disagree.${testing ? " During testing one key holds every role, so that veto isn't independent yet." : ""}`,
-            "Fees are capped in the code, except the unstake request fee, which you see before you confirm. Everything happens on-chain where anyone can check it.",
+            `Not instantly, and not quietly. TAO leaves the vault only through the bridge and front door set up at launch, or when a share owner withdraws directly on Bittensor. Adding a new route needs ${F.registryDelayDays} days' public notice, in which the guardian can veto it and you have time to unstake if you disagree.${
+              testing
+                ? " During testing one key holds every role, so that veto isn't independent yet."
+                : early
+                  ? " The guardian is a separate key from the owner, but Cascade holds both for now, so that veto isn't independent yet."
+                  : ""
+            }`,
+            "Every fee is capped in the code, and you see each one before you confirm. Everything happens on-chain where anyone can check it.",
           ],
         },
         {
@@ -366,7 +402,9 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
             "Smart contracts: a bug could lose funds, and the contracts aren't independently audited yet.",
             testing
               ? "Control: during testing one team key holds every role, and settings change at once. [Who controls Cascade](/faq/#who-controls)."
-              : `Control: an owner can change settings within the code's limits after a ${F.timelockH}-hour public delay, and pause in an emergency. [Who controls Cascade](/faq/#who-controls).`,
+              : early
+                ? "Control: the owner is one hardware wallet, with no multisig or timelock yet, so settings change at once, within the contracts' hard limits. [Who controls Cascade](/faq/#who-controls)."
+                : `Control: an owner can change settings within the code's limits after a ${F.timelockH}-hour public delay, and pause in an emergency. [Who controls Cascade](/faq/#who-controls).`,
             `Bridges: TAO crosses over Chainlink CCIP, and the TAO used${onLive} is issued by [ForeverMoney](${DOCS.foreverMoney}). If either has trouble, batches wait, and in a rare migration a batch already on its way could be lost.`,
             "Validator: if the validator moves its stake to a new key, balances read low until Cascade adds that key, and unstaking in that window pays less.",
             "Yield: rewards depend on the network and the validator, and can fall.",

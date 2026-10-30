@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { formatEther } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
@@ -10,6 +9,7 @@ import type { Available, Position } from "@/lib/cascade/types";
 import { checkUnstake, toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd, formatUsdcCents } from "@/lib/format";
+import { type SentNotice, unstakeNotice } from "@/lib/sent";
 import {
   deliveryFloorUsd,
   deliveryNote,
@@ -30,17 +30,25 @@ import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
 import { AmountField } from "./AmountField";
+import { SentDialog } from "./SentDialog";
 import styles from "./StakeForm.module.css";
 
 const GAS_WEI = 3n * 10n ** 13n;
 
-/** The unstake form: the amount typed in TAO or as its USDC value, a USDC estimate out. */
+/** The unstake form: the amount typed in TAO or as its USDC value, a USDC estimate out. An unstake that
+ * goes through is confirmed in a panel, held here so the refresh after it (which may change what the form
+ * shows) can't take the panel away. */
 export function UnstakeForm({ account }: { account: string | null }) {
-  if (!account) return <UnstakeFormBody account={null} position={null} />;
-  return <UnstakeWithBalance account={account} />;
+  const [sent, setSent] = useState<SentNotice | null>(null);
+  return (
+    <>
+      {account ? <UnstakeWithBalance account={account} onSent={setSent} /> : <UnstakeFormBody account={null} position={null} onSent={setSent} />}
+      <SentDialog notice={sent} onClose={() => setSent(null)} />
+    </>
+  );
 }
 
-function UnstakeWithBalance({ account }: { account: string }) {
+function UnstakeWithBalance({ account, onSent }: { account: string; onSent: (n: SentNotice) => void }) {
   const position = usePosition(account);
   const available = useAvailable(account);
   if (position.isError || available.isError) {
@@ -67,11 +75,18 @@ function UnstakeWithBalance({ account }: { account: string }) {
     );
   }
   if (!available.data) return <Loading />;
-  return <UnstakeFormBody account={account} position={{ ...position.data, ...available.data }} />;
+  return <UnstakeFormBody account={account} position={{ ...position.data, ...available.data }} onSent={onSent} />;
 }
 
-function UnstakeFormBody({ account, position }: { account: string | null; position: (Position & Available) | null }) {
-  const router = useRouter();
+function UnstakeFormBody({
+  account,
+  position,
+  onSent,
+}: {
+  account: string | null;
+  position: (Position & Available) | null;
+  onSent: (n: SentNotice) => void;
+}) {
   const v3 = useIsV3();
   const flows = useFlows(account);
   const balances = useBalances(account);
@@ -151,7 +166,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
         setRaw(UNSTAKE_FORM_CLEARED.raw);
         setAll(UNSTAKE_FORM_CLEARED.all);
         setPinned(UNSTAKE_FORM_CLEARED.pinned);
-        router.push(`/activity?withdrawal=${id}`);
+        onSent(unstakeNotice(id, quote));
       },
       () => undefined,
     );

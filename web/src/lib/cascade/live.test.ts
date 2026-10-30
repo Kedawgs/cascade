@@ -1040,6 +1040,14 @@ describe("live data", () => {
     expect(short.etaMinutes).toBe(base.etaMinutes);
   });
 
+  it("quotes carry the front door's batch interval, for the panel that confirms a deposit or unstake", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    expect((await createLiveCascadeData(D, deps()).quoteDeposit(20_000_000n)).batchIntervalS).toBe(600);
+    expect((await createLiveCascadeData(D3, deps()).quoteDeposit(20_000_000n)).batchIntervalS).toBe(600);
+    const hourly = deps({ readFrontDoor: async () => ({ ...fd, batchInterval: 3_600 }) });
+    expect((await createLiveCascadeData(D3, hourly).quoteWithdrawal(ME, 4n * 10n ** 22n)).batchIntervalS).toBe(3_600);
+  });
+
   it("v3 deposit estimate also uses the max wait", async () => {
     const L3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2", batchMaxWaitS: 86_400 };
     const q = await createLiveCascadeData(L3, deps({ now: () => fd.openStart * 1000 })).quoteDeposit(20_000_000n);

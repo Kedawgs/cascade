@@ -91,7 +91,7 @@ const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
 /** A wait in words: minutes under an hour, hours under 48 hours, then days. Minutes and hours round up,
  * so a limit is never understated; days round to the nearest ("about two days" for 49 hours). With
  * `adjective`, "24-hour". */
-function waitText(s: number, adjective = false): string {
+export function waitText(s: number, adjective = false): string {
   const [n, unit] =
     s < HOUR_S
       ? [Math.max(1, Math.ceil(s / MINUTE_S)), "minute"]

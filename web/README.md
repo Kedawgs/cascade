@@ -117,6 +117,11 @@ for display only (`units.ts`).
 `flows.ts` builds the calls and runs them; `use-flows.ts` binds them to the connected wallet through
 wagmi. Every flow is recorded in the operation log before the first signature.
 
+A stake or unstake that goes through clears its form at once (the refresh after it counts what was just
+sent, so the amount left in place would read as too much) and is confirmed in a modal panel
+(`SentDialog`, copy in `sent.ts`): the amount, the estimate, what happens next by the deployment's
+timing, and **Follow it live** to its receipt trail on Activity.
+
 A deployment with a staker and price oracle in `.env.local` runs the v3 flows; one with neither keeps
 v2. An env that names a v3 deployment (a staker, an oracle or a payout delay) without both a valid
 staker and oracle fails the build rather than falling back to v2.

@@ -494,6 +494,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       feesUsd: cascadeFeesUsd + toDisplay(rest, 6) * POOL_FEE,
       closesAt: at,
       etaMinutes: minutesUntil(at, deps.now()) + BRIDGE_MINUTES + STAKE_MINUTES,
+      batchIntervalS: fd.batchInterval,
       minTaoOut: ceilRao(lessSlippage(expected, SLIPPAGE_BPS)),
       depositFeeUsdc: depositFee,
       swapFeeUsdc: swapFee,
@@ -587,6 +588,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         feesUsd: amountUsd * POOL_FEE,
         closesAt: at,
         etaMinutes: minutesUntil(at, deps.now()) + BRIDGE_MINUTES + STAKE_MINUTES,
+        batchIntervalS: fd.batchInterval,
       };
     },
 
@@ -619,6 +621,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         taoPriceUsd: price,
         closesAt: at,
         etaMinutes: minutesUntil(at, deps.now()) + 2 * BRIDGE_MINUTES + Math.round(v.payoutDelay / 60),
+        batchIntervalS: fd.batchInterval,
         ...(await deliveryTerms()),
       };
     },

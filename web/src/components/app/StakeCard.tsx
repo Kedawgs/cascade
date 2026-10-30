@@ -1,16 +1,18 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { useBalances, useIsV3, useLimits, usePosition, useTaoPrice, useWithdrawals } from "@/lib/cascade/hooks";
 import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
 import { CLAIM_ENDS_DELIVERY, claimEndsDelivery, offerClaim, walletTaoNote } from "@/lib/stake-form";
+import { type SentNotice, walletTaoNotice } from "@/lib/sent";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
 import { Dash } from "../Dash";
 import app from "./App.module.css";
+import { SentDialog } from "./SentDialog";
 import { StakeForm } from "./StakeForm";
 import styles from "./StakeCard.module.css";
 
@@ -38,9 +40,9 @@ export function StakedSummary({ account }: { account: string }) {
 }
 
 /** TAO sitting in the wallet on Base (after a cancel, a claim kept as TAO, or a step that stopped):
- * deposit it, or swap it back to USDC. Hidden when there is none. */
-function WalletTao({ account }: { account: string }) {
-  const router = useRouter();
+ * deposit it, or swap it back to USDC. Hidden when there is none (so a deposit of it is confirmed by
+ * the card, through `onSent`: once the refresh shows the wallet empty, this is gone). */
+function WalletTao({ account, onSent }: { account: string; onSent: (n: SentNotice) => void }) {
   const balances = useBalances(account);
   const limits = useLimits();
   const flows = useFlows(account);
@@ -60,9 +62,7 @@ function WalletTao({ account }: { account: string }) {
             type="button"
             className="pill"
             disabled={flows.locked}
-            onClick={() =>
-              void flows.depositWalletTao(tao).then((id) => router.push(`/activity?deposit=${id}`), () => undefined)
-            }
+            onClick={() => void flows.depositWalletTao(tao).then((id) => onSent(walletTaoNotice(id, tao)), () => undefined)}
           >
             Deposit it
           </button>
@@ -117,6 +117,7 @@ function ClaimReady({ account }: { account: string }) {
 export function StakeCard({ account }: { account: string | null }) {
   const balance = useUsdcBalance();
   const avail = availableToStake(balance);
+  const [sent, setSent] = useState<SentNotice | null>(null);
 
   return (
     <div className={app.card}>
@@ -138,10 +139,11 @@ export function StakeCard({ account }: { account: string | null }) {
         )}
       </div>
       {account && <ClaimReady account={account} />}
-      {account && <WalletTao account={account} />}
+      {account && <WalletTao account={account} onSent={setSent} />}
       <div className={styles.form}>
         <StakeForm account={account} maxUsdc={account ? avail.max : null} />
       </div>
+      <SentDialog notice={sent} onClose={() => setSent(null)} />
     </div>
   );
 }

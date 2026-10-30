@@ -39,6 +39,7 @@ import {
   type UnstakeFormState,
 } from "./stake-form";
 import { checkUnstake } from "./cascade/units";
+import { depositNotice } from "./sent";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
 const limits = { minUsd: 10, maxUsd: 50_000, full: null };
@@ -559,7 +560,8 @@ describe("the stake form after a stake goes through", () => {
   // before: 80 USDC and room for 60 in the batch; the refresh after a 50 USDC stake: 30 left, room for 10
   const before = { minUsd: 1, maxUsd: 60, full: null };
   const after = { minUsd: 1, maxUsd: 10, full: null };
-  const typed = stakeFormReducer({ raw: "" }, { type: "edit", raw: "50" });
+  const typed = stakeFormReducer({ raw: "", sent: null }, { type: "edit", raw: "50" });
+  const notice = depositNotice("d1", { amountUsd: 50, estTao: 0.19, batchIntervalS: 3_600 });
 
   it("takes the amount before the stake", () => {
     expect(stakeFormNote(parseAmount(typed.raw), { data: before, isError: false }, 80)).toEqual({ error: null, note: "From $1 to $60" });
@@ -571,10 +573,18 @@ describe("the stake form after a stake goes through", () => {
   });
 
   it("is cleared the moment it goes through, so the refreshed figures show no error", () => {
-    const sent = stakeFormReducer(typed, { type: "sent" });
+    const sent = stakeFormReducer(typed, { type: "sent", notice });
     expect(sent.raw).toBe("");
     expect(stakeFormNote(parseAmount(sent.raw), { data: after, isError: false }, 30)).toEqual({ error: null, note: "From $1 to $10" });
     expect(stakeFormNote(parseAmount(sent.raw), { data: before, isError: false }, 0).error).toBeNull();
+  });
+
+  it("opens the panel confirming it, which closes leaving the form empty for the next stake", () => {
+    const sent = stakeFormReducer(typed, { type: "sent", notice });
+    expect(sent.sent).toEqual(notice);
+    expect(stakeFormReducer(sent, { type: "dismiss" })).toEqual({ raw: "", sent: null });
+    // typing while it was open (it can't be: the page behind a modal is inert) would keep the panel's notice
+    expect(stakeFormReducer(sent, { type: "edit", raw: "5" })).toEqual({ raw: "5", sent: notice });
   });
 
   it("says why there is no range while the limits load or can't be read", () => {

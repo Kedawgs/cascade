@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useId, useReducer, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
@@ -10,6 +9,7 @@ import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, use
 import { useFlows } from "@/lib/cascade/use-flows";
 import { useWalletKind } from "@/lib/cascade/use-wallet-kind";
 import { formatUsd, parseAmount } from "@/lib/format";
+import { depositNotice } from "@/lib/sent";
 import {
   breakEvenDays,
   breakEvenText,
@@ -27,6 +27,7 @@ import {
 import { ConnectWallet } from "../ConnectWallet";
 import { Dash } from "../Dash";
 import { AmountField } from "./AmountField";
+import { SentDialog } from "./SentDialog";
 import styles from "./StakeForm.module.css";
 
 /** Less than this much ETH on Base can't pay for the swap and deposit. */
@@ -69,12 +70,11 @@ export function StakeForm({
   /** The wallet's USDC balance for the MAX button, when known. */
   maxUsdc?: number | null;
 }) {
-  const router = useRouter();
   const v3 = useIsV3();
   const limits = useLimits();
   const balances = useBalances(account);
   const flows = useFlows(account);
-  const [{ raw }, dispatch] = useReducer(stakeFormReducer, { raw: initialAmount });
+  const [{ raw, sent }, dispatch] = useReducer(stakeFormReducer, { raw: initialAmount, sent: null });
   const setRaw = (v: string) => dispatch({ type: "edit", raw: v });
   const [opId, setOpId] = useState<string | null>(null);
   const inputId = useId();
@@ -117,16 +117,14 @@ export function StakeForm({
     start();
     setOpId(null);
     flows.stake(quote, setOpId).then(
-      (id) => {
-        // cleared before the refreshed balance arrives, which counts this stake (stakeFormReducer)
-        dispatch({ type: "sent" });
-        router.push(`/activity?deposit=${id}`);
-      },
+      // cleared before the refreshed balance arrives, which counts this stake, and confirmed in a panel
+      // (stakeFormReducer)
+      (id) => dispatch({ type: "sent", notice: depositNotice(id, quote) }),
       () => undefined, // the message is in flows.error
     );
   }
 
-  return (
+  const form = (
     // focus anywhere in the form (the amount, MAX, the button) is a first input too
     <form className={styles.form} onSubmit={onSubmit} onFocus={start} noValidate>
       {v3 && <PriceStrip />}
@@ -224,5 +222,12 @@ export function StakeForm({
       {breakEven !== null && <p className={styles.breakEven}>{breakEvenText(breakEven)}</p>}
       <p className={styles.foot}>{stakeFootText(v3)}</p>
     </form>
+  );
+
+  return (
+    <>
+      {form}
+      <SentDialog notice={sent} onClose={() => dispatch({ type: "dismiss" })} />
+    </>
   );
 }

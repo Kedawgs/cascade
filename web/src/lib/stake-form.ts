@@ -4,6 +4,7 @@ import type { DepositQuote, Limits, RoundTripCosts, WithdrawalQuote, WithdrawalR
 import { isDelivering, offersClaim } from "./cascade/trail";
 import { ENTRY_FULL_TEXT, entryFull, floorRao, MIN_UNSTAKE_TEXT, REST_LATER, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
+import type { SentNotice } from "./sent";
 
 /** What the unstake amount is typed in: TAO, or its value in USDC. */
 export type UnstakeUnit = "TAO" | "USDC";
@@ -70,18 +71,22 @@ export function stakeFormNote(
   return { error, note: error ?? range };
 }
 
-/** The stake form's amount, as typed. */
+/** The stake form's amount, as typed, and the stake that just went through (the panel confirming it). */
 export interface StakeFormState {
   raw: string;
+  sent: SentNotice | null;
 }
 
-export type StakeFormEvent = { type: "edit"; raw: string } | { type: "sent" };
+export type StakeFormEvent = { type: "edit"; raw: string } | { type: "sent"; notice: SentNotice } | { type: "dismiss" };
 
-/** A stake that goes through clears the amount at once. The balance and the limits are read again right
- * after it (useFlows), and they count the stake just made: the amount left in place would read as more
- * than the wallet holds, or than the batch has room for, an error flashing red after a stake that worked. */
+/** A stake that goes through clears the amount at once and opens the panel confirming it. The balance and
+ * the limits are read again right after it (useFlows), and they count the stake just made: the amount left
+ * in place would read as more than the wallet holds, or than the batch has room for, an error flashing red
+ * after a stake that worked. */
 export function stakeFormReducer(s: StakeFormState, e: StakeFormEvent): StakeFormState {
-  return e.type === "edit" ? { ...s, raw: e.raw } : { ...s, raw: "" };
+  if (e.type === "edit") return { ...s, raw: e.raw };
+  if (e.type === "sent") return { raw: "", sent: e.notice };
+  return { ...s, sent: null };
 }
 
 /** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds,

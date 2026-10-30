@@ -21,6 +21,37 @@ and [`reports/Cascade v3 root validators.md`](../reports/Cascade%20v3%20root%20v
 Licence: the repository is MIT, except `src/CascadeTwapOracle.sol`, which is GPL-2.0-or-later
 because it ports the maths of Uniswap's `OracleLibrary`.
 
+## Launch configuration (v3-launch)
+
+Live on Base and Bittensor mainnet since 2026-10-30, holding only the founder's own money. Not
+professionally audited, and the source is not yet verified on the explorers. These are the only
+Cascade contracts: the old test deployments (`v3-test` and `test-2026-10`) still exist on-chain but
+are not the product. See also [`SECURITY.md`](../SECURITY.md).
+
+| Contract | Chain | Address |
+|---|---|---|
+| `CascadeFrontDoor` | Base (8453) | [`0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA`](https://basescan.org/address/0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA) |
+| `CascadeStaker` | Base (8453) | [`0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E`](https://basescan.org/address/0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E) |
+| `CascadeTwapOracle` | Base (8453) | [`0xcAa85F00b6e470Dd28a31FBa982267B820736eBc`](https://basescan.org/address/0xcAa85F00b6e470Dd28a31FBa982267B820736eBc) |
+| `CcipBaseAdapter` | Base (8453) | [`0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92`](https://basescan.org/address/0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92) |
+| `CascadeVault` | Bittensor EVM (964) | [`0x450cD94401B45c72C09734071fe683F6b74Aea72`](https://evm.taostats.io/address/0x450cD94401B45c72C09734071fe683F6b74Aea72) |
+| `CcipBittensorAdapter` | Bittensor EVM (964) | [`0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1`](https://evm.taostats.io/address/0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1) |
+
+Roles: owner `0x478965abDe80ef000e0f3e60008B43ac46130bFC` (both chains), guardian
+`0xf996A598B75ab25B140bC50989C76eBB56B0187F`, keeper `0xBE2a34FE20C3006E759537922C807c228707DC23`,
+treasury `0x34D1f7DC8Cb62280d0bc617b784Bd2c4668809f6`.
+
+Limits: a 40 TAO deposit cap, at most 10 TAO per batch, a 24-hour payout delay, at most 10 TAO per
+unstake, and unstakes limited to 20% of the staked TAO a day, or 10 TAO if that is more
+(`ops/LAUNCH-SETTINGS.md` has every value and why).
+
+**The owner at launch is a single hardware-wallet account with no timelock,** the same account on
+both chains, not a Safe. Its parameter changes and unpauses take effect as soon as it signs, within
+the bounds in the code. Wherever this README speaks of "the timelock" or "the timelock's delay", that
+delay is zero for v3-launch. The delays written into the contracts still hold: a new front door or
+bridge waits 7 days and the guardian can veto it, and replacing the guardian takes 8 days. A Safe
+plus a timelock is planned as owner before Cascade takes other people's money.
+
 ## Contracts
 
 | Contract | Chain | What it does |
@@ -440,7 +471,9 @@ Routine calls and who makes them:
 
 Other roles:
 
-- **Owner:** a timelock (48 hours in the beta) controlled by a Safe. Proposes and activates front
+- **Owner:** at launch (v3-launch), a single hardware-wallet account with no timelock, so its
+  changes take effect at once; a Safe plus a timelock is planned before Cascade takes other people's
+  money (see [Launch configuration](#launch-configuration-v3-launch)). Proposes and activates front
   doors and bridges, sets the primary bridge, keeper, hotkeys and limits, replaces the guardian
   (`proposeGuardian`, then `acceptGuardian` 8 days later; only the owner can
   `cancelGuardianProposal`), cancels payout batches, and unpauses.
@@ -593,12 +626,12 @@ Soft spots:
   hotkey's rewards and so choose when its validator basket is sold into root stake. Do not let the
   keeper lapse.
 - **The limits are owner parameters, within hard bounds.** They change without the 7-day registry
-  delay, behind only the owner's timelock (an operational setting, 48 hours in the beta), but the
-  code bounds each one, so even a captured owner cannot loosen layers 2 and 3 past these bounds. The
-  bounds are upper bounds on risk, not a guarantee of liveness: the owner can still freeze exits by
-  setting limits low, as it can with `pause`. `setFeeLimits(0, 0)` refuses every payout chunk's fee
-  (`FeeTooHigh`), and `setOutflowLimits(0, 0)` or a `maxEntryValue` of 0 defers every front-door
-  redeem. Direct redeems stay open, and the guardian cannot undo it.
+  delay, behind only the owner's timelock (an operational setting; none at launch, so they take
+  effect at once), but the code bounds each one, so even a captured owner cannot loosen layers 2 and
+  3 past these bounds. The bounds are upper bounds on risk, not a guarantee of liveness: the owner
+  can still freeze exits by setting limits low, as it can with `pause`. `setFeeLimits(0, 0)` refuses
+  every payout chunk's fee (`FeeTooHigh`), and `setOutflowLimits(0, 0)` or a `maxEntryValue` of 0
+  defers every front-door redeem. Direct redeems stay open, and the guardian cannot undo it.
 
   | Setter | Bound in the code | Why this bound |
   |---|---|---|
@@ -941,6 +974,9 @@ results, no new defects. Re-run from `contracts/` with `slither .`.
 
 ## Pre-mainnet checklist
 
+This list predates the launch: v3-launch went live on 2026-10-30, holding only the founder's own
+money. Item 23, an independent audit, is still open and comes before other people's money.
+
 Confirm on Bittensor testnet 945 or a fork of chain 964:
 
 1. `claimRootWithHotkey` behaves as the mock models: it credits root (netuid 0) stake on the same
@@ -1086,7 +1122,8 @@ Added for v3 (2026-10-26):
     test cadence is 10 minutes and 1 hour; the cadence is stored in the record, so `verify` checks
     each record against its own values). Still to decide before real users: the treasury (the test
     deployment uses the test wallet), a timelock as owner (so interval changes are announced first),
-    and the caps.
+    and the caps. v3-launch has its own treasury and a 40 TAO cap; its owner is a single
+    hardware-wallet account with no timelock, and the Safe plus timelock is still to come.
 34. **Done in v3.** The v3 Bittensor adapter's payout gas is raised: `SETTINGS_V3.bitGas.base`
     goes from 120,000 to 170,000 (29,900 per entry, unchanged), and v2 keeps 120,000. The Base
     payout receiver needs about 134.6k for one entry: the node's estimate, which counts gas before

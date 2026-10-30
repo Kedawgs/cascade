@@ -11,7 +11,7 @@ test wallet.
 
 | Variable | What it is |
 |---|---|
-| `OPS_LAUNCH_OWNER_BASE`, `OPS_LAUNCH_OWNER_BITTENSOR` | The final owner on each chain: a Safe, or a timelock run by a Safe. It may be a contract. Per chain, because a Safe at one address on Base may not exist (or may be someone else's) on Bittensor. |
+| `OPS_LAUNCH_OWNER_BASE`, `OPS_LAUNCH_OWNER_BITTENSOR` | The final owner on each chain: a Safe, a timelock run by a Safe, or a plain account (v3-launch: one hardware-wallet account on both chains). It may be a contract. Per chain, because a Safe at one address on Base may not exist (or may be someone else's) on Bittensor. |
 | `OPS_LAUNCH_GUARDIAN_BASE`, `OPS_LAUNCH_GUARDIAN_BITTENSOR` | The guardian on each chain, set in the constructors (so there is no 8-day wait). A plain account with its own key, or a Safe. |
 | `OPS_LAUNCH_KEEPER` | The keeper on both chains. Must be a plain account. Before each send, the keeper reads its code on both chains, once a round at most. Code on either chain blocks every send, because one key holds the address on both and an EIP-7702 delegation can cover every chain at once. `run` then stops. |
 | `OPS_LAUNCH_TREASURY` | Receives the reward cut and the staker's fees. Must be a plain account (no code on either chain): deploy checks this before planning, and verify checks it again. |
@@ -46,11 +46,14 @@ The oracle and the adapters have no owner. Then:
   `preflight` checks its TAO and ETH. A launch rehearsal's keeper steps still sign as the test wallet,
   so rehearse with `OPS_LAUNCH_KEEPER` set to it. The keeper can time and route but never take funds. A
   separate keeper key keeps the deployer's key off the always-on keeper machine.
-- **Decision: the owners.** Is the owner a Safe, or a timelock behind a Safe? The README assumes a
-  48-hour timelock. With a timelock, every limit change and every unpause waits for it. Check that
-  Safe{Wallet} supports Bittensor EVM (chain 964) for the Bittensor owner. If it doesn't, use a plain
-  account there and accept from it (`handoff` prints the transaction). A plain account on a Ledger,
-  used through MetaMask, accepts with the signing page below.
+- **Decision: the owners.** Is the owner a Safe, or a timelock behind a Safe? The contracts README
+  was written for a 48-hour timelock. With a timelock, every limit change and every unpause waits for
+  it. Check that Safe{Wallet} supports Bittensor EVM (chain 964) for the Bittensor owner. If it
+  doesn't, use a plain account there and accept from it (`handoff` prints the transaction). A plain
+  account on a Ledger, used through MetaMask, accepts with the signing page below. **Decided for
+  v3-launch:** one plain account on a hardware wallet, the same on both chains, with no Safe and no
+  timelock, so limit changes and unpauses take effect at once. A Safe plus a timelock is planned
+  before other people's money.
 
 ## Sending from MetaMask (a Ledger)
 
@@ -158,11 +161,12 @@ At 10 TAO, a forced exit takes at most 25% of a 40 TAO vault per day (20% of a 5
 Windows are fixed, not rolling, so two windows back to back can take about twice that within minutes.
 
 What holds a forged batch is the guardian, inside the 24-hour payout delay. Its `pause` stops
-`processPayouts`, and so does `removeFrontDoor` or `disableBridge` (the registry's disable). The owner
-can't act in that time: behind a 48-hour timelock, anything it schedules lands a day after the payout
-could go. Undoing the batch is `cancelPayoutBatch`, which re-mints the burned shares. It is owner-only,
-so it goes through the timelock, after the guardian has paused (it works while paused). So the
-guardian's key, and someone watching, are what stop a forged batch in time.
+`processPayouts`, and so does `removeFrontDoor` or `disableBridge` (the registry's disable). Behind a
+48-hour timelock the owner couldn't act in that time: anything it schedules would land a day after the
+payout could go. (v3-launch's owner has no timelock, so it can act at once, but only if its holder is
+there to sign.) Undoing the batch is `cancelPayoutBatch`, which re-mints the burned shares. It is
+owner-only, so with a timelock it goes through it, after the guardian has paused (it works while
+paused). So the guardian's key, and someone watching, are what stop a forged batch in time.
 
 The cost: one holder of the whole 40 TAO cap needs 4 windows to leave, 10 TAO a day. A request asks
 for everything, burns at most the window's allowance, and the holder asks again the next day (the

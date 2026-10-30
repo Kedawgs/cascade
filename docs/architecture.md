@@ -21,16 +21,19 @@ validators.md` (which validator to stake with). v3 design:
   is all staked, and a three-stop lane for where the money is right now (wallet, in transit, staked);
   each deposit has a step-by-step trail with a receipt per step under the Activity tab. Shares and stake
   now live in one contract, so the check is one read on one chain.
-- **Security first.** Small immutable contracts, no upgrade proxies, caps, a guardian that can only
-  stop flows, and admin behind a timelock (48 hours in the beta). The team cannot move user funds
-  instantly: a front door or bridge added after deployment is announced on-chain 7 days ahead.
+- **Security first.** Small immutable contracts, no upgrade proxies, caps, and a guardian that can
+  only stop flows. At launch the owner is a single hardware-wallet account with no timelock, so its
+  setting changes take effect at once; a Safe plus a timelock is planned before Cascade takes other
+  people's money. The team cannot move user funds instantly: a front door or bridge added after
+  deployment is announced on-chain 7 days ahead.
 - **Runs on its own.** Closing batches, sending payouts and re-executing bridge messages are
   permissionless. Staking idle TAO and claiming rewards are timed by a keeper; if it has not acted
   for 7 days, anyone may. The team's bot is just the most reliable caller.
 - **Base only, in the contracts.** ForeverMoney's bridged TAO, the only TAO that CCIP carries to
   Bittensor EVM, exists only on Base and Robinhood Chain. The first front door is on Base; Robinhood
   Chain is a possible second. Users on Ethereum, BNB or Polygon bridge USDC to Base inside the app.
-- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base.
+- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base. The first launch
+  (v3-launch) starts far lower, at 40 TAO.
 - **csTAO cannot be transferred in v2.** That is what makes "the address that deposited controls the
   shares" true on both chains.
 - **A small anti-spam fee on withdrawal requests** (about $0.30 in ETH; the app can pre-pay it).
@@ -186,8 +189,10 @@ deposit. A quiet day costs at most one bridge crossing (about $1.40, only if the
 (`MAX_BATCH_INTERVAL`). The site's "closes by about" estimates use the later of the interval and
 the keeper's maximum wait.
 
-## Before mainnet
+## Launch status
 
-See the pre-mainnet checklist in `contracts/README.md`. The adapters are built and fork-tested;
-next is the deployment runbook. Just before deploying, re-run the live simulation of the inbound
-conversion with the real constructor arguments. An audit is still required.
+v3-launch has been live on Base and Bittensor mainnet since 2026-10-30, holding only the founder's
+own money, with deposits capped at 40 TAO. It is not professionally audited. The addresses are in
+`SECURITY.md` and under "Launch configuration" in `contracts/README.md`; the pre-mainnet checklist
+there records what was confirmed. An audit, and a Safe plus a timelock as owner, come before other
+people's money.

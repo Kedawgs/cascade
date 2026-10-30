@@ -277,5 +277,6 @@ hours count from about the first deposit. The test cadence closes as soon as all
 touches an empty batch.
 
 Shortening later: as volume grows, the owner can shorten (or lengthen) the interval with
-`setBatchInterval`, never beyond 7 days. At launch the owner is meant to be a timelock, so the
-change is announced first and applied after the delay.
+`setBatchInterval`, never beyond 7 days. At v3-launch the owner is a single hardware-wallet account
+with no timelock, so the change applies at once; once a Safe plus a timelock owns the contracts
+(planned before other people's money), it is announced first and applied after the delay.

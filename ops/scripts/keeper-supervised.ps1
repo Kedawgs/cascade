@@ -370,6 +370,10 @@ function Get-StartProblems([switch]$Retry) {
     if ($held -and (Test-LockHolder $held)) {
         [void]$running.Add(('another supervisor (PID {0}) holds {1}' -f (Get-Field $held 'supervisorPid'), $LockFile))
     }
+    if ($Deployment) {
+        $runLock = Get-RunLockState
+        if ($runLock.Present -and -not $runLock.Stale) { [void]$running.Add($runLock.Why) }
+    }
     return [pscustomobject]@{ Usage = $usage.ToArray(); Running = $running.ToArray() }
 }
 
@@ -470,17 +474,60 @@ function Wait-OrStop([int]$Seconds) {
 
 function Format-Code([int]$Code) { return ('{0} (0x{1})' -f $Code, $Code.ToString('X8')) }
 
-# A run lock (deployments/<name>.run.lock) left by a keeper that was ended. Called only right after a
-# check found no keeper running, so no process holds it. (The keeper takes over one whose PID is gone by
-# itself; this also clears one whose PID Windows has since given to another process.)
-function Clear-StaleRunLock {
+# The run lock `pnpm ops run` holds (deployments/<name>.run.lock: its `pid`, and `startedAt`, when it
+# took the lock; ops/src/keeper/runlock.ts), as { Present, Stale, Why }. Stale only when the process it
+# names can't be the keeper that took it: that PID isn't running, runs something other than node.exe, or
+# started after the lock was taken (Windows gave the PID to a new process). The process scan alone never
+# decides it: it can't read the command line of a keeper running elevated or as another user, so a
+# node.exe that was already running when the lock was taken is refused, as is a lock that can't be read.
+function Get-RunLockState {
     $path = Get-RunLockPath
-    if (-not (Test-Path -LiteralPath $path)) { return }
+    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{ Present = $false; Stale = $false; Why = '' } }
+    $lock = $null
+    try { $lock = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json } catch { }
+    $id = Get-Field $lock 'pid'
+    $at = Get-Field $lock 'startedAt'
+    $taken = $null
+    try {
+        if ($at -is [DateTime]) { $taken = $at.ToUniversalTime() }
+        elseif ($at) { $taken = [DateTime]::Parse([string]$at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+    } catch { }
+    if (-not $id -or -not $taken) {
+        return [pscustomobject]@{ Present = $true; Stale = $false; Why = ('the run lock {0} can''t be read (no pid or startedAt): if no keeper is running, delete it' -f $path) }
+    }
+    $p = Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
+    if (-not $p) { return [pscustomobject]@{ Present = $true; Stale = $true; Why = ('PID {0} is not running' -f $id) } }
+    if ($p.ProcessName -ne 'node') { return [pscustomobject]@{ Present = $true; Stale = $true; Why = ('PID {0} is {1}, not node.exe' -f $id, $p.ProcessName) } }
+    $start = $null
+    # unreadable for a process running elevated or as another user: then it can't be ruled out
+    try { $start = $p.StartTime.ToUniversalTime() } catch { }
+    if ($start -and $start -gt $taken) {
+        return [pscustomobject]@{ Present = $true; Stale = $true; Why = ('PID {0} started at {1:o}, after the lock was taken: Windows reused the PID' -f $id, $start) }
+    }
+    return [pscustomobject]@{
+        Present = $true
+        Stale = $false
+        Why = ('the run lock {0} names PID {1}, a node.exe that was running when the lock was taken: a keeper the process scan can''t see may be running (elevated, or another user''s). If none is, delete {0}' -f $path, $id)
+    }
+}
+
+# Whether a keeper may start as far as the run lock goes: none, or a stale one, which is removed. Called
+# right before each start; a lock it can't rule out refuses the start.
+function Clear-StaleRunLock {
+    $s = Get-RunLockState
+    if (-not $s.Present) { return $true }
+    if (-not $s.Stale) {
+        Write-Log ('REFUSING TO START: {0}' -f $s.Why)
+        return $false
+    }
+    $path = Get-RunLockPath
     try {
         Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-        Write-Log ('removed a stale run lock, {0}: no keeper is running' -f $path)
+        Write-Log ('removed a stale run lock, {0}: {1}' -f $path, $s.Why)
+        return $true
     } catch {
-        Write-Log ('could not remove the stale run lock {0} ({1}): the keeper says whether it can start' -f $path, $_.Exception.Message)
+        Write-Log ('REFUSING TO START: could not remove the stale run lock {0} ({1})' -f $path, $_.Exception.Message)
+        return $false
     }
 }
 
@@ -515,8 +562,11 @@ function Invoke-Supervisor {
     Write-Log ('supervising the keeper for {0} (OPS_CADENCE={1}, keystore {2}, password file {3}); logs in {4}' -f $Deployment, $Cadence, $Keystore, $PasswordFile, $LogDir)
     $restarts = 0
     while ($true) {
-        # every start follows a check that found no keeper running
-        Clear-StaleRunLock
+        # every start follows a check that found no keeper running, and one of the run lock
+        if (-not (Clear-StaleRunLock)) {
+            Write-Log 'Never run two keepers at once: not starting (see "Running the keeper unattended" in ops/LAUNCH-SETTINGS.md).'
+            return 1
+        }
         $run = Invoke-KeeperOnce
         if ($run.StopAsked) {
             Write-Log 'stopped on request'
@@ -630,7 +680,8 @@ function Invoke-DryRun {
     Write-Host ('  OPS_CADENCE={0}' -f $Cadence)
     if ($Deployment) {
         Write-Host ('Deployment record: {0}  ({1})' -f (Get-RecordPath), (& $exists (Get-RecordPath)))
-        $runLock = if (Test-Path -LiteralPath (Get-RunLockPath)) { 'present: removed before a start once no keeper is found running' } else { 'absent' }
+        $rl = Get-RunLockState
+        $runLock = if (-not $rl.Present) { 'absent' } elseif ($rl.Stale) { 'stale, ' + $rl.Why + ': removed before a start' } else { 'HELD: see below' }
         Write-Host ('Run lock: {0}  ({1})' -f (Get-RunLockPath), $runLock)
     }
     Write-Host ('Log: {0}  (one file a day, by its name)' -f (Get-LogPath))

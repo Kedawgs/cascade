@@ -249,6 +249,10 @@ Two lines need a look when they appear, though the keeper runs on:
 
 `run` takes `deployments/<name>.run.lock` while it runs, so a keeper started by hand can't run beside
 the supervised one. A lock left by a keeper that was killed is taken over once its process is gone.
+Before each start the supervisor removes a leftover lock only if the PID it names isn't running, isn't
+`node.exe`, or started after the lock was taken (Windows reused the PID). Otherwise it refuses to start,
+since that may be a keeper running elevated or as another user, which its process check can't see. If
+no keeper is running, delete the lock by hand.
 
 **Before the first start**, stop the keeper you started by hand. The supervisor refuses to start while
 any keeper runs. Windows can leave the keeper's `node` process running after its window or shell is

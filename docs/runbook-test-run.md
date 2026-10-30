@@ -101,7 +101,11 @@ little ETH for network fees.
    together with the rest; until then it sits in the vault and still counts in your balance.
 
 `pnpm ops run --live` does the operator's part by itself: it checks every minute, does whatever is
-due and prints each bridge message id. It stops at the first problem and says why.
+due and prints each bridge message id. A race or a passing fault (someone else closed the batch
+first, a slow block, an RPC error) fails only that round, on one line, and the next round tries
+again; it stops for good, with exit code 3, only on what needs a person (the keeper wallet holding
+code, a wrong key, a record that changed or isn't verified, a revert nothing explains). To keep it
+running unattended, see "Running the keeper unattended" in `ops/LAUNCH-SETTINGS.md`.
 
 ## 6. Withdraw (from the website)
 

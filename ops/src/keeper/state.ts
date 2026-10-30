@@ -14,7 +14,7 @@ import {
 } from "viem";
 import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
-import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord } from "../record.ts";
+import { type DeploymentRecord, loadRecord, RecordMismatch, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, codeAt, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, logsOf, sendCall, signerOf } from "../send.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
@@ -391,9 +391,11 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     refresh() {
       // a new round: the keeper wallet's code is read again before its first send
       signerCodes.clear();
+      // a file that can't be read or parsed now throws as it is (run waits a round on it); one that is
+      // gone or holds another deployment is a RecordMismatch, which stops run
       const now = loadRecord(recordPath);
-      if (!now) throw new Error(`${recordPath} is gone`);
-      if (!sameDeployment(now, rec)) throw new Error(`${recordPath} now holds another deployment`);
+      if (!now) throw new RecordMismatch(`${recordPath} is gone`);
+      if (!sameDeployment(now, rec)) throw new RecordMismatch(`${recordPath} now holds another deployment`);
       rec.verify = now.verify;
       rec.done = now.done;
       rec.messages = now.messages;

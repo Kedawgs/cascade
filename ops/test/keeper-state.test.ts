@@ -696,7 +696,7 @@ describe("a roll that reverts on chain", () => {
     await expect(roll(racing({}), launch)).rejects.toThrow(RevertedOnChain);
   });
 
-  it("a roll with no receipt still stops the keeper", async () => {
+  it("a roll with no receipt is not a skip: run fails the round, and the send guard holds the next send until it is mined", async () => {
     await expect(roll(racing({ openDeposits: () => [{ user: alice, amount: 10n ** 16n }] }, null), launch)).rejects.toThrow(ReceiptTimeout);
   });
 });

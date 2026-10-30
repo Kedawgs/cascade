@@ -6,7 +6,7 @@ import type { State } from "../src/keeper/due.ts";
 import { payoutsHash } from "../src/keeper/payouts.ts";
 import { formatStatus, type StatusDetail } from "../src/keeper/status.ts";
 import { buildPlan } from "../src/plan.ts";
-import type { DeploymentRecord } from "../src/record.ts";
+import { type DeploymentRecord, RecordMismatch } from "../src/record.ts";
 import { RevertedOnChain, type Sent, SendRefused } from "../src/send.ts";
 import type { CallRequest } from "../src/types.ts";
 import { windDown } from "../src/winddown.ts";
@@ -146,15 +146,21 @@ describe("keeper actions", () => {
     });
   });
 
-  it("run stops on a failed estimate", async () => {
+  it("run waits a round on a failed estimate (the chain changed under it), and decides again the next", async () => {
     const lines: string[] = [];
     const send = vi.fn(async (_req: CallRequest): Promise<Sent> => {
-      throw new SendRefused("estimate", "Bittensor: stake idle TAO would fail, nothing sent (NothingToStake())");
+      throw new SendRefused("estimate", "Base: close the open batch and send it to Bittensor would fail, nothing sent (BatchNotReady())");
     });
+    // a close is due (the idle TAO is below the nominator minimum, so no stake)
     const d = { ...deps(state({ vault: { ...state().vault, available: 10n ** 16n } }), send), log: (l: string) => lines.push(l) };
-    await runLoop(d, rec, { intervalMs: 0 });
-    expect(send).toHaveBeenCalledOnce();
-    expect(lines.at(-1)).toMatch(/^Stopped: .*nothing sent/);
+    expect(await runLoop(d, rec, { intervalMs: 0, maxTicks: 2, rewardsEveryTicks: 3 })).toEqual({ stopped: false });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.map((c) => c[0].functionName)).toEqual(["closeBatch", "closeBatch"]);
+    expect(lines.filter((l) => /nothing sent/.test(l))).toEqual([
+      "Failed this round (refused by simulation, closing the batch): Base: close the open batch and send it to Bittensor would fail, nothing sent (BatchNotReady()); next round in 0 s",
+      "Failed this round (refused by simulation, closing the batch): Base: close the open batch and send it to Bittensor would fail, nothing sent (BatchNotReady()); next round in 0 s",
+    ]);
+    expect(lines.some((l) => l.startsWith("Stopped"))).toBe(false);
   });
 
   it("run re-reads the record every round: a read-back that failed since it started stops its next send", async () => {
@@ -182,7 +188,7 @@ describe("keeper actions", () => {
   it("run stops, sending nothing, when the record can't be re-read as this deployment", async () => {
     const lines: string[] = [];
     const refresh = () => {
-      throw new Error("deployments/v3-test.json now holds another deployment");
+      throw new RecordMismatch("deployments/v3-test.json now holds another deployment");
     };
     const d = { ...deps(), refresh, log: (l: string) => lines.push(l) };
     await runLoop(d, rec, { intervalMs: 0, maxTicks: 2 });

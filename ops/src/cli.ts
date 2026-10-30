@@ -7,7 +7,7 @@ import { baseLogsTarget, baseLogsWindow, cadenceFromEnv, claimPolicy, deployment
 import { deployAndVerify } from "./deploy.ts";
 import { handoff, ownershipStatus } from "./handoff.ts";
 import { pauseCommand, pauseSigner } from "./pause.ts";
-import { claim, close, deliverCommand, deliveryPlan, payouts, runLoop, stake } from "./keeper/actions.ts";
+import { claim, close, deliverCommand, deliveryPlan, payouts, runCommand, stake } from "./keeper/actions.ts";
 import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
 import { keeperSigner, requireKeeperKey, separateKeeper } from "./keeper/signer.ts";
@@ -148,19 +148,22 @@ async function run(a: Args): Promise<number> {
     }
     case "track":
       return (await trackMessage(ctxFor(a.live), needRecord(a.live), a.messageId as Hex)) === "SUCCESS" ? 0 : 1;
-    case "run": {
-      const rec = needRecord(a.live);
-      const ctx = keeperCtx(a.live, rec);
-      // a wrong key stops the loop now, not at its first send
-      await requireKeeperKey(ctx, rec);
-      for (const line of uncheckedLines(rec)) log(line);
-      await runLoop(keeperDeps(ctx, rec, recordPath(a.live), a.users as Address[]), rec, {
-        intervalMs: 60_000,
-        policy: claimPolicy(env),
-        live: a.live,
-      });
-      return 1;
-    }
+    case "run":
+      // exits KEEPER_STOPPED (3) when it stops itself or refuses to start (the supervisor never restarts
+      // it then), 1 on a crash (the supervisor restarts it)
+      return runCommand(
+        async () => {
+          const rec = needRecord(a.live);
+          const ctx = keeperCtx(a.live, rec);
+          const policy = claimPolicy(env);
+          // a wrong key stops the loop now, not at its first send
+          await requireKeeperKey(ctx, rec);
+          for (const line of uncheckedLines(rec)) log(line);
+          return { deps: keeperDeps(ctx, rec, recordPath(a.live), a.users as Address[]), rec, policy };
+        },
+        log,
+        { intervalMs: 60_000, live: a.live },
+      );
     case "wind-down": {
       const rec = needRecord(a.live);
       for (const sent of await windDown(keeperDeps(ctxFor(a.live), rec, recordPath(a.live), a.users as Address[]), rec)) log(`Done (transaction ${sent.hash})`);
@@ -248,10 +251,11 @@ async function main(argv: string[]): Promise<number> {
   return run(a);
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  (e) => {
-    console.error(e instanceof Error ? e.message : e);
-    process.exit(1);
-  },
-);
+/** Exits once what was printed has been written out: on Windows, output to a pipe (a supervisor's log)
+ * is written asynchronously, and process.exit would drop the last lines, such as why the keeper stopped. */
+const exit = (code: number) => process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
+
+main(process.argv.slice(2)).then(exit, (e) => {
+  console.error(e instanceof Error ? e.message : e);
+  exit(1);
+});

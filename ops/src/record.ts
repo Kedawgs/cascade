@@ -91,6 +91,10 @@ export function needRecord(path: string, live: boolean): DeploymentRecord {
   return rec;
 }
 
+/** The record file a command works from is gone, or now holds another deployment (planned anew, or
+ * replaced): `run` stops on it rather than act for a deployment it can no longer see. */
+export class RecordMismatch extends Error {}
+
 /** Whether two records are of one deployment: the same kind of run and the same contract addresses. A
  * command that saves into a record it loaded earlier checks this first, since the file may since have
  * been planned anew (deploy --new-plan) or replaced. */

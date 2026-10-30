@@ -2,15 +2,17 @@ import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, pa
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy, WALLET } from "../config.ts";
 import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
-import { describeCode } from "../rpc.ts";
-import { chainLabel, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
+import { RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
 import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
+import { classifyFailure, type FailureKind, inWords, KeeperHasCode, KeeperNotReady, nextWaitMs, NotNow, oneLine } from "./failures.ts";
 import { type Payout, type PayoutLog, payoutsHash, rebuildPayouts } from "./payouts.ts";
 import { claimGasLimit, claimRequest, decideClaim, type RewardsDeps, upfrontShortfall } from "./rewards.ts";
 import { keeperMismatch } from "./signer.ts";
 import type { StatusDetail } from "./status.ts";
+
+export { KeeperHasCode } from "./failures.ts";
 
 export type KeeperState = State & { detail: StatusDetail };
 
@@ -42,7 +44,7 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   recordMessage(m: Message): void;
   /** Re-reads the deployment record from disk and takes its verify, done and messages onto the record
    * these deps hold (the one `run` passes to each action), so a read-back saved since the command started
-   * is seen; throws when the file is gone or now holds another deployment */
+   * is seen; throws RecordMismatch when the file is gone or now holds another deployment */
   refresh(): void;
   log(line: string): void;
 }
@@ -67,32 +69,21 @@ export function messageIdFrom(logs: Sent["logs"], adapter: Hex): Hex | undefined
 
 /** Keeper sends need the whole deployment in place and its read-back passed; a launch, its hand-off
  * accepted by the final owners too; and `signer`, who the keeper commands sign as (keeperSigner), must be
- * the record's keeper. */
+ * the record's keeper. Refuses with KeeperNotReady, which stops `run`. */
 export function requireReady(rec: DeploymentRecord, signer: Address = WALLET): void {
   const missing = rec.plan.steps.filter((s) => !rec.done[s.id]);
   if (missing.length || !rec.verify?.ok) {
-    throw new Error(
+    throw new KeeperNotReady(
       `the deployment is not complete and verified yet (${missing.length ? `${missing.length} step(s) to go` : "the read-back has not passed"}): run deploy, then verify`,
     );
   }
-  requireHandoff(rec);
-  const keeper = rolesOf(rec.plan).keeper;
-  if (keeper.toLowerCase() !== signer.toLowerCase()) throw new Error(keeperMismatch(keeper, signer));
-}
-
-/** The keeper wallet has code on `chain` (either chain stops a send on either). Not a SendRefused: a
- * run's delivery treats those as a wait for the next round, and this must stop the run. */
-export class KeeperHasCode extends Error {
-  readonly chain: ChainName;
-  readonly code: Hex;
-
-  constructor(chain: ChainName, keeper: Address, code: Hex) {
-    super(
-      `${chainLabel(chain)}: the keeper wallet ${keeper} has code (an EIP-7702 delegation or a contract): ${describeCode(code)}; assume its key is compromised; stop and rotate the keeper; nothing sent`,
-    );
-    this.chain = chain;
-    this.code = code;
+  try {
+    requireHandoff(rec);
+  } catch (e) {
+    throw new KeeperNotReady((e as Error).message);
   }
+  const keeper = rolesOf(rec.plan).keeper;
+  if (keeper.toLowerCase() !== signer.toLowerCase()) throw new KeeperNotReady(keeperMismatch(keeper, signer));
 }
 
 /** Every keeper send goes through here. The keeper wallet is a plain account, with no code; code there
@@ -178,10 +169,10 @@ export function payoutsRequest(
 export async function close(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
   requireReady(rec, deps.signer);
   const s = await deps.readState();
-  if (!s.alphaVault.healthy) throw new Error("AlphaVault is paused or migrating — not closing the batch");
-  if (s.frontDoor.paused) throw new Error("the front door is paused");
-  if (s.frontDoor.nDeposits + s.frontDoor.nRedeems === 0) throw new Error("the open batch is empty");
-  if (!s.frontDoor.canClose) throw new Error("the open batch is not ready to close yet");
+  if (!s.alphaVault.healthy) throw new NotNow("AlphaVault is paused or migrating — not closing the batch");
+  if (s.frontDoor.paused) throw new NotNow("the front door is paused");
+  if (s.frontDoor.nDeposits + s.frontDoor.nRedeems === 0) throw new NotNow("the open batch is empty");
+  if (!s.frontDoor.canClose) throw new NotNow("the open batch is not ready to close yet");
   const sent = await keeperSend(deps, closeRequest(rec, await deps.quoteClose(s), await deps.nonce("base")));
   return withMessage(deps, sent, rec.plan.addresses.baseAdapter, "Base → Bittensor");
 }
@@ -195,9 +186,10 @@ export type Rolled = ({ rolled: true } & Done) | { rolled: false; reason: string
  * has a max wait. A roll is never needed, so a race it loses is a skip for a later round: an entry
  * arriving before the simulation (which then would revert), or an entry or another close landing before
  * it is mined (it reverts on chain; the front door is re-read to tell that from an unexplained revert,
- * which still stops the keeper, as do a re-read that fails, a missing receipt and the send guards'
- * refusals). If a redeem lands between the simulation and the transaction, its fee pot may pay for a
- * real close; its bridge message is then recorded like a close's. */
+ * which still stops the keeper, as does a re-read that fails). A missing receipt and the send guards'
+ * refusals are thrown, for `run` to classify (classifyFailure). If a redeem lands between the simulation
+ * and the transaction, its fee pot may pay for a real close; its bridge message is then recorded like a
+ * close's. */
 export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rolled> {
   requireReady(rec, deps.signer);
   const s = await deps.readState();
@@ -234,18 +226,18 @@ export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rol
 export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Done> {
   requireReady(rec, deps.signer);
   const s = await deps.readState();
-  if (s.vault.paused) throw new Error("the vault is paused");
+  if (s.vault.paused) throw new NotNow("the vault is paused");
   return keeperSend(deps, stakeRequest(rec, await deps.nonce("bittensor")));
 }
 
 export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex): Promise<Done> {
   requireReady(rec, deps.signer);
   const s = await deps.readState();
-  if (!s.alphaVault.healthy) throw new Error("AlphaVault is paused or migrating — not paying out");
-  if (s.vault.paused) throw new Error("the vault is paused");
+  if (!s.alphaVault.healthy) throw new NotNow("AlphaVault is paused or migrating — not paying out");
+  if (s.vault.paused) throw new NotNow("the vault is paused");
   const b = s.vault.batches.find((b) => b.key.toLowerCase() === key.toLowerCase());
-  if (!b || b.cursor >= b.count) throw new Error(`no payout is pending for batch ${key.slice(0, 10)}…`);
-  if (s.now < b.queuedAt + s.vault.payoutDelay) throw new Error(`batch ${key.slice(0, 10)}… is not due yet`);
+  if (!b || b.cursor >= b.count) throw new NotNow(`no payout is pending for batch ${key.slice(0, 10)}…`);
+  if (s.now < b.queuedAt + s.vault.payoutDelay) throw new NotNow(`batch ${key.slice(0, 10)}… is not due yet`);
   const list = rebuildPayouts(await deps.payoutLogs(), key);
   const sent = await keeperSend(deps, payoutsRequest(rec, key, list, await deps.batchInfo(key), await deps.nonce("bittensor")));
   return withMessage(deps, sent, rec.plan.addresses.bitAdapter, "Bittensor → Base");
@@ -333,7 +325,7 @@ export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, 
   return payouts(deps, rec, a.key);
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Logs whether a reward claim is due when that changes; run never claims, and a failed read only waits. */
 async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean, last: boolean | undefined): Promise<boolean | undefined> {
@@ -353,23 +345,93 @@ async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean,
   }
 }
 
-/** Does the next due thing every `intervalMs` until stopped; stops at the first failure rather than
- * retrying it. A delivery goes ahead only when its simulation passes; one that would revert waits (its
- * reason logged once) without holding up anything else. A delivery that isn't sent (its re-check, its
- * estimate or the wallet's guard refuses it) never ends the round: the round's payout, stake or close
- * still goes ahead. One whose estimate refuses it is held, not retried, until the user's claimable
- * amount, preference, or the quote against the floors changes. Reward claims are only reported, every
+/** How a run ended: it stopped itself, on a failure classifyFailure says must stop it, or its rounds ran
+ * out (`maxTicks`, which only tests set). */
+export type LoopEnd = { stopped: false } | { stopped: true; kind: FailureKind; reason: string };
+
+/** What an action is doing, for a failed round's log line. */
+function doing(a: Action): string {
+  switch (a.kind) {
+    case "close":
+      return "closing the batch";
+    case "roll":
+      return "rolling the empty batch";
+    case "stake":
+      return "staking";
+    case "payouts":
+      return `paying out batch ${a.key.slice(0, 10)}…`;
+    case "deliver":
+      return `delivering to ${a.user}`;
+  }
+}
+
+/** Why a close, payout or stake that reverted on chain lost a race, from the chains read again after it
+ * (`before`: the round's read): a pause, another close landing first, another caller paying the batch out
+ * (processPayouts and closeBatch are anyone's), or the idle TAO gone. Undefined when nothing explains it
+ * or the read fails: the revert, with its transaction hash, then stops the keeper (as a roll's does). */
+async function lostRace(deps: KeeperDeps, a: Exclude<Action, { kind: "deliver" } | { kind: "roll" }>, before: KeeperState): Promise<string | undefined> {
+  let after: KeeperState;
+  try {
+    after = await deps.readState();
+  } catch {
+    return undefined;
+  }
+  if (a.kind === "close") {
+    const fd = after.frontDoor;
+    if (fd.paused) return "the front door was paused";
+    if (!after.alphaVault.healthy) return "AlphaVault was paused or began migrating";
+    if (fd.openStart !== before.frontDoor.openStart || fd.nDeposits + fd.nRedeems === 0 || !fd.canClose) return "another close landed first";
+    return undefined;
+  }
+  if (after.vault.paused) return "the vault was paused";
+  if (a.kind === "payouts") {
+    if (!after.alphaVault.healthy) return "AlphaVault was paused or began migrating";
+    const batch = (s: KeeperState) => s.vault.batches.find((b) => b.key.toLowerCase() === a.key.toLowerCase());
+    const was = batch(before);
+    const now = batch(after);
+    if (!now || now.cursor >= now.count || (was && now.cursor !== was.cursor)) return "another caller paid this batch out first";
+    return undefined;
+  }
+  if (after.vault.available < after.vault.minStakeWei) return "the idle TAO is no longer above the staking floor";
+  return undefined;
+}
+
+export interface RunOptions {
+  intervalMs: number;
+  maxTicks?: number;
+  policy?: ClaimPolicy;
+  rewardsEveryTicks?: number;
+  live?: boolean;
+  /** The longest wait between failed rounds (default 5 minutes; never less than the interval) */
+  maxBackoffMs?: number;
+  /** Failed rounds in a row after which each failure's line starts STILL FAILING (default 10) */
+  stillFailingAfter?: number;
+  /** For tests: how the run waits between rounds */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Does the next due thing every `intervalMs` until it stops itself. A delivery goes ahead only when its
+ * simulation passes; one that would revert waits (its reason logged once) without holding up anything
+ * else. A delivery that isn't sent (its re-check, its estimate or the wallet's guard refuses it), or that
+ * reverts on chain, never ends the round: the round's payout, stake or close still goes ahead. One whose
+ * estimate refuses it, or that reverted, is held, not retried, until the user's claimable amount,
+ * preference, or the quote against the floors changes. Reward claims are only reported, every
  * `rewardsEveryTicks` rounds. Each round starts by re-reading the record (`deps.refresh`, onto `rec`, the
- * record the deps were made with), so a read-back that failed since the run started stops its sends. A
- * keeper wallet found with code at any send, a delivery's too, stops the run (KeeperHasCode). */
-export async function runLoop(
-  deps: KeeperDeps,
-  rec: DeploymentRecord,
-  opts: { intervalMs: number; maxTicks?: number; policy?: ClaimPolicy; rewardsEveryTicks?: number; live?: boolean },
-) {
+ * record the deps were made with), so a read-back that failed since the run started stops its sends.
+ *
+ * A failure inside a round ends that round, never the run, unless classifyFailure says it must stop it
+ * (a keeper wallet found with code at any send, a delivery's too; a wrong key; the record not ready or
+ * replaced; a revert nothing explains): then the run logs "Stopped: <why>" and returns. Any other
+ * failure (a race lost to another caller or a user, a pending transaction, an RPC fault) is logged on
+ * one line and the next round decides again, after a wait that doubles with each failed round in a row
+ * (nextWaitMs); from `stillFailingAfter` failed rounds in a row the line starts STILL FAILING. Nothing is
+ * ever retried within the round that failed: a transaction with no receipt may still be pending, and the
+ * next round's send guard refuses every send until it is mined or dropped. A close, payout or stake that
+ * reverts on chain is re-read first: a lost race (lostRace) is a skip, not a failure. */
+export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: RunOptions): Promise<LoopEnd> {
   /** The last wait logged for each user, so each reason is logged once. */
   const waiting = new Map<string, string>();
-  /** Deliveries whose send-time estimate refused them, with the facts they were refused on. */
+  /** Deliveries whose send-time estimate refused them, or that reverted, with the facts they were refused on. */
   const held = new Map<string, { facts: string; reason: string }>();
   const waits = (user: Address, reason: string) => {
     const key = user.toLowerCase();
@@ -378,13 +440,14 @@ export async function runLoop(
     waiting.set(key, reason);
   };
   let claimDue: boolean | undefined;
-  for (let tick = 1; ; tick++) {
+
+  /** One round. A failure comes back, with what the round was doing then, instead of being thrown. */
+  async function round(tick: number): Promise<{ error: unknown; doing: string } | undefined> {
     // the record as it is now: a read-back that failed since the run started stops its sends
     try {
       deps.refresh();
     } catch (e) {
-      deps.log(`Stopped: ${(e as Error).message}`);
-      return;
+      return { error: e, doing: "re-reading the record" };
     }
     let s: KeeperState;
     let deliveries: DueDelivery[] = [];
@@ -405,20 +468,21 @@ export async function runLoop(
         else waits(c.user, c.deliver && hold ? hold.reason : c.reason);
       }
     } catch (e) {
-      deps.log(`Stopped: could not read the chains (${(e as Error).message})`);
-      return;
+      return { error: e, doing: "reading the chains" };
     }
     if (tick === 1 || tick % (opts.rewardsEveryTicks ?? 30) === 0) {
       claimDue = await reportClaim(deps, opts.policy ?? CLAIM_POLICY, opts.live ?? false, claimDue);
     }
+    let now = "deciding what is due";
     try {
       for (;;) {
         const next = decideNext({ ...s, deliveries });
         const action = next.action;
         if (!action) {
           deps.log(next.reason);
-          break;
+          return undefined;
         }
+        now = doing(action);
         if (action.kind === "roll") {
           // a roll that can't go ahead now is only a skip: the round ends, the next one decides again
           const r = await roll(deps, rec);
@@ -428,12 +492,21 @@ export async function runLoop(
               `Done: the open batch closed instead of rolling: an entry landed first and its fee pot paid the bridge (transaction ${r.hash}, bridge message ${r.messageId})`,
             );
           } else deps.log(`Done: ${next.reason} (transaction ${r.hash})`);
-          break;
+          return undefined;
         }
         if (action.kind !== "deliver") {
-          const done = await act(deps, rec, action);
+          let done: Done;
+          try {
+            done = await act(deps, rec, action);
+          } catch (e) {
+            // mined and reverted: a race lost to another caller is a skip; anything else stops the keeper
+            const why = e instanceof RevertedOnChain ? await lostRace(deps, action, s) : undefined;
+            if (!why || !(e instanceof RevertedOnChain)) throw e;
+            deps.log(`Not done: ${why}; the transaction reverted on chain (transaction ${e.hash}); the next round decides again`);
+            return undefined;
+          }
           deps.log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
-          break;
+          return undefined;
         }
         // whatever becomes of this delivery, the round's next action comes after it, never instead
         deliveries = deliveries.filter((d) => d.user !== action.user);
@@ -442,17 +515,22 @@ export async function runLoop(
         try {
           d = await deliver(deps, rec, action.user);
         } catch (e) {
-          // the wallet's guard (an earlier transaction pending, the nonce, the chain): not this user's
-          // facts, so tried again next round. Anything else (a keeper wallet with code) stops the run
-          if (!(e instanceof SendRefused)) throw e;
-          waits(action.user, `${e.message}; it is tried again next round`);
-          continue;
+          if (e instanceof RevertedOnChain) {
+            // mined and reverted, so nothing is pending: the user claimed first, changed or let lapse
+            // their preference, or the price moved. Held like a refused estimate, until its facts change
+            d = { user: action.user, delivered: false, reason: e.message, refused: e.message };
+          } else if (e instanceof SendRefused && !classifyFailure(e).stop) {
+            // the wallet's guard (an earlier transaction pending, the nonce) or the estimate: not this
+            // user's facts, so tried again next round. A wrong key or chain stops the run, as at any send
+            waits(action.user, `${e.message}; it is tried again next round`);
+            continue;
+          } else throw e;
         }
         if (d.delivered) {
           waiting.delete(key);
           const got = d.usdcOut === undefined ? "" : `, ${Number(d.usdcOut) / 1e6} USDC`;
           deps.log(`Done: ${next.reason} (transaction ${d.hash}${got})`);
-          break;
+          return undefined;
         }
         const f = facts.get(key);
         if (d.refused !== undefined && f !== undefined) {
@@ -464,10 +542,64 @@ export async function runLoop(
         }
       }
     } catch (e) {
-      deps.log(`Stopped: ${(e as Error).message}`);
-      return;
+      return { error: e, doing: now };
     }
-    if (opts.maxTicks && tick >= opts.maxTicks) return;
-    await sleep(opts.intervalMs);
   }
+
+  const stillFailingAfter = opts.stillFailingAfter ?? 10;
+  const pause = opts.sleep ?? sleep;
+  /** Failed rounds in a row */
+  let failing = 0;
+  for (let tick = 1; ; tick++) {
+    const failure = await round(tick);
+    const f = failure && classifyFailure(failure.error);
+    if (f?.stop) {
+      deps.log(`Stopped: ${oneLine(f.message)}`);
+      return { stopped: true, kind: f.kind, reason: f.message };
+    }
+    if (f) failing++;
+    else if (failing) {
+      deps.log(`Recovered after ${failing} failed round${failing === 1 ? "" : "s"}`);
+      failing = 0;
+    }
+    const wait = nextWaitMs(opts.intervalMs, failing, opts.maxBackoffMs);
+    if (failure && f) {
+      const head = failing >= stillFailingAfter ? `STILL FAILING (${failing} rounds; ` : "Failed this round (";
+      deps.log(`${head}${f.label}, ${failure.doing}): ${oneLine(f.message)}; next round in ${inWords(wait)}`);
+    }
+    if (opts.maxTicks && tick >= opts.maxTicks) return { stopped: false };
+    await pause(wait);
+  }
+}
+
+/** `pnpm ops run`'s exit code when the keeper stops itself (classifyFailure) or refuses to start. The
+ * supervisor (ops/scripts/keeper-supervised.ps1) restarts the keeper after any other non-zero exit, never
+ * after this one: what stopped it needs a person. */
+export const KEEPER_STOPPED = 3;
+
+const stoppedBanner = (reason: string) =>
+  `THE KEEPER STOPPED ITSELF: ${oneLine(reason, 240)} (exit code ${KEEPER_STOPPED}: the supervisor won't restart it). Fix that, then start it again.`;
+
+/** `pnpm ops run`: `start` loads the record and checks the keeper's key (and may log), then the loop runs
+ * until it stops itself. A start it refuses (no record, a bad setting, a wrong key) and every stop the
+ * loop makes are deliberate: said loudly, exit KEEPER_STOPPED. Anything else thrown (a crash) goes to
+ * the caller, a plain failure the supervisor restarts. */
+export async function runCommand(
+  start: () => Promise<{ deps: KeeperDeps; rec: DeploymentRecord; policy?: ClaimPolicy }>,
+  log: (line: string) => void,
+  opts: RunOptions,
+): Promise<number> {
+  let s: Awaited<ReturnType<typeof start>>;
+  try {
+    s = await start();
+  } catch (e) {
+    const reason = oneLine(e instanceof Error ? e.message : String(e));
+    log(`Stopped: ${reason}`);
+    log(stoppedBanner(reason));
+    return KEEPER_STOPPED;
+  }
+  const end = await runLoop(s.deps, s.rec, { ...opts, ...(s.policy ? { policy: s.policy } : {}) });
+  if (!end.stopped) return 0;
+  log(stoppedBanner(end.reason));
+  return KEEPER_STOPPED;
 }

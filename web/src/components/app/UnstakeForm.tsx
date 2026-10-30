@@ -21,8 +21,9 @@ import {
   unstakeErrorText,
   unstakeLabelUsd,
   unstakeMaxWei,
+  unstakeFormRequest,
   unstakeNote,
-  unstakeRequestWei,
+  UNSTAKE_FORM_CLEARED,
   type UnstakeUnit,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
@@ -90,7 +91,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const price = position?.taoPriceUsd ?? 0;
   // what MAX fills; null when no amount can go (nothing to unstake, or this batch's request is full)
   const maxWei = unstakeMaxWei(available, most);
-  const request = all ? available : (pinned ?? unstakeRequestWei(raw, unit, price));
+  const request = unstakeFormRequest({ raw, all, pinned }, unit, available, price);
   const check = position && request !== null ? checkUnstake(request, available, most) : null;
   const shares =
     position && check?.ok
@@ -145,7 +146,13 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
     if (!account || !quote || pending) return;
     setOpId(null);
     flows.unstake(quote, setOpId).then(
-      (id) => router.push(`/activity?withdrawal=${id}`),
+      (id) => {
+        // cleared before what can be unstaked is read again, which counts this request (UNSTAKE_FORM_CLEARED)
+        setRaw(UNSTAKE_FORM_CLEARED.raw);
+        setAll(UNSTAKE_FORM_CLEARED.all);
+        setPinned(UNSTAKE_FORM_CLEARED.pinned);
+        router.push(`/activity?withdrawal=${id}`);
+      },
       () => undefined,
     );
   }

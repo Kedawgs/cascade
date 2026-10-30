@@ -32,7 +32,13 @@ import {
   CONTRACT_WALLET_NOTE,
   contractWalletNote,
   atomicOf,
+  stakeFormNote,
+  stakeFormReducer,
+  UNSTAKE_FORM_CLEARED,
+  unstakeFormRequest,
+  type UnstakeFormState,
 } from "./stake-form";
+import { checkUnstake } from "./cascade/units";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
 const limits = { minUsd: 10, maxUsd: 50_000, full: null };
@@ -546,5 +552,59 @@ describe("unstakeEtaText", () => {
     expect(unstakeEtaText(150)).toBe("about 3 hours");
     expect(unstakeEtaText(1_500)).toBe("about 25 hours");
     expect(unstakeEtaText(60 * 72)).toBe("about 3 days");
+  });
+});
+
+describe("the stake form after a stake goes through", () => {
+  // before: 80 USDC and room for 60 in the batch; the refresh after a 50 USDC stake: 30 left, room for 10
+  const before = { minUsd: 1, maxUsd: 60, full: null };
+  const after = { minUsd: 1, maxUsd: 10, full: null };
+  const typed = stakeFormReducer({ raw: "" }, { type: "edit", raw: "50" });
+
+  it("takes the amount before the stake", () => {
+    expect(stakeFormNote(parseAmount(typed.raw), { data: before, isError: false }, 80)).toEqual({ error: null, note: "From $1 to $60" });
+  });
+
+  it("left in place, the amount just staked reads as too much once the balance and limits refresh (the red flash)", () => {
+    expect(stakeFormNote(parseAmount(typed.raw), { data: after, isError: false }, 30).error).toBe("The most you can stake right now is $10.");
+    expect(stakeFormNote(parseAmount(typed.raw), { data: before, isError: false }, 30).error).toBe("You have 30 USDC on Base.");
+  });
+
+  it("is cleared the moment it goes through, so the refreshed figures show no error", () => {
+    const sent = stakeFormReducer(typed, { type: "sent" });
+    expect(sent.raw).toBe("");
+    expect(stakeFormNote(parseAmount(sent.raw), { data: after, isError: false }, 30)).toEqual({ error: null, note: "From $1 to $10" });
+    expect(stakeFormNote(parseAmount(sent.raw), { data: before, isError: false }, 0).error).toBeNull();
+  });
+
+  it("says why there is no range while the limits load or can't be read", () => {
+    expect(stakeFormNote(null, { isError: false }, null)).toEqual({ error: null, note: "Checking the limits…" });
+    expect(stakeFormNote(50, { isError: true }, 80)).toEqual({ error: null, note: "Limits unavailable right now" });
+  });
+});
+
+describe("the unstake form after an unstake goes through", () => {
+  const price = 250;
+  // 0.2 TAO could be unstaked; $20 (0.08 TAO) is asked; the refresh then counts it as asked: 0.12 left
+  const typed: UnstakeFormState = { raw: "20", all: false, pinned: null };
+  const refreshed = 12n * 10n ** 16n;
+
+  it("asks for what is typed, everything after MAX, or a unit switch's exact TAO", () => {
+    expect(unstakeFormRequest(typed, "USDC", 2n * 10n ** 17n, price)).toBe(8n * 10n ** 16n);
+    expect(unstakeFormRequest({ ...typed, all: true }, "USDC", 2n * 10n ** 17n, price)).toBe(2n * 10n ** 17n);
+    expect(unstakeFormRequest({ ...typed, pinned: 5n * 10n ** 16n }, "USDC", 2n * 10n ** 17n, price)).toBe(5n * 10n ** 16n);
+  });
+
+  it("left in place, the amount just asked for reads as wrong once what can be unstaked refreshes (the red flash)", () => {
+    // $40 typed, 0.12 TAO ($30) left: more than can be unstaked
+    expect(checkUnstake(unstakeFormRequest({ ...typed, raw: "40" }, "USDC", refreshed, price) as bigint, refreshed)).toMatchObject({ ok: false, code: "tooMuch" });
+    // MAX after unstaking everything: nothing is left, which reads as an amount still to enter
+    expect(checkUnstake(unstakeFormRequest({ ...typed, all: true }, "USDC", 0n, price) as bigint, 0n)).toMatchObject({ ok: false, code: "empty" });
+  });
+
+  it("is cleared the moment it goes through, so nothing is checked against the refreshed figures", () => {
+    expect(UNSTAKE_FORM_CLEARED).toEqual({ raw: "", all: false, pinned: null });
+    expect(unstakeFormRequest(UNSTAKE_FORM_CLEARED, "USDC", refreshed, price)).toBeNull();
+    expect(unstakeFormRequest(UNSTAKE_FORM_CLEARED, "TAO", 0n, price)).toBeNull();
   });
 });

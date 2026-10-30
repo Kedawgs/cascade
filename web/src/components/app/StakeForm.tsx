@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useReducer, useState, type FormEvent } from "react";
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
@@ -21,8 +21,8 @@ import {
   stakeAmountText,
   stakeButtonLabel,
   stakeFootText,
-  stakeLimitsNote,
-  validateStakeAmount,
+  stakeFormNote,
+  stakeFormReducer,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
 import { Dash } from "../Dash";
@@ -74,7 +74,8 @@ export function StakeForm({
   const limits = useLimits();
   const balances = useBalances(account);
   const flows = useFlows(account);
-  const [raw, setRaw] = useState(initialAmount);
+  const [{ raw }, dispatch] = useReducer(stakeFormReducer, { raw: initialAmount });
+  const setRaw = (v: string) => dispatch({ type: "edit", raw: v });
   const [opId, setOpId] = useState<string | null>(null);
   const inputId = useId();
   const noteId = useId();
@@ -91,7 +92,7 @@ export function StakeForm({
 
   const amount = parseAmount(raw);
   const lim = limits.data;
-  const error = lim ? validateStakeAmount(amount, lim, account ? maxUsdc : null) : null;
+  const { error, note } = stakeFormNote(amount, limits, account ? maxUsdc : null);
   // MAX waits for the limits as well as the balance
   const maxInput = stakeMaxInput(maxUsdc, lim);
   const units = lim && amount !== null && amount > 0 && error === null ? usdcUnits(raw) : null;
@@ -116,12 +117,14 @@ export function StakeForm({
     start();
     setOpId(null);
     flows.stake(quote, setOpId).then(
-      (id) => router.push(`/activity?deposit=${id}`),
+      (id) => {
+        // cleared before the refreshed balance arrives, which counts this stake (stakeFormReducer)
+        dispatch({ type: "sent" });
+        router.push(`/activity?deposit=${id}`);
+      },
       () => undefined, // the message is in flows.error
     );
   }
-
-  const note = error ?? (lim ? stakeLimitsNote(lim) : limits.isError ? "Limits unavailable right now" : "Checking the limits…");
 
   return (
     // focus anywhere in the form (the amount, MAX, the button) is a first input too

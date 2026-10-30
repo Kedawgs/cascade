@@ -57,6 +57,33 @@ export function stakeLimitsNote(limits: StakeLimits): string {
   return limits.full ? FULL_TEXT[limits.full] : `From ${formatUsdShort(limits.minUsd)} to ${formatUsdShort(limits.maxUsd)}`;
 }
 
+/** What the stake form says under the amount: why it can't be staked (an error), or else the range a
+ * stake can be, or why that isn't known yet. `balance` is the wallet's USDC when known (null skips that
+ * check). */
+export function stakeFormNote(
+  amount: number | null,
+  limits: { data?: StakeLimits; isError: boolean },
+  balance: number | null,
+): { error: string | null; note: string } {
+  const error = limits.data ? validateStakeAmount(amount, limits.data, balance) : null;
+  const range = limits.data ? stakeLimitsNote(limits.data) : limits.isError ? "Limits unavailable right now" : "Checking the limits…";
+  return { error, note: error ?? range };
+}
+
+/** The stake form's amount, as typed. */
+export interface StakeFormState {
+  raw: string;
+}
+
+export type StakeFormEvent = { type: "edit"; raw: string } | { type: "sent" };
+
+/** A stake that goes through clears the amount at once. The balance and the limits are read again right
+ * after it (useFlows), and they count the stake just made: the amount left in place would read as more
+ * than the wallet holds, or than the batch has room for, an error flashing red after a stake that worked. */
+export function stakeFormReducer(s: StakeFormState, e: StakeFormEvent): StakeFormState {
+  return e.type === "edit" ? { ...s, raw: e.raw } : { ...s, raw: "" };
+}
+
 /** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds,
  * nor more than the most a stake can be right now (`most`, when the limits are known). */
 export function maxStakeInput(balance: number, most?: number): string {
@@ -258,6 +285,25 @@ export function unstakeRequestWei(raw: string, unit: UnstakeUnit, priceUsd: numb
   } catch {
     return null;
   }
+}
+
+/** The unstake form's amount: as typed, everything that can be unstaked (`all`, after MAX), or the exact
+ * TAO a unit switch or MAX carried over (`pinned`, until the amount is edited). */
+export interface UnstakeFormState {
+  raw: string;
+  all: boolean;
+  pinned: bigint | null;
+}
+
+/** The unstake form once an unstake has gone through: empty, at once. What can be unstaked is read again
+ * right after (useFlows) and counts the request just made, so the amount left in place would read as
+ * more than can be unstaked (or, after MAX, as nothing entered): an error flashing red after an unstake
+ * that worked. */
+export const UNSTAKE_FORM_CLEARED: UnstakeFormState = { raw: "", all: false, pinned: null };
+
+/** The TAO (wei) the unstake form asks for, or null with nothing to ask. */
+export function unstakeFormRequest(s: UnstakeFormState, unit: UnstakeUnit, availableWei: bigint, priceUsd: number): bigint | null {
+  return s.all ? availableWei : (s.pinned ?? unstakeRequestWei(s.raw, unit, priceUsd));
 }
 
 /** The amount in the other unit, shown under the field: "≈ $1.26" or "≈ 0.0396 TAO". */

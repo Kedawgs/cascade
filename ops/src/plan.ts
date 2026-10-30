@@ -1,5 +1,6 @@
 import { type Address, encodePacked, formatEther, getContractAddress, type Hex, parseAbi } from "viem";
 import {
+  ADAPTER_MAX_MESSAGE_VALUE,
   BASE_V3,
   CADENCE,
   type Cadence,
@@ -41,8 +42,10 @@ export interface PlanV3 extends Omit<Plan, "addresses"> {
 
 export const isPlanV3 = (plan: Plan | PlanV3): plan is PlanV3 => "version" in plan && plan.version === 3;
 
-/** The contracts build in contracts/out, which new v3 plans record and are deployed from. */
-export const CONTRACTS_BUILD = "launch-cadence";
+/** The contracts build in contracts/out, which new v3 plans record and are deployed from: the pre-audit
+ * changes (the adapters take a per-message cap, the vault's allowance base and setter bounds). The build
+ * before it, "launch-cadence", was never deployed, and its plans are refused like any unknown build. */
+export const CONTRACTS_BUILD = "preaudit";
 /** The build v3 was first deployed from: a v3 plan without a `build` was made by it. */
 export const A2B4412_BUILD = "a2b4412";
 export type ContractsBuild = typeof CONTRACTS_BUILD | typeof A2B4412_BUILD;
@@ -52,7 +55,9 @@ export function buildOf(plan: PlanV3): ContractsBuild {
   const b = plan.build;
   if (b === undefined) return A2B4412_BUILD;
   if (b === CONTRACTS_BUILD) return CONTRACTS_BUILD;
-  throw new Error(`the record's plan was deployed from a contracts build "${String(b)}" this tool does not know; nothing read or sent`);
+  throw new Error(
+    `the record's plan was deployed from a contracts build "${String(b)}" this tool does not know (an unfinished plan can be replaced with deploy --new-plan); nothing read or sent`,
+  );
 }
 
 /** The settings a plan was built with. */
@@ -64,9 +69,68 @@ export function settingsV3Of(plan: PlanV3): typeof SETTINGS_V3 | typeof SETTINGS
   return cadenceOf(plan) === "launch" ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
 }
 
-/** The vault limits a v3 plan runs with: a launch's own (set during deploy) over the contract's defaults,
+/** The vault limits a cadence runs with: a launch's own (set during deploy) over the contract's defaults,
  * which a test plan keeps. */
-export const vaultLimitsOf = (plan: PlanV3): VaultLimits => (cadenceOf(plan) === "launch" ? { ...VAULT_DEFAULTS, ...LAUNCH_VAULT_LIMITS } : VAULT_DEFAULTS);
+const vaultLimitsFor = (cadence: Cadence): VaultLimits => (cadence === "launch" ? { ...VAULT_DEFAULTS, ...LAUNCH_VAULT_LIMITS } : VAULT_DEFAULTS);
+
+/** The vault limits a v3 plan runs with. */
+export const vaultLimitsOf = (plan: PlanV3): VaultLimits => vaultLimitsFor(cadenceOf(plan));
+
+/** What the adapters' per-message caps are checked against, in wei. */
+export interface AdapterCapInputs {
+  baseCap: bigint;
+  bitCap: bigint;
+  minSendAmount: bigint;
+  maxBatchValue: bigint;
+  vaultMaxMessageValue: bigint;
+  maxEntryValue: bigint;
+}
+
+/** What breaks the adapters' per-message caps, as lines naming each value; none when they fit. The Base
+ * adapter's cap must hold a full batch (the front door's maxBatchValue), and its minSendAmount must be
+ * within it. The Bittensor adapter's must hold the largest payout message (the vault's maxMessageValue),
+ * a bounced deposit, which can be a whole batch (maxBatchValue), and the largest single entry (the
+ * vault's maxEntryValue, which goes alone if it must). Above a cap a send reverts MessageTooLarge, so the
+ * batch or payout would wait for new adapters (7 days). `view` names the adapters' view in the lines. */
+export function adapterCapProblems(c: AdapterCapInputs, view = "maxMessageValue"): string[] {
+  const tao = (wei: bigint) => `${formatEther(wei)} TAO`;
+  const base = `Base CcipBaseAdapter.${view} (${tao(c.baseCap)})`;
+  const bit = `Bittensor CcipBittensorAdapter.${view} (${tao(c.bitCap)})`;
+  const out: string[] = [];
+  if (c.baseCap < c.maxBatchValue) out.push(`${base} is below the front door's maxBatchValue (${tao(c.maxBatchValue)}): a full batch could never be sent`);
+  if (c.bitCap < c.vaultMaxMessageValue && c.vaultMaxMessageValue >= c.maxBatchValue) {
+    out.push(`${bit} is below the vault's maxMessageValue (${tao(c.vaultMaxMessageValue)}): a payout message that size could never be sent`);
+  } else if (c.bitCap < c.maxBatchValue) {
+    out.push(`${bit} is below the front door's maxBatchValue (${tao(c.maxBatchValue)}): a bounced batch could never be paid back`);
+  }
+  if (c.bitCap < c.maxEntryValue) out.push(`${bit} is below the vault's maxEntryValue (${tao(c.maxEntryValue)}): a payout entry that size could never be sent`);
+  if (c.minSendAmount > c.baseCap) out.push(`Base CcipBaseAdapter.minSendAmount (${tao(c.minSendAmount)}) is above its ${view} (${tao(c.baseCap)}): no amount could be sent`);
+  return out;
+}
+
+/** Refuses settings whose adapter caps don't cover the plan's batch value and vault limits. */
+export function checkAdapterCaps(
+  s: Pick<DeploySettings, "adapterMaxMessageValue" | "minSendAmount"> & { maxBatchValue: bigint },
+  limits: Pick<VaultLimits, "maxMessageValue" | "maxEntryValue">,
+): void {
+  const problems = adapterCapProblems({
+    baseCap: s.adapterMaxMessageValue.base,
+    bitCap: s.adapterMaxMessageValue.bittensor,
+    minSendAmount: s.minSendAmount,
+    maxBatchValue: s.maxBatchValue,
+    vaultMaxMessageValue: limits.maxMessageValue,
+    maxEntryValue: limits.maxEntryValue,
+  });
+  if (problems.length) throw new Error(`the adapters' per-message caps don't cover the plan's limits:\n  ${problems.join("\n  ")}\nnothing planned`);
+}
+
+/** Each adapter's per-message cap as deployed, and the view that reads it back. The a2b4412 build's
+ * adapters (the live v3-test record) have no maxMessageValue(): their cap is the constant
+ * MAX_MESSAGE_VALUE, 5,000 TAO. */
+export function adapterCapsOf(plan: PlanV3): { view: "maxMessageValue" | "MAX_MESSAGE_VALUE"; base: bigint; bittensor: bigint } {
+  if (buildOf(plan) === A2B4412_BUILD) return { view: "MAX_MESSAGE_VALUE", base: ADAPTER_MAX_MESSAGE_VALUE, bittensor: ADAPTER_MAX_MESSAGE_VALUE };
+  return { view: "maxMessageValue", ...settingsV3Of(plan).adapterMaxMessageValue };
+}
 
 /** Who holds each role: a launch plan's roles, else the test wallet in every one. */
 export const rolesOf = (plan: Plan | PlanV3): Roles => (isPlanV3(plan) && plan.roles ? plan.roles : TEST_ROLES);
@@ -177,6 +241,7 @@ function baseAdapterStep(nonce: number, a: Core, s: DeploySettings): PlannedStep
         remoteAdapter: a.bitAdapter,
         gasBase: s.baseGas.base,
         gasPerEntry: s.baseGas.perEntry,
+        maxMessageValue: s.adapterMaxMessageValue.base,
       },
       s.minSendAmount,
     ],
@@ -235,6 +300,7 @@ function bittensorSteps(bitNonce: number, a: Core, vaultColdkey: Hex, s: DeployS
           remoteAdapter: a.baseAdapter,
           gasBase: s.bitGas.base,
           gasPerEntry: s.bitGas.perEntry,
+          maxMessageValue: s.adapterMaxMessageValue.bittensor,
         },
         LIVE.ALPHA_VAULT,
       ],
@@ -349,6 +415,7 @@ export function buildPlanV3(baseNonce: number, bitNonce: number, vaultColdkey: H
   const r = planRoles(cadence, roles);
   const launch = cadence === "launch";
   const s = launch ? SETTINGS_V3_LAUNCH : SETTINGS_V3;
+  checkAdapterCaps(s, vaultLimitsFor(cadence));
   const addresses = {
     baseAdapter: at(baseNonce),
     oracle: at(baseNonce + 1),

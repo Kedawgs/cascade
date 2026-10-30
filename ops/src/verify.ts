@@ -4,7 +4,21 @@ import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
 import { codeFor } from "./builds.ts";
 import { cardinalityChecks } from "./cardinality.ts";
 import { BASE_V3, type ChainName, FRONT_DOOR_DEFAULTS, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
-import { buildOf, cadenceOf, isPlanV3, type Plan, type PlanV3, ROUTE_0, rolesOf, settingsOf, settingsV3Of, vaultLimitsOf } from "./plan.ts";
+import {
+  type AdapterCapInputs,
+  adapterCapProblems,
+  adapterCapsOf,
+  buildOf,
+  cadenceOf,
+  isPlanV3,
+  type Plan,
+  type PlanV3,
+  ROUTE_0,
+  rolesOf,
+  settingsOf,
+  settingsV3Of,
+  vaultLimitsOf,
+} from "./plan.ts";
 import {
   type Findings,
   gapFindings,
@@ -51,10 +65,11 @@ const same = (a: unknown, b: unknown) => {
 
 const ROUTE_FIELDS = ["kind", "router", "buyPath", "sellPath", "active"] as const;
 
-/** Every setting the spec's read-back lists, from the plan; a v3 plan adds the staker, the oracle, the
- * front door's delivery settings and the vault's reward cut. The guardians, keepers and treasury are the
- * plan's roles (the test wallet in a test plan). A launch plan's owners are left to ownershipChecks: the
- * test wallet until the final owner accepts, then the final owner. */
+/** Every setting the spec's read-back lists, from the plan; a v3 plan adds the adapters' per-message
+ * caps, the staker, the oracle, the front door's delivery settings and the vault's reward cut. The
+ * guardians, keepers and treasury are the plan's roles (the test wallet in a test plan). A launch plan's
+ * owners are left to ownershipChecks: the test wallet until the final owner accepts, then the final
+ * owner. */
 export function expectations(plan: Plan | PlanV3): Expectation[] {
   const a = plan.addresses;
   const s = settingsOf(plan);
@@ -110,6 +125,10 @@ export function expectations(plan: Plan | PlanV3): Expectation[] {
 
   const v = settingsV3Of(plan);
   const a3 = plan.addresses;
+  // an a2b4412 adapter has no maxMessageValue(): its constant MAX_MESSAGE_VALUE is its cap
+  const caps = adapterCapsOf(plan);
+  add("base", "CcipBaseAdapter", a3.baseAdapter, { [caps.view]: caps.base });
+  add("bittensor", "CcipBittensorAdapter", a3.bitAdapter, { [caps.view]: caps.bittensor });
   add("base", "CascadeFrontDoor", a3.frontDoor, {
     usdc: BASE_V3.USDC,
     keeper: roles.keeper,
@@ -258,6 +277,30 @@ export function v3AddressFailures(plan: PlanV3, actual: Map<string, unknown>): s
   return out;
 }
 
+/** The adapters' per-message caps against what is read back now (plan.ts's adapterCapProblems): the
+ * front door's batch value and the vault's message and entry limits can be raised after deploy, past what
+ * the adapters can carry. A value that couldn't be read fails too. */
+export function adapterCapFailures(plan: PlanV3, actual: Map<string, unknown>): string[] {
+  const { view } = adapterCapsOf(plan);
+  const reads: [keyof AdapterCapInputs, ChainName, string, string][] = [
+    ["baseCap", "base", "CcipBaseAdapter", view],
+    ["bitCap", "bittensor", "CcipBittensorAdapter", view],
+    ["minSendAmount", "base", "CcipBaseAdapter", "minSendAmount"],
+    ["maxBatchValue", "base", "CascadeFrontDoor", "maxBatchValue"],
+    ["vaultMaxMessageValue", "bittensor", "CascadeVault", "maxMessageValue"],
+    ["maxEntryValue", "bittensor", "CascadeVault", "maxEntryValue"],
+  ];
+  const values: Partial<AdapterCapInputs> = {};
+  const unread: string[] = [];
+  for (const [k, chain, contract, field] of reads) {
+    const x = readAt(actual, chain, contract, field);
+    if (whole(x)) values[k] = BigInt(x);
+    else unread.push(`${contract}.${field}`);
+  }
+  if (unread.length) return [`the adapters' per-message caps are not checked: ${unread.join(", ")} couldn't be read`];
+  return adapterCapProblems(values as AdapterCapInputs, view);
+}
+
 export function compare(expected: Expectation[], actual: Map<string, unknown>): string[] {
   return expected
     .filter((e) => !same(e.expected, actual.get(keyOf(e))))
@@ -362,6 +405,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
   let handoff: "accepted" | "pending" | undefined;
   if (isPlanV3(plan)) {
     failures.push(...v3AddressFailures(plan, actual));
+    failures.push(...adapterCapFailures(plan, actual));
     const allow = opts.allow ?? NO_ALLOW;
     await findings("the owners", async () => {
       const o = await ownershipChecks(ctx, plan);

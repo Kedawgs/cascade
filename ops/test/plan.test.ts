@@ -1,9 +1,10 @@
 import { type AbiFunction, encodeDeployData, encodeFunctionData, getContractAddress, type Hex, toFunctionSignature } from "viem";
 import { describe, expect, it } from "vitest";
 import { loadArtifact } from "../src/artifacts.ts";
-import { LIVE, PRECOMPILE, paths, SETTINGS, WALLET } from "../src/config.ts";
-import { buildPlan, buildPlanV3, isPlanV3 } from "../src/plan.ts";
+import { LAUNCH_VAULT_LIMITS, LIVE, PRECOMPILE, paths, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, VAULT_DEFAULTS, WALLET } from "../src/config.ts";
+import { type AdapterCapInputs, adapterCapProblems, adapterCapsOf, buildPlan, buildPlanV3, checkAdapterCaps, isPlanV3 } from "../src/plan.ts";
 import { castArg } from "../src/send.ts";
+import { ROLES } from "./launch-roles.ts";
 
 const coldkey: Hex = "0x9214633d20bb6247cb0475ea91ae10665a084404a04147ea48f673571263ad68";
 const at = (nonce: number) => getContractAddress({ from: WALLET, nonce: BigInt(nonce) });
@@ -45,6 +46,7 @@ describe("buildPlan", () => {
         remoteAdapter: plan.addresses.bitAdapter,
         gasBase: SETTINGS.baseGas.base,
         gasPerEntry: SETTINGS.baseGas.perEntry,
+        maxMessageValue: 5_000n * 10n ** 18n,
       },
       SETTINGS.minSendAmount,
     ]);
@@ -76,6 +78,7 @@ describe("buildPlan", () => {
         remoteAdapter: plan.addresses.baseAdapter,
         gasBase: SETTINGS.bitGas.base,
         gasPerEntry: SETTINGS.bitGas.perEntry,
+        maxMessageValue: 5_000n * 10n ** 18n,
       },
       LIVE.ALPHA_VAULT,
     ]);
@@ -173,9 +176,34 @@ describe("buildPlanV3", () => {
         remoteAdapter: plan.addresses.bitAdapter,
         gasBase: 540_000n,
         gasPerEntry: 26_450n,
+        // the test cadence keeps the lane's whole 5,000 TAO, as before the cap was a constructor argument
+        maxMessageValue: 5_000n * 10n ** 18n,
       },
       10n ** 16n,
     ]);
+    expect(step("bitAdapter").args[0]).toMatchObject({ maxMessageValue: 5_000n * 10n ** 18n });
+  });
+
+  it("a launch caps each adapter's messages at 50 TAO", () => {
+    const launch = buildPlanV3(3, 20, coldkey, "launch", ROLES);
+    const cap = (id: string) => (launch.steps.find((s) => s.id === id)!.args[0] as { maxMessageValue: bigint }).maxMessageValue;
+    expect([cap("baseAdapter"), cap("bitAdapter")]).toEqual([50n * 10n ** 18n, 50n * 10n ** 18n]);
+    expect(adapterCapsOf(launch)).toEqual({ view: "maxMessageValue", base: 50n * 10n ** 18n, bittensor: 50n * 10n ** 18n });
+    expect(adapterCapsOf(plan)).toEqual({ view: "maxMessageValue", base: 5_000n * 10n ** 18n, bittensor: 5_000n * 10n ** 18n });
+  });
+
+  it("an a2b4412 plan's adapters have no cap of their own: the constant MAX_MESSAGE_VALUE, 5,000 TAO", () => {
+    const { build: _, ...old } = plan;
+    expect(adapterCapsOf(old as typeof plan)).toEqual({ view: "MAX_MESSAGE_VALUE", base: 5_000n * 10n ** 18n, bittensor: 5_000n * 10n ** 18n });
+  });
+
+  it("both cadences' caps cover their batch, payout and entry limits", () => {
+    for (const [cadence, s, limits] of [
+      ["test", SETTINGS_V3, VAULT_DEFAULTS],
+      ["launch", SETTINGS_V3_LAUNCH, { ...VAULT_DEFAULTS, ...LAUNCH_VAULT_LIMITS }],
+    ] as const) {
+      expect(() => checkAdapterCaps(s, limits), cadence).not.toThrow();
+    }
   });
 
   it("deploys the TWAP oracle over the TAO/WETH 0.3% and WETH/USDC 0.05% pools", () => {
@@ -286,6 +314,8 @@ describe("buildPlanV3", () => {
       [plan.addresses.vault, "CascadeVault"],
       [plan.addresses.bitAdapter, "CcipBittensorAdapter"],
     ]);
+    // the adapters' Config carries the per-message cap
+    for (const id of ["baseAdapter", "bitAdapter"]) expect(Object.keys(step(id).args[0] as object), id).toContain("maxMessageValue");
     for (const s of plan.steps) {
       if (s.kind === "create") {
         const a = loadArtifact(dir, s.contract.split(":")[1]);
@@ -317,5 +347,53 @@ describe("buildPlanV3", () => {
     expect(Object.keys(v2.addresses)).toEqual(["baseAdapter", "frontDoor", "bitAdapter", "vault"]);
     expect(isPlanV3(v2)).toBe(false);
     expect(isPlanV3(plan)).toBe(true);
+  });
+});
+
+describe("the adapters' per-message caps", () => {
+  const TAO = 10n ** 18n;
+  /** The launch's numbers: 50 TAO caps over a 10 TAO batch, a 15 TAO payout message and a 10 TAO entry. */
+  const ok: AdapterCapInputs = { baseCap: 50n * TAO, bitCap: 50n * TAO, minSendAmount: 10n ** 16n, maxBatchValue: 10n * TAO, vaultMaxMessageValue: 15n * TAO, maxEntryValue: 10n * TAO };
+
+  it("pass when every cap covers what it carries, equal included", () => {
+    expect(adapterCapProblems(ok)).toEqual([]);
+    expect(adapterCapProblems({ ...ok, baseCap: 10n * TAO, bitCap: 15n * TAO, minSendAmount: 10n * TAO })).toEqual([]);
+  });
+
+  it("the Base adapter's must hold a full batch", () => {
+    expect(adapterCapProblems({ ...ok, maxBatchValue: 51n * TAO })).toEqual([
+      "Base CcipBaseAdapter.maxMessageValue (50 TAO) is below the front door's maxBatchValue (51 TAO): a full batch could never be sent",
+      "Bittensor CcipBittensorAdapter.maxMessageValue (50 TAO) is below the front door's maxBatchValue (51 TAO): a bounced batch could never be paid back",
+    ]);
+  });
+
+  it("the Bittensor adapter's must hold the vault's largest payout message and entry", () => {
+    expect(adapterCapProblems({ ...ok, vaultMaxMessageValue: 60n * TAO })).toEqual([
+      "Bittensor CcipBittensorAdapter.maxMessageValue (50 TAO) is below the vault's maxMessageValue (60 TAO): a payout message that size could never be sent",
+    ]);
+    expect(adapterCapProblems({ ...ok, bitCap: 9n * TAO, vaultMaxMessageValue: 9n * TAO, maxBatchValue: 9n * TAO })).toEqual([
+      "Bittensor CcipBittensorAdapter.maxMessageValue (9 TAO) is below the vault's maxEntryValue (10 TAO): a payout entry that size could never be sent",
+    ]);
+  });
+
+  it("the Base adapter's minimum send must be within its cap", () => {
+    expect(adapterCapProblems({ ...ok, minSendAmount: 51n * TAO })).toEqual([
+      "Base CcipBaseAdapter.minSendAmount (51 TAO) is above its maxMessageValue (50 TAO): no amount could be sent",
+    ]);
+  });
+
+  it("names the view it read", () => {
+    expect(adapterCapProblems({ ...ok, maxBatchValue: 60n * TAO }, "MAX_MESSAGE_VALUE")[0]).toMatch(/^Base CcipBaseAdapter\.MAX_MESSAGE_VALUE \(50 TAO\)/);
+  });
+
+  it("a plan whose settings break them is refused, saying which", () => {
+    const tooBig = { ...SETTINGS_V3_LAUNCH, maxBatchValue: 60n * TAO };
+    expect(() => checkAdapterCaps(tooBig, { ...VAULT_DEFAULTS, ...LAUNCH_VAULT_LIMITS })).toThrow(
+      /the adapters' per-message caps don't cover the plan's limits:\n {2}Base CcipBaseAdapter\.maxMessageValue \(50 TAO\) is below the front door's maxBatchValue \(60 TAO\).*nothing planned/s,
+    );
+    // a Bittensor cap lowered below the vault's default 4,000 TAO payout message
+    expect(() => checkAdapterCaps({ ...SETTINGS_V3, adapterMaxMessageValue: { base: 5_000n * TAO, bittensor: 3_000n * TAO } }, VAULT_DEFAULTS)).toThrow(
+      /Bittensor CcipBittensorAdapter\.maxMessageValue \(3000 TAO\) is below the vault's maxMessageValue \(4000 TAO\)/,
+    );
   });
 });

@@ -24,6 +24,7 @@ import { type DeploymentRecord, loadRecord, saveRecord } from "../src/record.ts"
 import type { Rpc } from "../src/rpc.ts";
 import {
   activationLogs,
+  adapterCapFailures,
   codeMismatch,
   compare,
   type Expectation,
@@ -54,8 +55,10 @@ describe("verify v3", () => {
   const added = exp3.filter((e) => !v2Keys.has(keyOf(e)));
   const expected = (contract: string, field: string) => exp3.find((e) => e.contract === contract && e.field === field)?.expected;
 
-  it("reads back every v3 setting: front door, staker, oracle and the vault's reward cut", () => {
+  it("reads back every v3 setting: the adapters' caps, front door, staker, oracle and the vault's reward cut", () => {
     expect(added.map((e) => `${e.contract}.${e.field}`)).toEqual([
+      "CcipBaseAdapter.maxMessageValue",
+      "CcipBittensorAdapter.maxMessageValue",
       "CascadeFrontDoor.usdc",
       "CascadeFrontDoor.keeper",
       "CascadeFrontDoor.swapper",
@@ -83,6 +86,7 @@ describe("verify v3", () => {
       "CascadeVault.treasury",
       "CascadeVault.rewardCutBps",
     ]);
+    expect([expected("CcipBaseAdapter", "maxMessageValue"), expected("CcipBittensorAdapter", "maxMessageValue")]).toEqual([5_000n * 10n ** 18n, 5_000n * 10n ** 18n]);
     expect(expected("CascadeFrontDoor", "usdc")).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
     expect(expected("CascadeFrontDoor", "swapper")).toBe(plan3.addresses.staker);
     expect(expected("CascadeFrontDoor", "oracle")).toBe(plan3.addresses.oracle);
@@ -253,7 +257,7 @@ describe("activationLogs", () => {
 });
 
 type Ranges = { start: number; length: number }[];
-/** The a2b4412 build's front door and staker, read straight from the checked-in data. */
+/** The a2b4412 build's contracts that differ from this build's, read straight from the checked-in data. */
 const A2B4412 = JSON.parse(readFileSync(new URL("../builds/a2b4412.json", import.meta.url), "utf8")) as {
   build: string;
   contracts: Record<string, { deployedBytecode: Hex; immutableReferences: Record<string, Ranges> }>;
@@ -266,7 +270,7 @@ const asDeployed = (code: Hex, ranges: Ranges): Hex => {
   return `0x${b.join("")}`;
 };
 const contractsDir = paths({}).contractsDir;
-/** This build's code for all six contracts, and a2b4412's: its own front door and staker, the rest the same. */
+/** This build's code for all six contracts, and a2b4412's: its own adapters, front door, staker and vault, the oracle the same. */
 const THIS_CODE: Record<string, Hex> = Object.fromEntries(
   CONTRACTS.map((n) => {
     const a = loadArtifact(contractsDir, n);
@@ -277,7 +281,14 @@ const A2B4412_CODE: Record<string, Hex> = {
   ...THIS_CODE,
   ...Object.fromEntries(Object.entries(A2B4412.contracts).map(([n, c]) => [n, asDeployed(c.deployedBytecode, Object.values(c.immutableReferences).flat())])),
 };
-const DIFFERS = ["Base CascadeFrontDoor: deployed code differs from the build", "Base CascadeStaker: deployed code differs from the build"];
+/** What verify says of the five contracts the two builds differ in, in its order. */
+const DIFFERS = [
+  "Base CcipBaseAdapter: deployed code differs from the build",
+  "Base CascadeFrontDoor: deployed code differs from the build",
+  "Bittensor CcipBittensorAdapter: deployed code differs from the build",
+  "Bittensor CascadeVault: deployed code differs from the build",
+  "Base CascadeStaker: deployed code differs from the build",
+];
 
 const V3_TEST_COLDKEY: Hex = "0x34680a431a7295c7df20c0482c37e06788390d7c8ad1f6abb7693394a269a0fa";
 const PEER: Hex = `0x${"5e".repeat(32)}`;
@@ -372,24 +383,29 @@ describe("verify compares each contract with the build its plan was deployed fro
   const marked = buildPlanV3(5, 8, V3_TEST_COLDKEY);
   const old = unmarked(marked);
 
-  it("the checked-in a2b4412 data holds the front door and staker, which differ from this build's", () => {
+  it("the checked-in a2b4412 data holds the adapters, front door, staker and vault, which differ from this build's", () => {
     expect(A2B4412.build).toBe("a2b4412");
-    expect(Object.keys(A2B4412.contracts)).toEqual(["CascadeFrontDoor", "CascadeStaker"]);
-    for (const n of ["CascadeFrontDoor", "CascadeStaker"]) {
+    expect(Object.keys(A2B4412.contracts)).toEqual(["CcipBaseAdapter", "CascadeFrontDoor", "CascadeStaker", "CcipBittensorAdapter", "CascadeVault"]);
+    for (const n of Object.keys(A2B4412.contracts)) {
       expect(A2B4412.contracts[n].deployedBytecode, n).not.toBe(loadArtifact(contractsDir, n).deployedBytecode);
     }
+    // the a2b4412 adapters have no per-message cap view; this build's do
+    const capView = (code: Hex) => code.includes(toFunctionSelector("maxMessageValue()").slice(2));
+    expect(capView(A2B4412.contracts.CcipBaseAdapter.deployedBytecode)).toBe(false);
+    expect(capView(A2B4412.contracts.CcipBittensorAdapter.deployedBytecode)).toBe(false);
+    expect(capView(loadArtifact(contractsDir, "CcipBaseAdapter").deployedBytecode)).toBe(true);
   });
 
   it("a new v3 plan records the build it is deployed from", () => {
-    expect((marked as PlanV3 & { build?: string }).build).toBe("launch-cadence");
-    expect((buildPlanV3(5, 8, V3_TEST_COLDKEY, "launch", ROLES) as PlanV3 & { build?: string }).build).toBe("launch-cadence");
+    expect((marked as PlanV3 & { build?: string }).build).toBe("preaudit");
+    expect((buildPlanV3(5, 8, V3_TEST_COLDKEY, "launch", ROLES) as PlanV3 & { build?: string }).build).toBe("preaudit");
   });
 
-  it("a plan with no build (deployed from a2b4412) verifies against a2b4412's front door and staker, with that build's immutable positions", async () => {
+  it("a plan with no build (deployed from a2b4412) verifies against a2b4412's contracts, with that build's immutable positions", async () => {
     expect(await verifyOn(recordOf(old), A2B4412_CODE)).toMatchObject({ ok: true, failures: [] });
   });
 
-  it("the same plan given this build's front door and staker fails, naming both", async () => {
+  it("the same plan given this build's contracts fails, naming each that differs", async () => {
     expect(await verifyOn(recordOf(old), THIS_CODE)).toMatchObject({ ok: false, failures: DIFFERS });
   });
 
@@ -398,12 +414,12 @@ describe("verify compares each contract with the build its plan was deployed fro
     expect(await verifyOn(recordOf(marked), A2B4412_CODE)).toMatchObject({ ok: false, failures: DIFFERS });
   });
 
-  it("every other contract is compared with this build either way", async () => {
+  it("each contract is compared with its build's code: one byte off fails it", async () => {
     for (const [plan, code] of [
       [old, A2B4412_CODE],
       [marked, THIS_CODE],
     ] as const) {
-      for (const n of ["CcipBaseAdapter", "CcipBittensorAdapter", "CascadeVault", "CascadeTwapOracle"]) {
+      for (const n of CONTRACTS) {
         const chain = n === "CcipBittensorAdapter" || n === "CascadeVault" ? "Bittensor" : "Base";
         // one byte off at the end, outside every immutable
         const other = { ...code, [n]: `${code[n].slice(0, -2)}${code[n].endsWith("00") ? "01" : "00"}` as Hex };
@@ -458,10 +474,96 @@ describe("verify compares each contract with the build its plan was deployed fro
   });
 
   it("refuses a plan from a build this tool does not know, before reading anything", async () => {
-    const rec = recordOf({ ...marked, build: "someday" } as PlanV3);
-    const chains = chainsFor(rec, THIS_CODE);
-    await expect(verify(chains.ctx, rec)).rejects.toThrow(/contracts build "someday" this tool does not know/);
-    expect(chains.calls).toEqual([]);
+    // launch-cadence, the build before the pre-audit changes, was never deployed and is no longer carried
+    for (const build of ["someday", "launch-cadence"]) {
+      const rec = recordOf({ ...marked, build } as PlanV3);
+      const chains = chainsFor(recordOf(marked), THIS_CODE);
+      await expect(verify(chains.ctx, rec)).rejects.toThrow(`contracts build "${build}" this tool does not know (an unfinished plan can be replaced with deploy --new-plan)`);
+      expect(chains.calls).toEqual([]);
+    }
+  });
+});
+
+describe("verify checks the adapters' per-message caps", () => {
+  const TAO = 10n ** 18n;
+  const marked = buildPlanV3(5, 8, V3_TEST_COLDKEY);
+  const old = unmarked(marked);
+  const capSel = toFunctionSelector("maxMessageValue()");
+  /** The chains, with `answer` overriding the calls it returns a value for (by selector and address). */
+  const overriding = (rec: DeploymentRecord, code: Record<string, Hex>, answer: (to: Address, data: Hex) => Promise<unknown> | undefined) => {
+    const chains = chainsFor(rec, code);
+    const request = chains.ctx.rpc.request;
+    const rpc: Rpc = {
+      request: (c, m, p) => {
+        const { to, data } = (p[0] ?? {}) as { to: Address; data: Hex };
+        return (m === "eth_call" && answer(to, data)) || request(c, m, p);
+      },
+    };
+    return { ...chains.ctx, rpc };
+  };
+  const isAdapter = (plan: PlanV3, to: Address) => [plan.addresses.baseAdapter, plan.addresses.bitAdapter].some((x) => x.toLowerCase() === to.toLowerCase());
+
+  it("an a2b4412 record's adapters, which have no maxMessageValue(), pass on their constant MAX_MESSAGE_VALUE", async () => {
+    // as on chain: the old adapters revert on maxMessageValue()
+    const ctx = overriding(recordOf(old), A2B4412_CODE, (to, data) => (data.startsWith(capSel) && isAdapter(old, to) ? Promise.reject(new Error("execution reverted")) : undefined));
+    expect(await verify(ctx, recordOf(old))).toMatchObject({ ok: true, failures: [] });
+    const fields = expectations(old).filter((e) => e.contract.startsWith("Ccip") && /message/i.test(e.field));
+    expect(fields.map((e) => [e.contract, e.field, e.expected])).toEqual([
+      ["CcipBaseAdapter", "MAX_MESSAGE_VALUE", 5_000n * TAO],
+      ["CcipBittensorAdapter", "MAX_MESSAGE_VALUE", 5_000n * TAO],
+    ]);
+  });
+
+  it("a record of this build whose adapter has no maxMessageValue() fails, saying so", async () => {
+    const ctx = overriding(recordOf(marked), THIS_CODE, (to, data) =>
+      data.startsWith(capSel) && to.toLowerCase() === marked.addresses.bitAdapter.toLowerCase() ? Promise.reject(new Error("execution reverted")) : undefined,
+    );
+    const r = await verify(ctx, recordOf(marked));
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([
+      `Bittensor CcipBittensorAdapter.maxMessageValue: expected ${5_000n * TAO}, found unreadable (execution reverted)`,
+      "the adapters' per-message caps are not checked: CcipBittensorAdapter.maxMessageValue couldn't be read",
+    ]);
+  });
+
+  it("a vault or front door limit raised past an adapter's cap fails", async () => {
+    // the vault's payout message raised to 5,000 TAO, past a Bittensor adapter deployed with 4,500
+    const v = toFunctionSelector("maxMessageValue()");
+    const ctx = overriding(recordOf(marked), THIS_CODE, (to, data) => {
+      if (!data.startsWith(v)) return undefined;
+      if (to.toLowerCase() === marked.addresses.vault.toLowerCase()) return Promise.resolve(numberToHex(5_000n * TAO, { size: 32 }));
+      if (to.toLowerCase() === marked.addresses.bitAdapter.toLowerCase()) return Promise.resolve(numberToHex(4_500n * TAO, { size: 32 }));
+      return undefined;
+    });
+    const r = await verify(ctx, recordOf(marked));
+    expect(r.failures).toEqual([
+      `Bittensor CcipBittensorAdapter.maxMessageValue: expected ${5_000n * TAO}, found ${4_500n * TAO}`,
+      `Bittensor CascadeVault.maxMessageValue: expected ${4_000n * TAO}, found ${5_000n * TAO}`,
+      "Bittensor CcipBittensorAdapter.maxMessageValue (4500 TAO) is below the vault's maxMessageValue (5000 TAO): a payout message that size could never be sent",
+    ]);
+  });
+
+  it("checks each rule on the values read back, under the view the plan's adapters have", () => {
+    const launch = buildPlanV3(5, 8, V3_TEST_COLDKEY, "launch", ROLES);
+    const right = (plan: PlanV3) => new Map([...expectations(plan), ...limitExpectations(plan)].map((e) => [keyOf(e), e.expected]));
+    expect(adapterCapFailures(launch, right(launch))).toEqual([]);
+    expect(adapterCapFailures(marked, right(marked))).toEqual([]);
+    expect(adapterCapFailures(old, right(old))).toEqual([]);
+    const at = (chain: ChainName, contract: string, field: string) => keyOf({ chain, contract, field });
+    // a launch's front door raised to 60 TAO batches, past both 50 TAO caps
+    const bigBatch = new Map(right(launch)).set(at("base", "CascadeFrontDoor", "maxBatchValue"), 60n * TAO);
+    expect(adapterCapFailures(launch, bigBatch)).toEqual([
+      "Base CcipBaseAdapter.maxMessageValue (50 TAO) is below the front door's maxBatchValue (60 TAO): a full batch could never be sent",
+      "Bittensor CcipBittensorAdapter.maxMessageValue (50 TAO) is below the front door's maxBatchValue (60 TAO): a bounced batch could never be paid back",
+    ]);
+    // the old adapters' constant is read and named
+    const oldBig = new Map(right(old)).set(at("bittensor", "CascadeVault", "maxEntryValue"), 5_001n * TAO);
+    expect(adapterCapFailures(old, oldBig)).toEqual([
+      "Bittensor CcipBittensorAdapter.MAX_MESSAGE_VALUE (5000 TAO) is below the vault's maxEntryValue (5001 TAO): a payout entry that size could never be sent",
+    ]);
+    // viem reads small uints as numbers: compared by value
+    const asNumber = new Map(right(launch)).set(at("base", "CcipBaseAdapter", "minSendAmount"), 1);
+    expect(adapterCapFailures(launch, asNumber)).toEqual([]);
   });
 });
 

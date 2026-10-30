@@ -458,8 +458,8 @@ describe("deploy and the contracts build a plan was made with", () => {
   it("a new v3 plan records this build", async () => {
     const w = world({ base: 4, bittensor: 9 });
     const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
-    expect(rec.plan).toMatchObject({ version: 3, build: "launch-cadence" });
-    expect(loadRecord(w.recordPath)!.plan).toMatchObject({ build: "launch-cadence" });
+    expect(rec.plan).toMatchObject({ version: 3, build: "preaudit" });
+    expect(loadRecord(w.recordPath)!.plan).toMatchObject({ build: "preaudit" });
   });
 
   it("refuses to resume an unfinished plan from the a2b4412 build: it would mix two builds' contracts", async () => {
@@ -488,15 +488,19 @@ describe("deploy and the contracts build a plan was made with", () => {
     saveRecord(w.recordPath, a2b4412Record(["baseAdapter"]));
     const fresh = await deploy(w.ctx, w.recordPath, { newPlan: true, v3: true }, w.deps);
     expect(readdirSync(w.dir).some((n) => /^rec\.abandoned-.*\.json$/.test(n))).toBe(true);
-    expect(fresh.plan).toMatchObject({ version: 3, build: "launch-cadence", baseNonce: 15, bitNonce: 16 });
+    expect(fresh.plan).toMatchObject({ version: 3, build: "preaudit", baseNonce: 15, bitNonce: 16 });
     expect(w.sent).toEqual(V3);
   });
 
-  it("refuses to resume a plan from a build this tool does not know", async () => {
-    const w = world({ base: 4, bittensor: 9 });
-    const rec = a2b4412Record([]);
-    saveRecord(w.recordPath, { ...rec, plan: { ...rec.plan, build: "someday" } as DeploymentRecord["plan"] });
-    await expect(deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps)).rejects.toThrow(/contracts build "someday" this tool does not know/);
-    expect(w.sent).toEqual([]);
+  it("refuses to resume a plan from a build this tool does not know, launch-cadence's included (never deployed, its adapters had no cap)", async () => {
+    for (const build of ["someday", "launch-cadence"]) {
+      const w = world({ base: 4, bittensor: 9 });
+      const rec = a2b4412Record([]);
+      saveRecord(w.recordPath, { ...rec, plan: { ...rec.plan, build } as DeploymentRecord["plan"] });
+      await expect(deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps)).rejects.toThrow(
+        `contracts build "${build}" this tool does not know (an unfinished plan can be replaced with deploy --new-plan)`,
+      );
+      expect(w.sent).toEqual([]);
+    }
   });
 });

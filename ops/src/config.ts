@@ -67,11 +67,21 @@ export const BASE_V3 = {
   QUOTER_V2: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
 } as const satisfies Record<string, Address>;
 
+const TAO = 10n ** 18n;
+
+/** The adapters' MAX_MESSAGE_VALUE, ForeverMoney's 5,000 TAO pool bucket: the most an adapter's own
+ * per-message cap (maxMessageValue) may be, and the whole cap of the a2b4412 build's adapters, which
+ * have no maxMessageValue of their own. */
+export const ADAPTER_MAX_MESSAGE_VALUE = 5_000n * TAO;
+
 /** What a deployment plan reads from its settings (v2 and v3 alike). */
 export interface DeploySettings {
   baseGas: { base: bigint; perEntry: bigint };
   minSendAmount: bigint;
   bitGas: { base: bigint; perEntry: bigint };
+  /** Each adapter's per-message cap, its constructor's Config.maxMessageValue (0 < cap <= 5,000 TAO): a
+   * send above it reverts MessageTooLarge. What each must cover is plan.ts's adapterCapProblems. */
+  adapterMaxMessageValue: { base: bigint; bittensor: bigint };
   batchInterval: number;
   minDeposit: bigint;
   depositCap: bigint;
@@ -88,6 +98,9 @@ export const SETTINGS = {
   baseGas: { base: 540_000n, perEntry: 26_450n },
   minSendAmount: 10n ** 16n,
   bitGas: { base: 120_000n, perEntry: 29_900n },
+  /** The lane's whole 5,000 TAO, as before the cap was a constructor argument: a test deploy behaves as
+   * it did. */
+  adapterMaxMessageValue: { base: ADAPTER_MAX_MESSAGE_VALUE, bittensor: ADAPTER_MAX_MESSAGE_VALUE },
   batchInterval: 600,
   minDeposit: 10n ** 16n,
   depositCap: 15n * 10n ** 16n,
@@ -165,8 +178,6 @@ export const VAULT_DEFAULTS: VaultLimits = {
   unstakeMarginRao: 0n,
 };
 
-const TAO = 10n ** 18n;
-
 /** The vault limits a launch sets during deploy (before the vault's hand-off) and verify checks, sized
  * for the 40 TAO deposit cap: a vault of about 40-60 TAO. The defaults were sized for a 1,000 TAO beta.
  * The reasoning, and which are product decisions, is in ops/LAUNCH-SETTINGS.md. The others keep their
@@ -214,15 +225,20 @@ export type Cadence = "test" | "launch";
 
 const { treasury: _testTreasury, ...SETTINGS_V3_NO_TREASURY } = SETTINGS_V3;
 
-/** The launch: hourly batches, a day's payout delay and the launch's vault limits (LAUNCH_VAULT_LIMITS);
- * the rest as the test settings, the 40 TAO deposit cap, 10 TAO batches and the 0.0001 ETH redeem
- * request fee included. It has no treasury: a launch plan takes its treasury, like its owner, guardian
- * and keeper, from its roles (roles.ts), never the test wallet. */
+/** The launch: hourly batches, a day's payout delay, the launch's vault limits (LAUNCH_VAULT_LIMITS) and
+ * 50 TAO adapter caps; the rest as the test settings, the 40 TAO deposit cap, 10 TAO batches and the
+ * 0.0001 ETH redeem request fee included. It has no treasury: a launch plan takes its treasury, like its
+ * owner, guardian and keeper, from its roles (roles.ts), never the test wallet. */
 export const SETTINGS_V3_LAUNCH = {
   ...SETTINGS_V3_NO_TREASURY,
   batchInterval: 3_600,
   payoutDelay: 86_400,
   vaultLimits: LAUNCH_VAULT_LIMITS,
+  /** One message carries at most 50 TAO either way: five times the 10 TAO batch and above the 15 TAO
+   * payout message, so a stolen or buggy send moves at most that, not the lane's 5,000. Raising the
+   * front door's maxBatchValue or the vault's maxMessageValue or maxEntryValue past 50 TAO needs new
+   * adapters first (7 days through the bridge registry). */
+  adapterMaxMessageValue: { base: 50n * TAO, bittensor: 50n * TAO },
 } as const;
 
 /** The keeper's longest wait before closing a batch with entries: null = no extra wait, close as soon as

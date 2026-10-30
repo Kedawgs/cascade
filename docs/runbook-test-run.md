@@ -192,8 +192,11 @@ refuses the old v2 record (`test-2026-10.json`).
    anything fails, stop and do not stake.
    A record's code is checked against the contracts build it was deployed from: one whose plan has no
    `build` (the existing `v3-test.json`) against the a2b4412 build kept in `ops/builds/a2b4412.json`
-   for the front door and staker, a newer one (`"build": "launch-cadence"`) against `contracts/out`;
-   `deploy` will not resume an unfinished plan from the older build (`--new-plan` starts a new one).
+   for the adapters, front door, staker and vault (its adapters have no `maxMessageValue()`, so their
+   cap is read as the constant `MAX_MESSAGE_VALUE`, 5,000 TAO), a newer one (`"build": "preaudit"`)
+   against `contracts/out`; `deploy` will not resume an unfinished plan from an older build
+   (`--new-plan` starts a new one). verify also fails if the front door's batch value or the vault's
+   payout message or entry limit is above what the adapters' per-message caps can carry.
 7. **Point the site at v3.** `pnpm ops web-config --live` writes `web/.env.local` with the
    deployment's public addresses (never a key). Then in `web/` run `pnpm dev` and open
    http://localhost:3000. The site reads `.env.local` only when it starts, so restart `pnpm dev` if

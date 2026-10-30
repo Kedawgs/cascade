@@ -332,7 +332,7 @@ export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: Dep
   }
   if (rec && isPlanV3(rec.plan) && buildOf(rec.plan) !== CONTRACTS_BUILD && !finished(rec)) {
     throw new Error(
-      `${path} holds an unfinished v3 plan from an earlier contracts build (${buildOf(rec.plan)}); this build's front door and staker differ, so resuming it would mix the two: run deploy --new-plan to plan anew; nothing sent`,
+      `${path} holds an unfinished v3 plan from an earlier contracts build (${buildOf(rec.plan)}); this build's contracts differ, so resuming it would mix the two: run deploy --new-plan to plan anew; nothing sent`,
     );
   }
   if (!rec) {

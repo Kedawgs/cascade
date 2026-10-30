@@ -1,4 +1,5 @@
-import { type AbiFunction, encodeFunctionData, type Hex, parseEther, toFunctionSignature } from "viem";
+import { readFileSync } from "node:fs";
+import { type AbiFunction, encodeFunctionData, type Hex, parseEther, parseUnits, toFunctionSignature } from "viem";
 import { describe, expect, it } from "vitest";
 import { loadArtifact } from "../src/artifacts.ts";
 import { LAUNCH_VAULT_LIMITS, paths, SETTINGS_V3, SETTINGS_V3_LAUNCH, VAULT_DEFAULTS } from "../src/config.ts";
@@ -10,6 +11,18 @@ import { ROLES } from "./launch-roles.ts";
 
 const L = LAUNCH_VAULT_LIMITS;
 const TAO = 10n ** 18n;
+
+const source = (path: string) => readFileSync(new URL(`../../contracts/src/${path}`, import.meta.url), "utf8");
+const VAULT_SOURCE = source("CascadeVault.sol");
+const FRONT_DOOR_SOURCE = source("CascadeFrontDoor.sol");
+const ADAPTER_SOURCE = source("adapters/CcipAdapterBase.sol");
+/** A constant's value in a contract's source: 5_000e18, 0.1e18, 1e9, 1 hours. */
+const bound = (src: string) => (name: string) => {
+  const m = src.match(new RegExp(`constant ${name} = ([\\d_.]+)(?:e(\\d+)| (hours))?;`));
+  if (!m) throw new Error(`no constant ${name}`);
+  const n = m[1].replaceAll("_", "");
+  return m[3] ? BigInt(n) * 3_600n : parseUnits(n, Number(m[2] ?? 0));
+};
 const launch = buildPlanV3(4, 9, COLDKEY, "launch", ROLES);
 const test = buildPlanV3(4, 9, COLDKEY);
 const step = (id: string) => launch.steps.find((s) => s.id === id)!;
@@ -50,10 +63,29 @@ describe("the launch's vault limits, sized for a 40 TAO deposit cap", () => {
     expect(SETTINGS_V3_LAUNCH.redeemRequestFee).toBe(10n ** 14n);
   });
 
-  it("are values setters accept: entry within message, 1 to 100 entries a chunk, bps at most 100%", () => {
+  it("are values setters accept: entry within message, 1 to 100 entries a chunk, and within the contracts' hard bounds", () => {
     expect(L.maxEntryValue <= L.maxMessageValue).toBe(true);
     expect(L.minChunk >= 1 && L.minChunk <= 100).toBe(true);
-    expect(L.maxDailyOutflowBps <= 10_000n && L.maxFeeBps <= 10_000n).toBe(true);
+    const vault = bound(VAULT_SOURCE);
+    // the bounds as the source writes them
+    expect([vault("MIN_PAYOUT_DELAY"), vault("MAX_OUTFLOW_BPS"), vault("MAX_MIN_DAILY_OUTFLOW"), vault("MAX_FEE_ABS"), bound(FRONT_DOOR_SOURCE)("MAX_REDEEM_REQUEST_FEE")]).toEqual([
+      3_600n,
+      5_000n,
+      100n * TAO,
+      parseEther("0.1"),
+      parseEther("0.001"),
+    ]);
+    expect(L.maxDailyOutflowBps <= vault("MAX_OUTFLOW_BPS") && L.minDailyOutflow <= vault("MAX_MIN_DAILY_OUTFLOW")).toBe(true);
+    expect(L.maxMessageValue <= vault("MAX_MESSAGE_VALUE")).toBe(true);
+    expect(L.maxFeeBps <= vault("MAX_FEE_BPS") && L.maxFeeAbs <= vault("MAX_FEE_ABS")).toBe(true);
+    // both cadences set the payout delay: 1 hour (the vault's floor, which the test cadence sits on) to 7 days
+    for (const s of [SETTINGS_V3, SETTINGS_V3_LAUNCH]) {
+      expect(BigInt(s.payoutDelay) >= vault("MIN_PAYOUT_DELAY") && s.payoutDelay <= 7 * 86_400, String(s.payoutDelay)).toBe(true);
+      // the front door's batch value and redeem request fee, and the adapters' caps
+      expect(s.maxBatchValue <= bound(FRONT_DOOR_SOURCE)("MAX_BATCH_VALUE")).toBe(true);
+      expect(s.redeemRequestFee <= bound(FRONT_DOOR_SOURCE)("MAX_REDEEM_REQUEST_FEE")).toBe(true);
+      for (const cap of Object.values(s.adapterMaxMessageValue)) expect(cap > 0n && cap <= bound(ADAPTER_SOURCE)("MAX_MESSAGE_VALUE")).toBe(true);
+    }
   });
 
   it("bound a forced exit to a quarter of a 40-60 TAO vault a day (the old 100 TAO floor was all of it)", () => {

@@ -40,9 +40,19 @@ describe("cadence", () => {
     expect(get("CascadeVault", "rewardCutBps")).toBe(SETTINGS_V3_LAUNCH.rewardCutBps);
   });
 
-  it("launch settings change the batch interval, the payout delay and the vault's limits, and take no treasury from the test settings", () => {
+  it("launch settings change the batch interval, the payout delay, the vault's limits and the adapters' caps, and take no treasury from the test settings", () => {
     const { treasury: _, ...rest } = SETTINGS_V3;
-    expect(SETTINGS_V3_LAUNCH).toEqual({ ...rest, batchInterval: 3_600, payoutDelay: 86_400, vaultLimits: LAUNCH_VAULT_LIMITS });
+    const TAO = 10n ** 18n;
+    expect(SETTINGS_V3_LAUNCH).toEqual({
+      ...rest,
+      batchInterval: 3_600,
+      payoutDelay: 86_400,
+      vaultLimits: LAUNCH_VAULT_LIMITS,
+      adapterMaxMessageValue: { base: 50n * TAO, bittensor: 50n * TAO },
+    });
+    // the test cadence keeps the lane's 5,000 TAO: a test deploy behaves as before the cap
+    expect(SETTINGS_V3.adapterMaxMessageValue).toEqual({ base: 5_000n * TAO, bittensor: 5_000n * TAO });
+    expect(SETTINGS.adapterMaxMessageValue).toEqual(SETTINGS_V3.adapterMaxMessageValue);
     expect("treasury" in SETTINGS_V3_LAUNCH).toBe(false);
     expect(CADENCE.launch.closeMaxWaitS).toBe(86_400);
   });

@@ -19,19 +19,27 @@ const SAFE = "0x00000000000000000000000000000000005afe00" as Hex;
 const delegation = (target: string) => `0xef0100${target.repeat(20)}` as Hex;
 const SAFE_CODE = "0x608060405273ffffffffffffffffffffffffffffffffffffffff" as Hex;
 
+/** Each tick's reading is at the next block. */
+let block = 37_000_000n;
+
 /** One tick's rule context: the role holders this reading names, and the code read for each. */
 function ctx(codes: Record<Hex, Hex>, meta: Record<string, string> = {}): RuleCtx {
+  block += 1n;
   const snap: Snapshot = {
     at: 1_800_000_000,
     nonces: { base: {}, bittensor: {} },
     safeNonces: {},
     messageStates: {},
     deliveredReads: [],
-    base: reading(37_000_000n, 1_800_000_000, baseState({ owner: SAFE, guardian: GUARDIAN, keeper: OWNER, stakerOwner: OWNER, stakerTreasury: TREASURY })),
+    base: reading(block, 1_800_000_000, baseState({ owner: SAFE, guardian: GUARDIAN, keeper: OWNER, stakerOwner: OWNER, stakerTreasury: TREASURY })),
     codes: { base: codes, bittensor: {} },
   };
   return ruleCtx({ snap, meta });
 }
+
+/** A finding's key, and its hold id: one per occurrence, by the codes before and after and the confirming block. */
+const keyOf = (f: Finding, rule: string, address: Hex, before: Hex | null, now: Hex) =>
+  `${rule}:base:${address}:${before === null ? "new" : keccak256(before).slice(0, 10)}:${keccak256(now).slice(0, 10)}:${f.facts.block}`;
 
 /** Ticks of the rule, each reading `codes`, the meta each writes carried to the next: the last tick's findings. */
 function ticks(reads: Record<Hex, Hex>[], meta: Record<string, string> = {}): { findings: Finding[]; meta: Record<string, string> } {
@@ -73,19 +81,34 @@ describe("keys.delegated", () => {
     expect(ticks([{ [OWNER]: "0x" }, { [OWNER]: evil }]).findings).toEqual([]);
     const { findings, meta } = ticks([{ [OWNER]: "0x" }, { [OWNER]: evil }, { [OWNER]: evil }]);
     expect(findings).toHaveLength(1);
+    const id = keyOf(findings[0], "keys.delegated", OWNER, "0x", evil);
     expect(findings[0]).toMatchObject({
       rule: "keys.delegated",
-      key: `keys.delegated:base:${OWNER}:${keccak256(evil)}`,
-      hold: { id: `keys.delegated:base:${OWNER}:${keccak256(evil)}` },
+      key: id,
+      hold: { id },
       facts: { address: OWNER, chain: "base", roles: "frontDoor.keeper, staker.owner", before: "no code (an account)", now: `an EIP-7702 delegation to 0x${"ee".repeat(20)}` },
     });
     expect(findings[0].facts.explorer).toBe(`https://basescan.org/address/${OWNER}`);
+    // a hold id the owner's script takes (pnpm hold:clear --id)
+    expect(id).toMatch(/^[a-z0-9_.:-]{1,200}$/);
     // found once: the new code is the baseline (the event alert stays open until acknowledged)
     expect(ticks([{ [OWNER]: evil }], meta).findings).toEqual([]);
     // a new target is a new critical
     const other = delegation("dd");
     const moved = ticks([{ [OWNER]: other }, { [OWNER]: other }], meta).findings;
-    expect(moved.map((f) => [f.rule, f.key, f.facts.before])).toEqual([["keys.delegated", `keys.delegated:base:${OWNER}:${keccak256(other)}`, `an EIP-7702 delegation to 0x${"ee".repeat(20)}`]]);
+    expect(moved.map((f) => [f.rule, f.key, f.facts.before])).toEqual([["keys.delegated", keyOf(moved[0], "keys.delegated", OWNER, evil, other), `an EIP-7702 delegation to 0x${"ee".repeat(20)}`]]);
+  });
+
+  it("makes a repeat of the same change a new occurrence: a fresh key and hold id each time", () => {
+    const evil = delegation("ee");
+    const first = ticks([{ [OWNER]: "0x" }, { [OWNER]: evil }, { [OWNER]: evil }]);
+    const back = ticks([{ [OWNER]: "0x" }, { [OWNER]: "0x" }], first.meta);
+    const again = ticks([{ [OWNER]: evil }, { [OWNER]: evil }], back.meta);
+    expect(first.findings[0].key).not.toBe(again.findings[0].key);
+    expect(first.findings[0].hold?.id).not.toBe(again.findings[0].hold?.id);
+    expect(again.findings[0].key).toBe(keyOf(again.findings[0], "keys.delegated", OWNER, "0x", evil));
+    // the warning in between has its own occurrence key too
+    expect(back.findings[0].key).toBe(keyOf(back.findings[0], "keys.code_changed", OWNER, evil, "0x"));
   });
 
   it("ignores one odd read that the next contradicts", () => {
@@ -104,7 +127,7 @@ describe("keys.delegated", () => {
     expect(findings).toEqual([
       expect.objectContaining({
         rule: "keys.code_changed",
-        key: `keys.code_changed:base:${GUARDIAN}:${keccak256(SAFE_CODE)}`,
+        key: keyOf(findings[0], "keys.code_changed", GUARDIAN, "0x", SAFE_CODE),
         facts: expect.objectContaining({ before: "no code (an account)", now: `contract code (26 bytes, hash ${keccak256(SAFE_CODE).slice(0, 10)}…)` }),
       }),
     ]);
@@ -124,7 +147,7 @@ describe("keys.delegated", () => {
   it("fires for a role wallet already delegated when first seen (the monitor may start after the delegation)", () => {
     const evil = delegation("ee");
     const { findings } = ticks([{ [OWNER]: evil }, { [OWNER]: evil }]);
-    expect(findings.map((x) => [x.key, x.facts.before])).toEqual([[`keys.delegated:base:${OWNER}:${keccak256(evil)}`, "not seen before"]]);
+    expect(findings.map((x) => [x.key, x.facts.before])).toEqual([[keyOf(findings[0], "keys.delegated", OWNER, null, evil), "not seen before"]]);
   });
 
   it("judges nothing without a code read, and never the zero address", () => {

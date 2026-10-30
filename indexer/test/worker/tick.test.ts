@@ -330,7 +330,34 @@ describe("role wallets' code (keys.delegated)", () => {
     await w.tick();
     const keys = await alertKeys();
     expect(keys).toHaveLength(1);
-    expect(keys[0]).toMatch(new RegExp(`^keys\\.delegated:base:${KEEPER}:0x[0-9a-f]{64}$`));
+    // keyed by the occurrence: the code before and after, and the confirming block
+    expect(keys[0]).toMatch(new RegExp(`^keys\\.delegated:base:${KEEPER}:0x[0-9a-f]{8}:0x[0-9a-f]{8}:\\d+$`));
+    expect((await w.status()).hold.active).toBe(true);
+  });
+
+  it("raises a fresh hold and a fresh email when the same delegation comes back after it was cleared", async () => {
+    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+    const step = async (code: Hex | undefined) => {
+      w.specs.base.code = code === undefined ? {} : { [KEEPER]: code };
+      for (let i = 0; i < 2; i++) {
+        await w.tick();
+        w.advance();
+      }
+    };
+    const criticals = () => w.sent.filter((m) => m.subject.startsWith("[CASCADE CRITICAL]") && m.subject.includes("role wallet"));
+    const evil = `0xef0100${"ee".repeat(20)}` as Hex;
+    await step(undefined);
+    await step(evil);
+    expect(criticals()).toHaveLength(1);
+    // the owner checked: the hold cleared, the alert acknowledged
+    await db.prepare("UPDATE holds SET cleared_at = ?1, cleared_note = 'checked'").bind(w.nowS()).run();
+    await db.prepare("UPDATE alerts SET acknowledged_at = ?1").bind(w.nowS()).run();
+    await step("0x");
+    // and the same delegation again: a new occurrence, a new hold, a new email
+    await step(evil);
+    expect(criticals()).toHaveLength(2);
+    const holds = await rows<{ cleared_at: number | null }>("SELECT cleared_at FROM holds WHERE rule = 'keys.delegated' ORDER BY raised_at");
+    expect(holds.map((x) => x.cleared_at === null)).toEqual([false, true]);
     expect((await w.status()).hold.active).toBe(true);
   });
 

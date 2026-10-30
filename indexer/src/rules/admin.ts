@@ -115,9 +115,14 @@ export const keysDelegated: Rule = {
         s = {};
       }
       const save = (next: CodeSeen) => ctx.writes.meta.push({ k, v: JSON.stringify(next) });
-      const facts = (before: string) => ({ address: w.address, chain: w.chain, roles: w.roles.join(", "), before, now: now.what, explorer: addressLink(w.chain, w.address) });
-      const critical = (before: string) => {
-        const id = `keys.delegated:${w.chain}:${w.address}:${now.hash}`;
+      // the confirming reading's block: each occurrence of a change has its own alert key and hold id (a change
+      // undone and made again is a new occurrence: a cleared hold id is never raised again, and an open alert
+      // would send nothing new)
+      const at = String(ctx.snap[w.chain]?.block ?? ctx.nowS);
+      const occurrence = (rule: string, before: Hex | undefined) => `${rule}:${w.chain}:${w.address}:${before === undefined ? "new" : before.slice(0, 10)}:${now.hash.slice(0, 10)}:${at}`;
+      const facts = (before: string) => ({ address: w.address, chain: w.chain, roles: w.roles.join(", "), before, now: now.what, block: at, explorer: addressLink(w.chain, w.address) });
+      const critical = (before: string, beforeHash?: Hex) => {
+        const id = occurrence("keys.delegated", beforeHash);
         out.push({
           rule: "keys.delegated",
           key: id,
@@ -126,8 +131,8 @@ export const keysDelegated: Rule = {
           hold: { id, summary: `the role wallet ${w.address} (${w.roles.join(", ")}) was delegated or its code changed` },
         });
       };
-      const warning = (before: string) =>
-        out.push({ rule: "keys.code_changed", key: `keys.code_changed:${w.chain}:${w.address}:${now.hash}`, subject: `A Cascade role wallet's code changed (${w.roles.join(", ")})`, facts: facts(before) });
+      const warning = (before: string, beforeHash: Hex) =>
+        out.push({ rule: "keys.code_changed", key: occurrence("keys.code_changed", beforeHash), subject: `A Cascade role wallet's code changed (${w.roles.join(", ")})`, facts: facts(before) });
       const twice = s.pending?.hash === now.hash;
       if (!s.first) {
         // first sight: an account or a contract is the baseline; a delegation is confirmed on the next read
@@ -146,8 +151,8 @@ export const keysDelegated: Rule = {
         const is = kindOf(now.what);
         // benign: plain contract code on an account (a counterfactual Safe deployed: no key can put it there),
         // or a delegation removed; everything else (a delegation set or moved, a contract's code changed) is not
-        if ((was === "account" && is === "contract") || (was === "delegation" && is === "account")) warning(s.first.what);
-        else critical(s.first.what);
+        if ((was === "account" && is === "contract") || (was === "delegation" && is === "account")) warning(s.first.what, s.first.hash);
+        else critical(s.first.what, s.first.hash);
         save({ first: now });
       }
     }

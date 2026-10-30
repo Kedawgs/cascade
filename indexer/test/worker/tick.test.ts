@@ -343,7 +343,7 @@ describe("transactions and messages", () => {
     w.advance();
     await w.tick();
     expect(await rows("SELECT hash FROM txs WHERE chain = 'base' AND selector IS NOT NULL")).toEqual([{ hash: rt.closeTx }]);
-    expect(await rows("SELECT v FROM meta WHERE k = 'tx_backlog'")).toEqual([{ v: "[]" }]);
+    expect(await rows("SELECT v FROM meta WHERE k = 'tx_backlog'")).toEqual([{ v: "" }]);
   });
 
   it("counts a message as arrived when its destination's Delivered was stored before its Sent", async () => {

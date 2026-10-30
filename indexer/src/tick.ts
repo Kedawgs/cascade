@@ -533,9 +533,11 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   // 9. commit 1, guarded by the lease
   const meta = new Map<string, string>();
   for (const w of ctx.writes.meta) meta.set(w.k, w.v);
-  meta.set("tx_backlog", JSON.stringify(txBacklog));
-  if (snap.bittensor?.state.payoutDelay !== undefined && String(snap.bittensor.state.payoutDelay) !== state.meta.payout_delay) meta.set("payout_delay", String(snap.bittensor.state.payoutDelay));
-  meta.set("catching_up", catchingUp.join(","));
+  // written only when they change (every row written counts against D1's quota)
+  const changes = (k: string, v: string) => (state.meta[k] ?? "") !== v && meta.set(k, v);
+  changes("tx_backlog", txBacklog.length ? JSON.stringify(txBacklog) : "");
+  if (snap.bittensor?.state.payoutDelay !== undefined) changes("payout_delay", String(snap.bittensor.state.payoutDelay));
+  changes("catching_up", catchingUp.join(","));
   meta.set("last_complete_tick", String(nowS));
   const hourNow = Math.floor(nowS / 3600) * 3600;
   const hourPrev = hours.find((h) => h.hour === hourNow);

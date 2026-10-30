@@ -49,7 +49,42 @@ The oracle and the adapters have no owner. Then:
 - **Decision: the owners.** Is the owner a Safe, or a timelock behind a Safe? The README assumes a
   48-hour timelock. With a timelock, every limit change and every unpause waits for it. Check that
   Safe{Wallet} supports Bittensor EVM (chain 964) for the Bittensor owner. If it doesn't, use a plain
-  account there and accept from it (`handoff` prints the transaction).
+  account there and accept from it (`handoff` prints the transaction). A plain account on a Ledger,
+  used through MetaMask, accepts with the signing page below.
+
+## Sending from MetaMask (a Ledger)
+
+For an owner or guardian that is a plain account on a Ledger, used through MetaMask (no Safe).
+`pnpm ops sign` serves the prepared calls as a page on this computer. The page sends them from
+MetaMask, one call per click.
+
+1. Write the calls to a file in `deployments/wallet/`. This reads the chains and sends nothing.
+   - `pnpm ops handoff --live --for-wallet`: each plain-account owner's `acceptOwnership()`, Base
+     and Bittensor in one file.
+   - `pnpm ops pause [front-door|vault|both] --for-wallet` (the guardian) or `unpause … --for-wallet`
+     (the owner): checks that each call would succeed and that the account can pay its gas. No
+     keystore is used. Not with `--live`.
+   - `pnpm ops cardinality --for-wallet --from 0x…`: the pool steps, in order, from the account you
+     name, each with its gas limit set.
+2. `pnpm ops sign deployments/wallet/<file>.json` prints the calls and a URL such as
+   `http://127.0.0.1:53114/`. Open it in the browser where MetaMask is.
+3. In MetaMask, select the Ledger account, then click Send on a call. The page refuses unless
+   MetaMask's selected account is that call's sender. It asks MetaMask to switch to the call's
+   network, adding Bittensor EVM (chain 964) if MetaMask doesn't have it. Check the Ledger's screen
+   against the page (network, To, data) before you approve. The page then shows the hash and waits for
+   the receipt.
+4. Press Ctrl-C to stop the server. Check the result with `pnpm ops ownership --live` and then
+   `pnpm ops verify --live` (hand-off), the pause dry run, or `pnpm ops cardinality`.
+
+What it guards:
+- `sign` refuses a file with anything but the known functions (`acceptOwnership`, `transferOwnership`,
+  `pause`, `unpause`, `increaseObservationCardinalityNext`), on the contracts each is for (the
+  deployment's front door, staker and vault, from its live record, and the oracle's two pools), with
+  value 0. The page shows each call decoded and can't edit it.
+- It listens on 127.0.0.1 only and loads nothing from anywhere (a strict CSP). It has nothing to type
+  into and never asks for seed words or keys.
+- The Ledger's Ethereum app may need "Blind signing" turned on to sign a contract call.
+- Reloading the page forgets what it sent: check on the explorer before sending a call again.
 
 ## Settings
 
@@ -102,7 +137,8 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
   - So it takes three transactions, from any wallet: `increaseObservationCardinalityNext(1200)` (a
     600-slot step measured 13,479,008 gas), then `(1800)`, then `(2000)` (about 4.5M).
   - Send each with the gas limit printed (15.1M, 15.1M, 5.1M): a wallet that pads its own limit could
-    go over the cap.
+    go over the cap. From MetaMask, `cardinality --for-wallet --from 0x…` and `pnpm ops sign` set
+    these limits and send the steps in order (see "Sending from MetaMask" above).
   - verify fails a launch, and preflight flags a problem, until the pool has enough slots.
 - **Base logs.** Every Base log scan reads from `OPS_BASE_LOGS_RPC`. Without it, the scans use
   `OPS_BASE_RPC` (your keyed provider), unless that is `mainnet.base.org`, which refuses `eth_getLogs`.
@@ -121,7 +157,8 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
   always show as warnings.
 - **Emergency.** `pnpm ops pause [front-door|vault|both]` does a dry run: it estimates the call and
   checks the keystore. `--live` sends as the guardian, with `OPS_GUARDIAN_KEYSTORE` and
-  `OPS_GUARDIAN_PASSWORD_FILE`. A Safe guardian gets a Transaction Builder file instead. If the
+  `OPS_GUARDIAN_PASSWORD_FILE`. A Safe guardian gets a Transaction Builder file instead. A Ledger
+  guardian in MetaMask uses `pause --for-wallet`, then `pnpm ops sign` (see above). If the
   guardian's plain account holds an EIP-7702 delegation, pause prints a WARNING and still pauses from
   its key: assume that key is compromised, and rotate the guardian afterwards. `unpause` is the owner's
   and goes through the timelock if there is one. Do the dry run once before launch.

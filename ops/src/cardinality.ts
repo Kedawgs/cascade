@@ -1,9 +1,10 @@
-import { type Address, encodeFunctionData, type Hex, parseAbi } from "viem";
+import { type Address, encodeFunctionData, getAddress, type Hex, parseAbi } from "viem";
 import { BASE_V3 } from "./config.ts";
 import { cadenceOf, type PlanV3 } from "./plan.ts";
 import type { Findings } from "./registry.ts";
 import { read } from "./rpc.ts";
 import type { Ctx } from "./send.ts";
+import { type NewWalletCall, walletFile, writeWalletFile, wroteLine } from "./wallet.ts";
 
 /** CascadeTwapOracle.TWAP_WINDOW (the test checks it against the source). */
 export const ORACLE_TWAP_WINDOW_S = 1800;
@@ -101,10 +102,12 @@ export const cardinalityTxs = (pool: Address, steps: number[]): { to: Address; d
   steps.map((next) => ({ to: pool, next, data: encodeFunctionData({ abi: POOL_ABI, functionName: "increaseObservationCardinalityNext", args: [next] }) }));
 
 /** `pnpm ops cardinality`: each pool's slots, and for one below the target the exact transactions that
- * grow it, in order. Anyone may send them (the pool's function is permissionless), from any wallet. Reads
- * only; sends nothing. */
-export async function cardinalityReport(ctx: Pick<Ctx, "rpc">): Promise<string[]> {
+ * grow it, in order. Anyone may send them (the pool's function is permissionless), from any wallet. With
+ * `wallet` (--for-wallet --from), they also go in a call file in its `dir`, in order and each with its gas
+ * limit, for pnpm ops sign to send from that account in MetaMask. Reads only; sends nothing. */
+export async function cardinalityReport(ctx: Pick<Ctx, "rpc">, wallet?: { from: Address; dir: string; now: number }): Promise<string[]> {
   const lines: string[] = [];
+  const calls: NewWalletCall[] = [];
   const need = cardinalityNeeded();
   for (const p of ORACLE_POOLS) {
     const s = await readPool(ctx, p.address);
@@ -123,12 +126,32 @@ export async function cardinalityReport(ctx: Pick<Ctx, "rpc">): Promise<string[]
       lines.push(
         `  ${i + 1}. to ${t.to} data ${t.data}  (increaseObservationCardinalityNext(${t.next}), about ${((slots * GAS_PER_SLOT) / 1e6).toFixed(1)}M gas; gas limit ${gasLimitFor(slots).toLocaleString("en-US")})`,
       );
+      if (wallet) {
+        calls.push({
+          chainId: 8453,
+          to: t.to,
+          data: t.data,
+          gas: gasLimitFor(slots),
+          label: `increaseObservationCardinalityNext(${t.next}) on the ${p.name}, step ${i + 1} of ${steps.length}`,
+          from: getAddress(wallet.from),
+          sender: "the account you chose with --from",
+        });
+      }
       from = t.next;
     });
     lines.push(
       `  With Foundry: cast send ${p.address} "increaseObservationCardinalityNext(uint16)" ${steps[0]} --gas-limit ${gasLimitFor(steps[0] - s.next)} --rpc-url <Base RPC> --keystore <your keystore>, then the next value with its own gas limit. Set the gas limit as given: a wallet that pads it could go over Base's cap.`,
       `Then the pool's history grows as it trades; run this again (or pnpm ops preflight) until it reads at least ${need} slots in use.`,
     );
+  }
+  if (wallet) {
+    if (calls.length) {
+      const file = walletFile({ title: "Cascade: grow the oracle pools' observation slots", ordered: true, now: wallet.now, calls });
+      const path = writeWalletFile(wallet.dir, "cardinality", file);
+      lines.push(wroteLine(path, calls.length));
+    } else {
+      lines.push("Both pools have enough slots: there is nothing for the wallet page to send.");
+    }
   }
   return lines;
 }

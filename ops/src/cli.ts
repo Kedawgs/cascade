@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { type Address, formatEther, type Hex } from "viem";
 import { type Args, parseArgs, USAGE, UsageError } from "./args.ts";
 import { computeBudget, formatBudget, gatherBudgetInputs } from "./budget.ts";
@@ -20,6 +20,7 @@ import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { createRpc, logsRpc } from "./rpc.ts";
 import { baseLogsLine, type Ctx, execFileRunner, unit } from "./send.ts";
+import { prepareSign, servePage } from "./sign.ts";
 import { verifyAndSave } from "./verify.ts";
 import { writeWebEnv } from "./webconfig.ts";
 import { sweep, windDown } from "./winddown.ts";
@@ -59,6 +60,9 @@ const recordPath = (live: boolean) => recordFor(env, live);
 
 /** The record for a --live run or a rehearsal run; a record of the other kind is refused. */
 const needRecord = (live: boolean) => needRecordAt(recordPath(live), live);
+
+/** Where --for-wallet writes call files for `pnpm ops sign`. */
+const walletDir = () => join(paths(env).deploymentsDir, "wallet");
 
 async function run(a: Args): Promise<number> {
   switch (a.cmd) {
@@ -175,6 +179,7 @@ async function run(a: Args): Promise<number> {
     case "handoff": {
       const out = await handoff(ctxFor(a.live), needRecord(a.live), {
         outDir: join(paths(env).deploymentsDir, "safe"),
+        ...(a.forWallet ? { walletDir: walletDir() } : {}),
         name: deploymentName(env),
         now: Date.now(),
       });
@@ -190,16 +195,30 @@ async function run(a: Args): Promise<number> {
         send: a.live,
         signer: (role, address) => pauseSigner(env, paths(env), role, address),
         outDir: join(paths(env).deploymentsDir, "safe"),
+        // --for-wallet: the plain account's call goes to a file for `sign`; parseArgs refuses it with --live
+        ...(a.forWallet ? { walletDir: walletDir() } : {}),
         name: deploymentName(env),
         now: Date.now(),
       });
       for (const line of r.lines) log(line);
       return r.ok ? 0 : 1;
     }
-    case "cardinality":
+    case "cardinality": {
       // always the live Base pools: the transactions are for mainnet; reads only
-      for (const line of await cardinalityReport(ctxFor(true))) log(line);
+      const wallet = a.forWallet ? { from: a.from as Address, dir: walletDir(), now: Date.now() } : undefined;
+      for (const line of await cardinalityReport(ctxFor(true), wallet)) log(line);
       return 0;
+    }
+    case "sign": {
+      // reads no chain and sends nothing: the page asks MetaMask to send, one click per call
+      const p = prepareSign(resolve(a.file as string), (name) => loadRecordFor(recordFor({ ...env, OPS_DEPLOYMENT: name }, true), true));
+      for (const line of p.lines) log(line);
+      const server = await servePage(p.page);
+      log(`Open ${server.url} in the browser where MetaMask is. Only this computer can reach it. Press Ctrl-C here when you're done.`);
+      await new Promise<void>((done) => process.once("SIGINT", () => done()));
+      await server.close();
+      return 0;
+    }
     case "ownership": {
       const r = await ownershipStatus(ctxFor(a.live), needRecord(a.live));
       for (const line of r.lines) log(line);

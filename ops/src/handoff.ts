@@ -5,9 +5,10 @@ import { type ChainName, WALLET } from "./config.ts";
 import { cadenceOf, isPlanV3, type PlanV3, rolesOf } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { read } from "./rpc.ts";
-import { accountKind, type SafeCall, safeBatch, timelockCalls } from "./safe.ts";
+import { type AccountKind, accountKind, type SafeCall, safeBatch, timelockCalls } from "./safe.ts";
 import { type Ctx, chainLabel } from "./send.ts";
 import { ownedContracts } from "./verify.ts";
+import { type NewWalletCall, walletFile, writeWalletFile, wroteLine } from "./wallet.ts";
 
 const OWNABLE = parseAbi([
   "function owner() view returns (address)",
@@ -38,8 +39,14 @@ export interface EmitOpts {
 /** `calls` for `signer` on `chain` to make, in the form it can use: a plain account gets the transactions
  * printed, to send from it; a Safe (or another contract) one Transaction Builder batch file; an
  * OpenZeppelin timelock two, the schedule batch for its proposer and the execute batch for its executor
- * once the timelock's delay has passed. Reads only. */
-export async function emitCalls(ctx: Pick<Ctx, "rpc" | "targets">, chain: ChainName, signer: Address, calls: SafeCall[], o: EmitOpts): Promise<{ lines: string[]; files: string[] }> {
+ * once the timelock's delay has passed. Reads only. `kind` is what the signer turned out to be. */
+export async function emitCalls(
+  ctx: Pick<Ctx, "rpc" | "targets">,
+  chain: ChainName,
+  signer: Address,
+  calls: SafeCall[],
+  o: EmitOpts,
+): Promise<{ lines: string[]; files: string[]; kind: AccountKind }> {
   const where = chainLabel(chain);
   const chainId = ctx.targets[chain].chainId;
   const lines: string[] = [];
@@ -56,7 +63,7 @@ export async function emitCalls(ctx: Pick<Ctx, "rpc" | "targets">, chain: ChainN
     const code = kind.delegation ? `with an EIP-7702 delegation to ${kind.delegation} (assume its key is compromised)` : "(no code)";
     lines.push(`${where}: ${signer} is a plain account ${code}: send these from it, from any wallet that holds its key:`);
     for (const c of calls) lines.push(`  to ${c.to} data ${c.data}  (${c.description})`);
-    return { lines, files };
+    return { lines, files, kind };
   }
   if (kind.kind === "timelock") {
     const salt = keccak256(stringToBytes(`cascade:${o.saltLabel ?? o.stem}`));
@@ -66,7 +73,7 @@ export async function emitCalls(ctx: Pick<Ctx, "rpc" | "targets">, chain: ChainN
     lines.push(
       `${where}: ${signer} is a timelock (minimum delay ${kind.minDelay} s). Its proposer's Safe loads ${s} in the Transaction Builder; once the delay has passed, its executor loads ${e}. The batch's salt ${salt}, operation id ${t.id}.`,
     );
-    return { lines, files };
+    return { lines, files, kind };
   }
   const path = write(o.stem, o.title, calls, kind.kind === "safe" ? signer : undefined);
   lines.push(
@@ -74,7 +81,7 @@ export async function emitCalls(ctx: Pick<Ctx, "rpc" | "targets">, chain: ChainN
       ? `${where}: ${signer} is a Safe: load ${path} in its Transaction Builder (Safe{Wallet} → Apps → Transaction Builder → drag the file in), check the calls, then sign and execute.`
       : `${where}: ${signer} is a contract but neither a Safe nor a timelock this tool knows: ${path} holds the calls (to, value, data) for whatever controls it.`,
   );
-  return { lines, files };
+  return { lines, files, kind };
 }
 
 const ownership = async (ctx: Pick<Ctx, "rpc">, chain: ChainName, address: Address) => ({
@@ -91,12 +98,14 @@ function launchPlan(rec: DeploymentRecord): PlanV3 {
 /** `pnpm ops handoff`: for each chain, the final owner's acceptOwnership() on each contract offered to
  * it (the front door and the staker on Base, the vault on Bittensor), as emitCalls gives them. A contract
  * already accepted is skipped; one not offered to the final owner yet is reported (deploy finishes the
- * plan). Sends nothing. */
-export async function handoff(ctx: Pick<Ctx, "rpc" | "targets">, rec: DeploymentRecord, o: { outDir: string; name: string; now: number }) {
+ * plan). With `walletDir` (--for-wallet), a plain-account owner's calls also go in one call file there,
+ * both chains', for pnpm ops sign to send from MetaMask. Sends nothing. */
+export async function handoff(ctx: Pick<Ctx, "rpc" | "targets">, rec: DeploymentRecord, o: { outDir: string; walletDir?: string; name: string; now: number }) {
   const plan = launchPlan(rec);
   const roles = rolesOf(plan);
   const lines: string[] = [];
   const files: string[] = [];
+  const wallet: NewWalletCall[] = [];
   for (const chain of ["base", "bittensor"] as const) {
     const final = roles.owner[chain];
     const calls: SafeCall[] = [];
@@ -121,6 +130,20 @@ export async function handoff(ctx: Pick<Ctx, "rpc" | "targets">, rec: Deployment
     });
     lines.push(...out.lines);
     files.push(...out.files);
+    if (o.walletDir && out.kind.kind === "account") {
+      const chainId = ctx.targets[chain].chainId;
+      wallet.push(...calls.map((c) => ({ chainId, to: c.to, data: c.data, label: c.description, from: final, sender: "the owner" })));
+    }
+  }
+  if (o.walletDir) {
+    if (wallet.length) {
+      const file = walletFile({ title: `Cascade ${o.name}: accept ownership`, deployment: o.name, now: o.now, calls: wallet });
+      const path = writeWalletFile(o.walletDir, `${o.name}-accept-ownership`, file);
+      files.push(path);
+      lines.push(wroteLine(path, wallet.length));
+    } else {
+      lines.push("There is nothing for the wallet page to send: no plain-account owner has a contract waiting to accept.");
+    }
   }
   lines.push("After the owners accept, run pnpm ops ownership (and verify) to confirm.");
   return { lines, files };

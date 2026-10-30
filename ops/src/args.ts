@@ -25,6 +25,7 @@ export const COMMANDS = [
   "cardinality",
   "pause",
   "unpause",
+  "sign",
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];
@@ -39,9 +40,16 @@ export interface Args {
   ethTo?: string;
   /** pause and unpause: which contracts */
   target?: "front-door" | "vault" | "both";
+  /** handoff, pause, unpause, cardinality: write a plain account's calls to a file for pnpm ops sign */
+  forWallet?: boolean;
+  /** cardinality --for-wallet: the account that will send the steps */
+  from?: string;
+  /** sign: the call file */
+  file?: string;
 }
 
 const PAUSE_TARGETS = ["front-door", "vault", "both"] as const;
+const FOR_WALLET: readonly string[] = ["handoff", "pause", "unpause", "cardinality"];
 
 export const USAGE = `usage: pnpm ops <command> [--live]
 
@@ -71,6 +79,12 @@ export const USAGE = `usage: pnpm ops <command> [--live]
                              sends. Signs with OPS_GUARDIAN_KEYSTORE and OPS_GUARDIAN_PASSWORD_FILE; a
                              Safe guardian gets a Transaction Builder file in deployments/safe/ instead
   unpause [front-door|vault|both]  the same, as the owner (OPS_OWNER_KEYSTORE, OPS_OWNER_PASSWORD_FILE)
+  sign <file>                serve a call file on http://127.0.0.1 (this computer only) as a page that
+                             sends each call from MetaMask (a Ledger behind it), one per click; Ctrl-C stops
+
+  --for-wallet               with handoff --live, pause, unpause, or cardinality --from <0x…>: also write
+                             a plain account's calls to deployments/wallet/<name>.json for pnpm ops sign.
+                             Sends nothing and opens no keystore (pause and unpause: not with --live)
 
 Without --live, deploy and the keeper commands use the local forks.
 Live, Base's logs are read from OPS_BASE_LOGS_RPC; without it from OPS_BASE_RPC, unless that is
@@ -99,12 +113,25 @@ export function parseArgs(argv: readonly string[]): Args {
     else if (a === "--eth-to" && cmd === "sweep") out.ethTo = value();
     else if (cmd === "track" && !a.startsWith("--") && !out.messageId) out.messageId = a;
     else if ((cmd === "pause" || cmd === "unpause") && (PAUSE_TARGETS as readonly string[]).includes(a) && !out.target) out.target = a as Args["target"];
+    else if (a === "--for-wallet" && FOR_WALLET.includes(cmd)) out.forWallet = true;
+    else if (a === "--from" && cmd === "cardinality") out.from = value();
+    else if (cmd === "sign" && !a.startsWith("--") && !out.file) out.file = a;
     else throw new UsageError(`unexpected argument ${a}`);
   }
   if (cmd === "deploy" && out.newPlan === undefined) out.newPlan = false;
   if (cmd === "track" && !out.messageId) throw new UsageError("track needs a message id");
   if ((cmd === "pause" || cmd === "unpause") && !out.target) out.target = "both";
   if (cmd === "sweep" && (!out.taoTo || !out.ethTo)) throw new UsageError("sweep needs both --tao-to and --eth-to");
+  if (cmd === "sign" && !out.file) throw new UsageError("sign needs the call file (written by handoff, pause, unpause or cardinality with --for-wallet)");
+  if (cmd === "sign" && out.live) throw new UsageError("sign sends nothing itself (MetaMask sends, one click per call): drop --live");
+  // handoff reads the live record only with --live; on the forks the page couldn't send what it wrote
+  if (cmd === "handoff" && out.forWallet && !out.live) throw new UsageError("handoff --for-wallet is for the live deployment: add --live (handoff only reads, it sends nothing)");
+  if ((cmd === "pause" || cmd === "unpause") && out.forWallet && out.live) {
+    throw new UsageError(`--for-wallet writes the call for MetaMask and sends nothing; --live sends with the keystore: drop --live`);
+  }
+  if (cmd === "cardinality" && out.forWallet && !out.from) throw new UsageError("cardinality --for-wallet needs --from 0x…, the account that will send the steps from MetaMask");
+  if (cmd === "cardinality" && out.from && !out.forWallet) throw new UsageError("--from goes with --for-wallet");
+  if (out.from && !isAddress(out.from)) throw new UsageError(`--from ${out.from} is not an address (or its checksum is wrong)`);
   // deliver sends a transaction naming each user
   const bad = cmd === "deliver" ? out.users.find((u) => !isAddress(u, { strict: false })) : undefined;
   if (bad) throw new UsageError(`--user ${bad} is not an address`);

@@ -107,7 +107,8 @@ describe("readSnapshot", () => {
     state.nonces.base[KEEPER] = 40n;
     state.nonces.bittensor[KEEPER] = 9n;
     state.base.safes[SAFE_OWNER] = 4n;
-    const { rpc, net } = fakeDeployment(cfg, state);
+    const { rpc, net, specs } = fakeDeployment(cfg, state);
+    specs.base.code = { [SAFE_OWNER]: "0x608060405273ffffffffffffffffffffffffffffffffffffffff" };
     const s = await readSnapshot(
       rpc,
       cfg,
@@ -124,10 +125,26 @@ describe("readSnapshot", () => {
     expect(s.nonces).toEqual({ base: { [OWNER]: 12n, [KEEPER]: 40n }, bittensor: { [KEEPER]: 9n } });
     expect(s.safeNonces).toEqual({ [SAFE_OWNER]: 4n });
     const countRequests = net.fetches.filter((f) => f.methods.includes("eth_getTransactionCount"));
-    expect(countRequests.map((f) => [f.chain, f.methods.length])).toEqual(expect.arrayContaining([["base", 2], ["bittensor", 1]]));
+    // the Safe's code is asked in the same batch as Base's counts
+    expect(countRequests.map((f) => [f.chain, f.methods.length])).toEqual(expect.arrayContaining([["base", 3], ["bittensor", 1]]));
     expect(countRequests).toHaveLength(2);
     // two multicalls and two count batches
     expect(net.count()).toBe(4);
+  });
+
+  it("never takes an EIP-7702 delegated account (code 0xef0100…) for a Safe, though its delegate answers nonce()", async () => {
+    const DELEGATED = "0x0000000000000000000000000000000000007702" as Hex;
+    const state = deploymentState(cfg);
+    state.nonces.base[DELEGATED] = 31n;
+    state.base.safes[DELEGATED] = 2n;
+    state.base.safes[SAFE_OWNER] = 4n;
+    const { rpc, specs } = fakeDeployment(cfg, state);
+    specs.base.code = { [DELEGATED]: `0xef0100${"ab".repeat(20)}`, [SAFE_OWNER]: "0x6080604052" };
+    const both = (address: Hex) => [{ chain: "base" as const, address }, { chain: "base" as const, address, isSafe: true }];
+    const s = await readSnapshot(rpc, cfg, inputs({ watched: [...both(DELEGATED), ...both(SAFE_OWNER)] }), 1);
+    // the delegated account is judged by its transaction count; only the real Safe by its nonce()
+    expect(s.safeNonces).toEqual({ [SAFE_OWNER]: 4n });
+    expect(s.nonces.base[DELEGATED]).toBe(31n);
   });
 
   it("reads each landing's delivered(...) at the block of the Base reading", async () => {

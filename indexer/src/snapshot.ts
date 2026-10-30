@@ -152,19 +152,28 @@ async function readChain<T>(rpc: Rpc, chain: ChainName, plan: Plan, multicall3: 
   return { block: r.block, time: r.time, state: s };
 }
 
-async function transactionCounts(rpc: Rpc, chain: ChainName, addresses: Hex[]): Promise<Record<Hex, bigint>> {
-  if (addresses.length === 0) return {};
+/** The watched accounts' transaction counts, and the code of the addresses read as Safes, in one batch. */
+async function countsAndCodes(rpc: Rpc, chain: ChainName, counted: Hex[], coded: Hex[]): Promise<{ counts: Record<Hex, bigint>; codes: Record<Hex, Hex> }> {
+  if (counted.length + coded.length === 0) return { counts: {}, codes: {} };
   try {
-    const out = await rpc.batch(
-      chain,
-      addresses.map((a) => ({ method: "eth_getTransactionCount", params: [a, "latest"] })),
-    );
-    return Object.fromEntries(addresses.map((a, i) => [a, hexToBigInt(out[i] as Hex)]));
+    const out = await rpc.batch(chain, [
+      ...counted.map((a) => ({ method: "eth_getTransactionCount", params: [a, "latest"] })),
+      ...coded.map((a) => ({ method: "eth_getCode", params: [a, "latest"] })),
+    ]);
+    return {
+      counts: Object.fromEntries(counted.map((a, i) => [a, hexToBigInt(out[i] as Hex)])),
+      codes: Object.fromEntries(coded.map((a, i) => [a, String(out[counted.length + i]).toLowerCase() as Hex])),
+    };
   } catch (e) {
     console.warn(`${chain} transaction counts failed: ${e instanceof Error ? e.message : String(e)}`);
-    return {};
+    return { counts: {}, codes: {} };
   }
 }
+
+/** An address is read as a Safe (by its nonce()) only when it holds contract code of its own: not an account
+ * (no code, nothing answers), and not an EIP-7702 delegated account (code 0xef0100 and the delegate's
+ * address), whose delegate may answer nonce() while its transactions are counted by its own nonce. */
+export const isContractCode = (code: Hex | undefined): boolean => code !== undefined && code !== "0x" && !code.toLowerCase().startsWith("0xef0100");
 
 /** One reading of both chains: a multicall each (block-pinned), and the watched addresses' transaction
  * counts in one batch per chain (a Safe's nonce() is read in the multicall instead). A chain's reading
@@ -284,11 +293,18 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   const [bitReading, baseReading, baseCounts, bitCounts] = await Promise.all([
     readChain(rpc, "bittensor", vp, t.multicall3, i.last.bittensor, bit),
     readChain(rpc, "base", bp, t.multicall3, i.last.base, base),
-    transactionCounts(rpc, "base", counted("base")),
-    transactionCounts(rpc, "bittensor", counted("bittensor")),
+    countsAndCodes(rpc, "base", counted("base"), safes("base")),
+    countsAndCodes(rpc, "bittensor", counted("bittensor"), safes("bittensor")),
   ]);
+  // a nonce() answer counts only from contract code of the address's own (never a 7702 delegation)
+  for (const [own, codes] of [
+    [baseSafes, baseCounts.codes],
+    [bitSafes, bitCounts.codes],
+  ] as const) {
+    for (const a of Object.keys(own) as Hex[]) if (!isContractCode(codes[a])) delete own[a];
+  }
 
-  const snap: Snapshot = { at: nowS, nonces: { base: baseCounts, bittensor: bitCounts }, safeNonces, messageStates, deliveredReads: [] };
+  const snap: Snapshot = { at: nowS, nonces: { base: baseCounts.counts, bittensor: bitCounts.counts }, safeNonces, messageStates, deliveredReads: [] };
   if (bitReading) {
     // the set now: from hotkeys(0) on, up to the first index past its end (unknown if hotkeys(0) failed)
     const set: Hex[] = [];

@@ -376,8 +376,11 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
       oracle: previous.base?.state.oracle,
       pendingMessages: [...state.pendingMessages, ...pendingFresh].map((m) => ({ messageId: m.messageId, direction: m.direction })),
-      // every watched address both ways: its transaction count, and nonce() in case it is a Safe (an account
-      // answers nothing to nonce(), and the keys rule takes a Safe's nonce() over its count)
+      // every watched address both ways: its transaction count, and nonce() in case it is a Safe (the keys rule
+      // takes a Safe's nonce() over its count). The reading keeps a nonce() only from an address with contract
+      // code of its own: an account answers nothing, and an EIP-7702 delegated account (code 0xef0100…), whose
+      // delegate may answer, is judged by its transaction count
+      // (snapshot.ts isContractCode)
       watched: [...watched.values()].flatMap((w) => [w, { ...w, isSafe: true }]),
       payoutUsers: state.payoutUsers,
       deliveredChecks: deliveredChecks(state.awaitingReads),

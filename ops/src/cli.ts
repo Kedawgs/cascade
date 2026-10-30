@@ -210,7 +210,7 @@ async function run(a: Args): Promise<number> {
       return 0;
     }
     case "sign": {
-      // reads no chain and sends nothing: the page asks MetaMask to send, one click per call
+      // sends nothing: the page asks MetaMask to send, one click per call
       // the file must be for this run's deployment: OPS_DEPLOYMENT, or --deployment. pause and unpause
       // targets' guardian and owner are read from the live chains (reads only)
       const live = ctxFor(true);

@@ -761,4 +761,9 @@ describe("pause and unpause after the guardian or owner is replaced on-chain: th
       ["base", "owner", a.frontDoor],
     ]);
   });
+
+  it("gives up on an RPC that doesn't answer, so a hung node can't hold up an emergency pause", async () => {
+    const hung = { rpc: { request: () => new Promise<never>(() => {}) } };
+    await expect(liveRoles(hung, "bittensor", a.vault, 20)).rejects.toThrow(/Bittensor RPC didn't answer within 0\.02s/);
+  });
 });

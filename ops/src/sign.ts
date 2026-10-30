@@ -25,11 +25,23 @@ export interface LiveRoles {
 export type LiveReads = ReadonlyMap<string, LiveRoles | { problem: string }>;
 const liveKey = (chainId: number, address: string) => `${chainId}:${address.toLowerCase()}`;
 
-/** The contract's guardian() and owner() now, through the chain's RPC. */
-export async function liveRoles(ctx: Pick<Ctx, "rpc">, chain: ChainName, address: Address): Promise<LiveRoles> {
-  const guardian = (await read(ctx.rpc, chain, { address, abi: PAUSE_ABI, functionName: "guardian" })) as Address;
-  const owner = (await read(ctx.rpc, chain, { address, abi: PAUSE_ABI, functionName: "owner" })) as Address;
-  return { guardian, owner };
+/** The contract's guardian() and owner() now, through the chain's RPC. Gives up after `timeoutMs`, so a
+ * hung node falls back to the record's roles instead of holding up an emergency pause. */
+export async function liveRoles(ctx: Pick<Ctx, "rpc">, chain: ChainName, address: Address, timeoutMs = 10_000): Promise<LiveRoles> {
+  const both = (async () => {
+    const guardian = (await read(ctx.rpc, chain, { address, abi: PAUSE_ABI, functionName: "guardian" })) as Address;
+    const owner = (await read(ctx.rpc, chain, { address, abi: PAUSE_ABI, functionName: "owner" })) as Address;
+    return { guardian, owner };
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`the ${chainLabel(chain)} RPC didn't answer within ${timeoutMs / 1000}s`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([both, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The contracts the signing page may call, the calls it may make to each, who may send each (the

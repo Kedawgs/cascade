@@ -490,8 +490,8 @@ head_time  = max(head_time, the newest of: the head's block time, this tick's re
 - Backfill: a new database starts every chain at the deployment's first block (*call*: Bittensor from the
   record's Bittensor adapter block, exactly the site's `bitBlock`, so the seed's `from` matches; Base from the
   record's Base adapter block). Bittensor is caught up first, since the API depends on it. A year of Bittensor
-  is about 2,600 windows. During that first backfill, until both chains have first come within an hour of their
-  heads (recorded once), a chain more than an hour behind whose lag shrinks each tick is "catching up": its lag
+  is about 2,600 windows. During that first backfill, until both chains have first come within their lag limit
+  (section 6's `lagLimit`: 15 minutes on v3-test, 30 at launch; recorded once), a chain further behind whose lag shrinks each tick is "catching up": its lag
   alerts are quiet, a cross-check waiting on it isn't reported stuck, and the digest says so. Every rule still
   runs (a cross-check judges a delivery as soon as the other chain is stored past it). A chain whose settled
   block is frozen, or that only keeps pace, isn't catching up, and after the first full catch-up none is.

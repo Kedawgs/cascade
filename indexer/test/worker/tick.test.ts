@@ -403,28 +403,52 @@ describe("the seed pages", () => {
 describe("catchingUpChains", () => {
   const chain = (lagS: number, settled: [number | null, number | null], head: [number | null, number]) => ({ lagS, settled: { before: settled[0], now: settled[1] }, head: { before: head[0], now: head[1] } });
   const fine = chain(100, [1000, 1060], [1100, 1160]);
-  const of = (bittensor: ReturnType<typeof chain>, caughtUp = false) => catchingUpChains({ caughtUp, chains: { base: fine, bittensor } });
+  // the floor is the lag limit (15 minutes with v3-test's payoutDelay of an hour)
+  const of = (bittensor: ReturnType<typeof chain>, caughtUp = false) => catchingUpChains({ caughtUp, floorS: 900, chains: { base: fine, bittensor } });
 
-  it("is a chain over an hour behind whose lag shrank by a minute or more this tick", () => {
+  it("is a chain over its lag limit whose lag shrank by a minute or more this tick", () => {
     expect(of(chain(7200, [1000, 2000], [8000, 8060]))).toEqual(["bittensor"]);
+    // between the lag limit and an hour too: catching up lasts until no lag alert would fire
+    expect(of(chain(3000, [1000, 1200], [3800, 3860]))).toEqual(["bittensor"]);
     // a settled time known for the first time is a gain
     expect(of(chain(7200, [null, 1000], [null, 8200]))).toEqual(["bittensor"]);
   });
 
-  it("is not a chain whose settled block is frozen, keeps pace, or isn't over an hour behind", () => {
+  it("is not a chain whose settled block is frozen, keeps pace, or is within its lag limit", () => {
     expect(of(chain(7200, [1000, 1000], [8000, 8060]))).toEqual([]);
     expect(of(chain(7200, [1000, 1060], [8000, 8060]))).toEqual([]);
     expect(of(chain(7200, [1000, 1100], [8000, 8060]))).toEqual([]);
-    expect(of(chain(3600, [1000, 5000], [4600, 4660]))).toEqual([]);
+    expect(of(chain(900, [1000, 5000], [5800, 5860]))).toEqual([]);
     expect(of(chain(7200, [null, null], [null, 8200]))).toEqual([]);
   });
 
-  it("is never once both chains have first come within the hour", () => {
+  it("is never once both chains have first come within their lag limit", () => {
     expect(of(chain(7200, [1000, 2000], [8000, 8060]), true)).toEqual([]);
   });
 });
 
 describe("catching up", () => {
+  it("a clean first backfill, slower than an hour, never pages: catching up lasts until the lag is under its limit (probe P3)", async () => {
+    // Base starts 8,000 s back and gains about 140 s a tick (one 100-block window); v3-test's limits: lag 15 min, blind 30
+    const w = tickWorld({ heads: { base: 37_004_000n, bittensor: 6_900_700n }, over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+    w.beforeFetch((url) => {
+      if (url.includes("base-logs.rpc.test")) w.clock.ms += 35_000;
+    });
+    const lags: number[] = [];
+    for (let i = 0; i < 70; i++) {
+      await w.tick();
+      lags.push((await w.status()).indexer.base?.lagS ?? -1);
+      w.advance();
+      if (lags.at(-1)! < 600) break;
+    }
+    // it went through the hour, the blind limit and the lag limit, and ended caught up
+    expect(lags[0]).toBeGreaterThan(3600);
+    expect(lags.at(-1)).toBeLessThan(600);
+    expect(w.sent.map((m) => m.subject)).toEqual([]);
+    expect(await rows("SELECT alert_key FROM alerts")).toEqual([]);
+    expect(await rows("SELECT v FROM meta WHERE k = 'caught_up'")).toHaveLength(1);
+  });
+
   it("while a chain backfills, more than an hour behind and its lag shrinking: its lag is quiet, and the cross-checks judge what both sides hold", async () => {
     const w = tickWorld({ heads: { base: START_HEADS.base, bittensor: 6_903_000n } });
     const rt = roundTrip(w.cfg, { id: 1n, payout: false, forge: "key", blocks: { delivery: 6_900_500n } });

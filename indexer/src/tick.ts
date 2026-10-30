@@ -86,10 +86,6 @@ const BASE_SCAN_RESERVE = 4;
 const BIT_WALL_SHARE = 0.75;
 /** The RPC client's deadline for the whole tick: the lease less this, so the commit lands inside the lease. */
 const LEASE_MARGIN_S = 30;
-/** A chain more than this far from its head is catching up (spec 3.2) while its lag shrinks, until both chains
- * have first come within it (meta.caught_up): its lag alerts are quiet, a cross-check waiting on it isn't
- * reported stuck, and the digest says so. */
-export const CATCH_UP_S = 3600;
 /** The lag must shrink by at least this much in a tick (settled time gained beyond the head's) to count as
  * catching up: a chain whose settled block is frozen, or that only keeps pace, is stuck, and its alerts fire. */
 export const CATCH_UP_GAIN_S = 60;
@@ -208,18 +204,22 @@ export function blocksToTime(o: { settledTo?: bigint; checks: readonly bigint[];
   return out;
 }
 
-/** The chains catching up this tick: never once both have first come within CATCH_UP_S of their heads
- * (`caughtUp`), and otherwise those more than CATCH_UP_S behind whose lag shrank by CATCH_UP_GAIN_S or more
- * this tick (their settled time gained that much more than their head's; a settled time first known this tick
- * counts as a gain). A settled block that is frozen, or merely keeps pace, is not catching up. */
+/** The chains catching up this tick (spec 3.2): during the first backfill only, until both chains have first come
+ * within `floorS` of their heads (`caughtUp`, meta.caught_up), those more than `floorS` behind whose lag shrank by
+ * CATCH_UP_GAIN_S or more this tick (their settled time gained that much more than their head's; a settled time
+ * first known this tick counts as a gain). `floorS` is the lag limit (lagLimitOf: 15 minutes on v3-test, 30 at
+ * launch), so a backfill never ends inside the lag or blind limits and pages on its way down. A settled block that
+ * is frozen, or merely keeps pace, is not catching up. While a chain catches up its lag alerts are quiet, a
+ * cross-check waiting on it isn't reported stuck, and the digest says so. */
 export function catchingUpChains(o: {
   caughtUp: boolean;
+  floorS: number;
   chains: Readonly<Record<ChainName, { lagS: number; settled: { before: number | null; now: number | null }; head: { before: number | null; now: number } }>>;
 }): ChainName[] {
   if (o.caughtUp) return [];
   return CHAINS.filter((c) => {
     const x = o.chains[c];
-    if (x.lagS <= CATCH_UP_S || x.settled.now === null) return false;
+    if (x.lagS <= o.floorS || x.settled.now === null) return false;
     if (x.settled.before === null) return true;
     const headGain = x.head.before === null ? 0 : x.head.now - x.head.before;
     return x.settled.now - x.settled.before - headGain >= CATCH_UP_GAIN_S;
@@ -557,14 +557,17 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   const payoutDelayS = payoutDelayOf(snap, history.bittensor, state.meta);
   const lagOf = (c: ChainName) => headTime[c] - (next[c].settledTime ?? 0);
   const caughtUp = state.meta.caught_up !== undefined && state.meta.caught_up !== "";
+  // catching up lasts until the lag is under the lag limit, so the end of a backfill never pages
+  const floorS = lagLimitOf(payoutDelayS, t);
   const catchingUp = catchingUpChains({
     caughtUp,
+    floorS,
     chains: Object.fromEntries(
       CHAINS.map((c) => [c, { lagS: lagOf(c), settled: { before: cursors[c].settledTime, now: next[c].settledTime }, head: { before: cursors[c].headTime, now: headTime[c] } }]),
     ) as Parameters<typeof catchingUpChains>[0]["chains"],
   });
-  // both chains within the hour for the first time: catching up is over for good (indexer.blind is never quiet after)
-  const firstCaughtUp = !caughtUp && CHAINS.every((c) => next[c].settledTime !== null && lagOf(c) <= CATCH_UP_S);
+  // both chains within the lag limit for the first time: catching up is over for good (indexer.blind is never quiet after)
+  const firstCaughtUp = !caughtUp && CHAINS.every((c) => next[c].settledTime !== null && lagOf(c) <= floorS);
   const hours = state.hours.flatMap((r) => {
     const h = expandHour(r.json);
     return h ? [h] : [];

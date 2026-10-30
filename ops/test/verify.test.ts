@@ -34,7 +34,9 @@ import {
   limitExpectations,
   readBack,
   reserveFailures,
-  treasuryCodeFailures,
+  roleAccounts,
+  roleCodeChecks,
+  roleCodeFindings,
   v3AddressFailures,
   verify,
   verifyAndSave,
@@ -44,6 +46,12 @@ import { fakeChain } from "./fake-keeper.ts";
 const plan = buildPlan(0, 0, `0x${"33".repeat(32)}`);
 const plan3 = buildPlanV3(0, 40, `0x${"33".repeat(32)}`);
 const OTHER: Address = "0x0000000000000000000000000000000000000001";
+/** Where a thief's sweeper code would live: what a stolen key delegates a role's plain account to. */
+const SWEEPER = getAddress("0x00000000000000000000000000000000005eeeee");
+/** A plain account's code once its key has signed an EIP-7702 delegation to SWEEPER: 23 bytes. */
+const DELEGATED: Hex = `0xef0100${SWEEPER.slice(2).toLowerCase()}`;
+/** A Safe's or a timelock's code. */
+const SAFE: Hex = "0x6080604052";
 
 /** A value of the same type that differs from `v`. */
 const wrong = (v: unknown): unknown =>
@@ -132,12 +140,16 @@ describe("verify v3", () => {
   });
 
   it("needs the treasury to be a plain account on Base and on Bittensor", () => {
-    expect(treasuryCodeFailures(WALLET, { base: "0x", bittensor: "0x" })).toEqual([]);
-    expect(treasuryCodeFailures(WALLET, { base: "0x6080", bittensor: "0x" })).toEqual([
+    const treasury = (chain: ChainName, code: Hex) => roleCodeFindings(chain, WALLET, ["treasury"], code);
+    expect(treasury("base", "0x")).toEqual({ failures: [], warnings: [] });
+    expect(treasury("base", "0x6080").failures).toEqual([
       `Base treasury ${WALLET}: has contract code; the treasury must be a plain account, the same owner on Base and Bittensor`,
     ]);
-    expect(treasuryCodeFailures(WALLET, { base: "0x", bittensor: "0x6080" })).toEqual([
+    expect(treasury("bittensor", "0x6080").failures).toEqual([
       `Bittensor treasury ${WALLET}: has contract code; the treasury must be a plain account, the same owner on Base and Bittensor`,
+    ]);
+    expect(treasury("base", DELEGATED).failures).toEqual([
+      `Base treasury ${WALLET}: has an EIP-7702 delegation to ${SWEEPER}, code its own key installed; assume the key is compromised and rotate the treasury`,
     ]);
   });
 
@@ -665,5 +677,125 @@ describe("verify reads back the registries, the pending proposals and the state"
     };
     const r = await verify({ ...chains.ctx, rpc }, recordOf(plan));
     expect(r.failures).toEqual([`Bittensor CascadeVault.minDailyOutflow: expected ${100n * 10n ** 18n}, found ${5n * 10n ** 18n}`]);
+  });
+});
+
+describe("verify reads each role's account by its code", () => {
+  const launch = buildPlanV3(5, 8, V3_TEST_COLDKEY, "launch", ROLES);
+  const test = buildPlanV3(5, 8, V3_TEST_COLDKEY);
+  const at = (chain: ChainName, a: Address) => `${chain}:${a.toLowerCase()}`;
+  /** Chains where each account in `code` (by `at`) holds that code, and every other none; the reads kept. */
+  const codes = (code: Record<string, Hex>) => {
+    const asked: string[] = [];
+    const rpc: Rpc = {
+      async request(chain, method, params) {
+        if (method !== "eth_getCode") throw new Error(`unexpected ${method}`);
+        asked.push(at(chain, params[0] as Address));
+        return code[at(chain, params[0] as Address)] ?? "0x";
+      },
+    };
+    return { ctx: { rpc }, asked };
+  };
+  /** A launch's owners as Safes (or timelocks), every other role a plain account. */
+  const safeOwners = { [at("base", ROLES.owner.base)]: SAFE, [at("bittensor", ROLES.owner.bittensor)]: SAFE };
+  const delegated = (where: string, roles: string) =>
+    `${where}: has an EIP-7702 delegation to ${SWEEPER}, code its own key installed; assume the key is compromised and rotate the ${roles}`;
+
+  it("reads each role on the chains where it acts: the keeper and the treasury on both, each chain's owner and guardian on it", () => {
+    expect(roleAccounts(launch)).toEqual([
+      { chain: "base", address: ROLES.owner.base, roles: ["owner"] },
+      { chain: "base", address: ROLES.guardian.base, roles: ["guardian"] },
+      { chain: "base", address: ROLES.keeper, roles: ["keeper"] },
+      { chain: "base", address: ROLES.treasury, roles: ["treasury"] },
+      { chain: "bittensor", address: ROLES.owner.bittensor, roles: ["owner"] },
+      { chain: "bittensor", address: ROLES.guardian.bittensor, roles: ["guardian"] },
+      { chain: "bittensor", address: ROLES.keeper, roles: ["keeper"] },
+      { chain: "bittensor", address: ROLES.treasury, roles: ["treasury"] },
+    ]);
+    // the test plan's wallet holds every role: one account a chain; a treasury the contracts name besides is read too
+    expect(roleAccounts(test, [WALLET.toLowerCase() as Address, OTHER])).toEqual([
+      { chain: "base", address: WALLET, roles: ["owner", "guardian", "keeper", "treasury"] },
+      { chain: "base", address: OTHER, roles: ["treasury"] },
+      { chain: "bittensor", address: WALLET, roles: ["owner", "guardian", "keeper", "treasury"] },
+      { chain: "bittensor", address: OTHER, roles: ["treasury"] },
+    ]);
+  });
+
+  it("passes a launch whose owners are Safes (a guardian may be one too) and the rest plain accounts, and the test plan's plain wallet", async () => {
+    expect(await roleCodeChecks(codes(safeOwners).ctx, launch)).toEqual({ failures: [], warnings: [] });
+    expect(await roleCodeChecks(codes({ ...safeOwners, [at("base", ROLES.guardian.base)]: SAFE }).ctx, launch)).toEqual({ failures: [], warnings: [] });
+    const t = codes({});
+    expect(await roleCodeChecks(t.ctx, test)).toEqual({ failures: [], warnings: [] });
+    expect(t.asked).toEqual([at("base", WALLET), at("bittensor", WALLET)]);
+  });
+
+  it("fails any role whose account holds an EIP-7702 delegation, naming the role and the chain: even an owner or a guardian", async () => {
+    const r = await roleCodeChecks(
+      codes({
+        [at("base", ROLES.owner.base)]: DELEGATED,
+        [at("bittensor", ROLES.owner.bittensor)]: SAFE,
+        [at("base", ROLES.guardian.base)]: DELEGATED,
+        [at("bittensor", ROLES.keeper)]: DELEGATED,
+        [at("bittensor", ROLES.treasury)]: DELEGATED,
+      }).ctx,
+      launch,
+    );
+    expect(r).toEqual({
+      failures: [
+        delegated(`Base owner ${ROLES.owner.base}`, "owner"),
+        delegated(`Base guardian ${ROLES.guardian.base}`, "guardian"),
+        delegated(`Bittensor keeper ${ROLES.keeper}`, "keeper"),
+        delegated(`Bittensor treasury ${ROLES.treasury}`, "treasury"),
+      ],
+      warnings: [],
+    });
+  });
+
+  it("fails the keeper or the treasury holding any other code, where an owner or a guardian may", async () => {
+    const r = await roleCodeChecks(
+      codes({ ...safeOwners, [at("base", ROLES.keeper)]: SAFE, [at("bittensor", ROLES.treasury)]: SAFE, [at("bittensor", ROLES.guardian.bittensor)]: SAFE }).ctx,
+      launch,
+    );
+    expect(r).toEqual({
+      failures: [
+        `Base keeper ${ROLES.keeper}: has contract code; the keeper must be a plain account, whose own key signs the keeper's transactions`,
+        `Bittensor treasury ${ROLES.treasury}: has contract code; the treasury must be a plain account, the same owner on Base and Bittensor`,
+      ],
+      warnings: [],
+    });
+  });
+
+  it("warns, without failing, when a launch's owner has no code: a plain account, where a Safe or a timelock was planned", async () => {
+    const r = await roleCodeChecks(codes({ [at("base", ROLES.owner.base)]: SAFE }).ctx, launch);
+    expect(r).toEqual({
+      failures: [],
+      warnings: [
+        `Bittensor owner ${ROLES.owner.bittensor}: has no code, so it is a plain account, not a Safe or a timelock; if one was meant, none is deployed at this address on Bittensor`,
+      ],
+    });
+  });
+
+  it("one wallet in every role fails once, naming each", async () => {
+    expect((await roleCodeChecks(codes({ [at("base", WALLET)]: DELEGATED }).ctx, test)).failures).toEqual([
+      delegated(`Base owner, guardian, keeper and treasury ${WALLET}`, "owner, guardian, keeper and treasury"),
+    ]);
+  });
+
+  it("verify reads them back: the test wallet with a delegation fails it, and code it can't read fails it, saying so", async () => {
+    const rec = recordOf(test);
+    const chains = chainsFor(rec, THIS_CODE);
+    const request = chains.ctx.rpc.request;
+    const wallet = (answer: () => Promise<unknown>): Rpc => ({
+      request: (c, m, p) => (m === "eth_getCode" && c === "base" && (p[0] as string).toLowerCase() === WALLET.toLowerCase() ? answer() : request(c, m, p)),
+    });
+    expect(await verify({ ...chains.ctx, rpc: wallet(async () => "0x") }, rec)).toMatchObject({ ok: true, failures: [] });
+    expect(await verify({ ...chains.ctx, rpc: wallet(async () => DELEGATED) }, rec)).toMatchObject({
+      ok: false,
+      failures: [delegated(`Base owner, guardian, keeper and treasury ${WALLET}`, "owner, guardian, keeper and treasury")],
+    });
+    expect(await verify({ ...chains.ctx, rpc: wallet(() => Promise.reject(new Error("node down"))) }, rec)).toMatchObject({
+      ok: false,
+      failures: ["the roles' accounts: could not be read (node down)"],
+    });
   });
 });

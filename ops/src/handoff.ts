@@ -53,7 +53,8 @@ export async function emitCalls(ctx: Pick<Ctx, "rpc" | "targets">, chain: ChainN
   };
   const kind = await accountKind(ctx, chain, signer);
   if (kind.kind === "account") {
-    lines.push(`${where}: ${signer} is a plain account (no code): send these from it, from any wallet that holds its key:`);
+    const code = kind.delegation ? `with an EIP-7702 delegation to ${kind.delegation} (assume its key is compromised)` : "(no code)";
+    lines.push(`${where}: ${signer} is a plain account ${code}: send these from it, from any wallet that holds its key:`);
     for (const c of calls) lines.push(`  to ${c.to} data ${c.data}  (${c.description})`);
     return { lines, files };
   }

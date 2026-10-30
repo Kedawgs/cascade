@@ -1,6 +1,6 @@
 import { type Address, encodeAbiParameters, encodeFunctionData, type Hex, keccak256, parseAbi, parseAbiParameters, stringToBytes } from "viem";
 import type { ChainName } from "./config.ts";
-import { codeAt, read } from "./rpc.ts";
+import { codeAt, delegationOf, read } from "./rpc.ts";
 import type { Ctx } from "./send.ts";
 
 /** One call for a Safe (or a timelock behind one) to make. */
@@ -100,13 +100,18 @@ export function timelockCalls(timelock: Address, calls: SafeCall[], salt: Hex, d
   };
 }
 
-export type AccountKind = { kind: "account" } | { kind: "safe" } | { kind: "timelock"; minDelay: bigint } | { kind: "contract" };
+/** `delegation`: a plain account whose code is an EIP-7702 delegation to that address. */
+export type AccountKind = { kind: "account"; delegation?: Address } | { kind: "safe" } | { kind: "timelock"; minDelay: bigint } | { kind: "contract" };
 
 /** What signs for an owner or guardian: a plain account (no code: it sends its own transactions), an
  * OpenZeppelin timelock (answers getMinDelay), a Safe (answers getThreshold), or another contract. A probe
- * that fails, for any reason, counts as "not that kind". */
+ * that fails, for any reason, counts as "not that kind". A plain account with an EIP-7702 delegation is
+ * still one, never probed: its own key signs, whatever the delegate's code would answer. */
 export async function accountKind(ctx: Pick<Ctx, "rpc">, chain: ChainName, address: Address): Promise<AccountKind> {
-  if ((await codeAt(ctx.rpc, chain, address)) === "0x") return { kind: "account" };
+  const code = await codeAt(ctx.rpc, chain, address);
+  if (code === "0x") return { kind: "account" };
+  const delegation = delegationOf(code);
+  if (delegation) return { kind: "account", delegation };
   try {
     return { kind: "timelock", minDelay: (await read(ctx.rpc, chain, { address, abi: TIMELOCK_ABI, functionName: "getMinDelay" })) as bigint };
   } catch {

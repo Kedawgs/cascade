@@ -50,8 +50,10 @@ export function pauseSigner(env: Env, p: Pick<Paths, "keystore" | "passwordFile"
  * Who calls is read from each contract (guardian(), owner()), not the plan, so it follows any change
  * since. A plain account signs with its keystore (pauseSigner): a dry run estimates the call and checks
  * the keystore signs as that account, and --live sends it through the usual send checks. A Safe gets a
- * Transaction Builder file (a timelock a schedule and an execute file) and nothing is sent. Each chain
- * stands alone: a problem on one is reported and the other still goes ahead. */
+ * Transaction Builder file (a timelock a schedule and an execute file) and nothing is sent. A plain account
+ * holding an EIP-7702 delegation is warned about (its key may be a thief's too) but still signs: an
+ * emergency pause is never held up by it. Each chain stands alone: a problem on one is reported and the
+ * other still goes ahead. */
 export async function pauseCommand(
   ctx: Ctx,
   rec: DeploymentRecord,
@@ -98,6 +100,12 @@ export async function pauseCommand(
         lines.push(...out.lines);
         files.push(...out.files);
         continue;
+      }
+      // a plain account whose key has signed an EIP-7702 delegation: said loudly, never in the way of the call
+      if (kind.delegation) {
+        lines.push(
+          `WARNING — ${where}: the ${role} ${who} has code, an EIP-7702 delegation to ${kind.delegation}: assume its key is compromised and rotate the ${role}. This doesn't stop ${call}, which its key still signs.`,
+        );
       }
       let gas: bigint;
       try {

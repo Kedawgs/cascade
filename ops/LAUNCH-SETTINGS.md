@@ -13,11 +13,16 @@ test wallet.
 |---|---|
 | `OPS_LAUNCH_OWNER_BASE`, `OPS_LAUNCH_OWNER_BITTENSOR` | The final owner on each chain: a Safe, or a timelock run by a Safe. It may be a contract. Per chain, because a Safe at one address on Base may not exist (or may be someone else's) on Bittensor. |
 | `OPS_LAUNCH_GUARDIAN_BASE`, `OPS_LAUNCH_GUARDIAN_BITTENSOR` | The guardian on each chain, set in the constructors (so there is no 8-day wait). A plain account with its own key, or a Safe. |
-| `OPS_LAUNCH_KEEPER` | The keeper on both chains. |
+| `OPS_LAUNCH_KEEPER` | The keeper on both chains. Must be a plain account: before each send, the keeper reads its code on that chain (once a round at most) and refuses if there is any. `run` then stops. |
 | `OPS_LAUNCH_TREASURY` | Receives the reward cut and the staker's fees. Must be a plain account (no code on either chain): deploy checks this before planning, and verify checks it again. |
 
 Refused: a guardian equal to any owner or to the keeper; the keeper equal to any owner; the test wallet
 as an owner or a guardian.
+
+verify reads every role's code on each chain where the role acts. An EIP-7702 delegation fails any role.
+That code is `0xef0100` plus an address, and it means the account's key has installed code in it, as in
+the Binance hot-wallet drain. Any other code fails the keeper or the treasury. A launch owner with no code
+is only a warning.
 
 How it runs: the test wallet deploys and owns everything while it configures. Each chain's last steps
 then offer ownership of the front door, the staker and the vault to that chain's owner (Ownable2Step).
@@ -116,5 +121,7 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
   always show as warnings.
 - **Emergency.** `pnpm ops pause [front-door|vault|both]` does a dry run: it estimates the call and
   checks the keystore. `--live` sends as the guardian, with `OPS_GUARDIAN_KEYSTORE` and
-  `OPS_GUARDIAN_PASSWORD_FILE`. A Safe guardian gets a Transaction Builder file instead. `unpause` is
-  the owner's and goes through the timelock if there is one. Do the dry run once before launch.
+  `OPS_GUARDIAN_PASSWORD_FILE`. A Safe guardian gets a Transaction Builder file instead. If the
+  guardian's plain account holds an EIP-7702 delegation, pause prints a WARNING and still pauses from
+  its key: assume that key is compromised, and rotate the guardian afterwards. `unpause` is the owner's
+  and goes through the timelock if there is one. Do the dry run once before launch.

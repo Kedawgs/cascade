@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Address, decodeFunctionData, encodeFunctionData, getAddress, type Hex, keccak256, parseAbi, stringToBytes, zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
 import { WALLET } from "../src/config.ts";
-import { handoff, ownershipStatus } from "../src/handoff.ts";
+import { emitCalls, handoff, ownershipStatus } from "../src/handoff.ts";
 import { buildPlanV3 } from "../src/plan.ts";
 import { accountKind, checksumSerialize, SAFE_PROBE_ABI, safeBatch, safeChecksum, TIMELOCK_ABI, timelockCalls } from "../src/safe.ts";
 import { COLDKEY, fakeChain, revert, v3Record } from "./fake-keeper.ts";
@@ -120,6 +120,24 @@ describe("what kind of account an owner or guardian is", () => {
     expect(await accountKind(probe(CODE, { getMinDelay: () => 172_800n }), "base", ROLES.owner.base)).toEqual({ kind: "timelock", minDelay: 172_800n });
     expect(await accountKind(probe(CODE, { getThreshold: () => 2n }), "base", ROLES.owner.base)).toEqual({ kind: "safe" });
     expect(await accountKind(probe(CODE, {}), "base", ROLES.owner.base)).toEqual({ kind: "contract" });
+  });
+
+  it("a plain account holding an EIP-7702 delegation is still a plain account, whatever its delegate's code answers", async () => {
+    const sweeper = getAddress("0x00000000000000000000000000000000005eeeee");
+    const delegated = probe(`0xef0100${sweeper.slice(2).toLowerCase()}`, { getMinDelay: () => 1n, getThreshold: () => 1n });
+    expect(await accountKind(delegated, "base", ROLES.owner.base)).toEqual({ kind: "account", delegation: sweeper });
+    // what handoff prints for it says so, instead of "no code"
+    const dir = mkdtempSync(join(tmpdir(), "ops-handoff-"));
+    const out = await emitCalls(delegated, "base", ROLES.owner.base, [{ to: getAddress("0x00000000000000000000000000000000000000f1"), data: ACCEPT, description: "acceptOwnership() on the front door" }], {
+      outDir: dir,
+      stem: "x",
+      title: "x",
+      now: 1,
+    });
+    expect(out.files).toEqual([]);
+    expect(out.lines[0]).toBe(
+      `Base: ${ROLES.owner.base} is a plain account with an EIP-7702 delegation to ${sweeper} (assume its key is compromised): send these from it, from any wallet that holds its key:`,
+    );
   });
 });
 

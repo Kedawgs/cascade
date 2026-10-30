@@ -32,7 +32,7 @@ import {
   type VerifyAllow,
 } from "./registry.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord, type VerifyResult } from "./record.ts";
-import { balanceOf, codeAt, read } from "./rpc.ts";
+import { balanceOf, codeAt, delegationOf, read } from "./rpc.ts";
 import { scanLogs, startBlock } from "./keeper/state.ts";
 import { type Ctx, chainLabel } from "./send.ts";
 
@@ -245,13 +245,81 @@ export async function readBack(
   return actual;
 }
 
-/** The treasury holds csTAO on Bittensor and redeems it through the front door on Base, so its address
- * must be the same owner on both chains: a plain account, never a contract (whose address on the other
- * chain could belong to someone else). */
-export function treasuryCodeFailures(treasury: Address, code: Record<ChainName, Hex>): string[] {
-  return (["base", "bittensor"] as const)
-    .filter((c) => code[c] !== "0x")
-    .map((c) => `${chainLabel(c)} treasury ${treasury}: has contract code; the treasury must be a plain account, the same owner on Base and Bittensor`);
+export type RoleName = "owner" | "guardian" | "keeper" | "treasury";
+
+/** Why a role must be a plain account, for the roles that must. The keeper's own key signs its sends.
+ * The treasury holds csTAO on Bittensor and redeems it through the front door on Base, so its address
+ * must be the same owner on both chains: never a contract, whose address on the other chain could belong
+ * to someone else. An owner or a guardian may be a Safe or a timelock. */
+const PLAIN: Partial<Record<RoleName, string>> = {
+  keeper: "the keeper must be a plain account, whose own key signs the keeper's transactions",
+  treasury: "the treasury must be a plain account, the same owner on Base and Bittensor",
+};
+
+/** "owner", "owner and guardian", "owner, guardian and keeper" */
+const listed = (names: readonly string[]) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
+
+/** Each account holding a role, on each chain where the role acts, with every role it holds there: the
+ * keeper and the treasury act on both chains, each chain's owner and guardian on that chain. `treasuries`:
+ * any other treasury the contracts name (verify compares those with the plan's separately). In a test plan
+ * the test wallet holds them all: one account a chain. */
+export function roleAccounts(plan: PlanV3, treasuries: readonly Address[] = []): { chain: ChainName; address: Address; roles: RoleName[] }[] {
+  const r = rolesOf(plan);
+  const out: { chain: ChainName; address: Address; roles: RoleName[] }[] = [];
+  for (const chain of ["base", "bittensor"] as const) {
+    const held: [RoleName, Address][] = [
+      ["owner", r.owner[chain]],
+      ["guardian", r.guardian[chain]],
+      ["keeper", r.keeper],
+      ["treasury", r.treasury],
+      ...treasuries.map((t): [RoleName, Address] => ["treasury", t]),
+    ];
+    for (const [role, address] of held) {
+      const at = out.find((x) => x.chain === chain && same(x.address, address));
+      if (!at) out.push({ chain, address, roles: [role] });
+      else if (!at.roles.includes(role)) at.roles.push(role);
+    }
+  }
+  return out;
+}
+
+/** What an account's code on `chain` says about the roles it holds there. An EIP-7702 delegation fails
+ * every role: a plain account whose key has installed code in it (as in the Binance hot-wallet drain),
+ * never a Safe or a timelock. Other code fails a role that must be a plain account (PLAIN). No code at a
+ * launch's owner is only a warning: LAUNCH-SETTINGS plans a Safe or a timelock, but allows a plain account
+ * on Bittensor if Safe{Wallet} doesn't run there. */
+export function roleCodeFindings(chain: ChainName, address: Address, roles: readonly RoleName[], code: Hex, launch = false): Findings {
+  const where = (names: readonly string[]) => `${chainLabel(chain)} ${listed(names)} ${address}`;
+  const to = delegationOf(code);
+  if (to) {
+    return {
+      failures: [`${where(roles)}: has an EIP-7702 delegation to ${to}, code its own key installed; assume the key is compromised and rotate the ${listed(roles)}`],
+      warnings: [],
+    };
+  }
+  if (code !== "0x") {
+    return { failures: roles.filter((r) => PLAIN[r]).map((r) => `${where([r])}: has contract code; ${PLAIN[r]}`), warnings: [] };
+  }
+  const owner = launch && roles.includes("owner");
+  return {
+    failures: [],
+    warnings: owner
+      ? [`${where(["owner"])}: has no code, so it is a plain account, not a Safe or a timelock; if one was meant, none is deployed at this address on ${chainLabel(chain)}`]
+      : [],
+  };
+}
+
+/** Reads each role's account on the chains where it acts (roleAccounts), one read an account a chain, and
+ * checks its code (roleCodeFindings). */
+export async function roleCodeChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3, treasuries: readonly Address[] = []): Promise<Findings> {
+  const out: Findings = { failures: [], warnings: [] };
+  const launch = cadenceOf(plan) === "launch";
+  for (const { chain, address, roles } of roleAccounts(plan, treasuries)) {
+    const f = roleCodeFindings(chain, address, roles, await codeAt(ctx.rpc, chain, address), launch);
+    out.failures.push(...f.failures);
+    out.warnings.push(...f.warnings);
+  }
+  return out;
 }
 
 const readAt = (actual: Map<string, unknown>, chain: ChainName, contract: string, field: string) => actual.get(keyOf({ chain, contract, field }));
@@ -437,13 +505,10 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
     }
     await findings("the pause and hotkey state", async () => ({ failures: [], warnings: await stateWarnings(ctx, plan) }));
     await findings("the oracle's pools", () => cardinalityChecks(ctx, plan));
-    const treasuries = new Map<string, Address>();
-    for (const t of [rolesOf(plan).treasury, readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")]) {
-      if (anAddress(t)) treasuries.set(t.toLowerCase(), t);
-    }
-    for (const t of treasuries.values()) {
-      failures.push(...treasuryCodeFailures(t, { base: await codeAt(ctx.rpc, "base", t), bittensor: await codeAt(ctx.rpc, "bittensor", t) }));
-    }
+    // every role's account by its code (an EIP-7702 delegation, or code where a plain account belongs), with
+    // the treasuries the contracts name besides the plan's
+    const named = [readAt(actual, "base", "CascadeStaker", "treasury"), readAt(actual, "bittensor", "CascadeVault", "treasury")].filter(anAddress);
+    await findings("the roles' accounts", () => roleCodeChecks(ctx, plan, named));
   }
 
   const v = plan.addresses.vault;

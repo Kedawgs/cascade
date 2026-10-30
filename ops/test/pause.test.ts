@@ -23,6 +23,8 @@ interface World {
   paused?: Partial<Record<ChainName, boolean>>;
   /** what kind of account each address is (default: a plain account) */
   kinds?: Record<string, "safe" | "timelock">;
+  /** an address's code, over what its kind gives it */
+  codes?: Record<string, Hex>;
   /** the account the keystore signs as */
   keystoreSigns?: Address;
   estimateFails?: ChainName;
@@ -50,7 +52,7 @@ function world(w: World = {}) {
       },
     },
     {
-      eth_getCode: (_c, p) => (kindOf(p[0] as string) ? "0x6080" : "0x"),
+      eth_getCode: (_c, p) => w.codes?.[(p[0] as string).toLowerCase()] ?? (kindOf(p[0] as string) ? "0x6080" : "0x"),
       eth_estimateGas: (chain) => {
         if (w.estimateFails === chain) throw revert("NotGuardian", chain);
         return numberToHex(30_000n);
@@ -165,6 +167,38 @@ describe("pause, the guardian a plain account", () => {
     expect(r.ok).toBe(false);
     expect(r.lines[0]).toMatch(new RegExp(`^PROBLEM — Base front door ${fd}: pause\\(\\) from the guardian ${ROLES.guardian.base} would fail \\(.*NotGuardian.*\\); nothing sent$`));
     expect(w.sends.map((s) => s.req.chain)).toEqual(["bittensor"]);
+  });
+
+  describe("whose account holds an EIP-7702 delegation", () => {
+    const SWEEPER = getAddress("0x00000000000000000000000000000000005eeeee");
+    // the delegate's code answers getThreshold, as if a Safe: still the guardian's own key that signs
+    const delegated = () =>
+      world({
+        codes: { [ROLES.guardian.base.toLowerCase()]: `0xef0100${SWEEPER.slice(2).toLowerCase()}` },
+        kinds: { [ROLES.guardian.base.toLowerCase()]: "safe" },
+        keystoreSigns: ROLES.guardian.base,
+      });
+    const warning = `WARNING — Base front door ${fd}: the guardian ${ROLES.guardian.base} has code, an EIP-7702 delegation to ${SWEEPER}: assume its key is compromised and rotate the guardian. This doesn't stop pause(), which its key still signs.`;
+
+    it("the dry run warns, and still checks the call and the keystore", async () => {
+      const w = delegated();
+      const r = await pauseCommand(w.ctx, rec, opts({ target: "front-door" }), w.deps);
+      expect(r.lines).toEqual([
+        warning,
+        `Base front door ${fd}: dry run: pause() from the guardian ${ROLES.guardian.base} would succeed (about 30,000 gas), and /keys/guardian.json signs as it. Add --live to send it.`,
+      ]);
+      expect(r.ok).toBe(true);
+      expect(r.files).toEqual([]);
+      expect(w.sends).toEqual([]);
+    });
+
+    it("--live still sends pause() from its key, warning all the same", async () => {
+      const w = delegated();
+      const r = await pauseCommand(w.ctx, rec, opts({ send: true, target: "front-door" }), w.deps);
+      expect(w.sends.map((s) => [s.req.chain, s.req.functionName, s.ctx.signer?.address])).toEqual([["base", "pause", ROLES.guardian.base]]);
+      expect(r.lines).toEqual([warning, `Base front door ${fd}: paused (transaction ${SENT.hash})`]);
+      expect(r.ok).toBe(true);
+    });
   });
 });
 

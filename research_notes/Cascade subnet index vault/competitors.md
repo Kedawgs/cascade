@@ -1,4 +1,4 @@
-# Competitive landscape: Bittensor subnet index vault (cascade.fi)
+# Competitive landscape: Bittensor subnet index vault (cascadefi.xyz)
 
 Research date: 2026-10-20. Items dated 2025 or earlier are labeled. Several sources conflict and that is flagged inline. Market context used throughout:
 - TAO market cap was about $2.4B in May–June 2026 — [FalconX, May 13 2026](https://www.falconx.io/newsroom/state-of-bittensor-subnet-adoption-trends-network-mechanics-and-covenants-departure); [Cointelegraph, Jun 27 2026](https://cointelegraph.com/news/yuma-bittensor-fund-institutional-tao-decentralized-ai). TAO fair value was $202.57 on Jun 30 2026 (Coinbase principal market) — [Grayscale Bittensor Trust 10-Q, Q2 2026](https://www.sec.gov/Archives/edgar/data/0002029297/000202929726000006/gtao-20260630.htm).
@@ -72,8 +72,8 @@ All TAO ETPs and ETFs, and all treasury companies, are single-asset TAO, not sub
 **F. Searches that turned up nothing.** I found no product or index named "TSBCSI", "Tao20" or "Tao Accelerate", and no Safety Shot link to TAO. See Gaps.
 
 ### Inferences
-- The only true diversified-subnet "index" products are (a) Yuma's gated funds, (b) TAO-denominated proxy allocators that require a Bittensor wallet and TAO, and (c) native root baskets. None is a USDC-in, ERC-20-out, permissionless vault on Base. That is the white space for cascade.fi.
-- Root Reborn is a strategic threat. If validator basket curation is enabled, every root validator effectively becomes an index manager with zero swap slippage on entry and TAO-denominated principal. cascade.fi should position as "USDC-native, on Base, transparent rules-based alpha exposure" rather than competing on TAO-native yield.
+- The only true diversified-subnet "index" products are (a) Yuma's gated funds, (b) TAO-denominated proxy allocators that require a Bittensor wallet and TAO, and (c) native root baskets. None is a USDC-in, ERC-20-out, permissionless vault on Base. That is the white space for cascadefi.xyz.
+- Root Reborn is a strategic threat. If validator basket curation is enabled, every root validator effectively becomes an index manager with zero swap slippage on entry and TAO-denominated principal. cascadefi.xyz should position as "USDC-native, on Base, transparent rules-based alpha exposure" rather than competing on TAO-native yield.
 - Fee benchmarks in this niche: ETPs charge 1.49–2.5%/yr (Grayscale 2.5%, Virtune 1.95%, STAO up to 1.49%). Mentat takes a "small" performance fee. Stakao charges a flat EUR 168/yr. Taostats charges nothing. A 0.5–1.0% management fee, or a small performance fee, would be competitive with the ETPs. Retail Bittensor users are used to near-zero platform fees.
 - Grayscale's TAO trust is tiny ($9.4M NAV). This suggests weak traditional-finance demand for TAO wrappers so far, or that the 2.5% fee and OTC structure deter buyers.
 
@@ -116,7 +116,7 @@ A Base user today can (1) use **TaoFi** to swap USDC into a single subnet's stak
 
 ### Inferences
 - The easiest Base-native path today is TaoFi (USDC → one subnet's staked alpha) or buying xAlpha on Aerodrome. Both are single-subnet bets, need manual portfolio construction, and suffer from thin pools.
-- A Base vault for cascade.fi probably cannot hold xAlpha for most of its index and rebalance on Base efficiently, because of Aerodrome depth and the 17-subnet coverage. The more realistic design is a Base-side ERC-4626 share token with execution on Bittensor, via a Hyperlane ICA as TaoFi does, or via a keeper or proxy. That adds bridge and keeper trust assumptions, which must be the centerpiece of the "security-first" story.
+- A Base vault for cascadefi.xyz probably cannot hold xAlpha for most of its index and rebalance on Base efficiently, because of Aerodrome depth and the 17-subnet coverage. The more realistic design is a Base-side ERC-4626 share token with execution on Bittensor, via a Hyperlane ICA as TaoFi does, or via a keeper or proxy. That adds bridge and keeper trust assumptions, which must be the centerpiece of the "security-first" story.
 - Coinbase users can buy TAO but have no direct subnet product. An ETF wrapper for subnets is not on the horizon in any filing I found.
 
 ### Gaps
@@ -185,7 +185,7 @@ No product combines (1) USDC or ETH deposits on Base, (2) a diversified, rules-b
 - Retail fee expectations are low: Taostats charges nothing, Stakao charges a flat EUR 168/yr, and Mentat takes a "small performance fee". TradFi wrappers charge 1.49–2.5% — sources as cited in Q1.
 
 ### Inferences
-Candidate differentiators for cascade.fi:
+Candidate differentiators for cascadefi.xyz:
 1. **USDC-in and USDC-out on Base** with an ERC-4626 share token. Coinbase Smart Wallet and Base users never touch a Bittensor wallet.
 2. **Transparent, rules-based Top-N index** with liquidity-aware caps (weight capped by pool depth), an exclusion screen (e.g., incentive-burn ratio, deregistration risk, team-sale events), and a published methodology. YCX and Yuma Large Cap show the market accepts "composite vs large-cap" framing.
 3. **Security story as the product:**

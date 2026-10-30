@@ -5,7 +5,7 @@ design is `docs/superpowers/specs/2026-10-28-cascade-indexer-monitor-design.md`;
 
 ## What it does
 
-- **Serves the site's starting point.** A first visit to cascade.fi reads the vault's whole history from the
+- **Serves the site's starting point.** A first visit to cascadefi.xyz reads the vault's whole history from the
   chain. The Worker keeps that history and serves it in the two halves the site's store saves, so a first visit
   starts near the head instead. It is only an accelerator: the site checks what it uses against chain receipts
   and works without it.
@@ -123,9 +123,9 @@ repository root.
    account, `test` in a second, free account), never both in one Free account (eight crons exceed its five,
    and both would share one set of daily quotas), and set the Free budget column above, knowing a full batch
    delivery doesn't fit Free's CPU limit (see Configuration). The test Worker in a
-   second account then has two limits: it **can't send email from cascade.fi** (a Worker sends only from an
+   second account then has two limits: it **can't send email from cascadefi.xyz** (a Worker sends only from an
    Email Routing domain in its own account, so it stays in `ALERT_MODE=log` or uses a domain of its own), and it
-   **can't use `api.cascade.fi`** (a custom domain must be a zone in its own account: it uses its `workers.dev`
+   **can't use `api.cascadefi.xyz`** (a custom domain must be a zone in its own account: it uses its `workers.dev`
    URL).
 The order matters: wrangler offers to create things when a step comes too early (a secret put before the first
 deploy creates an empty Worker), so deploy first, in log mode, and add the email secret after.
@@ -148,10 +148,10 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
    `--extra-hosts static.cloudflareinsights.com` (comma-separated for several): the hand-added hosts are named in
    the file, so they stay reviewable in git. Re-run this whenever the site is redeployed with new dependencies.
 7. Deploy, still in log mode (`"ALERT_MODE": "log"` as shipped, which needs no `ALERT_TO`):
-   `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascade.fi`), or use the
+   `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascadefi.xyz`), or use the
    `workers.dev` URL to start.
 8. Email (open question 2). In the dashboard: **Email Service → Email Routing**, onboard the sending domain
-   (cascade.fi; it adds MX and SPF records, so check nothing else receives mail there first, or use a sending
+   (cascadefi.xyz; it adds MX and SPF records, so check nothing else receives mail there first, or use a sending
    subdomain), then add and **verify** the destination address. Then, the Worker existing now:
    `pnpm --dir indexer wrangler secret put ALERT_TO --env test` (the verified address), and optionally the
    `THRESHOLDS_SECRET` and `*_RPC_URL_SECRET` secrets. Then set `"ALERT_MODE": "send"` in `env.test`'s vars
@@ -166,7 +166,7 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
     edit, a missing secret in `send` mode), no job runs at all, the watchdog and the digest included, and it
     stays silent. `/v1/health` answers 503 then (no tick has completed), which only an outside check sees. A
     missing daily digest is the weaker sign.
-11. A rate-limiting rule on the API path (`api.cascade.fi/v1/scan/*`).
+11. A rate-limiting rule on the API path (`api.cascadefi.xyz/v1/scan/*`).
 12. The site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). The keeper: set `OPS_HOLD_URL`
     (after the keeper tasks).
 13. Production: the same steps with `--env production` and the launch deployment's record, once it exists.

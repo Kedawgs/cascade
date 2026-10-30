@@ -86,7 +86,7 @@ describe("the address and host scan", () => {
 
   it("reads a body as a stream and stops at the cap, never buffering more", async () => {
     const s = server({ "/big.js": { bytes: 3_000_000 } });
-    const r = await readCapped(await s.fetch("https://cascade.fi/big.js"), 2_000_000);
+    const r = await readCapped(await s.fetch("https://cascadefi.xyz/big.js"), 2_000_000);
     expect(r).toEqual({ tooLarge: true });
     expect(s.read.bytes).toBeLessThanOrEqual(2_000_000 + 65_536);
     expect(await readCapped(new Response("small"), 10)).toEqual({ text: "small" });

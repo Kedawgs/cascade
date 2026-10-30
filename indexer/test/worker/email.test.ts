@@ -121,7 +121,7 @@ describe("sendAll", () => {
     expect(await sendAll({ EMAIL: { send } as unknown as SendEmail }, cfg("send"), msgs)).toEqual({ sent: [2], failed: [{ id: 1, code: "E_RATE_LIMIT_EXCEEDED" }] });
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[1]).toEqual([
-      expect.objectContaining({ to: ["owner@example.com", "second@example.com"], from: { email: "monitor@cascade.fi", name: "Cascade monitor" }, subject: msgs[1].subject }),
+      expect.objectContaining({ to: ["owner@example.com", "second@example.com"], from: { email: "monitor@cascadefi.xyz", name: "Cascade monitor" }, subject: msgs[1].subject }),
     ]);
   });
 });

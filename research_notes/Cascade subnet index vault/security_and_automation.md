@@ -1,4 +1,4 @@
-# Security Risks, Incident History, and Secure Automation Design for a Cross-Chain Bittensor Index Vault (cascade.fi)
+# Security Risks, Incident History, and Secure Automation Design for a Cross-Chain Bittensor Index Vault (cascadefi.xyz)
 
 Research date: 2026-10-20. Items are labeled with their date. Most 2026 incident figures come from news outlets and security-firm alerts (PeckShield and others), not from the protocols' own post-mortems. Treat exact dollar figures as approximate.
 

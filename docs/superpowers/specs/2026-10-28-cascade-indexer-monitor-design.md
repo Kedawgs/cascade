@@ -232,7 +232,7 @@ vault's `payoutDelay` and its pending payout batches.
                   └───────┬────────────────┬────────────────┬──────┘
                           ▼                ▼                ▼
           Base and Bittensor RPCs    price APIs and     send_email ──▶ owner's inbox
-          (logs, Multicall3)         cascade.fi's JS
+          (logs, Multicall3)         cascadefi.xyz's JS
 ```
 
 - **One Worker, `cascade-indexer`**, two handlers. `fetch` serves four read-only routes and nothing else
@@ -903,7 +903,7 @@ every `https://` host found in its HTML and JavaScript.
 ### 7. Email
 
 - **Transport:** the `send_email` binding `EMAIL`, restricted with `allowed_sender_addresses` to the sender in
-  `ALERT_FROM` (e.g. `monitor@cascade.fi`). Recipients come from the secret `ALERT_TO` (comma-separated), so no
+  `ALERT_FROM` (e.g. `monitor@cascadefi.xyz`). Recipients come from the secret `ALERT_TO` (comma-separated), so no
   personal address is in the public repo. *call*: send only to **verified destination addresses** (free on every
   plan, no quota); that needs Email Routing on the sending domain (open question 2).
 - **Order:** an alert is committed first, then its email is sent, then a small write marks it sent (section 1).
@@ -1010,8 +1010,8 @@ crons, `"cache": { "enabled": true }`, the D1 binding `DB` and the `send_email` 
 | `BASE_RPC_URL`, `BASE_LOGS_RPC_URL`, `BITTENSOR_RPC_URL` | `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://archive.chain.opentensor.ai` | a secret named `<var>_SECRET` (`BASE_RPC_URL_SECRET`, …) overrides each (for a keyed URL) |
 | `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `200`, `5000`, `40`, `180` | the Workers Paid profile (Free fallback: `45` and `100` for the two budgets; section 12). One `DECODE_BUDGET` unit is one log hashed and decoded, about 42 µs; `LEASE_S` at least 3 × `SCAN_WALL_S` |
 | `SITE_FILES_PER_RUN`, `SITE_MAX_BYTES` | `20`, `2000000` | the site check's own invocation (6.6); Free fallback `2` files per run |
-| `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascade.fi`, `https://cascade.fi`, `["/","/stake/"]` | CORS and the integrity check |
-| `ALERT_FROM`, `ALERT_MODE` | `monitor@cascade.fi`, `send` | `log` in dev and tests |
+| `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascadefi.xyz`, `https://cascadefi.xyz`, `["/","/stake/"]` | CORS and the integrity check |
+| `ALERT_FROM`, `ALERT_MODE` | `monitor@cascadefi.xyz`, `send` | `log` in dev and tests |
 | `THRESHOLDS` | `{}` | overrides of `src/thresholds.ts`; the `THRESHOLDS_SECRET` secret wins |
 | `PRICE_SOURCES` | `["coingecko","coinbase"]` | reference TAO price for `fmtao.depeg` (median of those that answer; both must agree within 2%) |
 
@@ -1059,9 +1059,9 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
    Free with **one environment per account**: `production` in the main account and `test` in a second, free
    Cloudflare account. Don't run both environments in one Free account: eight crons exceed its five, and both
    would share one set of daily quotas. Option (b) has two limits for the test Worker: it **can't send email
-   from cascade.fi** (a Worker sends only from an Email Routing domain in its own account, so the second account
+   from cascadefi.xyz** (a Worker sends only from an Email Routing domain in its own account, so the second account
    needs a domain of its own onboarded, or the test Worker stays in `ALERT_MODE=log`), and it **can't use
-   `api.cascade.fi`** (a custom domain must be a zone in the Worker's own account; the test Worker uses its
+   `api.cascadefi.xyz`** (a custom domain must be a zone in the Worker's own account; the test Worker uses its
    `workers.dev` URL).
 1. `pnpm --dir indexer install && pnpm --dir indexer test`.
 2. `pnpm --dir indexer wrangler login`.
@@ -1074,12 +1074,12 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
    `BASE_LOGS_RPC_URL_SECRET` and `BITTENSOR_RPC_URL_SECRET` (section 9).
 6. `pnpm --dir indexer config:from-record ../ops/deployments/v3-test.json` and paste the `DEPLOYMENT` value.
 7. `pnpm --dir indexer site:approved ../web/out` after building the site to deploy; commit the lists.
-8. `pnpm --dir indexer wrangler deploy --env test`; add the custom domain (`api.cascade.fi`, or the
+8. `pnpm --dir indexer wrangler deploy --env test`; add the custom domain (`api.cascadefi.xyz`, or the
    `workers.dev` URL to start).
 9. Watch `GET /v1/status` until both chains' `lagS` are small (backfill takes an hour or so); expect the first
    digest at 13:00 UTC; trigger one warning on purpose (e.g. a `THRESHOLDS` keeper floor above the real balance)
    to see an email arrive, then remove it.
-10. A rate-limiting rule on the API path (`api.cascade.fi/v1/scan/*`), and optionally an outside uptime check
+10. A rate-limiting rule on the API path (`api.cascadefi.xyz/v1/scan/*`), and optionally an outside uptime check
     on `/v1/health`.
 11. Site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). Keeper: set `OPS_HOLD_URL` (after the
     keeper tasks).
@@ -1183,9 +1183,9 @@ Tasks that depend on an answer are marked in the plan.
 
 1. **Plan shape:** *Answered 2026-10-29:* the account already pays for Workers Paid ($5/month); test and
    production share it, with the Paid budget profile (section 12). To be confirmed in the dashboard at deploy.
-2. **Email:** is cascade.fi's DNS on Cloudflare, and does anything else receive mail for cascade.fi today
+2. **Email:** is cascadefi.xyz's DNS on Cloudflare, and does anything else receive mail for cascadefi.xyz today
    (Email Routing takes over its MX records)? Which address gets alerts? A sending subdomain (e.g.
-   `alerts.cascade.fi` with Email Sending on Paid) avoids touching the main domain's mail.
+   `alerts.cascadefi.xyz` with Email Sending on Paid) avoids touching the main domain's mail.
 3. **Keeper fail-closed:** the design pays a batch only once the monitor reports it `ok`, and holds redeem closes,
    payouts and rolls when the monitor is unreadable, stale or lagging past `min(30 min, payoutDelay / 4)`, with an
    expiring `--ignore-monitor-outage` escape hatch. Agree?
@@ -1199,7 +1199,7 @@ Tasks that depend on an answer are marked in the plan.
    Without them `fmtao.depeg` doesn't run.
 7. **Planned admin changes:** today every admin event is critical, including the owner's own. Want a way to
    pre-announce a change (a row added with wrangler) so its alert says "announced"?
-8. **Domains:** the API at `api.cascade.fi`? Which site origin(s) to allow: only `https://cascade.fi`, or also
+8. **Domains:** the API at `api.cascadefi.xyz`? Which site origin(s) to allow: only `https://cascadefi.xyz`, or also
    `www` and Pages preview URLs (previews would then fall back to their own scan)?
 9. **Outside heartbeat:** add a free external uptime check on `/v1/health` that emails if the Worker stops? (An
    outward action on a third-party service, so your call.)

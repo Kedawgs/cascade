@@ -18,7 +18,7 @@ const SETTLED = FROM + 5000n;
 const USER = "0x00000000000000000000000000000000000a11ce" as Hex;
 const OTHER = "0x00000000000000000000000000000000000b0b00" as Hex;
 const KEY = keccak256(toBytes("batch 1")) as Hex;
-const ORIGIN = "https://cascade.fi";
+const ORIGIN = "https://cascadefi.xyz";
 
 const SHARED_EVENTS: SeedEvent[] = [
   { kind: "delivered", batchId: "1", key: KEY, txHash: tx(1), block: String(FROM + 100n) },

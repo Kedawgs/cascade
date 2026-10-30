@@ -255,7 +255,7 @@ Alpha stakers earn **alpha-denominated** dividends at each subnet epoch (default
 - Taostats has a yield page with chain-based staking calculations. — [taostats yield](https://taostats.io/yield)
 
 ### Inferences
-- For cascade.fi, "yield" must be reported in TAO (and USD) terms net of alpha price change. Marketing alpha APY would be misleading given the evidence that most subnets lost TAO value over 30-day windows in H1 2026.
+- For cascadefi.xyz, "yield" must be reported in TAO (and USD) terms net of alpha price change. Marketing alpha APY would be misleading given the evidence that most subnets lost TAO value over 30-day windows in H1 2026.
 - Root Reborn baskets are a **native, on-chain competitor**. They are validator-curated subnet-alpha index funds with a 1/16 concentration cap, NAV priced at realizable value, and staking-like UX. Yuma's "Total Market Fund" (June 2026) is another. — [A Bittensor Journey, June 2026](https://www.abittensorjourney.com/p/navigating-bittensor-june-2026)
 - A simpler cascade design could root-stake to a high-performing basket validator via `addStake(hotkey, amount, 0)` and periodically `claimRootWithHotkey`. That outsources subnet selection, at the cost of validator discretion risk. Whether direct `stake_into_basket` is reachable from EVM (it is not in staking-v2 today) matters for this path.
 

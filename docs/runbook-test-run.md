@@ -1,6 +1,6 @@
 # Test run runbook
 
-The first real-money test of cascade.fi: about $20 of the owner's own money through the whole loop
+The first real-money test of cascadefi.xyz: about $20 of the owner's own money through the whole loop
 on Base and Bittensor mainnet, from a throwaway test wallet. The contracts are unaudited, the site
 is not advertised, and nobody else deposits. Design:
 `docs/superpowers/specs/2026-10-24-cascade-test-deployment-design.md`.

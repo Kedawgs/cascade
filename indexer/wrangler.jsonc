@@ -40,7 +40,7 @@
           "migrations_dir": "migrations"
         }
       ],
-      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascade.fi"] }],
+      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
       // Public settings (spec section 9). A secret named <VAR>_SECRET overrides BASE_RPC_URL,
       // BASE_LOGS_RPC_URL, BITTENSOR_RPC_URL and THRESHOLDS (a keyed URL, private thresholds); ALERT_TO
       // is a secret only. src/config.ts checks all of it at the start of every invocation.
@@ -77,10 +77,10 @@
         "LEASE_S": "180",
         "SITE_FILES_PER_RUN": "20",
         "SITE_MAX_BYTES": "2000000",
-        "SITE_ORIGIN": "https://cascade.fi",
-        "SITE_URL": "https://cascade.fi",
+        "SITE_ORIGIN": "https://cascadefi.xyz",
+        "SITE_URL": "https://cascadefi.xyz",
         "SITE_PAGES": ["/", "/stake/"],
-        "ALERT_FROM": "monitor@cascade.fi",
+        "ALERT_FROM": "monitor@cascadefi.xyz",
         // log: emails are written to the log, never sent (until the owner deploys and verifies a recipient)
         "ALERT_MODE": "log",
         "THRESHOLDS": "{}",
@@ -117,7 +117,7 @@
           "migrations_dir": "migrations"
         }
       ],
-      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascade.fi"] }],
+      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
       // As test's, with the launch deployment's own DEPLOYMENT (and, at launch, ALERT_MODE "send").
       "vars": {
         "DEPLOYMENT": "not configured: paste the JSON printed by pnpm config:from-record",
@@ -132,10 +132,10 @@
         "LEASE_S": "180",
         "SITE_FILES_PER_RUN": "20",
         "SITE_MAX_BYTES": "2000000",
-        "SITE_ORIGIN": "https://cascade.fi",
-        "SITE_URL": "https://cascade.fi",
+        "SITE_ORIGIN": "https://cascadefi.xyz",
+        "SITE_URL": "https://cascadefi.xyz",
         "SITE_PAGES": ["/", "/stake/"],
-        "ALERT_FROM": "monitor@cascade.fi",
+        "ALERT_FROM": "monitor@cascadefi.xyz",
         "ALERT_MODE": "log",
         "THRESHOLDS": "{}",
         "PRICE_SOURCES": ["coingecko", "coinbase"],

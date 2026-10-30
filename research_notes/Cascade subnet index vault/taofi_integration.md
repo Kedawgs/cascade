@@ -1,8 +1,8 @@
-# TaoFi as an integration dependency for a multi-subnet index vault (cascade.fi)
+# TaoFi as an integration dependency for a multi-subnet index vault (cascadefi.xyz)
 
 Research date: 2026-10-20. "On-chain" values were read by me through public RPC `eth_call` (Bittensor EVM `lite.chain.opentensor.ai`, chain 964; Base; Arbitrum; Ethereum; Polygon; Unichain) and the taostats Blockscout API on that date. The explorer link given for each address is there so the reader can re-check it; it is not the place I read the value from. "Code" means the public repo `TaoFi-0x/taofi-swap` at HEAD `e51438f` (2026-01-19). Everything under "Inferences" is my reasoning, not a sourced fact.
 
-**Headline finding that changes the premise:** TaoFi no longer operates as an independent protocol. **Astrid Intelligence PLC (AQSE: ASTR) bought it, announced 2026-01-20.** It was renamed "Astrid Bridge" (astrid.taofi.com). Astrid said it will keep swap, LP and USDC bridging and **wind down the "cross-chain subnet" product, which is exactly the Base → alpha staking rail cascade.fi planned to build on.** taofi.com still shows a banner: "support for these products will not be provided after February 28, 2026." The contracts and API still work today, but nobody supports them.
+**Headline finding that changes the premise:** TaoFi no longer operates as an independent protocol. **Astrid Intelligence PLC (AQSE: ASTR) bought it, announced 2026-01-20.** It was renamed "Astrid Bridge" (astrid.taofi.com). Astrid said it will keep swap, LP and USDC bridging and **wind down the "cross-chain subnet" product, which is exactly the Base → alpha staking rail cascadefi.xyz planned to build on.** taofi.com still shows a banner: "support for these products will not be provided after February 28, 2026." The contracts and API still work today, but nobody supports them.
 
 ## 1. What exactly is TaoFi's integration surface (contracts, API, multi-subnet, contract-as-owner, fees, validator)?
 
@@ -558,7 +558,7 @@ On top of this, staking TAO into each subnet's own dTAO AMM adds its own slippag
 - The docs openly invite third-party interfaces to use the API and contracts with their own fee and validator. — [docs swap](https://docs.taofi.com/swap.md)
 
 ### Inferences
-- **BUSL-1.1 without a stated Additional Use Grant or Change Date** (no LICENSE file) should be treated as "no production use of the code without permission." This matters only if cascade.fi copies or forks TaoFi contracts. Calling the deployed contracts, or Hyperlane's own permissively licensed contracts directly, avoids the issue.
+- **BUSL-1.1 without a stated Additional Use Grant or Change Date** (no LICENSE file) should be treated as "no production use of the code without permission." This matters only if cascadefi.xyz copies or forks TaoFi contracts. Calling the deployed contracts, or Hyperlane's own permissively licensed contracts directly, avoids the issue.
 - The invitation to integrate in the docs predates the Astrid acquisition. There is no fresh written permission, API key or SLA. Relying on the API commercially without contacting Astrid is a business-continuity risk.
 
 ### Gaps

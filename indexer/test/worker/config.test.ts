@@ -33,7 +33,7 @@ describe("parseConfig", () => {
     expect(cfg.baseLogWindow).toBe(100n);
     expect(cfg.rpc.bittensor).toBe("https://archive.chain.opentensor.ai");
     expect(cfg.site.pages).toEqual(["/", "/stake/"]);
-    expect(cfg.alerts).toEqual({ from: "monitor@cascade.fi", mode: "log", to: [] });
+    expect(cfg.alerts).toEqual({ from: "monitor@cascadefi.xyz", mode: "log", to: [] });
     expect(cfg.priceSources).toEqual(["coingecko", "coinbase"]);
     expect(cfg.tokens.multicall3).toBe("0xca11bde05977b3631167028862be2a173976ca11");
     expect(cfg.thresholds).toEqual(DEFAULTS);
@@ -140,7 +140,7 @@ describe("parseConfig", () => {
   });
 
   it("refuses a site origin with a path, or with no host at all", () => {
-    for (const origin of ["https://cascade.fi/", "https://", "https:", "cascade.fi", 7]) {
+    for (const origin of ["https://cascadefi.xyz/", "https://", "https:", "cascadefi.xyz", 7]) {
       expect(refused(withVars({ SITE_ORIGIN: origin })).message).toContain("SITE_ORIGIN");
     }
   });

@@ -9,7 +9,7 @@ three operational questions. Send via @forevermoney_ai or the contact on docs.fo
 
 Subject: Integrating ForeverMoney TAO into a staking vault on Bittensor EVM
 
-Hi — I'm building cascade.fi, a product that gives people on Base root-staking exposure to TAO without
+Hi — I'm building cascadefi.xyz, a product that gives people on Base root-staking exposure to TAO without
 a Bittensor wallet. Your TAO token over CCIP is the rail. From your public bridge-contracts repo I've
 confirmed that a contract can call `AlphaVault.withdrawLiquid` and `depositLiquid` directly, so the
 plan is: our Base contract sends your token plus our batch data to our own receiver on 964 through
@@ -25,4 +25,4 @@ through `depositLiquid` and the router. We don't touch your gateways. Three ques
 
 Happy to share our design doc and audit when it's done. Thanks.
 
-— Daniel, cascade.fi
+— Daniel, cascadefi.xyz

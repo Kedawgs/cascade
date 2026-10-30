@@ -1,4 +1,4 @@
-# cascade.fi: Consumer UX Patterns on Base and the Regulatory Risk Map for a Fee-Charging Subnet Index Vault
+# cascadefi.xyz: Consumer UX Patterns on Base and the Regulatory Risk Map for a Fee-Charging Subnet Index Vault
 
 _Research notes, current as of 2026-10-20. This is research, not legal advice. Tags: **[older]** means the item predates 2026 and may have changed; **[secondary]** means commentary or an aggregator rather than a primary source; **[single source]** means it needs confirmation; **[background]** means the claim comes from general domain knowledge and was not verified in this session._
 
@@ -486,7 +486,7 @@ The typical pattern has three parts. An offshore no-owner entity, usually a **Ca
 These are options with trade-offs, for discussion with counsel.
 1. **Where the fee sits.**
    - A *contract-level fee* (management or streaming fee minted to a treasury) is transparent and automatic. It is still compensation (adviser and CPO analysis) and makes the recipient identifiable.
-   - A *front-end-only fee* (a surcharge on deposits through cascade.fi) creates a clearer "identifiable intermediary" in MiCA and UK terms.
+   - A *front-end-only fee* (a surcharge on deposits through cascadefi.xyz) creates a clearer "identifiable intermediary" in MiCA and UK terms.
    - *No fee at launch* minimises the compensation element but delays revenue.
 2. **Entity.**
    - A US LLC is cheap and simple, but squarely in US jurisdiction for a pooled, fee-charging product.

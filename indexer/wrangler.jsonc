@@ -12,7 +12,8 @@
   // Workers Cache serves the seed routes by their Cache-Control without running the Worker.
   "cache": { "enabled": true },
   // Four crons, the same in every environment (a test checks them against src/crons.ts):
-  // the tick every minute, the site check every two minutes, the hourly job and the daily digest.
+  // the tick every minute, the site check every two minutes (a run of the pass under way: a pass of every page
+  // in SITE_PAGES starts an hour after the last finished, see src/site-job.ts), the hourly job and the daily digest.
   // The account is on Workers Paid (open question 1), which allows 250 crons, so test and production
   // run side by side in it. Workers Free allows five per account: there only one environment fits.
   "triggers": { "crons": ["* * * * *", "*/2 * * * *", "17 * * * *", "0 13 * * *"] },
@@ -79,7 +80,8 @@
         "SITE_MAX_BYTES": "2000000",
         "SITE_ORIGIN": "https://cascadefi.xyz",
         "SITE_URL": "https://cascadefi.xyz",
-        "SITE_PAGES": ["/", "/stake/"],
+        // every page of the site (test/node/site-pages.test.ts checks them against web/src/app)
+        "SITE_PAGES": ["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/stake/", "/unstake/", "/withdraw/"],
         "ALERT_FROM": "monitor@cascadefi.xyz",
         // log: emails are written to the log, never sent (until the owner deploys and verifies a recipient)
         "ALERT_MODE": "log",
@@ -154,7 +156,8 @@
         "SITE_MAX_BYTES": "2000000",
         "SITE_ORIGIN": "https://cascadefi.xyz",
         "SITE_URL": "https://cascadefi.xyz",
-        "SITE_PAGES": ["/", "/stake/"],
+        // every page of the site (test/node/site-pages.test.ts checks them against web/src/app)
+        "SITE_PAGES": ["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/stake/", "/unstake/", "/withdraw/"],
         "ALERT_FROM": "monitor@cascadefi.xyz",
         "ALERT_MODE": "log",
         "THRESHOLDS": "{}",

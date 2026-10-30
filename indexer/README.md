@@ -22,9 +22,15 @@ It holds no key and never sends a transaction. Nothing over HTTP can write anyth
 | Cron | Job |
 |---|---|
 | `* * * * *` | the **tick**: lease, scan both chains, read their state, run the rules, commit, then send email |
-| `*/2 * * * *` | the **site check**: the live site's scripts against the approved lists, in its own invocation |
+| `*/2 * * * *` | the **site check**: the live site's pages and scripts against the approved lists, in its own invocation |
 | `17 * * * *` | the **hourly job**: the watchdog, and pruning readings (120 kept) and hour rows (35 days) |
 | `0 13 * * *` | the **daily digest** (once per UTC day), and the watchdog again |
+
+The site check's cron is how often a run may work, not how often the site is judged: a **pass** starts an hour
+after the last one finished, reads every page in `SITE_PAGES` (all 8 of the site's) in its first run, then 20
+scripts a run. The real build (32 scripts) is one pass of two runs, so a change to the live site is judged within
+about 64 minutes; at the 400-file cap a pass takes 40 minutes at most. A page it can't read is named
+(`site.unreachable`) and the other pages are still judged.
 
 The **watchdog** emails `monitor.stalled` itself when no tick has completed for 15 minutes, even when the
 database can't be written (then straight from memory). It runs with the hourly job, so a stall is noticed 15 to

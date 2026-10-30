@@ -32,7 +32,7 @@ describe("parseConfig", () => {
     expect(cfg.budgets).toEqual({ subrequests: 200, decode: 5000, scanWallS: 40, leaseS: 180, siteFilesPerRun: 20, siteMaxBytes: 2_000_000 });
     expect(cfg.baseLogWindow).toBe(100n);
     expect(cfg.rpc.bittensor).toBe("https://archive.chain.opentensor.ai");
-    expect(cfg.site.pages).toEqual(["/", "/stake/"]);
+    expect(cfg.site.pages).toEqual(["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/stake/", "/unstake/", "/withdraw/"]);
     expect(cfg.alerts).toEqual({ from: "monitor@cascadefi.xyz", mode: "log", to: [] });
     expect(cfg.priceSources).toEqual(["coingecko", "coinbase"]);
     expect(cfg.tokens.multicall3).toBe("0xca11bde05977b3631167028862be2a173976ca11");

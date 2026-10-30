@@ -11,7 +11,8 @@ import { testConfig } from "./fixtures.ts";
 
 const db = env.DB;
 const NOW = 1_800_000_000;
-const cfg = testConfig({ SITE_FILES_PER_RUN: "2" });
+// the fixture site's two pages (wrangler.jsonc lists all 8 of the real site's: see the last tests)
+const cfg = testConfig({ SITE_FILES_PER_RUN: "2", SITE_PAGES: ["/", "/stake/"] });
 const d = cfg.deployment;
 const OURS = [d.frontDoor, d.staker, d.vault, d.baseAdapter, d.bitAdapter, d.oracle];
 const APPROVED = { addresses: [...new Set(OURS)].sort(), hosts: ["mainnet.base.org", "rpc.example.org"] };
@@ -261,6 +262,37 @@ describe("the site job", () => {
     expect(s.calls.length).toBe(calls);
     await job(s, NOW + 240 + 3600);
     expect(s.calls.length).toBeGreaterThan(calls);
+  });
+
+  it("goes on past a page it can't read: the other pages are still judged, and that page is named", async () => {
+    const extra = "0x00000000000000000000000000000000000000e6";
+    const files = site({ "/": site()["/"].replace("</html>", `<script>e="${extra}"</script></html>`) });
+    delete files["/stake/"];
+    await fullPass(server(files));
+    const f = await findings(NOW + 300);
+    expect(f.map((x) => [x.rule, x.key]).sort()).toEqual([
+      ["site.integrity", `site.integrity:address:${extra}`],
+      ["site.unreachable", "site.unreachable:files"],
+    ]);
+    expect(f.find((x) => x.rule === "site.unreachable")?.facts.files).toBe("/stake/ (HTTP 404)");
+  });
+
+  it("reads every page in a pass's first run, and checks a build the real site's size (8 pages, 32 scripts) in one pass of two runs", async () => {
+    // wrangler.jsonc's own settings: every page of the site, 20 files a run
+    const real = testConfig();
+    expect([real.site.pages.length, real.budgets.siteFilesPerRun]).toEqual([8, 20]);
+    const scripts = Array.from({ length: 32 }, (_, i) => chunk(`c${i}`));
+    const pages = Object.fromEntries(
+      real.site.pages.map((p, i) => [p, `<html><script>a="${OURS.join('","')}"</script>${scripts.slice(i * 4, i * 4 + 4).map((x) => `<script src="${x}"></script>`).join("")}</html>`]),
+    );
+    const s = server({ ...pages, ...Object.fromEntries(scripts.map((x) => [x, "const z=0"])) });
+    const run = (nowS: number) => runSiteJob({ db, cfg: real, fetch: s.fetch, nowS, approved: APPROVED });
+    expect(await run(NOW)).toEqual({ checked: 20, finished: false });
+    expect(s.calls.slice(0, 8)).toEqual(real.site.pages);
+    expect(await run(NOW + 120)).toEqual({ checked: 12, finished: true });
+    const result = JSON.parse((await loadTickState(db, NOW)).meta.site_result);
+    expect([result.complete, result.files.length]).toEqual([true, 32]);
+    expect(await findings(NOW + 180)).toEqual([]);
   });
 
   it("says site.unreachable after 30 minutes without a successful fetch", async () => {

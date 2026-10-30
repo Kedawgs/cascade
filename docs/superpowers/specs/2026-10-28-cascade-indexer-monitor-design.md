@@ -865,7 +865,7 @@ invocation doesn't send it twice. Its arrival is itself a heartbeat: no digest m
 by `pnpm site:approved ../web/out` from the static export the owner is about to deploy: every 0x-address and
 every `https://` host found in its HTML and JavaScript.
 
-- **What is checked.** A pass starts from the pages in `SITE_PAGES` (default `/` and `/stake/`): the whole page
+- **What is checked.** A pass starts from the pages in `SITE_PAGES` (every page of the site, all 8): the whole page
   (inline scripts, and addresses and hosts in attributes), every same-origin `<script src>` and
   `<link rel=modulepreload>` or `<link rel=preload as=script>` wherever it is, then every further chunk path
   named inside the files fetched (the lazily loaded chunks, `/_next/static/chunks/….js` or turbopack's
@@ -892,8 +892,12 @@ every `https://` host found in its HTML and JavaScript.
   earlier one (that invocation died on that file: CPU, memory, wall time) skips the file, marks the pass
   incomplete and reports `site.integrity` naming it. So a hostile file is tried only once, and the pass goes
   on.
-- **Starting a pass.** A site-check invocation starts a new pass (fetching the pages) when none is running and
-  the last one finished at least an hour ago.
+- **Starting a pass.** A site-check invocation starts a new pass (fetching every page in that one run) when none
+  is running and the last one finished at least an hour ago. A page that can't be read is named
+  (`site.unreachable`) and the pass goes on with the others; only a run where no page answers starts no pass.
+  So the cron is how often a run may work, not how often the site is judged: the real build (8 pages, 32
+  scripts) is a pass of two runs, and a change to the live site is judged within about 64 minutes (40 minutes
+  more at most for a pass at the 400-file cap).
 - **Limits, stated.** An address assembled at run time, or code fetched from elsewhere at run time, is not seen;
   content hashes are not compared (they change with every build, while the address and host lists change only
   when dependencies or the deployment do, so the owner refreshes them rarely and reviews them in git). The check
@@ -1010,7 +1014,7 @@ crons, `"cache": { "enabled": true }`, the D1 binding `DB` and the `send_email` 
 | `BASE_RPC_URL`, `BASE_LOGS_RPC_URL`, `BITTENSOR_RPC_URL` | `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://archive.chain.opentensor.ai` | a secret named `<var>_SECRET` (`BASE_RPC_URL_SECRET`, …) overrides each (for a keyed URL) |
 | `BASE_LOG_WINDOW`, `SUBREQUEST_BUDGET`, `DECODE_BUDGET`, `SCAN_WALL_S`, `LEASE_S` | `100`, `200`, `5000`, `40`, `180` | the Workers Paid profile (Free fallback: `45` and `100` for the two budgets; section 12). One `DECODE_BUDGET` unit is one log hashed and decoded, about 42 µs; `LEASE_S` at least 3 × `SCAN_WALL_S` |
 | `SITE_FILES_PER_RUN`, `SITE_MAX_BYTES` | `20`, `2000000` | the site check's own invocation (6.6); Free fallback `2` files per run |
-| `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascadefi.xyz`, `https://cascadefi.xyz`, `["/","/stake/"]` | CORS and the integrity check |
+| `SITE_ORIGIN`, `SITE_URL`, `SITE_PAGES` | `https://cascadefi.xyz`, `https://cascadefi.xyz`, the site's 8 pages (checked against `web/src/app`) | CORS and the integrity check |
 | `ALERT_FROM`, `ALERT_MODE` | `monitor@cascadefi.xyz`, `send` | `log` in dev and tests |
 | `THRESHOLDS` | `{}` | overrides of `src/thresholds.ts`; the `THRESHOLDS_SECRET` secret wins |
 | `PRICE_SOURCES` | `["coingecko","coinbase"]` | reference TAO price for `fmtao.depeg` (median of those that answer; both must agree within 2%) |

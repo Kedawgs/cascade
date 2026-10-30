@@ -7,9 +7,15 @@ import { setMeta } from "./store.ts";
 // huge or hostile file, and the worst it can do here is stop a site-check invocation. Its state lives in meta
 // (its own small writes): the pass under way, the file being tried, and the last complete pass's result,
 // which the tick turns into alerts. It sends no email and never touches the tick's lease.
+//
+// Cadence. The cron is how often a run may work, not how often the site is judged: a pass starts at the first
+// run PASS_EVERY_S after the last pass finished, reads every page in SITE_PAGES in that first run, then
+// SITE_FILES_PER_RUN scripts a run. The real build (8 pages, 32 scripts, 20 a run on Paid) is one pass of two
+// runs, finished 2 minutes after it starts, so a change to the live site is judged within about 64 minutes
+// (the hour, the pass, the next tick); at the 400-file cap a pass takes 20 runs (40 minutes) at most.
 
 /** A new pass starts this long after the last one finished. */
-const PASS_EVERY_S = 3600;
+export const PASS_EVERY_S = 3600;
 /** The most script files a pass takes. The real build has 32; a site with more than this is padded to hide a
  * script past the end, so a capped pass is a critical, never a quiet truncation. */
 export const MAX_FILES = 400;
@@ -135,19 +141,21 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     const last = json<SiteResult>(meta.site_result);
     if (last && nowS - last.finishedAt < PASS_EVERY_S) return { checked: 0, finished: false };
     const p: Pass = { startedAt: nowS, queue: [], done: [], addresses: {}, hosts: {}, problems: [], capped: false };
+    let answered = 0;
     for (const page of cfg.site.pages) {
-      let res: Response;
+      let res: Response | undefined;
       try {
         res = await get(page);
       } catch {
-        await failed();
-        return { checked: 0, finished: false };
+        res = undefined;
       }
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => undefined);
-        await failed();
-        return { checked: 0, finished: false };
+      if (!res || !res.ok) {
+        // one page that can't be read never stops the others being checked: it is named (site.unreachable)
+        await res?.body?.cancel().catch(() => undefined);
+        p.problems.push({ file: page, kind: "unreadable", detail: res ? `HTTP ${res.status}` : "no answer" });
+        continue;
       }
+      answered++;
       const r = await readCapped(res, cfg.budgets.siteMaxBytes);
       if ("tooLarge" in r) {
         p.problems.push({ file: page, kind: "too_large", detail: `over the byte cap (${cfg.budgets.siteMaxBytes} bytes)` });
@@ -161,6 +169,11 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
       for (const h of foreignHosts) p.hosts[h] ??= page;
       // code from a data: or blob: URL comes from no host: named as what it is
       for (const e of embedded) (p.embedded ??= {})[e] ??= page;
+    }
+    // not one page answered: the site is down (or unreachable from here); the next run tries again
+    if (answered === 0) {
+      await failed();
+      return { checked: 0, finished: false };
     }
     await ok();
     pass = p;

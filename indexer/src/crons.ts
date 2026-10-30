@@ -3,7 +3,8 @@
 export const CRONS = {
   /** Every minute: scan both chains, read their state, run the rules, commit, then send email. */
   tick: "* * * * *",
-  /** Every two minutes, in its own invocation: the live site's scripts against the approved lists. */
+  /** Every two minutes, in its own invocation: the live site's pages and scripts against the approved lists.
+   * A run works on the pass under way; a new pass starts an hour after the last finished (src/site-job.ts). */
   site: "*/2 * * * *",
   /** At minute 17: hourly aggregates, pruning, and the watchdog. */
   hourly: "17 * * * *",

@@ -84,6 +84,13 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   a verified ops record (addresses checksummed, Bittensor starting at the Bittensor adapter's block, which is the
   site's `NEXT_PUBLIC_CASCADE_BIT_BLOCK`). `env.test` already holds the v3 test deployment's; `env.production`
   holds the launch's (v3-launch).
+- **Baselines**: each chain's `baselineBlock` is where the deployment's setup ends: an admin event at or before
+  it is setup, never an alert. It is the record's last step on that chain, unless an owner action that belongs
+  to the setup came later; `--setup-ends-base <block>` and `--setup-ends-bittensor <block>` move it there (never
+  earlier than the record's last step). Scans still start at `startBlock`, so that history is indexed. v3-launch
+  uses them: the Ledger accepted ownership after the deploy (front door at Base block 53297713, staker 53297722,
+  vault at Bittensor block 9398435), so production's baselines are 53297722 and 9398435, not the record's
+  53295834 and 9398130.
 - **RPC URLs**: `BASE_RPC_URL` (state reads), `BASE_LOGS_RPC_URL` (log scans) and `BITTENSOR_RPC_URL`. The Base
   logs URL must **not** be `https://mainnet.base.org`: it refuses `eth_getLogs`. The default,
   `https://base-rpc.publicnode.com`, answers 100-block windows. Bittensor must be an archive node

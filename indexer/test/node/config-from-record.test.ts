@@ -93,6 +93,42 @@ describe("pnpm config:from-record", () => {
     expect(r.notes.join("\n")).toMatch(/Base adapter/);
   });
 
+  it("ends the setup later when told: the owner's acceptOwnership after the deploy is setup too, and the scans still start at the deploy", () => {
+    const r = deploymentFromRecord(record(), { setupEnds: { base: 53119600, bittensor: 9368800 } });
+    expect(r.deployment.base).toEqual({ chainId: 8453, startBlock: "53119544", baselineBlock: "53119600" });
+    expect(r.deployment.bittensor).toEqual({ chainId: 964, startBlock: "9368744", baselineBlock: "9368800" });
+    expect(r.notes).toEqual([
+      "Base's setup ends at block 53119600 (--setup-ends-base), after the record's last Base step (53119575): no admin event up to it is an alert",
+      "Bittensor's setup ends at block 9368800 (--setup-ends-bittensor), after the record's last Bittensor step (9368753): no admin event up to it is an alert",
+    ]);
+    // one chain only: the other keeps the record's
+    expect(deploymentFromRecord(record(), { setupEnds: { bittensor: 9368800 } }).deployment.base.baselineBlock).toBe("53119575");
+    // never before the record's own setup: its events would be alerts
+    expect(() => deploymentFromRecord(record(), { setupEnds: { base: 53119574 } })).toThrow(
+      /--setup-ends-base 53119574 is before the record's last Base step \(53119575\)/,
+    );
+  });
+
+  it("takes --setup-ends-base and --setup-ends-bittensor, and refuses a value that isn't a block number", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cascade-record-"));
+    const path = join(dir, "v3-test.json");
+    writeFileSync(path, JSON.stringify(record()));
+    const read = (p: string) => readFileSync(p, "utf8");
+    const out: string[] = [];
+    expect(await main(["--", path, "--setup-ends-base", "53119600", "--setup-ends-bittensor", "9368800"], { print: (l) => out.push(l), read })).toBe(0);
+    const pasted = JSON.parse(`{${out.filter((l) => !l.startsWith("//")).join("\n").replace(/,\s*$/, "")}}`) as { DEPLOYMENT: { base: unknown; bittensor: unknown } };
+    expect(pasted.DEPLOYMENT.base).toEqual({ chainId: 8453, startBlock: "53119544", baselineBlock: "53119600" });
+    expect(pasted.DEPLOYMENT.bittensor).toEqual({ chainId: 964, startBlock: "9368744", baselineBlock: "9368800" });
+    expect(out).toContain(
+      "// note: Base's setup ends at block 53119600 (--setup-ends-base), after the record's last Base step (53119575): no admin event up to it is an alert",
+    );
+    for (const bad of [["--setup-ends-base", "12.5"], ["--setup-ends-base", "-1"], ["--setup-ends-bittensor"], ["--setup-end", "1"]]) {
+      const said: string[] = [];
+      expect(await main([path, ...bad], { print: (l) => said.push(l), read }), bad.join(" ")).toBe(2);
+      expect(said.join("\n")).toMatch(/usage: pnpm config:from-record/);
+    }
+  });
+
   it("reads the record with its $bigint reviver and prints the vars to paste", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cascade-record-"));
     const path = join(dir, "v3-test.json");
@@ -140,6 +176,14 @@ describe("the production environment in wrangler.jsonc", () => {
     expect(cfg.deployment.bittensor.startBlock).toBe(9398120n);
     expect(cfg.deployment.base.startBlock).toBe(53295800n);
     expect(cfg.deployment.batchMaxWaitS).toBe(86_400);
+  });
+
+  it("counts the Ledger's acceptOwnership as setup: each chain's baseline is its acceptance block, so the first run raises no ownership alert", () => {
+    const cfg = parseConfig(productionVars());
+    // the staker's acceptance (Base 53297722, after the front door's at 53297713) and the vault's (Bittensor
+    // 9398435); admin.event skips a log at or before the baseline
+    expect(cfg.deployment.base.baselineBlock).toBe(53297722n);
+    expect(cfg.deployment.bittensor.baselineBlock).toBe(9398435n);
   });
 
   it("keeps writing alerts to the log until the owner chooses a recipient and deploys", () => {

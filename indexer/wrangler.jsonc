@@ -120,12 +120,15 @@
       // a recipient after the first deploy, ALERT_MODE "send").
       "vars": {
         // The v3-launch deployment's addresses and blocks, as `pnpm config:from-record
-        // ../ops/deployments/v3-launch.json` prints them (verified 2026-10-30): Bittensor starts at the
-        // Bittensor adapter's creation block, the site's NEXT_PUBLIC_CASCADE_BIT_BLOCK; the launch cadence's
-        // 24-hour close wait. BRIDGES isn't set: it defaults to these two adapters.
+        // ../ops/deployments/v3-launch.json --setup-ends-base 53297722 --setup-ends-bittensor 9398435`
+        // prints them (verified 2026-10-30): Bittensor starts at the Bittensor adapter's creation block, the
+        // site's NEXT_PUBLIC_CASCADE_BIT_BLOCK; the launch cadence's 24-hour close wait. The baselines are
+        // later than the record's last steps (53295834, 9398130): the owner's Ledger accepted ownership after
+        // the deploy (front door 53297713, staker 53297722, vault 9398435), and that is setup, not an alert.
+        // BRIDGES isn't set: it defaults to these two adapters.
         "DEPLOYMENT": {
-          "base": { "chainId": 8453, "startBlock": "53295800", "baselineBlock": "53295834" },
-          "bittensor": { "chainId": 964, "startBlock": "9398120", "baselineBlock": "9398130" },
+          "base": { "chainId": 8453, "startBlock": "53295800", "baselineBlock": "53297722" },
+          "bittensor": { "chainId": 964, "startBlock": "9398120", "baselineBlock": "9398435" },
           "frontDoor": "0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA",
           "baseAdapter": "0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92",
           "staker": "0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E",

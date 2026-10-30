@@ -1,14 +1,17 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { getAddress } from "viem";
+import { parseArgs } from "./d1.ts";
 
-// pnpm config:from-record ../ops/deployments/v3-test.json
+// pnpm config:from-record ../ops/deployments/v3-test.json [--setup-ends-base <block>] [--setup-ends-bittensor <block>]
 //
 // Prints the DEPLOYMENT var for wrangler.jsonc from a verified ops deployment record (spec section 11, step
 // 6): the contracts' addresses checksummed (the Worker refuses any other spelling), each chain's start block
 // (Bittensor's is the Bittensor adapter's creation block, exactly the site's NEXT_PUBLIC_CASCADE_BIT_BLOCK,
 // so the seed's `from` matches the site's scans), each chain's baseline (the last block of the deployment's
-// own setup, whose events aren't alerts), the vault's coldkey and stake hotkey, and the keeper's close wait.
+// own setup, whose admin events aren't alerts: the record's last step on that chain, or a later block given
+// with --setup-ends-<chain>, such as the final owner's acceptOwnership, which the record doesn't hold), the
+// vault's coldkey and stake hotkey, and the keeper's close wait.
 // It only reads the record; paste what it prints into the environment's vars.
 
 /** The keeper's extra close wait by cadence (ops/src/config.ts CADENCE; a test compares them). */
@@ -46,8 +49,15 @@ export interface FromRecord {
   notes: string[];
 }
 
-/** The DEPLOYMENT var of a verified v3 record. Throws, saying why, for a record it won't use. */
-export function deploymentFromRecord(raw: unknown): FromRecord {
+/** Where each chain's setup ends, when later than the record's last step there (--setup-ends-<chain>). */
+export interface SetupEnds {
+  base?: number;
+  bittensor?: number;
+}
+
+/** The DEPLOYMENT var of a verified v3 record. Throws, saying why, for a record it won't use, or a setup
+ * end before the record's own last step on that chain (that step's admin events would become alerts). */
+export function deploymentFromRecord(raw: unknown, o: { setupEnds?: SetupEnds } = {}): FromRecord {
   if (!isObject(raw)) throw new Error("the file isn't a deployment record");
   const rec = raw as RecordLike;
   if (rec.verify?.ok !== true) throw new Error("the deployment's read-back hasn't passed (verify.ok): run pnpm ops verify first");
@@ -81,7 +91,17 @@ export function deploymentFromRecord(raw: unknown): FromRecord {
     notes.push(`the Base adapter's creation block isn't in the record (it was recovered): Base starts at the first Base step recorded, block ${baseStart}`);
   }
   const bitBlocks = chainBlocks("bittensor");
-  const baseline = (blocks: number[], start: number) => String(Math.max(start, ...blocks));
+  const baseline = (chain: "base" | "bittensor", blocks: number[], start: number) => {
+    const recorded = Math.max(start, ...blocks);
+    const ends = o.setupEnds?.[chain];
+    if (ends === undefined) return String(recorded);
+    const label = chain === "base" ? "Base" : "Bittensor";
+    if (ends < recorded) throw new Error(`--setup-ends-${chain} ${ends} is before the record's last ${label} step (${recorded}), whose events are setup`);
+    if (ends > recorded) {
+      notes.push(`${label}'s setup ends at block ${ends} (--setup-ends-${chain}), after the record's last ${label} step (${recorded}): no admin event up to it is an alert`);
+    }
+    return String(ends);
+  };
 
   const vaultStep = steps.find((s) => s.id === "vault");
   const [coldkey, hotkey] = (vaultStep?.args ?? []) as unknown[];
@@ -91,8 +111,8 @@ export function deploymentFromRecord(raw: unknown): FromRecord {
   };
 
   const deployment: FromRecord["deployment"] = {
-    base: { chainId: 8453, startBlock: String(baseStart), baselineBlock: baseline(baseBlocks, baseStart) },
-    bittensor: { chainId: 964, startBlock: String(bitStart), baselineBlock: baseline(bitBlocks, bitStart) },
+    base: { chainId: 8453, startBlock: String(baseStart), baselineBlock: baseline("base", baseBlocks, baseStart) },
+    bittensor: { chainId: 964, startBlock: String(bitStart), baselineBlock: baseline("bittensor", bitBlocks, bitStart) },
     frontDoor: address("frontDoor"),
     baseAdapter: address("baseAdapter"),
     staker: address("staker"),
@@ -106,15 +126,29 @@ export function deploymentFromRecord(raw: unknown): FromRecord {
   return { deployment, bridges: { base: [deployment.baseAdapter], bittensor: [deployment.bitAdapter] }, notes };
 }
 
+const USAGE =
+  "usage: pnpm config:from-record <ops deployment record, e.g. ../ops/deployments/v3-test.json> [--setup-ends-base <block>] [--setup-ends-bittensor <block>]";
+
 export async function main(argv: string[], o: { print: (line: string) => void; read: (path: string) => string }): Promise<number> {
-  const path = argv.filter((a) => a !== "--")[0];
-  if (!path) {
-    o.print("usage: pnpm config:from-record <ops deployment record, e.g. ../ops/deployments/v3-test.json>");
+  const a = parseArgs(argv, ["setup-ends-base", "setup-ends-bittensor"], []);
+  const usage = (why?: string) => {
+    if (why) o.print(why);
+    o.print(USAGE);
     return 2;
+  };
+  if ("error" in a) return usage(a.error);
+  const path = a.words[0];
+  if (!path || a.words.length > 1) return usage();
+  const setupEnds: SetupEnds = {};
+  for (const chain of ["base", "bittensor"] as const) {
+    const v = a.opts[`setup-ends-${chain}`];
+    if (v === undefined) continue;
+    if (!/^\d+$/.test(v) || !Number.isSafeInteger(Number(v))) return usage(`--setup-ends-${chain} must be a block number, not ${v}`);
+    setupEnds[chain] = Number(v);
   }
   let r: FromRecord;
   try {
-    r = deploymentFromRecord(JSON.parse(o.read(path), reviver));
+    r = deploymentFromRecord(JSON.parse(o.read(path), reviver), { setupEnds });
   } catch (e) {
     o.print(`nothing printed: ${e instanceof Error ? e.message : String(e)}`);
     return 1;

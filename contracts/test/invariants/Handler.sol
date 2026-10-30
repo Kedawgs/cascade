@@ -105,6 +105,14 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     uint256 public priceFloor;
     /// Deliveries that left a front door's burn window above its daily allowance.
     uint256 public burnViolations;
+    /// Gifts after which the allowance base (base()) was higher than before.
+    uint256 public giftBaseRises;
+    /// Cycles that raised the allowance base, or moved it at all although their redeem came back only off
+    /// the stake their own stakeIdle added.
+    uint256 public cycleBaseMoves;
+    /// Cycles whose redeem also unstaked older stake (to fund queued payouts the liquid balance did not
+    /// cover, or a full removal below the minimum remainder): they may lower the base, never raise it.
+    uint256 public cyclesIntoOlderStake;
     /// Cancels that left the price below min(priceFloor, delivery price) by a rao or more per
     /// re-minted entry.
     uint256 public cancelDustViolations;
@@ -503,18 +511,24 @@ contract Handler is CommonBase, StdCheats, StdUtils {
 
     /// @dev Moves 0.001 to 100 TAO of root stake onto the vault's stake hotkey from outside, as a
     /// transferStake from another coldkey would. It raises the price at once, and the allowance base only
-    /// once a stake has booked it and it has ramped in.
+    /// once a stake has booked it and it has ramped in: the gift itself must not raise the base.
     function gift(uint256 rao) external {
         rao = bound(rao, 1e6, 100e9);
+        uint256 baseBefore = base();
         staking.donateStake(hotkey, vault.coldkey(), rao);
+        if (base() > baseBefore) ++giftBaseRises;
         ghostGifts += rao * RAO;
         ++gifts;
         _raiseFloor();
     }
 
     /// @dev Cycles capital through the keeper's stake loop, as a griefer would: a direct deposit, the
-    /// keeper's stake, then a direct redeem of the shares that deposit minted. It must leave the
-    /// allowance base where it was (the window check catches a base that grew).
+    /// keeper's stake, then a direct redeem of the shares that deposit minted, all in one block. It must
+    /// never raise the allowance base, and when the redeem comes back only off the stake the cycle added
+    /// (the root stake ends no lower than it began) it must leave the base exactly where it was
+    /// (cycleBaseMoves); the window check alone would catch a grown base only when a delivery burns in
+    /// that window. A redeem that also unstakes older stake can lower the base: unstakes come off what is
+    /// still ramping first, and the stake that left no longer counts.
     function cycle(uint256 actorSeed, uint256 amount) external {
         address actor = actors[actorSeed % actors.length];
         uint256 maxRao = Math.min(MAX_DEPOSIT, _sub0(actor.balance, FEE_MONEY)) / RAO;
@@ -523,6 +537,8 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         // within the cap, and not below half the launch price
         uint256 assets = vault.totalAssets();
         if (assets + amount > vault.maxTotalAssets() || assets * 2_000_000 < vault.totalSupply()) return;
+        uint256 baseBefore = base();
+        uint256 rootBefore = vault.rootStakeRao();
         uint256 before = vault.balanceOf(actor);
         vm.prank(actor);
         try vault.depositDirect{value: amount}() {
@@ -549,6 +565,13 @@ contract Handler is CommonBase, StdCheats, StdUtils {
             ++cycles;
         } catch (bytes memory reason) {
             if (out >= RAO && !_dustBlocked(reason)) ++unexpectedReverts;
+        }
+        uint256 baseAfter = base();
+        if (vault.rootStakeRao() < rootBefore) {
+            ++cyclesIntoOlderStake;
+            if (baseAfter > baseBefore) ++cycleBaseMoves;
+        } else if (baseAfter != baseBefore) {
+            ++cycleBaseMoves;
         }
         _raiseFloor();
     }

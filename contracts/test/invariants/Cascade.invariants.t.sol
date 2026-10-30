@@ -179,6 +179,15 @@ contract CascadeInvariantTest is Test {
         assertEq(handler.burnViolations(), 0);
     }
 
+    /// @dev Checked at each gift and cycle on the base the vault computes: stake moved onto its hotkey
+    /// from outside never raises the base; capital cycled through the keeper (deposit, stake, redeem)
+    /// never raises it, and leaves it exactly where it was when the redeem comes back only off the
+    /// stake the cycle added.
+    function invariant_giftsAndCyclesHoldTheBase() public view {
+        assertEq(handler.giftBaseRises(), 0, "a gift raised the base");
+        assertEq(handler.cycleBaseMoves(), 0, "a cycle moved the base");
+    }
+
     /// @dev The front door holds exactly the open batch's deposits plus every unclaimed credit in TAO
     /// (exact because the handler never donates), exactly the open batch's fee pot plus the pre-paid
     /// credits in ETH, and no USDC (every delivery forwards all it measured).
@@ -252,6 +261,7 @@ contract CascadeInvariantTest is Test {
         emit log_named_uint("losses", handler.losses());
         emit log_named_uint("gifts", handler.gifts());
         emit log_named_uint("cycles", handler.cycles());
+        emit log_named_uint("cyclesIntoOlderStake", handler.cyclesIntoOlderStake());
         emit log_named_uint("depositBounces", handler.depositBounces());
         emit log_named_uint("bouncesPaid", handler.bouncesPaid());
         emit log_named_uint("bouncesCancelled", handler.bouncesCancelled());

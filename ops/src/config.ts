@@ -218,8 +218,10 @@ export const LAUNCH_VAULT_LIMITS = {
   maxFeeAbs: 5n * 10n ** 15n,
   /** setMaxTotalAssets: direct deposits on Bittensor stop once the vault holds 44 TAO (default 1,000):
    * 10% above the 40 TAO deposit cap, some room for rewards (it never stops a front-door batch, which it
-   * doesn't check). It bounds what a direct deposit can add
-   * to the outflow allowance's base (a README soft spot) and to a mispriced deposit after a hotkey swap. */
+   * doesn't check). It bounds a mispriced deposit after a hotkey swap, and the large direct deposit that
+   * draining the outflow allowance's base with a gift needs (a README soft spot: at 44 TAO the gift goes
+   * almost entirely to the other holders). A direct deposit no longer raises that base, which counts only
+   * root stake that has ramped in. */
   maxTotalAssets: 44n * TAO,
 } as const satisfies Partial<VaultLimits>;
 

@@ -231,7 +231,7 @@ forge fmt --check
 forge lint
 ```
 
-- **Suite:** 455 tests (unit, end-to-end, fuzz, and 10 invariants at 128 runs × 64 depth, set in
+- **Suite:** 456 tests (unit, end-to-end, fuzz, and 11 invariants at 128 runs × 64 depth, set in
   `foundry.toml`), plus 18 fork tests that report as skipped unless `FORK` is set (below). The
   invariants also held at 3,000 × 64 (re-run on the pre-audit changes, 2026-10-29).
 - **Stale artifacts:** running `forge lint` right after an edit can leave test artifacts without
@@ -250,7 +250,11 @@ forge lint
   cancelled under fuzzing. A 32-seed sweep reached a loss, a bounce, a paid bounce and a cancelled
   bounce on every seed. It also gives stake to the vault from outside (`gift`, counted in gross-asset
   conservation) and cycles capital through the keeper (`cycle`: a direct deposit, the keeper's stake,
-  a direct redeem), the two ways the allowance base was found to move.
+  a direct redeem), the two ways the allowance base was found to move, and checks the base the vault
+  computes across each: a gift never raises it, and a cycle never raises it and leaves it exactly
+  where it was when its redeem comes back only off the stake the cycle added. A cycle whose redeem
+  also unstakes older stake (to fund queued payouts the liquid balance did not cover, or a full
+  removal below the minimum remainder) can lower it.
 - **Test doubles** (`test/mocks`): `MockStaking` is etched at the precompile address and models the
   floor reads, over-request clipping, sweeps, a fresh position reading one rao short, claims that
   burn all gas when refused, an optional per-removal chain fee (`removeFeeRao`) and claims paid out
@@ -505,7 +509,9 @@ Soft spots:
   most the stake the vault has booked, less what is still ramping in (each stake re-spreads what is
   still ramping, plus what it adds, linearly over the next 24 hours, like reward vesting). Liquid TAO
   never counts: a delivery's deposits, an earlier delivery's, a direct deposit, payouts reserved in
-  the balance. So borrowed or short-lived capital cannot raise the base. Measured: a rogue adapter
+  the balance. So borrowed or short-lived capital cannot raise the base: unstakes come off the ramp
+  first, so fresh stake can stand in for stake that leaves during its ramp; the base never exceeds
+  what it would be had that stake stayed. Measured: a rogue adapter
   that delivers 4,000 TAO of its own as a deposit-only batch, then a redeem batch naming a
   1,000-TAO holder, burns that holder for 200 TAO, not 1,000, whether in the same transaction (the
   adapter then takes its 4,000 back with `redeemDirect`), a block later, or a block after the keeper
@@ -543,7 +549,8 @@ Soft spots:
   the base at the floor until the next stake, then let it recover over a day. `maxTotalAssets` bounds
   the deposit (44 TAO at launch), so there the gift goes almost entirely to the other holders. The
   same reconciliation un-books stake the hotkey set does not show when the keeper stakes (a swapped
-  hotkey not yet re-added, a misread): when it shows again it ramps back in over a day. Exits stay
+  hotkey not yet re-added, a misread): it ramps back in over a day after the next stake once it
+  shows again. Exits stay
   open at the floor and through `redeemDirect`; it takes nothing.
 - **Dust cannot leave through a front door.** A holder whose shares are worth less than 0.01 TAO,
   or whose request the window's last sliver of allowance would clip below 0.01 TAO, is deferred
@@ -860,7 +867,7 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
     entry is tiny, the owner cancels the batch (`cancelPayoutBatch` re-mints the shares; nobody loses
     funds), unless it holds bounced deposits (note 7). The web app must refuse unstake requests
     worth less than 0.01 TAO (the vault would defer them, and the user would have paid the request
-    fee for nothing). Before
+    fee for nothing); it asks for 0.011 TAO. Before
     `closeBatch`, the keeper reads `getDefaultMinStake()`: a deposit batch that arrives while the
     floor sits above its total waits in CCIP until the floor drops (at a 0.01 TAO minimum deposit
     that takes a five-fold raise). Next to that floor pre-check, a second keeper rule: do not
@@ -874,6 +881,13 @@ claim; see `reports/Cascade v3 root validators.md`). Moving to another validator
     `gasLimitOverride` if it ran out of gas. Re-execution needs the default committee's
     `verifierResults`, which only Chainlink's verifier infrastructure produces: fetch them from the
     CCIP explorer or verifier API first. The keeper spec owns the tooling.
+19. **A drained allowance base.** A gift taken back out, or stake the hotkey set did not show when the
+    keeper last staked (a swap), can leave the allowance base near the floor until the next
+    `stakeIdle`, which books the root stake again and ramps the drained part back in over a day (see
+    the soft spots under [Exit safety](#exit-safety)). The keeper stakes only when there is idle TAO,
+    so if no deposits arrive, make some: deposit 0.01 TAO directly (`depositDirect` on Bittensor, at
+    least `minDirectDeposit`), then run `stakeIdle` (the keeper's; `pnpm ops stake`). Until then
+    front-door exits are held to `minDailyOutflow` a day, and `redeemDirect` stays open.
 
 Defaults at deploy:
 

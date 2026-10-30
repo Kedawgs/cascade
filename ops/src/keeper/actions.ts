@@ -80,8 +80,8 @@ export function requireReady(rec: DeploymentRecord, signer: Address = WALLET): v
   if (keeper.toLowerCase() !== signer.toLowerCase()) throw new Error(keeperMismatch(keeper, signer));
 }
 
-/** The keeper wallet has code where it was about to send. Not a SendRefused: a run's delivery treats
- * those as a wait for the next round, and this must stop the run. */
+/** The keeper wallet has code on `chain` (either chain stops a send on either). Not a SendRefused: a
+ * run's delivery treats those as a wait for the next round, and this must stop the run. */
 export class KeeperHasCode extends Error {
   readonly chain: ChainName;
   readonly code: Hex;
@@ -97,11 +97,15 @@ export class KeeperHasCode extends Error {
 
 /** Every keeper send goes through here. The keeper wallet is a plain account, with no code; code there
  * means its key has signed an EIP-7702 delegation (a thief's sweeper, as in the Binance hot-wallet drain)
- * or the address is a contract. Either way nothing is sent, and `run` stops. Its code is read on the chain
- * the send goes to, at most once a round (signerCode). */
+ * or the address is a contract. Either way nothing is sent, and `run` stops. Its code is read on both
+ * chains, the send's first, each at most once a round (signerCode): one key holds the address on both, a
+ * delegation can be signed for every chain at once (chain id 0), and Bittensor may not run EIP-7702 at
+ * all, so code on either chain stops a send on either. The refusal names the chain the code is on. */
 async function keeperSend(deps: KeeperDeps, req: CallRequest): Promise<Sent> {
-  const code = await deps.signerCode(req.chain);
-  if (code !== "0x") throw new KeeperHasCode(req.chain, deps.signer, code);
+  for (const chain of [req.chain, req.chain === "base" ? "bittensor" : "base"] as const) {
+    const code = await deps.signerCode(chain);
+    if (code !== "0x") throw new KeeperHasCode(chain, deps.signer, code);
+  }
   return deps.sendCall(req);
 }
 

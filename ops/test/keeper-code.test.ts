@@ -99,13 +99,13 @@ const other = (c: ChainName): ChainName => (c === "base" ? "bittensor" : "base")
 const label = (c: ChainName) => (c === "base" ? "Base" : "Bittensor");
 
 describe("the keeper refuses to send when its wallet has code", () => {
-  it("each command reads the keeper wallet's code on the chain it sends to, and sends while it has none", async () => {
+  it("each command reads the keeper wallet's code on both chains, the one it sends to first, and sends while neither has any", async () => {
     for (const [name, chain, run, s] of COMMANDS) {
       const w = world({}, s);
       await run(w.deps);
       expect(w.sendCall, name).toHaveBeenCalledOnce();
       expect(w.sendCall.mock.calls[0][0].chain, name).toBe(chain);
-      expect(w.signerCode.mock.calls, name).toEqual([[chain]]);
+      expect(w.signerCode.mock.calls, name).toEqual([[chain], [other(chain)]]);
     }
   });
 
@@ -126,18 +126,35 @@ describe("the keeper refuses to send when its wallet has code", () => {
     }
   });
 
-  it("code on the other chain only doesn't stop a send: each send checks the chain it goes to", async () => {
+  it("code on the other chain only stops a send too, naming the chain it is on: one key holds the address on both", async () => {
+    // a delegation signed for chain id 0 holds on every chain; and Bittensor may not run EIP-7702 at all,
+    // so a delegation on Base must stop Bittensor's sends as well
     for (const [name, chain, run, s] of COMMANDS) {
       const w = world({ [other(chain)]: DELEGATED }, s);
-      await run(w.deps);
-      expect(w.sendCall, name).toHaveBeenCalledOnce();
+      const err = await run(w.deps).catch((e: unknown) => e);
+      expect(err, name).toBeInstanceOf(KeeperHasCode);
+      expect((err as Error).message, name).toBe(
+        `${label(other(chain))}: the keeper wallet ${WALLET} has code (an EIP-7702 delegation or a contract): an EIP-7702 delegation to ${SWEEPER}; assume its key is compromised; stop and rotate the keeper; nothing sent`,
+      );
+      expect(w.sendCall, name).not.toHaveBeenCalled();
     }
   });
 
-  it("run stops with the refusal in its log, even at a delivery (whose guard refusals only wait a round)", async () => {
-    // a delivery is due first on Base; a payout first on Bittensor
+  it("with code on both chains, the refusal names the chain the send goes to", async () => {
+    for (const [name, chain, run, s] of COMMANDS) {
+      const w = world({ [chain]: CONTRACT, [other(chain)]: DELEGATED }, s);
+      await expect(run(w.deps), name).rejects.toThrow(new RegExp(`^${label(chain)}: the keeper wallet .*: 5 bytes of contract code;`));
+      expect(w.sendCall, name).not.toHaveBeenCalled();
+    }
+  });
+
+  it("run stops with the refusal in its log, even at a delivery (whose guard refusals only wait a round), whichever chain has the code", async () => {
+    // a delivery is due first, on Base; or a payout, on Bittensor
+    const delivery = { ...due, vault: { ...due.vault, batches: [] } };
     const cases: [ChainName, KeeperState][] = [
-      ["base", { ...due, vault: { ...due.vault, batches: [] } }],
+      ["base", delivery],
+      ["bittensor", delivery],
+      ["base", due],
       ["bittensor", due],
     ];
     for (const [chain, s] of cases) {

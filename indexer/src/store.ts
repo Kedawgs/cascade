@@ -695,6 +695,15 @@ export const seedPageOf = (r: Record<string, unknown>): SeedPage => ({
 export const appendStatements = (db: D1Database, lastPage: { page: number; events: SeedEvent[] } | null, events: readonly SeedEvent[], pageSize?: number): D1PreparedStatement[] =>
   writePages(db, appendPages(lastPage, events, pageSize));
 
+/** Every stored, not removed log the seed pages are made of (the vault's BatchDelivered, Staked and
+ * PayoutChunkSent), by their event index: read only on a tick that must rebuild the pages. */
+export async function seedLogs(db: D1Database): Promise<StoredLog[]> {
+  const { results } = await db
+    .prepare("SELECT * FROM logs WHERE chain = 'bittensor' AND contract = 'vault' AND event IN ('BatchDelivered', 'Staked', 'PayoutChunkSent') AND removed = 0")
+    .all<Row>();
+  return results.map(logOf);
+}
+
 /** Every seed page written again from all the seed events (after a log was removed or re-mined). */
 export const rebuildStatements = (db: D1Database, allEvents: readonly SeedEvent[], pageSize?: number): D1PreparedStatement[] => [
   db.prepare("DELETE FROM seed_pages"),

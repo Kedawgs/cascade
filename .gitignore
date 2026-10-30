@@ -15,4 +15,6 @@ contracts/broadcast/*/31337/
 # local tooling
 .superpowers/
 *.log
+# the keeper supervisor's logs, lock and stop request (ops/scripts/keeper-supervised.ps1)
+ops/logs/
 .DS_Store

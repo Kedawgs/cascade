@@ -210,3 +210,86 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
   guardian's plain account holds an EIP-7702 delegation, pause prints a WARNING and still pauses from
   its key: assume that key is compromised, and rotate the guardian afterwards. `unpause` is the owner's
   and goes through the timelock if there is one. Do the dry run once before launch.
+
+## Running the keeper unattended
+
+`ops/scripts/keeper-supervised.ps1` runs `pnpm ops run --live` for one deployment, logs every line to a
+file, and restarts the keeper if it crashes. It passes the keeper's keystore and password file by path
+only; it never opens them.
+
+What `run` survives on its own: a failure inside one round is logged on one line (`Failed this round
+(…)`), and the next round tries again. The wait grows after each failure in a row (1, 2, 4, then 5
+minutes at most). After 10 failed rounds in a row, each line starts `STILL FAILING (n rounds)`. Nothing
+is retried within the round that failed, and every send passes the usual guards again.
+
+| Waits for the next round | Stops for good (exit code 3, never restarted) |
+|---|---|
+| Someone else closed the batch, or paid a batch out, first | The keeper wallet has code (an EIP-7702 delegation): assume its key is stolen |
+| An earlier transaction is still pending; a nonce race | The keystore signs as another account (a wrong key) |
+| The simulation refused the send (the chain changed) | The record isn't complete and verified, a read-back since has failed, or the hand-off isn't accepted |
+| No receipt yet (a slow block; the next send waits for it) | The record file is gone, or now holds another deployment |
+| A pause, or the chain changed since the round's read | An RPC answers for another chain |
+| An RPC error, a timeout, a dropped connection | A transaction reverted on chain and nothing explains it |
+| A delivery that reverted (held until the user's facts change) | Anything `run` refuses at start (no record, a bad setting) |
+
+**Before the first start**, stop the keeper you started by hand. The supervisor refuses to start while
+any keeper runs. Windows can leave the keeper's `node` process running after its window or shell is
+closed, so check that none is left:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'cli\.ts' -and $_.CommandLine -match '\brun\b' } | Select-Object ProcessId, CommandLine
+```
+
+End any that is listed with `Stop-Process -Id <PID>`.
+
+**Start**, in a PowerShell window, from the main checkout:
+
+```powershell
+cd E:\projects\cascade\ops
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keeper-supervised.ps1 -Deployment v3-launch -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keeper-supervised.ps1 -Deployment v3-launch
+```
+
+`-DryRun` prints what it would run, checks the key paths, the record, pnpm and the lock, and says
+whether a real start would go ahead. It starts and writes nothing. The key paths default to
+`C:/Users/danie/.foundry/keystores/cascade-keeper` and `C:/Users/danie/.foundry/cascade-keeper.pw`;
+change them with `-Keystore` and `-PasswordFile`. `-Cadence` (default `launch`) sets `OPS_CADENCE`.
+
+**Stop**: press Ctrl-C in its window, or from any PowerShell window run
+`powershell -NoProfile -ExecutionPolicy Bypass -File E:\projects\cascade\ops\scripts\keeper-supervised.ps1 -Stop`.
+`-Stop` asks the supervisor to stop, waits up to 30 seconds, then ends it. Either way it ends the
+keeper's whole process tree (cmd, pnpm's node, the keeper's node). Don't end it from Task Manager or with
+`Stop-ScheduledTask`: that ends PowerShell only and leaves the keeper running. If that happens, run
+`-Stop`: it finds the keeper the dead supervisor recorded in its lock and ends it.
+
+**Logs**: `ops/logs/keeper-<deployment>-<yyyy-MM-dd>.log`, a new file each day. Every keeper line is
+timestamped, and the supervisor's own lines are marked `[supervisor]`. The folder is git-ignored, and
+nothing deletes old files. To watch today's log:
+
+```powershell
+Get-Content "E:\projects\cascade\ops\logs\keeper-v3-launch-$(Get-Date -Format yyyy-MM-dd).log" -Wait -Tail 20
+```
+
+**Restarts**: exit code 3 means the keeper stopped itself on something from the right-hand column. It is
+never restarted: its last lines say why, so fix that and start the supervisor again. Exit 0 or 2 is not
+restarted either. Any other exit is a crash: it restarts after 10 seconds, then 20, 40 and so on, at most
+5 minutes apart. A keeper that ran 10 minutes or more starts the count again. Before each restart the
+supervisor checks again that no other keeper is running.
+
+**At logon (optional).** To have Windows start the supervisor when you log on, run this once yourself in
+PowerShell. It is a suggestion; nothing here registers it:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "E:\projects\cascade\ops\scripts\keeper-supervised.ps1" -Deployment v3-launch' -WorkingDirectory 'E:\projects\cascade\ops'
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName 'Cascade keeper' -Action $action -Trigger $trigger -Settings $settings -Description 'Cascade keeper, under keeper-supervised.ps1'
+```
+
+- `-ExecutionTimeLimit ([TimeSpan]::Zero)` matters: by default Windows ends a task after 72 hours.
+- Don't add a restart-on-failure setting to the task. The supervisor exits 3 only when the keeper
+  stopped itself, and a task restart would undo that stop.
+- It runs only while you are logged on. After a reboot it starts when you log on. If the PC sleeps, the
+  keeper sleeps with it.
+- Start it now: `Start-ScheduledTask -TaskName 'Cascade keeper'`. Stop it with `-Stop` (above). Remove
+  it: `Unregister-ScheduledTask -TaskName 'Cascade keeper'`.

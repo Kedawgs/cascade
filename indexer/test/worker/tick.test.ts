@@ -6,7 +6,7 @@ import { BIT_ADAPTER } from "../../src/abi.ts";
 import { catchingUpChains } from "../../src/tick.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog } from "./fixtures.ts";
-import { failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, tickWorld } from "./tick-world.ts";
+import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, tickWorld } from "./tick-world.ts";
 
 const db = env.DB;
 
@@ -175,6 +175,22 @@ describe("commit, then send", () => {
     expect(await rows("SELECT alert_key FROM alerts")).toEqual([]);
     // the failures are counted, and the lease let go, when the database takes that much
     expect((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'ticks_failed'"))[0].v).toBe("11");
+  });
+
+  it("treats a database that can't be read after the lease (the load, the prefetch) as failing: the db_failing email at minute 0 only", async () => {
+    const { w } = forged();
+    for (const first of ["SELECT chain, from_block", "SELECT * FROM logs WHERE chain = 'bittensor' AND block >= ?1"]) {
+      w.sent.length = 0;
+      const broken = failingBatches(db, (sql) => sql.startsWith(first));
+      expect((await w.tick({ db: broken, minute: 7 })).outcome).toBe("db_failing");
+      expect(w.sent).toEqual([]);
+      w.advance();
+      expect((await w.tick({ db: broken, minute: 0 })).outcome).toBe("db_failing");
+      expect(w.sent.map((m) => m.subject)).toEqual(["[CASCADE CRITICAL] The monitor can't write its database"]);
+      // the lease is let go: the next tick tries again at once
+      expect(await rows("SELECT until FROM lease")).toEqual([{ until: 0 }]);
+      w.advance();
+    }
   });
 
   it("stops quietly when another tick took the lease over mid-tick: commit 1 fails whole, and no email, even at minute 0", async () => {

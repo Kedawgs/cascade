@@ -258,12 +258,35 @@ export async function runTick(deps: TickDeps): Promise<TickReport> {
   try {
     return await work(deps, { db, startMs, nowS, minute, holder, date });
   } catch (e) {
+    await bestEffort(() => db.batch([...countStatements(db, date, { ticks_failed: 1 }), releaseLease(db, holder)]));
+    if (e instanceof DbError) {
+      // the database can't be read: as a failing commit, no alert email, and the one stateless email at minute 0
+      console.error(`tick: ${message(e)}`);
+      if (minute === 0) await sendAll(deps.env, cfg, [{ id: 0, ...renderDbFailing(message(e.cause), nowS) }]);
+      return { outcome: "db_failing", error: message(e.cause) };
+    }
     // a bug: nothing was committed; the watchdog notices if it happens every tick
     console.error(`tick failed: ${message(e)}`);
-    await bestEffort(() => db.batch([...countStatements(db, date, { ticks_failed: 1 }), releaseLease(db, holder)]));
     return { outcome: "failed", error: message(e) };
   }
 }
+
+/** A D1 query of the tick failed (after the lease was taken): the database is failing, not the code. */
+class DbError extends Error {
+  constructor(what: string, cause: unknown) {
+    super(`${what} failed: ${message(cause)}`, { cause });
+    this.name = "DbError";
+  }
+}
+
+/** A tick's D1 read, failing as a DbError. */
+const fromD1 = async <T>(what: string, read: () => Promise<T>): Promise<T> => {
+  try {
+    return await read();
+  } catch (e) {
+    throw new DbError(what, e);
+  }
+};
 
 interface TickRun {
   db: D1Database;
@@ -281,7 +304,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   const t = cfg.thresholds;
 
   // 2. what D1 holds
-  const state = await loadTickState(db, nowS);
+  const state = await fromD1("loading the tick's state", () => loadTickState(db, nowS));
   const refuse = async (why: string): Promise<TickReport> => {
     console.error(`tick refused: ${why}`);
     await bestEffort(() => releaseLease(db, holder).run());
@@ -300,7 +323,9 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     const r = rereadRange(c, cursors[c], d[c].startBlock);
     return r ? [{ chain: c, ...r }] : [];
   });
-  const reread = ranges.length ? await rereadStored(db, ranges) : { stored: new Map<ChainName, Map<Hex, StoredRef>>(), removed: new Set<Hex>() };
+  const reread = ranges.length
+    ? await fromD1("loading the re-read ranges' logs", () => rereadStored(db, ranges))
+    : { stored: new Map<ChainName, Map<Hex, StoredRef>>(), removed: new Set<Hex>() };
 
   // 4. scan Bittensor, then Base
   const budget = new Budget(cfg.budgets.subrequests);
@@ -416,7 +441,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     openBatch: snap.base?.state.openBatch?.id,
     messageIds: uniq([...state.pendingMessages, ...pendingFresh].map((m) => m.messageId)),
   };
-  const pre = await prefetch(db, needs);
+  const pre = await fromD1("the prefetch", () => prefetch(db, needs));
   for (const [k, v] of pre.blockTimes) blockTimesKnown.set(k, v);
 
   // 5. block times and transactions (after the prefetch, which says which are stored already)
@@ -501,7 +526,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   ];
   let seedStatements: D1PreparedStatement[] = [];
   if (seedNeedsRebuild({ lastPagedBlock: state.lastSeedPage?.lastBlock, newEvents: newSeed, changed })) {
-    const byUid = new Map((await seedLogs(db)).map((l) => [l.uid, l]));
+    const byUid = new Map((await fromD1("reading the seed logs", () => seedLogs(db))).map((l) => [l.uid, l]));
     for (const uid of scans.bittensor.removed) byUid.delete(uid);
     for (const l of upserts) if (l.chain === "bittensor") byUid.set(l.uid, l);
     seedStatements = rebuildStatements(db, seedEventsOf([...byUid.values()], d));

@@ -111,7 +111,7 @@
         {
           "binding": "DB",
           "database_name": "cascade-indexer-production",
-          "database_id": "local-only-production",
+          "database_id": "1bfa3258-3d46-4beb-b0c4-6a9e26fa9fc7",
           "migrations_dir": "migrations"
         }
       ],

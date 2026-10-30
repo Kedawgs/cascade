@@ -18,15 +18,16 @@
   "triggers": { "crons": ["* * * * *", "*/2 * * * *", "17 * * * *", "0 13 * * *"] },
   // Budgets, two profiles (spec section 12). Both environments use the Workers Paid profile: about 30 s
   // of CPU per cron invocation, 1,000+ subrequests, 1,000 D1 queries per invocation and a monthly D1
-  // allowance. The values stay well inside those, and the code stays safe on Free: every budget is a var.
-  //   var                 Paid (set)   Free (fallback)
+  // allowance. The values stay well inside those. Every budget is a var.
+  //   var                 Paid (set)   Free (fallback: not viable for a full batch, see below)
   //   SUBREQUEST_BUDGET   200          45     (Free: 50 external subrequests per invocation)
-  //   DECODE_BUDGET       5000         100    (about 42 µs a log: ~210 ms on Paid, ~4 ms of Free's 10 ms)
+  //   DECODE_BUDGET       5000         100    (about 110-125 µs a log, measured in local workerd: ~0.6 s on Paid)
   //   SITE_FILES_PER_RUN  20           2      (Free: a big chunk can use up 10 ms of CPU)
   //   SCAN_WALL_S         40           40     (a tick a minute either way)
   //   LEASE_S             180          180    (at least 3 × SCAN_WALL_S)
   //   SITE_MAX_BYTES      2000000      2000000
-  // To run on Free, set the Free column in the environment's vars.
+  // Free's 10 ms of CPU doesn't fit a full batch delivery: one block of about 205 logs, which the scan never
+  // splits, takes about 23-26 ms to hash and decode, so the tick that meets it would be killed every minute.
   "env": {
     // The v3 test deployment.
     "test": {
@@ -69,8 +70,8 @@
         "BASE_LOG_WINDOW": "100",
         // the Workers Paid profile (see the table above; Free: 45, 100, 2)
         "SUBREQUEST_BUDGET": "200",
-        // logs a tick may hash and decode, both chains together: about 42 µs each (23 to hash, 19 to
-        // decode). A log already stored at the same place costs nothing.
+        // logs a tick may hash and decode, both chains together: about 110-125 µs each (measured in local
+        // workerd). A log already stored at the same place costs nothing.
         "DECODE_BUDGET": "5000",
         "SCAN_WALL_S": "40",
         "LEASE_S": "180",

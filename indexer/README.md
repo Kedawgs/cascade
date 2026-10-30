@@ -27,8 +27,10 @@ It holds no key and never sends a transaction. Nothing over HTTP can write anyth
 | `0 13 * * *` | the **daily digest** (once per UTC day), and the watchdog again |
 
 The **watchdog** emails `monitor.stalled` itself when no tick has completed for 15 minutes, even when the
-database can't be written (then straight from memory). A tick that can't write its database sends one
-`monitor.db_failing` email, at minute 0 only.
+database can't be written (then straight from memory). It runs with the hourly job, so a stall is noticed 15 to
+about 75 minutes after the last complete tick. A tick that can't read or write its database sends one
+`monitor.db_failing` email, at minute 0 only. Neither can speak when the Worker refuses its config: that is
+what the outside uptime check on `/v1/health` is for (deploy step 10).
 
 ### Four routes
 
@@ -88,14 +90,17 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   (`https://archive.chain.opentensor.ai`): the lite node keeps only minutes of logs.
 - **Budgets** (two profiles; both environments are set to Paid):
 
-  | Var | Workers Paid (set) | Workers Free (fallback) |
+  | Var | Workers Paid (set) | Workers Free (fallback, not viable for a full batch) |
   |---|---|---|
   | `SUBREQUEST_BUDGET` | 200 | 45 |
   | `DECODE_BUDGET` | 5000 | 100 |
   | `SITE_FILES_PER_RUN` | 20 | 2 (1 if the site has a chunk near the byte cap) |
   | `SCAN_WALL_S`, `LEASE_S`, `SITE_MAX_BYTES` | 40, 180, 2000000 | the same |
 
-  On Paid, raise `DECODE_BUDGET` and `SUBREQUEST_BUDGET` if a backfill is slow; on Free, keep the Free column.
+  On Paid, raise `DECODE_BUDGET` and `SUBREQUEST_BUDGET` if a backfill is slow. The Free column is not viable
+  for a full batch: hashing and decoding a log costs about 110–125 µs (measured in local workerd), so a full
+  batch delivery (one block of about 205 logs, which the scan can't split) needs about 23–26 ms, over Free's
+  10 ms per invocation, and the tick that meets it is killed every minute until it settles.
 - **Thresholds**: every number the rules use is in `src/thresholds.ts`. Override any of them with the
   `THRESHOLDS` var (public) or the `THRESHOLDS_SECRET` secret (wins over the var, for values you'd rather not
   publish), as JSON, e.g. `{"keeperMinEthWei":"3000000000000000","rules":{"off":["fmtao.mint_surge"]}}`.
@@ -116,44 +121,55 @@ repository root.
 
    If the account were to stay on Free instead: run **one environment per account** (`production` in the main
    account, `test` in a second, free account), never both in one Free account (eight crons exceed its five,
-   and both would share one set of daily quotas), and set the Free budget column above. The test Worker in a
+   and both would share one set of daily quotas), and set the Free budget column above, knowing a full batch
+   delivery doesn't fit Free's CPU limit (see Configuration). The test Worker in a
    second account then has two limits: it **can't send email from cascade.fi** (a Worker sends only from an
    Email Routing domain in its own account, so it stays in `ALERT_MODE=log` or uses a domain of its own), and it
    **can't use `api.cascade.fi`** (a custom domain must be a zone in its own account: it uses its `workers.dev`
    URL).
+The order matters: wrangler offers to create things when a step comes too early (a secret put before the first
+deploy creates an empty Worker), so deploy first, in log mode, and add the email secret after.
+
 1. Install and test: `pnpm --dir indexer install && pnpm --dir indexer test`.
 2. Log in: `pnpm --dir indexer wrangler login`.
-3. Create the database: `pnpm --dir indexer wrangler d1 create cascade-indexer-test`, and paste the printed
-   `database_id` over `local-only-test` in `env.test` of `indexer/wrangler.jsonc` (an id, not a secret).
+3. Create the database: `pnpm --dir indexer wrangler d1 create cascade-indexer-test`. When it asks whether to
+   add the binding to your config, answer **No** (it would add a top-level binding the environments don't use).
+   Paste the printed `database_id` over `local-only-test` in `env.test` of `indexer/wrangler.jsonc` (an id, not
+   a secret). For production later, the same with `cascade-indexer-production` into `env.production`.
 4. Create the tables: `pnpm --dir indexer wrangler d1 migrations apply cascade-indexer-test --remote --env test`.
-5. Email (open question 2). In the dashboard: **Email Service → Email Routing**, onboard the sending domain
-   (cascade.fi; it adds MX and SPF records, so check nothing else receives mail there first, or use a sending
-   subdomain), then add and **verify** the destination address. Then:
-   `pnpm --dir indexer wrangler secret put ALERT_TO --env test` (the verified address). Optionally the
-   `THRESHOLDS_SECRET` and `*_RPC_URL_SECRET` secrets. Once the address is verified, set `"ALERT_MODE": "send"`
-   in `env.test`'s vars (it ships as `"log"`).
-6. The deployment: `env.test` already holds v3-test's. For another deployment:
+5. The deployment: `env.test` already holds v3-test's. For another deployment:
    `pnpm --dir indexer config:from-record ../ops/deployments/<record>.json` and paste what it prints into that
    environment's vars.
-7. The approved site lists: build the site you are about to deploy, then
+6. The approved site lists: build the site you are about to deploy, then
    `pnpm --dir indexer site:approved ../web/out`, review the change to `indexer/src/site-approved.ts` and commit
    it. Until this is done, the site check judges nothing and says so (`site.no_approved_lists`). When the site
    check reports a host that Cloudflare itself injects into the served pages (the Web Analytics beacon,
    `static.cloudflareinsights.com`, or a `/cdn-cgi/` script), check it is Cloudflare's and run it again with
    `--extra-hosts static.cloudflareinsights.com` (comma-separated for several): the hand-added hosts are named in
    the file, so they stay reviewable in git. Re-run this whenever the site is redeployed with new dependencies.
-8. Deploy: `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascade.fi`), or use the
+7. Deploy, still in log mode (`"ALERT_MODE": "log"` as shipped, which needs no `ALERT_TO`):
+   `pnpm --dir indexer wrangler deploy --env test`. Add the custom domain (`api.cascade.fi`), or use the
    `workers.dev` URL to start.
+8. Email (open question 2). In the dashboard: **Email Service → Email Routing**, onboard the sending domain
+   (cascade.fi; it adds MX and SPF records, so check nothing else receives mail there first, or use a sending
+   subdomain), then add and **verify** the destination address. Then, the Worker existing now:
+   `pnpm --dir indexer wrangler secret put ALERT_TO --env test` (the verified address), and optionally the
+   `THRESHOLDS_SECRET` and `*_RPC_URL_SECRET` secrets. Then set `"ALERT_MODE": "send"` in `env.test`'s vars
+   and deploy again (step 7's command).
 9. Watch `GET /v1/status` until both chains' `lagS` are small: the first backfill takes an hour or so, and the
-   digest says "catching up" meanwhile (the cross-checks wait until both chains are within an hour of their
-   heads). Expect the first digest at 13:00 UTC. Trigger one warning on purpose to see an email arrive, e.g.
-   `THRESHOLDS` `{"keeperMinEthWei":"1000000000000000000000"}` (a keeper floor above the real balance), then
-   remove it.
-10. A rate-limiting rule on the API path (`api.cascade.fi/v1/scan/*`), and optionally an outside uptime check on
-    `/v1/health` (open question 9).
-11. The site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). The keeper: set `OPS_HOLD_URL`
+   digest says "catching up" meanwhile (its lag alerts are quiet then, and a cross-check waiting on it isn't
+   reported stuck). Expect the first digest at 13:00 UTC. Trigger one warning on purpose to see an email
+   arrive, e.g. `THRESHOLDS` `{"keeperMinEthWei":"1000000000000000000000"}` (a keeper floor above the real
+   balance), then remove it.
+10. **An outside uptime check on `/v1/health`** (required): a free checker that emails you when it stops
+    answering 200. The Worker can't watch itself for everything: if it refuses its config (a bad value after an
+    edit, a missing secret in `send` mode), no job runs at all, the watchdog and the digest included, and it
+    stays silent. `/v1/health` answers 503 then (no tick has completed), which only an outside check sees. A
+    missing daily digest is the weaker sign.
+11. A rate-limiting rule on the API path (`api.cascade.fi/v1/scan/*`).
+12. The site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). The keeper: set `OPS_HOLD_URL`
     (after the keeper tasks).
-12. Production: the same steps with `--env production` and the launch deployment's record, once it exists.
+13. Production: the same steps with `--env production` and the launch deployment's record, once it exists.
 
 ## When an email arrives
 

@@ -1,19 +1,11 @@
 "use client";
 
 import { useCascadeAccount } from "@/lib/account";
+import { STAKE_POINTS as POINTS } from "@/lib/landing";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
 import { StakeForm } from "../app/StakeForm";
 import styles from "./Landing.module.css";
-
-const POINTS = [
-  { lead: "One balance.", body: "Your TAO and your rewards, in dollars and in TAO." },
-  {
-    lead: "Always visible.",
-    body: "See exactly where your money is at every step, with a live on-chain check once it is staked.",
-  },
-  { lead: "Unstake any time.", body: "Back to USDC in the same wallet. The form shows how long it takes." },
-];
 
 function Tick() {
   return (

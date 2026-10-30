@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { formatUnits } from "viem";
 import { describe, expect, it } from "vitest";
 import type { SourceChainInfo } from "./cascade/chains";
-import { type Deployment, MIN_UNSTAKE_WEI, PATH_USDC_TO_TAO, readDeployment } from "./cascade/config";
-import { appFaq, FAQ_FACTS, type FaqOptions, faqSections, VALIDATORS } from "./faq";
+import { type Deployment, EXPECTED_DEPLOYMENTS, MIN_UNSTAKE_WEI, PATH_USDC_TO_TAO, readDeployment } from "./cascade/config";
+import { appFaq, FAQ_FACTS, type FaqOptions, faqSections, type Stage, VALIDATORS } from "./faq";
 import { parseInlineLinks } from "./inline-links";
 import { POOL_FEE_PCT, POOL_FEES_TEXT } from "./stake-form";
 import { APY_FOOTNOTE } from "./stats";
@@ -194,8 +194,12 @@ describe("the FAQ's answers say what the code does", () => {
     expect(APY_FOOTNOTE).not.toContain("compounded");
   });
 
-  it("says a pause can hold unstakes", () => {
-    expect(answer(TEST, "lock-up")).toContain("Only an emergency pause holds unstakes, for as long as it lasts.");
+  it("says the daily unstake limit and a pause can hold unstakes", () => {
+    for (const d of [TEST, LAUNCH_SITE]) {
+      expect(answer(d, "lock-up")).toBe(
+        "No. You can unstake whenever you like; it just takes the time above to come back. Only two things hold an unstake back: the daily unstake limit, which leaves anything over it staked for you to unstake again later, and an emergency pause, for as long as it lasts.",
+      );
+    }
   });
 
   it("says what Claim as USDC does and costs", () => {
@@ -240,9 +244,25 @@ describe("the FAQ's answers say what the code does", () => {
     expect(a).toContain("7 days' public notice");
     expect(a).toContain("time to unstake if you disagree");
     expect(a).toContain("During testing one key holds every role, so that veto isn't independent yet.");
-    expect(a).toContain("Every fee is capped in the code, and you see each one before you confirm.");
+    expect(a).toContain(
+      "Every fee is capped in the code, and you see each one before you confirm. With no timelock yet, the reward cut and the fee on selling back to USDC can still rise to their caps after you stake, but the minimum price you approve still protects each swap.",
+    );
     expect(a).not.toMatch(/no cap|except the unstake request fee/);
-    expect(answer(TEST, "take-funds", { stage: "live" })).not.toContain("During testing");
+    const live = answer(TEST, "take-funds", { stage: "live" });
+    expect(live).not.toContain("During testing");
+    expect(live).toContain("Every fee is capped in the code, and you see each one before you confirm.");
+    expect(live).not.toContain("With no timelock yet");
+  });
+
+  it("fails closed: a stage that isn't exactly early or live gets the testing answers, never the live ones", () => {
+    for (const stage of ["Live", "launch", ""] as unknown as Stage[]) {
+      const text = items(TEST, { stage })
+        .flatMap((i) => i.a)
+        .join("\n");
+      expect(text).toContain("one team key holds every role");
+      expect(text).not.toMatch(/multi-signature wallet, and its changes wait|after a 48-hour public delay/);
+      expect(answer(TEST, "audited", { stage, audit: "scheduled" })).toBe(answer(TEST, "audited", { stage: "testing", audit: "scheduled" }));
+    }
   });
 
   it("names price impact, the unstake fee in ETH, planned chains and the backing as checked", () => {
@@ -276,9 +296,11 @@ describe("the FAQ at the launch (early: real money, a Ledger owner, no multisig 
   it("says who controls it as it is: the founder's Ledger, a separate guardian, no multisig or timelock, the code's hard limits", () => {
     const a = answer(LAUNCH_SITE, "who-controls");
     expect(a).toContain("Cascade's contracts are owned by the founder's hardware wallet (a Ledger) on Base and on Bittensor.");
-    expect(a).toContain("A separate emergency key, the guardian, can pause deposits and unstakes and veto a new route; it can never move anyone's money.");
     expect(a).toContain(
-      "There is no multisig or timelock yet, so a settings change takes effect at once, but only within hard limits written into the contracts: every fee has a fixed maximum, the safety delay stays between 1 hour and 7 days, no batch can be set to carry more than 5,000 TAO, and unstakes through Cascade take at most half the staked TAO a day (or 100 TAO, if that's more).",
+      "A separate emergency key, the guardian, can pause deposits and unstakes, veto a new route, and switch off the current one; turning a route back on takes the same 7 days' public notice as a new one. The guardian can never move anyone's money.",
+    );
+    expect(a).toContain(
+      "There is no multisig or timelock yet, so a settings change takes effect at once, and the riskiest settings move only within hard limits written into the contracts: every fee has a fixed maximum, the safety delay stays between 1 hour and 7 days, no batch can be set to carry more than 5,000 TAO, and unstakes through Cascade take at most half the staked TAO a day (or 100 TAO, if that's more).",
     );
   });
 
@@ -288,8 +310,12 @@ describe("the FAQ at the launch (early: real money, a Ledger owner, no multisig 
     );
   });
 
-  it("names the deposit cap", () => {
+  it("names the deposit cap and the unstake limits, from the deployment's settings", () => {
     expect(answer(LAUNCH_SITE, "limits")).toBe(
+      "The smallest stake is 0.04 TAO (the stake form shows it in dollars), the smallest unstake 0.011 TAO. One batch carries at most 10 TAO, and while Cascade is early, total deposits are capped at 40 TAO. One unstake carries at most 10 TAO, and unstakes through Cascade are limited to 20% of the staked TAO a day, or 10 TAO if that's more, shared by everyone. Anything over a limit stays staked, and you unstake it again later, paying the request fee again. Only deposit what you could afford to lose.",
+    );
+    // a deployment whose limits aren't listed says nothing it doesn't know
+    expect(answer(TEST, "limits", { stage: "early" })).toBe(
       "The smallest stake is 0.04 TAO (the stake form shows it in dollars), the smallest unstake 0.011 TAO. One batch carries at most 10 TAO, and while Cascade is early, total deposits are capped at 40 TAO. Only deposit what you could afford to lose.",
     );
   });
@@ -299,7 +325,7 @@ describe("the FAQ at the launch (early: real money, a Ledger owner, no multisig 
       .flatMap((s) => s.items)
       .find((i) => i.id === "risks")!.a;
     expect(risks.find((p) => p.startsWith("Control:"))).toBe(
-      "Control: the owner is one hardware wallet, with no multisig or timelock yet, so settings change at once, within the contracts' hard limits. [Who controls Cascade](/faq/#who-controls).",
+      "Control: the owner is one hardware wallet, with no multisig or timelock yet, so settings change at once, the riskiest only within the contracts' hard limits. [Who controls Cascade](/faq/#who-controls).",
     );
     expect(answer(LAUNCH_SITE, "take-funds")).toContain("The guardian is a separate key from the owner, but Cascade holds both for now, so that veto isn't independent yet.");
   });
@@ -483,6 +509,14 @@ describe("the FAQ's numbers match the code", () => {
     expect(decimals(field(v3, "redeemRequestFee"), 18)).toBe(FAQ_FACTS.requestFeeEth);
     expect(decimals(field(v3, "minDeposit"), 18)).toBe(FAQ_FACTS.minStakeTao);
     expect(decimals(field(v3, "maxBatchValue"), 18)).toBe(FAQ_FACTS.maxBatchTao);
+  });
+
+  it("the launch's unstake limits (deployments.json) as ops sets up its vault", () => {
+    const limits = objectBody(OPS_CONFIG, "LAUNCH_VAULT_LIMITS").replace(/\bTAO\b/g, "10n ** 18n");
+    const u = EXPECTED_DEPLOYMENTS["v3-launch"].unstakeLimits!;
+    expect(decimals(field(limits, "maxEntryValue"), 18)).toBe(u.maxEntryTao);
+    expect(decimals(field(limits, "maxDailyOutflowBps"), 2)).toBe(u.dailyOutflowPct);
+    expect(decimals(field(limits, "minDailyOutflow"), 18)).toBe(u.dailyFloorTao);
   });
 
   it("the request fee's cap, the deposit cap and the hard limits the early answers name", () => {

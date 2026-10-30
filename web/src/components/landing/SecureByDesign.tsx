@@ -1,3 +1,5 @@
+import { DEPLOYMENT, deploymentStage, type Stage } from "@/lib/cascade/config";
+import { auditCard } from "@/lib/landing";
 import { AUDIT_STATUS, SITE_LINKS } from "@/lib/site";
 import styles from "./Landing.module.css";
 
@@ -28,13 +30,15 @@ function Icon({ name }: { name: keyof typeof ICON }) {
   );
 }
 
-export function SecureByDesign() {
+/** `stage`: the deployment's (deployments.json), which words the audit card. */
+export function SecureByDesign({ stage = deploymentStage(DEPLOYMENT) }: { stage?: Stage }) {
+  const audit = auditCard(stage, AUDIT_STATUS);
   return (
     <section id="secure" className={`wrap ${styles.section}`} aria-labelledby="secure-heading">
       <h2 id="secure-heading" className={styles.h2}>
         Secure <b>by design</b>
       </h2>
-      <p className={styles.lede}>Your TAO sits in an open, auditable contract. Not in our hands.</p>
+      <p className={styles.lede}>Your TAO sits in an open, auditable contract. We can&apos;t move your TAO.</p>
       <div className={styles.secure}>
         <div className={styles.sec}>
           <Icon name="shield" />
@@ -55,9 +59,9 @@ export function SecureByDesign() {
           <Icon name="clock" />
           <h3>
             Independent audit
-            {AUDIT_STATUS === "scheduled" && <span className={styles.status}>Scheduled</span>}
+            {audit.badge && <span className={styles.status}>{audit.badge}</span>}
           </h3>
-          <p>A third-party review before launch. The report will be linked here.</p>
+          <p>{audit.body}</p>
         </div>
         <div className={styles.sec}>
           <Icon name="link" />

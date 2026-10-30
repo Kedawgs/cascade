@@ -171,7 +171,7 @@ export function formatBudget(b: Budget): string[] {
 /** The vault's own payout delay (CascadeVault.sol: `payoutDelay = 24 hours`). A plan that sets it to
  * that (a launch) finds it already set on a fresh vault, on the forks and live alike, so deploy records
  * the step without sending it and it costs nothing. */
-const VAULT_DEFAULT_PAYOUT_DELAY = 86_400n;
+export const VAULT_DEFAULT_PAYOUT_DELAY = 86_400n;
 const setByDefault = (s: DeploymentRecord["plan"]["steps"][number]) =>
   s.id === "setPayoutDelay" && "args" in s && s.args?.[0] === VAULT_DEFAULT_PAYOUT_DELAY;
 

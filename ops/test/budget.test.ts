@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
-import { type BudgetInputs, budgetChecks, computeBudget, formatBudget, gatherBudgetInputs } from "../src/budget.ts";
+import { type BudgetInputs, budgetChecks, computeBudget, formatBudget, gatherBudgetInputs, VAULT_DEFAULT_PAYOUT_DELAY } from "../src/budget.ts";
 import { claimPolicy, paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3 } from "../src/plan.ts";
 import type { DeploymentRecord } from "../src/record.ts";
@@ -233,6 +234,13 @@ describe("gatherBudgetInputs", () => {
     }
     // v2 has no round trip to finish
     await expect(gatherBudgetInputs(liveChains().ctx, rehearsalOf(buildPlan(0, 0, COLDKEY)))).resolves.toMatchObject({ baseDeploySteps: 2 });
+  });
+
+  it("takes the vault's own payout delay from the contract: CascadeVault.sol's `payoutDelay = 24 hours`", () => {
+    const src = readFileSync(new URL("../../contracts/src/CascadeVault.sol", import.meta.url), "utf8");
+    const m = /uint64 public payoutDelay = (\d+) hours;/.exec(src);
+    expect(m, "CascadeVault.sol declares payoutDelay in hours").not.toBeNull();
+    expect(VAULT_DEFAULT_PAYOUT_DELAY).toBe(BigInt(m![1]) * 3_600n);
   });
 
   it("prices a launch whose payout delay is the vault's own 24 hours: deploy finds it set and sends nothing, live too", async () => {

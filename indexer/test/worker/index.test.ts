@@ -55,16 +55,19 @@ describe("scheduled runs each cron's own job", () => {
     expect(n.cursors + n.lease + n.logs + n.readings).toBe(0);
   });
 
-  it("the hourly job runs the watchdog and prunes", async () => {
-    await setMeta(db, "last_complete_tick", String(Math.floor(Date.now() / 1000) - 16 * 60)).run();
-    await run(CRONS.hourly);
-    expect((await db.prepare("SELECT alert_key FROM alerts").all()).results).toEqual([{ alert_key: "monitor.stalled" }]);
+  it("the hourly job runs the watchdog, at the cron's scheduled time (its resends exactly an hour apart)", async () => {
+    // a last tick an hour ahead of the wall clock: only the scheduled time, 16 minutes after it, says stalled
+    const last = Math.floor(Date.now() / 1000) + 3600;
+    await setMeta(db, "last_complete_tick", String(last)).run();
+    await run(CRONS.hourly, (last + 16 * 60) * 1000);
+    expect((await db.prepare("SELECT alert_key, notified_at FROM alerts").all()).results).toEqual([{ alert_key: "monitor.stalled", notified_at: last + 16 * 60 }]);
   });
 
-  it("the daily job sends the digest once a UTC day", async () => {
-    await setMeta(db, "last_complete_tick", String(Math.floor(Date.now() / 1000))).run();
-    await run(CRONS.daily);
-    expect((await meta()).digest_date).toBe(new Date().toISOString().slice(0, 10));
+  it("the daily job sends the digest once a UTC day, the day it was scheduled for", async () => {
+    const at = Date.UTC(2030, 0, 1, 13, 0, 0);
+    await setMeta(db, "last_complete_tick", String(at / 1000)).run();
+    await run(CRONS.daily, at);
+    expect((await meta()).digest_date).toBe("2030-01-01");
   });
 
   it("does nothing for a cron it doesn't run", async () => {

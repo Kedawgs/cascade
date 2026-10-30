@@ -53,6 +53,9 @@ async function scheduled(controller: ScheduledController, env: Env, _ctx: Execut
   if (!cfg) return;
   const fetch = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
   const clock = () => Math.floor(Date.now() / 1000);
+  // the hourly and daily jobs work at their scheduled time: a critical's resend is due exactly an hour after
+  // the last, and a few seconds' start-up delay can't push it to the next run
+  const scheduledS = Math.floor(controller.scheduledTime / 1000);
   switch (controller.cron) {
     case CRONS.tick: {
       const r = await runTick({ env, cfg, fetch, now: () => Date.now(), scheduledMs: controller.scheduledTime });
@@ -66,12 +69,12 @@ async function scheduled(controller: ScheduledController, env: Env, _ctx: Execut
       return;
     }
     case CRONS.hourly: {
-      const r = await runHourly({ env, cfg, nowS: clock() });
+      const r = await runHourly({ env, cfg, nowS: scheduledS });
       console.log(`hourly: ${JSON.stringify(r)}`);
       return;
     }
     case CRONS.daily: {
-      const r = await runDaily({ env, cfg, nowS: clock(), fetch });
+      const r = await runDaily({ env, cfg, nowS: scheduledS, fetch });
       console.log(`daily: ${JSON.stringify(r)}`);
       return;
     }

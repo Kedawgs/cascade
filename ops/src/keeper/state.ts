@@ -15,7 +15,7 @@ import {
 import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, sameDeployment, saveRecord } from "../record.ts";
-import { balanceOf, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
+import { balanceOf, codeAt, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, logsOf, sendCall, signerOf } from "../send.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
@@ -265,6 +265,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
    * deps. A batch reads count 0 both once deleted and on a node not yet showing its queue, so it is taken
    * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
   const deleted = new Set<string>();
+  /** The keeper wallet's code on each chain as read this round (refresh forgets it), so a round's sends
+   * cost one read a chain. A failed read is not kept. */
+  const signerCodes = new Map<ChainName, Hex>();
 
   async function messageState(m: { id: Hex; direction: Message["direction"] }): Promise<string> {
     const dst: ChainName = m.direction === "Base → Bittensor" ? "bittensor" : "base";
@@ -341,6 +344,13 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     sendCall: (req) => sendCall(ctx, req),
     signer,
+    async signerCode(chain) {
+      const kept = signerCodes.get(chain);
+      if (kept !== undefined) return kept;
+      const code = await codeAt(ctx.rpc, chain, signer);
+      signerCodes.set(chain, code);
+      return code;
+    },
     nonce: (chain) => nonceOf(ctx.rpc, chain, signer),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
@@ -379,6 +389,8 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       rec.messages = now.messages;
     },
     refresh() {
+      // a new round: the keeper wallet's code is read again before its first send
+      signerCodes.clear();
       const now = loadRecord(recordPath);
       if (!now) throw new Error(`${recordPath} is gone`);
       if (!sameDeployment(now, rec)) throw new Error(`${recordPath} now holds another deployment`);

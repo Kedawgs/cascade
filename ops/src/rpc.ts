@@ -3,6 +3,7 @@ import {
   type Address,
   decodeFunctionResult,
   encodeFunctionData,
+  getAddress,
   type Hex,
   hexToBigInt,
   hexToNumber,
@@ -125,6 +126,20 @@ export const balanceOf = async (rpc: Rpc, chain: ChainName, addr: Address): Prom
 
 export const codeAt = async (rpc: Rpc, chain: ChainName, addr: Address): Promise<Hex> =>
   (await rpc.request(chain, "eth_getCode", [addr, "latest"])) as Hex;
+
+/** EIP-7702 lets a plain account's key install code at the account: its code then reads 0xef0100 and the
+ * 20-byte address of the contract it delegates to (23 bytes), and calls to the account run that
+ * contract's code. A thief with the key can install a sweeper this way (as in the Binance hot-wallet
+ * drain). The delegate's address, or undefined for any other code (none, or a contract's own). */
+export function delegationOf(code: Hex): Address | undefined {
+  return /^0xef0100[0-9a-f]{40}$/i.test(code) ? getAddress(`0x${code.slice(8)}`) : undefined;
+}
+
+/** An account's code in words, for a message: the delegation's target, or the code's size. */
+export function describeCode(code: Hex): string {
+  const to = delegationOf(code);
+  return to ? `an EIP-7702 delegation to ${to}` : `${Math.ceil((code.length - 2) / 2)} bytes of contract code`;
+}
 
 /** The block `addr`'s code first appears in: steps back from the head, doubling the step, to a block
  * without it, then halves the gap. A recent creation costs few reads, and state is asked for only about

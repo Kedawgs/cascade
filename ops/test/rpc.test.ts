@@ -1,7 +1,7 @@
-import { numberToHex } from "viem";
+import { getAddress, type Hex, numberToHex } from "viem";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { targets } from "../src/config.ts";
-import { createRpc, firstBlockWithCode, nonceOf, type Rpc } from "../src/rpc.ts";
+import { createRpc, delegationOf, describeCode, firstBlockWithCode, nonceOf, type Rpc } from "../src/rpc.ts";
 
 const live = targets({}).live;
 
@@ -85,5 +85,26 @@ describe("firstBlockWithCode", () => {
 
   it("refuses an address with no code at the head", async () => {
     await expect(firstBlockWithCode(chain(1_000n, 2_000n).rpc, "bittensor", ADDR)).rejects.toThrow(/no code at 0x0+c0/);
+  });
+});
+
+describe("an account's code: none, an EIP-7702 delegation, or a contract's", () => {
+  const TO = getAddress("0x5a0b54d5dc17e0aadc383d2db43b0a0d3e029c4c");
+  /** A plain account's code once its key has signed an EIP-7702 delegation to TO: 23 bytes. */
+  const DELEGATED: Hex = `0xef0100${TO.slice(2).toLowerCase()}`;
+
+  it("reads a delegation as exactly 0xef0100 and the delegate's 20-byte address, checksummed", () => {
+    expect((DELEGATED.length - 2) / 2).toBe(23);
+    expect(delegationOf(DELEGATED)).toBe(TO);
+    expect(delegationOf(`0x${DELEGATED.slice(2).toUpperCase()}`)).toBe(TO);
+    // no code, a contract's, a designator a byte short or a byte long, another prefix: not a delegation
+    for (const code of ["0x", "0x6080", DELEGATED.slice(0, -2), `${DELEGATED}00`, `0xef0000${TO.slice(2)}`] as Hex[]) {
+      expect(delegationOf(code), code).toBeUndefined();
+    }
+  });
+
+  it("says which in a message: the delegate, or the contract code's size", () => {
+    expect(describeCode(DELEGATED)).toBe(`an EIP-7702 delegation to ${TO}`);
+    expect(describeCode("0x6080604052")).toBe("5 bytes of contract code");
   });
 });

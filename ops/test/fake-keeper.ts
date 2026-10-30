@@ -81,11 +81,12 @@ const missing = (name: string) => () => {
   throw new Error(`${name} is not stubbed`);
 };
 
-/** Keeper dependencies that fail loudly unless a test provides them. */
+/** Keeper dependencies that fail loudly unless a test provides them; the keeper wallet a plain account. */
 export function stubDeps(over: Partial<KeeperDeps>): KeeperDeps {
   return {
     readState: missing("readState"),
     signer: WALLET,
+    signerCode: async () => "0x",
     sendCall: missing("sendCall"),
     nonce: async () => 4,
     quoteClose: missing("quoteClose"),

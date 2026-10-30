@@ -581,6 +581,8 @@ describe("a roll goes through the same send guards as close", () => {
         eth_blockNumber: () => numberToHex(1_000),
         eth_getLogs: () => [],
         eth_chainId: (c) => numberToHex(f.ctx.targets[c].chainId),
+        // the keeper wallet: a plain account, no code
+        eth_getCode: () => "0x",
         eth_getTransactionCount: () => numberToHex(4),
         eth_estimateGas: (_c, params) => {
           estimates.push(params[0]);
@@ -655,6 +657,8 @@ describe("a roll that reverts on chain", () => {
       eth_blockNumber: () => numberToHex(1_000),
       eth_getLogs: () => [],
       eth_chainId: (c) => numberToHex(f.ctx.targets[c].chainId),
+      // the keeper wallet: a plain account, no code
+      eth_getCode: () => "0x",
       eth_getTransactionCount: () => numberToHex(4),
       eth_estimateGas: () => "0x88b8",
       eth_gasPrice: () => "0x1",

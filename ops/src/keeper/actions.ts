@@ -2,7 +2,8 @@ import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, pa
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy, WALLET } from "../config.ts";
 import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
-import { RevertedOnChain, type Sent, SendRefused } from "../send.ts";
+import { describeCode } from "../rpc.ts";
+import { chainLabel, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
 import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
@@ -25,6 +26,9 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   sendCall(req: CallRequest): Promise<Sent>;
   /** Who the keeper's sends come from (keeperSigner): requireReady checks it is the record's keeper */
   signer: Address;
+  /** The keeper wallet's (`signer`'s) code on `chain`: "0x" for a plain account. Read at most once a
+   * round: `refresh`, at each round's start, forgets it. */
+  signerCode(chain: ChainName): Promise<Hex>;
   nonce(chain: ChainName): Promise<number>;
   quoteClose(s: KeeperState): Promise<bigint>;
   payoutLogs(): Promise<PayoutLog[]>;
@@ -74,6 +78,31 @@ export function requireReady(rec: DeploymentRecord, signer: Address = WALLET): v
   requireHandoff(rec);
   const keeper = rolesOf(rec.plan).keeper;
   if (keeper.toLowerCase() !== signer.toLowerCase()) throw new Error(keeperMismatch(keeper, signer));
+}
+
+/** The keeper wallet has code where it was about to send. Not a SendRefused: a run's delivery treats
+ * those as a wait for the next round, and this must stop the run. */
+export class KeeperHasCode extends Error {
+  readonly chain: ChainName;
+  readonly code: Hex;
+
+  constructor(chain: ChainName, keeper: Address, code: Hex) {
+    super(
+      `${chainLabel(chain)}: the keeper wallet ${keeper} has code (an EIP-7702 delegation or a contract): ${describeCode(code)}; assume its key is compromised; stop and rotate the keeper; nothing sent`,
+    );
+    this.chain = chain;
+    this.code = code;
+  }
+}
+
+/** Every keeper send goes through here. The keeper wallet is a plain account, with no code; code there
+ * means its key has signed an EIP-7702 delegation (a thief's sweeper, as in the Binance hot-wallet drain)
+ * or the address is a contract. Either way nothing is sent, and `run` stops. Its code is read on the chain
+ * the send goes to, at most once a round (signerCode). */
+async function keeperSend(deps: KeeperDeps, req: CallRequest): Promise<Sent> {
+  const code = await deps.signerCode(req.chain);
+  if (code !== "0x") throw new KeeperHasCode(req.chain, deps.signer, code);
+  return deps.sendCall(req);
 }
 
 async function withMessage(deps: KeeperDeps, sent: Sent, adapter: Hex, direction: Message["direction"]): Promise<Done> {
@@ -149,7 +178,7 @@ export async function close(deps: KeeperDeps, rec: DeploymentRecord): Promise<Do
   if (s.frontDoor.paused) throw new Error("the front door is paused");
   if (s.frontDoor.nDeposits + s.frontDoor.nRedeems === 0) throw new Error("the open batch is empty");
   if (!s.frontDoor.canClose) throw new Error("the open batch is not ready to close yet");
-  const sent = await deps.sendCall(closeRequest(rec, await deps.quoteClose(s), await deps.nonce("base")));
+  const sent = await keeperSend(deps, closeRequest(rec, await deps.quoteClose(s), await deps.nonce("base")));
   return withMessage(deps, sent, rec.plan.addresses.baseAdapter, "Base → Bittensor");
 }
 
@@ -178,7 +207,7 @@ export async function roll(deps: KeeperDeps, rec: DeploymentRecord): Promise<Rol
   if (!fd.canClose) return skip("the open batch can't close yet");
   let sent: Sent;
   try {
-    sent = await deps.sendCall(rollRequest(rec, await deps.nonce("base")));
+    sent = await keeperSend(deps, rollRequest(rec, await deps.nonce("base")));
   } catch (e) {
     if (e instanceof SendRefused && e.reason === "estimate") return skip(`${e.message}; the next round decides again`);
     if (e instanceof RevertedOnChain) {
@@ -202,7 +231,7 @@ export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Do
   requireReady(rec, deps.signer);
   const s = await deps.readState();
   if (s.vault.paused) throw new Error("the vault is paused");
-  return deps.sendCall(stakeRequest(rec, await deps.nonce("bittensor")));
+  return keeperSend(deps, stakeRequest(rec, await deps.nonce("bittensor")));
 }
 
 export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex): Promise<Done> {
@@ -214,7 +243,7 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
   if (!b || b.cursor >= b.count) throw new Error(`no payout is pending for batch ${key.slice(0, 10)}…`);
   if (s.now < b.queuedAt + s.vault.payoutDelay) throw new Error(`batch ${key.slice(0, 10)}… is not due yet`);
   const list = rebuildPayouts(await deps.payoutLogs(), key);
-  const sent = await deps.sendCall(payoutsRequest(rec, key, list, await deps.batchInfo(key), await deps.nonce("bittensor")));
+  const sent = await keeperSend(deps, payoutsRequest(rec, key, list, await deps.batchInfo(key), await deps.nonce("bittensor")));
   return withMessage(deps, sent, rec.plan.addresses.bitAdapter, "Bittensor → Base");
 }
 
@@ -227,7 +256,7 @@ export async function claim(deps: KeeperDeps, rec: DeploymentRecord, policy: Cla
   if (!d.claim) throw new Error(`not claiming: ${d.reason}; nothing sent`);
   const short = upfrontShortfall(r);
   if (short) throw new Error(short);
-  return deps.sendCall(claimRequest(rec, r.hotkey, claimGasLimit(r.claimGasRequired), await deps.nonce("bittensor")));
+  return keeperSend(deps, claimRequest(rec, r.hotkey, claimGasLimit(r.claimGasRequired), await deps.nonce("bittensor")));
 }
 
 /** One user's delivery: sent, with the USDC from the front door's Delivered event, or skipped with why
@@ -249,7 +278,7 @@ export async function deliver(deps: KeeperDeps, rec: DeploymentRecord, user: Add
   if (!c.deliver || c.keeperMinOut === undefined) return { user, delivered: false, reason: c.reason };
   let sent: Sent;
   try {
-    sent = await deps.sendCall(deliverRequest(plan, user, c.keeperMinOut, await deps.nonce("base")));
+    sent = await keeperSend(deps, deliverRequest(plan, user, c.keeperMinOut, await deps.nonce("base")));
   } catch (e) {
     if (e instanceof SendRefused && e.reason === "estimate") {
       return { user, delivered: false, reason: `${e.message}; it waits for a later round`, refused: e.message };
@@ -327,7 +356,8 @@ async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean,
  * still goes ahead. One whose estimate refuses it is held, not retried, until the user's claimable
  * amount, preference, or the quote against the floors changes. Reward claims are only reported, every
  * `rewardsEveryTicks` rounds. Each round starts by re-reading the record (`deps.refresh`, onto `rec`, the
- * record the deps were made with), so a read-back that failed since the run started stops its sends. */
+ * record the deps were made with), so a read-back that failed since the run started stops its sends. A
+ * keeper wallet found with code at any send, a delivery's too, stops the run (KeeperHasCode). */
 export async function runLoop(
   deps: KeeperDeps,
   rec: DeploymentRecord,
@@ -409,7 +439,7 @@ export async function runLoop(
           d = await deliver(deps, rec, action.user);
         } catch (e) {
           // the wallet's guard (an earlier transaction pending, the nonce, the chain): not this user's
-          // facts, so tried again next round
+          // facts, so tried again next round. Anything else (a keeper wallet with code) stops the run
           if (!(e instanceof SendRefused)) throw e;
           waits(action.user, `${e.message}; it is tried again next round`);
           continue;

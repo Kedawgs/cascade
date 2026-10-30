@@ -70,6 +70,8 @@ function deps(
   return {
     recorded,
     signer: WALLET,
+    // a plain account (keeper-code.test.ts covers one with code)
+    signerCode: async () => "0x",
     recordMessage: (m) => {
       recorded.push(m);
     },

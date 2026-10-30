@@ -28,7 +28,8 @@ export const siteIntegrity: Rule = {
       out.push({
         rule: "site.integrity",
         key: `site.integrity:${u.kind}:${u.value}`,
-        subject: `The live site holds ${u.kind === "address" ? "an address" : "a host"} not on the approved list`,
+        subject:
+          u.kind === "script" ? "The live site loads a script from a data: or blob: URL" : `The live site holds ${u.kind === "address" ? "an address" : "a host"} not on the approved list`,
         facts: { [u.kind]: u.value, file: u.file, pass },
       });
     }

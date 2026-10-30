@@ -32,6 +32,8 @@ interface Pass {
   /** each address and host, with the first file it was seen in */
   addresses: Record<string, string>;
   hosts: Record<string, string>;
+  /** scripts whose source is a data: or blob: URL ("data: URL"), with the page that loads them */
+  embedded?: Record<string, string>;
   problems: SiteProblem[];
   capped: boolean;
 }
@@ -41,7 +43,8 @@ export interface SiteResult {
   /** every file was read and scanned */
   complete: boolean;
   files: string[];
-  unapproved: { kind: "address" | "host"; value: string; file: string }[];
+  /** an address or host not on the approved lists, or a script from a data: or blob: URL (never approved) */
+  unapproved: { kind: "address" | "host" | "script"; value: string; file: string }[];
   /** configured Cascade addresses found nowhere (judged on a complete pass only) */
   missing: string[];
   problems: SiteProblem[];
@@ -152,10 +155,12 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
       }
       // the whole page: inline scripts, and addresses and hosts in attributes too
       add(p, page, scan(r.text));
-      const { srcs, foreignHosts } = pageScripts(r.text, cfg.site.url);
+      const { srcs, foreignHosts, embedded } = pageScripts(r.text, cfg.site.url);
       for (const s of srcs) enqueue(p, s);
       // a script from elsewhere is never fetched: its host is reported for approval
       for (const h of foreignHosts) p.hosts[h] ??= page;
+      // code from a data: or blob: URL comes from no host: named as what it is
+      for (const e of embedded) (p.embedded ??= {})[e] ??= page;
     }
     await ok();
     pass = p;
@@ -215,6 +220,7 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
           ...Object.entries(pass.hosts)
             .filter(([h]) => !okHosts.has(h))
             .map(([value, file]) => ({ kind: "host" as const, value, file })),
+          ...Object.entries(pass.embedded ?? {}).map(([value, file]) => ({ kind: "script" as const, value, file })),
         ],
     missing: complete ? ours.filter((a) => pass.addresses[a] === undefined) : [],
     problems: pass.problems,

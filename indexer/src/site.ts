@@ -9,6 +9,9 @@ export const HOST_RE = /(?:(?:https?|wss?):|(?<=["'(\s=`]))\/\/([a-zA-Z0-9.-]+\.
 /** A Next.js chunk path, with or without /_next/ (turbopack names its lazy chunks `static/chunks/….js`). */
 export const CHUNK_RE = /\/_next\/static\/chunks\/[A-Za-z0-9_./-]+?\.js(?![A-Za-z0-9_])|(?<![A-Za-z0-9_/])static\/chunks\/[A-Za-z0-9_./-]+?\.js(?![A-Za-z0-9_])/g;
 const chunkPath = (m: string) => (m.startsWith("/_next/") ? m : `/_next/${m}`);
+/** Any quoted same-origin script path, "/….js" or "/….mjs" (never `//host/…`): what a dynamic import(), a
+ * `new Worker` or `serviceWorker.register` can load from outside /_next/static/chunks/. */
+export const SCRIPT_PATH_RE = /(["'`])(\/(?!\/)[A-Za-z0-9_\-./]*\.m?js)\1/g;
 
 export interface ScanResult {
   addresses: string[];
@@ -23,16 +26,18 @@ export function scanScript(text: string): ScanResult {
   return {
     addresses: uniq([...text.matchAll(ADDRESS_RE)].map((m) => m[0].toLowerCase())),
     hosts: uniq([...text.matchAll(HOST_RE)].map((m) => m[1].toLowerCase())),
-    chunks: uniq([...text.matchAll(CHUNK_RE)].map((m) => chunkPath(m[0]))),
+    chunks: uniq([...[...text.matchAll(CHUNK_RE)].map((m) => chunkPath(m[0])), ...[...text.matchAll(SCRIPT_PATH_RE)].map((m) => m[2])]),
   };
 }
 
 /** The scripts a page loads: every `<script src>` and `<link rel=modulepreload>` or `<link rel=preload
  * as=script>`. A same-origin one is a path to fetch and scan (wherever it is: /_next/static/, /cdn-cgi/, …);
- * a cross-origin one is never fetched, its host is reported for approval. */
-export function pageScripts(html: string, origin: string): { srcs: string[]; foreignHosts: string[] } {
+ * a cross-origin one is never fetched, its host is reported for approval; one whose source is a data: or
+ * blob: URL (code that comes from no host at all) is named as such ("data: URL", "blob: URL"). */
+export function pageScripts(html: string, origin: string): { srcs: string[]; foreignHosts: string[]; embedded: string[] } {
   const srcs = new Set<string>();
   const foreign = new Set<string>();
+  const embedded = new Set<string>();
   const take = (ref: string) => {
     let u: URL;
     try {
@@ -40,7 +45,8 @@ export function pageScripts(html: string, origin: string): { srcs: string[]; for
     } catch {
       return;
     }
-    if (u.origin === new URL(origin).origin) srcs.add(u.pathname);
+    if (u.protocol === "data:" || u.protocol === "blob:") embedded.add(`${u.protocol} URL`);
+    else if (u.origin === new URL(origin).origin) srcs.add(u.pathname);
     else foreign.add(u.hostname.toLowerCase());
   };
   for (const m of html.matchAll(/<script\b([^>]*)>/gi)) {
@@ -53,7 +59,7 @@ export function pageScripts(html: string, origin: string): { srcs: string[]; for
     const href = attr(m[1], "href");
     if (href && (rel.includes("modulepreload") || (rel.includes("preload") && as === "script"))) take(href);
   }
-  return { srcs: [...srcs], foreignHosts: [...foreign].sort() };
+  return { srcs: [...srcs], foreignHosts: [...foreign].sort(), embedded: [...embedded].sort() };
 }
 
 const attr = (attrs: string, name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(attrs)?.slice(1).find((x) => x !== undefined);

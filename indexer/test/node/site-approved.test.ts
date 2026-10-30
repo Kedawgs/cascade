@@ -39,4 +39,18 @@ describe("pnpm site:approved", () => {
     expect(lines.join("\n")).toContain("largest file");
     expect(await main([], { target, print: () => undefined, today: () => "x" })).toBe(2);
   });
+
+  it("adds hosts approved by hand (--extra-hosts), named as such in the file so a review in git sees them", async () => {
+    const dir = fixtureOut();
+    const target = join(dir, "site-approved.ts");
+    const print = () => undefined;
+    expect(await main([dir, "--extra-hosts", "Static.CloudflareInsights.com,mainnet.base.org"], { target, print, today: () => "2027-01-15" })).toBe(0);
+    const text = readFileSync(target, "utf8");
+    expect(text).toContain("// Added by hand (--extra-hosts): static.cloudflareinsights.com, mainnet.base.org");
+    expect(text).toContain('APPROVED_HOSTS: readonly string[] = [\n  "basescan.org",\n  "mainnet.base.org",\n  "static.cloudflareinsights.com",\n];');
+    // a host must be a host: no scheme, path or wildcard
+    expect(await main([dir, "--extra-hosts", "https://x.example/y"], { target, print, today: () => "x" })).toBe(2);
+    expect(await main([dir, "--extra-hosts", "*.example.com"], { target, print, today: () => "x" })).toBe(2);
+    expect(await main([dir, "--extra-hosts"], { target, print, today: () => "x" })).toBe(2);
+  });
 });

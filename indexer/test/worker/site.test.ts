@@ -4,6 +4,7 @@ import { ruleCtx } from "./rule-ctx.ts";
 import { siteIntegrity, siteNoApprovedLists, siteUnreachable } from "../../src/rules/site.ts";
 import { ADDRESS_RE, readCapped, scanScript } from "../../src/site.ts";
 import { MAX_FILES, runSiteJob, type SiteJobOptions, siteRunMaxS } from "../../src/site-job.ts";
+import { RUNBOOK } from "../../src/runbook.ts";
 import { loadTickState } from "../../src/store.ts";
 import { rowCounts, wipe } from "./d1-count.ts";
 import { testConfig } from "./fixtures.ts";
@@ -193,6 +194,35 @@ describe("the site job", () => {
         "site.integrity:host:sock.evil.example",
       ].sort(),
     );
+  });
+
+  it('follows any same-origin "/….js" a script names: a dynamic import(), new Worker, serviceWorker.register', async () => {
+    expect(scanScript(`import("/assets/a.js");new Worker('/w/worker.mjs');navigator.serviceWorker.register(\`/sw.js\`);x="//cdn.example/no.js";y="/not-a-script.json"`).chunks).toEqual([
+      "/assets/a.js",
+      "/sw.js",
+      "/w/worker.mjs",
+    ]);
+    const evil = "0x00000000000000000000000000000000000000e6";
+    const s = server(site({ [chunk("lazy2")]: 'const y=2;navigator.serviceWorker.register("/sw.js")', "/sw.js": `const e="${evil}"` }));
+    for (let i = 0; i < 4; i++) await job(s, NOW + i * 120);
+    expect(s.calls).toContain("/sw.js");
+    expect((await findings(NOW + 600)).map((f) => f.key)).toEqual([`site.integrity:address:${evil}`]);
+  });
+
+  it("labels a script whose source is a data: or blob: URL as such", async () => {
+    const page = site()["/"].replace("</html>", '<script src="data:text/javascript,alert(1)"></script><script src="blob:null/1234"></script></html>');
+    await fullPass(server(site({ "/": page })));
+    const f = await findings(NOW + 300);
+    expect(f.map((x) => x.key).sort()).toEqual(["site.integrity:script:blob: URL", "site.integrity:script:data: URL"]);
+    expect(f[0].subject).toBe("The live site loads a script from a data: or blob: URL");
+  });
+
+  it("says in its runbook line what it can't see, and what a killed run points to", () => {
+    const line = RUNBOOK["site.integrity"]({});
+    expect(line).toContain("string concatenation");
+    expect(line).toContain("clean copy");
+    expect(line).toContain("--extra-hosts");
+    expect(line).toMatch(/stopped a run.*CPU.*not the byte cap/);
   });
 
   it("follows turbopack's chunk names (static/chunks/… without /_next/)", async () => {

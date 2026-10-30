@@ -117,6 +117,14 @@ describe("buildDigest", () => {
     expect(text).toContain("ticks: 900 run, 2 failed, 1 skipped");
   });
 
+  it("says when a chain is catching up, and that the cross-checks wait", async () => {
+    await wipe(db);
+    const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [] };
+    const text = (d: Awaited<ReturnType<typeof buildDigest>>) => d.sections.map((s) => s.lines.join("\n")).join("\n");
+    expect(text(await buildDigest({ ...o, meta: { catching_up: "bittensor" } }))).toContain("catching up: bittensor (the cross-checks wait until both chains are within an hour of their heads)");
+    expect(text(await buildDigest({ ...o, meta: { catching_up: "" } }))).not.toContain("catching up");
+  });
+
   it("says OK, or the number of warnings, when nothing critical is open", async () => {
     await wipe(db);
     const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], meta: {} };

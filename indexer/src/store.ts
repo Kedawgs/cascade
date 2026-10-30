@@ -195,7 +195,7 @@ const cursorOf = (r: Row): CursorRow => ({
   updatedAt: Number(r.updated_at),
 });
 
-const alertOf = (r: Row): AlertRow => ({
+export const alertOf = (r: Row): AlertRow => ({
   id: Number(r.id),
   alertKey: r.alert_key as string,
   rule: r.rule as string,

@@ -207,7 +207,10 @@ export const stakedLog = (cfg: Config, block: bigint, label = "stake") =>
 
 /** A D1Database whose commit 1 (the batch that starts with the lease's guard) throws while `fail()` says
  * so, as a D1 that can't be written would; every other query goes through. */
-export function failingCommits(db: D1Database, fail: () => boolean): D1Database {
+export const failingCommits = (db: D1Database, fail: () => boolean): D1Database => failingBatches(db, (sql) => sql.startsWith("INSERT INTO guard") && fail());
+
+/** A D1Database whose batches throw when `fails` says so of the batch's first statement's SQL. */
+export function failingBatches(db: D1Database, fails: (firstSql: string) => boolean): D1Database {
   const sqlOf = new WeakMap<object, string>();
   const real = new WeakMap<object, D1PreparedStatement>();
   const wrap = (stmt: D1PreparedStatement, sql: string): D1PreparedStatement => {
@@ -225,7 +228,7 @@ export function failingCommits(db: D1Database, fail: () => boolean): D1Database 
   return {
     prepare: (sql: string) => wrap(db.prepare(sql), sql),
     async batch(stmts: D1PreparedStatement[]) {
-      if (stmts.length && sqlOf.get(stmts[0])?.startsWith("INSERT INTO guard") && fail()) throw new Error("D1_ERROR: the database is over its limit");
+      if (stmts.length && fails(sqlOf.get(stmts[0]) ?? "")) throw new Error("D1_ERROR: the database is over its limit");
       return db.batch(stmts.map((s) => real.get(s) ?? s));
     },
     exec: (sql: string) => db.exec(sql),

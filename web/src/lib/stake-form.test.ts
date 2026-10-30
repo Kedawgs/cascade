@@ -212,17 +212,35 @@ describe("unstake helpers", () => {
     expect(unstakeMaxWei(25n * TAO, undefined)).toBe(25n * TAO);
   });
 
+  it("MAX fills nothing, never zero or less, when no amount can go: the open request already at the cap, or nothing to unstake", () => {
+    const TAO = 10n ** 18n;
+    // the open batch's request already carries 9.89 TAO of the 9.9: room for 0.01, under the 0.011 minimum
+    expect(unstakeMaxWei(25n * TAO, 10n ** 16n)).toBeNull();
+    expect(unstakeMaxWei(25n * TAO, 0n)).toBeNull();
+    // room of 0.012 TAO, but taking it would leave less than the minimum behind and all of it is too much
+    expect(unstakeMaxWei(20n * 10n ** 15n, 12n * 10n ** 15n)).toBeNull();
+    expect(unstakeMaxWei(0n, undefined)).toBeNull();
+    expect(unstakeMaxWei(0n, 9n * TAO)).toBeNull();
+  });
+
+  it("says the batch's request is already full instead of an amount of 0 TAO", () => {
+    const TAO = 10n ** 18n;
+    const full = "Your unstake in the current batch is already as large as one can be; unstake more after it leaves.";
+    expect(unstakeNote(25n * TAO, "TAO", 250, 10n ** 16n)).toBe(full);
+    expect(unstakeNote(25n * TAO, "USDC", 250, 0n)).toBe(full);
+  });
+
   it("says why the amount is capped, in the unit shown", () => {
     const TAO = 10n ** 18n;
     const most = (99n * TAO) / 10n;
-    expect(unstakeNote(25n * TAO, "TAO", 250, most)).toBe("One unstake can carry up to 9.9 TAO; unstake the rest after this one. The minimum is 0.011 TAO.");
+    expect(unstakeNote(25n * TAO, "TAO", 250, most)).toBe("One unstake can carry up to 9.9 TAO; unstake the rest a day later (unstakes are limited per day). The minimum is 0.011 TAO.");
     expect(unstakeNote(25n * TAO, "USDC", 250, most)).toBe(
-      "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest after this one. The minimum is about $2.75 (0.011 TAO).",
+      "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest a day later (unstakes are limited per day). The minimum is about $2.75 (0.011 TAO).",
     );
     // a stake within the most reads as before
     expect(unstakeNote(70_219_000_000_000_000n, "TAO", 252, most)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.011 TAO.");
-    const over = { ok: false as const, code: "overEntry" as const, reason: "One unstake can carry up to 9.9 TAO; unstake the rest after this one", offerAll: false };
-    expect(unstakeErrorText(over, 25n * TAO, "USDC", 250, most)).toBe("One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest after this one.");
+    const over = { ok: false as const, code: "overEntry" as const, reason: "One unstake can carry up to 9.9 TAO; unstake the rest a day later (unstakes are limited per day)", offerAll: false };
+    expect(unstakeErrorText(over, 25n * TAO, "USDC", 250, most)).toBe("One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest a day later (unstakes are limited per day).");
     expect(unstakeErrorText(over, 25n * TAO, "TAO", 250, most)).toBe(over.reason);
   });
 

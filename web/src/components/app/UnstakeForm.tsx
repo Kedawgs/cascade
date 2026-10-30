@@ -88,6 +88,8 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   // v3: the most one unstake can carry (the vault's maxEntryValue); MAX and the check keep to it
   const most = position?.mostTaoWei;
   const price = position?.taoPriceUsd ?? 0;
+  // what MAX fills; null when no amount can go (nothing to unstake, or this batch's request is full)
+  const maxWei = unstakeMaxWei(available, most);
   const request = all ? available : (pinned ?? unstakeRequestWei(raw, unit, price));
   const check = position && request !== null ? checkUnstake(request, available, most) : null;
   const shares =
@@ -118,7 +120,8 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   /** MAX: the whole stake, or as much as one unstake can carry (pinned exactly, so a unit switch or the
    * price can't move it past the limit). */
   function fillAll() {
-    const max = unstakeMaxWei(available, most);
+    const max = maxWei;
+    if (max === null) return;
     setRaw(maxUnstakeInputIn(max, unit, price));
     if (max === available) {
       setPinned(null);
@@ -163,7 +166,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
         unit={unit}
         chain={liveChains()[0]}
         decimals={unit === "TAO" ? 6 : 2}
-        onMax={account && position ? fillAll : undefined}
+        onMax={account && position && maxWei !== null ? fillAll : undefined}
         invalid={error !== null}
         describedBy={noteId}
         onToggleUnit={position && (unit === "USDC" || price > 0) ? switchUnit : undefined}

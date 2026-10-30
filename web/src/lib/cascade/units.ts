@@ -57,6 +57,15 @@ export function unstakeMostWei(maxEntryValue: bigint, askedWei: bigint): bigint 
   return room > 0n ? (room / MICRO_TAO) * MICRO_TAO : 0n;
 }
 
+/** What follows the per-unstake limit: the vault's daily outflow limit is shared, so the rest waits a day. */
+export const REST_LATER = "unstake the rest a day later (unstakes are limited per day)";
+/** The open batch's request from this account already carries as much as one can. */
+export const ENTRY_FULL_TEXT = "Your unstake in the current batch is already as large as one can be; unstake more after it leaves";
+/** No amount can go in one more request: under a limit (`mostWei`) whose room is below the minimum unstake,
+ * and a stake larger than that room (else all of it fits). */
+export const entryFull = (availableWei: bigint, mostWei: bigint | undefined): boolean =>
+  mostWei !== undefined && mostWei < MIN_UNSTAKE_WEI && availableWei > mostWei;
+
 /** The vault defers a front-door redeem worth less than 0.01 TAO (its payout could fall below the
  * bridge's floor after its fee), so an unstake is at least MIN_UNSTAKE_WEI and never leaves a smaller
  * remainder behind (it couldn't be unstaked later). With `mostWei` (unstakeMostWei), no request is larger
@@ -64,19 +73,13 @@ export function unstakeMostWei(maxEntryValue: bigint, askedWei: bigint): bigint 
 export function checkUnstake(requestWei: bigint, availableWei: bigint, mostWei?: bigint): UnstakeCheck {
   const canAll = availableWei >= MIN_UNSTAKE_WEI;
   const allFits = mostWei === undefined || availableWei <= mostWei;
+  // first, whatever is typed: no amount can go until the open batch leaves
+  if (canAll && entryFull(availableWei, mostWei)) return { ok: false, code: "entryFull", reason: ENTRY_FULL_TEXT, offerAll: false };
   if (requestWei <= 0n) return { ok: false, code: "empty", reason: "Enter an amount", offerAll: false };
   if (requestWei > availableWei) return { ok: false, code: "tooMuch", reason: "That's more than you can unstake", offerAll: canAll && allFits };
   if (!canAll) return { ok: false, code: "stakeBelowMin", reason: `Unstakes start at ${MIN_UNSTAKE_TEXT}; your stake is below that`, offerAll: false };
-  if (mostWei !== undefined && mostWei < MIN_UNSTAKE_WEI) {
-    return {
-      ok: false,
-      code: "entryFull",
-      reason: "Your unstake in the current batch is already as large as one can be; unstake more after it leaves",
-      offerAll: false,
-    };
-  }
   if (mostWei !== undefined && requestWei > mostWei) {
-    return { ok: false, code: "overEntry", reason: `One unstake can carry up to ${formatUnits(mostWei, 18)} TAO; unstake the rest after this one`, offerAll: false };
+    return { ok: false, code: "overEntry", reason: `One unstake can carry up to ${formatUnits(mostWei, 18)} TAO; ${REST_LATER}`, offerAll: false };
   }
   if (requestWei === availableWei) return { ok: true, all: true };
   if (requestWei < MIN_UNSTAKE_WEI) return { ok: false, code: "belowMin", reason: `Unstake at least ${MIN_UNSTAKE_TEXT}`, offerAll: false };

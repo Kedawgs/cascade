@@ -88,7 +88,7 @@ describe("units", () => {
     expect(checkUnstake(most + 1n, available, most)).toEqual({
       ok: false,
       code: "overEntry",
-      reason: "One unstake can carry up to 9.9 TAO; unstake the rest after this one",
+      reason: "One unstake can carry up to 9.9 TAO; unstake the rest a day later (unstakes are limited per day)",
       offerAll: false,
     });
     // all of a stake above the most: refused, and more than the stake never offers all
@@ -106,6 +106,8 @@ describe("units", () => {
       reason: "Your unstake in the current batch is already as large as one can be; unstake more after it leaves",
       offerAll: false,
     });
+    // said first, whatever is typed: not "Enter an amount" for a 0, nor "more than you can unstake"
+    for (const typed of [0n, 30n * TAO]) expect(checkUnstake(typed, available, 0n)).toMatchObject({ ok: false, code: "entryFull" });
   });
 
   it("names why an unstake can't go, so the form can say it in the unit shown", () => {

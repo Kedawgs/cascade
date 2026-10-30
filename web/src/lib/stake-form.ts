@@ -2,7 +2,7 @@ import { formatUnits, parseUnits } from "viem";
 import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
 import type { DepositQuote, Limits, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
 import { isDelivering, offersClaim } from "./cascade/trail";
-import { floorRao, MIN_UNSTAKE_TEXT, toDisplay, type UnstakeCheck } from "./cascade/units";
+import { ENTRY_FULL_TEXT, entryFull, floorRao, MIN_UNSTAKE_TEXT, REST_LATER, toDisplay, type UnstakeCheck } from "./cascade/units";
 import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
 
 /** What the unstake amount is typed in: TAO, or its value in USDC. */
@@ -267,11 +267,15 @@ export function unstakeEquivalent(taoWei: bigint, typedIn: UnstakeUnit, priceUsd
 }
 
 /** The TAO MAX asks for: the whole stake, or with a per-unstake limit (`mostWei`, units.unstakeMostWei)
- * at most that, leaving at least the minimum unstake behind so what stays can be unstaked later. */
-export function unstakeMaxWei(availableWei: bigint, mostWei: bigint | undefined): bigint {
+ * at most that, leaving at least the minimum unstake behind so what stays can be unstaked later. Null,
+ * so MAX fills nothing, when that comes to less than the minimum (the open batch's request is already at
+ * the limit) or there is nothing to unstake: never zero or less. */
+export function unstakeMaxWei(availableWei: bigint, mostWei: bigint | undefined): bigint | null {
+  if (availableWei <= 0n) return null;
   if (mostWei === undefined || availableWei <= mostWei) return availableWei;
   const leavingMin = availableWei - MIN_UNSTAKE_WEI;
-  return leavingMin < mostWei ? leavingMin : mostWei;
+  const max = leavingMin < mostWei ? leavingMin : mostWei;
+  return max >= MIN_UNSTAKE_WEI ? max : null;
 }
 
 /** What MAX types in the unit shown: exact TAO (six decimals), or its USDC value floored to cents. */
@@ -312,15 +316,16 @@ const usdDown = (taoWei: bigint, priceUsd: number) => formatUsd(floorTo(toDispla
 /** The minimum in dollars, rounded up to the cent so typing the figure shown is always enough. */
 const MIN_USD = (priceUsd: number) => `about ${formatUsd(Math.ceil(toDisplay(MIN_UNSTAKE_WEI, 18) * priceUsd * 100 - 1e-7) / 100)}`;
 
-/** "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest after this one", in the unit shown. */
+/** "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest a day later (…)", in the unit shown. */
 function oneUnstakeText(mostWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
   const tao = `${maxUnstakeInput(mostWei)} TAO`;
-  return `One unstake can carry up to ${unit === "USDC" && priceUsd > 0 ? `${usdDown(mostWei, priceUsd)} (${tao})` : tao}; unstake the rest after this one`;
+  return `One unstake can carry up to ${unit === "USDC" && priceUsd > 0 ? `${usdDown(mostWei, priceUsd)} (${tao})` : tao}; ${REST_LATER}`;
 }
 
 /** The line under the unstake field: how much can go and the minimum, in the unit shown. A stake larger
  * than one unstake can carry (`mostWei`) says so instead. */
 export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number, mostWei?: bigint): string {
+  if (availableWei >= MIN_UNSTAKE_WEI && entryFull(availableWei, mostWei)) return `${ENTRY_FULL_TEXT}.`;
   if (mostWei !== undefined && availableWei > mostWei) {
     const min = unit === "USDC" && priceUsd > 0 ? `${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT})` : MIN_UNSTAKE_TEXT;
     return `${oneUnstakeText(mostWei, unit, priceUsd)}. The minimum is ${min}.`;

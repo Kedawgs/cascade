@@ -99,6 +99,8 @@ const QUIET_WHILE_CATCHING_UP: ReadonlySet<string> = new Set(["bridge.check_stuc
 const DAY_BASE_BLOCKS = 43_200n;
 /** At most this many transactions wait in the retry list (meta tx_backlog), the newest kept. */
 const TX_BACKLOG_MAX = 500;
+/** A transaction a node has answered without this many times (a minute apart) is given up. */
+const MAX_TX_TRIES = 10;
 /** The payout delay used before any reading has given one: v3-test's, the shortest (the earliest deadline,
  * the tightest lag limit). */
 const DEFAULT_PAYOUT_DELAY_S = 3600;
@@ -427,7 +429,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   // 7. what the rules read from D1
   const newDeliveries = newLogs.filter((l) => l.chain === "bittensor" && l.contract === "vault" && l.event === "BatchDelivered");
   const newLandings = newLogs.filter((l) => l.chain === "base" && l.contract === "frontDoor" && l.event === "PayoutsDelivered");
-  const backlog = (json<{ chain: ChainName; hash: Hex }[]>(state.meta.tx_backlog) ?? []).filter((x) => (x.chain === "base" || x.chain === "bittensor") && /^0x[0-9a-f]{64}$/.test(x.hash));
+  const backlog = (json<{ chain: ChainName; hash: Hex; tries?: number }[]>(state.meta.tx_backlog) ?? []).filter((x) => (x.chain === "base" || x.chain === "bittensor") && /^0x[0-9a-f]{64}$/.test(x.hash));
+  const triesOf = new Map(backlog.map((x) => [`${x.chain}:${x.hash}`, Number.isSafeInteger(x.tries) ? (x.tries as number) : 0]));
   const fromArgs = argSenders(newLogs);
   const toFetch = uniq([...txsToFetch(newLogs), ...backlog].map((x) => `${x.chain}:${x.hash}`)).map((k) => ({ chain: k.slice(0, k.indexOf(":")) as ChainName, hash: k.slice(k.indexOf(":") + 1) as Hex }));
   const oldest = (rs: readonly ChainReading<unknown>[], fallback: bigint) => (rs.length ? rs[rs.length - 1].block : fallback);
@@ -455,6 +458,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   };
   const fetchedTimes: { chain: ChainName; number: bigint; time: number }[] = [];
   const fetched: TxRow[] = [];
+  /** transactions a node answered for, with or without them */
+  const answered = new Set<string>();
   await Promise.all(
     CHAINS.map(async (c) => {
       const settledTo = scans[c].cursor.settledTo > cursors[c].settledTo ? scans[c].cursor.settledTo : undefined;
@@ -473,7 +478,9 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       const hashes = toFetch.filter((x) => x.chain === c && !fetchedBefore.has(x.hash)).map((x) => x.hash);
       if (hashes.length) {
         try {
-          fetched.push(...(await fetchTxs(rpc, c, hashes.slice(0, PER_TICK))));
+          const asked = hashes.slice(0, PER_TICK);
+          fetched.push(...(await fetchTxs(rpc, c, asked)));
+          for (const h of asked) answered.add(`${c}:${h}`);
         } catch (e) {
           console.warn(`${c} transactions failed: ${message(e)}`);
         }
@@ -482,8 +489,16 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   );
   const fetchedKeys = new Set(fetched.map((x) => `${x.chain}:${x.hash}`));
   const fetchedBeforeKeys = new Set(pre.txs.filter((x) => x.to !== undefined || x.selector !== undefined).map((x) => `${x.chain}:${x.hash}`));
-  // what is still to fetch, the newest first, waits for the next tick
-  const txBacklog = toFetch.filter((x) => !fetchedKeys.has(`${x.chain}:${x.hash}`) && !fetchedBeforeKeys.has(`${x.chain}:${x.hash}`)).slice(0, TX_BACKLOG_MAX);
+  // what is still to fetch, the newest first, waits for the next tick; one a node answered without, MAX_TX_TRIES
+  // times, is given up (a tick while the node is down doesn't count)
+  const txBacklog = toFetch
+    .filter((x) => !fetchedKeys.has(`${x.chain}:${x.hash}`) && !fetchedBeforeKeys.has(`${x.chain}:${x.hash}`))
+    .map((x) => {
+      const k = `${x.chain}:${x.hash}`;
+      return { ...x, tries: (triesOf.get(k) ?? 0) + (answered.has(k) ? 1 : 0) };
+    })
+    .filter((x) => x.tries < MAX_TX_TRIES)
+    .slice(0, TX_BACKLOG_MAX);
   const txRows = new Map<string, TxRow>();
   for (const r of fromArgs) if (!txRows.has(`${r.chain}:${r.hash}`)) txRows.set(`${r.chain}:${r.hash}`, r);
   for (const r of fetched) txRows.set(`${r.chain}:${r.hash}`, r);

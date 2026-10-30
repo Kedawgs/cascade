@@ -555,12 +555,43 @@ describe("transactions and messages", () => {
     };
     await w.tick();
     expect(await rows("SELECT hash FROM txs WHERE chain = 'base' AND selector IS NOT NULL")).toEqual([]);
-    expect(JSON.parse((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'tx_backlog'"))[0].v)).toEqual([{ chain: "base", hash: rt.closeTx }]);
+    expect(JSON.parse((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'tx_backlog'"))[0].v)).toEqual([{ chain: "base", hash: rt.closeTx, tries: 0 }]);
     calls.eth_getTransactionByHash = real;
     w.advance();
     await w.tick();
     expect(await rows("SELECT hash FROM txs WHERE chain = 'base' AND selector IS NOT NULL")).toEqual([{ hash: rt.closeTx }]);
     expect(await rows("SELECT v FROM meta WHERE k = 'tx_backlog'")).toEqual([{ v: "" }]);
+  });
+
+  it("gives up on a transaction the node never returns after 10 answered tries; tries while the node is down don't count", async () => {
+    const w = tickWorld();
+    const rt = roundTrip(w.cfg, { id: 1n, payout: false });
+    w.addLogs("base", rt.base);
+    w.addLogs("bittensor", rt.bit);
+    const calls = w.specs.base.calls ?? {};
+    const real = calls.eth_getTransactionByHash;
+    const backlog = async () => {
+      const v = (await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'tx_backlog'"))[0]?.v;
+      return v ? (JSON.parse(v) as { hash: string; tries?: number }[]) : [];
+    };
+    // down: the batch fails, which isn't the node saying it has no such transaction
+    calls.eth_getTransactionByHash = () => {
+      throw new Error("down");
+    };
+    for (let i = 0; i < 3; i++) {
+      await w.tick();
+      w.advance();
+    }
+    expect(await backlog()).toEqual([{ chain: "base", hash: rt.closeTx, tries: 0 }]);
+    // up, but it answers null for this one
+    calls.eth_getTransactionByHash = (params, at) => (params[0] === rt.closeTx ? null : real?.(params, at));
+    for (let i = 0; i < 9; i++) {
+      await w.tick();
+      w.advance();
+    }
+    expect(await backlog()).toEqual([{ chain: "base", hash: rt.closeTx, tries: 9 }]);
+    await w.tick();
+    expect(await backlog()).toEqual([]);
   });
 
   it("counts a message as arrived when its destination's Delivered was stored before its Sent", async () => {

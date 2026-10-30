@@ -372,7 +372,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       ret = {
         ...ret,
         status: "active",
-        detail: `The ${Math.round(f.payoutDelay / 3600)}-hour safety wait ends around ${hhmm(from)}, then it crosses back to Base (${BRIDGE_TIME})`,
+        detail: `The ${Math.round(f.payoutDelay / 3600)}-hour safety wait ends around ${hhmm(from)}${dayLabel(from, f.now)}, then it crosses back to Base (${BRIDGE_TIME})`,
       };
     }
   }

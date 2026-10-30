@@ -334,6 +334,16 @@ describe("withdrawal trail with a max wait", () => {
     // past the time: it can close now, either way
     expect(withdrawalRecord(wop, { ...wbase, closesBy: true, now: new Date("2026-10-25T10:20:00Z") }).steps[1].detail).toMatch(/^The batch can close now/);
   });
+
+  it("gives the day the launch's 24-hour safety wait ends on when it is not today", () => {
+    const redeemed = { at: new Date(2026, 9, 25, 10, 35), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+    const facts = { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payoutDelay: 86_400, now: new Date(2026, 9, 25, 10, 40) };
+    expect(withdrawalRecord(wop, facts).steps[2].detail).toBe("The 24-hour safety wait ends around 10:35 AM tomorrow, then it crosses back to Base (usually 20–30 minutes)");
+    // the next morning it ends today: no day
+    expect(withdrawalRecord(wop, { ...facts, now: new Date(2026, 9, 26, 8, 0) }).steps[2].detail).toBe(
+      "The 24-hour safety wait ends around 10:35 AM, then it crosses back to Base (usually 20–30 minutes)",
+    );
+  });
 });
 
 describe("withdrawal trail", () => {

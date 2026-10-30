@@ -30,23 +30,24 @@ contract AdapterGasTest is AdaptersFixture {
     // point is not re-measured offline, so the test carries the vault's own change since the calibration
     // onto it: 187,450 + (136,763 - 134,606) = 189,607.
     //
-    // Recalibrated toward Bittensor (2026-10-29) on small and one-sided batches, each measured from a cold
-    // start in its own test. The first redeem of a delivery writes a payout batch and starts a burn window,
-    // about 105,000 gas a deposit does not cost (0+1 = 242,671 against 1+0 = 136,763), so the 540,000 /
-    // 26,450 model fell short of the 15% rule at every small batch with a redeem (1+1: 592,900 < 756,075),
-    // and deposits alone climb faster than its per-entry average (about 28,500 gas a deposit against 15,000
-    // a further redeem: 50+0: 1,862,500 < 2,168,560). Every point now counts the same way (`vaultNeed`): a
-    // message with tokens (any deposit) carries the real AlphaVault's 52,844 gas over the mock, a
-    // redeem-only one calls no AlphaVault; then + 300,000 and x 1.15.
-    //   Two points bind, 1+1 and 50+0; the base (a multiple of 10,000) and the per entry (of 500) cover both
-    //   with about 20,000 gas of slack: 1+1 (304,613 mock, 357,457 real) needs 756,075 of
-    //   720,000 + 2 x 29,500 = 779,000; 50+0 (1,532,861 mock) needs 2,168,560 of 720,000 + 50 x 29,500 =
-    //   2,195,000. The tests below log every point's slack.
-    //   Fits the cap: 720,000 + 200 x 29,500 = 6,620,000 <= 7,000,000. Not covered at 15%: deposit-heavy
-    //     batches beyond the operator's 50 deposits (100+0 needs about 3,808,000 of 3,670,000), which need
-    //     a fork measurement before the limits are raised anyway.
-    uint256 public constant GAS_BASE_TO_BITTENSOR = 720_000;
-    uint256 public constant GAS_PER_ENTRY_TO_BITTENSOR = 29_500;
+    // Recalibrated toward Bittensor (2026-10-29) on small, one-sided and deposit-heavy batches, each measured
+    // from a cold start in its own test. The first redeem of a delivery writes a payout batch and starts a
+    // burn window, about 105,000 gas a deposit does not cost (0+1 = 242,671 against 1+0 = 136,763), and a
+    // deposit costs about 28,500 gas against 15,000 for a further redeem. So the 540,000 / 26,450 model fell
+    // short of the 15% rule at every small batch with a redeem (1+1: 592,900 < 756,075) and at every
+    // deposit-heavy one. Every point counts the same way (`vaultNeed`): a message with tokens (any deposit)
+    // carries the real AlphaVault's 52,844 gas over the mock, a redeem-only one calls no AlphaVault; then
+    // + 300,000 and x 1.15.
+    //   The binding shape is many deposits with one redeem, the deposits' climb plus the first redeem's fixed
+    //   cost: 50+1 (1,700,714 mock) needs 2,361,591 of 780,000 + 51 x 31,100 = 2,366,100, 4,509 gas of
+    //   slack. The next tightest: 50+2 (18,351, probed), 40+1 (21,293, probed), 25+1 (46,355), 50+5
+    //   (59,869), 10+1 (71,285), 1+1 (86,125: needs 756,075 of 842,200), 50+10 (129,058), 50+0 (166,440).
+    //   The tests below log every point's slack.
+    //   Fits the cap exactly: 780,000 + 200 x 31,100 = 7,000,000. Within the operator's 50 + 50 every
+    //     measured shape is covered; beyond it, deposit-heavy shapes are not (100+1, probed, is 80,304
+    //     short; 100+0 has 81,657 and 100+100 1,282,966), so fork-measure before raising the limits.
+    uint256 public constant GAS_BASE_TO_BITTENSOR = 780_000;
+    uint256 public constant GAS_PER_ENTRY_TO_BITTENSOR = 31_100;
     uint256 public constant GAS_BASE_TO_BASE = 120_000;
     uint256 public constant GAS_PER_ENTRY_TO_BASE = 29_900;
 
@@ -209,6 +210,28 @@ contract AdapterGasTest is AdaptersFixture {
 
     function test_gas_vault_50_0() public {
         checkVaultPoint(50, 0);
+    }
+
+    // Many deposits and a few redeems: the deposits' steep climb plus the first redeem's fixed cost. These
+    // bind the model, 50+1 hardest.
+    function test_gas_vault_10_1() public {
+        checkVaultPoint(10, 1);
+    }
+
+    function test_gas_vault_25_1() public {
+        checkVaultPoint(25, 1);
+    }
+
+    function test_gas_vault_50_1() public {
+        checkVaultPoint(50, 1);
+    }
+
+    function test_gas_vault_50_5() public {
+        checkVaultPoint(50, 5);
+    }
+
+    function test_gas_vault_50_10() public {
+        checkVaultPoint(50, 10);
     }
 
     /// Gas of one `ccipReceive` on the front-door side for a chunk of `n` payouts (0x3000 + i, 1e18 each).

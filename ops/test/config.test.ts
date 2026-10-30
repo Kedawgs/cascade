@@ -45,7 +45,7 @@ describe("v3 config", () => {
     expect(SETTINGS_V3.depositFeeUsdc).toBe(50_000n);
     expect(SETTINGS_V3.maxDeliverySlippageBps).toBe(150);
     // unchanged from v2: the reserves; the payout gas and the delivery gas toward Bittensor are raised
-    expect(SETTINGS_V3.baseGas).toEqual({ base: 720_000n, perEntry: 29_500n });
+    expect(SETTINGS_V3.baseGas).toEqual({ base: 780_000n, perEntry: 31_100n });
     expect(SETTINGS.baseGas).toEqual({ base: 540_000n, perEntry: 26_450n });
     expect(SETTINGS_V3.bitGas).toEqual({ base: 170_000n, perEntry: 29_900n });
     expect(SETTINGS.bitGas).toEqual({ base: 120_000n, perEntry: 29_900n });

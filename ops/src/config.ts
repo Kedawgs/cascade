@@ -121,10 +121,12 @@ export const SETTINGS_V3 = {
   /** The gas a batch asks CCIP for on Bittensor, as contracts/test/adapters/AdapterGas.t.sol calibrates
    * it (v2's was 540,000 + 26,450 per entry). A delivery's first redeem writes a payout batch and starts
    * a burn window, about 105,000 gas a deposit doesn't cost, and a deposit costs about 28,500 gas against
-   * 15,000 for a further redeem, so 1+1 and 50+0 bind: each keeps the test's 15% headroom over the mock,
-   * the real AlphaVault's 52,844 and a 300,000 precompile allowance, with about 20,000 gas to spare. A
-   * delivery that runs short loses nothing but waits for a manual re-execution. */
-  baseGas: { base: 720_000n, perEntry: 29_500n },
+   * 15,000 for a further redeem, so many deposits with one redeem bind: 50+1 keeps the test's 15% headroom
+   * over the mock, the real AlphaVault's 52,844 and a 300,000 precompile allowance with 4,509 gas to
+   * spare, and every other measured shape within 50 + 50 has more. 780,000 + 200 x 31,100 is exactly the
+   * adapters' 7,000,000 cap. A delivery that runs short loses nothing but waits for a manual
+   * re-execution. */
+  baseGas: { base: 780_000n, perEntry: 31_100n },
   /** The gas a payout asks CCIP for on Base. The rehearsal, relaying with the limit enforced, measured
    * the Base receiver needing about 134.6k for one entry: 90% of v2's 149,900. 170,000 + 29,900 per
    * entry keeps one entry at about two thirds of its limit. */

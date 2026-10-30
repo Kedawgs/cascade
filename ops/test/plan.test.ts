@@ -174,8 +174,8 @@ describe("buildPlanV3", () => {
         remoteChainId: 964n,
         remoteSelector: LIVE.bittensor.SELECTOR,
         remoteAdapter: plan.addresses.bitAdapter,
-        gasBase: 720_000n,
-        gasPerEntry: 29_500n,
+        gasBase: 780_000n,
+        gasPerEntry: 31_100n,
         // the test cadence keeps the lane's whole 5,000 TAO, as before the cap was a constructor argument
         maxMessageValue: 5_000n * 10n ** 18n,
       },

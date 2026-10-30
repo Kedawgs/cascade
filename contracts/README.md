@@ -149,22 +149,24 @@ the fee rule.
 - **Gas sizing.** The delivery gas limit is `min(gasBase + entries × gasPerEntry, 7,000,000)`
   (`GAS_CAP`), with `entries` read from the message's length (both message kinds have a fixed size
   per entry); a message of neither shape gets the cap. The deployment values, calibrated in
-  `test/adapters/AdapterGas.t.sol` with at least 15% headroom, are `gasBase` 720,000 and
-  `gasPerEntry` 29,500 toward Bittensor (Base adapter) and 120,000 and 29,900 toward Base
-  (Bittensor adapter); the constructor's 200-entry check gives 6,620,000 and 6,100,000, under the
-  cap. They are constructor arguments, so a tune is a redeploy, not a code change. A delivery that
+  `test/adapters/AdapterGas.t.sol` with at least 15% headroom, are `gasBase` 780,000 and
+  `gasPerEntry` 31,100 toward Bittensor (Base adapter) and 120,000 and 29,900 toward Base
+  (Bittensor adapter); the constructor's 200-entry check gives exactly 7,000,000 (the cap) and
+  6,100,000. They are constructor arguments, so a tune is a redeploy, not a code change. A delivery that
   still runs short fails and is re-executed with `gasLimitOverride`; nothing is lost. The
   Bittensor-side figures rest on mock-precompile measurements plus a 300,000-gas allowance, and a
   message that carries tokens also carries the real AlphaVault's extra cost over the mock (52,844 gas,
   from the fork measurement of the 1-deposit point, 187,450). A delivery's first redeem writes a payout
   batch and starts a burn window, about 105,000 gas a deposit does not cost (0+1 is 242,671 mock gas,
   1+0 136,763), and a deposit costs about 28,500 gas against 15,000 for a further redeem, so the
-  binding points are 1+1 (needs 756,075 of 779,000) and 50 deposits alone (2,168,560 of 2,195,000);
-  `AdapterGas.t.sol` checks 1+0, 0+1, 1+1 to 1+10, 2+2, 0+5, 0+50, 10+0, 50+0, 50+50 and 100+100
-  and logs each one's slack. Deposit-only batches above the operator's 50 deposits are not covered
-  at 15% (100+0 needs about 3,808,000 of 3,670,000): fork-measure before raising the limits. The
-  first calibration, 540,000 and 26,450, fell short at every small batch with a redeem (1+1 needed
-  756,075 of 592,900). Real-precompile
+  binding shape is many deposits with one redeem: 50+1 needs 2,361,591 of 2,366,100, 4,509 gas of
+  slack (then 50+2 about 18,000, 40+1 about 21,000, 25+1 46,355, 50+5 59,869, 10+1 71,285; 1+1
+  needs 756,075 of 842,200). `AdapterGas.t.sol` checks 1+0, 0+1, 1+1 to 1+10, 2+2, 0+5, 0+50,
+  10+0, 10+1, 25+1, 50+0, 50+1, 50+5, 50+10, 50+50 and 100+100 and logs each one's slack. Every
+  measured shape within the operator's 50 + 50 is covered; deposit-heavy shapes beyond it are not
+  (100+1 is about 80,000 short): fork-measure before raising the limits. The first calibration,
+  540,000 and 26,450, fell short at every small batch with a redeem (1+1 needed 756,075 of 592,900)
+  and at every deposit-heavy one (50+1: 2,361,591 of 1,888,950). Real-precompile
   delivery gas is unmeasured until the first live batch, which should therefore be the single-entry
   batch of the checklist (item 28), with the re-execution path and its `verifierResults` source
   ready.
@@ -231,7 +233,7 @@ forge fmt --check
 forge lint
 ```
 
-- **Suite:** 456 tests (unit, end-to-end, fuzz, and 11 invariants at 128 runs × 64 depth, set in
+- **Suite:** 461 tests (unit, end-to-end, fuzz, and 11 invariants at 128 runs × 64 depth, set in
   `foundry.toml`), plus 18 fork tests that report as skipped unless `FORK` is set (below). The
   invariants also held at 3,000 × 64 (re-run on the pre-audit changes, 2026-10-29).
 - **Stale artifacts:** running `forge lint` right after an edit can leave test artifacts without
@@ -909,7 +911,7 @@ Defaults at deploy:
 | `REGISTRY_DELAY`, `KEEPER_FALLBACK`, `REWARD_VESTING` | 7 days each (constants) | both / vault |
 | `GUARDIAN_DELAY` | 8 days (constant) | both |
 | `ED_RESERVE` | 1e12 wei (constant) | vault |
-| `gasBase` / `gasPerEntry` toward Bittensor | 720,000 / 29,500 (constructor arguments, Base adapter; calibrated in `test/adapters/AdapterGas.t.sol`; the live v3-test adapters have 540,000 / 26,450) | Base adapter |
+| `gasBase` / `gasPerEntry` toward Bittensor | 780,000 / 31,100 (constructor arguments, Base adapter; calibrated in `test/adapters/AdapterGas.t.sol`; the live v3-test adapters have 540,000 / 26,450) | Base adapter |
 | `gasBase` / `gasPerEntry` toward Base | 120,000 / 29,900 (constructor arguments, Bittensor adapter) | Bittensor adapter |
 | `minSendAmount` | 0.01 TAO (1e16 wei; constructor argument; keep `minDeposit` at or above it) | Base adapter |
 | adapter reserve | 1e12 wei, funded by the deployer through `fundReserve()` before the first delivery | Bittensor adapter |

@@ -64,7 +64,8 @@ describe("cadence", () => {
     expect(s.adapterMaxMessageValue).toEqual({ base: 5_000n * 10n ** 18n, bittensor: 5_000n * 10n ** 18n });
     expect(field(old as ReturnType<typeof buildPlanV3>, "CcipBaseAdapter", "gasBase")).toBe(540_000n);
     expect(field(old as ReturnType<typeof buildPlanV3>, "CcipBaseAdapter", "gasPerEntry")).toBe(26_450n);
-    expect(field(buildPlanV3(0, 40, COLDKEY), "CcipBaseAdapter", "gasBase")).toBe(720_000n);
+    expect(field(buildPlanV3(0, 40, COLDKEY), "CcipBaseAdapter", "gasBase")).toBe(780_000n);
+    expect(field(buildPlanV3(0, 40, COLDKEY, "launch", ROLES), "CcipBaseAdapter", "gasPerEntry")).toBe(31_100n);
   });
 
   it("a plan without a cadence is a test plan, v2 and v3 alike, and keeps SETTINGS_V3 exactly", () => {

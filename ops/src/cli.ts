@@ -10,6 +10,7 @@ import { pauseCommand, pauseSigner } from "./pause.ts";
 import { claim, close, deliverCommand, deliveryPlan, payouts, runCommand, stake } from "./keeper/actions.ts";
 import { closeHold } from "./keeper/due.ts";
 import { formatRewards } from "./keeper/rewards.ts";
+import { runLockPath, takeRunLock } from "./keeper/runlock.ts";
 import { keeperSigner, requireKeeperKey, separateKeeper } from "./keeper/signer.ts";
 import { keeperDeps, trackMessage } from "./keeper/state.ts";
 import { formatStatus } from "./keeper/status.ts";
@@ -154,6 +155,9 @@ async function run(a: Args): Promise<number> {
       return runCommand(
         async () => {
           const rec = needRecord(a.live);
+          // one keeper per deployment: a second `run` (by hand beside the supervised one) refuses here
+          const release = takeRunLock(runLockPath(recordPath(a.live)), { log });
+          process.once("exit", release);
           const ctx = keeperCtx(a.live, rec);
           const policy = claimPolicy(env);
           // a wrong key stops the loop now, not at its first send

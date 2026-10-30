@@ -2,11 +2,24 @@ import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, pa
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy, WALLET } from "../config.ts";
 import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
-import { RevertedOnChain, type Sent, SendRefused } from "../send.ts";
+import { ReceiptTimeout, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
 import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
-import { classifyFailure, type FailureKind, inWords, KeeperHasCode, KeeperNotReady, nextWaitMs, NotNow, oneLine } from "./failures.ts";
+import {
+  classifyFailure,
+  DeliveryReverted,
+  type FailureKind,
+  inWords,
+  KeeperHasCode,
+  KeeperNotReady,
+  nextWaitMs,
+  NotNow,
+  oneLine,
+  PayoutListMismatch,
+  RevertUnread,
+  scrubSecrets,
+} from "./failures.ts";
 import { type Payout, type PayoutLog, payoutsHash, rebuildPayouts } from "./payouts.ts";
 import { claimGasLimit, claimRequest, decideClaim, type RewardsDeps, upfrontShortfall } from "./rewards.ts";
 import { keeperMismatch } from "./signer.ts";
@@ -46,6 +59,9 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
    * these deps hold (the one `run` passes to each action), so a read-back saved since the command started
    * is seen; throws RecordMismatch when the file is gone or now holds another deployment */
   refresh(): void;
+  /** A transaction's receipt (null while there is none): `run` looks up those that timed out. Optional:
+   * without it, a transaction with no receipt is only logged. */
+  receipt?(chain: ChainName, hash: Hex): Promise<{ reverted: boolean; logs: Sent["logs"] } | null>;
   log(line: string): void;
 }
 
@@ -100,9 +116,23 @@ async function keeperSend(deps: KeeperDeps, req: CallRequest): Promise<Sent> {
   return deps.sendCall(req);
 }
 
+/** Records a bridge message the keeper sent. The transaction has gone through: a record that can't be
+ * saved (EPERM, a full disk) is said loudly, with the hash and the message id, and never thrown. */
+function recordSafely(deps: KeeperDeps, m: Message): void {
+  try {
+    deps.recordMessage(m);
+  } catch (e) {
+    deps.log(
+      scrubSecrets(
+        `SENT, BUT NOT SAVED: transaction ${m.hash}, bridge message ${m.id} went through, but saving it to the record failed (${oneLine((e as Error).message)}); follow it with: pnpm ops track ${m.id}`,
+      ),
+    );
+  }
+}
+
 async function withMessage(deps: KeeperDeps, sent: Sent, adapter: Hex, direction: Message["direction"]): Promise<Done> {
   const messageId = messageIdFrom(sent.logs, adapter);
-  if (messageId) deps.recordMessage({ id: messageId, direction, hash: sent.hash });
+  if (messageId) recordSafely(deps, { id: messageId, direction, hash: sent.hash });
   return { ...sent, messageId };
 }
 
@@ -151,7 +181,7 @@ export function payoutsRequest(
   nonce: number,
 ): CallRequest {
   if (list.length !== stored.count || payoutsHash(list).toLowerCase() !== stored.payoutsHash.toLowerCase()) {
-    throw new Error(
+    throw new PayoutListMismatch(
       `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries); nothing sent`,
     );
   }
@@ -345,11 +375,11 @@ async function reportClaim(deps: KeeperDeps, policy: ClaimPolicy, live: boolean,
   }
 }
 
-/** How a run ended: it stopped itself, on a failure classifyFailure says must stop it, or its rounds ran
- * out (`maxTicks`, which only tests set). */
+/** How a run ended: it stopped itself, on a failure classifyFailure says must stop it (or one that kept
+ * repeating), or its rounds ran out (`maxTicks`, which only tests set). */
 export type LoopEnd = { stopped: false } | { stopped: true; kind: FailureKind; reason: string };
 
-/** What an action is doing, for a failed round's log line. */
+/** What an action is doing, for a log line. */
 function doing(a: Action): string {
   switch (a.kind) {
     case "close":
@@ -365,23 +395,21 @@ function doing(a: Action): string {
   }
 }
 
-/** Why a close, payout or stake that reverted on chain lost a race, from the chains read again after it
- * (`before`: the round's read): a pause, another close landing first, another caller paying the batch out
- * (processPayouts and closeBatch are anyone's), or the idle TAO gone. Undefined when nothing explains it
- * or the read fails: the revert, with its transaction hash, then stops the keeper (as a roll's does). */
-async function lostRace(deps: KeeperDeps, a: Exclude<Action, { kind: "deliver" } | { kind: "roll" }>, before: KeeperState): Promise<string | undefined> {
-  let after: KeeperState;
-  try {
-    after = await deps.readState();
-  } catch {
-    return undefined;
-  }
-  if (a.kind === "close") {
+/** An action another caller (or a pause) can beat: re-read after it reverts on chain. */
+type Racing = Exclude<Action, { kind: "deliver" }>;
+
+/** Why a close, roll, payout or stake that reverted on chain lost a race, from the chains as read after
+ * it (`before`: the round's read): a pause, another close or an entry landing first, another caller
+ * paying the batch out (processPayouts and closeBatch are anyone's), or the idle TAO gone. Undefined when
+ * nothing explains it: the revert, with its transaction hash, then stops the keeper. */
+export function explainRace(a: Racing, before: KeeperState, after: KeeperState): string | undefined {
+  if (a.kind === "close" || a.kind === "roll") {
     const fd = after.frontDoor;
     if (fd.paused) return "the front door was paused";
     if (!after.alphaVault.healthy) return "AlphaVault was paused or began migrating";
-    if (fd.openStart !== before.frontDoor.openStart || fd.nDeposits + fd.nRedeems === 0 || !fd.canClose) return "another close landed first";
-    return undefined;
+    const moved = fd.openStart !== before.frontDoor.openStart || !fd.canClose;
+    if (a.kind === "roll") return moved || fd.nDeposits + fd.nRedeems > 0 ? "an entry or another close landed first" : undefined;
+    return moved || fd.nDeposits + fd.nRedeems === 0 ? "another close landed first" : undefined;
   }
   if (after.vault.paused) return "the vault was paused";
   if (a.kind === "payouts") {
@@ -396,6 +424,27 @@ async function lostRace(deps: KeeperDeps, a: Exclude<Action, { kind: "deliver" }
   return undefined;
 }
 
+/** How long a held delivery waits at most before it is tried again on the same facts. */
+export const HOLD_MS = 30 * 60_000;
+/** Unexplained reverts of one user's delivery (its simulation passing on the same facts each time)
+ * before the keeper stops. Each costs a Base transaction's gas, and each holds the delivery 30 minutes,
+ * so three span an hour: one or two can be a price move within the block or a race the simulation
+ * couldn't see; a third on unchanged facts says the chain and the simulation disagree for a reason the
+ * keeper can't see (an RPC answering simulations wrongly included), which needs a person. */
+export const MAX_DELIVERY_REVERTS = 3;
+/** Rounds a transaction with no receipt is looked up for before it is reported as probably dropped. */
+const LATE_RECEIPT_ROUNDS = 60;
+
+/** A transaction sent with no receipt yet: looked up each round until one comes. */
+interface Unreceipted {
+  hash: Hex;
+  chain: ChainName;
+  what: string;
+  /** Where its bridge message, if it sent one, is read from */
+  message?: { adapter: Hex; direction: Message["direction"] };
+  rounds: number;
+}
+
 export interface RunOptions {
   intervalMs: number;
   maxTicks?: number;
@@ -404,10 +453,13 @@ export interface RunOptions {
   live?: boolean;
   /** The longest wait between failed rounds (default 5 minutes; never less than the interval) */
   maxBackoffMs?: number;
-  /** Failed rounds in a row after which each failure's line starts STILL FAILING (default 10) */
+  /** Failed rounds, or skips of one action, in a row after which each line starts STILL FAILING (default 10) */
   stillFailingAfter?: number;
-  /** For tests: how the run waits between rounds */
+  /** Rounds in a row failed on something unexpected after which the run stops (default 30) */
+  maxUnexpectedRounds?: number;
+  /** For tests: how the run waits between rounds, and its clock (ms) */
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
 /** Does the next due thing every `intervalMs` until it stops itself. A delivery goes ahead only when its
@@ -415,33 +467,133 @@ export interface RunOptions {
  * else. A delivery that isn't sent (its re-check, its estimate or the wallet's guard refuses it), or that
  * reverts on chain, never ends the round: the round's payout, stake or close still goes ahead. One whose
  * estimate refuses it, or that reverted, is held, not retried, until the user's claimable amount,
- * preference, or the quote against the floors changes. Reward claims are only reported, every
- * `rewardsEveryTicks` rounds. Each round starts by re-reading the record (`deps.refresh`, onto `rec`, the
- * record the deps were made with), so a read-back that failed since the run started stops its sends.
+ * preference, or the quote against the floors changes, or for 30 minutes (HOLD_MS). A reverted delivery
+ * is re-checked at once: if its simulation still passes on the same facts, the revert is unexplained, the
+ * round counts as failed, and the third such revert for one user stops the run (MAX_DELIVERY_REVERTS).
+ * Reward claims are only reported, every `rewardsEveryTicks` rounds. Each round starts by re-reading the
+ * record (`deps.refresh`, onto `rec`, the record the deps were made with), so a read-back that failed
+ * since the run started stops its sends.
  *
  * A failure inside a round ends that round, never the run, unless classifyFailure says it must stop it
  * (a keeper wallet found with code at any send, a delivery's too; a wrong key; the record not ready or
- * replaced; a revert nothing explains): then the run logs "Stopped: <why>" and returns. Any other
- * failure (a race lost to another caller or a user, a pending transaction, an RPC fault) is logged on
- * one line and the next round decides again, after a wait that doubles with each failed round in a row
- * (nextWaitMs); from `stillFailingAfter` failed rounds in a row the line starts STILL FAILING. Nothing is
- * ever retried within the round that failed: a transaction with no receipt may still be pending, and the
- * next round's send guard refuses every send until it is mined or dropped. A close, payout or stake that
- * reverts on chain is re-read first: a lost race (lostRace) is a skip, not a failure. */
+ * replaced; a payout list that doesn't match the vault's; a revert nothing explains), or 30 rounds in a
+ * row fail on something unexpected: then the run logs "Stopped: <why>" and returns. Any other failure (a
+ * race lost to another caller or a user, a pending transaction, an RPC fault) is logged on one line and
+ * the next round decides again, after a wait that doubles with each failed round in a row (nextWaitMs);
+ * from `stillFailingAfter` failed rounds in a row the line starts STILL FAILING, as does a skip of one
+ * action (a lost race, a delivery the wallet's guard refuses) that many rounds in a row. Nothing is ever
+ * retried within the round that failed: a transaction with no receipt may still be pending, and the next
+ * round's send guard refuses every send until it is mined or dropped; its receipt is looked up each
+ * round, and a bridge message it sent is recorded once it lands. A close, roll, payout or stake that
+ * reverts on chain is re-read first: a lost race is a skip; when that read fails, the next round's read
+ * decides. Every line is logged with any URL's secrets stripped (scrubSecrets). */
 export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: RunOptions): Promise<LoopEnd> {
+  const log = (line: string) => deps.log(scrubSecrets(line));
+  const clock = opts.now ?? Date.now;
+  const stillFailingAfter = opts.stillFailingAfter ?? 10;
   /** The last wait logged for each user, so each reason is logged once. */
   const waiting = new Map<string, string>();
-  /** Deliveries whose send-time estimate refused them, or that reverted, with the facts they were refused on. */
-  const held = new Map<string, { facts: string; reason: string }>();
+  /** Deliveries held after a refused estimate or a revert: the facts they were held on, and since when. */
+  const held = new Map<string, { facts: string; reason: string; at: number }>();
+  /** Unexplained reverts of each user's delivery so far. */
+  const deliveryReverts = new Map<string, number>();
+  /** How many rounds in a row each kind of skip has happened, and the ones this round. */
+  const skipRuns = new Map<string, number>();
+  let skippedNow = new Set<string>();
+  /** A revert whose re-read failed: the next round's read decides. */
+  let unread: { action: Racing; before: KeeperState; revert: RevertedOnChain } | undefined;
+  let unreceipted: Unreceipted[] = [];
+  let claimDue: boolean | undefined;
+
   const waits = (user: Address, reason: string) => {
     const key = user.toLowerCase();
     if (waiting.get(key) === reason) return;
-    deps.log(`Delivery to ${user} waits: ${reason}`);
+    log(`Delivery to ${user} waits: ${reason}`);
     waiting.set(key, reason);
   };
-  let claimDue: boolean | undefined;
+  /** A skip of `key` this round, said as `line` (or by `quietly`); from `stillFailingAfter` rounds in a
+   * row, loudly, every round. */
+  const skipped = (key: string, what: string, line: string, quietly: () => void = () => log(line)) => {
+    if (!skippedNow.has(key)) {
+      skippedNow.add(key);
+      skipRuns.set(key, (skipRuns.get(key) ?? 0) + 1);
+    }
+    const n = skipRuns.get(key) ?? 1;
+    if (n >= stillFailingAfter) log(`STILL FAILING (${n} rounds; ${what}): ${line}`);
+    else quietly();
+  };
+  const notDone = (a: Racing, why: string, hash: Hex) =>
+    skipped(`not-done:${a.kind}`, doing(a), `Not done: ${why}; the transaction reverted on chain (transaction ${hash}); the next round decides again`);
+  const hold = (key: string, facts: string, reason: string) => held.set(key, { facts, reason, at: clock() });
 
-  /** One round. A failure comes back, with what the round was doing then, instead of being thrown. */
+  /** A close, roll, payout or stake that reverted on chain: true when the chains, read again, show it lost
+   * a race (a skip). Nothing explaining it throws the revert (which stops the run); a read that fails
+   * throws RevertUnread, and the next round's read decides. Anything else: false. */
+  async function raced(e: unknown, a: Racing, before: KeeperState): Promise<boolean> {
+    if (!(e instanceof RevertedOnChain)) return false;
+    let after: KeeperState;
+    try {
+      after = await deps.readState();
+    } catch (readError) {
+      unread = { action: a, before, revert: e };
+      throw new RevertUnread(e, readError);
+    }
+    const why = explainRace(a, before, after);
+    if (!why) throw e;
+    notDone(a, why, e.hash);
+    return true;
+  }
+
+  /** A transaction sent with no receipt: its receipt is looked up in later rounds. */
+  function watch(a: Action, e: ReceiptTimeout) {
+    if (!e.hash) return;
+    const message =
+      a.kind === "close" || a.kind === "roll"
+        ? { adapter: rec.plan.addresses.baseAdapter, direction: "Base → Bittensor" as const }
+        : a.kind === "payouts"
+          ? { adapter: rec.plan.addresses.bitAdapter, direction: "Bittensor → Base" as const }
+          : undefined;
+    unreceipted.push({ hash: e.hash, chain: e.chain, what: doing(a), message, rounds: 0 });
+  }
+
+  /** Looks up each transaction still with no receipt: one that landed is reported (its bridge message
+   * recorded); one with none after LATE_RECEIPT_ROUNDS is reported as probably dropped. */
+  async function lookUpReceipts() {
+    if (!deps.receipt) {
+      unreceipted = [];
+      return;
+    }
+    const still: Unreceipted[] = [];
+    for (const u of unreceipted) {
+      let r: Awaited<ReturnType<NonNullable<KeeperDeps["receipt"]>>>;
+      try {
+        r = await deps.receipt(u.chain, u.hash);
+      } catch {
+        still.push(u);
+        continue;
+      }
+      if (!r) {
+        if (++u.rounds < LATE_RECEIPT_ROUNDS) still.push(u);
+        else {
+          log(
+            `NO RECEIPT after ${u.rounds} rounds for transaction ${u.hash} (${u.what}): it was probably dropped or replaced. Check it on the chain's explorer${u.message ? "; if it went through, find its bridge message with pnpm ops status" : ""}`,
+          );
+        }
+        continue;
+      }
+      if (r.reverted) {
+        log(`Late receipt: ${u.what} reverted on chain (transaction ${u.hash})`);
+        continue;
+      }
+      const id = u.message ? messageIdFrom(r.logs, u.message.adapter) : undefined;
+      if (id && u.message) recordSafely(deps, { id, direction: u.message.direction, hash: u.hash });
+      log(`Late receipt: ${u.what} went through (transaction ${u.hash}${id ? `, bridge message ${id}` : ""})`);
+    }
+    unreceipted = still;
+  }
+
+  /** One round. A failure comes back, with what the round was doing then, instead of being thrown; an
+   * unexplained delivery revert comes back once the round's other action is done. */
   async function round(tick: number): Promise<{ error: unknown; doing: string } | undefined> {
     // the record as it is now: a read-back that failed since the run started stops its sends
     try {
@@ -450,15 +602,30 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
       return { error: e, doing: "re-reading the record" };
     }
     let s: KeeperState;
+    try {
+      s = await deps.readState({ economics: true });
+    } catch (e) {
+      // a revert the last round couldn't explain, and the chains still can't be read: the revert stops it
+      if (unread) return { error: unread.revert, doing: `${doing(unread.action)}, read again` };
+      return { error: e, doing: "reading the chains" };
+    }
+    if (unread) {
+      const u = unread;
+      unread = undefined;
+      const why = explainRace(u.action, u.before, s);
+      if (!why) return { error: u.revert, doing: `${doing(u.action)}, read again` };
+      notDone(u.action, why, u.revert.hash);
+    }
+    await lookUpReceipts();
     let deliveries: DueDelivery[] = [];
     const facts = new Map<string, string | undefined>();
     try {
-      s = await deps.readState({ economics: true });
       for (const user of await deps.deliveryCandidates()) {
         const c = await checkDelivery(deps, user);
         const key = c.user.toLowerCase();
         facts.set(key, c.facts);
-        if (c.facts !== undefined && held.get(key)?.facts !== c.facts) held.delete(key);
+        const h = held.get(key);
+        if (h && ((c.facts !== undefined && h.facts !== c.facts) || clock() - h.at >= HOLD_MS)) held.delete(key);
         if (c.claimable === 0n) {
           waiting.delete(key);
           continue;
@@ -473,99 +640,135 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     if (tick === 1 || tick % (opts.rewardsEveryTicks ?? 30) === 0) {
       claimDue = await reportClaim(deps, opts.policy ?? CLAIM_POLICY, opts.live ?? false, claimDue);
     }
-    let now = "deciding what is due";
+    /** An unexplained delivery revert: the round fails once its other action is done. */
+    let soft: { error: unknown; doing: string } | undefined;
+    let step = "deciding what is due";
+    let current: Action | undefined;
     try {
       for (;;) {
         const next = decideNext({ ...s, deliveries });
         const action = next.action;
         if (!action) {
-          deps.log(next.reason);
-          return undefined;
+          log(next.reason);
+          break;
         }
-        now = doing(action);
+        current = action;
+        step = doing(action);
         if (action.kind === "roll") {
           // a roll that can't go ahead now is only a skip: the round ends, the next one decides again
-          const r = await roll(deps, rec);
-          if (!r.rolled) deps.log(`Not rolled: ${r.reason}`);
+          let r: Rolled;
+          try {
+            r = await roll(deps, rec);
+          } catch (e) {
+            if (await raced(e, action, s)) break;
+            throw e;
+          }
+          if (!r.rolled) skipped("not-rolled", step, `Not rolled: ${r.reason}`);
           else if (r.messageId) {
-            deps.log(
+            log(
               `Done: the open batch closed instead of rolling: an entry landed first and its fee pot paid the bridge (transaction ${r.hash}, bridge message ${r.messageId})`,
             );
-          } else deps.log(`Done: ${next.reason} (transaction ${r.hash})`);
-          return undefined;
+          } else log(`Done: ${next.reason} (transaction ${r.hash})`);
+          break;
         }
         if (action.kind !== "deliver") {
           let done: Done;
           try {
             done = await act(deps, rec, action);
           } catch (e) {
-            // mined and reverted: a race lost to another caller is a skip; anything else stops the keeper
-            const why = e instanceof RevertedOnChain ? await lostRace(deps, action, s) : undefined;
-            if (!why || !(e instanceof RevertedOnChain)) throw e;
-            deps.log(`Not done: ${why}; the transaction reverted on chain (transaction ${e.hash}); the next round decides again`);
-            return undefined;
+            if (await raced(e, action, s)) break;
+            throw e;
           }
-          deps.log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
-          return undefined;
+          log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
+          break;
         }
         // whatever becomes of this delivery, the round's next action comes after it, never instead
         deliveries = deliveries.filter((d) => d.user !== action.user);
         const key = action.user.toLowerCase();
+        const f = facts.get(key);
         let d: Delivery;
         try {
           d = await deliver(deps, rec, action.user);
         } catch (e) {
           if (e instanceof RevertedOnChain) {
-            // mined and reverted, so nothing is pending: the user claimed first, changed or let lapse
-            // their preference, or the price moved. Held like a refused estimate, until its facts change
-            d = { user: action.user, delivered: false, reason: e.message, refused: e.message };
-          } else if (e instanceof SendRefused && !classifyFailure(e).stop) {
-            // the wallet's guard (an earlier transaction pending, the nonce) or the estimate: not this
-            // user's facts, so tried again next round. A wrong key or chain stops the run, as at any send
-            waits(action.user, `${e.message}; it is tried again next round`);
+            // mined and reverted, so nothing is pending. Held at once, whatever the re-check finds (or if
+            // it fails): a reverted delivery is never sent again blindly
+            hold(key, f ?? "", `${e.message}; held while it is checked again`);
+            const again = await checkDelivery(deps, action.user);
+            if (!again.deliver || again.facts !== f) {
+              // the user claimed first, changed or let lapse their preference, or the price moved
+              const why = again.deliver ? "the user's claimable amount, preference or quote changed" : again.reason;
+              const reason = `${e.message}: ${why}; not retried until the claimable amount, the preference or the quote against the floors changes, or for 30 minutes`;
+              hold(key, f ?? "", reason);
+              waits(action.user, reason);
+              continue;
+            }
+            // its simulation still passes on the same facts: nothing explains the revert
+            const n = (deliveryReverts.get(key) ?? 0) + 1;
+            deliveryReverts.set(key, n);
+            const failure = new DeliveryReverted(action.user, n, MAX_DELIVERY_REVERTS, e);
+            if (n >= MAX_DELIVERY_REVERTS) throw failure;
+            hold(key, f ?? "", `${e.message}, while its simulation still passes on the same facts; held for 30 minutes, or until the user's facts change`);
+            soft = { error: failure, doing: step };
             continue;
-          } else throw e;
+          }
+          if (e instanceof SendRefused && !classifyFailure(e).stop) {
+            // the wallet's guard (an earlier transaction pending, the nonce): not this user's facts, so
+            // tried again next round. A wrong key or chain stops the run, as at any send
+            const said = `${e.message}; it is tried again next round`;
+            skipped(`deliver:${key}`, step, said, () => waits(action.user, said));
+            continue;
+          }
+          throw e;
         }
         if (d.delivered) {
           waiting.delete(key);
+          deliveryReverts.delete(key);
           const got = d.usdcOut === undefined ? "" : `, ${Number(d.usdcOut) / 1e6} USDC`;
-          deps.log(`Done: ${next.reason} (transaction ${d.hash}${got})`);
-          return undefined;
+          log(`Done: ${next.reason} (transaction ${d.hash}${got})`);
+          break;
         }
-        const f = facts.get(key);
         if (d.refused !== undefined && f !== undefined) {
-          const reason = `${d.refused}; not retried until the claimable amount, the preference or the quote against the floors changes`;
-          held.set(key, { facts: f, reason });
+          const reason = `${d.refused}; not retried until the claimable amount, the preference or the quote against the floors changes, or for 30 minutes`;
+          hold(key, f, reason);
           waits(action.user, reason);
         } else {
           waits(action.user, d.reason);
         }
       }
     } catch (e) {
-      return { error: e, doing: now };
+      if (e instanceof ReceiptTimeout && current) watch(current, e);
+      return { error: e, doing: step };
     }
+    return soft;
   }
 
-  const stillFailingAfter = opts.stillFailingAfter ?? 10;
+  const maxUnexpected = opts.maxUnexpectedRounds ?? 30;
   const pause = opts.sleep ?? sleep;
-  /** Failed rounds in a row */
+  /** Failed rounds in a row, and those failed on something unexpected */
   let failing = 0;
+  let unexpected = 0;
   for (let tick = 1; ; tick++) {
     const failure = await round(tick);
+    // a skip that didn't happen this round starts its count again
+    for (const key of [...skipRuns.keys()]) if (!skippedNow.has(key)) skipRuns.delete(key);
+    skippedNow = new Set();
     const f = failure && classifyFailure(failure.error);
-    if (f?.stop) {
-      deps.log(`Stopped: ${oneLine(f.message)}`);
-      return { stopped: true, kind: f.kind, reason: f.message };
+    unexpected = f?.kind === "unexpected" ? unexpected + 1 : 0;
+    if (f && (f.stop || unexpected >= maxUnexpected)) {
+      const reason = f.stop ? f.message : `${unexpected} rounds in a row failed on something unexpected; the last: ${f.message}`;
+      log(`Stopped: ${oneLine(reason)}`);
+      return { stopped: true, kind: f.kind, reason };
     }
     if (f) failing++;
     else if (failing) {
-      deps.log(`Recovered after ${failing} failed round${failing === 1 ? "" : "s"}`);
+      log(`Recovered after ${failing} failed round${failing === 1 ? "" : "s"}`);
       failing = 0;
     }
     const wait = nextWaitMs(opts.intervalMs, failing, opts.maxBackoffMs);
     if (failure && f) {
       const head = failing >= stillFailingAfter ? `STILL FAILING (${failing} rounds; ` : "Failed this round (";
-      deps.log(`${head}${f.label}, ${failure.doing}): ${oneLine(f.message)}; next round in ${inWords(wait)}`);
+      log(`${head}${f.label}, ${failure.doing}): ${oneLine(f.message)}; next round in ${inWords(wait)}`);
     }
     if (opts.maxTicks && tick >= opts.maxTicks) return { stopped: false };
     await pause(wait);
@@ -574,16 +777,21 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
 
 /** `pnpm ops run`'s exit code when the keeper stops itself (classifyFailure) or refuses to start. The
  * supervisor (ops/scripts/keeper-supervised.ps1) restarts the keeper after any other non-zero exit, never
- * after this one: what stopped it needs a person. */
+ * after this one with STOPPED_BANNER printed: what stopped it needs a person. */
 export const KEEPER_STOPPED = 3;
 
-const stoppedBanner = (reason: string) =>
-  `THE KEEPER STOPPED ITSELF: ${oneLine(reason, 240)} (exit code ${KEEPER_STOPPED}: the supervisor won't restart it). Fix that, then start it again.`;
+/** How the line `run` prints with exit code 3 starts: the supervisor's proof that the 3 is the keeper's
+ * own stop, not a code cmd or pnpm returned. */
+export const STOPPED_BANNER = "THE KEEPER STOPPED ITSELF";
 
-/** `pnpm ops run`: `start` loads the record and checks the keeper's key (and may log), then the loop runs
- * until it stops itself. A start it refuses (no record, a bad setting, a wrong key) and every stop the
- * loop makes are deliberate: said loudly, exit KEEPER_STOPPED. Anything else thrown (a crash) goes to
- * the caller, a plain failure the supervisor restarts. */
+const stoppedBanner = (reason: string) =>
+  `${STOPPED_BANNER}: ${oneLine(reason, 240)} (exit code ${KEEPER_STOPPED}: the supervisor won't restart it). Fix that, then start it again.`;
+
+/** `pnpm ops run`: `start` loads the record, takes the deployment's run lock and checks the keeper's key
+ * (and may log), then the loop runs until it stops itself. A start it refuses (no record, another keeper
+ * running, a bad setting, a wrong key) and every stop the loop makes are deliberate: said loudly, exit
+ * KEEPER_STOPPED. Anything else thrown (a crash) goes to the caller, a plain failure the supervisor
+ * restarts. */
 export async function runCommand(
   start: () => Promise<{ deps: KeeperDeps; rec: DeploymentRecord; policy?: ClaimPolicy }>,
   log: (line: string) => void,
@@ -593,7 +801,7 @@ export async function runCommand(
   try {
     s = await start();
   } catch (e) {
-    const reason = oneLine(e instanceof Error ? e.message : String(e));
+    const reason = scrubSecrets(oneLine(e instanceof Error ? e.message : String(e)));
     log(`Stopped: ${reason}`);
     log(stoppedBanner(reason));
     return KEEPER_STOPPED;

@@ -294,7 +294,7 @@ describe("keeper actions", () => {
       expect(lines.at(-1)).toBe(`Not rolled: ${reason}`);
     });
 
-    it("a reverted roll whose re-read fails still stops the keeper with the revert and its transaction hash", async () => {
+    it("a reverted roll whose re-read fails, and whose next round's read fails too, stops the keeper with the revert and its transaction hash", async () => {
       let mined = false;
       const reverted = new RevertedOnChain("base", "roll the empty open batch (restart its timer)", SENT.hash);
       const send = vi.fn(async (): Promise<Sent> => {
@@ -313,7 +313,12 @@ describe("keeper actions", () => {
       expect((err as Error).message).toContain(SENT.hash);
       const lines: string[] = [];
       mined = false;
-      await runLoop({ ...d, log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 1, rewardsEveryTicks: 2 });
+      // round 1 fails (the re-read after the revert fails); round 2's read fails too: the revert stops it
+      expect(await runLoop({ ...d, log: (l: string) => lines.push(l) }, rec, { intervalMs: 0, maxTicks: 2, rewardsEveryTicks: 3 })).toMatchObject({
+        stopped: true,
+        kind: "reverted",
+      });
+      expect(lines.filter((l) => l.startsWith("Failed this round"))).toEqual([expect.stringMatching(/^Failed this round \(a revert not yet explained, rolling the empty batch\)/)]);
       expect(lines.at(-1)).toBe(`Stopped: ${reverted.message}`);
     });
   });

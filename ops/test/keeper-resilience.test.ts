@@ -1,12 +1,23 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Address, getAddress, type Hex } from "viem";
+import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbi, parseAbiParameters } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import { CLAIM_POLICY, WALLET } from "../src/config.ts";
 import { KEEPER_STOPPED, type KeeperDeps, type KeeperState, runCommand, runLoop } from "../src/keeper/actions.ts";
 import { DESTINATION_BASE } from "../src/keeper/delivery.ts";
-import { classifyFailure, type FailureKind, KeeperHasCode, KeeperNotReady, NotNow, nextWaitMs } from "../src/keeper/failures.ts";
+import {
+  classifyFailure,
+  DeliveryReverted,
+  type FailureKind,
+  KeeperHasCode,
+  KeeperNotReady,
+  NotNow,
+  nextWaitMs,
+  PayoutListMismatch,
+  RevertUnread,
+  scrubSecrets,
+} from "../src/keeper/failures.ts";
 import { payoutsHash } from "../src/keeper/payouts.ts";
 import { keeperDeps } from "../src/keeper/state.ts";
 import type { StatusDetail } from "../src/keeper/status.ts";
@@ -45,13 +56,18 @@ const payoutDue: KeeperState = {
 /** Idle TAO to stake, and nothing else. */
 const stakeDue: KeeperState = { ...closeDue, frontDoor: { ...closeDue.frontDoor, canClose: false, nDeposits: 0 }, vault: { ...closeDue.vault, available: TAO } };
 
-/** Keeper deps whose state reads come from `reads` in turn (the last one again once they run out), and
- * whose sends throw what `sends` gives for that send (in order; nothing, or past its end: a success). */
-function world(reads: KeeperState[], sends: (Error | undefined)[] = [], over: Partial<KeeperDeps> = {}) {
+/** Keeper deps whose state reads come from `reads` in turn (the last one again once they run out; an
+ * Error there is thrown), and whose sends throw what `sends` gives for that send (in order; nothing, or
+ * past its end: a success). */
+function world(reads: (KeeperState | Error)[], sends: (Error | undefined)[] = [], over: Partial<KeeperDeps> = {}) {
   const lines: string[] = [];
   let read = 0;
   let sent = 0;
-  const readState = vi.fn(async () => reads[Math.min(read++, reads.length - 1)]);
+  const readState = vi.fn(async () => {
+    const r = reads[Math.min(read++, reads.length - 1)];
+    if (r instanceof Error) throw r;
+    return r;
+  });
   const sendCall = vi.fn(async (_r: CallRequest): Promise<Sent> => {
     const e = sends[sent++];
     if (e) throw e;
@@ -266,15 +282,14 @@ describe("deliveries in a run that must survive", () => {
     expect(failed(w.lines)).toEqual([expect.stringMatching(/^Failed this round \(no receipt yet, delivering to 0x0+a11c\): Base: no receipt yet for nonce 9/)]);
   });
 
-  it("a delivery that reverts on chain (the user claimed first, the price moved) is held, and the round's close still goes", async () => {
+  it("a delivery that reverts while nothing changed (unexplained) fails the round once, is held, and the round's close still goes", async () => {
+    // the explained reverts (the user claimed first, the price moved) are below, under "re-checked at once"
     const w = delivering([new RevertedOnChain("base", `deliver ${alice}'s TAO as USDC`, HASH)]);
     expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 2 })).toEqual({ stopped: false });
     // held, not retried unchanged: round 2 only closes
     expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch"]);
-    expect(w.lines.filter((l) => l.startsWith(`Delivery to ${alice} waits:`))).toEqual([
-      expect.stringMatching(new RegExp(`reverted on chain \\(transaction ${HASH}\\); not retried until the claimable amount, the preference or the quote against the floors changes$`)),
-    ]);
-    expect(failed(w.lines)).toEqual([]);
+    expect(failed(w.lines)).toEqual([expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*\(1 of 3/)]);
+    expect(w.lines).toContain("Recovered after 1 failed round");
   });
 
   it("a delivery refused for the wrong key or chain stops the keeper, as any send would", async () => {
@@ -380,5 +395,260 @@ describe("the record's re-read tells a changed record from a passing read error"
     rmSync(path);
     expect(() => deps.refresh()).toThrow(RecordMismatch);
     expect(() => deps.refresh()).toThrow(/is gone/);
+  });
+});
+
+const SENT_EVENT = parseAbi([
+  "event Sent(bytes32 indexed messageId, uint64 destChain, address indexed sender, address indexed recipient, uint256 amount, uint256 fee, uint256 gasLimit)",
+]);
+const MESSAGE: Hex = `0x${"5a".repeat(32)}`;
+/** The Base adapter's Sent log for a close's bridge message. */
+const sentLog = {
+  address: rec.plan.addresses.baseAdapter,
+  topics: encodeEventTopics({ abi: SENT_EVENT, args: { messageId: MESSAGE, sender: rec.plan.addresses.frontDoor, recipient: rec.plan.addresses.vault } }) as Hex[],
+  data: encodeAbiParameters(parseAbiParameters("uint64, uint256, uint256, uint256"), [964n, 10n ** 16n, 1n, 1n]),
+};
+const MINUTE = 60_000;
+/** A clock each round's wait moves on by `step`. */
+const clock = (step: number) => {
+  let t = 0;
+  return { now: () => t, sleep: async () => void (t += step) };
+};
+
+/** A close due and alice's delivery ready on the same facts every time, unless `read` (her nth delivery
+ * read) or `simulate` (the nth simulation) say otherwise; `deliverSend(n)` is what her nth deliver send
+ * throws (nothing: it goes through). */
+function deliveryWorld(o: {
+  deliverSend?: (n: number) => Error | undefined;
+  read?: (n: number) => { claimable?: bigint; quoteUsdc?: bigint };
+  simulate?: (n: number) => { ok: true; usdcOut: bigint } | { ok: false; reason: string };
+}) {
+  const lines: string[] = [];
+  let sent = 0;
+  let reads = 0;
+  let sims = 0;
+  const sendCall = vi.fn(async (r: CallRequest): Promise<Sent> => {
+    if (r.functionName === "deliver") {
+      const e = o.deliverSend?.(++sent);
+      if (e) throw e;
+    }
+    return { ...SENT, logs: [] };
+  });
+  const deps = stubDeps({
+    readState: async () => closeDue,
+    sendCall,
+    quoteClose: async () => 1n,
+    deliveryCandidates: async () => [alice],
+    readDelivery: async (user) => ({
+      user,
+      claimable: TAO,
+      pref: { minUsdcPerTao: 240_000_000n, deadline: T + 3600, destination: DESTINATION_BASE },
+      quoteUsdc: 252_000_000n,
+      twapUsdc: 250_000_000n,
+      slippageBps: 150,
+      now: T,
+      ...(o.read?.(++reads) ?? {}),
+    }),
+    simulateDeliver: async () => o.simulate?.(++sims) ?? { ok: true, usdcOut: 251_000_000n },
+    readRewards: async () => {
+      throw new Error("rewards are not part of these tests");
+    },
+    log: (l) => void lines.push(l),
+  });
+  return { deps, lines, sends: () => sendCall.mock.calls.map((c) => c[0].functionName) };
+}
+const deliveryRevert = () => new RevertedOnChain("base", `deliver ${alice}'s TAO as USDC`, HASH);
+const waitsFor = (lines: string[]) => lines.filter((l) => l.startsWith(`Delivery to ${alice} waits:`));
+
+describe("a delivery that reverts on chain is re-checked at once", () => {
+  it("explained when the user claimed first: held, the round's close still goes, and no failure", async () => {
+    // her 3rd read is the re-check after the revert
+    const w = deliveryWorld({ deliverSend: (n) => (n === 1 ? deliveryRevert() : undefined), read: (n) => (n >= 3 ? { claimable: 0n } : {}) });
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 2 })).toEqual({ stopped: false });
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch"]);
+    expect(waitsFor(w.lines)).toEqual([expect.stringMatching(new RegExp(`reverted on chain \\(transaction ${HASH}\\): nothing is claimable;`))]);
+    expect(failed(w.lines)).toEqual([]);
+  });
+
+  it("explained when its simulation now fails (the price moved): held, no failure", async () => {
+    const w = deliveryWorld({
+      deliverSend: (n) => (n === 1 ? deliveryRevert() : undefined),
+      simulate: (n) => (n >= 3 ? { ok: false, reason: "Error(Too little received)" } : { ok: true, usdcOut: 251_000_000n }),
+    });
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 2 })).toEqual({ stopped: false });
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch"]);
+    expect(waitsFor(w.lines)[0]).toMatch(/reverted on chain .*: deliver would revert now \(Error\(Too little received\)\)/);
+    expect(failed(w.lines)).toEqual([]);
+  });
+
+  it("unexplained when it still passes on the same facts: a failed round, held 30 minutes, and the third stops the keeper", async () => {
+    const w = deliveryWorld({ deliverSend: () => deliveryRevert() });
+    // each round's wait is 31 minutes: every hold has run out by the next round
+    const end = await runLoop(w.deps, rec, { ...opts, maxTicks: 5, ...clock(31 * MINUTE) });
+    expect(end).toMatchObject({ stopped: true, kind: "delivery-reverts" });
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "deliver", "closeBatch", "deliver"]);
+    expect(failed(w.lines)).toEqual([
+      expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*reverted on chain.*still passes on the same facts \(1 of 3/),
+      expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*\(2 of 3/),
+    ]);
+    expect(w.lines.at(-1)).toMatch(/^Stopped: deliver to 0x0+a11c reverted on chain 3 times while its simulation passed on the same facts/);
+  });
+
+  it("an unexplained revert's hold keeps her waiting within the 30 minutes", async () => {
+    const w = deliveryWorld({ deliverSend: (n) => (n === 1 ? deliveryRevert() : undefined) });
+    await runLoop(w.deps, rec, { ...opts, maxTicks: 3, ...clock(10 * MINUTE) });
+    // rounds at 0, 10 and 20 minutes: only the first delivers
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch", "closeBatch"]);
+  });
+
+  it("every hold ends after 30 minutes, even on the same facts (a refused estimate's too)", async () => {
+    const w = deliveryWorld({ deliverSend: () => new SendRefused("estimate", "Base: deliver would fail, nothing sent (BelowMinimum())") });
+    await runLoop(w.deps, rec, { ...opts, maxTicks: 4, ...clock(10 * MINUTE) });
+    // rounds at 0, 10, 20 and 30 minutes: tried again at 30
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch", "closeBatch", "deliver", "closeBatch"]);
+  });
+});
+
+describe("failures that would otherwise repeat forever stop the keeper", () => {
+  it("30 rounds in a row failed on something unexpected stop it", async () => {
+    const w = world([new Error("something odd")]);
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 40 })).toMatchObject({ stopped: true, kind: "unexpected" });
+    expect(w.readState).toHaveBeenCalledTimes(30);
+    expect(failed(w.lines)).toHaveLength(29);
+    expect(w.lines.at(-1)).toBe("Stopped: 30 rounds in a row failed on something unexpected; the last: something odd");
+  });
+
+  it("any other outcome between them starts the count again", async () => {
+    const odd = new Error("something odd");
+    const w = world([...Array(29).fill(odd), new RpcError("base eth_call: HTTP 503"), ...Array(29).fill(odd)]);
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 59 })).toEqual({ stopped: false });
+  });
+
+  it("a payout list that doesn't match the vault's stops it at once: it would block every other action", async () => {
+    expect(classifyFailure(new PayoutListMismatch("x"))).toMatchObject({ stop: true, kind: "payout-list" });
+    const w = world([payoutDue], [], { batchInfo: async () => ({ payoutsHash: payoutsHash([]), count: 1 }) });
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 3 })).toMatchObject({ stopped: true, kind: "payout-list" });
+    expect(w.sendCall).not.toHaveBeenCalled();
+    expect(w.lines.at(-1)).toMatch(/^Stopped: the payout list rebuilt from the vault's events \(0 entries\) does not match batch 0xaaaaaaaa…/);
+  });
+});
+
+describe("a transaction that went through is never lost from the log", () => {
+  it("a send whose record save fails is logged loudly with its hash and bridge message; the round still counts as done", async () => {
+    const w = world([closeDue], [], {
+      sendCall: async () => ({ ...SENT, logs: [sentLog] }),
+      recordMessage: () => {
+        throw Object.assign(new Error("EPERM: operation not permitted, rename 'deployments/v3-launch.json.tmp'"), { code: "EPERM" });
+      },
+    });
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 1 })).toEqual({ stopped: false });
+    expect(w.lines).toContainEqual(
+      `SENT, BUT NOT SAVED: transaction ${SENT.hash}, bridge message ${MESSAGE} went through, but saving it to the record failed (EPERM: operation not permitted, rename 'deployments/v3-launch.json.tmp'); follow it with: pnpm ops track ${MESSAGE}`,
+    );
+    expect(w.lines.at(-1)).toBe(`Done: the open batch is ready to close (transaction ${SENT.hash}, bridge message ${MESSAGE})`);
+    expect(failed(w.lines)).toEqual([]);
+  });
+
+  it("a transaction with no receipt is looked up in later rounds; once it lands, its bridge message is recorded", async () => {
+    let asked = 0;
+    const recorded: unknown[] = [];
+    const w = world([closeDue], [new ReceiptTimeout("base", 4, HASH), new SendRefused("waiting", "Base: an earlier transaction is still waiting to be mined")], {
+      receipt: async (chain, hash) => {
+        expect([chain, hash]).toEqual(["base", HASH]);
+        return ++asked < 2 ? null : { reverted: false, logs: [sentLog] };
+      },
+      recordMessage: (m) => void recorded.push(m),
+    });
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 3 })).toEqual({ stopped: false });
+    expect(recorded).toEqual([{ id: MESSAGE, direction: "Base → Bittensor", hash: HASH }]);
+    expect(w.lines).toContain(`Late receipt: closing the batch went through (transaction ${HASH}, bridge message ${MESSAGE})`);
+    expect(asked).toBe(2);
+  });
+
+  it("a late receipt that reverted is said so", async () => {
+    const w = world([closeDue], [new ReceiptTimeout("base", 4, HASH)], { receipt: async () => ({ reverted: true, logs: [] }) });
+    await runLoop(w.deps, rec, { ...opts, maxTicks: 2 });
+    expect(w.lines).toContain(`Late receipt: closing the batch reverted on chain (transaction ${HASH})`);
+  });
+});
+
+describe("the same action skipped round after round is said loudly", () => {
+  it("a close another caller beats every round: STILL FAILING once it has happened `stillFailingAfter` rounds in a row", async () => {
+    const reads = Array(4).fill([closeDue, closeDue, closedElsewhere]).flat() as KeeperState[];
+    const w = world(reads, Array(4).fill(new RevertedOnChain("base", "close the open batch and send it to Bittensor", HASH)));
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 4, stillFailingAfter: 3 })).toEqual({ stopped: false });
+    const notDone = `Not done: another close landed first; the transaction reverted on chain (transaction ${HASH}); the next round decides again`;
+    expect(w.lines.filter((l) => l.includes("Not done:"))).toEqual([
+      notDone,
+      notDone,
+      `STILL FAILING (3 rounds; closing the batch): ${notDone}`,
+      `STILL FAILING (4 rounds; closing the batch): ${notDone}`,
+    ]);
+  });
+
+  it("a delivery the wallet's guard refuses every round: logged once, then STILL FAILING", async () => {
+    const pending = new SendRefused("waiting", "Base: an earlier transaction from the keeper (nonce 3) is still waiting to be mined; nothing sent — try again once it is");
+    const w = deliveryWorld({ deliverSend: () => pending });
+    await runLoop(w.deps, rec, { ...opts, maxTicks: 4, stillFailingAfter: 3 });
+    const said = `${pending.message}; it is tried again next round`;
+    expect(w.lines.filter((l) => l.includes(pending.message))).toEqual([
+      `Delivery to ${alice} waits: ${said}`,
+      `STILL FAILING (3 rounds; delivering to ${alice}): ${said}`,
+      `STILL FAILING (4 rounds; delivering to ${alice}): ${said}`,
+    ]);
+  });
+});
+
+describe("a revert whose re-read fails", () => {
+  const reverted = new RevertedOnChain("base", "close the open batch and send it to Bittensor", HASH);
+  const down = new RpcError("base eth_call: HTTP 503");
+
+  it("fails that round only; the next round's read explains it: a skip", async () => {
+    const w = world([closeDue, closeDue, down, closedElsewhere], [reverted]);
+    expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 2 })).toEqual({ stopped: false });
+    expect(classifyFailure(new RevertUnread(reverted, down))).toMatchObject({ stop: false, kind: "revert-unread" });
+    expect(failed(w.lines)).toEqual([expect.stringMatching(/^Failed this round \(a revert not yet explained, closing the batch\): .*reverted on chain.*HTTP 503/)]);
+    expect(w.lines).toContain(`Not done: another close landed first; the transaction reverted on chain (transaction ${HASH}); the next round decides again`);
+  });
+
+  it("stops the keeper when the next round's read shows nothing to explain it, or fails again", async () => {
+    for (const next of [closeDue, down]) {
+      const w = world([closeDue, closeDue, down, next], [reverted]);
+      expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 3 })).toEqual({ stopped: true, kind: "reverted", reason: reverted.message });
+      expect(w.sendCall).toHaveBeenCalledOnce();
+      expect(w.lines.at(-1)).toBe(`Stopped: ${reverted.message}`);
+    }
+  });
+});
+
+describe("no failure line carries a secret from a URL", () => {
+  it("strips a URL to its domain and drops key-like parameters", () => {
+    const out = scrubSecrets(
+      "request to https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY123 failed; https://base-mainnet.g.alchemy.com/v2/ALCHEMYKEY9; wss://user:hunter2@node.example.com:8546/ws; api_key=XYZ789",
+    );
+    for (const secret of ["SECRETKEY123", "ALCHEMYKEY9", "hunter2", "XYZ789", "ogrpc", "/v2/"]) expect(out).not.toContain(secret);
+    expect(out).toContain("drpc.org");
+    expect(out).toContain("alchemy.com");
+    expect(scrubSecrets(`transaction ${HASH}, user ${alice}, 0.5 TAO`)).toBe(`transaction ${HASH}, user ${alice}, 0.5 TAO`);
+  });
+
+  it("in a failed round's line, a stop's line and its reason, and a start refused", async () => {
+    const w = world([new RpcError("base eth_call: request to https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY123 failed: HTTP 503"), closeDue]);
+    await runLoop(w.deps, rec, { ...opts, maxTicks: 2 });
+    expect(failed(w.lines)).toEqual([expect.stringContaining("drpc.org")]);
+    expect(w.lines.join("\n")).not.toContain("SECRETKEY123");
+
+    const wrong = new SendRefused("chain-id", "Base: the RPC at https://base.example.com/v2/APIKEY456 reports chain id 1, expected 8453");
+    const s = world([closeDue], [wrong]);
+    const end = await runLoop(s.deps, rec, { ...opts, maxTicks: 2 });
+    expect(JSON.stringify(end)).not.toContain("APIKEY456");
+    expect(s.lines.join("\n")).not.toContain("APIKEY456");
+
+    const lines: string[] = [];
+    const start = async (): Promise<never> => {
+      throw new Error("could not open https://rpc.example.com/?token=TOKEN789");
+    };
+    await runCommand(start, (l) => void lines.push(l), opts);
+    expect(lines.join("\n")).not.toContain("TOKEN789");
   });
 });

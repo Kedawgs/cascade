@@ -16,7 +16,7 @@ import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE } from "../co
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, RecordMismatch, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, codeAt, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
-import { type Ctx, describeRevert, logsOf, sendCall, signerOf } from "../send.ts";
+import { type Ctx, describeRevert, logsOf, type Sent, sendCall, signerOf } from "../send.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
@@ -399,6 +399,10 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       rec.verify = now.verify;
       rec.done = now.done;
       rec.messages = now.messages;
+    },
+    async receipt(chain, hash) {
+      const r = (await ctx.rpc.request(chain, "eth_getTransactionReceipt", [hash])) as { status: Hex; logs?: Sent["logs"] } | null;
+      return r ? { reverted: r.status !== "0x1", logs: r.logs ?? [] } : null;
     },
     async readRewards() {
       const hotkey = (await r("bittensor", a.vault, REWARDS_VAULT, "stakeHotkey")) as Hex;

@@ -87,7 +87,7 @@ it at the start of every invocation and refuses to run on a bad config, with a l
 - **Baselines**: each chain's `baselineBlock` is where the deployment's setup ends: an admin event at or before
   it is setup, never an alert. It is the record's last step on that chain, unless an owner action that belongs
   to the setup came later; `--setup-ends-base <block>` and `--setup-ends-bittensor <block>` move it there (never
-  earlier than the record's last step). Scans still start at `startBlock`, so that history is indexed. v3-launch
+  earlier than the record's last step, nor more than 100,000 blocks past it without `--force`). Scans still start at `startBlock`, so that history is indexed. v3-launch
   uses them: the Ledger accepted ownership after the deploy (front door at Base block 53297713, staker 53297722,
   vault at Bittensor block 9398435), so production's baselines are 53297722 and 9398435, not the record's
   53295834 and 9398130.

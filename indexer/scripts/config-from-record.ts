@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { getAddress } from "viem";
 import { parseArgs } from "./d1.ts";
 
-// pnpm config:from-record ../ops/deployments/v3-test.json [--setup-ends-base <block>] [--setup-ends-bittensor <block>]
+// pnpm config:from-record ../ops/deployments/v3-test.json [--setup-ends-base <block>] [--setup-ends-bittensor <block>] [--force]
 //
 // Prints the DEPLOYMENT var for wrangler.jsonc from a verified ops deployment record (spec section 11, step
 // 6): the contracts' addresses checksummed (the Worker refuses any other spelling), each chain's start block
@@ -49,6 +49,11 @@ export interface FromRecord {
   notes: string[];
 }
 
+/** How far past the record's last step a setup end may be without --force: about 2.3 days of Base's
+ * 2-second blocks, about 14 days of Bittensor's 12-second ones. Further is likely a typo or the other
+ * chain's block, and every admin event up to it would be hidden. */
+export const SETUP_ENDS_MAX_PAST = 100_000;
+
 /** Where each chain's setup ends, when later than the record's last step there (--setup-ends-<chain>). */
 export interface SetupEnds {
   base?: number;
@@ -57,7 +62,7 @@ export interface SetupEnds {
 
 /** The DEPLOYMENT var of a verified v3 record. Throws, saying why, for a record it won't use, or a setup
  * end before the record's own last step on that chain (that step's admin events would become alerts). */
-export function deploymentFromRecord(raw: unknown, o: { setupEnds?: SetupEnds } = {}): FromRecord {
+export function deploymentFromRecord(raw: unknown, o: { setupEnds?: SetupEnds; force?: boolean } = {}): FromRecord {
   if (!isObject(raw)) throw new Error("the file isn't a deployment record");
   const rec = raw as RecordLike;
   if (rec.verify?.ok !== true) throw new Error("the deployment's read-back hasn't passed (verify.ok): run pnpm ops verify first");
@@ -97,9 +102,16 @@ export function deploymentFromRecord(raw: unknown, o: { setupEnds?: SetupEnds } 
     if (ends === undefined) return String(recorded);
     const label = chain === "base" ? "Base" : "Bittensor";
     if (ends < recorded) throw new Error(`--setup-ends-${chain} ${ends} is before the record's last ${label} step (${recorded}), whose events are setup`);
+    const past = ends - recorded;
+    if (past > SETUP_ENDS_MAX_PAST && !o.force) {
+      throw new Error(
+        `--setup-ends-${chain} ${ends} is ${past.toLocaleString("en-US")} blocks past the record's last ${label} step (${recorded}), more than ${SETUP_ENDS_MAX_PAST.toLocaleString("en-US")}: check the block, or pass --force`,
+      );
+    }
     if (ends > recorded) {
       notes.push(`${label}'s setup ends at block ${ends} (--setup-ends-${chain}), after the record's last ${label} step (${recorded}): no admin event up to it is an alert`);
     }
+    if (past > SETUP_ENDS_MAX_PAST) notes.push(`--force: ${label}'s setup end is ${past.toLocaleString("en-US")} blocks past the record's last ${label} step`);
     return String(ends);
   };
 
@@ -127,10 +139,10 @@ export function deploymentFromRecord(raw: unknown, o: { setupEnds?: SetupEnds } 
 }
 
 const USAGE =
-  "usage: pnpm config:from-record <ops deployment record, e.g. ../ops/deployments/v3-test.json> [--setup-ends-base <block>] [--setup-ends-bittensor <block>]";
+  "usage: pnpm config:from-record <ops deployment record, e.g. ../ops/deployments/v3-test.json> [--setup-ends-base <block>] [--setup-ends-bittensor <block>] [--force]";
 
 export async function main(argv: string[], o: { print: (line: string) => void; read: (path: string) => string }): Promise<number> {
-  const a = parseArgs(argv, ["setup-ends-base", "setup-ends-bittensor"], []);
+  const a = parseArgs(argv, ["setup-ends-base", "setup-ends-bittensor"], ["force"]);
   const usage = (why?: string) => {
     if (why) o.print(why);
     o.print(USAGE);
@@ -148,7 +160,7 @@ export async function main(argv: string[], o: { print: (line: string) => void; r
   }
   let r: FromRecord;
   try {
-    r = deploymentFromRecord(JSON.parse(o.read(path), reviver), { setupEnds });
+    r = deploymentFromRecord(JSON.parse(o.read(path), reviver), { setupEnds, force: a.flags.has("force") });
   } catch (e) {
     o.print(`nothing printed: ${e instanceof Error ? e.message : String(e)}`);
     return 1;

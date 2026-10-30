@@ -109,6 +109,18 @@ describe("pnpm config:from-record", () => {
     );
   });
 
+  it("refuses a setup end more than 100,000 blocks past the record's last step on that chain, unless forced", () => {
+    // 100,000 past the last Base step (53119575) is allowed; one more is a typo or the wrong chain's block
+    expect(deploymentFromRecord(record(), { setupEnds: { base: 53119575 + 100_000 } }).deployment.base.baselineBlock).toBe("53219575");
+    expect(() => deploymentFromRecord(record(), { setupEnds: { base: 53119575 + 100_001 } })).toThrow(
+      /--setup-ends-base 53219576 is 100,001 blocks past the record's last Base step \(53119575\), more than 100,000: check the block, or pass --force/,
+    );
+    expect(() => deploymentFromRecord(record(), { setupEnds: { bittensor: 53119575 } })).toThrow(/--setup-ends-bittensor 53119575 is .* past the record's last Bittensor step/);
+    const forced = deploymentFromRecord(record(), { setupEnds: { base: 53119575 + 100_001 }, force: true });
+    expect(forced.deployment.base.baselineBlock).toBe("53219576");
+    expect(forced.notes.join("\n")).toMatch(/--force/);
+  });
+
   it("takes --setup-ends-base and --setup-ends-bittensor, and refuses a value that isn't a block number", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cascade-record-"));
     const path = join(dir, "v3-test.json");
@@ -127,6 +139,14 @@ describe("pnpm config:from-record", () => {
       expect(await main([path, ...bad], { print: (l) => said.push(l), read }), bad.join(" ")).toBe(2);
       expect(said.join("\n")).toMatch(/usage: pnpm config:from-record/);
     }
+    // far past the record: refused (nothing printed), then taken with --force
+    const far = ["--setup-ends-base", String(53119575 + 100_001)];
+    const refused: string[] = [];
+    expect(await main([path, ...far], { print: (l) => refused.push(l), read })).toBe(1);
+    expect(refused.join("\n")).toMatch(/^nothing printed: --setup-ends-base 53219576 is 100,001 blocks past/);
+    const forced: string[] = [];
+    expect(await main([path, ...far, "--force"], { print: (l) => forced.push(l), read })).toBe(0);
+    expect(forced.join("\n")).toContain('"baselineBlock": "53219576"');
   });
 
   it("reads the record with its $bigint reviver and prints the vars to paste", async () => {

@@ -35,6 +35,8 @@ export interface Position {
 export interface Available {
   availableShares: bigint;
   availableTaoWei: bigint;
+  /** v3: the most TAO one more unstake request can carry (units.unstakeMostWei). Absent on v2. */
+  mostTaoWei?: bigint;
 }
 
 /** Figures that need the vault's history (its logs since deployment, scanned from where this browser

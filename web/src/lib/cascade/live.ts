@@ -21,7 +21,7 @@ import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore } from "./scan-store";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
-import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay } from "./units";
+import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay, unstakeMostWei } from "./units";
 import { checkWiring, createWiringCheck } from "./wiring";
 
 export class NotConfiguredError extends Error {
@@ -369,7 +369,13 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     }
     const asked = fd.redeemOf + sum(away().map((w) => w.shares));
     const availableShares = v.shares > asked ? v.shares - asked : 0n;
-    return { availableShares, availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply) };
+    // one request carries at most the vault's maxEntryValue, this batch's earlier request included
+    const most = v.maxEntryValue !== undefined ? unstakeMostWei(v.maxEntryValue, taoFor(fd.redeemOf, v.totalAssets, v.totalSupply)) : undefined;
+    return {
+      availableShares,
+      availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply),
+      ...(most !== undefined ? { mostTaoWei: most } : {}),
+    };
   }
 
   /** What needs the vault's history: TAO on its way in, rewards earned, the average entry price. */

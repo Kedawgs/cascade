@@ -81,13 +81,17 @@ export interface VaultState {
   stakeHotkey: Hex;
   payoutDelay: number;
   nominatorMinWei: bigint;
+  /** v3: the most TAO one front-door unstake request can carry (the vault burns no more of it per
+   * delivery; the rest stays staked). Absent on v2. */
+  maxEntryValue?: bigint;
 }
 
 export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, account: Address = ZERO): Promise<VaultState> {
   const v = { address: d.vault, abi: VAULT } as const;
   // read at a block known to be recent: a server that is behind then errors instead of answering from the past
   const blockNumber = await freshTip(c);
-  const [shares, totalAssets, totalSupply, rootStakeRao, pendingPayouts, stakeHotkey, payoutDelay, nominatorMin] =
+  const v3 = isV3(d);
+  const [shares, totalAssets, totalSupply, rootStakeRao, pendingPayouts, stakeHotkey, payoutDelay, nominatorMin, maxEntryValue] =
     await c.bittensor.multicall({
       blockNumber,
       allowFailure: false,
@@ -100,9 +104,12 @@ export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, ac
         { ...v, functionName: "stakeHotkey" },
         { ...v, functionName: "payoutDelay" },
         { address: STAKING_ADDRESS, abi: STAKING, functionName: "getNominatorMinRequiredStake" },
+        // v2's vault has no per-unstake limit to ask about
+        v3 ? { ...v, functionName: "maxEntryValue" } : { ...v, functionName: "totalSupply" },
       ],
     });
   return {
+    ...(v3 ? { maxEntryValue } : {}),
     shares,
     totalAssets,
     totalSupply,

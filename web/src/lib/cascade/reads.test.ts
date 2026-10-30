@@ -97,6 +97,29 @@ describe("reads", () => {
     expect(v).toMatchObject({ shares: 10n ** 22n, rootStakeWei: 15n * 10n ** 15n, nominatorMinWei: 2n * 10n ** 16n, payoutDelay: 3600, balanceWei: 2n * 10n ** 16n });
     // read at a block known to be recent, so a lagging server errors instead of answering from the past
     expect(bit.pinned).toEqual([9_400_000n, 9_400_000n]);
+    // v2: no per-unstake limit is asked for, nor given
+    expect(bit.asked).not.toContain("maxEntryValue");
+    expect(v.maxEntryValue).toBeUndefined();
+  });
+
+  it("on v3 also reads the most one unstake can carry (the vault's maxEntryValue)", async () => {
+    const answers = {
+      balanceOf: 10n ** 22n,
+      totalAssets: 2n * 10n ** 16n,
+      totalSupply: 2n * 10n ** 22n,
+      rootStakeRao: 15_000_000n,
+      pendingPayouts: 0n,
+      stakeHotkey: `0x${"58".repeat(32)}`,
+      payoutDelay: 86_400n,
+      getNominatorMinRequiredStake: 20_000_000n,
+      maxEntryValue: 10n * 10n ** 18n,
+    };
+    const D3 = { ...D, staker: "0x00000000000000000000000000000000005A4E12", oracle: "0x000000000000000000000000000000000000041E" } as Deployment;
+    const v = await readVault({ bittensor: fake(answers).client }, D3, ME);
+    expect(v.maxEntryValue).toBe(10n * 10n ** 18n);
+    // a vault that can't say fails the read, so the form never offers an unchecked amount
+    const { maxEntryValue: _m, ...without } = answers;
+    await expect(readVault({ bittensor: fake(without).client }, D3, ME)).rejects.toThrow(/maxEntryValue/);
   });
 
   it("reads the wallet's balances and the allowances the flows need", async () => {

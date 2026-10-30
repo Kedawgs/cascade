@@ -22,6 +22,7 @@ import {
   switchUnstakeUnit,
   unstakeErrorText,
   unstakeLabelUsd,
+  unstakeMaxWei,
   unstakeNote,
   unstakeButtonLabel,
   unstakeEquivalent,
@@ -198,6 +199,31 @@ describe("unstake helpers", () => {
     const available = 70_219_000_000_000_000n;
     expect(unstakeNote(available, "USDC", 252)).toBe("You can unstake up to $17.69. The minimum is about $2.78 (0.011 TAO).");
     expect(unstakeNote(available, "TAO", 252)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.011 TAO.");
+  });
+
+  it("MAX fills no more than one unstake can carry, and leaves at least the minimum behind", () => {
+    const TAO = 10n ** 18n;
+    const most = (99n * TAO) / 10n;
+    expect(unstakeMaxWei(25n * TAO, most)).toBe(most);
+    expect(unstakeMaxWei(5n * TAO, most)).toBe(5n * TAO);
+    // 0.005 TAO over the most: MAX leaves the 0.011 TAO minimum, so what stays can be unstaked later
+    expect(unstakeMaxWei(most + 5n * 10n ** 15n, most)).toBe(most + 5n * 10n ** 15n - 11n * 10n ** 15n);
+    // no limit known (v2): the whole stake, as before
+    expect(unstakeMaxWei(25n * TAO, undefined)).toBe(25n * TAO);
+  });
+
+  it("says why the amount is capped, in the unit shown", () => {
+    const TAO = 10n ** 18n;
+    const most = (99n * TAO) / 10n;
+    expect(unstakeNote(25n * TAO, "TAO", 250, most)).toBe("One unstake can carry up to 9.9 TAO; unstake the rest after this one. The minimum is 0.011 TAO.");
+    expect(unstakeNote(25n * TAO, "USDC", 250, most)).toBe(
+      "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest after this one. The minimum is about $2.75 (0.011 TAO).",
+    );
+    // a stake within the most reads as before
+    expect(unstakeNote(70_219_000_000_000_000n, "TAO", 252, most)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.011 TAO.");
+    const over = { ok: false as const, code: "overEntry" as const, reason: "One unstake can carry up to 9.9 TAO; unstake the rest after this one", offerAll: false };
+    expect(unstakeErrorText(over, 25n * TAO, "USDC", 250, most)).toBe("One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest after this one.");
+    expect(unstakeErrorText(over, 25n * TAO, "TAO", 250, most)).toBe(over.reason);
   });
 
   it("rounds the dollar minimum up, so typing the minimum shown is always accepted", () => {

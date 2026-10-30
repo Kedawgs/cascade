@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MIN_UNSTAKE_WEI } from "./config";
-import { batchFree, capFree, ceilRao, checkUnstake, floorRao, lessSlippage, sharesFor, taoFor, toDisplay } from "./units";
+import { batchFree, capFree, ceilRao, checkUnstake, floorRao, lessSlippage, sharesFor, taoFor, toDisplay, unstakeMostWei } from "./units";
 
 const TAO = 10n ** 18n;
 const milli = (n: bigint) => (n * TAO) / 1000n;
@@ -70,6 +70,42 @@ describe("units", () => {
     // a stake of 0.01 TAO can't leave through the front door
     expect(checkUnstake(milli(10n), milli(10n))).toMatchObject({ ok: false, code: "stakeBelowMin", reason: "Unstakes start at 0.011 TAO; your stake is below that" });
     expect(checkUnstake(milli(11n), milli(11n))).toEqual({ ok: true, all: true });
+  });
+
+  it("caps one unstake at the vault's maxEntryValue, less 1% and what this batch already asks of it", () => {
+    // the 1% margin: the share price may rise before delivery, and the vault clips past the limit
+    expect(unstakeMostWei(10n * TAO, 0n)).toBe((99n * TAO) / 10n);
+    expect(unstakeMostWei(10n * TAO, 4n * TAO)).toBe((59n * TAO) / 10n);
+    expect(unstakeMostWei(10n * TAO, 10n * TAO)).toBe(0n);
+    // floored to the 0.000001 TAO the form shows
+    expect(unstakeMostWei(10n * TAO, 1n)).toBe((99n * TAO) / 10n - 10n ** 12n);
+  });
+
+  it("refuses an unstake larger than one can carry, and never offers all of a stake above it", () => {
+    const most = (99n * TAO) / 10n;
+    const available = 25n * TAO;
+    expect(checkUnstake(most, available, most)).toEqual({ ok: true, all: false });
+    expect(checkUnstake(most + 1n, available, most)).toEqual({
+      ok: false,
+      code: "overEntry",
+      reason: "One unstake can carry up to 9.9 TAO; unstake the rest after this one",
+      offerAll: false,
+    });
+    // all of a stake above the most: refused, and more than the stake never offers all
+    expect(checkUnstake(available, available, most)).toMatchObject({ ok: false, code: "overEntry", offerAll: false });
+    expect(checkUnstake(26n * TAO, available, most)).toMatchObject({ ok: false, code: "tooMuch", offerAll: false });
+    // the most would leave dust behind: not offered all either, since all is too much for one
+    expect(checkUnstake(most, most + milli(5n), most)).toMatchObject({ ok: false, code: "leavesDust", offerAll: false });
+    // a stake within the most: as before
+    expect(checkUnstake(5n * TAO, 5n * TAO, most)).toEqual({ ok: true, all: true });
+    expect(checkUnstake(6n * TAO, 5n * TAO, most)).toMatchObject({ ok: false, code: "tooMuch", offerAll: true });
+    // this batch's request already as large as one can be
+    expect(checkUnstake(milli(11n), available, milli(10n))).toEqual({
+      ok: false,
+      code: "entryFull",
+      reason: "Your unstake in the current batch is already as large as one can be; unstake more after it leaves",
+      offerAll: false,
+    });
   });
 
   it("names why an unstake can't go, so the form can say it in the unit shown", () => {

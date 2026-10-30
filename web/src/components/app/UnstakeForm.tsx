@@ -20,6 +20,7 @@ import {
   unstakeEquivalent,
   unstakeErrorText,
   unstakeLabelUsd,
+  unstakeMaxWei,
   unstakeNote,
   unstakeRequestWei,
   type UnstakeUnit,
@@ -84,9 +85,11 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const noteId = useId();
 
   const available = position?.availableTaoWei ?? 0n;
+  // v3: the most one unstake can carry (the vault's maxEntryValue); MAX and the check keep to it
+  const most = position?.mostTaoWei;
   const price = position?.taoPriceUsd ?? 0;
   const request = all ? available : (pinned ?? unstakeRequestWei(raw, unit, price));
-  const check = position && request !== null ? checkUnstake(request, available) : null;
+  const check = position && request !== null ? checkUnstake(request, available, most) : null;
   const shares =
     position && check?.ok
       ? check.all
@@ -98,7 +101,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
   const pending = flows.busy === "unstake";
   const error =
     check && !check.ok
-      ? unstakeErrorText(check, available, unit, price)
+      ? unstakeErrorText(check, available, unit, price, most)
       : quoteQuery.isError && shares !== null
         ? "This amount can't be sent back right now"
         : null;
@@ -112,10 +115,18 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
     pending,
   });
 
+  /** MAX: the whole stake, or as much as one unstake can carry (pinned exactly, so a unit switch or the
+   * price can't move it past the limit). */
   function fillAll() {
-    setRaw(maxUnstakeInputIn(available, unit, price));
-    setPinned(null);
-    setAll(true);
+    const max = unstakeMaxWei(available, most);
+    setRaw(maxUnstakeInputIn(max, unit, price));
+    if (max === available) {
+      setPinned(null);
+      setAll(true);
+    } else {
+      setPinned(max);
+      setAll(false);
+    }
   }
 
   /** Switches the unit, showing the same amount in the other unit (MAX stays MAX). */
@@ -161,7 +172,7 @@ function UnstakeFormBody({ account, position }: { account: string | null; positi
       <p id={noteId} className={error ? styles.error : styles.note}>
         {error ??
           (position
-            ? `${request !== null && price > 0 ? `${unstakeEquivalent(request, unit, price)}. ` : ""}${unstakeNote(available, unit, price)}`
+            ? `${request !== null && price > 0 ? `${unstakeEquivalent(request, unit, price)}. ` : ""}${unstakeNote(available, unit, price, most)}`
             : "Connect a wallet to see what you can unstake.")}
       </p>
       {check && !check.ok && check.offerAll && (

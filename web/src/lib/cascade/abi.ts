@@ -76,6 +76,7 @@ export const VAULT = parseAbi([
   "function stakeHotkey() view returns (bytes32)",
   "function payoutDelay() view returns (uint64)",
   "function rewardCutBps() view returns (uint16)",
+  "function maxEntryValue() view returns (uint256)",
   "function coldkey() view returns (bytes32)",
   "function frontDoorActive(bytes32 peer) view returns (bool)",
   "function primaryBridge() view returns (address)",

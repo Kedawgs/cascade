@@ -211,6 +211,14 @@ describe("cancelled requests", () => {
     const p = await createLiveCascadeData(D, d).getAvailable(ME);
     expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 4n * 10n ** 21n);
   });
+
+  it("give the most one more unstake can carry: the vault's maxEntryValue less 1% and what the open batch already asks", async () => {
+    // 10 TAO an entry; this account's open-batch request is 1e21 shares, 0.001 TAO at 1e-6 TAO a share
+    const p = await createLiveCascadeData(D, deps({ readVault: async () => ({ ...vault, maxEntryValue: 10n * 10n ** 18n }) })).getAvailable(ME);
+    expect(p.mostTaoWei).toBe(9_899n * 10n ** 15n);
+    // a vault that has no such limit (v2): none
+    expect((await createLiveCascadeData(D, deps()).getAvailable(ME)).mostTaoWei).toBeUndefined();
+  });
 });
 
 describe("the vault's history", () => {

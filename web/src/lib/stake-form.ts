@@ -266,6 +266,14 @@ export function unstakeEquivalent(taoWei: bigint, typedIn: UnstakeUnit, priceUsd
   return typedIn === "TAO" ? `≈ ${formatUsd(tao * priceUsd)}` : `≈ ${formatTao(tao, 4)} TAO`;
 }
 
+/** The TAO MAX asks for: the whole stake, or with a per-unstake limit (`mostWei`, units.unstakeMostWei)
+ * at most that, leaving at least the minimum unstake behind so what stays can be unstaked later. */
+export function unstakeMaxWei(availableWei: bigint, mostWei: bigint | undefined): bigint {
+  if (mostWei === undefined || availableWei <= mostWei) return availableWei;
+  const leavingMin = availableWei - MIN_UNSTAKE_WEI;
+  return leavingMin < mostWei ? leavingMin : mostWei;
+}
+
 /** What MAX types in the unit shown: exact TAO (six decimals), or its USDC value floored to cents. */
 export function maxUnstakeInputIn(taoWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
   if (unit === "TAO") return maxUnstakeInput(taoWei);
@@ -304,8 +312,19 @@ const usdDown = (taoWei: bigint, priceUsd: number) => formatUsd(floorTo(toDispla
 /** The minimum in dollars, rounded up to the cent so typing the figure shown is always enough. */
 const MIN_USD = (priceUsd: number) => `about ${formatUsd(Math.ceil(toDisplay(MIN_UNSTAKE_WEI, 18) * priceUsd * 100 - 1e-7) / 100)}`;
 
-/** The line under the unstake field: how much can go and the minimum, in the unit shown. */
-export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
+/** "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest after this one", in the unit shown. */
+function oneUnstakeText(mostWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
+  const tao = `${maxUnstakeInput(mostWei)} TAO`;
+  return `One unstake can carry up to ${unit === "USDC" && priceUsd > 0 ? `${usdDown(mostWei, priceUsd)} (${tao})` : tao}; unstake the rest after this one`;
+}
+
+/** The line under the unstake field: how much can go and the minimum, in the unit shown. A stake larger
+ * than one unstake can carry (`mostWei`) says so instead. */
+export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number, mostWei?: bigint): string {
+  if (mostWei !== undefined && availableWei > mostWei) {
+    const min = unit === "USDC" && priceUsd > 0 ? `${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT})` : MIN_UNSTAKE_TEXT;
+    return `${oneUnstakeText(mostWei, unit, priceUsd)}. The minimum is ${min}.`;
+  }
   if (unit === "USDC" && priceUsd > 0) {
     return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
   }
@@ -313,9 +332,17 @@ export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: n
 }
 
 /** Why an amount can't be unstaked, in dollars when the user types dollars. */
-export function unstakeErrorText(check: Extract<UnstakeCheck, { ok: false }>, availableWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
+export function unstakeErrorText(
+  check: Extract<UnstakeCheck, { ok: false }>,
+  availableWei: bigint,
+  unit: UnstakeUnit,
+  priceUsd: number,
+  mostWei?: bigint,
+): string {
   if (unit !== "USDC" || !(priceUsd > 0)) return check.reason;
   switch (check.code) {
+    case "overEntry":
+      return mostWei !== undefined ? `${oneUnstakeText(mostWei, unit, priceUsd)}.` : check.reason;
     case "tooMuch":
       return `That's more than you can unstake (up to ${usdDown(availableWei, priceUsd)}).`;
     case "belowMin":

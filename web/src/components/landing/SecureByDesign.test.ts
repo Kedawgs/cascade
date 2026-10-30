@@ -6,10 +6,10 @@ import { SecureByDesign } from "./SecureByDesign";
 const card = (stage: "testing" | "early") => plainText(renderWithCache(createElement(SecureByDesign, { stage })));
 
 describe("SecureByDesign", () => {
-  it("says we can't move your TAO, for every stage", () => {
+  it("says we can't move your TAO without the registry's 7 days' public notice, for every stage", () => {
     for (const stage of ["testing", "early"] as const) {
-      expect(card(stage)).toContain("Your TAO sits in an open, auditable contract. We can't move your TAO.");
-      expect(card(stage)).not.toContain("Not in our hands");
+      expect(card(stage)).toContain("Your TAO sits in an open, auditable contract. We can't move your TAO without 7 days' public notice.");
+      expect(card(stage)).not.toMatch(/Not in our hands|move your TAO\./);
     }
   });
 

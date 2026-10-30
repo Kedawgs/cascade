@@ -38,7 +38,7 @@ export function SecureByDesign({ stage = deploymentStage(DEPLOYMENT) }: { stage?
       <h2 id="secure-heading" className={styles.h2}>
         Secure <b>by design</b>
       </h2>
-      <p className={styles.lede}>Your TAO sits in an open, auditable contract. We can&apos;t move your TAO.</p>
+      <p className={styles.lede}>Your TAO sits in an open, auditable contract. We can&apos;t move your TAO without 7 days&apos; public notice.</p>
       <div className={styles.secure}>
         <div className={styles.sec}>
           <Icon name="shield" />

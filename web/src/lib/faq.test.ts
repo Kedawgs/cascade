@@ -194,10 +194,10 @@ describe("the FAQ's answers say what the code does", () => {
     expect(APY_FOOTNOTE).not.toContain("compounded");
   });
 
-  it("says the daily unstake limit and a pause can hold unstakes", () => {
+  it("says the daily unstake limit, a pause and the guardian switching off the route can hold unstakes", () => {
     for (const d of [TEST, LAUNCH_SITE]) {
       expect(answer(d, "lock-up")).toBe(
-        "No. You can unstake whenever you like; it just takes the time above to come back. Only two things hold an unstake back: the daily unstake limit, which leaves anything over it staked for you to unstake again later, and an emergency pause, for as long as it lasts.",
+        "No. You can unstake whenever you like; it just takes the time above to come back. Only three things hold an unstake back: the daily unstake limit, which leaves anything over it staked for you to unstake again later; an emergency pause, for as long as it lasts; and the guardian switching off Cascade's route, which takes at least 7 days' public notice to undo.",
       );
     }
   });

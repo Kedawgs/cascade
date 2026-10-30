@@ -319,7 +319,7 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
           q: "Is there a lock-up?",
           inApp: true,
           a: [
-            "No. You can unstake whenever you like; it just takes the time above to come back. Only two things hold an unstake back: the daily unstake limit, which leaves anything over it staked for you to unstake again later, and an emergency pause, for as long as it lasts.",
+            `No. You can unstake whenever you like; it just takes the time above to come back. Only three things hold an unstake back: the daily unstake limit, which leaves anything over it staked for you to unstake again later; an emergency pause, for as long as it lasts; and the guardian switching off Cascade's route, which takes at least ${F.registryDelayDays} days' public notice to undo.`,
           ],
         },
         {

@@ -118,7 +118,8 @@ describe("the committed deployments", () => {
     );
     expect(() => checkedDeployment({ ...launch, batchMaxWaitS: 600 })).toThrow(/NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S is 600, but deployments\.json pins v3-launch's at 86400/);
     // left out of the env: refused too
-    const { payoutDelayS: _p, ...noDelay } = launch;
+    const noDelay: Deployment = { ...launch };
+    delete noDelay.payoutDelayS;
     expect(() => checkedDeployment(noDelay)).toThrow(/NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S is not set, but deployments\.json pins v3-launch's at 86400/);
     // a deployment that pins nothing keeps whatever the env says
     const test = readDeployment(envOf("v3-test")) as Deployment;

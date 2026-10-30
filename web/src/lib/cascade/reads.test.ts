@@ -118,7 +118,8 @@ describe("reads", () => {
     const v = await readVault({ bittensor: fake(answers).client }, D3, ME);
     expect(v.maxEntryValue).toBe(10n * 10n ** 18n);
     // a vault that can't say fails the read, so the form never offers an unchecked amount
-    const { maxEntryValue: _m, ...without } = answers;
+    const without: Record<string, unknown> = { ...answers };
+    delete without.maxEntryValue;
     await expect(readVault({ bittensor: fake(without).client }, D3, ME)).rejects.toThrow(/maxEntryValue/);
   });
 

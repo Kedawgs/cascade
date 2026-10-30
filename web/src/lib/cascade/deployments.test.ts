@@ -66,6 +66,27 @@ describe("the committed deployments", () => {
     expect(() => checkedDeployment({ ...d, frontDoor: OTHER })).toThrow(/deployments\.json/);
   });
 
+  it("include the launch, as `pnpm ops web-config` writes it for v3-launch: its 24-hour batch wait and payout delay kept", () => {
+    const env = {
+      NEXT_PUBLIC_CASCADE_FRONT_DOOR: "0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA",
+      NEXT_PUBLIC_CASCADE_BASE_ADAPTER: "0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92",
+      NEXT_PUBLIC_CASCADE_STAKER: "0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E",
+      NEXT_PUBLIC_CASCADE_ORACLE: "0xcAa85F00b6e470Dd28a31FBa982267B820736eBc",
+      NEXT_PUBLIC_CASCADE_VAULT: "0x450cD94401B45c72C09734071fe683F6b74Aea72",
+      NEXT_PUBLIC_CASCADE_BIT_ADAPTER: "0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1",
+      NEXT_PUBLIC_CASCADE_BIT_BLOCK: "9398120",
+      NEXT_PUBLIC_CASCADE_VAULT_SS58: "5ELMyza1QBFKY1K6bbJXoPSENaiJVVTSQZBgdkQujxKpsfQn",
+      NEXT_PUBLIC_CASCADE_HOTKEY_SS58: "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u",
+      NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: "86400",
+      NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: "86400",
+    };
+    const d = checkedDeployment(readDeployment(env)) as Deployment;
+    expect(knownDeployment(d)).toBe("v3-launch");
+    expect(d).toMatchObject({ batchMaxWaitS: 86_400, payoutDelayS: 86_400 });
+    // the test deployments stay listed beside it
+    expect(Object.keys(EXPECTED_DEPLOYMENTS)).toEqual(expect.arrayContaining(["v3-launch", "v3-test", "test-2026-10"]));
+  });
+
   it("include the deployment this checkout builds with (web/.env.local), when there is one", () => {
     const path = fileURLToPath(new URL("../../../.env.local", import.meta.url));
     if (!existsSync(path)) return;

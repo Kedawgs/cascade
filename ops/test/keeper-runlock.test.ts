@@ -41,6 +41,23 @@ describe("pnpm ops run holds a lock for its deployment, so two keepers never run
     expect(said).toEqual([`took over a stale lock: ${path} named PID 4242, which is gone`]);
   });
 
+  it("after taking over a stale lock, checks the file is still its own: a racer's lock is refused, and left alone", () => {
+    const path = join(dir(), "v3-launch.run.lock");
+    writeFileSync(path, JSON.stringify({ pid: 4242 }));
+    // another keeper saw the same stale lock, removed this one's fresh lock and wrote its own meanwhile
+    const racer = () => writeFileSync(path, JSON.stringify({ pid: 6161, startedAt: "2026-10-30T00:00:01.000Z" }));
+    expect(() => takeRunLock(path, { pid: 5151, alive: () => false, settle: racer })).toThrow(RunLockHeld);
+    expect(() => {
+      writeFileSync(path, JSON.stringify({ pid: 4242 }));
+      takeRunLock(path, { pid: 5151, alive: () => false, settle: racer });
+    }).toThrow(/another keeper \(PID 6161\) took the lock first.*nothing started/);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ pid: 6161 });
+    // with no racer, the takeover holds
+    writeFileSync(path, JSON.stringify({ pid: 4242 }));
+    takeRunLock(path, { pid: 5151, alive: () => false, settle: () => undefined });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ pid: 5151 });
+  });
+
   it("refuses a lock it can't read, saying how to clear it", () => {
     const path = join(dir(), "v3-launch.run.lock");
     writeFileSync(path, "{not json");

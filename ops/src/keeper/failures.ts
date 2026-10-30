@@ -2,7 +2,9 @@ import type { Address, Hex } from "viem";
 import type { ChainName } from "../config.ts";
 import { RecordMismatch } from "../record.ts";
 import { describeCode, RpcError } from "../rpc.ts";
-import { chainLabel, ReceiptTimeout, RevertedOnChain, SendRefused } from "../send.ts";
+import { chainLabel, ReceiptTimeout, RevertedOnChain, SendRefused, scrubSecrets } from "../send.ts";
+
+export { scrubSecrets } from "../send.ts";
 
 /** The keeper wallet has code on `chain` (either chain stops a send on either). Not a SendRefused: a
  * run's delivery treats most of those as a wait for the next round, and this must stop the run. */
@@ -175,26 +177,6 @@ export function nextWaitMs(intervalMs: number, failing: number, capMs = 300_000)
 /** A wait in words for the log: "30 s", "2 min", "2.5 min". */
 export function inWords(ms: number): string {
   return ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Number((ms / 60_000).toFixed(1))} min`;
-}
-
-/** A URL: its scheme, its authority (user info, host, port), and the rest (path, query, fragment). */
-const URL_IN_TEXT = /\b([a-z][a-z0-9+.-]*):\/\/([^\s/?#"'<>()[\]]+)([^\s"'<>()[\]]*)/gi;
-
-/** `text` with every URL cut down to its scheme, its host's last two labels and its port (no user info,
- * subdomain, path or query, where a provider's key can sit), and every key-like `name=value` value
- * dropped. `run` passes every line it logs through this. */
-export function scrubSecrets(text: string): string {
-  return text
-    .replace(URL_IN_TEXT, (_m, scheme: string, authority: string, rest: string) => {
-      const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
-      const colon = hostPort.lastIndexOf(":");
-      const host = colon > 0 && !hostPort.endsWith("]") ? hostPort.slice(0, colon) : hostPort;
-      const port = host === hostPort ? "" : hostPort.slice(colon);
-      const labels = host.split(".");
-      const shown = /^[\d.]+$/.test(host) || host.startsWith("[") || labels.length <= 2 ? host : `…${labels.slice(-2).join(".")}`;
-      return `${scheme}://${shown}${port}${rest ? "/…" : ""}`;
-    })
-    .replace(/\b((?:d|api_?)?key|token|secret|password|passwd)=[^&\s)"']+/gi, "$1=…");
 }
 
 /** An error's message on one line, at most `max` characters (a send's stderr can run to many). */

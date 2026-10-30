@@ -27,21 +27,38 @@ function holder(path: string): number | undefined {
   }
 }
 
+/** Blocks for `ms` (a takeover's settle time; `run` has nothing else to do yet). */
+const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
 /** Takes `run`'s lock for one deployment: created only when absent, naming this process. A lock whose
  * process is gone (a keeper that was killed) is stale and taken over; one whose process is alive, or that
  * can't be read, is refused (RunLockHeld). So a keeper started by hand can't run beside the supervised
  * one, nor two by hand. A process id Windows has since given to another process reads as alive: the
- * refusal says how to clear it. Returns the release, which removes the lock only while it is still this
- * process's. */
+ * refusal says how to clear it.
+ *
+ * Two keepers can find the same stale lock at once: each removes it, and the slower one's removal can
+ * take the faster one's fresh lock with it. So after a takeover it waits a moment (`settle`, 200 ms) and
+ * reads the file again: holding another process's id, it refuses, leaving that lock alone. Returns the
+ * release, which removes the lock only while it is still this process's. */
 export function takeRunLock(
   path: string,
-  o: { pid?: number; alive?: (pid: number) => boolean; log?: (line: string) => void; now?: () => Date } = {},
+  o: { pid?: number; alive?: (pid: number) => boolean; log?: (line: string) => void; now?: () => Date; settle?: () => void } = {},
 ): () => void {
   const pid = o.pid ?? process.pid;
   const alive = o.alive ?? processAlive;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       writeFileSync(path, JSON.stringify({ pid, startedAt: (o.now?.() ?? new Date()).toISOString() }), { flag: "wx" });
+      if (attempt > 0) {
+        // a takeover: another keeper that saw the same stale lock may have replaced this one meanwhile
+        (o.settle ?? (() => pause(200)))();
+        const now = holder(path);
+        if (now !== pid) {
+          throw new RunLockHeld(
+            `another keeper (PID ${now ?? "unknown"}) took the lock first: ${path} no longer names this process after the stale one was taken over; never run two keepers at once; nothing started`,
+          );
+        }
+      }
       return () => {
         try {
           if (holder(path) === pid) unlinkSync(path);
@@ -61,7 +78,12 @@ export function takeRunLock(
         `another keeper (PID ${held}) is already running for this deployment: it holds ${path}; never run two keepers at once. If no keeper is running (Windows reused that PID), delete ${path}; nothing started`,
       );
     }
-    unlinkSync(path);
+    try {
+      unlinkSync(path);
+    } catch (e) {
+      // another keeper removed it first: the next create, and its check, decide
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
     o.log?.(`took over a stale lock: ${path} named PID ${held}, which is gone`);
   }
   throw new RunLockHeld(`could not take ${path}: another keeper took it first; nothing started`);

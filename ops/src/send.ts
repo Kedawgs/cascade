@@ -149,6 +149,27 @@ export function redact(targets: Ctx["targets"], text: string): string {
   return out.replace(/((?:d|api_?)?key|token|secret)=[^&\s)"']+/gi, "$1=…");
 }
 
+/** A URL: its scheme, its authority (user info, host, port), and the rest (path, query, fragment). */
+const URL_IN_TEXT = /\b([a-z][a-z0-9+.-]*):\/\/([^\s/?#"'<>()[\]]+)([^\s"'<>()[\]]*)/gi;
+
+/** `text` with every URL cut down to its scheme, its host's last two labels and its port (no user info,
+ * subdomain, path or query, where a provider's key can sit; a bare "/" carries none and stays, so the
+ * sign page's http://127.0.0.1:<port>/ still opens), and every key-like `name=value` value dropped.
+ * Unlike redact it needs no list of RPCs: every line the CLI prints goes through it (output.ts). */
+export function scrubSecrets(text: string): string {
+  return text
+    .replace(URL_IN_TEXT, (_m, scheme: string, authority: string, rest: string) => {
+      const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+      const colon = hostPort.lastIndexOf(":");
+      const host = colon > 0 && !hostPort.endsWith("]") ? hostPort.slice(0, colon) : hostPort;
+      const port = host === hostPort ? "" : hostPort.slice(colon);
+      const labels = host.split(".");
+      const shown = /^[\d.]+$/.test(host) || host.startsWith("[") || labels.length <= 2 ? host : `…${labels.slice(-2).join(".")}`;
+      return `${scheme}://${shown}${port}${rest === "" || rest === "/" ? rest : "/…"}`;
+    })
+    .replace(/\b((?:d|api_?)?key|token|secret|password|passwd)=[^&\s)"']+/gi, "$1=…");
+}
+
 /** A URL's registrable domain, the last two labels of its host (drpc.org, publicnode.com): never a
  * subdomain, path or query, where a provider's key can sit. An IP address or a one-label host as it is.
  * (No public-suffix list: a host under e.g. co.uk shows as co.uk, which says less but leaks nothing.) */

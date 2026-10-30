@@ -21,13 +21,15 @@ import { rehearse } from "./rehearse.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { createRpc, logsRpc } from "./rpc.ts";
 import { baseLogsLine, type Ctx, execFileRunner, unit } from "./send.ts";
+import { printError, printLine } from "./output.ts";
 import { liveRoles, prepareSign, servePage } from "./sign.ts";
 import { verifyAndSave } from "./verify.ts";
 import { writeWebEnv } from "./webconfig.ts";
 import { sweep, windDown } from "./winddown.ts";
 
 const env = process.env;
-const log = (l: string) => console.log(l);
+// every line printed, from any command, with any URL's secrets stripped (output.ts)
+const log = printLine;
 
 function ctxFor(live: boolean): Ctx {
   const t = live ? targets(env).live : targets(env).rehearsal;
@@ -249,7 +251,9 @@ async function main(argv: string[]): Promise<number> {
     a = parseArgs(argv);
   } catch (e) {
     if (!(e instanceof UsageError)) throw e;
-    console.error(`${e.message}\n\n${USAGE}`);
+    // the usage text is fixed (its own example URLs stay whole); the message can quote what was typed
+    printError(e.message);
+    console.error(`\n${USAGE}`);
     return 2;
   }
   return run(a);
@@ -260,6 +264,6 @@ async function main(argv: string[]): Promise<number> {
 const exit = (code: number) => process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
 
 main(process.argv.slice(2)).then(exit, (e) => {
-  console.error(e instanceof Error ? e.message : e);
+  printError(e instanceof Error ? e.message : String(e));
   exit(1);
 });

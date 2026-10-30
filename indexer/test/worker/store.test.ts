@@ -318,6 +318,18 @@ describe("loadTickState", () => {
     expect(s.meta.digest_date).toBe("2026-10-29");
   });
 
+  it("keeps a watched row's Safe mark, and leaves it off an account's row", async () => {
+    await db.batch(
+      upsertNonces(db, [
+        { chain: "base", address: USER, roles: ["frontDoor.owner"], baseline: 3, seen: 0, nonce: 3, changedAt: 1, safe: true },
+        { chain: "base", address: OTHER, roles: ["frontDoor.keeper"], baseline: 9, seen: 0, nonce: 9, changedAt: 1 },
+      ]),
+    );
+    const s = await loadTickState(db, 100);
+    expect(s.nonces.find((r) => r.address === USER)?.safe).toBe(true);
+    expect(s.nonces.find((r) => r.address === OTHER)).not.toHaveProperty("safe");
+  });
+
   it("upsertNonces replaces a watched address's row", async () => {
     const row = { chain: "bittensor" as const, address: USER, roles: ["vault.keeper"], baseline: 10, seen: 0, nonce: 10, changedAt: 1 };
     await db.batch(upsertNonces(db, [row]));

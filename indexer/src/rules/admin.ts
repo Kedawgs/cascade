@@ -182,23 +182,25 @@ export const keys: Rule = {
       const counts = Object.fromEntries(Object.entries(ctx.snap.nonces[chain]).map(([a, n]) => [lower(a as Hex), n]));
       const safes = Object.fromEntries(Object.entries(ctx.snap.safeNonces).map(([a, n]) => [lower(a as Hex), n]));
       for (const h of now) {
-        const read = safes[h.address] ?? counts[h.address];
         const row = stored.get(`${chain}:${h.address}`);
+        const isSafe = safes[h.address] !== undefined;
+        // a row once read as a Safe is judged only by its nonce(): a tick without it (its code misread) is skipped
+        const read = isSafe ? safes[h.address] : row?.safe ? undefined : counts[h.address];
         if (read === undefined) {
           if (row && !sameRoles(row.roles, h.roles)) ctx.writes.nonces.push({ ...row, roles: h.roles });
           continue;
         }
         const count = Number(read);
+        const safe = isSafe || row?.safe ? ({ safe: true } as const) : {};
         if (!row) {
-          ctx.writes.nonces.push({ chain, address: h.address, roles: h.roles, baseline: count, seen: 0, nonce: count, changedAt: ctx.nowS });
+          ctx.writes.nonces.push({ chain, address: h.address, roles: h.roles, baseline: count, seen: 0, nonce: count, changedAt: ctx.nowS, ...safe });
           continue;
         }
         // an account's count moves only for what it sends; a Safe's nonce for what it executes, which
         // arrives as a transaction sent to it (or names it as the caller in an event's args)
-        const isSafe = safes[h.address] !== undefined;
         const mine = (t: TxRow) => lower(t.from) === h.address || (isSafe && t.to !== undefined && lower(t.to) === h.address);
         const seenNow = ctx.newTxs.filter((t) => t.chain === chain && mine(t)).length;
-        const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + seenNow, nonce: count };
+        const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + seenNow, nonce: count, ...safe };
         let excess = count - next.baseline - next.seen;
         if (excess < 0) {
           // more seen than counted (a count read before the logs, or a reorg): start again from the count
@@ -217,7 +219,8 @@ export const keys: Rule = {
           });
           next.baseline += excess;
         }
-        const changed = next.baseline !== row.baseline || next.seen !== row.seen || next.nonce !== row.nonce || next.changedAt !== row.changedAt || !sameRoles(next.roles, row.roles);
+        const changed =
+          next.baseline !== row.baseline || next.seen !== row.seen || next.nonce !== row.nonce || next.changedAt !== row.changedAt || !sameRoles(next.roles, row.roles) || next.safe !== row.safe;
         if (changed) ctx.writes.nonces.push(next);
       }
     }

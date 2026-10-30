@@ -74,6 +74,8 @@ export interface NonceRow {
   nonce: number;
   /** since when the count has been ahead of what the logs explain (or when that last began) */
   changedAt: number;
+  /** read as a Safe (by its nonce()) once: it stays one, and a tick without its nonce() skips it */
+  safe?: true;
 }
 
 export interface MessageRow {
@@ -314,7 +316,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 6"),
     db.prepare("SELECT at, base_block, bit_block, json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 6"),
     db.prepare("SELECT hour, json FROM hours ORDER BY hour DESC LIMIT 170"),
-    db.prepare("SELECT chain, address, roles, baseline, seen, nonce, changed_at FROM nonces"),
+    db.prepare("SELECT chain, address, roles, baseline, seen, nonce, changed_at, safe FROM nonces"),
     db.prepare("SELECT * FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' ORDER BY src_block LIMIT 100"),
     // with the bridge the landing came through: delivered(bridge, hash) is read for it
     db.prepare(
@@ -370,6 +372,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
       seen: Number(r.seen),
       nonce: Number(r.nonce),
       changedAt: Number(r.changed_at),
+      ...(Number(r.safe) === 1 ? { safe: true } : {}),
     })),
     pendingMessages: rows(7).map(messageOf),
     awaitingReads: rows(8).map(chunkCheckOf),
@@ -525,11 +528,11 @@ export function upsertBlocks(db: D1Database, rows: readonly { chain: ChainName; 
 /** Watched addresses' rows, written as the keys rule decided them. */
 export function upsertNonces(db: D1Database, rows: readonly NonceRow[]): D1PreparedStatement[] {
   const stmt = db.prepare(
-    `INSERT INTO nonces (chain, address, roles, baseline, seen, nonce, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    `INSERT INTO nonces (chain, address, roles, baseline, seen, nonce, changed_at, safe) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
      ON CONFLICT (chain, address) DO UPDATE SET roles = excluded.roles, baseline = excluded.baseline, seen = excluded.seen,
-       nonce = excluded.nonce, changed_at = excluded.changed_at`,
+       nonce = excluded.nonce, changed_at = excluded.changed_at, safe = MAX(nonces.safe, excluded.safe)`,
   );
-  return rows.map((r) => stmt.bind(r.chain, r.address, JSON.stringify(r.roles), r.baseline, r.seen, r.nonce, r.changedAt));
+  return rows.map((r) => stmt.bind(r.chain, r.address, JSON.stringify(r.roles), r.baseline, r.seen, r.nonce, r.changedAt, r.safe ? 1 : 0));
 }
 
 /** A fetched transaction (with `to`, selector and nonce) fills in, and wins over, one known only from an

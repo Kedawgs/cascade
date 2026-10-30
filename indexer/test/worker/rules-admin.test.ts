@@ -184,6 +184,27 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     expect(one.writes.nonces[0]).toMatchObject({ changedAt: NOW });
   });
 
+  it("remembers a Safe: a tick without its nonce() (its code misread) is skipped, never judged by its transaction count", () => {
+    // first read as a Safe: the row is marked
+    const first = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, counts: { base: { [SAFE]: 1n } } });
+    keys.run(first);
+    expect(first.writes.nonces).toEqual([expect.objectContaining({ address: SAFE, nonce: 3, safe: true })]);
+    const safeRow = first.writes.nonces[0];
+    // a tick where only its transaction count (1) answers: nothing judged, nothing written
+    const misread = ctx({ base: { owner: SAFE }, counts: { base: { [SAFE]: 1n } }, nonces: [safeRow] });
+    expect(keys.run(misread)).toEqual([]);
+    expect(misread.writes.nonces).toEqual([]);
+    // and its nonce() back, unchanged: still nothing (the baseline wasn't reset to the count)
+    const back = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, counts: { base: { [SAFE]: 1n } }, nonces: [safeRow], nowS: NOW + 3600 });
+    expect(keys.run(back)).toEqual([]);
+  });
+
+  it("marks a watched account a Safe once its nonce() is read (a Safe deployed at it)", () => {
+    const c = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 0n }, nonces: [row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 0, nonce: 0 })] });
+    keys.run(c);
+    expect(c.writes.nonces).toEqual([expect.objectContaining({ address: SAFE, safe: true })]);
+  });
+
   it("starts again from the count when more is seen than the count explains", () => {
     const c = ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [row({ address: ADMIN })], newTxs: sent(3, ADMIN) });
     expect(keys.run(c)).toEqual([]);

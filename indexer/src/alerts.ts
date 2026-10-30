@@ -81,13 +81,24 @@ const asDue = (a: Live, reason: Due["reason"]): Due => ({
  * - Holds come only from rules that can hold. */
 export function reconcile(
   db: D1Database,
-  o: { open: readonly AlertRow[]; findings: readonly Finding[]; nowS: number; t: Thresholds; holdActive: boolean; lastWarningSentAt?: number },
+  o: {
+    open: readonly AlertRow[];
+    findings: readonly Finding[];
+    nowS: number;
+    t: Thresholds;
+    holdActive: boolean;
+    lastWarningSentAt?: number;
+    /** alerts quieted this tick (a chain catching up): their findings are dropped, and their open alerts are
+     * left as they are, neither resolved nor sent again */
+    quiet?: (a: { rule: string; key: string }) => boolean;
+  },
 ): { statements: D1PreparedStatement[]; due: Due[]; holds: { id: string; rule: RuleId; summary: string }[] } {
   const { nowS, t } = o;
   const off = new Set(t.rules.off);
+  const quiet = o.quiet ?? (() => false);
   const kept = new Map<string, Finding>();
   for (const f of o.findings) {
-    if (off.has(f.rule) || (o.holdActive && RULES[f.rule].mutedByHold) || kept.has(f.key)) continue;
+    if (off.has(f.rule) || (o.holdActive && RULES[f.rule].mutedByHold) || kept.has(f.key) || quiet(f)) continue;
     kept.set(f.key, f);
   }
   const open = new Map(o.open.map((a) => [a.alertKey, a]));
@@ -116,7 +127,7 @@ export function reconcile(
   }
 
   for (const a of o.open) {
-    if (kept.has(a.alertKey)) continue;
+    if (kept.has(a.alertKey) || quiet({ rule: a.rule, key: a.alertKey })) continue;
     const row: Live = {
       key: a.alertKey,
       rule: a.rule as RuleId,

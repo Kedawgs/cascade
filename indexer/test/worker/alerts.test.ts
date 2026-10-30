@@ -135,6 +135,29 @@ describe("what is dropped", () => {
     expect((await rows()).map((x) => x.rule)).toEqual(["keeper.low_eth"]);
   });
 
+  it("leaves a quieted alert alone: an open one isn't resolved or sent again, and a new one isn't opened", async () => {
+    // indexer.blind on Bittensor opened and sent; then Bittensor is quieted (catching up), Base isn't
+    await tick(T0, [finding("indexer.blind", "indexer.blind:bittensor"), finding("indexer.blind", "indexer.blind:base")]);
+    const state = await loadTickState(db, T0 + 3600);
+    const quiet = (a: { rule: string; key: string }) => a.key === "indexer.blind:bittensor" || a.rule === "bridge.check_stuck";
+    const r = reconcile(db, {
+      open: state.openAlerts,
+      findings: [finding("indexer.blind", "indexer.blind:bittensor"), finding("bridge.check_stuck", "bridge.check_stuck:1:0xk")],
+      nowS: T0 + 3600,
+      t: DEFAULTS,
+      holdActive: false,
+      quiet,
+    });
+    if (r.statements.length) await db.batch(r.statements);
+    // Bittensor's: neither resolved nor due again (an hour on, a resend would be due); Base's, not quieted and
+    // not found, resolves as usual; the quieted check_stuck opens nothing
+    expect(r.due.map((x) => [x.key, x.reason])).toEqual([["indexer.blind:base", "resolved"]]);
+    expect(await rows()).toEqual([
+      expect.objectContaining({ alert_key: "indexer.blind:bittensor", resolved_at: null }),
+      expect.objectContaining({ alert_key: "indexer.blind:base", resolved_at: T0 + 3600 }),
+    ]);
+  });
+
   it("never returns a hold for a rule that can't hold", async () => {
     const r = await tick(T0, [
       finding("admin.event", "admin.event:1", { hold: { id: "admin.event:1", summary: "no" } }),

@@ -125,11 +125,13 @@ describe("buildDigest", () => {
     expect(await text(1_012_345_678_901n)).toContain("share price: 1.012345678901 TAO per csTAO");
   });
 
-  it("says when a chain is catching up, and that the cross-checks wait", async () => {
+  it("says when a chain is catching up, and what that quiets", async () => {
     await wipe(db);
     const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [] };
     const text = (d: Awaited<ReturnType<typeof buildDigest>>) => d.sections.map((s) => s.lines.join("\n")).join("\n");
-    expect(text(await buildDigest({ ...o, meta: { catching_up: "bittensor" } }))).toContain("catching up: bittensor (the cross-checks wait until both chains are within an hour of their heads)");
+    expect(text(await buildDigest({ ...o, meta: { catching_up: "bittensor" } }))).toContain(
+      "catching up: bittensor (its first backfill: its lag alerts are quiet, and a cross-check waiting on it isn't reported stuck)",
+    );
     expect(text(await buildDigest({ ...o, meta: { catching_up: "" } }))).not.toContain("catching up");
   });
 

@@ -86,10 +86,15 @@ const BASE_SCAN_RESERVE = 4;
 const BIT_WALL_SHARE = 0.75;
 /** The RPC client's deadline for the whole tick: the lease less this, so the commit lands inside the lease. */
 const LEASE_MARGIN_S = 30;
-/** A chain more than this far from its head that is still moving forward is catching up (spec 3.2): the
- * cross-checks wait and its lag alerts are quiet, and the digest says so. A chain that far back that doesn't
- * move is stuck, and its lag alerts fire. */
+/** A chain more than this far from its head is catching up (spec 3.2) while its lag shrinks, until both chains
+ * have first come within it (meta.caught_up): its lag alerts are quiet, a cross-check waiting on it isn't
+ * reported stuck, and the digest says so. */
 export const CATCH_UP_S = 3600;
+/** The lag must shrink by at least this much in a tick (settled time gained beyond the head's) to count as
+ * catching up: a chain whose settled block is frozen, or that only keeps pace, is stuck, and its alerts fire. */
+export const CATCH_UP_GAIN_S = 60;
+/** The findings quiet while a chain catches up: a check waiting on the other chain is expected to. */
+const QUIET_WHILE_CATCHING_UP: ReadonlySet<string> = new Set(["bridge.check_stuck", "bridge.payout_unchecked"]);
 /** Base blocks in 24 hours (2-second blocks): the redeem requests unstakes.tiny_wave counts. */
 const DAY_BASE_BLOCKS = 43_200n;
 /** At most this many transactions wait in the retry list (meta tx_backlog), the newest kept. */
@@ -199,6 +204,24 @@ export function blocksToTime(o: { settledTo?: bigint; checks: readonly bigint[];
   for (const n of [...o.checks].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) add(n);
   for (const n of [...o.logs].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0))) add(n);
   return out;
+}
+
+/** The chains catching up this tick: never once both have first come within CATCH_UP_S of their heads
+ * (`caughtUp`), and otherwise those more than CATCH_UP_S behind whose lag shrank by CATCH_UP_GAIN_S or more
+ * this tick (their settled time gained that much more than their head's; a settled time first known this tick
+ * counts as a gain). A settled block that is frozen, or merely keeps pace, is not catching up. */
+export function catchingUpChains(o: {
+  caughtUp: boolean;
+  chains: Readonly<Record<ChainName, { lagS: number; settled: { before: number | null; now: number | null }; head: { before: number | null; now: number } }>>;
+}): ChainName[] {
+  if (o.caughtUp) return [];
+  return CHAINS.filter((c) => {
+    const x = o.chains[c];
+    if (x.lagS <= CATCH_UP_S || x.settled.now === null) return false;
+    if (x.settled.before === null) return true;
+    const headGain = x.head.before === null ? 0 : x.head.now - x.head.before;
+    return x.settled.now - x.settled.before - headGain >= CATCH_UP_GAIN_S;
+  });
 }
 
 /** The seed is rebuilt instead of appended when a seed log was removed or re-mined, or a new seed event lies
@@ -486,8 +509,16 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
 
   // 8. the rules
   const payoutDelayS = payoutDelayOf(snap, history.bittensor, state.meta);
-  const progressed = (c: ChainName) => next[c].scannedTo !== null && (cursors[c].scannedTo === null || (next[c].scannedTo as bigint) > cursors[c].scannedTo!);
-  const catchingUp = CHAINS.filter((c) => headTime[c] - (next[c].settledTime ?? 0) > CATCH_UP_S && progressed(c));
+  const lagOf = (c: ChainName) => headTime[c] - (next[c].settledTime ?? 0);
+  const caughtUp = state.meta.caught_up !== undefined && state.meta.caught_up !== "";
+  const catchingUp = catchingUpChains({
+    caughtUp,
+    chains: Object.fromEntries(
+      CHAINS.map((c) => [c, { lagS: lagOf(c), settled: { before: cursors[c].settledTime, now: next[c].settledTime }, head: { before: cursors[c].headTime, now: headTime[c] } }]),
+    ) as Parameters<typeof catchingUpChains>[0]["chains"],
+  });
+  // both chains within the hour for the first time: catching up is over for good (indexer.blind is never quiet after)
+  const firstCaughtUp = !caughtUp && CHAINS.every((c) => next[c].settledTime !== null && lagOf(c) <= CATCH_UP_S);
   const hours = state.hours.flatMap((r) => {
     const h = expandHour(r.json);
     return h ? [h] : [];
@@ -525,9 +556,12 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     meta: state.meta,
     writes: { batchChecks: [], chunkChecks: [], nonces: [], meta: [] },
   };
-  const rules = catchingUp.length ? TICK_RULES.filter((r) => !BRIDGE_RULES.includes(r)) : TICK_RULES;
-  const findings = runRules(rules, ctx).filter((f) => !((f.rule === "indexer.lag" || f.rule === "indexer.blind") && catchingUp.includes(f.facts.chain as ChainName)));
-  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at) });
+  // every rule runs, the cross-checks too (they wait for the other chain by themselves); while a chain catches
+  // up, its lag alerts and the reports of checks stuck waiting are quiet: dropped if new, left as they are if open
+  const findings = runRules(TICK_RULES, ctx);
+  const quiet = (a: { rule: string; key: string }) =>
+    catchingUp.length > 0 && (QUIET_WHILE_CATCHING_UP.has(a.rule) || catchingUp.some((c) => a.key === `indexer.lag:${c}` || a.key === `indexer.blind:${c}`));
+  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at), quiet });
   const holds = holdStatements(db, r.holds, state.holdIds, nowS);
 
   // 9. commit 1, guarded by the lease
@@ -538,6 +572,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   changes("tx_backlog", txBacklog.length ? JSON.stringify(txBacklog) : "");
   if (snap.bittensor?.state.payoutDelay !== undefined) changes("payout_delay", String(snap.bittensor.state.payoutDelay));
   changes("catching_up", catchingUp.join(","));
+  if (firstCaughtUp) meta.set("caught_up", String(nowS));
   meta.set("last_complete_tick", String(nowS));
   const hourNow = Math.floor(nowS / 3600) * 3600;
   const hourPrev = hours.find((h) => h.hour === hourNow);

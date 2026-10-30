@@ -100,7 +100,9 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
     const cur = i.cursors[c];
     return `${c}: ${cur?.headTime && cur.settledTime ? `${Math.floor((cur.headTime - cur.settledTime) / 60)} minutes behind` : "unknown"}`;
   });
-  if (i.meta.catching_up) lag.push(`catching up: ${i.meta.catching_up.split(",").join(", ")} (the cross-checks wait until both chains are within an hour of their heads)`);
+  if (i.meta.catching_up) {
+    lag.push(`catching up: ${i.meta.catching_up.split(",").join(", ")} (its first backfill: its lag alerts are quiet, and a cross-check waiting on it isn't reported stuck)`);
+  }
   const counted = i.meta.ticks_date === dateOf(i.nowS);
   const ticks = counted ? `ticks: ${i.meta.ticks_run ?? 0} run, ${i.meta.ticks_failed ?? 0} failed, ${i.meta.ticks_skipped ?? 0} skipped` : "ticks: none counted today";
   return {

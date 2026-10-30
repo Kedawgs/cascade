@@ -2,7 +2,11 @@ import { env } from "cloudflare:workers";
 import type { Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import { countingDb, wipe } from "./d1-count.ts";
-import { failingCommits, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, tickWorld } from "./tick-world.ts";
+import { BIT_ADAPTER } from "../../src/abi.ts";
+import { catchingUpChains } from "../../src/tick.ts";
+import { TEST_URLS } from "./fake-rpc.ts";
+import { rawLog } from "./fixtures.ts";
+import { failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, tickWorld } from "./tick-world.ts";
 
 const db = env.DB;
 
@@ -58,6 +62,39 @@ describe("the cross-check, end to end (D1 → prefetch → rules)", () => {
     // both messages arrived
     expect((await rows<{ dst_tx: string | null }>("SELECT dst_tx FROM messages")).every((m) => m.dst_tx !== null)).toBe(true);
     expect(w.sent).toEqual([]);
+  });
+
+  it("decides a delivery found by a later re-read from the Base history stored ticks before", async () => {
+    const w = tickWorld();
+    const rt = roundTrip(w.cfg, { id: 1n, payout: false });
+    w.addLogs("base", rt.base);
+    await w.tick();
+    expect(await rows("SELECT uid FROM logs WHERE chain = 'bittensor'")).toEqual([]);
+    w.advance();
+    w.addLogs("bittensor", rt.bit);
+    await w.tick();
+    expect(await rows("SELECT batch_id, status, expected_key, detail FROM batch_checks")).toEqual([{ batch_id: 1, status: "ok", expected_key: rt.key, detail: null }]);
+    expect(await alertKeys()).toEqual([]);
+  });
+
+  it("checks a landing that settles a tick later from the vault's logs stored the tick before", async () => {
+    const w = tickWorld();
+    const rt = roundTrip(w.cfg, { id: 1n, blocks: { landing: 37_000_390n } });
+    w.addLogs("base", rt.base);
+    w.addLogs("bittensor", rt.bit);
+    w.state.base.delivered[`${w.cfg.deployment.baseAdapter}:${rt.payoutHash}`] = true;
+    await w.tick();
+    // within SETTLE of Base's head: not stored yet
+    expect(await rows("SELECT status FROM chunk_checks")).toEqual([]);
+    const trail: unknown[] = [];
+    for (let k = 0; k < 6; k++) {
+      w.advance();
+      await w.tick();
+      trail.push(await rows("SELECT status, expected_hash, detail FROM chunk_checks"));
+    }
+    expect(trail).toContainEqual([{ status: "awaiting_read", expected_hash: rt.payoutHash, detail: null }]);
+    expect(await rows("SELECT status FROM chunk_checks")).toEqual([{ status: "ok" }]);
+    expect(await alertKeys()).toEqual([]);
   });
 
   it("lists an honest batch's key in okKeys while its payouts are pending", async () => {
@@ -300,8 +337,32 @@ describe("the seed pages", () => {
   });
 });
 
+describe("catchingUpChains", () => {
+  const chain = (lagS: number, settled: [number | null, number | null], head: [number | null, number]) => ({ lagS, settled: { before: settled[0], now: settled[1] }, head: { before: head[0], now: head[1] } });
+  const fine = chain(100, [1000, 1060], [1100, 1160]);
+  const of = (bittensor: ReturnType<typeof chain>, caughtUp = false) => catchingUpChains({ caughtUp, chains: { base: fine, bittensor } });
+
+  it("is a chain over an hour behind whose lag shrank by a minute or more this tick", () => {
+    expect(of(chain(7200, [1000, 2000], [8000, 8060]))).toEqual(["bittensor"]);
+    // a settled time known for the first time is a gain
+    expect(of(chain(7200, [null, 1000], [null, 8200]))).toEqual(["bittensor"]);
+  });
+
+  it("is not a chain whose settled block is frozen, keeps pace, or isn't over an hour behind", () => {
+    expect(of(chain(7200, [1000, 1000], [8000, 8060]))).toEqual([]);
+    expect(of(chain(7200, [1000, 1060], [8000, 8060]))).toEqual([]);
+    expect(of(chain(7200, [1000, 1100], [8000, 8060]))).toEqual([]);
+    expect(of(chain(3600, [1000, 5000], [4600, 4660]))).toEqual([]);
+    expect(of(chain(7200, [null, null], [null, 8200]))).toEqual([]);
+  });
+
+  it("is never once both chains have first come within the hour", () => {
+    expect(of(chain(7200, [1000, 2000], [8000, 8060]), true)).toEqual([]);
+  });
+});
+
 describe("catching up", () => {
-  it("while a chain is more than an hour behind and moving, the cross-checks wait and its lag is quiet; then they run", async () => {
+  it("while a chain backfills, more than an hour behind and its lag shrinking: its lag is quiet, and the cross-checks judge what both sides hold", async () => {
     const w = tickWorld({ heads: { base: START_HEADS.base, bittensor: 6_903_000n } });
     const rt = roundTrip(w.cfg, { id: 1n, payout: false, forge: "key", blocks: { delivery: 6_900_500n } });
     w.addLogs("base", rt.base);
@@ -313,15 +374,108 @@ describe("catching up", () => {
     const r = await w.tick();
     expect(r.catchingUp).toEqual(["bittensor"]);
     expect(await rows("SELECT v FROM meta WHERE k = 'catching_up'")).toEqual([{ v: "bittensor" }]);
-    expect(await rows("SELECT status FROM batch_checks")).toEqual([{ status: "waiting" }]);
-    expect(await alertKeys()).toEqual([]);
+    // Base is stored past the delivery: the forged batch is judged at once, however far Bittensor has to go
+    expect(await rows("SELECT status, expected_key FROM batch_checks")).toEqual([{ status: "mismatch", expected_key: rt.key }]);
+    expect(await alertKeys()).toEqual([`bridge.batch:1:${rt.deliveredKey}`]);
     for (let i = 0; i < 4; i++) {
       w.advance();
       await w.tick();
     }
     expect(await rows("SELECT v FROM meta WHERE k = 'catching_up'")).toEqual([{ v: "" }]);
-    expect(await rows("SELECT status FROM batch_checks")).toEqual([{ status: "mismatch" }]);
+    expect(await rows("SELECT v FROM meta WHERE k = 'caught_up'")).toEqual([{ v: expect.stringMatching(/^\d+$/) }]);
     expect(await alertKeys()).toEqual([`bridge.batch:1:${rt.deliveredKey}`]);
+  });
+
+  it("during a backfill, a check waiting on the other chain isn't reported stuck, and is decided once that chain is stored past it", async () => {
+    // Base starts 8,000 s back and backfills slowly; the delivery on Bittensor is 6,600 s old
+    const w = tickWorld({ heads: { base: 37_004_000n, bittensor: 6_900_700n } });
+    const rt = roundTrip(w.cfg, { id: 1n, payout: false, blocks: { delivery: 6_900_150n } });
+    w.addLogs("base", rt.base);
+    w.addLogs("bittensor", rt.bit);
+    w.state.bit.payoutBatches[rt.key] = { queuedAt: BigInt(T0 - 600), cursor: 0, count: 1, chunk: 0, remaining: 1n };
+    w.beforeFetch((url) => {
+      if (url.includes("base-logs.rpc.test")) w.clock.ms += 15_000;
+    });
+    const trail: { status: string; catchingUp: string[]; keys: string[] }[] = [];
+    for (let i = 0; i < 8; i++) {
+      const r = await w.tick();
+      trail.push({ status: (await rows<{ status: string }>("SELECT status FROM batch_checks"))[0]?.status, catchingUp: r.catchingUp ?? [], keys: await alertKeys() });
+      w.advance();
+    }
+    // it waited while Base was behind the delivery, with no bridge.check_stuck (nor Base's lag) reported
+    expect(trail[0]).toEqual({ status: "waiting", catchingUp: ["base"], keys: [] });
+    // and was decided while Base was still catching up, as soon as Base was stored past the delivery
+    const decided = trail.findIndex((x) => x.status === "ok");
+    expect(decided).toBeGreaterThan(0);
+    expect(trail[decided].catchingUp).toEqual(["base"]);
+    expect(trail.every((x) => x.keys.length === 0)).toBe(true);
+  });
+
+  it("raises ccip.unexpected_source for a forged sender stored while catching up", async () => {
+    const w = tickWorld({ heads: { base: START_HEADS.base, bittensor: 6_903_000n } });
+    const d = w.cfg.deployment;
+    const forgedTx = h("forged tx");
+    w.addLogs("bittensor", [
+      rawLog({ address: d.bitAdapter, abi: BIT_ADAPTER, eventName: "Delivered", args: { messageId: h("forged"), sourceChain: 8453n, sender: "0x00000000000000000000000000000000000000ee", recipient: d.vault, amount: 5n }, block: 6_900_500n, logIndex: 0, txHash: forgedTx }),
+    ]);
+    w.beforeFetch((url) => {
+      if (url.includes("bittensor.rpc.test")) w.clock.ms += 15_000;
+    });
+    expect((await w.tick()).catchingUp).toEqual(["bittensor"]);
+    expect(await alertKeys()).toContain(`ccip.unexpected_source:bittensor:${forgedTx}`);
+  });
+
+  it("never again after the first full catch-up: a chain an hour behind keeps indexer.blind up while it recovers", async () => {
+    const w = tickWorld({ over: { BASE_LOG_WINDOW: "10", SUBREQUEST_BUDGET: "45" } });
+    for (let i = 0; i < 3; i++) {
+      await w.tick();
+      w.advance();
+    }
+    expect(await rows("SELECT v FROM meta WHERE k = 'caught_up'")).toHaveLength(1);
+    w.fail((url) => (url.includes("base-logs.rpc.test") ? new Error("down") : undefined));
+    for (let m = 0; m < 90; m++) {
+      await w.tick();
+      w.advance();
+    }
+    expect(await alertKeys()).toEqual(["indexer.blind:base"]);
+    // back, but slow (10-block windows): the lag shrinks over several ticks, still above an hour at first
+    w.fail(undefined);
+    const lags: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await w.tick();
+      expect(r.catchingUp).toEqual([]);
+      lags.push((await w.status()).indexer.base?.lagS ?? -1);
+      expect(await alertKeys()).toEqual(["indexer.blind:base"]);
+      w.advance();
+    }
+    expect(lags[0]).toBeGreaterThan(3600);
+    expect(lags[2]).toBeLessThan(lags[0]);
+    expect(await rows("SELECT resolved_at FROM alerts WHERE alert_key = 'indexer.blind:base'")).toEqual([{ resolved_at: null }]);
+  });
+
+  it("is never a frozen settled block: Bittensor's block times failing while its logs flow keeps indexer.blind up, and the cross-checks on", async () => {
+    const w = tickWorld();
+    await w.tick();
+    // only the block-time batch fails (by number; the scan's own head asks for "latest")
+    const realFetch = w.net.fetch;
+    w.net.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (url.startsWith(TEST_URLS.bittensor) && body.includes("eth_getBlockByNumber") && !body.includes("latest")) return new Response("busy", { status: 503 });
+      return realFetch(input, init);
+    }) as typeof globalThis.fetch;
+    const seen: Record<number, { keys: string[]; catchingUp: string[] }> = {};
+    for (let m = 1; m <= 75; m++) {
+      w.advance();
+      const r = await w.tick();
+      if (m % 15 === 0) seen[m] = { keys: await alertKeys(), catchingUp: r.catchingUp ?? [] };
+    }
+    expect(seen[30].keys).toEqual(["indexer.blind:bittensor"]);
+    expect(seen[75]).toEqual({ keys: ["indexer.blind:bittensor"], catchingUp: [] });
+    expect(await rows("SELECT resolved_at FROM alerts WHERE alert_key LIKE 'indexer.%' AND resolved_at IS NOT NULL")).toEqual([
+      // only indexer.lag, resolved quietly when indexer.blind replaced it
+      { resolved_at: expect.any(Number) },
+    ]);
   });
 });
 

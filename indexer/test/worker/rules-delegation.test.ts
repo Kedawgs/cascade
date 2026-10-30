@@ -80,23 +80,45 @@ describe("keys.delegated", () => {
       facts: { address: OWNER, chain: "base", roles: "frontDoor.keeper, staker.owner", before: "no code (an account)", now: `an EIP-7702 delegation to 0x${"ee".repeat(20)}` },
     });
     expect(findings[0].facts.explorer).toBe(`https://basescan.org/address/${OWNER}`);
-    // found every tick while it lasts (one alert), and a new target is a new alert
-    expect(ticks([{ [OWNER]: evil }], meta).findings.map((f) => f.key)).toEqual([`keys.delegated:base:${OWNER}:${keccak256(evil)}`]);
+    // found once: the new code is the baseline (the event alert stays open until acknowledged)
+    expect(ticks([{ [OWNER]: evil }], meta).findings).toEqual([]);
+    // a new target is a new critical
     const other = delegation("dd");
-    expect(ticks([{ [OWNER]: other }, { [OWNER]: other }], meta).findings.map((f) => f.key)).toEqual([`keys.delegated:base:${OWNER}:${keccak256(other)}`]);
+    const moved = ticks([{ [OWNER]: other }, { [OWNER]: other }], meta).findings;
+    expect(moved.map((f) => [f.rule, f.key, f.facts.before])).toEqual([["keys.delegated", `keys.delegated:base:${OWNER}:${keccak256(other)}`, `an EIP-7702 delegation to 0x${"ee".repeat(20)}`]]);
   });
 
   it("ignores one odd read that the next contradicts", () => {
     expect(ticks([{ [SAFE]: SAFE_CODE }, { [SAFE]: "0x" }, { [SAFE]: SAFE_CODE }, { [SAFE]: SAFE_CODE }]).findings).toEqual([]);
   });
 
-  it("fires when an account suddenly holds any code, and when a Safe's code changes", () => {
-    const changed = { [GUARDIAN]: "0x6000", [SAFE]: "0x6080604052ff" } as Record<Hex, Hex>;
-    const { findings } = ticks([{ [GUARDIAN]: "0x", [SAFE]: SAFE_CODE }, changed, changed]);
-    expect(findings.map((x) => [x.facts.address, x.facts.before, x.facts.now])).toEqual([
-      [SAFE, `contract code (26 bytes, hash ${keccak256(SAFE_CODE).slice(0, 10)}…)`, `contract code (6 bytes, hash ${keccak256("0x6080604052ff").slice(0, 10)}…)`],
-      [GUARDIAN, "no code (an account)", `contract code (2 bytes, hash ${keccak256("0x6000").slice(0, 10)}…)`],
+  it("is critical when a Safe's code changes to other contract code", () => {
+    const { findings } = ticks([{ [SAFE]: SAFE_CODE }, { [SAFE]: "0x6080604052ff" }, { [SAFE]: "0x6080604052ff" }]);
+    expect(findings.map((x) => [x.rule, x.facts.address, x.facts.before, x.facts.now, x.hold !== undefined])).toEqual([
+      ["keys.delegated", SAFE, `contract code (26 bytes, hash ${keccak256(SAFE_CODE).slice(0, 10)}…)`, `contract code (6 bytes, hash ${keccak256("0x6080604052ff").slice(0, 10)}…)`, true],
     ]);
+  });
+
+  it("only warns when an account gains plain contract code (a counterfactual Safe deployed there; a key can't do that), and takes it as the baseline", () => {
+    const { findings, meta } = ticks([{ [GUARDIAN]: "0x" }, { [GUARDIAN]: SAFE_CODE }, { [GUARDIAN]: SAFE_CODE }]);
+    expect(findings).toEqual([
+      expect.objectContaining({
+        rule: "keys.code_changed",
+        key: `keys.code_changed:base:${GUARDIAN}:${keccak256(SAFE_CODE)}`,
+        facts: expect.objectContaining({ before: "no code (an account)", now: `contract code (26 bytes, hash ${keccak256(SAFE_CODE).slice(0, 10)}…)` }),
+      }),
+    ]);
+    expect(findings[0].hold).toBeUndefined();
+    // now a contract: a later change of its code is critical
+    expect(ticks([{ [GUARDIAN]: "0x6000" }, { [GUARDIAN]: "0x6000" }], meta).findings.map((f) => f.rule)).toEqual(["keys.delegated"]);
+  });
+
+  it("only warns when a delegation is removed, and a new delegation after is critical again", () => {
+    const evil = delegation("ee");
+    const delegated = ticks([{ [OWNER]: "0x" }, { [OWNER]: evil }, { [OWNER]: evil }]).meta;
+    const removed = ticks([{ [OWNER]: "0x" }, { [OWNER]: "0x" }], delegated);
+    expect(removed.findings.map((f) => [f.rule, f.facts.before, f.facts.now, f.hold])).toEqual([["keys.code_changed", `an EIP-7702 delegation to 0x${"ee".repeat(20)}`, "no code (an account)", undefined]]);
+    expect(ticks([{ [OWNER]: evil }, { [OWNER]: evil }], removed.meta).findings.map((f) => f.rule)).toEqual(["keys.delegated"]);
   });
 
   it("fires for a role wallet already delegated when first seen (the monitor may start after the delegation)", () => {
@@ -111,8 +133,13 @@ describe("keys.delegated", () => {
     expect(ticks([zero, zero]).findings).toEqual([]);
   });
 
-  it("has the runbook line asked for", () => {
-    expect(RUNBOOK["keys.delegated"]({})).toContain("A role wallet was delegated or its code changed: assume its key is compromised. Guardian pauses; rotate the role.");
+  it("has the runbook lines asked for: first check whether it was your own smart-account upgrade, then pause and rotate", () => {
+    const line = RUNBOOK["keys.delegated"]({});
+    expect(line).toContain("A role wallet was delegated or its code changed.");
+    const check = line.toLowerCase().indexOf("first check whether it was your own wallet's smart-account upgrade");
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(line.indexOf("Guardian pauses; rotate the role."));
+    expect(RUNBOOK["keys.code_changed"]({}).toLowerCase()).toContain("first check whether it was your own");
   });
 });
 

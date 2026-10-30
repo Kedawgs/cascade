@@ -346,7 +346,8 @@ describe("role wallets' code (keys.delegated)", () => {
       await w.tick();
       w.advance();
     }
-    expect((await alertKeys()).map((k) => k.split(":").slice(0, 3).join(":"))).toEqual([`keys.delegated:base:${TREASURY_WALLET}`, `keys.delegated:bittensor:${TREASURY_WALLET}`]);
+    // plain contract code at an account is only a warning (a counterfactual Safe); a delegation is critical
+    expect((await alertKeys()).map((k) => k.split(":").slice(0, 3).join(":"))).toEqual([`keys.code_changed:base:${TREASURY_WALLET}`, `keys.delegated:bittensor:${TREASURY_WALLET}`]);
     // the treasury isn't a watched key: its own transactions raise nothing
     expect(await rows(`SELECT address FROM nonces WHERE address = '${TREASURY_WALLET}'`)).toEqual([]);
   });

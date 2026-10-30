@@ -80,18 +80,24 @@ function codeIs(code: Hex): string {
 const DELEGATION = /^0xef0100[0-9a-f]{40}$/;
 
 interface CodeSeen {
-  /** the code first seen (its hash, and what it was) */
+  /** the baseline: the code first seen, or since its last change (its hash, and what it was) */
   first?: { hash: Hex; what: string };
-  /** a code differing from the first, read on the last tick (a change counts once read twice in a row) */
+  /** a code differing from the baseline, read on the last tick (a change counts once read twice in a row) */
   pending?: { hash: Hex; what: string };
 }
 
-/** keys.delegated (critical, holds): a role wallet's code (read every tick, in the same batch as the
- * transaction counts) differs from the first code the monitor saw for it, on two readings in a row: an
- * account that shows an EIP-7702 delegation designator, a delegation to another target, any code on an
- * account, or a Safe whose code changed. A wallet already delegated when first seen fires too (the monitor may
- * start after the delegation). One alert per wallet and code, found every tick while it lasts. Kept in meta
- * (code_seen:{chain}:{address}), written only when it changes. */
+type CodeKind = "account" | "delegation" | "contract";
+/** What kind of code an email's description (codeIs) names. */
+const kindOf = (what: string): CodeKind => (what.startsWith("no code") ? "account" : what.startsWith("an EIP-7702") ? "delegation" : "contract");
+
+/** keys.delegated (critical, holds) and keys.code_changed (warning): a role wallet's code (read every tick, in the
+ * same batch as the transaction counts) differs from its baseline, the code first seen or since its last change,
+ * on two readings in a row. Critical: an EIP-7702 delegation designator appearing on an account, a delegation to
+ * another target, a contract's code changing, and anything else unexpected; a wallet already delegated when first
+ * seen too (the monitor may start after the delegation). Only a warning: plain contract code appearing on an
+ * account (a counterfactual Safe deployed at a role address: no key can put contract code there), and a
+ * delegation removed. Each confirmed change becomes the baseline, so it is one alert, open until acknowledged.
+ * Kept in meta (code_seen:{chain}:{address}), written only when it changes. */
 export const keysDelegated: Rule = {
   name: "keys.delegated",
   run(ctx) {
@@ -109,30 +115,40 @@ export const keysDelegated: Rule = {
         s = {};
       }
       const save = (next: CodeSeen) => ctx.writes.meta.push({ k, v: JSON.stringify(next) });
-      const fire = (before: string) => {
+      const facts = (before: string) => ({ address: w.address, chain: w.chain, roles: w.roles.join(", "), before, now: now.what, explorer: addressLink(w.chain, w.address) });
+      const critical = (before: string) => {
         const id = `keys.delegated:${w.chain}:${w.address}:${now.hash}`;
         out.push({
           rule: "keys.delegated",
           key: id,
           subject: `A Cascade role wallet's code changed (${w.roles.join(", ")}): assume its key is compromised`,
-          facts: { address: w.address, chain: w.chain, roles: w.roles.join(", "), before, now: now.what, explorer: addressLink(w.chain, w.address) },
+          facts: facts(before),
           hold: { id, summary: `the role wallet ${w.address} (${w.roles.join(", ")}) was delegated or its code changed` },
         });
       };
+      const warning = (before: string) =>
+        out.push({ rule: "keys.code_changed", key: `keys.code_changed:${w.chain}:${w.address}:${now.hash}`, subject: `A Cascade role wallet's code changed (${w.roles.join(", ")})`, facts: facts(before) });
       const twice = s.pending?.hash === now.hash;
       if (!s.first) {
         // first sight: an account or a contract is the baseline; a delegation is confirmed on the next read
         if (!DELEGATION.test(code)) save({ first: now });
         else if (twice) {
-          fire("not seen before");
+          critical("not seen before");
           save({ first: now });
         } else save({ pending: now });
       } else if (now.hash === s.first.hash) {
         if (s.pending) save({ first: s.first });
-      } else if (twice) {
-        fire(s.first.what);
-      } else {
+      } else if (!twice) {
         save({ first: s.first, pending: now });
+      } else {
+        // a change, read twice: judged by what the code was and is, then taken as the baseline (one alert each)
+        const was = kindOf(s.first.what);
+        const is = kindOf(now.what);
+        // benign: plain contract code on an account (a counterfactual Safe deployed: no key can put it there),
+        // or a delegation removed; everything else (a delegation set or moved, a contract's code changed) is not
+        if ((was === "account" && is === "contract") || (was === "delegation" && is === "account")) warning(s.first.what);
+        else critical(s.first.what);
+        save({ first: now });
       }
     }
     return out;

@@ -8,7 +8,9 @@ import { type BatchFixture, D, h, honestBatch, withArgs } from "./bridge-fixture
 import { ruleCtx } from "./rule-ctx.ts";
 import { checkBatch } from "../../src/crosscheck/batches.ts";
 import { groupDelivered, pairSent } from "../../src/crosscheck/pairing.ts";
-import { batches, V3, v3Logs } from "./v3-test-fixtures.ts";
+import { batches, stored, V3, v3Logs } from "./v3-test-fixtures.ts";
+import { numberToHex, pad } from "viem";
+import { type RawLog, topic0Of } from "../../src/logs.ts";
 
 const E18 = 10n ** 18n;
 const A = "0x00000000000000000000000000000000000000a1" as Hex;
@@ -355,5 +357,29 @@ describe("real bytes (v3-test batches 1 and 2, recorded)", () => {
       const v = checkBatch({ d: V3, delivery: group.opener, group, frontDoorLogs, baseTx: (hash) => base.filter((l) => l.txHash === hash) });
       expect(v).toEqual({ status: "ok", closedTx: b.closeTx, messageId: b.messageId, expectedKey: b.deliveredKey });
     }
+  });
+
+  it("fails batch 1 at its key when one recorded deposit's amount is changed by a wei", () => {
+    const requested = topic0Of("frontDoor", "DepositRequested");
+    const one = pad(numberToHex(1n));
+    let tampered = 0;
+    const raws = (batches.base as RawLog[]).map((l) => {
+      if (tampered > 0 || l.topics[0] !== requested || l.topics[1] !== one) return l;
+      tampered++;
+      // DepositRequested's data: the amount, then the payer
+      const amount = BigInt(`0x${l.data.slice(2, 66)}`) + 1n;
+      return { ...l, data: `0x${amount.toString(16).padStart(64, "0")}${l.data.slice(66)}` as Hex };
+    });
+    expect(tampered).toBe(1);
+    const base = stored("base", raws);
+    const { bittensor } = v3Logs();
+    const b = batches.batches[0];
+    const [group] = groupDelivered(
+      bittensor.filter((l) => l.txHash === b.deliveryTx),
+      { opener: "vault:BatchDelivered", adapter: "bitAdapter", recipient: V3.vault },
+    );
+    const v = checkBatch({ d: V3, delivery: group.opener, group, frontDoorLogs: base.filter((l) => l.contract === "frontDoor"), baseTx: (hash) => base.filter((l) => l.txHash === hash) });
+    expect(v).toMatchObject({ status: "mismatch", step: "5: the batch's key", closedTx: b.closeTx, messageId: b.messageId });
+    expect(v.expectedKey).not.toBe(b.deliveredKey);
   });
 });

@@ -12,7 +12,7 @@
     "wrangler": "wrangler",
     "smoke": "node -e \"console.error('smoke: not built yet (plan Task 30)'); process.exit(1)\"",
     "fixtures": "node scripts/write-seed-fixtures.ts",
-    "config:from-record": "node -e \"console.error('config:from-record: not built yet (plan Task 29)'); process.exit(1)\"",
+    "config:from-record": "node scripts/config-from-record.ts",
     "site:approved": "node scripts/site-approved.ts",
     "hold:clear": "node scripts/hold-clear.ts",
     "alerts:ack": "node scripts/alerts-ack.ts",

@@ -44,9 +44,23 @@
       // BASE_LOGS_RPC_URL, BITTENSOR_RPC_URL and THRESHOLDS (a keyed URL, private thresholds); ALERT_TO
       // is a secret only. src/config.ts checks all of it at the start of every invocation.
       "vars": {
-        // The deployment's addresses and blocks: `pnpm config:from-record ../ops/deployments/v3-test.json`
-        // prints the JSON to paste here (spec section 11, step 6). Until then the Worker refuses to run.
-        "DEPLOYMENT": "not configured: paste the JSON printed by pnpm config:from-record",
+        // The v3 test deployment's addresses and blocks, as `pnpm config:from-record
+        // ../ops/deployments/v3-test.json` prints them (spec section 11, step 6): Bittensor starts at the
+        // Bittensor adapter's creation block, the site's NEXT_PUBLIC_CASCADE_BIT_BLOCK, so the seed's `from`
+        // matches the site's scans. BRIDGES isn't set: it defaults to these two adapters.
+        "DEPLOYMENT": {
+          "base": { "chainId": 8453, "startBlock": "53119544", "baselineBlock": "53119575" },
+          "bittensor": { "chainId": 964, "startBlock": "9368744", "baselineBlock": "9368753" },
+          "frontDoor": "0xDBe6aDCac889adcbE4D4230a82C8d719FB3C1f8B",
+          "baseAdapter": "0x7c9Ceb476C50B4E4eCc1610d3cEe5d146c2bB9a0",
+          "staker": "0x5659c5929Dfe7993f3db521582B0201d6bf246B7",
+          "oracle": "0x45614AE84875EFA577F21F85cf8a6abAA6B2f217",
+          "vault": "0x32f4c98ACb181a80343CC0925b4202C35e0EB6e3",
+          "bitAdapter": "0x5659c5929Dfe7993f3db521582B0201d6bf246B7",
+          "vaultColdkey": "0x34680a431a7295c7df20c0482c37e06788390d7c8ad1f6abb7693394a269a0fa",
+          "stakeHotkey": "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748",
+          "batchMaxWaitS": 0
+        },
         "BASE_RPC_URL": "https://mainnet.base.org",
         // mainnet.base.org refuses eth_getLogs; publicnode answers 100-block windows with the head
         "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
@@ -91,7 +105,8 @@
       }
     },
     // The launch deployment, once it exists, in the same account as test. Until its DEPLOYMENT is
-    // pasted the Worker refuses to run in it.
+    // pasted (`pnpm config:from-record ../ops/deployments/<launch record>.json`) the Worker refuses to
+    // run in it.
     "production": {
       "d1_databases": [
         {

@@ -175,10 +175,15 @@ export interface PrefetchNeeds {
   payoutKeys: Hex[];
   /** transactions whose senders to load (this tick's own too: those found are not new) */
   txHashes: Hex[];
-  /** blocks whose times to load */
+  /** blocks whose times to load (and, with them, the times of every block from `since` on, of Base's from
+   * `requestsSince` on, and of the blocks of `bitTxs` and `baseTxs`) */
   blocks: { chain: ChainName; number: bigint }[];
   /** Base block 24 hours back: the redeem requests since */
   requestsSince: bigint;
+  /** the open batch: its deposits' transactions (the staker's Staked there names who really paid) */
+  openBatch?: bigint;
+  /** bridge messages whose destination adapter's Delivered to load (one stored before its Sent arrived) */
+  messageIds?: Hex[];
 }
 
 export interface Prefetched {
@@ -238,17 +243,43 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
     db.prepare("SELECT * FROM batch_checks WHERE batch_id IN (SELECT value FROM json_each(?1))").bind(json(n.batchIds.map(Number))),
     db.prepare("SELECT * FROM chunk_checks WHERE batch_key IN (SELECT value FROM json_each(?1))").bind(keys),
     db.prepare("SELECT * FROM txs WHERE chain IN ('base', 'bittensor') AND hash IN (SELECT value FROM json_each(?1))").bind(json(n.txHashes.map((x) => x.toLowerCase()))),
+    // the times of the blocks asked, of the loaded deliveries' and landings' blocks, and of every block from
+    // the readings' range (and Base's day) on: the blocks table holds only blocks with stored logs
     db
       .prepare(
         `SELECT b.chain, b.number, b.time FROM json_each(?1) j
-         JOIN blocks b ON b.chain = json_extract(j.value, '$.chain') AND b.number = json_extract(j.value, '$.number')`,
+         JOIN blocks b ON b.chain = json_extract(j.value, '$.chain') AND b.number = json_extract(j.value, '$.number')
+         UNION SELECT chain, number, time FROM blocks WHERE chain = 'bittensor' AND number IN (
+           SELECT block FROM logs WHERE chain = 'bittensor' AND tx_hash IN (SELECT value FROM json_each(?2)))
+         UNION SELECT chain, number, time FROM blocks WHERE chain = 'base' AND number IN (
+           SELECT block FROM logs WHERE chain = 'base' AND tx_hash IN (SELECT value FROM json_each(?3)))
+         UNION SELECT chain, number, time FROM blocks WHERE (chain = 'base' AND number >= ?4) OR (chain = 'bittensor' AND number >= ?5)`,
       )
-      .bind(json(n.blocks.map((b) => ({ chain: b.chain, number: Number(b.number) })))),
+      .bind(
+        json(n.blocks.map((b) => ({ chain: b.chain, number: Number(b.number) }))),
+        json(n.bitTxs),
+        json(n.baseTxs),
+        Number(n.since.base < n.requestsSince ? n.since.base : n.requestsSince),
+        Number(n.since.bittensor),
+      ),
     db.prepare("SELECT * FROM logs WHERE chain = 'base' AND contract = 'frontDoor' AND event = 'RedeemRequested' AND block >= ?1 AND removed = 0").bind(Number(n.requestsSince)),
+    // the open batch's deposits' transactions (nothing matches '' when there is none)
+    db
+      .prepare(
+        `SELECT * FROM logs WHERE chain = 'base' AND removed = 0 AND tx_hash IN (
+           SELECT tx_hash FROM logs INDEXED BY logs_by_topic1 WHERE contract = 'frontDoor' AND event = 'DepositRequested' AND topic1 = ?1)`,
+      )
+      .bind(n.openBatch === undefined ? "" : pad(numberToHex(n.openBatch))),
+    db
+      .prepare(
+        `SELECT * FROM logs INDEXED BY logs_by_topic1 WHERE contract IN ('baseAdapter', 'bitAdapter') AND event = 'Delivered'
+         AND topic1 IN (SELECT value FROM json_each(?1)) AND removed = 0`,
+      )
+      .bind(json((n.messageIds ?? []).map((m) => m.toLowerCase()))),
   ]);
   const rows = (i: number) => rs[i].results;
   return {
-    logs: [0, 1, 2, 3, 4, 5, 6, 7, 12].flatMap((i) => rows(i).map(logOf)),
+    logs: [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14].flatMap((i) => rows(i).map(logOf)),
     batchChecks: rows(8).map(batchCheckOf),
     chunkChecks: rows(9).map(chunkCheckOf),
     txs: rows(10).map(txRowOf),

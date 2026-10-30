@@ -3,7 +3,9 @@ import { type Hex, keccak256, pad, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import {
+  appendStatements,
   checkDeployment,
+  countStatements,
   deploymentStatement,
   guardStatement,
   insertHold,
@@ -16,6 +18,8 @@ import {
   pruneHours,
   pruneReadings,
   releaseLease,
+  rereadStored,
+  returnedIds,
   setCursor,
   setMeta,
   storedUids,
@@ -144,6 +148,16 @@ describe("logs", () => {
     expect(got.get("bittensor")?.get(h("in"))).toEqual({ block: 3101n, logIndex: 0, txHash: h("tx"), contract: "vault", event: "Staked", topic1: null, topic2: null, topic3: null, data: "0x" });
     expect((await storedUids(db, [])).size).toBe(0);
   });
+
+  it("names the removed logs of the range too, in the same query: one that comes back is re-mined, not new", async () => {
+    await db.batch(upsertLogs(db, [log({ uid: h("kept"), block: 3200n }), log({ uid: h("gone"), block: 3201n }), log({ uid: h("far"), block: 10n })]));
+    await db.batch(markRemoved(db, [h("gone"), h("far")]));
+    const c = countingDb(db);
+    const r = await rereadStored(c.db, [{ chain: "bittensor", from: 3101n, to: 3500n }]);
+    expect(c.stats.queries).toBe(1);
+    expect([...(r.stored.get("bittensor") ?? new Map()).keys()]).toEqual([h("kept")]);
+    expect([...r.removed]).toEqual([h("gone")]);
+  });
 });
 
 describe("cursors", () => {
@@ -250,6 +264,14 @@ describe("checks and holds", () => {
 });
 
 describe("loadTickState", () => {
+  it("loads the last seed page, which appending fills up", async () => {
+    expect((await loadTickState(db, 1)).lastSeedPage).toBeNull();
+    const events = Array.from({ length: 7 }, (_, i) => ({ kind: "staked" as const, block: String(100 + i), txHash: h(`s${i}`) }));
+    await db.batch(appendStatements(db, null, events, 5));
+    const s = await loadTickState(db, 1);
+    expect(s.lastSeedPage).toMatchObject({ page: 1, count: 2, firstBlock: 105n, lastBlock: 106n });
+  });
+
   it("is one query, reading at most 6 readings per chain and a week of hour rows", async () => {
     const readings = Array.from({ length: 200 }, (_, i) => insertReading(db, { at: 1000 + i * 60, baseBlock: BigInt(37_000_000 + i * 30), bitBlock: i % 2 ? BigInt(6_900_000 + i * 5) : null, json: "{}" }));
     const hours = Array.from({ length: 100 }, (_, i) => upsertHour(db, 3600 * i, `{"i":${i}}`));
@@ -388,6 +410,35 @@ describe("the payout users' cost", () => {
     await db.batch(upsertLogs(db, [fd("mine", "Claimed", 1400n, addr(0), "topic1")]));
     const c = countingDb(db);
     expect((await loadTickState(c.db, 1_000_100)).payoutUsers).toHaveLength(49);
+  });
+});
+
+describe("the per-day counters", () => {
+  const counters = async () => Object.fromEntries((await db.prepare("SELECT k, v FROM meta WHERE k LIKE 'ticks%' OR k = 'emails_sent' ORDER BY k").all<{ k: string; v: string }>()).results.map((r) => [r.k, r.v]));
+
+  it("add up within a UTC day and start again at 0 on the next, all together", async () => {
+    await db.batch(countStatements(db, "2026-10-29", { ticks_run: 1 }));
+    await db.batch(countStatements(db, "2026-10-29", { ticks_run: 1, emails_sent: 2 }));
+    await db.batch(countStatements(db, "2026-10-29", { ticks_skipped: 1 }));
+    expect(await counters()).toEqual({ emails_sent: "2", ticks_date: "2026-10-29", ticks_failed: "0", ticks_run: "2", ticks_skipped: "1" });
+    // a skip first on a new day must not carry the old day's runs
+    await db.batch(countStatements(db, "2026-10-30", { ticks_skipped: 1 }));
+    await db.batch(countStatements(db, "2026-10-30", { ticks_run: 1 }));
+    expect(await counters()).toEqual({ emails_sent: "0", ticks_date: "2026-10-30", ticks_failed: "0", ticks_run: "1", ticks_skipped: "1" });
+  });
+});
+
+describe("ids a commit hands back", () => {
+  it("names each new alert's id and each newly raised hold's public id", async () => {
+    const rs = await db.batch([
+      db.prepare("INSERT INTO alerts (alert_key, rule, tier, kind, subject, body, runbook, opened_at, last_seen_at) VALUES ('k1','r','critical','event','s','b','rb',1,1) RETURNING id, alert_key"),
+      insertHold(db, { id: "bridge.batch:1", rule: "bridge.batch_mismatch", summary: "s", raisedAt: 1 }, "h_00000001"),
+      // a hold already raised hands back nothing
+      insertHold(db, { id: "bridge.batch:1", rule: "bridge.batch_mismatch", summary: "s", raisedAt: 2 }, "h_00000002"),
+    ]);
+    const ids = returnedIds(rs);
+    expect([...ids.alerts]).toEqual([["k1", 1]]);
+    expect([...ids.holds]).toEqual([["bridge.batch:1", "h_00000001"]]);
   });
 });
 

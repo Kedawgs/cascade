@@ -185,6 +185,41 @@ describe("prefetch", () => {
     expect(c.stats.rowsRead).toBeLessThan(500);
   });
 
+  it("loads the open batch's deposit transactions (the staker's Staked names the real payer), and adapters' Delivered by message id", async () => {
+    const STAKER = "0x51d233584210133de458dc45c0bca0698d31396d" as Hex;
+    const depositTx = h("deposit via the staker");
+    const message = h("message 9");
+    await db.batch(
+      upsertLogs(db, [
+        slog({ contract: "staker", event: "Staked", chain: "base", address: STAKER, block: 20_200n, logIndex: 0, txHash: depositTx }),
+        fd("DepositRequested", 20_200n, 1, { txHash: depositTx, topic1: word(44n) }),
+        slog({ contract: "baseAdapter", event: "Delivered", chain: "base", block: 20_300n, logIndex: 0, topic1: message }),
+        slog({ contract: "bitAdapter", event: "Delivered", chain: "bittensor", block: 3_100n, logIndex: 0, topic1: h("another message") }),
+      ]),
+    );
+    const c = countingDb(db);
+    const p = await prefetch(c.db, { ...steady, openBatch: 44n, messageIds: [message] });
+    expect(c.stats.queries).toBe(1);
+    const q = logQuery(p.logs);
+    expect(q.inTx("base", depositTx).map((l) => `${l.contract}:${l.event}`)).toEqual(["staker:Staked", "frontDoor:DepositRequested"]);
+    expect(q.range("base", "baseAdapter", "Delivered").map((l) => l.topic1)).toEqual([message]);
+    expect(q.range("bittensor", "bitAdapter", "Delivered")).toEqual([]);
+  });
+
+  it("loads the block times of the loaded transactions' blocks and of the readings' and the day's ranges", async () => {
+    await db.batch(
+      upsertBlocks(db, [
+        { chain: "base", number: 20_003n, time: 1_799_999_000 },
+        { chain: "base", number: 20_095n, time: 1_799_999_500 },
+        { chain: "base", number: 20_000n, time: 1_799_998_000 },
+        { chain: "bittensor", number: 3_995n, time: 1_799_999_900 },
+        { chain: "bittensor", number: 100n, time: 1 },
+      ]),
+    );
+    const p = await prefetch(db, { ...steady, requestsSince: 20_050n, bitTxs: [deliveryTx], baseTxs: [closeTx] });
+    expect([...p.blockTimes.keys()].sort()).toEqual(["base:20003", "base:20095", "bittensor:3000", "bittensor:3995"]);
+  });
+
   it("the tick's load carries the checks still open", async () => {
     const s = await loadTickState(db, 1);
     expect(s.openChecks.batches.map((r) => r.deliveredTx)).toEqual([deliveryTx]);

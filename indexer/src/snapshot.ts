@@ -322,11 +322,26 @@ export function payoutsDone(s: Snapshot, pending: readonly { key: Hex; queuedBlo
   });
 }
 
-/** A snapshot as stored in `readings`: JSON, bigints tagged { $bigint } (the ops record's form). */
-export const compact = (s: Snapshot): string => JSON.stringify(s, (_k, v) => (typeof v === "bigint" ? { $bigint: v.toString() } : v));
+const bigOut = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);
+const bigIn = (_k: string, v: any) => (v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$bigint === "string" ? BigInt(v.$bigint) : v);
 
-export const expand = (json: string): Snapshot =>
-  JSON.parse(json, (_k, v) => (v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$bigint === "string" ? BigInt(v.$bigint) : v)) as Snapshot;
+/** A snapshot as stored in `readings`: JSON, bigints tagged { $bigint } (the ops record's form). */
+export const compact = (s: Snapshot): string => JSON.stringify(s, bigOut);
+
+export const expand = (json: string): Snapshot => JSON.parse(json, bigIn) as Snapshot;
+
+/** An hour row as stored in `hours`, in the same form. */
+export const compactHour = (h: HourAgg): string => JSON.stringify(h, bigOut);
+
+/** An hour row read back; undefined for one that can't be read (it is then left out, never fatal). */
+export function expandHour(json: string): HourAgg | undefined {
+  try {
+    const h = JSON.parse(json, bigIn) as HourAgg;
+    return typeof h?.hour === "number" ? h : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** One hour's running aggregates, updated by each tick (rules that look back a day or a week read these,
  * not per-minute readings). `hour` is the unix time the hour starts at. */

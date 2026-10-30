@@ -1,6 +1,6 @@
 import { encodeAbiParameters, type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
-import { compact, expand, hourRollup, payoutsDone, peerIdOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
+import { compact, compactHour, expand, expandHour, hourRollup, payoutsDone, peerIdOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
 import { decodeAccountId, OWNER_PREFIX, ownerStorageKey } from "../../src/subtensor.ts";
 import { deploymentState, fakeDeployment, GUARDIAN, KEEPER, OWNER, VALIDATOR_OWNER } from "./fake-deployment.ts";
 import { testConfig } from "./fixtures.ts";
@@ -226,6 +226,13 @@ describe("readings in D1", () => {
     expect(agg.supplyFirst).toBe(100n * 10n ** 18n);
     const next = hourRollup(agg, await readSnapshot(rpc, cfg, inputs(), at(3600)));
     expect(next).toMatchObject({ hour: 3600 * 1001, ticks: 1, priceHigh: 10n ** 18n - 3n });
+  });
+
+  it("an hour row round-trips through its JSON, bigints included", async () => {
+    const { rpc } = fakeDeployment(cfg, deploymentState(cfg));
+    const agg = hourRollup(undefined, await readSnapshot(rpc, cfg, inputs(), 3600 * 7), 401.5);
+    expect(expandHour(compactHour(agg))).toEqual(agg);
+    expect(expandHour("not json")).toBeUndefined();
   });
 });
 

@@ -96,7 +96,7 @@ export function reconcile(
   const live: Live[] = [];
 
   const insert = db.prepare(
-    "INSERT INTO alerts (alert_key, rule, tier, kind, subject, body, runbook, opened_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+    "INSERT INTO alerts (alert_key, rule, tier, kind, subject, body, runbook, opened_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) RETURNING id, alert_key",
   );
   const seen = db.prepare("UPDATE alerts SET last_seen_at = ?1, subject = ?2, body = ?3, runbook = ?4 WHERE id = ?5");
   const resolve = db.prepare("UPDATE alerts SET resolved_at = ?1 WHERE id = ?2");

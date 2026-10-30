@@ -173,6 +173,8 @@ export interface TickState {
   /** deliveries whose payouts are queued and not yet done */
   pendingPayoutKeys: { key: Hex; queuedBlock: bigint }[];
   meta: Record<string, string>;
+  /** the last seed page (appending fills it up first); null before any seed event is paged */
+  lastSeedPage: SeedPage | null;
 }
 
 const big = (x: unknown): bigint | null => (x === null || x === undefined ? null : BigInt(x as number));
@@ -344,6 +346,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
       `SELECT * FROM batch_checks INDEXED BY batch_checks_approved WHERE approved_at IS NOT NULL
        AND approved_at > COALESCE((SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'approvals_seen'), 0) ORDER BY approved_at`,
     ),
+    db.prepare("SELECT page, first_block, last_block, count, delivered, staked, payouts FROM seed_pages ORDER BY page DESC LIMIT 1"),
   ]);
   const rows = (i: number) => rs[i].results;
   const cursors: TickState["cursors"] = {};
@@ -376,29 +379,44 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
     meta: Object.fromEntries(rows(11).map((r) => [r.k as string, r.v as string])),
     openChecks: { batches: rows(12).map(batchCheckOf), chunks: rows(13).map(chunkCheckOf) },
     approvals: rows(14).map(batchCheckOf),
+    lastSeedPage: rows(15).length ? seedPageOf(rows(15)[0]) : null,
   };
 }
 
 /** The stored, not removed logs in each chain's re-read range (uid → place and content), in one query:
  * the only range a tick's windows read again, so the only place a stored log can go missing. */
 export async function storedUids(db: D1Database, ranges: readonly { chain: ChainName; from: bigint; to: bigint }[]): Promise<Map<ChainName, Map<Hex, StoredRef>>> {
-  const out = new Map<ChainName, Map<Hex, StoredRef>>();
-  if (ranges.length === 0) return out;
+  return (await rereadStored(db, ranges)).stored;
+}
+
+/** As storedUids, and the uids of the range's removed logs too, from the same query: a removed log a re-read
+ * finds again is re-mined, not new (an event rule reports a log once). */
+export async function rereadStored(
+  db: D1Database,
+  ranges: readonly { chain: ChainName; from: bigint; to: bigint }[],
+): Promise<{ stored: Map<ChainName, Map<Hex, StoredRef>>; removed: Set<Hex> }> {
+  const stored = new Map<ChainName, Map<Hex, StoredRef>>();
+  const removed = new Set<Hex>();
+  if (ranges.length === 0) return { stored, removed };
   // a chain without a range gets an empty one (from 1 to 0)
   const range = (chain: ChainName) => ranges.find((r) => r.chain === chain) ?? { from: 1n, to: 0n };
   const base = range("base");
   const bit = range("bittensor");
   const { results } = await db
     .prepare(
-      `SELECT chain, uid, block, log_index, tx_hash, contract, event, topic1, topic2, topic3, data FROM logs WHERE removed = 0 AND (
-         (chain = 'base' AND block BETWEEN ?1 AND ?2) OR (chain = 'bittensor' AND block BETWEEN ?3 AND ?4))`,
+      `SELECT chain, uid, block, log_index, tx_hash, contract, event, topic1, topic2, topic3, data, removed FROM logs WHERE
+         (chain = 'base' AND block BETWEEN ?1 AND ?2) OR (chain = 'bittensor' AND block BETWEEN ?3 AND ?4)`,
     )
     .bind(int(base.from), int(base.to), int(bit.from), int(bit.to))
     .all<Row>();
   for (const r of results) {
+    if (Number(r.removed) === 1) {
+      removed.add(r.uid as Hex);
+      continue;
+    }
     const chain = r.chain as ChainName;
-    if (!out.has(chain)) out.set(chain, new Map());
-    out.get(chain)!.set(r.uid as Hex, {
+    if (!stored.has(chain)) stored.set(chain, new Map());
+    stored.get(chain)!.set(r.uid as Hex, {
       block: BigInt(r.block as number),
       logIndex: Number(r.log_index),
       txHash: r.tx_hash as Hex,
@@ -410,7 +428,7 @@ export async function storedUids(db: D1Database, ranges: readonly { chain: Chain
       data: r.data as Hex,
     });
   }
-  return out;
+  return { stored, removed };
 }
 
 /** Takes the tick's lease for `leaseS` under `holder` (random per tick) unless another holds it. */
@@ -693,5 +711,39 @@ export function newPublicId(): string {
  * by the owner's script, never here. */
 export const insertHold = (db: D1Database, h: { id: string; rule: string; summary: string; raisedAt: number }, publicId = newPublicId()): D1PreparedStatement =>
   db
-    .prepare("INSERT INTO holds (id, public_id, rule, summary, raised_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (id) DO NOTHING")
+    .prepare("INSERT INTO holds (id, public_id, rule, summary, raised_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (id) DO NOTHING RETURNING id, public_id")
     .bind(h.id, publicId, h.rule, h.summary, h.raisedAt);
+
+/** What a commit's statements hand back (RETURNING): each new alert's id by its key (for pnpm alerts:ack in
+ * its email), and each hold actually raised, by its id, with its public id. */
+export function returnedIds(results: readonly D1Result<unknown>[]): { alerts: Map<string, number>; holds: Map<string, string> } {
+  const alerts = new Map<string, number>();
+  const holds = new Map<string, string>();
+  for (const r of results) {
+    for (const row of (r.results ?? []) as Row[]) {
+      if (typeof row.alert_key === "string" && row.id !== undefined) alerts.set(row.alert_key, Number(row.id));
+      else if (typeof row.public_id === "string" && typeof row.id === "string") holds.set(row.id, row.public_id);
+    }
+  }
+  return { alerts, holds };
+}
+
+/** The per-day counters the digest shows (meta ticks_run, ticks_failed, ticks_skipped, emails_sent, for the
+ * UTC day in ticks_date): all set to 0 together when the day changes, then these added. One batch. */
+export const COUNTERS = ["ticks_run", "ticks_failed", "ticks_skipped", "emails_sent"] as const;
+export function countStatements(db: D1Database, date: string, add: Partial<Record<(typeof COUNTERS)[number], number>>): D1PreparedStatement[] {
+  const reset = db.prepare(
+    `INSERT INTO meta (k, v) SELECT value, '0' FROM json_each(?1)
+     WHERE COALESCE((SELECT v FROM meta WHERE k = 'ticks_date'), '') <> ?2
+     ON CONFLICT (k) DO UPDATE SET v = '0'`,
+  );
+  // (a bound JS number arrives as a REAL: cast it, or "2" becomes "2.0")
+  const plus = db.prepare(
+    "INSERT INTO meta (k, v) VALUES (?1, CAST(CAST(?2 AS INTEGER) AS TEXT)) ON CONFLICT (k) DO UPDATE SET v = CAST(CAST(meta.v AS INTEGER) + CAST(?2 AS INTEGER) AS TEXT)",
+  );
+  return [
+    reset.bind(JSON.stringify(COUNTERS), date),
+    setMeta(db, "ticks_date", date),
+    ...Object.entries(add).flatMap(([k, n]) => (n ? [plus.bind(k, n)] : [])),
+  ];
+}

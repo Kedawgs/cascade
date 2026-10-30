@@ -24,19 +24,36 @@ type Row = Record<string, unknown>;
 const CURSOR =
   "SELECT from_block, scanned_to, settled_to, settled_time, (SELECT v FROM meta WHERE k = 'deployment') AS deployment FROM cursors WHERE chain = 'bittensor'";
 
+/** Whether a /v1/scan request is within the client's rate limit (the SCAN_LIMITER binding: per client IP,
+ * per Cloudflare location, approximate). A request with no client IP (never one through Cloudflare's edge,
+ * which sets it) isn't counted, and a limiter that fails lets the request through: the API is an accelerator,
+ * and the site falls back to its own scan on any refusal anyway. */
+async function withinLimit(limiter: RateLimit | undefined, request: Request): Promise<boolean> {
+  const ip = request.headers.get("cf-connecting-ip");
+  if (!limiter || !ip) return true;
+  try {
+    return (await limiter.limit({ key: `scan:${ip}` })).success;
+  } catch (e) {
+    console.error(`the rate limiter failed (request served): ${e instanceof Error ? e.message : String(e)}`);
+    return true;
+  }
+}
+
 /** GET /v1/scan/{vault} (the deployment-wide half) and GET /v1/scan/{vault}/{account} (one account's
  * half), in exactly the ScanState v1 form the site's store saves, with next = Bittensor's settled_to + 1.
  * One spelling per resource, checked before any D1 query so the cache can't be sidestepped with
  * variants: no query string at all (400), the configured vault in lowercase (else 404), the account as
  * 0x and 40 lowercase hex digits (else 400). 503 until the first Bittensor window is stored, when D1
- * fails or a row can't be read, or when the database holds another deployment than DEPLOYMENT. Cached for
+ * fails or a row can't be read, or when the database holds another deployment than DEPLOYMENT. 429 past the
+ * client's rate limit (every GET that reaches the Worker counts; cached answers don't reach it). Cached for
  * 30 s, with CORS for the site's one origin. */
-export async function handleScan(request: Request, env: { DB: D1Database }, cfg: Config): Promise<Response> {
+export async function handleScan(request: Request, env: { DB: D1Database; SCAN_LIMITER?: RateLimit }, cfg: Config): Promise<Response> {
   const cors = { "Access-Control-Allow-Origin": cfg.site.origin };
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: { ...cors, "Access-Control-Allow-Methods": "GET", "Access-Control-Max-Age": "86400" } });
   }
   if (request.method !== "GET") return plain(405, "method not allowed", { ...cors, Allow: "GET, OPTIONS" });
+  if (!(await withinLimit(env.SCAN_LIMITER, request))) return plain(429, "too many requests", { ...cors, "Retry-After": "60" });
   // `?` alone leaves URL.search empty: look at the raw URL
   if (request.url.includes("?")) return plain(400, "no query string", cors);
   const m = SCAN_PATH.exec(new URL(request.url).pathname);

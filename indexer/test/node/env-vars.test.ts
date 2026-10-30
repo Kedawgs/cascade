@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { pkg, readJsonc } from "./files.ts";
 
 interface Wrangler {
-  env?: Record<string, { vars?: Record<string, unknown> }>;
+  env?: Record<string, { vars?: Record<string, unknown>; ratelimits?: { name: string; namespace_id: string; simple: { limit: number; period: number } }[] }>;
 }
 
 const BUDGETS = ["SUBREQUEST_BUDGET", "DECODE_BUDGET", "SCAN_WALL_S", "LEASE_S", "SITE_FILES_PER_RUN", "SITE_MAX_BYTES"];
@@ -20,5 +20,13 @@ describe("the environments' vars in wrangler.jsonc", () => {
       const vars = env[name]?.vars ?? {};
       expect(Object.fromEntries(BUDGETS.map((b) => [b, vars[b]])), name).toEqual(paid);
     }
+  });
+
+  it("bind the /v1/scan rate limiter in both (a binding isn't inherited), 60 a minute, each in its own namespace", () => {
+    const limits = ["test", "production"].map((name) => env[name]?.ratelimits ?? []);
+    for (const l of limits) expect(l.map(({ name, simple }) => ({ name, simple }))).toEqual([{ name: "SCAN_LIMITER", simple: { limit: 60, period: 60 } }]);
+    const ids = limits.map((l) => l[0]?.namespace_id);
+    for (const id of ids) expect(id).toMatch(/^[1-9]\d{0,8}$/);
+    expect(new Set(ids).size).toBe(2);
   });
 });

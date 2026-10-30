@@ -42,6 +42,10 @@
         }
       ],
       "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
+      // Workers Rate Limiting on /v1/scan/*: 60 requests a minute per client IP, counted per Cloudflare location
+      // (approximate). Cached answers never reach the Worker, so never count. The namespace id is any integer
+      // unique in the account (nothing to create); each environment has its own.
+      "ratelimits": [{ "name": "SCAN_LIMITER", "namespace_id": "8453001", "simple": { "limit": 60, "period": 60 } }],
       // Public settings (spec section 9). A secret named <VAR>_SECRET overrides BASE_RPC_URL,
       // BASE_LOGS_RPC_URL, BITTENSOR_RPC_URL and THRESHOLDS (a keyed URL, private thresholds); ALERT_TO
       // is a secret only. src/config.ts checks all of it at the start of every invocation.
@@ -118,6 +122,8 @@
         }
       ],
       "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
+      // As test's (its own namespace, so the two never share counters)
+      "ratelimits": [{ "name": "SCAN_LIMITER", "namespace_id": "8453002", "simple": { "limit": 60, "period": 60 } }],
       // As test's, with the launch deployment's own DEPLOYMENT (and, once the owner has chosen and verified
       // a recipient after the first deploy, ALERT_MODE "send").
       "vars": {

@@ -233,3 +233,59 @@ describe("headers", () => {
     expect(r.headers.get("Access-Control-Allow-Credentials")).toBeNull();
   });
 });
+
+describe("the rate limit (the SCAN_LIMITER binding)", () => {
+  /** A limiter letting `allowed` calls through, recording the keys it was asked about. */
+  const limiter = (allowed: number) => {
+    const keys: string[] = [];
+    const l = { limit: async ({ key }: { key: string }) => ({ success: keys.push(key) <= allowed }) } as RateLimit;
+    return { l, keys };
+  };
+  const IP = { "cf-connecting-ip": "203.0.113.7" };
+  const ask = (l: RateLimit, init: RequestInit = { headers: IP }) => handleScan(new Request(`https://api.test/v1/scan/${VAULT}`, init), { DB: env.DB, SCAN_LIMITER: l }, cfg);
+
+  it("counts each client by its IP and answers 429, with CORS and Retry-After, past the limit", async () => {
+    const { l, keys } = limiter(2);
+    for (let i = 0; i < 2; i++) {
+      const r = await ask(l);
+      expect(r.status).toBe(200);
+      await r.text();
+    }
+    const r = await ask(l);
+    expect([r.status, await r.text()]).toEqual([429, "too many requests"]);
+    expect(Object.fromEntries(r.headers)).toMatchObject({ "retry-after": "60", "access-control-allow-origin": ORIGIN, "cache-control": "no-store" });
+    expect(keys).toEqual(["scan:203.0.113.7", "scan:203.0.113.7", "scan:203.0.113.7"]);
+  });
+
+  it("leaves a preflight, and a request with no client IP (never one through Cloudflare), uncounted; serves when the limiter fails", async () => {
+    const { l, keys } = limiter(0);
+    expect((await ask(l, { method: "OPTIONS", headers: IP })).status).toBe(204);
+    const bare = await ask(l, {});
+    expect(bare.status).toBe(200);
+    await bare.text();
+    expect(keys).toEqual([]);
+    const broken = { limit: async () => Promise.reject(new Error("limiter down")) } as unknown as RateLimit;
+    const r = await ask(broken);
+    expect(r.status).toBe(200);
+    await r.text();
+  });
+
+  it("is bound in the Worker (60 a minute per IP): a burst from one IP is refused, another IP still served", async () => {
+    // a wrong vault: counted, then refused before D1. The window is one wall-clock minute: 130 requests straddle
+    // at most one boundary, so 60 to 120 pass
+    const burst = (ip: string) => get(`/v1/scan/0x${"0".repeat(40)}`, { headers: { "cf-connecting-ip": ip } });
+    const statuses: number[] = [];
+    for (let i = 0; i < 130; i++) {
+      const r = await burst("198.51.100.1");
+      statuses.push(r.status);
+      await r.text();
+    }
+    const passed = statuses.filter((s) => s === 404).length;
+    expect(passed).toBeGreaterThanOrEqual(60);
+    expect(passed).toBeLessThanOrEqual(120);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(130 - passed);
+    const other = await burst("198.51.100.2");
+    expect(other.status).toBe(404);
+    await other.text();
+  });
+});

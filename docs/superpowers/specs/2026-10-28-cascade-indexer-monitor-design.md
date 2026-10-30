@@ -1093,8 +1093,8 @@ sources) and refuses to run on a bad config with a log line only (an unconfigure
 9. Watch `GET /v1/status` until both chains' `lagS` are small (backfill takes an hour or so); expect the first
    digest at 13:00 UTC; trigger one warning on purpose (e.g. a `THRESHOLDS` keeper floor above the real balance)
    to see an email arrive, then remove it.
-10. A rate-limiting rule on the API path (`api.cascadefi.xyz/v1/scan/*`), and optionally an outside uptime check
-    on `/v1/health`.
+10. An outside uptime check on `/v1/health`. (The API path's rate limit is in the Worker: the `SCAN_LIMITER`
+    Workers Rate Limiting binding, 60 requests a minute per IP on `/v1/scan/*`, deployed with it.)
 11. Site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). Keeper: set `OPS_HOLD_URL` (after the
     keeper tasks).
 12. Production: the same with `--env production` once the launch deployment exists.
@@ -1141,7 +1141,7 @@ run at the edge of its limits:
 - **Subrequests.** 50 per invocation slows backfill and leaves little slack when RPCs retry.
 - **Shared daily quotas.** Public API traffic and the monitor draw on the same account quotas (requests, D1 rows
   read), and on Free those reset only at midnight UTC. Defences: Workers Paid (no daily request limit, a monthly
-  D1 allowance thousands of times larger), the cacheable shared half, a rate-limiting rule on the API path, the
+  D1 allowance thousands of times larger), the cacheable shared half, the Worker's rate limit on the API path, the
   site's fallback when the API answers 503, and the keeper holding when the monitor goes stale.
 - **Two environments.** On Paid both run side by side in one account; on Free the test one needs its own account
   (section 11).

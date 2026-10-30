@@ -174,6 +174,12 @@ describe("keys.delegated", () => {
     expect(check).toBeLessThan(line.indexOf("Guardian pauses; rotate the role."));
     expect(RUNBOOK["keys.code_changed"]({}).toLowerCase()).toContain("first check whether it was your own");
   });
+
+  it("says a contract deployed at a role address by someone else is critical (as at Wintermute's Optimism address)", () => {
+    const line = RUNBOOK["keys.code_changed"]({});
+    expect(line).toContain("If you didn't deploy it, treat it as critical");
+    expect(line).toContain("Wintermute");
+  });
 });
 
 describe("the Bittensor side", () => {

@@ -141,6 +141,10 @@ describe("the operational conditions, unread", () => {
     expect(judged(ops.validatorNotEarning, ctx({ bit: staked, hours: dayAgo }))).toEqual(blind(earning));
     // no hour row a day ago to compare with
     expect(judged(ops.validatorNotEarning, ctx({ bit: { ...staked, unclaimed: E18 } }))).toEqual(blind(earning));
+    // the stake on the stake hotkey unread, and the vault's counted stake too
+    expect(judged(ops.validatorNotEarning, ctx({ bit: { unclaimed: E18 }, hours: dayAgo }))).toEqual(blind(earning));
+    // an empty vault is judged: nothing to earn on
+    expect(judged(ops.validatorNotEarning, ctx({ bit: { unclaimed: E18, stakes: { [HK]: 0n } }, hours: dayAgo }))).toEqual(CLEAR);
     expect(judged(ops.validatorNotEarning, ctx({ bit: { ...staked, unclaimed: 2n * E18 }, hours: dayAgo }))).toEqual(CLEAR);
   });
 
@@ -324,5 +328,8 @@ describe("no flapping, end to end", () => {
     expect(await tick(ops.validatorNotEarning, at(NOW + 120, { ...flat, unclaimed: undefined }))).toEqual([]);
     expect(await tick(ops.validatorNotEarning, at(NOW + 180, flat))).toEqual([]);
     expect(await alerts()).toEqual([{ alert_key: "validator.not_earning", resolved_at: null }]);
+    // the vault emptied (the live false alarm): judged, and resolved
+    expect(await tick(ops.validatorNotEarning, at(NOW + 240, { ...flat, stakes: { [HK]: 0n }, rootStakeRao: 0n }))).toEqual([]);
+    expect(await alerts()).toEqual([{ alert_key: "validator.not_earning", resolved_at: NOW + 240 }]);
   });
 });

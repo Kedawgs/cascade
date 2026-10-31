@@ -266,7 +266,10 @@ export const rewardsUncollected: Rule = {
 };
 
 /** validator.not_earning: the stake hotkey's unclaimed rewards no higher than a day ago (the hour row then),
- * with no claim in the day. */
+ * with no claim in the day. Not while the vault's stake on that hotkey is under notEarningMinStakeRao (an empty
+ * vault earns nothing): the hotkey the reading asked getUnclaimedRootTaoByHotkey for (the previous reading's stake
+ * hotkey, else the configured one, snapshot.ts) and its getStake from the same multicall, no request of its own; the
+ * vault's counted stake (rootStakeRao, which can only be larger) when that answer is missing. */
 export const validatorNotEarning: Rule = {
   name: "validator.not_earning",
   run(ctx) {
@@ -274,12 +277,21 @@ export const validatorNotEarning: Rule = {
     const s = v?.state;
     const blind = () => unjudged(ctx, "validator.not_earning", "validator.not_earning");
     if (!v || s?.unclaimed === undefined) return blind();
+    const hotkey = (ctx.previous.bittensor?.state.stakeHotkey ?? ctx.cfg.deployment.stakeHotkey).toLowerCase() as Hex;
+    const staked = s.stakes[hotkey] ?? s.rootStakeRao;
+    if (staked === undefined) return blind();
+    if (staked < ctx.t.notEarningMinStakeRao) return [];
     const dayAgo = Math.floor((ctx.nowS - ctx.t.notEarningS) / 3600) * 3600;
     const then = ctx.hours.find((r) => r.hour === dayAgo)?.unclaimedLast;
     if (then === undefined) return blind();
     if (s.unclaimed > then) return [];
     if (s.lastClaimAt !== undefined && s.lastClaimAt >= v.time - ctx.t.notEarningS) return [];
-    return one("validator.not_earning", "validator.not_earning", "The validator hasn't earned in a day", { unclaimed: tao(s.unclaimed), "a day ago": tao(then), hotkey: ctx.cfg.deployment.stakeHotkey });
+    return one("validator.not_earning", "validator.not_earning", "The validator hasn't earned in a day", {
+      unclaimed: tao(s.unclaimed),
+      "a day ago": tao(then),
+      "the vault's stake on it": tao(staked * RAO),
+      hotkey,
+    });
   },
 };
 

@@ -90,6 +90,9 @@ export const DEFAULTS = {
   rewardsDueWei: 25n * 57n * 10n ** 15n,
   /** validator.not_earning: unclaimed rewards flat this long */
   notEarningS: 86400,
+  /** validator.not_earning is judged only while the vault holds at least this much stake on the stake hotkey (1 TAO):
+   * an empty vault earns nothing, and a tiny stake's day of root rewards can round to nothing */
+  notEarningMinStakeRao: 10n ** 9n,
   /** lagLimit = min(lagCapS, payoutDelay / lagPayoutDelayDivisor) */
   lagCapS: 1800,
   lagPayoutDelayDivisor: 4,

@@ -12,7 +12,9 @@ import { D, h } from "./bridge-fixtures.ts";
 import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
 const E18 = 10n ** 18n;
+const TAO_RAO = 10n ** 9n;
 const NOW = 1_800_000_000;
+const HK = ruleCtx().cfg.deployment.stakeHotkey;
 const MIN = 60;
 const USER = "0x00000000000000000000000000000000000000a1" as Hex;
 const KEY = h("payout key");
@@ -167,10 +169,35 @@ describe("keeper and vault housekeeping", () => {
   it("validator.not_earning: unclaimed rewards flat for 24 hours with no claim", () => {
     const dayAgo = Math.floor((NOW - 86400) / 3600) * 3600;
     const hours: HourAgg[] = [{ hour: dayAgo, ticks: 60, spotSum: 0, spotCount: 0, unclaimedLast: 5n * E18 }];
-    expect(rules(ops.validatorNotEarning, ctx({ bit: { unclaimed: 5n * E18, lastClaimAt: NOW - 2 * 86400 }, hours }))).toEqual(["validator.not_earning"]);
-    expect(rules(ops.validatorNotEarning, ctx({ bit: { unclaimed: 5n * E18 + 1n, lastClaimAt: NOW - 2 * 86400 }, hours }))).toEqual([]);
+    const staked = { [HK]: 100n * TAO_RAO };
+    const [f] = ops.validatorNotEarning.run(ctx({ bit: { unclaimed: 5n * E18, lastClaimAt: NOW - 2 * 86400, stakes: staked }, hours }));
+    expect(f).toMatchObject({ rule: "validator.not_earning", facts: { hotkey: HK, "the vault's stake on it": "100 TAO" } });
+    expect(rules(ops.validatorNotEarning, ctx({ bit: { unclaimed: 5n * E18 + 1n, lastClaimAt: NOW - 2 * 86400, stakes: staked }, hours }))).toEqual([]);
     // a claim in the day explains it
-    expect(rules(ops.validatorNotEarning, ctx({ bit: { unclaimed: 0n, lastClaimAt: NOW - 3600 }, hours }))).toEqual([]);
+    expect(rules(ops.validatorNotEarning, ctx({ bit: { unclaimed: 0n, lastClaimAt: NOW - 3600, stakes: staked }, hours }))).toEqual([]);
+  });
+
+  it("validator.not_earning: not while the vault's stake on the stake hotkey is under notEarningMinStakeRao (1 TAO): an empty vault earns nothing", () => {
+    const dayAgo = Math.floor((NOW - 86400) / 3600) * 3600;
+    const hours: HourAgg[] = [{ hour: dayAgo, ticks: 60, spotSum: 0, spotCount: 0, unclaimedLast: 0n }];
+    const flat = (o: Partial<BitState>) => ctx({ bit: { unclaimed: 0n, lastClaimAt: NOW - 3 * 86400, ...o }, hours });
+    expect(DEFAULTS.notEarningMinStakeRao).toBe(TAO_RAO);
+    // the live vault, empty: nothing on the stake hotkey, nothing counted
+    const empty = flat({ stakes: { [HK]: 0n }, rootStakeRao: 0n });
+    expect(rules(ops.validatorNotEarning, empty)).toEqual([]);
+    // judged, not unjudged: an alert opened before resolves
+    expect(empty.unjudged).toEqual([]);
+    expect(rules(ops.validatorNotEarning, flat({ stakes: { [HK]: TAO_RAO - 1n } }))).toEqual([]);
+    expect(rules(ops.validatorNotEarning, flat({ stakes: { [HK]: TAO_RAO } }))).toEqual(["validator.not_earning"]);
+    // the hotkey's stake unread: the vault's counted stake stands in for it
+    expect(rules(ops.validatorNotEarning, flat({ rootStakeRao: 0n }))).toEqual([]);
+    expect(rules(ops.validatorNotEarning, flat({ rootStakeRao: 100n * TAO_RAO }))).toEqual(["validator.not_earning"]);
+    // the hotkey asked is the one the reading asked getUnclaimedRootTaoByHotkey for: the previous reading's stake hotkey
+    const other = "0x00000000000000000000000000000000000000000000000000000000000000bb" as Hex;
+    const moved = ruleCtx({ ...flat({ stakes: { [HK]: 100n * TAO_RAO, [other]: 0n } }), previous: { bittensor: reading(6_899_000n, NOW - 60, bitState({ stakeHotkey: other })) } });
+    expect(rules(ops.validatorNotEarning, moved)).toEqual([]);
+    // tunable in THRESHOLDS
+    expect(rules(ops.validatorNotEarning, ruleCtx({ ...flat({ stakes: { [HK]: TAO_RAO - 1n } }), t: { ...DEFAULTS, notEarningMinStakeRao: 0n } }))).toEqual(["validator.not_earning"]);
   });
 
   it("rail.alpha_vault: AlphaVault paused, migration ready or finished", () => {

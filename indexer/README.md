@@ -411,6 +411,10 @@ the store (or on acknowledgement, `pnpm alerts:ack`).
   supply (read 2026-10-31: 8,855.69 TAO on Base against 13,985.61 locked) and only a large forged mint would cross it;
   a drain of the lock is invisible to it. `fmtao.backing_true` (the AlphaVault's backing against wTAO, and wTAO
   against the lock) covers what it can't, and still can't read Robinhood's supply itself.
+- **`validator.not_earning` sleeps while the vault holds little stake.** It is judged only while the vault's stake on
+  the stake hotkey is at least `notEarningMinStakeRao` (1 TAO; the vault's counted stake stands in when that read is
+  missing): an empty vault's unclaimed rewards stay at 0 and used to page every day. A test run of a few dollars
+  isn't watched by it; set the threshold lower in `THRESHOLDS` to watch one.
 - **CPU on Workers Free.** Measured in local workerd (2026-10-29): hashing and decoding a log costs about
   110–125 µs, so a full batch delivery (one block of about 205 vault logs) costs about 23–26 ms each time a tick
   reads it, while it is within SETTLE of the head (about 3 ticks) and once more when it settles. That is over

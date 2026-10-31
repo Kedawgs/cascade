@@ -463,7 +463,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !isCancelled(op, facts))
       .reduce((sum, { op }) => sum + op.targetTao, 0n);
     for (const { op, facts } of found) out.push(depositRecord(op, { ...facts, incomingWei }));
-    for (const e of await chainDeposits(c, scan)) if (!seen.has(e.txHash.toLowerCase())) out.push(chainOnlyDeposit(e));
+    for (const e of await chainDeposits(c, d, scan)) if (!seen.has(e.txHash.toLowerCase())) out.push(chainOnlyDeposit(e));
     return out.sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());
   }
 

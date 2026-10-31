@@ -186,18 +186,26 @@ export async function scanVault(c: Pick<Clients, "bittensor">, d: Deployment, sc
       if (l.eventName === "BatchDelivered" && l.args.sourceChain === BASE_CHAIN_ID && l.args.frontDoor && same(l.args.frontDoor, d.frontDoor)) {
         scan.delivered.set(String(l.args.batchId), { key: l.args.key as Hex, txHash, block });
       } else if (l.eventName === "Staked") {
-        if (fresh(staking(txHash))) scan.staked.push({ block, txHash });
+        const s: Stake = { block, txHash };
+        if (fresh(staking(txHash))) scan.staked.push(s);
+        else {
+          // a stored stake read again: the chain's copy takes its place, confirmed by the log itself
+          const i = scan.staked.findIndex((x) => x.unconfirmed && same(x.txHash, txHash));
+          if (i >= 0) scan.staked[i] = s;
+        }
       } else if (l.eventName === "PayoutChunkSent") {
         const key = l.args.key as Hex;
-        const chunk = { txHash, block, chunk: Number(l.args.chunk), taken: Number(l.args.taken) };
+        const chunk: PayoutChunk = { txHash, block, chunk: Number(l.args.chunk), taken: Number(l.args.taken) };
         const chunks = scan.payouts.get(key) ?? [];
-        if (!chunks.some((p) => p.chunk === chunk.chunk)) scan.payouts.set(key, [...chunks, chunk]);
+        const i = chunks.findIndex((p) => p.chunk === chunk.chunk);
+        if (i < 0) scan.payouts.set(key, [...chunks, chunk]);
+        else if (chunks[i].unconfirmed) scan.payouts.set(key, chunks.map((p, j) => (j === i ? chunk : p)));
       } else if (l.eventName === "Deposited" && account && l.args.user && same(l.args.user, account)) {
-        const e = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint };
+        const e: AccountEvent = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint, shares: l.args.shares as bigint };
         if (fresh(accountEvent("deposited", e))) scan.deposited.push(e);
         else confirmedBy(scan.deposited, e);
       } else if (l.eventName === "Redeemed" && account && l.args.user && same(l.args.user, account)) {
-        const e = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint };
+        const e: AccountEvent = { key: l.args.key as Hex, txHash, block, assets: l.args.assets as bigint, shares: l.args.shares as bigint };
         if (fresh(accountEvent("redeemed", e))) scan.redeemed.push(e);
         else confirmedBy(scan.redeemed, e);
       }
@@ -221,21 +229,39 @@ function confirmedBy(list: AccountEvent[], e: AccountEvent): void {
 /** How many receipts confirmAccountEvents asks Bittensor's public node for at once. */
 const CONFIRM_AT_ONCE = 8;
 
-/** Saved history that Bittensor shows to be wrong: one of its events isn't where it says. The scan was
- * put back to the deploy block, to read it all again; this read shows nothing from it meanwhile. */
+/** Saved history that Bittensor shows to be wrong: one of its events isn't where it says, or one it
+ * should hold is missing. The scan is put back to the deploy block, to read it all again (by
+ * confirmAccountEvents itself, which runs under the account's lock; by live.ts for the trails); this
+ * read shows nothing from it meanwhile. `seeded`: the event in question came from the history indexer's
+ * seed (below the scan's seeded mark), so the indexer is distrusted (live.ts). */
 export class HistoryMismatchError extends Error {
-  constructor() {
+  constructor(readonly seeded = false) {
     super("The history saved in this browser didn't match Bittensor, so it is being read again.");
     this.name = "HistoryMismatchError";
   }
 }
 
+/** Whether an event at `block` was the indexer's (below the scan's mark for that half). */
+const seededShared = (scan: VaultScan, block: bigint) => block < (scan.sharedSeededTo ?? 0n);
+const seededAccount = (scan: VaultScan, block: bigint) => block < (scan.accountSeededTo ?? 0n);
+
+/** The vault's BatchDelivered from our front door in a receipt, under `key`: its batch id. */
+function deliveredBatchIn(r: Receipt | null, d: Deployment, key: Hex): string | undefined {
+  if (!mined(r)) return undefined;
+  const l = parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "BatchDelivered", strict: false }).find(
+    (l) => same(l.address, d.vault) && l.args.sourceChain === BASE_CHAIN_ID && !!l.args.frontDoor && same(l.args.frontDoor, d.frontDoor) && same(l.args.key as string, key),
+  );
+  return l ? String(l.args.batchId) : undefined;
+}
+
 /** Confirms the account's Deposited and Redeemed events that came from storage or a seed, by their
- * receipts on Bittensor: the amount (and block) is the receipt's. A receipt that can't be read, or a
- * "not found" from a server that hasn't reached the event's block, throws and leaves the event as it
- * was, so nothing unconfirmed is summed and nothing is lost to a node that is behind. Only a server
+ * receipts on Bittensor: the amount, shares (and block) are the receipt's. A receipt that can't be read,
+ * or a "not found" from a server that hasn't reached the event's block, throws and leaves the event as
+ * it was, so nothing unconfirmed is summed and nothing is lost to a node that is behind. Only a server
  * that has reached the block, showing no such event there, makes the saved history wrong: then nothing
- * is dropped quietly, the scan starts over from the deploy block (HistoryMismatchError). */
+ * is dropped quietly, the scan starts over from the deploy block (HistoryMismatchError, naming the
+ * indexer when the seed supplied the event). The same when a receipt shows the batch arriving but the
+ * indexer's half of the scan holds no such delivery: the seed left one out. */
 export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account: Address): Promise<void> {
   const unconfirmed = [...scan.deposited, ...scan.redeemed].filter((e) => e.unconfirmed);
   if (unconfirmed.length === 0) return;
@@ -253,16 +279,95 @@ export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Dep
     const log = parseEventLogs({ abi: VAULT, logs: (r?.logs ?? []) as never, eventName, strict: false }).find(
       (l) => same(l.address, d.vault) && same(l.args.key as string, e.key) && !!l.args.user && same(l.args.user as string, account),
     );
-    return mined(r) && log ? { key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint } : undefined;
+    return mined(r) && log
+      ? { key: e.key, txHash: e.txHash, block: (log.blockNumber as bigint | null) ?? e.block, assets: log.args.assets as bigint, shares: log.args.shares as bigint }
+      : undefined;
   };
   const deposited = scan.deposited.map((e) => confirm(e, "Deposited"));
   const redeemed = scan.redeemed.map((e) => confirm(e, "Redeemed"));
-  if ([...deposited, ...redeemed].some((e) => e === undefined)) {
+  const wrong = [...scan.deposited, ...scan.redeemed].filter((e, i) => [...deposited, ...redeemed][i] === undefined);
+  if (wrong.length > 0) {
+    const seeded = wrong.some((e) => seededAccount(scan, e.block));
     restart(scan);
-    throw new HistoryMismatchError();
+    throw new HistoryMismatchError(seeded);
+  }
+  for (const e of unconfirmed) {
+    const batchId = deliveredBatchIn(receipts.get(e.txHash) ?? null, d, e.key);
+    if (batchId !== undefined && !scan.delivered.has(batchId) && seededShared(scan, e.block)) {
+      restart(scan);
+      throw new HistoryMismatchError(true);
+    }
   }
   scan.deposited.splice(0, scan.deposited.length, ...(deposited as AccountEvent[]));
   scan.redeemed.splice(0, scan.redeemed.length, ...(redeemed as AccountEvent[]));
+}
+
+/** A receipt as receiptAt gives it, or "unknown" when it can't tell yet (no answer, or no server far
+ * enough past the block): a trail then stays at its previous step rather than guess. */
+async function receiptOrUnknown(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: Hex, block: bigint): Promise<Receipt | null | "unknown"> {
+  try {
+    return await receiptAt(c, scan, hash, block);
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Whether a receipt holds the vault's Staked. */
+const stakedIn = (r: Receipt | null, d: Deployment) =>
+  mined(r) && parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "Staked", strict: false }).some((l) => same(l.address, d.vault));
+
+/** Whether a receipt holds the vault's PayoutChunkSent for this key, chunk and taken count. */
+const chunkIn = (r: Receipt | null, d: Deployment, key: Hex, chunk: number, taken: number) =>
+  mined(r) &&
+  parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "PayoutChunkSent", strict: false }).some(
+    (l) => same(l.address, d.vault) && same(l.args.key as string, key) && Number(l.args.chunk) === chunk && Number(l.args.taken) === taken,
+  );
+
+/** The first stake after `block`, as a trail may use it: as the browser's own scan read it, or, for one
+ * from storage or a seed, once its receipt shows the vault's Staked (then at the receipt's block, and
+ * kept so for the visit). Undefined when there is none, or the receipt can't be read yet: the trail
+ * stays at its previous step. Throws HistoryMismatchError when a receipt from a server well past the
+ * block shows no such stake: the saved history is wrong, and the caller starts the scan over under the
+ * account's lock (live.ts), distrusting the indexer when the seed supplied it. */
+export async function confirmedStakeAfter(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, block: bigint): Promise<Stake | undefined> {
+  const s = scan.staked.find((x) => x.block > block);
+  if (!s?.unconfirmed) return s;
+  const r = await receiptOrUnknown(c, scan, s.txHash, s.block);
+  if (r === "unknown") return undefined;
+  if (!stakedIn(r, d)) throw new HistoryMismatchError(seededShared(scan, s.block));
+  const confirmed: Stake = { block: r!.blockNumber ?? s.block, txHash: s.txHash };
+  scan.staked[scan.staked.indexOf(s)] = confirmed;
+  return confirmed;
+}
+
+/** A batch key's payout chunks, as a trail may map an entry over them (chunkOf adds up `taken`, so a
+ * missing one would shift every entry after it): numbered 0 … n with no gap, each as the browser's own
+ * scan read it or, from storage or a seed, with its receipt showing PayoutChunkSent for that key, chunk
+ * and taken count. Undefined while a receipt can't be read yet, or the browser's own read has a gap (a
+ * node that hasn't caught up: the trail waits). Throws HistoryMismatchError on a receipt that shows
+ * otherwise, or a gap below the indexer's mark (the seed left a chunk out). */
+export async function confirmedChunks(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, key: Hex): Promise<PayoutChunk[] | undefined> {
+  const chunks = [...(scan.payouts.get(key) ?? [])].sort((a, b) => a.chunk - b.chunk);
+  if (chunks.length === 0) return undefined;
+  const gap = chunks.findIndex((p, i) => p.chunk !== i);
+  if (gap >= 0) {
+    // the chunk after the gap is the indexer's: the missing one, earlier still, was the indexer's to give
+    if (seededShared(scan, chunks[gap].block)) throw new HistoryMismatchError(true);
+    return undefined;
+  }
+  const checked = await Promise.all(
+    chunks.map(async (p): Promise<PayoutChunk | "unknown"> => {
+      if (!p.unconfirmed) return p;
+      const r = await receiptOrUnknown(c, scan, p.txHash, p.block);
+      if (r === "unknown") return "unknown";
+      if (!chunkIn(r, d, key, p.chunk, p.taken)) throw new HistoryMismatchError(seededShared(scan, p.block));
+      return { txHash: p.txHash, block: r!.blockNumber ?? p.block, chunk: p.chunk, taken: p.taken };
+    }),
+  );
+  if (checked.some((p) => p === "unknown")) return undefined;
+  const confirmed = checked as PayoutChunk[];
+  scan.payouts.set(key, confirmed);
+  return confirmed;
 }
 
 /** Whether a receipt holds the vault's BatchDelivered of batch `batchId` from our front door, under `key`. */
@@ -546,7 +651,8 @@ async function deliveryOf(c: Pick<Clients, "bittensor">, d: Deployment, scan: Va
   const saved = batchId !== undefined ? scan.delivered.get(String(batchId)) : undefined;
   if (!saved) return { hit: undefined, r: null };
   const r = saved.unconfirmed ? await bitReceipt(c, scan, saved.txHash).catch(() => null) : await bitReceipt(c, scan, saved.txHash);
-  return { hit: deliveryIn(r, d, String(batchId), saved.key) ? saved : undefined, r };
+  // a saved entry's block is the receipt's, once that is known
+  return { hit: deliveryIn(r, d, String(batchId), saved.key) ? { ...saved, block: r?.blockNumber ?? saved.block } : undefined, r };
 }
 
 /** The account's own vault events in a delivery's receipt, for this batch (`key`) only. */
@@ -612,7 +718,7 @@ export async function depositFacts(
       (l) => same(l.address, d.bitAdapter),
     );
     facts.delivered = { at: await blockTime(c, ctx.scan, hit.block), txHash: hit.txHash, outcome, messageId: message?.args.messageId as Hex | undefined };
-    const staked = ctx.scan.staked.find((s) => s.block > hit.block);
+    const staked = await confirmedStakeAfter(c, d, ctx.scan, hit.block);
     if (staked) facts.staked = { at: await blockTime(c, ctx.scan, staked.block), txHash: staked.txHash };
     else {
       const idle = ctx.vault.balanceWei > ED_RESERVE + ctx.vault.pendingPayouts ? ctx.vault.balanceWei - ED_RESERVE - ctx.vault.pendingPayouts : 0n;
@@ -663,7 +769,8 @@ export async function withdrawalFacts(
     else if (mine.some((l) => l.eventName === "RedeemDeferred")) facts.delivered = { at, txHash: hit.txHash, outcome: "deferred" };
     else if (mine.some((l) => l.eventName === "RedeemSkipped")) facts.delivered = { at, txHash: hit.txHash, outcome: "skipped" };
 
-    const sent = redeemed ? chunkOf(ctx.scan.payouts.get(hit.key) ?? [], entryIndex(r, d, hit.key, op.account)) : undefined;
+    const chunks = redeemed ? await confirmedChunks(c, d, ctx.scan, hit.key) : undefined;
+    const sent = chunks ? chunkOf(chunks, entryIndex(r, d, hit.key, op.account)) : undefined;
     if (redeemed && sent) {
       const pr = await bitReceipt(c, ctx.scan, sent.txHash);
       const at = await blockTime(c, ctx.scan, sent.block);
@@ -739,7 +846,7 @@ async function deliveryFacts(
   part: (amount: bigint) => bigint,
 ): Promise<void> {
   // the batch's first chunk left Bittensor first: no part of the payout can land on Base before it
-  const first = ctx.scan.payouts.get(key)?.[0];
+  const first = (await confirmedChunks(c, d, ctx.scan, key))?.[0];
   if (!first) {
     facts.traceFailed = true;
     return;
@@ -1106,11 +1213,12 @@ async function searchBaseSince<T>(
   return searchBase(c, head > back ? head - back : 0n, head, filter, {}, pick);
 }
 
-/** The account's deposits as the vault recorded them, with when they arrived and whether staking followed. */
-export async function chainDeposits(c: Pick<Clients, "bittensor">, scan: VaultScan) {
+/** The account's deposits as the vault recorded them, with when they arrived and whether staking followed
+ * (a stake after it the trail may use: confirmedStakeAfter). */
+export async function chainDeposits(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan) {
   const out: { key: Hex; txHash: Hex; at: Date; assets: bigint; staked: boolean }[] = [];
   for (const e of scan.deposited) {
-    out.push({ ...e, at: await blockTime(c, scan, e.block), staked: scan.staked.some((s) => s.block > e.block) });
+    out.push({ ...e, at: await blockTime(c, scan, e.block), staked: (await confirmedStakeAfter(c, d, scan, e.block)) !== undefined });
   }
   return out;
 }

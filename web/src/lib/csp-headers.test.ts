@@ -164,20 +164,24 @@ describe("each page's own policy", () => {
     }
   });
 
-  /** A fake export: the committed headers and three pages, built in a fresh folder. */
-  const exported = () => {
+  /** A fake export: the committed headers, three pages and a script chunk that inlined `inlined` as
+   * NEXT_PUBLIC_CASCADE_INDEXER_URL (the way next build writes config.ts's object), in a fresh folder. */
+  const exported = (inlined?: string) => {
     const out = mkdtempSync(join(tmpdir(), "cascade-csp-"));
     writeFileSync(join(out, "_headers"), HEADERS);
     writeFileSync(join(out, "index.html"), "<html><script>home()</script></html>");
     mkdirSync(join(out, "activity"));
     writeFileSync(join(out, "activity", "index.html"), "<html><script>activity()</script></html>");
     writeFileSync(join(out, "404.html"), "<html><script>notFound()</script></html>");
+    mkdirSync(join(out, "_next", "static", "chunks"), { recursive: true });
+    const literal = inlined === undefined ? "void 0" : JSON.stringify(inlined);
+    writeFileSync(join(out, "_next", "static", "chunks", "app.js"), `let e={NEXT_PUBLIC_CASCADE_VAULT:"0x1",NEXT_PUBLIC_CASCADE_INDEXER_URL:${literal}};`);
     return out;
   };
 
   it("builds out/_headers with exactly the indexer's origin in every connect-src when the env names one, and none when it doesn't", () => {
     const committed = directives(fallbackPolicy(HEADERS)).get("connect-src")!;
-    const named = exported();
+    const named = exported("https://api.cascadefi.xyz");
     build(named, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" });
     const withIt = readFileSync(join(named, "_headers"), "utf8");
     expect(directives(fallbackPolicy(withIt)).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
@@ -187,14 +191,48 @@ describe("each page's own policy", () => {
     // the page hashes are there as before
     expect(directives(policyOf(withIt, "/activity/")).get("script-src")).toEqual(["'self'", sha("activity()")]);
     expect(directives(fallbackPolicy(withIt)).get("script-src")).toEqual(["'self'", sha("home()"), sha("activity()"), sha("notFound()")]);
-    for (const env of [{}, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "" }, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz/v1" }]) {
-      const unnamed = exported();
+    for (const [env, inlined] of [
+      [{}, undefined],
+      [{ NEXT_PUBLIC_CASCADE_INDEXER_URL: "" }, undefined],
+      [{ NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz/v1" }, "https://api.cascadefi.xyz/v1"],
+    ] as const) {
+      const unnamed = exported(inlined);
       build(unnamed, env);
       const without = readFileSync(join(unnamed, "_headers"), "utf8");
       expect(without, JSON.stringify(env)).not.toContain("cascadefi.xyz");
       expect(directives(fallbackPolicy(without)).get("connect-src")).toEqual(committed);
       expect(directives(policyOf(without, "/")).get("connect-src")).toEqual(committed);
     }
+  });
+
+  it("reads the value next build inlined from web/.env.local the way next build does, so a value set only there still reaches the policy", () => {
+    const committed = directives(fallbackPolicy(HEADERS)).get("connect-src")!;
+    const dir = mkdtempSync(join(tmpdir(), "cascade-web-"));
+    writeFileSync(join(dir, ".env.local"), "NEXT_PUBLIC_CASCADE_INDEXER_URL=https://api.cascadefi.xyz\n");
+    const env = process.env as Record<string, string | undefined>;
+    const had = env.NEXT_PUBLIC_CASCADE_INDEXER_URL;
+    const nodeEnv = env.NODE_ENV;
+    delete env.NEXT_PUBLIC_CASCADE_INDEXER_URL;
+    // as under `next build`: Next reads .env.local for a production build (and never under NODE_ENV=test)
+    env.NODE_ENV = "production";
+    try {
+      const out = exported("https://api.cascadefi.xyz");
+      expect(build(out, undefined, dir).indexer).toBe("https://api.cascadefi.xyz");
+      expect(directives(policyOf(readFileSync(join(out, "_headers"), "utf8"), "/activity/")).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
+      // (a value the process starts with wins over the file, as it does for next build: @next/env keeps
+      // the environment it first saw, which a test in one process can't change)
+    } finally {
+      env.NODE_ENV = nodeEnv;
+      delete env.NEXT_PUBLIC_CASCADE_INDEXER_URL;
+      if (had !== undefined) env.NEXT_PUBLIC_CASCADE_INDEXER_URL = had;
+    }
+  });
+
+  it("fails the build when the exported scripts inlined another indexer URL than the policy would allow, or none", () => {
+    expect(() => build(exported("https://other.example"), { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toThrow(/inlined/);
+    expect(() => build(exported(), { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toThrow(/inlined/);
+    expect(() => build(exported("https://api.cascadefi.xyz"), {})).toThrow(/inlined/);
+    expect(indexerOrigin("https://other.example")).toBe("https://other.example");
   });
 
   it("fails the build when the committed fallback's script-src is anything but 'self'", () => {

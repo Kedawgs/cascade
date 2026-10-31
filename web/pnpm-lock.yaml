@@ -33,6 +33,9 @@ importers:
         specifier: 3.7.7
         version: 3.7.7(@base-org/account@2.5.13(@types/react@19.3.0)(debug@4.4.3(supports-color@7.2.0))(react@19.3.1)(supports-color@7.2.0)(typescript@5.9.3)(use-sync-external-store@1.4.0(react@19.3.1))(zod@3.25.76))(@tanstack/query-core@5.104.5)(@tanstack/react-query@5.104.5(@types/react@19.3.0)(react@19.3.1))(@types/react@19.3.0)(react@19.3.1)(typescript@5.9.3)(viem@2.57.7(typescript@5.9.3)(zod@3.25.76))
     devDependencies:
+      '@next/env':
+        specifier: 16.4.2
+        version: 16.4.2
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2

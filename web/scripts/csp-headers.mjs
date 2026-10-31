@@ -7,6 +7,7 @@
 // writes a few inline scripts into every page (the RSC payload and the chunk list), and they change with
 // every build. Fails the build rather than write a file Cloudflare Pages would refuse (a line over 2,000
 // characters, more than 100 rules).
+import { loadEnvConfig } from "@next/env";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -111,19 +112,57 @@ function htmlFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? htmlFiles(join(dir, e.name)) : e.name.endsWith(".html") ? [join(dir, e.name)] : []));
 }
 
+/** The value of NEXT_PUBLIC_CASCADE_INDEXER_URL `next build` inlined into the exported scripts under
+ * `out` (config.ts passes it by name, and the minified bundle keeps that name as the property), or null
+ * when the bundle names none. Throws when the scripts name two different values. */
+export function inlinedIndexerUrl(out) {
+  const files = jsFiles(out);
+  const values = new Set();
+  for (const file of files) {
+    for (const m of readFileSync(file, "utf8").matchAll(/NEXT_PUBLIC_CASCADE_INDEXER_URL:(?:"((?:[^"\\]|\\.)*)"|(void 0|undefined|null))/g)) {
+      values.add(m[1] === undefined ? null : m[1]);
+    }
+  }
+  if (values.size > 1) throw new Error(`the exported scripts name more than one NEXT_PUBLIC_CASCADE_INDEXER_URL: ${[...values].join(", ")}`);
+  return values.size === 1 ? [...values][0] : null;
+}
+
+function jsFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? jsFiles(join(dir, e.name)) : e.name.endsWith(".js") ? [join(dir, e.name)] : []));
+}
+
+/** The environment `next build` built with: the process's, with the `.env` files of `dir` (web/)
+ * loaded the way Next loads them (`.env.local` and friends, never overriding a value the process has),
+ * so the policy reads the same NEXT_PUBLIC_CASCADE_INDEXER_URL the bundle inlined.
+ * @param {string} dir */
+export function buildEnv(dir) {
+  return loadEnvConfig(dir, false, { info: () => undefined, error: console.error }, true).combinedEnv;
+}
+
 /** Writes `out`'s _headers from the pages exported there, with the indexer's origin in connect-src when
- * `env` names one (NEXT_PUBLIC_CASCADE_INDEXER_URL, the value the site was built with).
+ * the build's environment names one (NEXT_PUBLIC_CASCADE_INDEXER_URL: `env`, or the process's environment
+ * with `dir`'s .env files loaded as `next build` loads them). Fails rather than write a policy that
+ * disagrees with what the exported scripts inlined: the page may connect exactly where its code asks.
  * @param {string} out
- * @param {Record<string, string | undefined>} [env] */
-export function build(out, env = process.env) {
+ * @param {Record<string, string | undefined>} [env]
+ * @param {string} [dir] */
+export function build(out, env, dir = fileURLToPath(new URL("..", import.meta.url))) {
+  const environment = env ?? buildEnv(dir);
   const headersPath = join(out, "_headers");
   const files = htmlFiles(out).map((file) => ({ route: routeOf(relative(out, file).split(sep).join("/")), html: readFileSync(file, "utf8") }));
   const pages = files.filter((p) => p.route !== null).sort((a, b) => a.route.localeCompare(b.route));
   if (pages.length === 0) throw new Error("no exported pages in out/: run next build first");
   const others = files.filter((p) => p.route === null).map((p) => p.html);
-  const indexer = indexerOrigin(env.NEXT_PUBLIC_CASCADE_INDEXER_URL);
-  if (env.NEXT_PUBLIC_CASCADE_INDEXER_URL && !indexer) {
+  const value = environment.NEXT_PUBLIC_CASCADE_INDEXER_URL;
+  const indexer = indexerOrigin(value);
+  if (value && !indexer) {
     console.warn("csp-headers: NEXT_PUBLIC_CASCADE_INDEXER_URL isn't an https origin; the site ignores it, and the policy doesn't name it");
+  }
+  const inlined = inlinedIndexerUrl(out);
+  if ((inlined ?? "") !== (value ?? "")) {
+    throw new Error(
+      `the exported scripts inlined NEXT_PUBLIC_CASCADE_INDEXER_URL=${inlined === null ? "(none)" : JSON.stringify(inlined)} but the policy would be built from ${value === undefined ? "(none)" : JSON.stringify(value)}: build and this step must see the same environment`,
+    );
   }
   writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages, others, indexer ? [indexer] : []));
   return { pages: pages.map((p) => p.route), indexer };

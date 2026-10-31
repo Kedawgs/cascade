@@ -1,4 +1,5 @@
 import type { Address, Hex } from "viem";
+import { CLOCK_AHEAD_MS, RESUME_WINDOW_MS } from "./config";
 
 /** Where an operation stands on the user's side: still sending, waiting for the user, all sent, or failed. */
 export type OpState = "running" | "needs-you" | "sent" | "failed";
@@ -130,10 +131,13 @@ const DECIMAL = /^(0|[1-9]\d{0,77})$/;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** No record is older than this (Cascade's first transaction was in 2026)… */
 const EPOCH_FLOOR = Date.UTC(2025, 0, 1);
-/** …nor dated further ahead than a device's clock plausibly runs fast: a day. A date further ahead is
- * a real record from a clock since corrected, so it is kept and dated now (the earliest this device can
- * vouch for) rather than lost; every judgement by age then reads it as just made, which is safe. */
-const CLOCK_AHEAD_MS = 24 * 60 * 60_000;
+/** …nor dated further ahead than a device's clock plausibly runs fast (CLOCK_AHEAD_MS, a day). A date
+ * further ahead is a real record from a clock since corrected, so it is kept rather than lost, but
+ * dated a day old (now less RESUME_WINDOW_MS): what it recorded may be any age, so it must read as
+ * lapsed, to be started again at today's price, never as a stake fresh enough to carry on (a stake it
+ * sent days ago, its hash lost, would otherwise be searched for only in the newest blocks and sent
+ * twice). Every other judgement by age reads it as a day old too, which only makes it wait more. */
+const CLAMP_TO_MS = RESUME_WINDOW_MS;
 /** The record's dates (createdAt, sentAt, …) as read, or undefined for one that isn't a date. */
 type Dates = (x: unknown) => number | undefined;
 
@@ -160,7 +164,7 @@ const time = (now: number, issues: { clamped: number }): Dates => (x) => {
   if (typeof x !== "number" || !Number.isInteger(x) || x < EPOCH_FLOOR) return undefined;
   if (x <= now + CLOCK_AHEAD_MS) return x;
   issues.clamped++;
-  return now;
+  return now - CLAMP_TO_MS;
 };
 /** The step hashes a record keeps: only the named steps, each a transaction hash. */
 const hashesOf = <K extends string>(keys: readonly K[]) => (x: unknown): Partial<Record<K, Hex>> | undefined => {
@@ -193,7 +197,7 @@ const defined = <T extends object>(o: { [K in keyof Required<T>]: Required<T>[K]
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
 /** `x` as a record of `account`'s, every field checked; null for anything else. A date ahead of the
- * clock by more than a day is read as now, counted in `issues.clamped`. */
+ * clock by more than a day is read as a day old, counted in `issues.clamped`. */
 export function decodeOperation(x: unknown, account: Address, now: number, issues: { clamped: number } = { clamped: 0 }): Operation | null {
   try {
     if (!isRecord(x)) throw new Bad();
@@ -271,7 +275,8 @@ export function decodeOperation(x: unknown, account: Address, now: number, issue
 }
 
 /** A stored list as its records, `account`'s and sound (decodeOperation), with how many were dropped
- * and how many dates were ahead of the clock and read as now; null when `raw` isn't a JSON list at all. */
+ * and how many dates were ahead of the clock and read as a day old; null when `raw` isn't a JSON list
+ * at all. */
 export function decodeOperations(raw: string, account: Address, now: number): { ops: Operation[]; dropped: number; clamped: number } | null {
   let parsed: unknown;
   try {
@@ -327,7 +332,7 @@ export function createOpLog(storage: StringStorage, frontDoor: Address, makeRoom
     }
     const said = [
       ...(decoded.dropped > 0 ? [`${plural(decoded.dropped, "activity record")} couldn't be read and ${decoded.dropped === 1 ? "is" : "are"} left out`] : []),
-      ...(decoded.clamped > 0 ? [`${plural(decoded.clamped, "activity record date")} dated ahead of this device's clock ${decoded.clamped === 1 ? "is" : "are"} read as now`] : []),
+      ...(decoded.clamped > 0 ? [`${plural(decoded.clamped, "activity record date")} dated ahead of this device's clock ${decoded.clamped === 1 ? "is" : "are"} read as a day old`] : []),
     ];
     if (said.length > 0) warnOnce(k, raw, said.join("; "));
     return decoded.ops;

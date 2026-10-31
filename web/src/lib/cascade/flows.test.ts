@@ -1434,6 +1434,21 @@ describe("carrying on a v3 stake (planResumeStakeV3)", () => {
     expect(calls[1].args[2]).not.toBe(stale.minTaoOut);
   });
 
+  it("a record dated after now (the clock put back since) is still searched for on the chain, and a stake found is only waited for: nothing is sent", async () => {
+    const t = tracker();
+    const quote = vi.fn(async () => today);
+    const findStake = vi.fn(async () => H(62));
+    const calls = await resume({ op: { ...op, createdAt: NOW + 2 * 60 * 60_000 }, findStake, adopt: (h) => t.store.setHash("stake", h), quote });
+    expect(findStake).toHaveBeenCalledOnce();
+    expect(calls.map((c) => c.key)).toEqual(["stake"]);
+    expect(quote).not.toHaveBeenCalled();
+    const p = port();
+    await runFlow(p, t.store as never, calls);
+    expect(p.send).not.toHaveBeenCalled();
+    expect(p.sendBatch).not.toHaveBeenCalled();
+    expect(p.wait).toHaveBeenCalledWith(H(62), expect.any(Function));
+  });
+
   it("checks today's quote against the oracle, and sends nothing when they disagree or it can't be read", async () => {
     const record = vi.fn();
     expect(((await resume({ record, oracle: async () => 200_000_000n }).catch((e: unknown) => e)) as FlowError).message).toBe(PRICE_DISAGREES);

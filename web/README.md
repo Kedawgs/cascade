@@ -203,8 +203,10 @@ the record only.
 The browser's own records (the op log) are checked field by field when read back (`oplog.ts`,
 `decodeOperations`): known kinds, states and step names, exact amounts within their token's range,
 wallet batch ids up to EIP-5792's 8,194 characters, dates that make sense (one more than a day ahead
-of the clock, a clock since corrected, is read as now rather than lost), hashes and accounts that are
-what they say. A record that isn't is dropped with a console warning and never reaches a screen or a
+of the clock, a clock since corrected, is read as a day old rather than lost, so the stake lapses and
+is started again rather than continued), hashes and accounts that are what they say. The search of
+Base's logs for a stake whose hash was lost reaches a day further back than the record's age says
+(`facts.ts`, `searchBaseSince`), so a clock put back since the stake was sent never hides it. A record that isn't is dropped with a console warning and never reaches a screen or a
 flow. A flow keeps its own copy of its record while it runs (`op-store.ts`), so a write the log won't
 read back never stops it between a send and its receipt; it says so on the console instead. With the
 re-quoting above, nothing that moves money is ever taken from storage without a fresh read from the

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RESUME_WINDOW_MS } from "./config";
+import { freshStakeTerms } from "./flows";
 import { type ClaimOp, type CloseOp, createOpLog, decodeOperations, type DepositOp, effectiveState, type Operation, type WithdrawalOp } from "./oplog";
 import { dropSavedScans } from "./scan-store";
+import { type DepositFacts, depositRecord, STAKE_LAPSED } from "./trail";
 
 const FD = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750" as const;
 const ME = "0x000000000000000000000000000000000000A11c" as const;
@@ -340,17 +343,29 @@ describe("what the op log reads back from storage is checked before it is believ
       expect(warn).not.toHaveBeenCalled();
     });
 
-    it("is kept, dated now, when dated further ahead than that: a clock correction never loses a real record", () => {
+    it("is kept, dated a day old, when dated further ahead than that: a clock correction never loses a real record, and never makes an old one look fresh", () => {
       const far = { ...depositOp, createdAt: NOW + DAY + 1, cancelled: { hash: H(3), at: NOW + 3 * DAY } };
       const log = withStored([far]);
       const op = log.get(ME, "dep1") as DepositOp;
-      expect(op.createdAt).toBe(NOW);
-      expect(op.cancelled).toEqual({ hash: H(3), at: NOW });
+      expect(op.createdAt).toBe(NOW - RESUME_WINDOW_MS);
+      expect(op.cancelled).toEqual({ hash: H(3), at: NOW - RESUME_WINDOW_MS });
       expect(warn).toHaveBeenCalledOnce();
       expect(String(warn.mock.calls[0][0])).toMatch(/dated ahead/);
       // the same for every date a record keeps
       const w = { ...withdrawalOp, sentAt: NOW + 2 * DAY, droppedAt: NOW + 2 * DAY };
-      expect(withStored([w]).get(ME, "wd1")).toMatchObject({ createdAt: w.createdAt, sentAt: NOW, droppedAt: NOW });
+      expect(withStored([w]).get(ME, "wd1")).toMatchObject({ createdAt: w.createdAt, sentAt: NOW - RESUME_WINDOW_MS, droppedAt: NOW - RESUME_WINDOW_MS });
+    });
+
+    it("so a stopped stake dated more than a day ahead reads as lapsed, to be started again at today's price, never continued", async () => {
+      const stopped = { ...depositOp, createdAt: NOW + 2 * DAY, state: "needs-you" as const, hashes: {}, callsId: undefined, cancelled: undefined };
+      const op = withStored([stopped]).get(ME, "dep1") as DepositOp;
+      const facts: DepositFacts = { swapMined: false, depositMined: false, openBatchId: 1n, now: new Date(NOW), closesAt: new Date(NOW + 600_000), waitingForMinimum: false, stillOpen: true };
+      const r = depositRecord(op, facts);
+      expect(r.status).toBe("failed");
+      expect(r.restake).toBe(true);
+      expect(r.steps[0].detail).toBe(STAKE_LAPSED);
+      // the flow refuses it too
+      await expect(freshStakeTerms({ op, now: NOW, quote: async () => Promise.reject(new Error("never asked")), record: () => undefined })).rejects.toThrow(STAKE_LAPSED);
     });
 
     it("still drops a date that isn't one, or one from before Cascade existed", () => {

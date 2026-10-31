@@ -1,7 +1,7 @@
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpRequestError, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
-import type { Deployment } from "./config";
+import { CLOCK_AHEAD_MS, type Deployment } from "./config";
 import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, requestBatch, requestReplacement, scanVault, stakerDepositsIn, withdrawalFacts } from "./facts";
 import { StaleChainError } from "./fresh";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
@@ -1431,14 +1431,14 @@ describe("finding a v3 stake that went through before its hash was recorded", ()
       tx,
     );
 
-  /** Base's logs RPC: eth_blockNumber (successive answers from `heads`) and topic-filtered eth_getLogs. */
+  /** Base's logs RPC: eth_blockNumber (successive answers from `heads`, the last repeated) and topic-filtered eth_getLogs. */
   function logsRpc(opts: { logs?: ReturnType<typeof staked>[]; heads?: bigint[]; fail?: boolean; baseHead?: bigint }) {
     const windows: [bigint, bigint][] = [];
     const asked: unknown[] = [];
     let headCalls = 0;
     const baseLogs = {
       request: async ({ method, params }: { method: string; params?: { address: string; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }[] }) => {
-        if (method === "eth_blockNumber") return `0x${(opts.heads?.[headCalls++] ?? HEAD).toString(16)}`;
+        if (method === "eth_blockNumber") return `0x${(opts.heads ? opts.heads[Math.min(headCalls++, opts.heads.length - 1)] : HEAD).toString(16)}`;
         if (method !== "eth_getLogs") throw new Error(`unexpected ${method}`);
         if (opts.fail) throw new Error("HTTP request failed. URL: https://base-rpc.publicnode.com Status: 503");
         const q = params![0];
@@ -1459,15 +1459,28 @@ describe("finding a v3 stake that went through before its hash was recorded", ()
     const rpc = logsRpc({ logs: [staked(ME, 20_000_000n, HEAD - 100n, H(51))] });
     expect(await find(rpc)).toBe(H(51));
     for (const [from, to] of rpc.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
-    // two hours of 2-second blocks back from the head, and a little earlier in case the timing is off
-    expect(rpc.windows[0][0]).toBeLessThan(HEAD - 3_600n);
-    expect(rpc.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 3_600n - 600n);
+    // two hours of 2-second blocks back from the head, a day more (the record's date may be that far
+    // ahead of the real time: oplog.ts), and a little earlier in case the timing is off
+    const DAY_BLOCKS = BigInt(CLOCK_AHEAD_MS / 2_000);
+    expect(rpc.windows[0][0]).toBeLessThan(HEAD - 3_600n - DAY_BLOCKS);
+    expect(rpc.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 3_600n - DAY_BLOCKS - 600n);
     expect(rpc.windows.at(-1)![1]).toBe(HEAD);
     // only the staker's logs, paid by and for the account
     expect(rpc.asked[0]).toEqual({
       address: STAKER_AT,
       topics: encodeEventTopics({ abi: STAKER, eventName: "Staked", args: { payer: ME, beneficiary: ME } }),
     });
+  });
+
+  it("still finds the stake after the device's clock was put back: a record dated after now is searched for a day and more back, never only the margin", async () => {
+    // the clock ran two hours fast when the record was made, and was corrected since: the stake went
+    // out an hour (1,800 blocks) ago by the chain
+    const rpc = logsRpc({ logs: [staked(ME, 20_000_000n, HEAD - 1_800n, H(56))] });
+    expect(await find(rpc, { createdAtMs: NOW + 2 * 3_600_000, nowMs: NOW })).toBe(H(56));
+    expect(rpc.windows[0][0]).toBeLessThanOrEqual(HEAD - BigInt(CLOCK_AHEAD_MS / 2_000));
+    // a clock a day fast (as far ahead as a record is read as it is), the stake a day and 23 hours ago
+    const old = logsRpc({ logs: [staked(ME, 20_000_000n, HEAD - 84_600n, H(57))] });
+    expect(await find(old, { createdAtMs: NOW - 23 * 3_600_000, nowMs: NOW })).toBe(H(57));
   });
 
   it("ignores a stake of a different amount, another account's, and one another record already owns", async () => {

@@ -242,6 +242,11 @@ export const SLIPPAGE_BPS = 50n;
 /** How long a stopped stake can be carried on: a day. One stopped longer ago is started again at
  * today's price (flows.ts, freshStakeTerms; trail.ts shows it so). */
 export const RESUME_WINDOW_MS = 24 * 60 * 60_000;
+/** How far ahead of the real time a record's date may be and still be read as it is: a day, as far as a
+ * device's clock plausibly runs fast. The op log reads a date further ahead as a day old (oplog.ts), so
+ * it lapses; and a search of the chain for a record's transaction reaches this much further back than
+ * the record's age says (facts.ts, searchBaseSince), so a clock put back since never hides one. */
+export const CLOCK_AHEAD_MS = 24 * 60 * 60_000;
 /** Before any stake is sent, the quote it is priced from is checked against the 30-minute TWAP of
  * Cascade's own oracle (CascadeTwapOracle.usdcValue), read on the other Base RPC: a spot price more than
  * this far from the oracle's, either way, in basis points, sends nothing (flows.ts, assertPriceAgrees).

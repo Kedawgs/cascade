@@ -2,7 +2,7 @@ import { type Address, encodeEventTopics, type Hex, parseEventLogs, toHex } from
 import { FRESH_TRIES, freshTip, StaleChainError } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, STAKER, VAULT } from "./abi";
 import type { Clients } from "./chain";
-import { batchCloseAt, type Deployment, explorer, isV3, OFFRAMP, TOKENS } from "./config";
+import { batchCloseAt, CLOCK_AHEAD_MS, type Deployment, explorer, isV3, OFFRAMP, TOKENS } from "./config";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import { type FrontDoorState, quoteSell, readStakerFees, type VaultState } from "./reads";
 import type { DepositFacts, WithdrawalFacts } from "./trail";
@@ -1063,9 +1063,14 @@ async function searchBase<T>(
   return null;
 }
 
-/** Searches Base's logs matching `filter`, oldest first, from a little before `sinceMs` up to the head,
- * for the first window `pick` finds something in. Null when none does; throws when a window can't be read
- * (or its server is behind), which must never be taken for "none". */
+/** Searches Base's logs matching `filter`, oldest first, from well before `sinceMs` up to the head, for
+ * the first window `pick` finds something in. The record's age (`nowMs - sinceMs`) is what the device's
+ * clock says, and that clock may have been put back since the record was made: a date up to
+ * CLOCK_AHEAD_MS ahead of the real time is read as it is (oplog.ts), so the transaction may be that much
+ * older than the record's age says, or the age may even come out negative. The search therefore
+ * reaches the record's age, plus CLOCK_AHEAD_MS, plus a margin back, never only the margin, so a stake
+ * sent before the clock was corrected is found rather than sent again. Null when none is found; throws
+ * when a window can't be read (or its server is behind), which must never be taken for "none". */
 async function searchBaseSince<T>(
   c: Pick<Clients, "base" | "baseLogs">,
   s: { sinceMs: number; nowMs: number },
@@ -1073,8 +1078,8 @@ async function searchBaseSince<T>(
   pick: (raw: RawLog[]) => T | undefined,
 ): Promise<T | null> {
   const head = await baseHead(c);
-  // the device clock made both times, so their difference is the time since, whatever the clock says
-  const back = BigInt(Math.ceil(Math.max(0, s.nowMs - s.sinceMs) / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
+  const ageMs = Math.max(0, s.nowMs - s.sinceMs) + CLOCK_AHEAD_MS;
+  const back = BigInt(Math.ceil(ageMs / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
   return searchBase(c, head > back ? head - back : 0n, head, filter, {}, pick);
 }
 

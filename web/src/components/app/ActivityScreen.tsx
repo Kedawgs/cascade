@@ -8,6 +8,7 @@ import {
   useBalances,
   useDeposit,
   useDeposits,
+  useIndexerNamed,
   useIsV3,
   usePendingEntries,
   usePendingEntry,
@@ -357,9 +358,12 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   const deposits = useDeposits(account);
   const withdrawals = useWithdrawals(account);
   // older history from the indexer the browser hasn't read itself yet: a deposit made from another
-  // browser may still be missing from the list, so the list says so
-  const history = usePositionHistory(account);
-  const olderChecking = tab === "deposits" && history.data?.provisional === true;
+  // browser may still be missing from the list, so the list says so. Read only for the deposits, and
+  // only where an indexer is named (with none, nothing is ever seeded: no reads for it)
+  const indexer = useIndexerNamed();
+  const asked = tab === "deposits" && indexer;
+  const history = usePositionHistory(account, asked);
+  const olderChecking = asked && history.data?.provisional === true;
   const pending = {
     deposits: usePendingEntries(account, "deposit", deposits.data),
     unstakes: usePendingEntries(account, "withdrawal", withdrawals.data),

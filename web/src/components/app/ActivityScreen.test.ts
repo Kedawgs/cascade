@@ -71,17 +71,23 @@ describe("Activity lists", () => {
   });
 
   it("says under the deposits that older history is still being checked, while the indexer's seed isn't the browser's own reading yet (review 2)", () => {
-    const withHistory = (provisional: boolean) =>
+    const withHistory = (provisional: boolean, data = launchData(undefined, { indexerUrl: "https://api.cascadefi.xyz" }), tab: ActivityTab = "deposits") =>
       plainText(
-        renderWithCache(createElement(Lists, { account: ME, tab: "deposits" }), [
-          { key: cascadeKeys.deposits(ME), data: [deposit] },
-          { key: cascadeKeys.withdrawals(ME), data: [] },
-          { key: cascadeKeys.history(ME), data: { pendingTao: 0, avgEntryPriceUsd: null, ...(provisional ? { provisional: true } : {}) } },
-        ]),
+        renderWithCache(
+          createElement(Lists, { account: ME, tab }),
+          [
+            { key: cascadeKeys.deposits(ME), data: [deposit] },
+            { key: cascadeKeys.withdrawals(ME), data: [] },
+            { key: cascadeKeys.history(ME), data: { pendingTao: 0, avgEntryPriceUsd: null, ...(provisional ? { provisional: true } : {}) } },
+          ],
+          { data },
+        ),
       );
     expect(withHistory(true)).toContain(OLDER_CHECKING);
     expect(withHistory(false)).not.toContain(OLDER_CHECKING);
-    expect(plainText(html("deposits", []))).not.toContain(OLDER_CHECKING);
+    expect(withHistory(true, launchData(undefined, { indexerUrl: "https://api.cascadefi.xyz" }), "unstakes")).not.toContain(OLDER_CHECKING);
+    // with no indexer named nothing is ever seeded: the history isn't read for Activity at all (review 3)
+    expect(withHistory(true, launchData())).not.toContain(OLDER_CHECKING);
   });
 
   it("shows the open tab as soon as its own list is read, without waiting for the other", () => {

@@ -176,14 +176,26 @@ export function useAvailable(account: string, live = false) {
 
 /** Figures that need the vault's history (TAO on its way, rewards earned, the average entry price).
  * They come after the balance, once the scan has caught up: on a first visit that is the whole history,
- * later only what is new since the last. */
-export function usePositionHistory(account: string) {
+ * later only what is new since the last. `enabled`: false where they're wanted only some of the time. */
+export function usePositionHistory(account: string, enabled = true) {
   const data = useCascadeData();
   return useQuery({
     queryKey: cascadeKeys.history(account),
     queryFn: () => data.getPositionHistory(account),
+    enabled,
     refetchInterval: IDLE_MS,
   });
+}
+
+/** Whether the site's deployment names a history indexer, whose seed may still be being checked; false
+ * when none is configured. */
+export function useIndexerNamed(): boolean {
+  const data = useCascadeData();
+  try {
+    return data.deployment.indexerUrl !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 export function useProof(live = false) {

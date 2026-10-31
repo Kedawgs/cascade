@@ -2,7 +2,7 @@ import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpReque
 import { describe, expect, it } from "vitest";
 import { VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { HistoryMismatchError, newScan, REREAD } from "./facts";
+import { HistoryMismatchError, newScan, REREAD, restartScan } from "./facts";
 import { StaleChainError } from "./fresh";
 import { scanState, seedHalves } from "./scan-store";
 import { type CheckMemo, checkSeededHistory, MAX_SEED_ACCOUNT_EVENTS_EXTRA, MAX_SEED_CHUNKS_PER_KEY, MAX_SEED_EVENTS, SEED_MAX_LAG, SEED_SAMPLE, vaultEvents, verifySeed } from "./seed";
@@ -529,6 +529,25 @@ describe("checkSeededHistory", () => {
     scan.staked.push({ block: NEXT + 5n, txHash: H(999) });
     await checkSeededHistory(n.clients, D, scan, ME, 1, memo);
     expect(memo.shared).not.toBe(first);
+  });
+
+  it("stops, confirming nothing and moving no progress, when the scan started over while a receipt was being read for an event the window lacked (review 3)", async () => {
+    const n = node();
+    const scan = seeded();
+    // a node whose logs for the first window lag: the seed's stake at 1,600 is judged by its receipt, and
+    // the scan starts over (a trail caught something) while that receipt is being read
+    const nodeBittensor = (n.clients as { bittensor: Record<string, (q: never) => Promise<unknown>> }).bittensor;
+    const logs = nodeBittensor.getLogs;
+    nodeBittensor.getLogs = async (q: never) => ((await logs(q)) as { transactionHash: Hex }[]).filter((l) => l.transactionHash !== H(102));
+    const receipt = nodeBittensor.getTransactionReceipt;
+    nodeBittensor.getTransactionReceipt = async (q: never) => {
+      const r = await receipt(q);
+      restartScan(scan);
+      return r;
+    };
+    expect(await checkSeededHistory(n.clients, D, scan, ME, 1)).toBe("stopped");
+    expect(scan.sharedCheckedTo).toBeUndefined();
+    expect(scan.accountCheckedTo).toBeUndefined();
   });
 
   it("stops, judging nothing and moving no progress, when the scan's mark changed under a window read: it started over, or was seeded again", async () => {

@@ -447,6 +447,8 @@ export async function checkSeededHistory(c: Pick<Clients, "bittensor">, d: Deplo
       const r = await receiptAt(c, scan, t.e.txHash, t.e.block);
       if (!shows(r, d, account, t)) throw new HistoryMismatchError(true);
     }
+    // the receipts above were awaited: a scan that started over meanwhile keeps nothing of this window
+    if (marks() !== was) return "stopped";
     if (index && sharedSpan) {
       for (const e of found.entries) if (e.block >= sharedSpan.lo && e.block <= sharedSpan.hi && !index.keys.has(e.key.toLowerCase())) throw new HistoryMismatchError(true);
       confirmWindow(scan, sharedSpan.lo, sharedSpan.hi);

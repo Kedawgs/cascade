@@ -52,8 +52,9 @@ export function renderWithCache(
 const LAUNCH = EXPECTED_DEPLOYMENTS["v3-launch"];
 
 /** A data source for the launch deployment as the site is built for it, with its own op log (in memory
- * unless given). It reads nothing: a server render asks no query for data. */
-export function launchData(opLog?: OpLog): CascadeData {
+ * unless given), and anything `over` changes (an indexer named, say). It reads nothing: a server render
+ * asks no query for data. */
+export function launchData(opLog?: OpLog, over: Partial<Deployment> = {}): CascadeData {
   const d: Deployment = {
     frontDoor: LAUNCH.frontDoor as Address,
     baseAdapter: LAUNCH.baseAdapter as Address,
@@ -66,6 +67,7 @@ export function launchData(opLog?: OpLog): CascadeData {
     oracle: LAUNCH.oracle as Address,
     batchMaxWaitS: LAUNCH.batchMaxWaitS,
     payoutDelayS: LAUNCH.payoutDelayS,
+    ...over,
   };
   return createLiveCascadeData(d, { clients: {} as Clients, ...(opLog ? { opLog } : {}) });
 }

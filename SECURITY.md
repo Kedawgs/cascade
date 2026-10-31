@@ -4,8 +4,10 @@
 
 Cascade has been live on Base and Bittensor mainnet since 2026-10-30. It is early: so far it holds
 only the founder's own money, and deposits are capped. The contracts have been reviewed many times
-internally but are **not professionally audited**, and their source is not yet verified on the block
-explorers (that is being arranged; the source is in `contracts/src/` here).
+internally but are **not professionally audited**. Their source (`contracts/src/` here) is verified
+as an exact match on Sourcify for all six contracts, and on the Bittensor explorer (taostats) for the
+two Bittensor contracts. Basescan verification is still pending, so Basescan doesn't show the Base
+contracts' source yet; use the Sourcify links below.
 
 Launch limits:
 
@@ -16,14 +18,14 @@ Launch limits:
 
 ## The contracts (v3-launch)
 
-| Contract | Chain | Address |
-|---|---|---|
-| Front door (`CascadeFrontDoor`) | Base (8453) | [`0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA`](https://basescan.org/address/0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA) |
-| Staker (`CascadeStaker`) | Base (8453) | [`0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E`](https://basescan.org/address/0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E) |
-| TWAP oracle (`CascadeTwapOracle`) | Base (8453) | [`0xcAa85F00b6e470Dd28a31FBa982267B820736eBc`](https://basescan.org/address/0xcAa85F00b6e470Dd28a31FBa982267B820736eBc) |
-| Base CCIP adapter (`CcipBaseAdapter`) | Base (8453) | [`0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92`](https://basescan.org/address/0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92) |
-| Vault (`CascadeVault`) | Bittensor EVM (964) | [`0x450cD94401B45c72C09734071fe683F6b74Aea72`](https://evm.taostats.io/address/0x450cD94401B45c72C09734071fe683F6b74Aea72) |
-| Bittensor CCIP adapter (`CcipBittensorAdapter`) | Bittensor EVM (964) | [`0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1`](https://evm.taostats.io/address/0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1) |
+| Contract | Chain | Address | Verified source |
+|---|---|---|---|
+| Front door (`CascadeFrontDoor`) | Base (8453) | [`0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA`](https://basescan.org/address/0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA) | [Sourcify](https://repo.sourcify.dev/8453/0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA) |
+| Staker (`CascadeStaker`) | Base (8453) | [`0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E`](https://basescan.org/address/0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E) | [Sourcify](https://repo.sourcify.dev/8453/0xe33012f8ae80E17a7D7B8d9249043dB01D27e59E) |
+| TWAP oracle (`CascadeTwapOracle`) | Base (8453) | [`0xcAa85F00b6e470Dd28a31FBa982267B820736eBc`](https://basescan.org/address/0xcAa85F00b6e470Dd28a31FBa982267B820736eBc) | [Sourcify](https://repo.sourcify.dev/8453/0xcAa85F00b6e470Dd28a31FBa982267B820736eBc) |
+| Base CCIP adapter (`CcipBaseAdapter`) | Base (8453) | [`0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92`](https://basescan.org/address/0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92) | [Sourcify](https://repo.sourcify.dev/8453/0xF2B3A36185e74ddCf8Ea9A174c06b75520F47F92) |
+| Vault (`CascadeVault`) | Bittensor EVM (964) | [`0x450cD94401B45c72C09734071fe683F6b74Aea72`](https://evm.taostats.io/address/0x450cD94401B45c72C09734071fe683F6b74Aea72) | [Sourcify](https://repo.sourcify.dev/964/0x450cD94401B45c72C09734071fe683F6b74Aea72), [taostats](https://evm.taostats.io/address/0x450cD94401B45c72C09734071fe683F6b74Aea72?tab=contract) |
+| Bittensor CCIP adapter (`CcipBittensorAdapter`) | Bittensor EVM (964) | [`0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1`](https://evm.taostats.io/address/0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1) | [Sourcify](https://repo.sourcify.dev/964/0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1), [taostats](https://evm.taostats.io/address/0x002d7C6b2A6062d4E066FB41671DbB3Fd4f388E1?tab=contract) |
 
 **Only these addresses are Cascade.** Anything else is not Cascade's product, including Cascade's
 own old test deployments (`v3-test` and `test-2026-10`), which still exist on-chain. Don't send money

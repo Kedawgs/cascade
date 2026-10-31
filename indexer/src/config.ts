@@ -1,14 +1,21 @@
 import { getAddress, type Hex } from "viem";
+import { DEPENDENCY_TOPICS } from "./abi.ts";
 import { ConfigError } from "./errors.ts";
 import { jsonSetting, mergeThresholds, type Thresholds } from "./thresholds.ts";
 
 export { ConfigError } from "./errors.ts";
 
 export type ChainName = "base" | "bittensor";
+/** The deployment's own contracts, whose every log is scanned. */
+export type OwnRole = "vault" | "bitAdapter" | "frontDoor" | "baseAdapter" | "staker";
+/** ForeverMoney's contracts the rail runs on, whose admin events only are scanned (watchFilters): FM-TAO on Base and
+ * wTAO on Bittensor (`fmTao`), the CCIP token pool on each chain (`tokenPool`: the burn-mint pool on Base, the
+ * lock-release pool on Bittensor) and the AlphaVault. */
+export type DependencyRole = "fmTao" | "tokenPool" | "alphaVault";
 /** The contracts whose logs are scanned, by what they are: a log is always keyed by its chain and
  * role, never by its event name alone (names collide, and on v3-test the staker on Base and the
  * Bittensor adapter share an address). */
-export type Role = "vault" | "bitAdapter" | "frontDoor" | "baseAdapter" | "staker";
+export type Role = OwnRole | DependencyRole;
 export type RoleOf = (chain: ChainName, address: Hex) => Role | undefined;
 
 /** One v3 deployment: its contracts (lowercase), where each chain's history starts, and the blocks up
@@ -33,7 +40,9 @@ export interface Deployment {
 export interface Tokens {
   /** Multicall3, at the same address on both chains */
   multicall3: Hex;
-  base: { fmTao: Hex; usdc: Hex; weth: Hex; taoWethPool: Hex; wethUsdcPool: Hex; offRamp: Hex };
+  /** `tokenPool`: FM-TAO's CCIP burn-mint pool on Base; `lockPool`: wTAO's lock-release pool on Bittensor (it serves
+   * the Base lane and others, Robinhood's among them); `fmTao` on Bittensor is wTAO, the AlphaVault's token */
+  base: { fmTao: Hex; usdc: Hex; weth: Hex; taoWethPool: Hex; wethUsdcPool: Hex; offRamp: Hex; tokenPool: Hex };
   bittensor: { fmTao: Hex; lockPool: Hex; offRamp: Hex; alphaVault: Hex };
 }
 
@@ -207,20 +216,54 @@ function parseBridges(raw: unknown, d: Deployment): Config["bridges"] {
 }
 
 const TOKEN_KEYS = {
-  base: ["fmTao", "usdc", "weth", "taoWethPool", "wethUsdcPool", "offRamp"],
+  base: ["fmTao", "usdc", "weth", "taoWethPool", "wethUsdcPool", "offRamp", "tokenPool"],
   bittensor: ["fmTao", "lockPool", "offRamp", "alphaVault"],
 } as const;
 
-function parseTokens(raw: unknown): Tokens {
+function parseTokens(raw: unknown, d: Deployment, bridges: Config["bridges"]): Tokens {
   const x = object("TOKENS", raw, ["multicall3", "base", "bittensor"]);
   const chain = <K extends string>(name: "base" | "bittensor", keys: readonly K[]): Record<K, Hex> => {
     const c = object(`TOKENS.${name}`, x[name], keys);
     return Object.fromEntries(keys.map((k) => [k, address(`TOKENS.${name}.${k}`, c[k])])) as Record<K, Hex>;
   };
-  return {
+  const tokens = {
     multicall3: address("TOKENS.multicall3", x.multicall3),
     base: chain("base", TOKEN_KEYS.base),
     bittensor: chain("bittensor", TOKEN_KEYS.bittensor),
+  };
+  // the watched contracts are roled by address on their chain, as the deployment's are: no two may share one
+  const own = scanAddresses({ deployment: d, bridges });
+  const watched = dependencyAddresses(tokens);
+  for (const c of ["base", "bittensor"] as const) {
+    const all = [...own[c], ...(c === "base" ? [d.oracle] : []), ...watched[c].map(([a]) => a)];
+    if (new Set(all).size !== all.length) throw new ConfigError(`TOKENS.${c}`, "puts a watched contract at an address the deployment (or another watched contract) has");
+  }
+  return tokens;
+}
+
+/** ForeverMoney's contracts watched on each chain, with their roles. */
+function dependencyAddresses(t: Pick<Tokens, "base" | "bittensor">): Record<ChainName, [Hex, DependencyRole][]> {
+  return {
+    base: [
+      [t.base.fmTao, "fmTao"],
+      [t.base.tokenPool, "tokenPool"],
+    ],
+    bittensor: [
+      [t.bittensor.fmTao, "fmTao"],
+      [t.bittensor.lockPool, "tokenPool"],
+      [t.bittensor.alphaVault, "alphaVault"],
+    ],
+  };
+}
+
+/** The second log filter each chain's scan asks in the same request as the deployment's (rpc.logsWithHead): ForeverMoney's
+ * contracts, for their admin events only (DEPENDENCY_EVENTS: role, owner, admin, rate-limit and lane changes), so
+ * none of their transfers (FM-TAO's every swap and bridge) is read, stored or decoded. */
+export function watchFilters(cfg: Pick<Config, "tokens">): Record<ChainName, { address: Hex[]; topics: Hex[] }> {
+  const w = dependencyAddresses(cfg.tokens);
+  return {
+    base: { address: w.base.map(([a]) => a), topics: [...DEPENDENCY_TOPICS] },
+    bittensor: { address: w.bittensor.map(([a]) => a), topics: [...DEPENDENCY_TOPICS] },
   };
 }
 
@@ -289,10 +332,11 @@ export function parseConfig(env: ConfigEnv): Config {
     throw new ConfigError("PRICE_SOURCES", `may list only ${PRICE_SOURCES.join(" and ")}, once each`);
   }
 
+  const bridges = parseBridges(env.BRIDGES, deployment);
   return {
     deployment,
-    bridges: parseBridges(env.BRIDGES, deployment),
-    tokens: parseTokens(env.TOKENS),
+    bridges,
+    tokens: parseTokens(env.TOKENS, deployment, bridges),
     rpc: {
       base: rpc("BASE_RPC_URL"),
       baseLogs: rpc("BASE_LOGS_RPC_URL"),
@@ -319,16 +363,19 @@ export function parseConfig(env: ConfigEnv): Config {
 /** Which scanned contract `address` is on `chain`: Base holds the front door, its adapter and the
  * staker; Bittensor the vault and its adapter. Every bridge listed in BRIDGES is an adapter on its chain
  * (a second, legitimately activated bridge carries batches and payouts too). One address can be two
- * roles on two chains. */
-export function rolesOf(d: Deployment, bridges: Config["bridges"] = { base: [d.baseAdapter], bittensor: [d.bitAdapter] }): RoleOf {
+ * roles on two chains. With `tokens`, ForeverMoney's watched contracts are roled too (watchFilters). */
+export function rolesOf(d: Deployment, bridges: Config["bridges"] = { base: [d.baseAdapter], bittensor: [d.bitAdapter] }, tokens?: Pick<Tokens, "base" | "bittensor">): RoleOf {
+  const watched = tokens ? dependencyAddresses(tokens) : { base: [], bittensor: [] };
   const roles: Record<ChainName, Map<string, Role>> = {
     base: new Map<string, Role>([
+      ...watched.base,
       ...bridges.base.map((b): [string, Role] => [b, "baseAdapter"]),
       [d.frontDoor, "frontDoor"],
       [d.baseAdapter, "baseAdapter"],
       [d.staker, "staker"],
     ]),
     bittensor: new Map<string, Role>([
+      ...watched.bittensor,
       ...bridges.bittensor.map((b): [string, Role] => [b, "bitAdapter"]),
       [d.vault, "vault"],
       [d.bitAdapter, "bitAdapter"],

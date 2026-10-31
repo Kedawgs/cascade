@@ -1,5 +1,5 @@
 import { type Hex, hexToNumber, numberToHex } from "viem";
-import { ADMIN_EVENTS } from "./abi.ts";
+import { ADMIN_EVENTS, DEPENDENCY_EVENTS } from "./abi.ts";
 import type { ChainName, Role } from "./config.ts";
 import type { StoredLog } from "./logs.ts";
 import type { Rpc } from "./rpc.ts";
@@ -21,6 +21,8 @@ export const ATTRIBUTABLE: ReadonlySet<`${Role}:${string}`> = new Set([
   "vault:HotkeyAdded",
   "vault:StakeMoved",
   ...ADMIN_EVENTS,
+  // ForeverMoney's admin events (only these of theirs are scanned): who sent each is named in its alert
+  ...DEPENDENCY_EVENTS.flatMap((e) => (["fmTao", "tokenPool", "alphaVault"] as const).map((r) => `${r}:${e.name}` as const)),
 ]);
 
 /** Events that name their caller (msg.sender) in their arguments: the transaction's sender for an

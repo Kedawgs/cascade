@@ -1,6 +1,6 @@
 import { type Hex, keccak256, toBytes } from "viem";
 import { EVENT_CLOSES_AFTER_S, type Finding, markSent, reconcile } from "./alerts.ts";
-import { type ChainName, type Config, hostDomain, rolesOf, scanAddresses } from "./config.ts";
+import { type ChainName, type Config, hostDomain, rolesOf, scanAddresses, watchFilters } from "./config.ts";
 import { type AlertItem, type Outgoing, renderCritical, renderWarnings, sendAll } from "./email.ts";
 import { decode, identify, type RawLog } from "./logs.ts";
 import { CONTRACT_NAMES, txLink } from "./rules/context.ts";
@@ -132,8 +132,10 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     now,
     sleep: deps.sleep,
   });
-  const roleOf = rolesOf(cfg.deployment, cfg.bridges);
+  const roleOf = rolesOf(cfg.deployment, cfg.bridges, cfg.tokens);
   const addresses = scanAddresses(cfg);
+  // ForeverMoney's watched admin events are stored by the tick, so they are re-read here too (in the same requests)
+  const watch = watchFilters(cfg);
   const catchingUp = (meta.catching_up ?? "").split(",").filter(Boolean);
   const findings: Finding[] = [];
 
@@ -166,7 +168,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     try {
       for (let a = from; a <= to; a = checkedTo + 1n) {
         const b = min(a + window - 1n, to);
-        const r = await rpc.logsWithHead(chain, { address: addresses[chain], fromBlock: a, toBlock: b });
+        const r = await rpc.logsWithHead(chain, { address: addresses[chain], fromBlock: a, toBlock: b, watch: watch[chain] });
         if (r.head < b + SETTLE[chain]) break;
         second.push(...r.logs);
         lowestHead = lowestHead === undefined ? r.head : min(lowestHead, r.head);

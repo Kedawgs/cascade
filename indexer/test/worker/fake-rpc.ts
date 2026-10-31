@@ -92,13 +92,16 @@ export function fakeChains(specs: Partial<Record<ChainName, ChainSpec>>, opts: {
         return { number: numberToHex(n), timestamp: numberToHex(time(spec, n)), hash: numberToHex(n, { size: 32 }) };
       }
       case "eth_getLogs": {
-        const f = params[0] as { address: Hex[] | Hex; fromBlock: Hex; toBlock: Hex };
+        const f = params[0] as { address: Hex[] | Hex; fromBlock: Hex; toBlock: Hex; topics?: (Hex | Hex[] | null)[] };
         const addresses = (Array.isArray(f.address) ? f.address : [f.address]).map((a) => a.toLowerCase());
         const from = hexToBigInt(f.fromBlock);
         const to = hexToBigInt(f.toBlock);
+        // topic 0 only, as the scan asks: one topic or a list of them
+        const t0 = f.topics?.[0];
+        const topics = t0 === undefined || t0 === null ? undefined : (Array.isArray(t0) ? t0 : [t0]).map((t) => t.toLowerCase());
         return (spec.logs ?? []).filter((l) => {
           const b = hexToBigInt(l.blockNumber);
-          return b >= from && b <= to && b <= nodeHead && addresses.includes(l.address.toLowerCase());
+          return b >= from && b <= to && b <= nodeHead && addresses.includes(l.address.toLowerCase()) && (topics === undefined || topics.includes(l.topics[0]?.toLowerCase()));
         });
       }
       default:

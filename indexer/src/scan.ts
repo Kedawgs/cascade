@@ -80,6 +80,8 @@ export async function scanChain(o: {
   chain: ChainName;
   roleOf: RoleOf;
   addresses: Hex[];
+  /** other addresses read in the same requests, for these topics only (ForeverMoney's admin events: watchFilters) */
+  watch?: { address: Hex[]; topics: readonly Hex[] };
   startBlock: bigint;
   cursor: { scannedTo: bigint | null; settledTo: bigint };
   /** the stored logs in this chain's re-read range (store.storedUids) */
@@ -207,7 +209,7 @@ export async function scanChain(o: {
             outOfTime = true;
             break;
           }
-          const r = await rpc.logsWithHead(chain, { address: o.addresses, fromBlock: a, toBlock: b }, { headTime: firstRequest, deadlineMs: o.deadlineMs });
+          const r = await rpc.logsWithHead(chain, { address: o.addresses, fromBlock: a, toBlock: b, watch: o.watch }, { headTime: firstRequest, deadlineMs: o.deadlineMs });
           if (firstRequest && r.headTime !== undefined) result.headTime = r.headTime;
           firstRequest = false;
           if (r.head >= b) {

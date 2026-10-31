@@ -111,10 +111,12 @@ export interface Rpc {
   batch(chain: ChainName, calls: Call[], opts?: CallOptions): Promise<unknown[]>;
   /** One window of logs and the answering node's head, in one batched request to one node (Base's
    * goes to its logs URL), so a window is accepted only from a node that has reached its end.
-   * `headTime` also asks for the latest block, for its time. */
+   * `headTime` also asks for the latest block, for its time. `watch` asks, in the same request, for the logs of
+   * other addresses whose topic 0 is one of `topics` (ForeverMoney's admin events: config.ts watchFilters); its logs
+   * come back with the others. */
   logsWithHead(
     chain: ChainName,
-    filter: { address: Hex[]; fromBlock: bigint; toBlock: bigint },
+    filter: { address: Hex[]; fromBlock: bigint; toBlock: bigint; watch?: { address: Hex[]; topics: readonly Hex[] } },
     opts?: { headTime?: boolean } & CallOptions,
   ): Promise<{ logs: RawLog[]; head: bigint; headTime?: number }>;
 }
@@ -281,19 +283,28 @@ export function createRpc(o: RpcOptions): Rpc {
 
     async logsWithHead(chain, filter, opts = {}) {
       const ep: Endpoint = chain === "base" ? "baseLogs" : "bittensor";
+      const range = { fromBlock: numberToHex(filter.fromBlock), toBlock: numberToHex(filter.toBlock) };
       const calls: Call[] = [
-        { method: "eth_getLogs", params: [{ address: filter.address, fromBlock: numberToHex(filter.fromBlock), toBlock: numberToHex(filter.toBlock) }] },
+        { method: "eth_getLogs", params: [{ address: filter.address, ...range }] },
         { method: "eth_blockNumber", params: [] },
       ];
       if (opts.headTime) calls.push({ method: "eth_getBlockByNumber", params: ["latest", false] });
-      const [logs, head, block] = await batchAt(ep, chain, calls, deadlineOf(opts));
-      if (!Array.isArray(logs)) throw new RpcError(chain, "eth_getLogs", o.urls[ep], "answered with something that isn't a list of logs");
-      // every log whole, before anything reads it: a malformed one fails the window (the scan keeps the windows before)
-      const bad = logs.findIndex((l) => !isRawLog(l));
-      if (bad !== -1) throw new RpcError(chain, "eth_getLogs", o.urls[ep], `answered a malformed log (log ${bad + 1} of ${logs.length})`);
+      // the watched contracts' admin events: one more call in the same request, never a request of its own
+      const watched = filter.watch && filter.watch.address.length > 0 && filter.watch.topics.length > 0 ? calls.length : undefined;
+      if (watched !== undefined) calls.push({ method: "eth_getLogs", params: [{ address: filter.watch!.address, ...range, topics: [[...filter.watch!.topics]] }] });
+      const answers = await batchAt(ep, chain, calls, deadlineOf(opts));
+      const [logs, head] = answers;
+      const block = opts.headTime ? answers[2] : undefined;
+      const lists = watched === undefined ? [logs] : [logs, answers[watched]];
+      for (const list of lists) {
+        if (!Array.isArray(list)) throw new RpcError(chain, "eth_getLogs", o.urls[ep], "answered with something that isn't a list of logs");
+        // every log whole, before anything reads it: a malformed one fails the window (the scan keeps the windows before)
+        const bad = list.findIndex((l) => !isRawLog(l));
+        if (bad !== -1) throw new RpcError(chain, "eth_getLogs", o.urls[ep], `answered a malformed log (log ${bad + 1} of ${list.length})`);
+      }
       if (typeof head !== "string") throw new RpcError(chain, "eth_blockNumber", o.urls[ep], "answered with something that isn't a block number");
       const time = isObject(block) && typeof block.timestamp === "string" ? hexToNumber(block.timestamp as Hex) : undefined;
-      return { logs: logs as RawLog[], head: hexToBigInt(head as Hex), ...(time === undefined ? {} : { headTime: time }) };
+      return { logs: (lists as RawLog[][]).flat(), head: hexToBigInt(head as Hex), ...(time === undefined ? {} : { headTime: time }) };
     },
   };
 }

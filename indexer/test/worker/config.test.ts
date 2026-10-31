@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { ConfigError, parseConfig, redact, rolesOf, scanAddresses, VAR_NAMES } from "../../src/config.ts";
+import { toEventSelector } from "viem";
+import { ConfigError, parseConfig, redact, rolesOf, scanAddresses, VAR_NAMES, watchFilters } from "../../src/config.ts";
 import { DEFAULTS, lagLimitS } from "../../src/thresholds.ts";
 import deployment from "../fixtures/deployment.json";
 
@@ -211,6 +212,52 @@ describe("rolesOf", () => {
     expect(roleOf("base", deployment.frontDoor as `0x${string}`)).toBe("frontDoor");
     expect(roleOf("bittensor", deployment.vault.toLowerCase() as `0x${string}`)).toBe("vault");
     expect(roleOf("bittensor", deployment.frontDoor.toLowerCase() as `0x${string}`)).toBeUndefined();
+  });
+});
+
+describe("ForeverMoney's contracts the scan watches (TOKENS)", () => {
+  const cfg = () => parseConfig(vars());
+
+  it("are FM-TAO and the CCIP token pool on Base, and wTAO, the lock pool and the AlphaVault on Bittensor, each roled on its chain", () => {
+    const c = cfg();
+    expect(c.tokens.base.tokenPool).toBe("0xf5ac6d6bd12d8b87de3c136fac9375961577e794");
+    const roleOf = rolesOf(c.deployment, c.bridges, c.tokens);
+    expect(roleOf("base", c.tokens.base.fmTao)).toBe("fmTao");
+    expect(roleOf("base", c.tokens.base.tokenPool)).toBe("tokenPool");
+    expect(roleOf("bittensor", c.tokens.bittensor.fmTao)).toBe("fmTao");
+    expect(roleOf("bittensor", c.tokens.bittensor.lockPool)).toBe("tokenPool");
+    expect(roleOf("bittensor", c.tokens.bittensor.alphaVault)).toBe("alphaVault");
+    expect(roleOf("bittensor", c.tokens.base.tokenPool)).toBeUndefined();
+    // the deployment's own contracts keep their roles; without TOKENS only they are roled
+    expect(roleOf("bittensor", c.deployment.vault)).toBe("vault");
+    expect(rolesOf(c.deployment, c.bridges)("base", c.tokens.base.fmTao)).toBeUndefined();
+  });
+
+  it("are read with their admin events' topics only (never a transfer), apart from the deployment's own scan", () => {
+    const c = cfg();
+    const w = watchFilters(c);
+    expect(w.base.address).toEqual([c.tokens.base.fmTao, c.tokens.base.tokenPool]);
+    expect(w.bittensor.address).toEqual([c.tokens.bittensor.fmTao, c.tokens.bittensor.lockPool, c.tokens.bittensor.alphaVault]);
+    for (const chain of ["base", "bittensor"] as const) {
+      expect(w[chain].topics).toContain(toEventSelector("RoleGranted(bytes32,address,address)"));
+      expect(w[chain].topics).toContain(toEventSelector("OwnershipTransferRequested(address,address)"));
+      expect(w[chain].topics).not.toContain(toEventSelector("Transfer(address,address,uint256)"));
+      expect(w[chain].topics).not.toContain(toEventSelector("Approval(address,address,uint256)"));
+      expect(scanAddresses(c)[chain].some((a) => w[chain].address.includes(a))).toBe(false);
+    }
+  });
+
+  it("refuses TOKENS without the Base token pool, or a watched contract at one of the deployment's addresses", () => {
+    const tokens = () => JSON.parse(JSON.stringify(vars().TOKENS)) as { base: Record<string, string>; bittensor: Record<string, string> };
+    const missing = tokens();
+    delete missing.base.tokenPool;
+    expect(refused(withVars({ TOKENS: JSON.stringify(missing) })).message).toContain("TOKENS.base.tokenPool");
+    const onTheVault = tokens();
+    onTheVault.bittensor.alphaVault = deployment.vault;
+    expect(refused(withVars({ TOKENS: JSON.stringify(onTheVault) })).message).toContain("TOKENS");
+    const onTheFrontDoor = tokens();
+    onTheFrontDoor.base.tokenPool = deployment.frontDoor;
+    expect(refused(withVars({ TOKENS: JSON.stringify(onTheFrontDoor) })).message).toContain("TOKENS");
   });
 });
 

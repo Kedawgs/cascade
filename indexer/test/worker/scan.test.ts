@@ -1,7 +1,7 @@
-import type { Hex } from "viem";
+import { type Hex, parseAbi } from "viem";
 import { describe, expect, it } from "vitest";
-import { FRONT_DOOR, VAULT } from "../../src/abi.ts";
-import { type ChainName, rolesOf } from "../../src/config.ts";
+import { DEPENDENCY_EVENTS, FRONT_DOOR, MINTER_ROLE, VAULT } from "../../src/abi.ts";
+import { type ChainName, rolesOf, watchFilters } from "../../src/config.ts";
 import { decode, identify, type RawLog, type StoredRef, storedRefOf } from "../../src/logs.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
 import { headTimeOf, REREAD, rereadRange, SETTLE, scanChain, WINDOW } from "../../src/scan.ts";
@@ -45,10 +45,12 @@ function setup(
       window: more.window,
       reserve: more.reserve === undefined ? undefined : { budget, keep: more.reserve },
     });
-  return { net, budget, decodeBudget, clock, scan };
+  return { net, budget, decodeBudget, clock, scan, rpc };
 }
 
 const FIRST = { scannedTo: null, settledTo: 999n };
+/** An ERC-20 transfer: what FM-TAO emits most, and the scan never asks for. */
+const ERC20_EVENTS = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
 
 describe("scanChain on Bittensor", () => {
   it("reads a first scan from the start block in 1,000-block windows, up to the head", async () => {
@@ -402,6 +404,42 @@ describe("scanChain on Base", () => {
     const b = setup({ base: { head: 1250n } });
     await b.scan("base", FIRST, { window: 2000n });
     expect(windowsAsked(b.net.fetches)).toEqual([[1000n, 1250n]]);
+  });
+
+  it("stores ForeverMoney's admin events from the watched contracts, in the same requests, and none of their transfers", async () => {
+    const cfg = testConfig();
+    const fmTao = cfg.tokens.base.fmTao;
+    const grant = rawLog({
+      address: fmTao,
+      abi: DEPENDENCY_EVENTS,
+      eventName: "RoleGranted",
+      args: { role: MINTER_ROLE, account: "0x00000000000000000000000000000000000000bb", sender: "0x00000000000000000000000000000000000000cc" },
+      block: 1100n,
+      logIndex: 3,
+      txHash: tx(77),
+    });
+    const transfer = rawLog({ address: fmTao, abi: ERC20_EVENTS, eventName: "Transfer", args: { from: d.frontDoor, to: d.staker, value: 5n }, block: 1100n, logIndex: 4, txHash: tx(78) });
+    const a = setup({ base: { head: 1250n, logs: [closed(1100n, 1), grant, transfer] } });
+    const r = await scanChain({
+      rpc: a.rpc,
+      chain: "base",
+      roleOf: rolesOf(cfg.deployment, cfg.bridges, cfg.tokens),
+      addresses: BASE,
+      watch: watchFilters(cfg).base,
+      startBlock: 1000n,
+      cursor: FIRST,
+      stored: new Map(),
+      decodeBudget: new Budget(300, "decode"),
+      deadlineMs: a.clock.now() + 40_000,
+      now: a.clock.now,
+    });
+    expect(r.upserts.map((l) => [l.contract, l.event])).toEqual([
+      ["frontDoor", "BatchRolled"],
+      ["fmTao", "RoleGranted"],
+    ]);
+    expect(r.upserts[1].args).toMatchObject({ role: MINTER_ROLE, account: "0x00000000000000000000000000000000000000bb" });
+    // three windows, three requests: the watched contracts cost no request of their own
+    expect(a.net.fetches.filter((f) => f.methods.includes("eth_getLogs"))).toHaveLength(3);
   });
 });
 

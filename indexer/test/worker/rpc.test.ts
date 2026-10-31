@@ -1,4 +1,4 @@
-import { type Hex, numberToHex } from "viem";
+import { type Hex, hexToNumber, keccak256, numberToHex, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
 import { getJson, getText, HttpError } from "../../src/http.ts";
 import { Budget, BudgetExhausted, createRpc, RpcError, scrub } from "../../src/rpc.ts";
@@ -160,6 +160,31 @@ describe("createRpc", () => {
     // other Base reads go to the main Base URL
     await rpc.call("base", "eth_blockNumber", []);
     expect(net.fetches[2].url).toBe(TEST_URLS.base);
+  });
+
+  it("asks for a watched filter's logs (other addresses, their topics only) in the same request, and returns both", async () => {
+    const MAIN = "0x0000000000000000000000000000000000000001" as Hex;
+    const WATCHED = "0x0000000000000000000000000000000000000002" as Hex;
+    const TOPIC = keccak256(toBytes("RoleGranted(bytes32,address,address)"));
+    const OTHER = keccak256(toBytes("Transfer(address,address,uint256)"));
+    const log = (address: Hex, topic: Hex, n: number) => ({ address, topics: [topic], data: "0x" as Hex, blockNumber: "0x64" as Hex, logIndex: numberToHex(n), transactionHash: keccak256(toBytes(`tx ${n}`)) });
+    const net = fakeChains({ base: { head: 250n, logs: [log(MAIN, OTHER, 0), log(WATCHED, OTHER, 1), log(WATCHED, TOPIC, 2), log(MAIN, TOPIC, 3)] } });
+    const budget = new Budget(45);
+    const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget, ...quiet });
+    const r = await rpc.logsWithHead("base", { address: [MAIN], fromBlock: 100n, toBlock: 199n, watch: { address: [WATCHED], topics: [TOPIC] } });
+    // one request: the deployment's logs, the head, and the watched contracts' admin events
+    expect(net.fetches).toHaveLength(1);
+    expect(budget.left).toBe(44);
+    expect(net.fetches[0].methods).toEqual(["eth_getLogs", "eth_blockNumber", "eth_getLogs"]);
+    expect(net.fetches[0].params[2][0]).toMatchObject({ address: [WATCHED], topics: [[TOPIC]] });
+    expect(r.logs.map((l) => [l.address, hexToNumber(l.logIndex)])).toEqual([
+      [MAIN, 0],
+      [MAIN, 3],
+      [WATCHED, 2],
+    ]);
+    // nothing watched: the request is as before
+    await rpc.logsWithHead("base", { address: [MAIN], fromBlock: 100n, toBlock: 199n, watch: { address: [], topics: [TOPIC] } });
+    expect(net.fetches[1].methods).toEqual(["eth_getLogs", "eth_blockNumber"]);
   });
 
   it("returns the head of the node that answered the logs, even when it is behind", async () => {

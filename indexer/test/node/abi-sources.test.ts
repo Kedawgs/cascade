@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import type { AbiEvent } from "viem";
 import { describe, expect, it } from "vitest";
 import { ADMIN_EVENTS, abiFor } from "../../src/abi.ts";
-import type { Role } from "../../src/config.ts";
+import type { OwnRole } from "../../src/config.ts";
 import { pkg } from "./files.ts";
 
 /** The contract sources each role is built from (inherited OpenZeppelin events aside). */
-const SOURCES: Record<Role, string[]> = {
+const SOURCES: Record<OwnRole, string[]> = {
   vault: ["CascadeVault.sol", "CascadeBase.sol"],
   frontDoor: ["CascadeFrontDoor.sol", "CascadeBase.sol"],
   staker: ["CascadeStaker.sol"],
@@ -19,7 +19,7 @@ const OWNABLE2STEP = [
   "OwnershipTransferStarted(address indexed previousOwner,address indexed newOwner)",
   "OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
 ];
-const OPENZEPPELIN: Record<Role, string[]> = {
+const OPENZEPPELIN: Record<OwnRole, string[]> = {
   vault: ["Transfer(address indexed from,address indexed to,uint256 value)", "Paused(address account)", "Unpaused(address account)", ...OWNABLE2STEP],
   frontDoor: ["Paused(address account)", "Unpaused(address account)", ...OWNABLE2STEP],
   staker: OWNABLE2STEP,
@@ -45,10 +45,10 @@ function declared(file: string): string[] {
 }
 
 const signature = (e: AbiEvent) => `${e.name}(${e.inputs.map((i) => `${i.type}${i.indexed ? " indexed" : ""} ${i.name}`).join(",")})`;
-const events = (role: Role) => abiFor(role).filter((x): x is AbiEvent => x.type === "event");
+const events = (role: OwnRole) => abiFor(role).filter((x): x is AbiEvent => x.type === "event");
 
 describe("the ABIs match the contracts' sources", () => {
-  for (const role of Object.keys(SOURCES) as Role[]) {
+  for (const role of Object.keys(SOURCES) as OwnRole[]) {
     it(`${role}: every event in its ABI is declared in its sources (or inherited from OpenZeppelin)`, () => {
       const inSources = new Set([...SOURCES[role].flatMap(declared), ...OPENZEPPELIN[role]]);
       expect(events(role).map(signature).filter((s) => !inSources.has(s))).toEqual([]);
@@ -64,7 +64,7 @@ describe("the ABIs match the contracts' sources", () => {
   it("every admin event is in its role's ABI, and is declared in its sources or inherited", () => {
     expect(ADMIN_EVENTS.size).toBeGreaterThan(30);
     for (const key of ADMIN_EVENTS) {
-      const [role, name] = key.split(":") as [Role, string];
+      const [role, name] = key.split(":") as [OwnRole, string];
       expect(events(role).map((e) => e.name), key).toContain(name);
       const names = [...SOURCES[role].flatMap(declared), ...OPENZEPPELIN[role]].map((s) => s.slice(0, s.indexOf("(")));
       expect(names, key).toContain(name);

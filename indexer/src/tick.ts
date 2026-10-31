@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { type Due, type Finding, markSent, reconcile } from "./alerts.ts";
 import { argSenders, blockTimes, fetchTxs, PER_TICK, txsToFetch } from "./attribute.ts";
-import { type ChainName, type Config, rolesOf, scanAddresses } from "./config.ts";
+import { type ChainName, type Config, rolesOf, scanAddresses, watchFilters } from "./config.ts";
 import { deliveredChecks } from "./crosscheck/payouts.ts";
 import { type AlertItem, type Outgoing, renderCritical, renderDbFailing, renderResolved, renderWarnings, sendAll } from "./email.ts";
 import { holdStatements } from "./hold.ts";
@@ -346,8 +346,10 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     spacingMs: deps.spacingMs,
     deadlineMs: rpcDeadlineMs,
   });
-  const roleOf = rolesOf(d, cfg.bridges);
+  const roleOf = rolesOf(d, cfg.bridges, cfg.tokens);
   const addresses = scanAddresses(cfg);
+  // ForeverMoney's contracts, for their admin events only, in the same requests as the deployment's logs
+  const watch = watchFilters(cfg);
   const bitShare = Math.ceil(cfg.budgets.decode / 2);
   const bitDecode = new Budget(bitShare, "decode");
   const scans = {} as Record<ChainName, ScanResult>;
@@ -356,6 +358,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     chain: "bittensor",
     roleOf,
     addresses: addresses.bittensor,
+    watch: watch.bittensor,
     startBlock: d.bittensor.startBlock,
     cursor: cursors.bittensor,
     stored: reread.stored.get("bittensor") ?? new Map(),
@@ -371,6 +374,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     chain: "base",
     roleOf,
     addresses: addresses.base,
+    watch: watch.base,
     startBlock: d.base.startBlock,
     cursor: cursors.base,
     stored: reread.stored.get("base") ?? new Map(),

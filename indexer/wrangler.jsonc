@@ -108,7 +108,9 @@
             "weth": "0x4200000000000000000000000000000000000006",
             "taoWethPool": "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A",
             "wethUsdcPool": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
-            "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808"
+            "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808",
+            // FM-TAO's CCIP pool on Base (BurnMintTokenPool 1.5.1, read 2026-10-31): watched for its admin events
+            "tokenPool": "0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794"
           },
           "bittensor": {
             "fmTao": "0xC5b6C1632d34901239396F5E1BDe54B342900256",
@@ -187,7 +189,9 @@
             "weth": "0x4200000000000000000000000000000000000006",
             "taoWethPool": "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A",
             "wethUsdcPool": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
-            "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808"
+            "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808",
+            // FM-TAO's CCIP pool on Base (BurnMintTokenPool 1.5.1, read 2026-10-31): watched for its admin events
+            "tokenPool": "0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794"
           },
           "bittensor": {
             "fmTao": "0xC5b6C1632d34901239396F5E1BDe54B342900256",

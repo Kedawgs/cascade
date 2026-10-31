@@ -128,6 +128,10 @@ export const CONTRACT_NAMES: Record<Role, string> = {
   baseAdapter: "Base adapter",
   vault: "vault",
   bitAdapter: "Bittensor adapter",
+  // ForeverMoney's (watched for their admin events only): FM-TAO on Base is wTAO on Bittensor
+  fmTao: "FM-TAO (wTAO on Bittensor)",
+  tokenPool: "CCIP token pool",
+  alphaVault: "AlphaVault",
 };
 
 /** This tick stores the log for the first time. */

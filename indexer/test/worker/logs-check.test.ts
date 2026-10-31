@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { type Hex, keccak256, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
-import { VAULT } from "../../src/abi.ts";
+import { DEPENDENCY_EVENTS, VAULT } from "../../src/abi.ts";
 import { type Config, rolesOf } from "../../src/config.ts";
 import { runHourly } from "../../src/hourly.ts";
 import { LOGS_CHECK_WINDOW, runLogsCheck } from "../../src/logs-check.ts";
@@ -33,11 +33,14 @@ type Trip = ReturnType<typeof roundTrip>;
 type Cursors = Record<"base" | "bittensor", bigint>;
 type SecondLogs = (chain: "base" | "bittensor", primary: RawLog[], x: { cfg: Config; trip: Trip; cursors: Cursors }) => RawLog[];
 
-async function world(o: { secondLogs?: SecondLogs; secondHeads?: { base?: bigint; bittensor?: bigint } } = {}) {
+async function world(o: { secondLogs?: SecondLogs; secondHeads?: { base?: bigint; bittensor?: bigint }; primaryLogs?: (cfg: Config) => { base?: RawLog[]; bittensor?: RawLog[] } } = {}) {
   const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com", BASE_LOGS_RPC_URL_2: TEST_URLS.baseLogs2, BITTENSOR_RPC_URL_2: TEST_URLS.bittensor2 } });
   const trip = roundTrip(w.cfg, { id: 1n });
   w.addLogs("base", trip.base);
   w.addLogs("bittensor", trip.bit);
+  const more = o.primaryLogs?.(w.cfg) ?? {};
+  w.addLogs("base", more.base ?? []);
+  w.addLogs("bittensor", more.bittensor ?? []);
   // settle everything, and re-read it: the check judges only blocks REREAD (70 and 400) below the settled point,
   // so Bittensor's head is moved 500 blocks on after the logs settled (Base's 2-second blocks need no help)
   for (let i = 0; i < 4; i++) {
@@ -90,9 +93,10 @@ describe("runLogsCheck", () => {
     expect(m["logs_check_fail_since:base"] ?? "").toBe("");
     expect(await alerts()).toEqual([]);
     expect(aboutLogs(w.sent)).toEqual([]);
-    // Base in windows of its log window (100 blocks) to the second logs URL; Bittensor in one window
+    // Base in windows of its log window (100 blocks) to the second logs URL; Bittensor in one window; ForeverMoney's
+    // watched admin events in the same requests
     const asked = net2.fetches.map((f) => [f.chain, new URL(f.url).host, f.methods.join("+")]);
-    expect(asked.filter(([c]) => c === "base").every(([, host, m]) => host === new URL(TEST_URLS.baseLogs2).host && m === "eth_getLogs+eth_blockNumber")).toBe(true);
+    expect(asked.filter(([c]) => c === "base").every(([, host, m]) => host === new URL(TEST_URLS.baseLogs2).host && m === "eth_getLogs+eth_blockNumber+eth_getLogs")).toBe(true);
     expect(asked.filter(([c]) => c === "base")).toHaveLength(Math.ceil(Number(to.base - from.base + 1n) / Number(w.cfg.baseLogWindow)));
     expect(asked.filter(([c]) => c === "bittensor")).toHaveLength(1);
     expect(LOGS_CHECK_WINDOW.bittensor).toBeGreaterThanOrEqual(BigInt(DEFAULTS.logsCheckBittensorBlocks));
@@ -111,6 +115,29 @@ describe("runLogsCheck", () => {
     expect(r.bittensor).toMatchObject({ to: to.bittensor, omitted: 0 });
     expect(await alerts()).toEqual([]);
     expect(aboutLogs(w.sent)).toEqual([]);
+  });
+
+  it("re-reads ForeverMoney's watched admin events too: one the tick stored is no extra, one the primary omitted is found", async () => {
+    const grant = (cfg: Config, label: string, block: bigint) =>
+      rawLog({
+        address: cfg.tokens.bittensor.alphaVault,
+        abi: DEPENDENCY_EVENTS,
+        eventName: "RoleGranted",
+        args: { role: h("GUARDIAN_ROLE"), account: "0x00000000000000000000000000000000000000ee", sender: "0x00000000000000000000000000000000000000ef" },
+        block,
+        logIndex: 0,
+        txHash: h(label),
+      });
+    // the first one the primary served too (so the tick stored it); the second only the second endpoint serves
+    const { deps } = await world({
+      primaryLogs: (cfg) => ({ bittensor: [grant(cfg, "a grant both serve", 6_900_165n)] }),
+      secondLogs: (chain, primary, { cfg }) => (chain === "bittensor" ? [...primary, grant(cfg, "a grant the primary hid", 6_900_166n)] : primary),
+    });
+    expect((await rows<{ contract: string; event: string }>("SELECT contract, event FROM logs WHERE contract = 'alphaVault'")).map((r) => `${r.contract}:${r.event}`)).toEqual(["alphaVault:RoleGranted"]);
+    const r = await runLogsCheck(deps());
+    expect(r.bittensor).toMatchObject({ primary: 10, second: 11, omitted: 1, extra: 0 });
+    const [open] = await alerts();
+    expect(open).toMatchObject({ alert_key: "indexer.logs_omitted:bittensor", subject: "The Bittensor logs RPC omitted 1 watched event: AlphaVault RoleGranted" });
   });
 
   it("checks on from where it left off on the next run, never twice, and never more than the cap at once", async () => {

@@ -1,4 +1,4 @@
-import { type Abi, parseAbi } from "viem";
+import { type Abi, type Hex, keccak256, parseAbi, toBytes, toEventSelector } from "viem";
 import type { Role } from "./config.ts";
 
 // Events by contract role, as tagged v3.1 (contracts/src). A test checks each list against the
@@ -107,12 +107,57 @@ export const ADAPTER = parseAbi([
 /** The Bittensor adapter also takes top-ups of its native reserve. */
 export const BIT_ADAPTER = [...ADAPTER, ...parseAbi(["event ReserveFunded(address indexed from, uint256 amount)"])] as const;
 
+/** The admin events of ForeverMoney's contracts the rail runs on (config.ts watchFilters), the only events of theirs the
+ * scan asks for: FM-TAO on Base (Chainlink's BurnMintERC20: OpenZeppelin AccessControl, a CCIP admin), the CCIP token
+ * pools (Chainlink TokenPool 1.5.1, both read live as "BurnMintTokenPool 1.5.1" and "LockReleaseTokenPool 1.5.1" on
+ * 2026-10-31: ConfirmedOwner's two-step ownership, the rate-limit admin, each lane's buckets and remote pools, the
+ * router, the lock pool's liquidity), and the AlphaVault (AccessControlDefaultAdminRules: its admin moves only after a
+ * scheduled delay). One list for all of them: a log whose topic 0 is one of these is decoded the same whichever
+ * watched contract emitted it. */
+export const DEPENDENCY_EVENTS = parseAbi([
+  "event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)",
+  "event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender)",
+  "event RoleAdminChanged(bytes32 indexed role, bytes32 indexed previousAdminRole, bytes32 indexed newAdminRole)",
+  "event CCIPAdminTransferred(address indexed previousAdmin, address indexed newAdmin)",
+  "event DefaultAdminTransferScheduled(address indexed newAdmin, uint48 acceptSchedule)",
+  "event DefaultAdminTransferCanceled()",
+  "event DefaultAdminDelayChangeScheduled(uint48 newDelay, uint48 effectSchedule)",
+  "event DefaultAdminDelayChangeCanceled()",
+  "event OwnershipTransferRequested(address indexed from, address indexed to)",
+  "event OwnershipTransferred(address indexed from, address indexed to)",
+  "event RateLimitAdminSet(address rateLimitAdmin)",
+  "event ChainAdded(uint64 remoteChainSelector, bytes remoteToken, (bool isEnabled, uint128 capacity, uint128 rate) outboundRateLimiterConfig, (bool isEnabled, uint128 capacity, uint128 rate) inboundRateLimiterConfig)",
+  "event ChainConfigured(uint64 remoteChainSelector, (bool isEnabled, uint128 capacity, uint128 rate) outboundRateLimiterConfig, (bool isEnabled, uint128 capacity, uint128 rate) inboundRateLimiterConfig)",
+  "event ChainRemoved(uint64 remoteChainSelector)",
+  "event RemotePoolAdded(uint64 indexed remoteChainSelector, bytes remotePoolAddress)",
+  "event RemotePoolRemoved(uint64 indexed remoteChainSelector, bytes remotePoolAddress)",
+  "event RouterUpdated(address oldRouter, address newRouter)",
+  "event AllowListAdd(address sender)",
+  "event AllowListRemove(address sender)",
+  "event LiquidityRemoved(address indexed provider, uint256 indexed amount)",
+  "event LiquidityTransferred(address indexed from, uint256 amount)",
+]);
+
+/** Topic 0 of each watched admin event: the watched contracts' log filter. */
+export const DEPENDENCY_TOPICS: readonly Hex[] = DEPENDENCY_EVENTS.map((e) => toEventSelector(e));
+
+/** AccessControl's roles as FM-TAO names them: MINTER_ROLE is keccak256("MINTER_ROLE") (read live), the admin role 0. */
+export const MINTER_ROLE = keccak256(toBytes("MINTER_ROLE"));
+export const BURNER_ROLE = keccak256(toBytes("BURNER_ROLE"));
+export const DEFAULT_ADMIN_ROLE = `0x${"00".repeat(32)}` as Hex;
+
+/** CCIP's chain selectors of the lane Cascade uses (ops/src/config.ts LIVE). */
+export const CCIP_SELECTOR = { base: 15_971_525_489_660_198_786n, bittensor: 2_135_107_236_357_186_872n } as const;
+
 const BY_ROLE: Record<Role, Abi> = {
   vault: VAULT,
   frontDoor: FRONT_DOOR,
   staker: STAKER,
   baseAdapter: ADAPTER,
   bitAdapter: BIT_ADAPTER,
+  fmTao: DEPENDENCY_EVENTS,
+  tokenPool: DEPENDENCY_EVENTS,
+  alphaVault: DEPENDENCY_EVENTS,
 };
 
 /** The events a scanned contract can emit. */

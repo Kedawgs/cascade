@@ -127,13 +127,16 @@ function eventsOf(role: Role): Map<string, AbiEvent> {
 
 const HEX = /^0x[0-9a-fA-F]*$/;
 
-/** viem's decoded arguments as stored: bigints as decimal strings, hex (addresses, hashes) lowercase. */
+/** viem's decoded arguments as stored: bigints as decimal strings, hex (addresses, hashes) lowercase; a struct (a
+ * token pool's rate-limit config) as JSON of the same. */
 function plain(args: Record<string, unknown>): StoredLog["args"] {
   const out: StoredLog["args"] = {};
+  const flat = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : typeof v === "string" && HEX.test(v) ? v.toLowerCase() : v);
   for (const [k, v] of Object.entries(args)) {
     if (typeof v === "bigint") out[k] = v.toString();
     else if (typeof v === "number" || typeof v === "boolean") out[k] = v;
     else if (typeof v === "string") out[k] = HEX.test(v) ? v.toLowerCase() : v;
+    else if (typeof v === "object" && v !== null) out[k] = JSON.stringify(v, flat);
     else out[k] = String(v);
   }
   return out;

@@ -368,6 +368,8 @@ describe("the open batch and its close's economics", () => {
     return fakeChain(Object.values(KEEPER_READ_ABIS), answers, {
       eth_getBalance: () => "0x0",
       eth_blockNumber: (c) => numberToHex(c === "base" ? BASE_HEAD : 1_000),
+      // Base's blocks are 2 seconds apart, block BASE_HEAD at T (the batch's first block is found by its time)
+      eth_getBlockByNumber: (c, p) => ({ timestamp: numberToHex(c !== "base" || p[0] === "latest" ? T : T + 2 * (Number(p[0]) - BASE_HEAD)) }),
       eth_getLogs: logsOn([requested(STAKER_AT, 4n * 10n ** 17n, BASE_HEAD - 50)]),
       ...methods,
     });
@@ -410,14 +412,15 @@ describe("the open batch and its close's economics", () => {
     expect((await read(mixed)).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 112_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
   });
 
-  it("finds the batch's deposits on Base by its id, back to its start (2-second blocks, a minute's margin), then only the new blocks each round", async () => {
+  it("finds the batch's deposits on Base by its id, from the block it opened in (found by its time), then only the new blocks each round", async () => {
     let head = BASE_HEAD;
     let batchId = 7n;
     const queries: { from: bigint; to: bigint; topics: (Hex | null)[] }[] = [];
-    // the batch is two hours old: 3,600 blocks, and 30 more; a stake older than that is not found
+    // the batch is two hours old: it opened in block BASE_HEAD - 3,600, where its first stake landed; a
+    // DepositRequested for its id in the block before can only be an earlier, rolled life of the batch
     const logs = [
-      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_631),
-      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_630),
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_601),
+      requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 3_600),
       requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 5, { logIndex: 1 }),
     ];
     const f = chain(
@@ -429,7 +432,7 @@ describe("the open batch and its close's economics", () => {
     expect((await deps.readState({ economics: true })).frontDoor.closeEconomics).toEqual({ feesUsdc: 100_000n + 75_000n + 230_000n, bridgeFeeUsdc: 1_380_000n });
     expect(queries.every((q) => q.topics[1] === numberToHex(7n, { size: 32 }))).toBe(true);
     expect(queries).toHaveLength(37);
-    expect([queries[0].from, queries.at(-1)!.to]).toEqual([BigInt(BASE_HEAD - 3_630), BigInt(BASE_HEAD)]);
+    expect([queries[0].from, queries.at(-1)!.to]).toEqual([BigInt(BASE_HEAD - 3_600), BigInt(BASE_HEAD)]);
     // the next round reads only the new blocks, from 70 back: the stake read again there is counted once
     queries.length = 0;
     logs.push(requested(STAKER_AT, 10n ** 17n, BASE_HEAD + 25));
@@ -440,11 +443,11 @@ describe("the open batch and its close's economics", () => {
     queries.length = 0;
     batchId = 8n;
     expect((await deps.readState({ economics: true })).frontDoor.closeEconomics).toEqual({ feesUsdc: 230_000n, bridgeFeeUsdc: 1_380_000n });
-    expect(queries[0].from).toBe(BigInt(BASE_HEAD + 30 - 3_630));
+    expect(queries[0].from).toBe(BigInt(BASE_HEAD - 3_600));
     expect(queries.every((q) => q.topics[1] === numberToHex(8n, { size: 32 }))).toBe(true);
   });
 
-  it("looks back at most four hours of Base blocks for an older batch: its earlier deposits count as unpaid", async () => {
+  it("looks back at most 72 queries of the logs window (four hours of Base blocks at a public RPC's 100): earlier deposits count as unpaid", async () => {
     const queries: { from: bigint; to: bigint; topics: (Hex | null)[] }[] = [];
     const logs = [requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 7_201), requested(STAKER_AT, 10n ** 17n, BASE_HEAD - 7_200)];
     // twenty hours old: under the launch cadence's 24-hour max wait, so its fees still decide
@@ -452,6 +455,15 @@ describe("the open batch and its close's economics", () => {
     expect((await read(f)).frontDoor.closeEconomics).toEqual({ feesUsdc: 50_000n + 37_500n + 230_000n, bridgeFeeUsdc: 1_380_000n });
     expect(queries).toHaveLength(73);
     expect(queries[0].from).toBe(BigInt(BASE_HEAD - 7_200));
+    // the live logs server's 10,000-block window reaches the batch's first block in four queries
+    const wide = chain({ openBatch: () => [7n, BigInt(T - 20 * HOUR), 4n * 10n ** 17n, 10n ** 14n, 1n, 0n] }, { eth_getLogs: logsOn(logs, queries) });
+    queries.length = 0;
+    expect((await keeperDeps({ ...wide.ctx, logsWindow: { base: 10_000n } }, launch, recordPath()).readState({ economics: true })).frontDoor.closeEconomics).toEqual({
+      feesUsdc: 100_000n + 75_000n + 230_000n,
+      bridgeFeeUsdc: 1_380_000n,
+    });
+    expect(queries).toHaveLength(4);
+    expect(queries[0].from).toBe(BigInt(BASE_HEAD - 36_000));
   });
 
   it("counts a cancelled stake's deposit fee, which the treasury kept, but the swap fee on no more than the batch's TAO", async () => {

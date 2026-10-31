@@ -19,7 +19,11 @@ const LIMITED = () => {
 };
 const BASE_HEAD = 20_000_000;
 
-/** A logs server: Base's head at `head`, and `logs` (filtered by block range); every request is kept. */
+/** The logs server's head block time; its blocks are 2 seconds apart. */
+const HEAD_TIME = 1_800_000_000;
+
+/** A logs server: Base's head at `head` (its blocks' times 2 seconds apart, the head's HEAD_TIME), and
+ * `logs` (filtered by block range); every request is kept. */
 function logsServer(head: number, logs: { blockNumber: Hex; topics: Hex[]; address: Address; data: Hex; logIndex: Hex; transactionHash: Hex }[] = [], fail?: () => never) {
   const asked: { chain: ChainName; method: string }[] = [];
   const rpc: Rpc = {
@@ -27,6 +31,7 @@ function logsServer(head: number, logs: { blockNumber: Hex; topics: Hex[]; addre
       asked.push({ chain, method });
       if (method === "eth_chainId") return numberToHex(chain === "base" ? 8453 : 964);
       if (method === "eth_blockNumber") return numberToHex(head);
+      if (method === "eth_getBlockByNumber") return { timestamp: numberToHex(HEAD_TIME + 2 * (Number(params[0]) - head)) };
       if (method === "eth_getLogs") {
         if (fail) fail();
         const q = params[0] as { fromBlock: Hex; toBlock: Hex };

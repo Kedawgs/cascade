@@ -17,6 +17,7 @@ import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, RecordMismatch, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, codeAt, gasPriceOf, isRevert, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, logsOf, type Sent, sendCall, signerOf } from "../send.ts";
+import type { Rpc } from "../rpc.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
@@ -116,12 +117,45 @@ const ED_RESERVE = 10n ** 12n;
 export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
 /** One eth_getLogs's block range on `chain`: the logs server's own (live Base: OPS_BASE_LOGS_WINDOW), else WINDOW. */
 export const windowOf = (ctx: Pick<Ctx, "logsWindow">, chain: ChainName): bigint => ctx.logsWindow?.[chain] ?? WINDOW[chain];
-/** The furthest the keeper's first look at a batch's deposits reaches back on Base: four hours of its
- * 2-second blocks, 72 queries. Fees decide a close only once the batch can close (an hour in at the launch
- * cadence), and `run` then looks again each round, so it sees a batch's whole life unless it starts late. */
-const REQUESTED_LOOKBACK = 7_200n;
-/** Blocks looked back beyond a batch's age in Base's 2-second blocks: a minute. */
-const REQUESTED_MARGIN = 30n;
+/** The most eth_getLogs queries the keeper's first look at a batch's deposits makes on Base: that many of
+ * the logs window (REQUESTED_MAX_QUERIES × windowOf) back from the head at most. The live logs server's
+ * 10,000-block window covers a day's batch (43,200 blocks) in 5; a public RPC's 100-block window would
+ * reach only four hours back, and the keeper then says so (a batch older than that counts its earlier
+ * deposits as unpaid). The look-back starts at the batch's first block (blockAtOrAfter), so a keeper
+ * restarted at any hour of a batch sees its whole life. */
+const REQUESTED_MAX_QUERIES = 72n;
+/** Base's block time, and the first step of blockAtOrAfter's bracket around its guess (a minute). */
+const BASE_SECONDS_PER_BLOCK = 2;
+const BLOCK_SEARCH_STEP = 30n;
+
+/** The first block of `chain` at or after `time` (a Unix second), by its timestamps: a guess from the
+ * head's time at `secondsPerBlock` a block, a bracket around it (each side stepped away, doubling, until
+ * it is on its side of `time`), then bisected. About two reads when the guess is right (Base's steady
+ * 2-second blocks), a handful more when it is off by minutes. `head + 1` when no block is at `time` yet. */
+export async function blockAtOrAfter(rpc: Rpc, chain: ChainName, time: number, head: bigint, headTime: number, secondsPerBlock = BASE_SECONDS_PER_BLOCK): Promise<bigint> {
+  const timeOf = async (n: bigint) => hexToNumber(((await rpc.request(chain, "eth_getBlockByNumber", [numberToHex(n), false])) as { timestamp: Hex }).timestamp);
+  if (headTime < time) return head + 1n;
+  const back = BigInt(Math.floor((headTime - time) / secondsPerBlock));
+  const guess = back < head ? head - back : 0n;
+  // lo is before `time` (or -1, before the chain); hi is at or after it
+  let lo = guess - 1n;
+  let hi = guess;
+  for (let step = BLOCK_SEARCH_STEP; hi < head && (await timeOf(hi)) < time; step *= 2n) {
+    lo = hi;
+    hi = hi + step < head ? hi + step : head;
+  }
+  for (let step = BLOCK_SEARCH_STEP; lo >= 0n && (await timeOf(lo)) >= time; step *= 2n) {
+    hi = lo;
+    lo -= step;
+  }
+  if (lo < 0n) lo = -1n;
+  while (hi - lo > 1n) {
+    const mid = (lo + hi) / 2n;
+    if ((await timeOf(mid)) >= time) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
 /** Each later scan of an event starts this many blocks before the last head it reached, so a log a
  * lagging (load-balanced) node or a reorg hid is found on a later round; still one query a round (about
  * 70 + 30 new blocks of Base's 100-block window, 400 + 5 of Bittensor's 1,000). */
@@ -222,10 +256,10 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     const kept: ScannedLog[] = [];
     const seen = new Set<string>();
     let scannedTo: bigint | undefined;
-    return async (first: (head: bigint) => bigint): Promise<{ logs: ScannedLog[]; head: bigint }> => {
+    return async (first: (head: bigint) => bigint | Promise<bigint>): Promise<{ logs: ScannedLog[]; head: bigint }> => {
       // the head from the server the logs come from
       const head = hexToBigInt((await logsOf(ctx).request(chain, "eth_blockNumber", [])) as Hex);
-      const earliest = first(head);
+      const earliest = await first(head);
       const back = scannedTo === undefined ? earliest : scannedTo + 1n - REREAD[chain];
       const from = back > earliest ? back : earliest;
       const fresh: ScannedLog[] = [];
@@ -515,28 +549,47 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       now,
     };
     if (economics && undecided && !full) {
-      frontDoor.closeEconomics = await closeEconomics({ id, ageS: now - openStart, totalDeposits, feePot }, deposits, redeems);
+      frontDoor.closeEconomics = await closeEconomics({ id, openStart, totalDeposits, feePot }, deposits, redeems);
     }
     return { frontDoor, closeMaxWaitS };
   }
 
-  /** The open batch's DepositRequested logs on Base, kept for one batch across rounds. */
-  let requested: { batchId: bigint; read: ReturnType<typeof logCursor> } | undefined;
+  /** The open batch's DepositRequested logs on Base, kept for one batch across rounds, from the block the
+   * batch opened in (found once a batch; undefined until it is). */
+  let requested: { batchId: bigint; start?: bigint; read: ReturnType<typeof logCursor> } | undefined;
   /** The batch whose deposits the logs server last failed to give: its failure is said once. */
   let logsFailedFor: bigint | undefined;
+  /** The batch whose first look the logs window cut short: said once. */
+  let cappedFor: bigint | undefined;
 
   /** The open batch's deposits the staker made (DepositRequested names it as the payer): only those paid
    * the staker's deposit and swap fees; TAO deposited straight into the front door (deposit, depositFor)
-   * paid neither. Found by the batch's id over Base's logs, the first look reaching back to the batch's
-   * start (its age in Base's 2-second blocks, and a minute more), REQUESTED_LOOKBACK blocks at most: an
-   * older deposit (a batch the keeper first sees late) counts as unpaid. */
-  async function stakerDeposits(batchId: bigint, ageS: number, staker: Address): Promise<{ count: number; tao: bigint }> {
+   * paid neither. Found by the batch's id over Base's logs, the first look reaching back to the block the
+   * batch opened in, the first at or after `openStart` on Base's clock (blockAtOrAfter, found once a batch
+   * through the logs server, whose head the scan uses), so a keeper restarted at any hour of a batch counts
+   * its deposits; its max wait bounds that, since the fees decide a close only until then. The look-back is
+   * cut at REQUESTED_MAX_QUERIES of the logs window (said once a batch): an older deposit then counts as
+   * unpaid. Later looks scan only the new blocks. */
+  async function stakerDeposits(batchId: bigint, openStart: number, staker: Address): Promise<{ count: number; tao: bigint }> {
     if (requested?.batchId !== batchId) {
       requested = { batchId, read: logCursor("base", a.frontDoor, event(FRONT, "DepositRequested"), [numberToHex(batchId, { size: 32 })]) };
     }
-    const age = (BigInt(Math.max(ageS, 0)) + 1n) / 2n + REQUESTED_MARGIN;
-    const back = age < REQUESTED_LOOKBACK ? age : REQUESTED_LOOKBACK;
-    const { logs } = await requested.read((head) => (head > back ? head - back : 0n));
+    const r = requested;
+    const maxBack = REQUESTED_MAX_QUERIES * windowOf(ctx, "base");
+    const { logs } = await r.read(async (head) => {
+      if (r.start === undefined) {
+        const headTime = hexToNumber(((await logsOf(ctx).request("base", "eth_getBlockByNumber", [numberToHex(head), false])) as { timestamp: Hex }).timestamp);
+        r.start = await blockAtOrAfter(logsOf(ctx), "base", openStart, head, headTime);
+      }
+      const floor = head > maxBack ? head - maxBack : 0n;
+      if (r.start < floor && cappedFor !== batchId) {
+        cappedFor = batchId;
+        ctx.log(
+          `Base logs: batch ${batchId} opened at block ${r.start}, ${head - r.start} blocks back, further than the ${maxBack} blocks the logs window allows in ${REQUESTED_MAX_QUERIES} queries: its deposits before block ${floor} are not counted, so it may wait for its max wait instead of closing when its fees cover the bridge fee. Set OPS_BASE_LOGS_WINDOW higher (the live logs server takes 10,000).`,
+        );
+      }
+      return r.start > floor ? r.start : floor;
+    });
     const staked = logs.filter((l) => (l.args.payer as Address).toLowerCase() === staker.toLowerCase());
     return { count: staked.length, tao: staked.reduce((t, l) => t + (l.args.amount as bigint), 0n) };
   }
@@ -549,7 +602,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
    * fee would count any batch as covered): the batch then waits for its max wait, never closing early on a
    * guess. */
   async function closeEconomics(
-    batch: { id: bigint; ageS: number; totalDeposits: bigint; feePot: bigint },
+    batch: { id: bigint; openStart: number; totalDeposits: bigint; feePot: bigint },
     deposits: readonly Entry[],
     redeems: readonly Entry[],
   ): Promise<CloseEconomics | null> {
@@ -564,7 +617,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       if (taoPriceUsdc === 0n || ethPriceUsdc === 0n || bridgeFeeWei === 0n) return null;
       let staked: { count: number; tao: bigint };
       try {
-        staked = await stakerDeposits(batch.id, batch.ageS, staker);
+        staked = await stakerDeposits(batch.id, batch.openStart, staker);
         logsFailedFor = undefined;
       } catch (e) {
         // said once a batch, not every round of `run`

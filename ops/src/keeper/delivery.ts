@@ -5,9 +5,13 @@ import type { CallRequest } from "../types.ts";
 
 /** Circle's CCTP domain for Base: the only delivery destination the front door accepts. */
 export const DESTINATION_BASE = 6;
-/** The keeper's own minimum is the quote less 0.5% (room for the price to move before the sale lands),
- * raised to the contract's floors when the quote sits within 0.5% of them. */
+/** The keeper's own minimum is the quote less 0.5%: room for the price to move between the simulation
+ * and the sale landing. A delivery goes only while that minimum clears every floor the front door
+ * applies (the user's and the TWAP's), so the keeper never sends with no room: a quote within 0.5% of a
+ * floor waits for a better one, since any downtick before the sale lands would revert it, for the gas. */
 const KEEPER_ROOM_BPS = 50n;
+/** KEEPER_ROOM_BPS in words, for the log. */
+export const KEEPER_ROOM = "0.5%";
 
 export const TWAP_UNAVAILABLE = "the pool's price history doesn't reach 30 minutes; the user can claim by hand";
 /** The node answered a read or the simulation with an error of its own, not a revert. */
@@ -46,10 +50,12 @@ export function preferenceProblem(pref: DeliveryPref | null, now: number): strin
   return null;
 }
 
-/** Deliver only with a live Base preference and a quote (already net of the staker's fee) at or above
- * every floor deliver applies: the user's, rounded up, and the TWAP's less the slippage allowance, each
- * computed as the front door does. The keeper's own minimum is the quote less 0.5%, never below either
- * floor, so the keeper never narrows the window the contract allows. */
+/** Deliver only with a live Base preference and a quote (already net of the staker's fee) that clears
+ * every floor deliver applies by the keeper's room: the user's floor, rounded up, and the TWAP's less the
+ * slippage allowance, each computed as the front door does. The keeper's own minimum is the quote less
+ * 0.5% (KEEPER_ROOM_BPS), and the delivery waits while that is under either floor: sent at the floor
+ * itself, any downtick before the sale lands reverts it (BelowMinimum, "Too little received"), for the
+ * gas, and a user whose floor sits at the market price would have that happen round after round. */
 export function deliveryDecision(i: DeliveryInput): { deliver: boolean; keeperMinOut?: bigint; reason: string } {
   if (i.claimable === 0n) return no("nothing is claimable");
   const problem = preferenceProblem(i.pref, i.now);
@@ -61,13 +67,29 @@ export function deliveryDecision(i: DeliveryInput): { deliver: boolean; keeperMi
   const quote = `the quote, ${usdc(i.quoteUsdc)} after the swap fee,`;
   if (i.quoteUsdc < userFloor) return no(`${quote} is below the user's floor of ${usdc(userFloor)}; it waits for a later round`);
   if (i.quoteUsdc < twapFloor) return no(`${quote} is below the 30-minute TWAP floor of ${usdc(twapFloor)}; it waits for a later round`);
-  const roomy = (i.quoteUsdc * (10_000n - KEEPER_ROOM_BPS)) / 10_000n;
-  const keeperMinOut = [roomy, userFloor, twapFloor].reduce((a, b) => (a > b ? a : b));
+  const keeperMinOut = (i.quoteUsdc * (10_000n - KEEPER_ROOM_BPS)) / 10_000n;
+  const tooClose = (floor: string) =>
+    no(`${quote} clears ${floor} by less than the ${KEEPER_ROOM} room the keeper keeps for the price to move before the sale lands; it waits for a better quote`);
+  if (keeperMinOut < userFloor) return tooClose(`the user's floor of ${usdc(userFloor)}`);
+  if (keeperMinOut < twapFloor) return tooClose(`the 30-minute TWAP floor of ${usdc(twapFloor)}`);
   return {
     deliver: true,
     keeperMinOut,
-    reason: `${quote} clears the user's floor (${usdc(userFloor)}) and the TWAP floor (${usdc(twapFloor)})`,
+    reason: `${quote} clears the user's floor (${usdc(userFloor)}) and the TWAP floor (${usdc(twapFloor)}) with ${KEEPER_ROOM} room`,
   };
+}
+
+/** What a delivery's decoded revert reason says, when it is the price or the user: a price race (the
+ * front door's BelowMinimum, the staker's InsufficientOutput, Uniswap's "Too little received"), or the
+ * user claiming first, or changing or letting lapse their preference. Undefined for no reason, or one
+ * that says neither. */
+export function explainDeliveryRevert(reason: string | undefined): string | undefined {
+  if (!reason) return undefined;
+  if (/BelowMinimum|InsufficientOutput|Too little received/i.test(reason)) return `the price moved before the sale landed (${reason})`;
+  if (/NothingToClaim|NoDelivery|DeliveryExpired|UnsupportedDestination/i.test(reason)) {
+    return `the user claimed first, or changed or let lapse their preference (${reason})`;
+  }
+  return undefined;
 }
 
 /** The staker's fee comes off the sale's output, after the swap, as sellFor takes it. */

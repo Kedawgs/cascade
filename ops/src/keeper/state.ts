@@ -15,7 +15,7 @@ import {
 import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE } from "../config.ts";
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, RecordMismatch, sameDeployment, saveRecord } from "../record.ts";
-import { balanceOf, codeAt, gasPriceOf, nonceOf, read, RpcError } from "../rpc.ts";
+import { balanceOf, codeAt, gasPriceOf, isRevert, nonceOf, read, RpcError } from "../rpc.ts";
 import { type Ctx, describeRevert, logsOf, type Sent, sendCall, signerOf } from "../send.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
@@ -105,19 +105,7 @@ const UNISWAP_V3 = 0;
 const ETH_USDC_PATH = encodePacked(["address", "uint24", "address"], [BASE_V3.WETH, 500, BASE_V3.USDC]);
 const E18 = 10n ** 18n;
 
-/** The call really failed in the contract: JSON-RPC code 3, revert data, or a message that says so
- * (a revert, out of gas, an invalid opcode). A node that
- * answered with an error of its own (-32005 limit exceeded, -32000 header not found, -32603) did not
- * run the call, so its answer says nothing about the contract. */
-export function isRevert(e: unknown): boolean {
-  if (!(e instanceof RpcError)) return false;
-  if (e.code === 3) return true;
-  const raw = e.data;
-  const data = typeof raw === "string" ? raw : (raw as { data?: unknown } | undefined)?.data;
-  if (typeof data === "string" && /^0x[0-9a-fA-F]{8,}$/.test(data)) return true;
-  // geth reports a call that ran out of gas or hit an invalid opcode as -32000, with no revert data
-  return /revert|out of gas|invalid opcode/i.test(e.message);
-}
+export { isRevert } from "../rpc.ts";
 
 /** A node's own error (not a revert): the delivery is skipped for a later round, never sent on it. */
 const unanswered = (e: unknown) => e instanceof RpcError && !isRevert(e);

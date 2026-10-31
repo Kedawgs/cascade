@@ -34,22 +34,16 @@ export class NotNow extends Error {}
  * go until a person looks, and a due payout comes before every other action, so `run` stops on it. */
 export class PayoutListMismatch extends Error {}
 
-/** A delivery reverted on chain while its simulation still passed on the same facts: the `count`th such
- * revert for `user`. `run` fails the round for it, and stops at `limit`. */
+/** A delivery reverted on chain while its simulation still passed on the same facts, and its revert
+ * decoded to nothing that explains it. A passing failure: `run` fails the round for it (so the log and
+ * the back-off show it) and holds that user's delivery; one user's delivery never stops the keeper, and
+ * repeated reverts of it, explained or not, only hold that user longer (the revert budget). */
 export class DeliveryReverted extends Error {
   readonly user: Address;
-  readonly count: number;
-  readonly limit: number;
 
-  constructor(user: Address, count: number, limit: number, revert: RevertedOnChain) {
-    super(
-      count >= limit
-        ? `deliver to ${user} reverted on chain ${count} times while its simulation passed on the same facts (the last: transaction ${revert.hash}): the chain and the simulation disagree for a reason the keeper can't see`
-        : `${revert.message}, while its simulation still passes on the same facts (${count} of ${limit} before the keeper stops); held for 30 minutes, or until the user's facts change`,
-    );
+  constructor(user: Address, revert: RevertedOnChain) {
+    super(`${revert.message}, while its simulation still passes on the same facts and nothing explains it; held for 30 minutes, or until the user's facts change`);
     this.user = user;
-    this.count = count;
-    this.limit = limit;
   }
 }
 
@@ -75,7 +69,6 @@ export type FailureKind =
   | "not-live"
   | "reverted"
   | "payout-list"
-  | "delivery-reverts"
   | "waiting"
   | "nonce"
   | "estimate"
@@ -121,15 +114,16 @@ function networkCode(e: unknown): string | undefined {
  * hand-off not accepted, another keeper); the record file is gone or holds another deployment; the
  * keystore signs as another account; an RPC answers for another chain; the live gate; a transaction
  * that reverted on chain with nothing to explain it (`run` re-reads first: a lost race never gets here);
- * a payout list that doesn't match the vault's (it would block every other action); and a third
- * unexplained revert of one user's delivery. (`run` also stops after 30 rounds in a row of "unexpected".)
+ * and a payout list that doesn't match the vault's on two full scans of its events. (`run` also stops
+ * after 30 rounds in a row of "unexpected".) These are states that are unsafe, or wrong, for everyone;
+ * one user's delivery never stops the keeper: its reverts only hold that user (the revert budget).
  *
  * Wait (log, back off, next round): an earlier transaction still pending, a nonce race, a simulation
  * that refused the send (the chain changed under it), no receipt yet (the send guard then holds every
  * send until it is mined or dropped), the chain changed since the round's read, a revert whose re-read
- * failed (the next round's read decides), a first or second unexplained delivery revert, an RPC error or
- * a network failure, and anything else: none of these can send twice, since every send goes through the
- * guards again. The message has any URL's secrets stripped (scrubSecrets). */
+ * failed (the next round's read decides), a delivery revert nothing explains, an RPC error or a network
+ * failure, and anything else: none of these can send twice, since every send goes through the guards
+ * again. The message has any URL's secrets stripped (scrubSecrets). */
 export function classifyFailure(e: unknown): Failure {
   // a message can quote an RPC's URL, where a provider's key can sit
   const message = scrubSecrets(e instanceof Error ? e.message : String(e));
@@ -139,9 +133,7 @@ export function classifyFailure(e: unknown): Failure {
   if (e instanceof RecordMismatch) return as(true, "record", "the record changed");
   if (e instanceof RevertedOnChain) return as(true, "reverted", "an unexplained revert");
   if (e instanceof PayoutListMismatch) return as(true, "payout-list", "the payout list doesn't match the vault");
-  if (e instanceof DeliveryReverted) {
-    return e.count >= e.limit ? as(true, "delivery-reverts", "repeated delivery reverts") : as(false, "delivery-reverted", "an unexplained delivery revert");
-  }
+  if (e instanceof DeliveryReverted) return as(false, "delivery-reverted", "an unexplained delivery revert");
   if (e instanceof RevertUnread) return as(false, "revert-unread", "a revert not yet explained");
   if (e instanceof SendRefused) {
     switch (e.reason) {

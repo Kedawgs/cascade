@@ -288,8 +288,11 @@ describe("deliveries in a run that must survive", () => {
     expect(await runLoop(w.deps, rec, { ...opts, maxTicks: 2 })).toEqual({ stopped: false });
     // held, not retried unchanged: round 2 only closes
     expect(w.sends()).toEqual(["deliver", "closeBatch", "closeBatch"]);
-    expect(failed(w.lines)).toEqual([expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*\(1 of 3/)]);
+    expect(failed(w.lines)).toEqual([
+      expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*still passes on the same facts and nothing explains it; held for 30 minutes/),
+    ]);
     expect(w.lines).toContain("Recovered after 1 failed round");
+    expect(classifyFailure(new DeliveryReverted(alice, new RevertedOnChain("base", "deliver", HASH)))).toMatchObject({ stop: false, kind: "delivery-reverted" });
   });
 
   it("a delivery refused for the wrong key or chain stops the keeper, as any send would", async () => {
@@ -481,17 +484,20 @@ describe("a delivery that reverts on chain is re-checked at once", () => {
     expect(failed(w.lines)).toEqual([]);
   });
 
-  it("unexplained when it still passes on the same facts: a failed round, held 30 minutes, and the third stops the keeper", async () => {
+  it("unexplained when it still passes on the same facts: a failed round, held 30 minutes; the second in a day holds her for hours, and the keeper never stops", async () => {
     const w = deliveryWorld({ deliverSend: () => deliveryRevert() });
-    // each round's wait is 31 minutes: every hold has run out by the next round
+    // each round's wait is 31 minutes: every 30-minute hold has run out by the next round
     const end = await runLoop(w.deps, rec, { ...opts, maxTicks: 5, ...clock(31 * MINUTE) });
-    expect(end).toMatchObject({ stopped: true, kind: "delivery-reverts" });
-    expect(w.sends()).toEqual(["deliver", "closeBatch", "deliver", "closeBatch", "deliver"]);
+    expect(end).toEqual({ stopped: false });
+    // the second revert runs out her budget (REVERT_BUDGET in a day): held six hours, the closes go on
+    expect(w.sends()).toEqual(["deliver", "closeBatch", "deliver", "closeBatch", "closeBatch", "closeBatch", "closeBatch"]);
     expect(failed(w.lines)).toEqual([
-      expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*reverted on chain.*still passes on the same facts \(1 of 3/),
-      expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*\(2 of 3/),
+      expect.stringMatching(/^Failed this round \(an unexplained delivery revert, delivering to 0x0+a11c\): .*reverted on chain.*still passes on the same facts and nothing explains it/),
     ]);
-    expect(w.lines.at(-1)).toMatch(/^Stopped: deliver to 0x0+a11c reverted on chain 3 times while its simulation passed on the same facts/);
+    expect(w.lines.filter((l) => l.startsWith("DELIVERY HELD:"))).toEqual([
+      expect.stringMatching(/^DELIVERY HELD: deliver to 0x0+a11c reverted on chain 2 times within 24 hours \(the last: transaction 0x7e.*, and nothing explains it\); held 6 hours, until 1970-01-01 06:31 UTC/),
+    ]);
+    expect(w.lines.some((l) => l.startsWith("Stopped"))).toBe(false);
   });
 
   it("an unexplained revert's hold keeps her waiting within the 30 minutes", async () => {

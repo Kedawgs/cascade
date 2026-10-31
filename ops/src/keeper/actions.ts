@@ -4,7 +4,7 @@ import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
 import { ReceiptTimeout, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
-import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom } from "./delivery.ts";
+import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom, explainDeliveryRevert } from "./delivery.ts";
 import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
 import {
   classifyFailure,
@@ -426,12 +426,21 @@ export function explainRace(a: Racing, before: KeeperState, after: KeeperState):
 
 /** How long a held delivery waits at most before it is tried again on the same facts. */
 export const HOLD_MS = 30 * 60_000;
-/** Unexplained reverts of one user's delivery (its simulation passing on the same facts each time)
- * before the keeper stops. Each costs a Base transaction's gas, and each holds the delivery 30 minutes,
- * so three span an hour: one or two can be a price move within the block or a race the simulation
- * couldn't see; a third on unchanged facts says the chain and the simulation disagree for a reason the
- * keeper can't see (an RPC answering simulations wrongly included), which needs a person. */
-export const MAX_DELIVERY_REVERTS = 3;
+/** A user's revert budget: this many of their deliveries reverted on chain within REVERT_WINDOW_MS,
+ * explained (a price race, a preference they changed under the send) or not, and that user's delivery
+ * is held for REVERT_HOLD_MS, whatever their facts do; each time the budget runs out again within the
+ * window the hold doubles, up to REVERT_HOLD_MAX_MS. Each reverted delivery costs the keeper a Base
+ * transaction's gas, so a floor that sits at the market price, or a user changing their preference once
+ * a round, is allowed two a day and then waits; the user can claim by hand at any time. One user's
+ * reverts never stop the keeper, whose other work goes on. */
+export const REVERT_BUDGET = 2;
+export const REVERT_WINDOW_MS = 24 * 3600_000;
+export const REVERT_HOLD_MS = 6 * 3600_000;
+export const REVERT_HOLD_MAX_MS = 48 * 3600_000;
+
+const hours = (ms: number) => `${Number((ms / 3600_000).toFixed(1))} hour${ms === 3600_000 ? "" : "s"}`;
+/** A clock time for the log: "2027-01-18 14:05 UTC". */
+const at = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 /** Rounds a transaction with no receipt is looked up for before it is reported as probably dropped. */
 const LATE_RECEIPT_ROUNDS = 60;
 
@@ -468,11 +477,14 @@ export interface RunOptions {
  * reverts on chain, never ends the round: the round's payout, stake or close still goes ahead. One whose
  * estimate refuses it, or that reverted, is held, not retried, until the user's claimable amount,
  * preference, or the quote against the floors changes, or for 30 minutes (HOLD_MS). A reverted delivery
- * is re-checked at once: if its simulation still passes on the same facts, the revert is unexplained, the
- * round counts as failed, and the third such revert for one user stops the run (MAX_DELIVERY_REVERTS).
- * Reward claims are only reported, every `rewardsEveryTicks` rounds. Each round starts by re-reading the
- * record (`deps.refresh`, onto `rec`, the record the deps were made with), so a read-back that failed
- * since the run started stops its sends.
+ * is explained by its decoded revert (a price race, the user's own change) or by re-checking the user;
+ * one its simulation still passes on, on the same facts, with nothing to explain it, fails the round (the
+ * log shows it) and is held too. Every reverted delivery counts against that user's revert budget
+ * (REVERT_BUDGET within REVERT_WINDOW_MS): over it, that user is held for hours, said loudly, whatever
+ * their facts do. No delivery ever stops the run: only states unsafe for everyone do. Reward claims are
+ * only reported, every `rewardsEveryTicks` rounds. Each round starts by re-reading the record
+ * (`deps.refresh`, onto `rec`, the record the deps were made with), so a read-back that failed since the
+ * run started stops its sends.
  *
  * A failure inside a round ends that round, never the run, unless classifyFailure says it must stop it
  * (a keeper wallet found with code at any send, a delivery's too; a wrong key; the record not ready or
@@ -493,10 +505,12 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
   const stillFailingAfter = opts.stillFailingAfter ?? 10;
   /** The last wait logged for each user, so each reason is logged once. */
   const waiting = new Map<string, string>();
-  /** Deliveries held after a refused estimate or a revert: the facts they were held on, and since when. */
-  const held = new Map<string, { facts: string; reason: string; at: number }>();
-  /** Unexplained reverts of each user's delivery so far. */
-  const deliveryReverts = new Map<string, number>();
+  /** Deliveries held after a refused estimate or a revert: why, the facts they were held on (unset: a
+   * timed hold that no change in the facts ends), and when the hold ends. */
+  const held = new Map<string, { reason: string; facts?: string; until: number }>();
+  /** Each user's reverted deliveries (when, by the clock) within REVERT_WINDOW_MS, the holds their budget
+   * has cost in a row, and when the last of those ends. */
+  const reverts = new Map<string, { at: number[]; strikes: number; holdEnd: number }>();
   /** How many rounds in a row each kind of skip has happened, and the ones this round. */
   const skipRuns = new Map<string, number>();
   let skippedNow = new Set<string>();
@@ -524,7 +538,23 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
   };
   const notDone = (a: Racing, why: string, hash: Hex) =>
     skipped(`not-done:${a.kind}`, doing(a), `Not done: ${why}; the transaction reverted on chain (transaction ${hash}); the next round decides again`);
-  const hold = (key: string, facts: string, reason: string) => held.set(key, { facts, reason, at: clock() });
+  /** Holds a user's delivery for `forMs` (HOLD_MS), or until their `facts` change when those are given. */
+  const hold = (key: string, reason: string, facts?: string, forMs = HOLD_MS) => held.set(key, { reason, facts, until: clock() + forMs });
+  /** Counts a reverted delivery of `key`'s against the user's budget: how many fell within the window,
+   * and the hold that costs (0 while within budget). Each hold within a window of the last one's end
+   * doubles the one before; a window with no hold starts them again at REVERT_HOLD_MS. */
+  function overBudget(key: string): { within: number; holdMs: number } {
+    const now = clock();
+    const r = reverts.get(key) ?? { at: [], strikes: 0, holdEnd: Number.NEGATIVE_INFINITY };
+    r.at = [...r.at.filter((t) => now - t < REVERT_WINDOW_MS), now];
+    reverts.set(key, r);
+    if (r.at.length < REVERT_BUDGET) return { within: r.at.length, holdMs: 0 };
+    if (now >= r.holdEnd + REVERT_WINDOW_MS) r.strikes = 0;
+    r.strikes++;
+    const holdMs = Math.min(REVERT_HOLD_MS * 2 ** (r.strikes - 1), REVERT_HOLD_MAX_MS);
+    r.holdEnd = now + holdMs;
+    return { within: r.at.length, holdMs };
+  }
 
   /** A close, roll, payout or stake that reverted on chain: true when the chains, read again, show it lost
    * a race (a skip). Nothing explaining it throws the revert (which stops the run); a read that fails
@@ -625,7 +655,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
         const key = c.user.toLowerCase();
         facts.set(key, c.facts);
         const h = held.get(key);
-        if (h && ((c.facts !== undefined && h.facts !== c.facts) || clock() - h.at >= HOLD_MS)) held.delete(key);
+        if (h && ((h.facts !== undefined && c.facts !== undefined && h.facts !== c.facts) || clock() >= h.until)) held.delete(key);
         if (c.claimable === 0n) {
           waiting.delete(key);
           continue;
@@ -693,23 +723,35 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
           if (e instanceof RevertedOnChain) {
             // mined and reverted, so nothing is pending. Held at once, whatever the re-check finds (or if
             // it fails): a reverted delivery is never sent again blindly
-            hold(key, f ?? "", `${e.message}; held while it is checked again`);
-            const again = await checkDelivery(deps, action.user);
-            if (!again.deliver || again.facts !== f) {
-              // the user claimed first, changed or let lapse their preference, or the price moved
-              const why = again.deliver ? "the user's claimable amount, preference or quote changed" : again.reason;
+            hold(key, `${e.message}; held while it is checked again`, f ?? "");
+            const budget = overBudget(key);
+            // the decoded revert first (a price race, the user's own change); else the user re-read
+            let why = explainDeliveryRevert(e.reason);
+            if (!why) {
+              const again = await checkDelivery(deps, action.user);
+              if (!again.deliver) why = again.reason;
+              else if (again.facts !== f) why = "the user's claimable amount, preference or quote changed";
+            }
+            if (budget.holdMs) {
+              // over budget, explained or not: this user waits, whatever the price or their preference
+              // does, and the keeper's other work goes on. Said loudly every time
+              const until = clock() + budget.holdMs;
+              hold(key, `held until ${at(until)}: ${budget.within} of this user's deliveries reverted on chain within ${hours(REVERT_WINDOW_MS)}`, undefined, budget.holdMs);
+              log(
+                `DELIVERY HELD: deliver to ${action.user} reverted on chain ${budget.within} times within ${hours(REVERT_WINDOW_MS)} (the last: transaction ${e.hash}${e.reason ? `, ${e.reason}` : ""}${why ? `: ${why}` : ", and nothing explains it"}); held ${hours(budget.holdMs)}, until ${at(until)}, whatever the price or the preference does; the user can claim by hand meanwhile, and the keeper's other work goes on`,
+              );
+              continue;
+            }
+            if (why) {
               const reason = `${e.message}: ${why}; not retried until the claimable amount, the preference or the quote against the floors changes, or for 30 minutes`;
-              hold(key, f ?? "", reason);
+              hold(key, reason, f ?? "");
               waits(action.user, reason);
               continue;
             }
-            // its simulation still passes on the same facts: nothing explains the revert
-            const n = (deliveryReverts.get(key) ?? 0) + 1;
-            deliveryReverts.set(key, n);
-            const failure = new DeliveryReverted(action.user, n, MAX_DELIVERY_REVERTS, e);
-            if (n >= MAX_DELIVERY_REVERTS) throw failure;
-            hold(key, f ?? "", `${e.message}, while its simulation still passes on the same facts; held for 30 minutes, or until the user's facts change`);
-            soft = { error: failure, doing: step };
+            // its simulation still passes on the same facts, and the revert decodes to nothing that
+            // explains it: the round fails on it (so the log shows it), and this user is held; never a stop
+            hold(key, `${e.message}, while its simulation still passes on the same facts; held for 30 minutes, or until the user's facts change`, f ?? "");
+            soft = { error: new DeliveryReverted(action.user, e), doing: step };
             continue;
           }
           if (e instanceof SendRefused && !classifyFailure(e).stop) {
@@ -723,14 +765,14 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
         }
         if (d.delivered) {
           waiting.delete(key);
-          deliveryReverts.delete(key);
+          reverts.delete(key);
           const got = d.usdcOut === undefined ? "" : `, ${Number(d.usdcOut) / 1e6} USDC`;
           log(`Done: ${next.reason} (transaction ${d.hash}${got})`);
           break;
         }
         if (d.refused !== undefined && f !== undefined) {
           const reason = `${d.refused}; not retried until the claimable amount, the preference or the quote against the floors changes, or for 30 minutes`;
-          hold(key, f, reason);
+          hold(key, reason, f);
           waits(action.user, reason);
         } else {
           waits(action.user, d.reason);

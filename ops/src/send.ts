@@ -17,7 +17,7 @@ import {
 } from "viem";
 import { loadArtifact } from "./artifacts.ts";
 import { type ChainName, type ChainTarget, type Paths, WALLET } from "./config.ts";
-import { chainIdOf, codeAt, gasPriceOf, nonceOf, type Rpc, RpcError } from "./rpc.ts";
+import { chainIdOf, codeAt, gasPriceOf, isRevert, nonceOf, type Rpc, RpcError } from "./rpc.ts";
 import type { CallRequest, CreateRequest } from "./types.ts";
 
 export interface Runner {
@@ -73,29 +73,37 @@ export class SendRefused extends Error {
   }
 }
 
-/** The transaction was mined and reverted: its receipt's status is not 1. */
+/** The transaction was mined and reverted: its receipt's status is not 1. `reason` is why, when the
+ * call, replayed at the block it reverted in (revertReason), reverts too: a Cascade contract's error by
+ * name (BelowMinimum()), Error(string) with its text ("Too little received"); unset when the replay goes
+ * through (the state moved within the block) or the node didn't answer it. */
 export class RevertedOnChain extends Error {
   readonly chain: ChainName;
   readonly hash: Hex;
+  readonly reason?: string;
 
-  constructor(chain: ChainName, label: string, hash: Hex) {
-    super(`${chainLabel(chain)}: ${label} reverted on chain (transaction ${hash})`);
+  constructor(chain: ChainName, label: string, hash: Hex, reason?: string) {
+    super(`${chainLabel(chain)}: ${label} reverted on chain (transaction ${hash}${reason ? `, ${reason}` : ""})`);
     this.chain = chain;
     this.hash = hash;
+    this.reason = reason;
   }
 }
 
-/** The transaction was sent but no receipt came within the wait. `hash` is unknown when forge timed out. */
+/** The transaction was sent but no receipt came within the wait. `hash` is unknown when forge timed out.
+ * `request` is the call it carries (sendCall's), for a replacement at the same nonce (replaceCall). */
 export class ReceiptTimeout extends Error {
   readonly hash?: Hex;
   readonly chain: ChainName;
   readonly nonce: number;
+  readonly request?: CallRequest;
 
-  constructor(chain: ChainName, nonce: number, hash?: Hex) {
+  constructor(chain: ChainName, nonce: number, hash?: Hex, request?: CallRequest) {
     super(`${chainLabel(chain)}: no receipt yet for nonce ${nonce}${hash ? ` (transaction ${hash})` : ""}; nothing more will be sent until it is mined or dropped`);
     this.hash = hash;
     this.chain = chain;
     this.nonce = nonce;
+    this.request = request;
   }
 }
 
@@ -310,7 +318,7 @@ type Receipt = {
 };
 
 /** Polls for the receipt; an RPC error is retried until the deadline, since the transaction is out. */
-async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex): Promise<Receipt> {
+async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex, request?: CallRequest): Promise<Receipt> {
   const deadline = Date.now() + ctx.receiptTimeoutMs;
   for (;;) {
     try {
@@ -319,9 +327,27 @@ async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex)
     } catch {
       // keep waiting: the transaction was broadcast
     }
-    if (Date.now() >= deadline) throw new ReceiptTimeout(chain, nonce, hash);
+    if (Date.now() >= deadline) throw new ReceiptTimeout(chain, nonce, hash, request);
     await sleep(ctx.pollMs ?? 3_000);
   }
+}
+
+/** Why a mined transaction reverted, as far as a replay can tell: its call as an eth_call at the block it
+ * was mined in (that block's end state, which holds the price moves that beat it), then at the block
+ * before. The first replay that reverts gives the reason (describeRevert: a Cascade contract's error by
+ * name, Error(string) with its text); neither reverting, or the node not answering, gives undefined. Reads
+ * only: nothing is sent. */
+export async function revertReason(ctx: Pick<Ctx, "rpc" | "paths">, chain: ChainName, tx: { from: Address; to: Address; data: Hex; value: Hex }, block: Hex): Promise<string | undefined> {
+  const mined = hexToBigInt(block);
+  for (const at of [mined, mined - 1n]) {
+    if (at < 0n) break;
+    try {
+      await ctx.rpc.request(chain, "eth_call", [tx, numberToHex(at)]);
+    } catch (e) {
+      return isRevert(e) ? describeRevert(ctx, e) : undefined;
+    }
+  }
+  return undefined;
 }
 
 /** Foundry gave no hash. If the wallet's nonce moved past this one (pending or mined), the node took
@@ -333,8 +359,8 @@ async function noHash(ctx: Ctx, chain: ChainName, nonce: number, label: string, 
   return new Error(`${chainLabel(chain)}: ${label} failed: ${redact(ctx.targets, out.stderr.trim() || out.stdout.trim())}`);
 }
 
-function settle(chain: ChainName, label: string, hash: Hex, r: Receipt): Sent {
-  if (r.status !== "0x1") throw new RevertedOnChain(chain, label, hash);
+function settle(chain: ChainName, label: string, hash: Hex, r: Receipt, reason?: string): Sent {
+  if (r.status !== "0x1") throw new RevertedOnChain(chain, label, hash, reason);
   const gasUsed = hexToBigInt(r.gasUsed);
   return { hash, block: hexToNumber(r.blockNumber), gasUsed, costWei: gasUsed * hexToBigInt(r.effectiveGasPrice), logs: r.logs ?? [] };
 }
@@ -381,11 +407,13 @@ export async function sendCreate(ctx: Ctx, req: CreateRequest, predicted: Addres
   return { ...sent, address: predicted };
 }
 
-/** Calls with `cast send --async`, then waits for the receipt here. */
+/** Calls with `cast send --async`, then waits for the receipt here. One that reverts on chain is thrown
+ * with its reason, when a replay at its block can tell it (revertReason). */
 export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   await guard(ctx, req.chain, req.nonce);
   const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args } as never);
-  const gas = await estimate(ctx, req.chain, { from: signerOf(ctx).address, to: req.to, data, value: numberToHex(req.value ?? 0n) }, req.label);
+  const tx = { from: signerOf(ctx).address, to: req.to, data, value: numberToHex(req.value ?? 0n) };
+  const gas = await estimate(ctx, req.chain, tx, req.label);
   if (req.gasLimit !== undefined && gas > req.gasLimit) {
     throw new SendRefused(
       "estimate",
@@ -409,7 +437,8 @@ export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   const out = await ctx.runner.run(bin(ctx, "cast"), args, { cwd: ctx.paths.contractsDir });
   const hash = out.code === 0 ? hashIn(out.stdout) : undefined;
   if (!hash) throw await noHash(ctx, req.chain, req.nonce, req.label, out);
-  return settle(req.chain, req.label, hash, await waitReceipt(ctx, req.chain, req.nonce, hash));
+  const r = await waitReceipt(ctx, req.chain, req.nonce, hash, req);
+  return settle(req.chain, req.label, hash, r, r.status === "0x1" ? undefined : await revertReason(ctx, req.chain, tx, r.blockNumber));
 }
 
 /** A plain value transfer with `cast send <to> --value`, through the same checks. */

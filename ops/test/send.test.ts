@@ -6,13 +6,29 @@ import { describe, expect, it } from "vitest";
 import { paths, targets, WALLET } from "../src/config.ts";
 import { buildPlan } from "../src/plan.ts";
 import { RpcError, type Rpc } from "../src/rpc.ts";
-import { castArg, type Ctx, ReceiptTimeout, redact, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
+import { castArg, type Ctx, ReceiptTimeout, redact, RevertedOnChain, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
 import type { CallRequest, CreateRequest } from "../src/types.ts";
+import { revert } from "./fake-keeper.ts";
 
 const HASH = `0x${"ab".repeat(32)}` as Hex;
 const SENTINEL = "NEVER-PRINT-ME";
 
-function fixture(over: { chainId?: number; nonce?: number; latestNonce?: number; estimate?: "fail" | "custom" | bigint; receipt?: "none" | "reverted" | "throws"; created?: Address; signer?: Address; castFails?: boolean; castErrors?: string; codeAfter?: number } = {}) {
+function fixture(
+  over: {
+    chainId?: number;
+    nonce?: number;
+    latestNonce?: number;
+    estimate?: "fail" | "custom" | bigint;
+    receipt?: "none" | "reverted" | "throws";
+    /** What an eth_call of the sent call at `block` answers (a reverted receipt's replay); unset: the node has no eth_call */
+    replay?: (block: string) => unknown;
+    created?: Address;
+    signer?: Address;
+    castFails?: boolean;
+    castErrors?: string;
+    codeAfter?: number;
+  } = {},
+) {
   const calls: { method: string; params: unknown[] }[] = [];
   const runs: { file: string; args: string[] }[] = [];
   const logs: string[] = [];
@@ -54,6 +70,8 @@ function fixture(over: { chainId?: number; nonce?: number; latestNonce?: number;
         case "eth_getCode":
           // a load-balanced RPC can answer from a node a block behind
           return codeReads++ < (over.codeAfter ?? 0) ? "0x" : "0x6080";
+        case "eth_call":
+          if (over.replay) return over.replay(params[1] as string);
       }
       throw new Error(`unexpected ${method}`);
     },
@@ -217,6 +235,34 @@ describe("send", () => {
   it("a reverted receipt fails", async () => {
     const f = fixture({ receipt: "reverted" });
     await expect(sendCall(f.ctx, call)).rejects.toThrow(/reverted/);
+  });
+
+  it("a reverted receipt carries the reason a replay of the call at its block gives, the block before if that one passes, else none", async () => {
+    // replayed at the receipt's block (0x10): the router's "Too little received"
+    const revertsAt = (at: string) => (block: string) => {
+      if (block === at) throw revert("Too little received");
+      return "0x";
+    };
+    const raced = fixture({ receipt: "reverted", replay: revertsAt("0x10") });
+    const e = await sendCall(raced.ctx, call).catch((e: unknown) => e);
+    expect(e).toBeInstanceOf(RevertedOnChain);
+    expect((e as RevertedOnChain).reason).toBe("Error(Too little received)");
+    expect((e as Error).message).toBe(`Bittensor: stake idle TAO reverted on chain (transaction ${HASH}, Error(Too little received))`);
+    const replays = raced.calls.filter((c) => c.method === "eth_call").map((c) => c.params[1]);
+    expect(replays).toEqual(["0x10"]);
+    expect(raced.calls.find((c) => c.method === "eth_call")?.params[0]).toMatchObject({ from: WALLET, to: call.to, value: "0x0" });
+    // the block's end state passes it; the block before reverts it
+    const before = fixture({ receipt: "reverted", replay: revertsAt("0xf") });
+    expect(((await sendCall(before.ctx, call).catch((e: unknown) => e)) as RevertedOnChain).reason).toBe("Error(Too little received)");
+    expect(before.calls.filter((c) => c.method === "eth_call").map((c) => c.params[1])).toEqual(["0x10", "0xf"]);
+    // both pass (the state moved within the block), or the node didn't answer: no reason, still a revert
+    for (const replay of [() => "0x" as const, () => { throw new RpcError("bittensor eth_call: limit exceeded", -32005); }]) {
+      const none = fixture({ receipt: "reverted", replay });
+      const err = (await sendCall(none.ctx, call).catch((e: unknown) => e)) as RevertedOnChain;
+      expect(err).toBeInstanceOf(RevertedOnChain);
+      expect(err.reason).toBeUndefined();
+      expect(err.message).toBe(`Bittensor: stake idle TAO reverted on chain (transaction ${HASH})`);
+    }
   });
 
   it("a receipt timeout stops with the hash", async () => {

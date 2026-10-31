@@ -27,6 +27,20 @@ export class RpcError extends Error {
   }
 }
 
+/** The call really failed in the contract: JSON-RPC code 3, revert data, or a message that says so (a
+ * revert, out of gas, an invalid opcode). A node that answered with an error of its own (-32005 limit
+ * exceeded, -32000 header not found, -32603) did not run the call, so its answer says nothing about the
+ * contract. */
+export function isRevert(e: unknown): boolean {
+  if (!(e instanceof RpcError)) return false;
+  if (e.code === 3) return true;
+  const raw = e.data;
+  const data = typeof raw === "string" ? raw : (raw as { data?: unknown } | undefined)?.data;
+  if (typeof data === "string" && /^0x[0-9a-fA-F]{8,}$/.test(data)) return true;
+  // geth reports a call that ran out of gas or hit an invalid opcode as -32000, with no revert data
+  return /revert|out of gas|invalid opcode/i.test(e.message);
+}
+
 export interface RpcOptions {
   minIntervalMs?: Partial<Record<ChainName, number>>;
   retries?: number;

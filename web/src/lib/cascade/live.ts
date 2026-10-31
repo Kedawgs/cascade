@@ -288,10 +288,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       return read;
     };
     try {
-      // the scan's own end is as good a head as any for the decision: once caught up, nothing is read for it
-      const known = heads.get(key);
-      const seen = known && known.head > scan.next ? known.head : undefined;
-      if ((seen ?? (await head())) - scan.next <= SEED_MIN_BLOCKS) return;
+      // within a day of the head as last read: caught up (a scan only moves on, until it starts over), and
+      // nothing is read to say so again; otherwise a reading, fresh unless taken moments ago
+      const known = heads.get(key)?.head;
+      if (known !== undefined && scan.next + SEED_MIN_BLOCKS >= known) return;
+      if ((await head()) - scan.next <= SEED_MIN_BLOCKS) return;
     } catch {
       return;
     }

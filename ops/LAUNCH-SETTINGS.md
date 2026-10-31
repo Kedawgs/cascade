@@ -277,11 +277,15 @@ Each has its own loud line, in capitals, so it stands out in the log.
   closes behind it. A refused simulation sends nothing, so a skip can never send twice; while skipped
   the action is not even estimated. An action that goes through, or is no longer due, starts its count
   again.
-- **The gas price cap.** No send goes out at a gas price over `OPS_MAX_GAS_PRICE_BASE` /
+- **The gas price cap.** The keeper's sends (`run`, and the hand-run `close`, `stake`, `payouts`,
+  `deliver`, `claim`; `deploy` too) go out at no gas price over `OPS_MAX_GAS_PRICE_BASE` /
   `OPS_MAX_GAS_PRICE_BITTENSOR` (gwei, decimals allowed; by default 5 and 100, against prices that sit
   under 0.1 and about 10). Over it the send is refused (`the gas price is … gwei, over the … gwei cap
   (OPS_MAX_GAS_PRICE_…); … waits for it to fall; nothing sent`) and tried again later, and so is a
-  replacement whose bumped fee would be over it: a fee spike costs a wait, never the wallet's funds.
+  replacement whose effective price (what it would pay a gas now, judged as a fresh send's is) would be
+  over it: a fee spike costs a wait, never the wallet's funds. **The emergency and owner commands have
+  no cap**: `pause`, `unpause`, `wind-down` and `sweep` are run by hand and meant, gas spike or not, so
+  a guardian's pause always goes out; `--max-gas-price <gwei>` gives one of them a cap for that run.
 - **A stuck transaction is replaced.** A transaction of the keeper's still pending 15 minutes after
   the keeper stopped waiting for its receipt (a 5-minute wait at the send, so about 20 minutes in all)
   is sent again at the same nonce with a 12.5% higher fee (fee cap and tip on Base, the tip never under
@@ -345,10 +349,17 @@ supervisor is running another send: `-Stop` first, or do it between rounds):
 1. Find the stuck nonce: `cast nonce <keeper> --rpc-url <rpc>` is the mined count, `cast nonce
    <keeper> --block pending --rpc-url <rpc>` the pending one; the stuck nonce is the mined count when
    the pending one is higher. The line above names it too.
-2. Cancel it with a transfer of nothing to the keeper itself at that nonce, with a fee at least 12.5%
-   over the stuck transaction's (`cast tx <hash> --rpc-url <rpc>` shows it; the explorer too):
-   `cast send <keeper> --value 0 --nonce <N> --gas-price <wei> --keystore <keystore> --password-file
-   <pw> --rpc-url <rpc>`, adding `--legacy` on Bittensor and `--priority-gas-price <wei>` on Base.
+2. Cancel it with a transfer of nothing to the keeper itself at that nonce. A node takes a replacement
+   only with every fee at least 10% over the stuck transaction's (geth's rule; use 12.5% as the keeper
+   does), and never under the market's now. `cast tx <hash> --rpc-url <rpc>` shows the stuck fees; the
+   explorer too.
+   - Bittensor (legacy transactions: one gas price):
+     `cast send <keeper> --value 0 --nonce <N> --legacy --gas-price <wei> --keystore <keystore>
+     --password-file <pw> --rpc-url <rpc>`
+   - Base (EIP-1559: a fee cap and a tip, BOTH bumped, the cap not under the tip):
+     `cast send <keeper> --value 0 --nonce <N> --gas-price <fee cap wei> --priority-gas-price <tip wei>
+     --keystore <keystore> --password-file <pw> --rpc-url <rpc>` (cast's `--gas-price` is the fee cap
+     of a 1559 transaction; `cast gas-price` and `cast rpc eth_maxPriorityFeePerGas` give the market's).
    Or re-send the stuck call the same way instead of a cancel, if it should still go.
 3. Start the keeper again. The next round decides what is due; nothing is sent twice, since the nonce
    was taken by the cancel.

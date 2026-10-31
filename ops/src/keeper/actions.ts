@@ -290,7 +290,9 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
     // in a first scan would rebuild a short list for the life of the process: the vault's events are
     // scanned again, in full, and only a second full scan that mismatches too refuses the payout
     deps.log(
-      `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries): scanning the vault's events again in full before deciding`,
+      scrubSecrets(
+        `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries): scanning the vault's events again in full before deciding`,
+      ),
     );
     deps.rescanPayoutLogs();
     list = rebuildPayouts(await deps.payoutLogs(), key);
@@ -655,7 +657,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
   }
 
   /** A transaction sent with no receipt: its receipt is looked up in later rounds. */
-  function watch(a: Action, e: ReceiptTimeout, replacements = 0) {
+  function watch(a: Action, e: ReceiptTimeout) {
     if (!e.hash) return;
     const message =
       a.kind === "close" || a.kind === "roll"
@@ -664,7 +666,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
           ? { adapter: rec.plan.addresses.bitAdapter, direction: "Bittensor → Base" as const }
           : undefined;
     const now = clock();
-    unreceipted.push({ hash: e.hash, chain: e.chain, what: doing(a), message, rounds: 0, request: e.request, since: now, replacements, replaceAt: now + REPLACE_AFTER_MS * 2 ** replacements });
+    unreceipted.push({ hash: e.hash, chain: e.chain, what: doing(a), message, rounds: 0, request: e.request, since: now, replacements: 0, replaceAt: now + REPLACE_AFTER_MS });
   }
 
   /** Reports a transaction of the keeper's that went through late (a late receipt, a replacement), and

@@ -484,14 +484,11 @@ export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Pro
   const market = await gasPriceOf(ctx.rpc, chain);
   const t = ctx.targets[chain];
   const max = (a: bigint, b: bigint) => (a > b ? a : b);
-  const fee = t.legacy
-    ? ["--legacy", "--gas-price", max(bumped(hexToBigInt(tx.gasPrice ?? "0x0")), market).toString()]
-    : [
-        "--gas-price",
-        max(bumped(hexToBigInt(tx.maxFeePerGas ?? tx.gasPrice ?? "0x0")), market).toString(),
-        "--priority-gas-price",
-        bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0")).toString(),
-      ];
+  // cast's --gas-price is the gas price of a legacy transaction, the fee cap of an EIP-1559 one
+  const tip = bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0"));
+  const cap = max(max(bumped(hexToBigInt((t.legacy ? tx.gasPrice : (tx.maxFeePerGas ?? tx.gasPrice)) ?? "0x0")), market), t.legacy ? 0n : tip);
+  const fee = t.legacy ? ["--legacy", "--gas-price", cap.toString()] : ["--gas-price", cap.toString(), "--priority-gas-price", tip.toString()];
+  const feeInWords = t.legacy ? `gas price ${cap} wei` : `fee cap ${cap} wei, tip ${tip} wei`;
   // the same call, if it still passes; else a cancel, which costs 21,000 gas and frees the nonce
   const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args } as never);
   let cancelled = false;
@@ -510,7 +507,7 @@ export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Pro
     limit = CANCEL_GAS;
   }
   const label = cancelled ? `cancel nonce ${req.nonce} (${req.label})` : `${req.label} (replacing ${pending})`;
-  ctx.log(`${chainLabel(chain)}: ${label} — nonce ${req.nonce}, fee ${fee.join(" ")}`);
+  ctx.log(`${chainLabel(chain)}: ${label} — nonce ${req.nonce}, ${feeInWords} (12.5% over the pending transaction's, never under the node's gas price)`);
   const args = ["send", ...call, "--rpc-url", t.rpcUrl, "--keystore", from.keystore, "--password-file", from.passwordFile, "--gas-limit", limit.toString(), ...fee, "--nonce", String(req.nonce), "--async"];
   await checkSigner(ctx);
   const out = await ctx.runner.run(bin(ctx, "cast"), args, { cwd: ctx.paths.contractsDir });

@@ -44,6 +44,7 @@ export function ruleCtx(over: Partial<RuleCtx> & { logs?: RuleCtx["logs"]; store
     holdActive: false,
     meta: {},
     writes: { batchChecks: [], chunkChecks: [], nonces: [], meta: [] },
+    unjudged: [],
     ...rest,
   };
 }

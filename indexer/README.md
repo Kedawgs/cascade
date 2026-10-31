@@ -240,6 +240,12 @@ and what to do. Criticals arrive at once and are re-sent hourly (at most 6 times
 arrive together at most every 30 minutes; a critical condition that clears sends a "resolved" email. Act from
 your own tools, never from a link in an email.
 
+A condition resolves only on a reading that shows it cleared. A tick that can't judge it (that chain's reading
+missing, a field the rule needs unread or undecodable, a ×2 rule with no older reading to confirm, or the rule
+throwing) leaves its open alert as it is: not resolved, not re-sent, no "resolved" email, and the next reading that
+still shows it continues the same alert rather than opening a new one (`unjudged` in `src/rules/context.ts`). So a
+condition alert stays open through an RPC hiccup; if readings stay missing, `monitor.chain_unreadable` says so.
+
 The owner's scripts run `wrangler d1 execute --remote`, so they need `wrangler login`; each takes `--dry-run` to
 print what it would run:
 

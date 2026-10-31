@@ -4,7 +4,7 @@ import type { Finding } from "../alerts.ts";
 import { type ChainName, DEPENDENCY_ROLES, type DependencyRole } from "../config.ts";
 import type { StoredLog } from "../logs.ts";
 import type { BaseState, BitState, Bucket, ChainReading } from "../snapshot.ts";
-import { addressLink, isNew, onset, type Readings, type RuleCtx, twice, txLink, utc } from "./context.ts";
+import { addressLink, isNew, onset, type Readings, type RuleCtx, twice, txLink, unjudged, utc } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // What Cascade depends on and doesn't control (the economics and security review of 2026-10-31): ForeverMoney's rail
@@ -38,6 +38,7 @@ const num = (s: string | undefined) => (s === undefined || s === "" || !Number.i
  *   fmtao.unbacked (Base) can see that one's result. A reading that couldn't read the lock leaves the marks alone. */
 export const fmtaoBackingTrue: Rule = {
   name: "fmtao.backing_true",
+  conditions: ["fmtao.lock_outside"],
   run(ctx) {
     const out: Finding[] = [];
     const now = ctx.snap.bittensor;
@@ -64,8 +65,10 @@ export const fmtaoBackingTrue: Rule = {
       const slack = (supply * BigInt(ctx.t.backingToleranceBps)) / 10_000n;
       return supply - have > (slack > ctx.t.fmtaoBackingSlackWei ? slack : ctx.t.fmtaoBackingSlackWei) ? supply - have : undefined;
     };
-    const cond = (r: Readings) => short(r.bittensor) !== undefined;
-    if (now && twice(ctx, "bittensor", cond)) {
+    const cond = (r: Readings) => (r.bittensor?.wTaoSupply === undefined || r.bittensor.alpha.backing === undefined ? undefined : short(r.bittensor) !== undefined);
+    const held = twice(ctx, "bittensor", cond);
+    if (held === undefined) unjudged(ctx, "fmtao.backing_true", "fmtao.backing_true:alpha");
+    if (now && held) {
       const what = "The AlphaVault's backing is below wTAO's supply";
       const f: Finding = {
         rule: "fmtao.backing_true",
@@ -77,9 +80,12 @@ export const fmtaoBackingTrue: Rule = {
       out.push(f);
     }
 
-    // lock: wTAO outside the lock pool, held there an hour (marks in meta)
+    // lock: wTAO outside the lock pool, held there an hour (marks in meta); unread, its marks and alerts left as they are
     const s = now?.state;
-    if (!now || !s || s.wTaoSupply === undefined || s.lockPoolFmTao === undefined || s.wTaoSupply === 0n) return out;
+    if (!now || !s || s.wTaoSupply === undefined || s.lockPoolFmTao === undefined) {
+      return [...out, ...unjudged(ctx, "fmtao.backing_true", "fmtao.backing_true:lock"), ...unjudged(ctx, "fmtao.lock_outside", "fmtao.lock_outside")];
+    }
+    if (s.wTaoSupply === 0n) return out;
     const outside = s.wTaoSupply > s.lockPoolFmTao ? s.wTaoSupply - s.lockPoolFmTao : 0n;
     const mark = (k: string, on: boolean): number | undefined => {
       const since = num(ctx.meta[k]);
@@ -268,7 +274,9 @@ export const railAlphaVaultAdmin: Rule = {
   name: "rail.alpha_vault_admin",
   run(ctx) {
     const p = ctx.snap.bittensor?.state.alpha.pendingAdmin;
-    if (!p || p.admin === ZERO) return [];
+    // unread: every alert of the rule left as it is (its key names the admin, unknown here)
+    if (!p) return unjudged(ctx, "rail.alpha_vault_admin");
+    if (p.admin === ZERO) return [];
     return [
       {
         rule: "rail.alpha_vault_admin",
@@ -295,12 +303,14 @@ const takeText = (t: number | null | undefined) => (t === undefined ? "unknown" 
  * validatorTakeMaxBps on two readings. 0 at launch. */
 export const validatorTake: Rule = {
   name: "validator.take",
+  conditions: ["validator.take_high"],
   run(ctx) {
     const s = ctx.snap.bittensor;
     const [p, e] = ctx.history.bittensor;
     const out: Finding[] = [];
     const vs = validatorOf(s);
-    if (!s || !vs) return out;
+    // the hotkey unread: every take_high alert left as it is
+    if (!s || !vs) return unjudged(ctx, "validator.take_high");
     const hk = vs.hotkey;
     const same = (r: ChainReading<BitState> | undefined) => validatorOf(r)?.hotkey === hk;
     const take = (r: ChainReading<BitState> | undefined) => validatorOf(r)?.take;
@@ -312,11 +322,15 @@ export const validatorTake: Rule = {
         facts: { hotkey: hk, before: takeText(take(e)), after: takeText(take(s)), block: String(p.block), taostats: `https://taostats.io/hotkey/${hk}` },
       });
     }
+    // another hotkey's reading is no reading of this one's take: false; this one's, its take unread: unknown
     const high = (r: Readings) => {
       const v = r.bittensor?.validator;
-      return v?.hotkey === hk && v.take !== undefined && takeOf(v.take) * 10_000 > ctx.t.validatorTakeMaxBps * 65_535;
+      if (v === undefined || (v.hotkey === hk && v.take === undefined)) return undefined;
+      return v.hotkey === hk && takeOf(v.take as number | null) * 10_000 > ctx.t.validatorTakeMaxBps * 65_535;
     };
-    if (twice(ctx, "bittensor", high)) {
+    const held = twice(ctx, "bittensor", high);
+    if (held === undefined) unjudged(ctx, "validator.take_high", `validator.take_high:${hk}`);
+    if (held) {
       out.push({
         rule: "validator.take_high",
         key: `validator.take_high:${hk}`,
@@ -336,7 +350,8 @@ export const validatorRootStakeDrop: Rule = {
   run(ctx) {
     const s = ctx.snap.bittensor;
     const vs = validatorOf(s);
-    if (!s || vs?.rootStake === undefined) return [];
+    if (!s || !vs) return unjudged(ctx, "validator.root_stake_drop");
+    if (vs.rootStake === undefined) return unjudged(ctx, "validator.root_stake_drop", `validator.root_stake_drop:${vs.hotkey}`);
     const hk = vs.hotkey;
     const since = ctx.nowS - 86_400;
     const highs = [
@@ -347,9 +362,12 @@ export const validatorRootStakeDrop: Rule = {
     const high = highs.reduce((a, b) => (a > b ? a : b));
     const low = (r: Readings) => {
       const v = r.bittensor?.validator;
-      return v?.hotkey === hk && v.rootStake !== undefined && high > 0n && (high - v.rootStake) * 10_000n > high * BigInt(ctx.t.validatorStakeDropBps);
+      if (v === undefined || (v.hotkey === hk && v.rootStake === undefined)) return undefined;
+      return v.hotkey === hk && high > 0n && (high - (v.rootStake as bigint)) * 10_000n > high * BigInt(ctx.t.validatorStakeDropBps);
     };
-    if (!twice(ctx, "bittensor", low)) return [];
+    const held = twice(ctx, "bittensor", low);
+    if (held === undefined) return unjudged(ctx, "validator.root_stake_drop", `validator.root_stake_drop:${hk}`);
+    if (!held) return [];
     const rao = (x: bigint) => tao(x * 10n ** 9n);
     return [
       {
@@ -370,13 +388,20 @@ export const validatorRootUidLost: Rule = {
   run(ctx) {
     const s = ctx.snap.bittensor;
     const vs = validatorOf(s);
-    if (!s || !vs) return [];
+    if (!s || !vs) return unjudged(ctx, "validator.root_uid_lost");
     const hk = vs.hotkey;
     const seenKey = `root_uid_seen:${hk}`;
     if (typeof vs.rootUid === "number" && ctx.meta[seenKey] === undefined) ctx.writes.meta.push({ k: seenKey, v: String(vs.rootUid) });
     const seen = ctx.meta[seenKey] !== undefined || ctx.history.bittensor.some((r) => validatorOf(r)?.hotkey === hk && typeof validatorOf(r)?.rootUid === "number");
-    const gone = (r: Readings) => r.bittensor?.validator?.hotkey === hk && r.bittensor.validator.rootUid === null;
-    if (!seen || !twice(ctx, "bittensor", gone)) return [];
+    const gone = (r: Readings) => {
+      const v = r.bittensor?.validator;
+      if (v === undefined || (v.hotkey === hk && v.rootUid === undefined)) return undefined;
+      return v.hotkey === hk && v.rootUid === null;
+    };
+    if (!seen) return [];
+    const held = twice(ctx, "bittensor", gone);
+    if (held === undefined) return unjudged(ctx, "validator.root_uid_lost", `validator.root_uid_lost:${hk}`);
+    if (!held) return [];
     return [
       {
         rule: "validator.root_uid_lost",
@@ -399,16 +424,18 @@ const BUCKETS: { chain: ChainName; dir: "inbound" | "outbound"; lane: string; po
 /** ccip.rate_limited (warning): a bucket of Cascade's lane (either pool, either direction) under ccipBucketMinWei for more
  * than ccipRateLimitedS (since: meta rate_limited_since:{chain}:{direction}). A batch or payout bigger than what is
  * left waits for the bucket to refill (0.6 TAO a second, 5,000 TAO at most, read live). A bucket that is off (no
- * limit) never is. A chain without a reading leaves its marks as they are. */
+ * limit) never is. A chain without a reading, or a bucket unread, leaves its marks and its alert as they are. */
 export const ccipRateLimited: Rule = {
   name: "ccip.rate_limited",
   run(ctx) {
     const out: Finding[] = [];
     for (const b of BUCKETS) {
       const r = ctx.snap[b.chain];
-      if (!r) continue;
-      const bucket = (r.state as BaseState | BitState).lane?.[b.dir] as Bucket | undefined;
-      if (!bucket) continue;
+      const bucket = (r?.state as BaseState | BitState | undefined)?.lane?.[b.dir] as Bucket | undefined;
+      if (!r || !bucket) {
+        unjudged(ctx, "ccip.rate_limited", `ccip.rate_limited:${b.chain}:${b.dir}`);
+        continue;
+      }
       const k = `rate_limited_since:${b.chain}:${b.dir}`;
       const since = num(ctx.meta[k]);
       if (!bucket.isEnabled || bucket.tokens >= ctx.t.ccipBucketMinWei) {
@@ -438,8 +465,10 @@ export const ccipRateLimited: Rule = {
 export const rootUnlockInterval: Rule = {
   name: "root.unlock_interval",
   run(ctx) {
-    const set = (r: Readings) => (r.bittensor?.rootUnlockInterval ?? 0n) > 0n;
-    if (!twice(ctx, "bittensor", set)) return [];
+    const set = (r: Readings) => (r.bittensor?.rootUnlockInterval === undefined ? undefined : r.bittensor.rootUnlockInterval > 0n);
+    const held = twice(ctx, "bittensor", set);
+    if (held === undefined) return unjudged(ctx, "root.unlock_interval", "root.unlock_interval");
+    if (!held) return [];
     const s = ctx.snap.bittensor!;
     const blocks = s.state.rootUnlockInterval as bigint;
     return [
@@ -468,9 +497,11 @@ export const oracleCardinality: Rule = {
       const of = (s?: BaseState) => (pool === "taoWeth" ? s?.taoWethPool : s?.wethUsdcPool);
       const few = (r: Readings) => {
         const c = of(r.base)?.cardinality;
-        return c !== undefined && c < ctx.t.oracleMinCardinality;
+        return c === undefined ? undefined : c < ctx.t.oracleMinCardinality;
       };
-      if (!twice(ctx, "base", few)) continue;
+      const held = twice(ctx, "base", few);
+      if (held === undefined) unjudged(ctx, "oracle.cardinality", `oracle.cardinality:${pool}`);
+      if (!held) continue;
       const p = of(ctx.snap.base!.state)!;
       out.push({
         rule: "oracle.cardinality",
@@ -491,11 +522,15 @@ export const oracleCardinality: Rule = {
 };
 
 /** oracle.reverted (critical): the front door's oracle's usdcValue reverts on two readings. Deliveries to USDC stop
- * (the keeper can't price a sale); claims of TAO on Base still work. */
+ * (the keeper can't price a sale); claims of TAO on Base still work. A reading has one or the other (the value, or
+ * the revert); one with neither is unjudged. */
 export const oracleReverted: Rule = {
   name: "oracle.reverted",
   run(ctx) {
-    if (!twice(ctx, "base", (r) => r.base?.oracleReverted === true)) return [];
+    const reverted = (r: Readings) => (r.base?.oracleReverted === true ? true : r.base?.oracleValue !== undefined ? false : undefined);
+    const held = twice(ctx, "base", reverted);
+    if (held === undefined) return unjudged(ctx, "oracle.reverted", "oracle.reverted");
+    if (!held) return [];
     const oracle = ctx.snap.base?.state.oracle ?? ctx.cfg.deployment.oracle;
     return [
       {
@@ -517,9 +552,12 @@ export const payoutFeeCeiling: Rule = {
   run(ctx) {
     const near = (r: Readings) => {
       const s = r.bittensor;
-      return s?.payoutFeeQuote !== undefined && s.maxFeeAbs !== undefined && s.maxFeeAbs > 0n && s.payoutFeeQuote * 100n > s.maxFeeAbs * BigInt(ctx.t.payoutFeeCeilingPct);
+      if (s?.payoutFeeQuote === undefined || s.maxFeeAbs === undefined) return undefined;
+      return s.maxFeeAbs > 0n && s.payoutFeeQuote * 100n > s.maxFeeAbs * BigInt(ctx.t.payoutFeeCeilingPct);
     };
-    if (!twice(ctx, "bittensor", near)) return [];
+    const held = twice(ctx, "bittensor", near);
+    if (held === undefined) return unjudged(ctx, "payout.fee_ceiling", "payout.fee_ceiling");
+    if (!held) return [];
     const s = ctx.snap.bittensor!.state;
     const fee = s.payoutFeeQuote as bigint;
     const abs = s.maxFeeAbs as bigint;

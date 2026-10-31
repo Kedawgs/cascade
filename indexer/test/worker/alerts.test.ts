@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { type Finding, markSent, reconcile } from "../../src/alerts.ts";
+import { type Finding, markSent, reconcile, type Unjudged } from "../../src/alerts.ts";
 import { RULES, type RuleId } from "../../src/rules/ids.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import { loadTickState } from "../../src/store.ts";
@@ -13,10 +13,10 @@ const T0 = 1_800_000_000;
 const finding = (rule: RuleId, key: string, o: Partial<Finding> = {}): Finding => ({ rule, key, subject: `${rule} ${key}`, facts: { what: "it happened" }, ...o });
 
 /** One tick of the alert lifecycle against D1: reconcile, commit, then mark what was due as sent. */
-async function tick(nowS: number, findings: Finding[], o: { holdActive?: boolean; t?: typeof DEFAULTS; send?: boolean } = {}) {
+async function tick(nowS: number, findings: Finding[], o: { holdActive?: boolean; t?: typeof DEFAULTS; send?: boolean; unjudged?: Unjudged[] } = {}) {
   const state = await loadTickState(db, nowS);
   const lastWarning = state.meta.last_warning_at === undefined ? undefined : Number(state.meta.last_warning_at);
-  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t: o.t ?? DEFAULTS, holdActive: o.holdActive ?? false, lastWarningSentAt: lastWarning });
+  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t: o.t ?? DEFAULTS, holdActive: o.holdActive ?? false, lastWarningSentAt: lastWarning, unjudged: o.unjudged });
   if (r.statements.length) await db.batch(r.statements);
   const marks = o.send === false ? [] : markSent(db, r.due, nowS);
   if (marks.length) await db.batch(marks);
@@ -156,6 +156,59 @@ describe("what is dropped", () => {
       expect.objectContaining({ alert_key: "indexer.blind:bittensor", resolved_at: null }),
       expect.objectContaining({ alert_key: "indexer.blind:base", resolved_at: T0 + 3600 }),
     ]);
+  });
+
+  it("leaves a condition its rule couldn't judge as it is: not resolved, not sent again, and no 'resolved' email until a reading clears it", async () => {
+    // a critical condition opened and sent
+    expect((await tick(T0, [finding("vault.solvency", "vault.solvency")])).due.map((x) => x.reason)).toEqual(["alert"]);
+    // an hour on (a resend would be due), the vault's reading is missing: the rule couldn't judge it
+    const blind = await tick(T0 + 3600, [], { unjudged: [{ rule: "vault.solvency", key: "vault.solvency" }] });
+    expect(blind.due).toEqual([]);
+    expect(await rows()).toEqual([expect.objectContaining({ alert_key: "vault.solvency", resolved_at: null, notify_count: 1 })]);
+    // a rule-wide mark (no key) keeps every open alert of the rule the same way
+    expect((await tick(T0 + 7200, [], { unjudged: [{ rule: "vault.solvency" }] })).due).toEqual([]);
+    expect((await rows())[0].resolved_at).toBeNull();
+    // a reading that shows it cleared: resolved, and the one "resolved" email goes out
+    const cleared = await tick(T0 + 7260, []);
+    expect(cleared.due.map((x) => [x.key, x.reason])).toEqual([["vault.solvency", "resolved"]]);
+    expect(await rows()).toEqual([expect.objectContaining({ alert_key: "vault.solvency", resolved_at: T0 + 7260 })]);
+  });
+
+  it("an unjudged mark keeps only what it names, opens nothing, and never hides a finding", async () => {
+    await tick(T0, [finding("oracle.cardinality", "oracle.cardinality:taoWeth"), finding("oracle.cardinality", "oracle.cardinality:wethUsdc"), finding("keeper.low_eth", "keeper.low_eth")]);
+    const r = await tick(T0 + 60, [finding("keeper.low_eth", "keeper.low_eth")], {
+      unjudged: [
+        // TAO/WETH's cardinality unread: kept; WETH/USDC's read and fine: resolves
+        { rule: "oracle.cardinality", key: "oracle.cardinality:taoWeth" },
+        // a key with no open alert opens nothing
+        { rule: "keeper.low_tao", key: "keeper.low_tao" },
+        // found as well as marked: the finding stands
+        { rule: "keeper.low_eth", key: "keeper.low_eth" },
+      ],
+    });
+    expect(r.due).toEqual([]);
+    expect((await rows()).map((x) => [x.alert_key, x.resolved_at])).toEqual([
+      ["oracle.cardinality:taoWeth", null],
+      ["oracle.cardinality:wethUsdc", T0 + 60],
+      ["keeper.low_eth", null],
+    ]);
+  });
+
+  it("an unjudged mark doesn't keep a rule switched off, or one a hold mutes while it is on: those resolve as before", async () => {
+    await tick(T0, [finding("keeper.low_eth", "keeper.low_eth"), finding("payout.overdue", "payout.overdue:0x01")]);
+    const t = mergeThresholds('{"rules":{"off":["keeper.low_eth"]}}', undefined);
+    await tick(T0 + 60, [], { t, holdActive: true, unjudged: [{ rule: "keeper.low_eth" }, { rule: "payout.overdue" }] });
+    expect((await rows()).map((x) => [x.alert_key, x.resolved_at])).toEqual([
+      ["keeper.low_eth", T0 + 60],
+      ["payout.overdue:0x01", T0 + 60],
+    ]);
+  });
+
+  it("an unjudged mark never keeps an event open past its close", async () => {
+    await tick(T0, [finding("admin.event", "admin.event:0xabc#0")]);
+    await db.prepare("UPDATE alerts SET acknowledged_at = ?").bind(T0 + 10).run();
+    await tick(T0 + 60, [], { unjudged: [{ rule: "admin.event" }] });
+    expect((await rows())[0].resolved_at).toBe(T0 + 60);
   });
 
   it("never returns a hold for a rule that can't hold", async () => {

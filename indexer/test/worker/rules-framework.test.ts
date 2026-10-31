@@ -2,12 +2,15 @@ import { env } from "cloudflare:workers";
 import { type Hex, keccak256, numberToHex, pad, toBytes } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
-import { afterSettled, logQuery, prefetch, type PrefetchNeeds, twice, utc } from "../../src/rules/context.ts";
+import { afterSettled, logQuery, prefetch, type PrefetchNeeds, type Readings, twice, unjudged, utc } from "../../src/rules/context.ts";
+import { RULES, type RuleId } from "../../src/rules/ids.ts";
 import { type Rule, runRules } from "../../src/rules/index.ts";
+import type { BitState, ChainReading } from "../../src/snapshot.ts";
 import { insertTxs, loadTickState, upsertBatchCheck, upsertBlocks, upsertChunkCheck, upsertLogs } from "../../src/store.ts";
+import { TICK_RULES } from "../../src/tick.ts";
 import { countingDb, wipe } from "./d1-count.ts";
 import { tx } from "./fixtures.ts";
-import { bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
+import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
 const db = env.DB;
 const h = (s: string) => keccak256(toBytes(s)) as Hex;
@@ -50,6 +53,33 @@ describe("runRules", () => {
     expect(ctx.writes).toEqual({ batchChecks: [{ ...row, batchId: 7n }], chunkChecks: [], nonces: [], meta: [] });
   });
 
+  it("leaves the open conditions of a rule that throws as they are (it couldn't judge them): its own, and the others it raises", () => {
+    const boom = () => {
+      throw new Error("boom");
+    };
+    const ctx = ruleCtx();
+    runRules(
+      [
+        { name: "keeper.low_eth", run: boom },
+        { name: "bridge.payouts", conditions: ["bridge.payout_unchecked"], run: boom },
+        { name: "indexer.lag", conditions: ["indexer.blind"], run: boom },
+        { name: "fine", run: () => [] },
+      ],
+      ctx,
+    );
+    expect(ctx.unjudged).toEqual([{ rule: "keeper.low_eth" }, { rule: "bridge.payout_unchecked" }, { rule: "indexer.lag" }, { rule: "indexer.blind" }]);
+  });
+
+  it("names every condition a tick rule raises: its name, or in its conditions, so a rule that throws keeps them", () => {
+    // raised outside the tick's rules: the watchdog's, the tick's own failure, and runRules' own for a rule that throws
+    const elsewhere = new Set(["monitor.stalled", "monitor.db_failing", "monitor.rule_failed", "monitor.bridge_rule_failed"]);
+    const named = new Set(TICK_RULES.flatMap((r) => [r.name, ...(r.conditions ?? [])]));
+    const conditions = (Object.keys(RULES) as RuleId[]).filter((id) => RULES[id].kind === "condition" && !elsewhere.has(id));
+    expect(conditions.filter((id) => !named.has(id))).toEqual([]);
+    // and a rule declares only conditions
+    for (const r of TICK_RULES) for (const id of r.conditions ?? []) expect(RULES[id].kind, `${r.name}: ${id}`).toBe("condition");
+  });
+
   it("raises a bridge rule's failure as the critical monitor.bridge_rule_failed: its checks stay waiting", () => {
     const out = runRules(
       [
@@ -77,16 +107,51 @@ describe("utc", () => {
 });
 
 describe("twice", () => {
-  const low = (s: { bittensor?: { price?: bigint } }) => (s.bittensor?.price ?? 0n) < 100n;
+  /** the price under 100, unknown without a price */
+  const low = (s: { bittensor?: { price?: bigint } }) => (s.bittensor?.price === undefined ? undefined : s.bittensor.price < 100n);
+  const at = (now?: ChainReading<BitState>, before?: ChainReading<BitState>) => ruleCtx({ snap: { ...ruleCtx().snap, bittensor: now }, previous: { bittensor: before } });
+
   it("holds only when the previous reading held too, from an older block", () => {
-    const first = ruleCtx({ snap: { ...ruleCtx().snap, bittensor: reading(11n, 1, bitState({ price: 50n })) }, previous: { bittensor: reading(10n, 0, bitState({ price: 500n })) } });
-    expect(twice(first, "bittensor", low)).toBe(false);
-    const second = ruleCtx({ snap: { ...ruleCtx().snap, bittensor: reading(12n, 2, bitState({ price: 50n })) }, previous: { bittensor: reading(11n, 1, bitState({ price: 50n })) } });
-    expect(twice(second, "bittensor", low)).toBe(true);
-    const notNewer = ruleCtx({ snap: { ...ruleCtx().snap, bittensor: reading(11n, 2, bitState({ price: 50n })) }, previous: { bittensor: reading(11n, 1, bitState({ price: 50n })) } });
-    expect(twice(notNewer, "bittensor", low)).toBe(false);
-    const noReading = ruleCtx({ previous: { bittensor: reading(11n, 1, bitState({ price: 50n })) } });
-    expect(twice(noReading, "bittensor", low)).toBe(false);
+    expect(twice(at(reading(11n, 1, bitState({ price: 50n })), reading(10n, 0, bitState({ price: 500n }))), "bittensor", low)).toBe(false);
+    expect(twice(at(reading(12n, 2, bitState({ price: 50n })), reading(11n, 1, bitState({ price: 50n }))), "bittensor", low)).toBe(true);
+  });
+
+  it("is false once this reading shows the condition doesn't hold, whatever came before: one good reading clears it", () => {
+    expect(twice(at(reading(12n, 2, bitState({ price: 500n })), reading(11n, 1, bitState({ price: 50n }))), "bittensor", low)).toBe(false);
+    expect(twice(at(reading(12n, 2, bitState({ price: 500n })), undefined), "bittensor", low)).toBe(false);
+    expect(twice(at(reading(11n, 2, bitState({ price: 500n })), reading(11n, 1, bitState({ price: 50n }))), "bittensor", low)).toBe(false);
+  });
+
+  it("is undefined when it can't be told: no reading this tick, the field unread, or holding now with nothing older to confirm it", () => {
+    // no reading of the chain this tick
+    expect(twice(at(undefined, reading(11n, 1, bitState({ price: 50n }))), "bittensor", low)).toBeUndefined();
+    // the reading lacks the field (a sub-call failed)
+    expect(twice(at(reading(12n, 2, bitState()), reading(11n, 1, bitState({ price: 50n }))), "bittensor", low)).toBeUndefined();
+    // holding now: the previous reading missing, not older, or lacking the field
+    expect(twice(at(reading(12n, 2, bitState({ price: 50n })), undefined), "bittensor", low)).toBeUndefined();
+    expect(twice(at(reading(11n, 2, bitState({ price: 50n })), reading(11n, 1, bitState({ price: 50n }))), "bittensor", low)).toBeUndefined();
+    expect(twice(at(reading(12n, 2, bitState({ price: 50n })), reading(11n, 1, bitState())), "bittensor", low)).toBeUndefined();
+  });
+
+  it("on two chains, needs this tick's reading of each", () => {
+    const both = (r: Readings) => (r.base?.fmTaoSupply === undefined || r.bittensor?.price === undefined ? undefined : r.base.fmTaoSupply > r.bittensor.price);
+    const c = (base?: bigint) =>
+      ruleCtx({
+        snap: { ...ruleCtx().snap, base: base === undefined ? undefined : reading(21n, 2, baseState({ fmTaoSupply: base })), bittensor: reading(12n, 2, bitState({ price: 5n })) },
+        previous: { base: reading(20n, 1, baseState({ fmTaoSupply: 9n })), bittensor: reading(11n, 1, bitState({ price: 5n })) },
+      });
+    expect(twice(c(9n), ["base", "bittensor"], both)).toBe(true);
+    expect(twice(c(1n), ["base", "bittensor"], both)).toBe(false);
+    expect(twice(c(undefined), ["base", "bittensor"], both)).toBeUndefined();
+  });
+});
+
+describe("unjudged", () => {
+  it("notes a condition (or every alert of a rule) the rule couldn't judge this tick, and returns no findings", () => {
+    const ctx = ruleCtx();
+    expect(unjudged(ctx, "keeper.low_eth")).toEqual([]);
+    expect(unjudged(ctx, "oracle.cardinality", "oracle.cardinality:taoWeth")).toEqual([]);
+    expect(ctx.unjudged).toEqual([{ rule: "keeper.low_eth" }, { rule: "oracle.cardinality", key: "oracle.cardinality:taoWeth" }]);
   });
 });
 

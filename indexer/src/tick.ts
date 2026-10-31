@@ -618,13 +618,16 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     holdActive: state.activeHolds.length > 0,
     meta: state.meta,
     writes: { batchChecks: [], chunkChecks: [], nonces: [], meta: [] },
+    unjudged: [],
   };
   // every rule runs, the cross-checks too (they wait for the other chain by themselves); while a chain catches
-  // up, its lag alerts and the reports of checks stuck waiting are quiet: dropped if new, left as they are if open
+  // up, its lag alerts and the reports of checks stuck waiting are quiet: dropped if new, left as they are if open.
+  // A condition a rule couldn't judge (a reading or a field missing) is left as it is too: it resolves only on a
+  // reading that shows it cleared
   const findings = runRules(TICK_RULES, ctx);
   const quiet = (a: { rule: string; key: string }) =>
     JOB_OWNED.has(a.rule) || (catchingUp.length > 0 && (QUIET_WHILE_CATCHING_UP.has(a.rule) || catchingUp.some((c) => a.key === `indexer.lag:${c}` || a.key === `indexer.blind:${c}`)));
-  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at), quiet });
+  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at), quiet, unjudged: ctx.unjudged });
   const holds = holdStatements(db, r.holds, state.holdIds, nowS);
 
   // 9. commit 1, guarded by the lease

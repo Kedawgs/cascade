@@ -20,6 +20,15 @@ export interface Finding {
   hold?: { id: string; summary: string };
 }
 
+/** A condition a rule couldn't judge this tick: the reading it reads is missing, or lacks a field it needs (a
+ * sub-call failed, an answer didn't decode), or a ×2 rule holds now with no older reading to confirm it. The open
+ * alerts it names (its key's, or with no key every open alert of the rule) are left as they are, neither resolved nor
+ * sent again; it opens nothing. A condition resolves only on a reading that shows it cleared. */
+export interface Unjudged {
+  rule: RuleId;
+  key?: string;
+}
+
 /** An email due this tick: a new alert, a critical's hourly resend, or a critical condition that cleared. */
 export interface Due {
   key: string;
@@ -76,7 +85,8 @@ const asDue = (a: Live, reason: Due["reason"]): Due => ({
  *
  * - Findings of rules switched off (`rules.off`), and of rules a hold mutes while one is on, are dropped.
  * - A new key opens an alert; a key still found updates its last-seen time (and its facts).
- * - A *condition* not found any more resolves; a critical one that was sent is due again as "resolved".
+ * - A *condition* not found any more resolves; a critical one that was sent is due again as "resolved". One its
+ *   rule couldn't judge this tick (`unjudged`) is left as it is instead: not resolved, not sent again.
  *   An *event* not found any more stays open until acknowledged, or closes quietly 7 days after opening.
  * - A critical is due when never sent, and again every `criticalResendS` while open and unacknowledged,
  *   at most `criticalMaxSends` times in all. Warnings are due once each, all together, when the last
@@ -94,14 +104,22 @@ export function reconcile(
     /** alerts quieted this tick (a chain catching up): their findings are dropped, and their open alerts are
      * left as they are, neither resolved nor sent again */
     quiet?: (a: { rule: string; key: string }) => boolean;
+    /** conditions the rules couldn't judge this tick: their open alerts are left as they are */
+    unjudged?: readonly Unjudged[];
   },
 ): { statements: D1PreparedStatement[]; due: Due[]; holds: { id: string; rule: RuleId; summary: string }[] } {
   const { nowS, t } = o;
   const off = new Set(t.rules.off);
   const quiet = o.quiet ?? (() => false);
+  /** switched off, or muted while a hold is on: its findings dropped, its open alerts resolved */
+  const dropped = (rule: RuleId) => off.has(rule) || (o.holdActive && RULES[rule]?.mutedByHold === true);
+  const marks = (o.unjudged ?? []).filter((u) => !dropped(u.rule));
+  const unjudgedKeys = new Set(marks.flatMap((u) => (u.key === undefined ? [] : [u.key])));
+  const unjudgedRules = new Set<string>(marks.flatMap((u) => (u.key === undefined ? [u.rule] : [])));
+  const unjudged = (a: AlertRow) => a.kind === "condition" && (unjudgedKeys.has(a.alertKey) || unjudgedRules.has(a.rule));
   const kept = new Map<string, Finding>();
   for (const f of o.findings) {
-    if (off.has(f.rule) || (o.holdActive && RULES[f.rule].mutedByHold) || kept.has(f.key) || quiet(f)) continue;
+    if (dropped(f.rule) || kept.has(f.key) || quiet(f)) continue;
     kept.set(f.key, f);
   }
   const open = new Map(o.open.map((a) => [a.alertKey, a]));
@@ -130,7 +148,7 @@ export function reconcile(
   }
 
   for (const a of o.open) {
-    if (kept.has(a.alertKey) || quiet({ rule: a.rule, key: a.alertKey })) continue;
+    if (kept.has(a.alertKey) || quiet({ rule: a.rule, key: a.alertKey }) || unjudged(a)) continue;
     const row: Live = {
       key: a.alertKey,
       rule: a.rule as RuleId,

@@ -173,6 +173,7 @@ const keeperOnly = (roles: readonly string[]) => roles.every((r) => r.endsWith("
  * once. A newly watched address starts at its current count. Writes the watched rows that changed. */
 export const keys: Rule = {
   name: "keys",
+  conditions: ["keys.safe_unread"],
   run(ctx) {
     const out: Finding[] = [];
     const stored = new Map(ctx.nonces.map((r) => [`${r.chain}:${lower(r.address)}`, r]));

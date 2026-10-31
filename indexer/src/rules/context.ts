@@ -1,4 +1,5 @@
 import { type Hex, numberToHex, pad } from "viem";
+import type { Finding, Unjudged } from "../alerts.ts";
 import type { ChainName, Config, Role } from "../config.ts";
 import type { StoredLog } from "../logs.ts";
 import type { BaseState, BitState, ChainReading, HourAgg, Snapshot } from "../snapshot.ts";
@@ -18,6 +19,7 @@ import {
 } from "../store.ts";
 import type { Reference } from "../prices.ts";
 import type { Thresholds } from "../thresholds.ts";
+import type { RuleId } from "./ids.ts";
 
 /** The logs the rules read, in memory: what the prefetch loaded and this tick's own. */
 export interface LogQuery {
@@ -111,6 +113,16 @@ export interface RuleCtx {
   meta: Record<string, string>;
   /** rows the rules decided this tick, committed with everything else */
   writes: { batchChecks: BatchCheckWrite[]; chunkChecks: ChunkCheckWrite[]; nonces: NonceRow[]; meta: { k: string; v: string }[] };
+  /** the conditions the rules couldn't judge this tick (`unjudged`): their open alerts are left as they are */
+  unjudged: Unjudged[];
+}
+
+/** A condition `rule` couldn't judge this tick (`key`'s, or with no key every alert of the rule): the reading it reads
+ * is missing, or lacks a field it needs. Its open alerts are left as they are, neither resolved nor sent again, so a
+ * condition resolves only on a reading that shows it cleared. Returns no findings, for `return unjudged(…)`. */
+export function unjudged(ctx: RuleCtx, rule: RuleId, key?: string): Finding[] {
+  ctx.unjudged.push(key === undefined ? { rule } : { rule, key });
+  return [];
 }
 
 const EXPLORER: Record<ChainName, string> = { base: "https://basescan.org", bittensor: "https://evm.taostats.io" };
@@ -137,24 +149,30 @@ export const CONTRACT_NAMES: Record<Role, string> = {
 /** This tick stores the log for the first time. */
 export const isNew = (ctx: RuleCtx, l: Pick<StoredLog, "uid">): boolean => ctx.newUids.has(l.uid);
 
+/** A condition on readings: true or false, or undefined when a reading lacks what it needs to tell. */
+export type Cond = (r: Readings) => boolean | undefined;
+
 /** The condition held in this reading and in the previous one too, from an older block, on each chain it
- * reads: one bad answer can't trip a rule marked ×2. */
-export function twice(ctx: RuleCtx, chains: ChainName | readonly ChainName[], cond: (r: Readings) => boolean): boolean {
+ * reads: one bad answer can't trip a rule marked ×2. False as soon as this tick's reading shows it doesn't hold
+ * (one good reading clears it). Undefined when that can't be told: a chain without this tick's reading, the
+ * condition unknown on it, or holding on it with no older reading (or one lacking the field) to confirm it. A rule
+ * leaves its open alert as it is on undefined (`unjudged`). */
+export function twice(ctx: RuleCtx, chains: ChainName | readonly ChainName[], cond: Cond): boolean | undefined {
   const list = typeof chains === "string" ? [chains] : chains;
+  if (list.some((c) => !ctx.snap[c])) return undefined;
+  const now = cond({ base: ctx.snap.base?.state, bittensor: ctx.snap.bittensor?.state });
+  if (now !== true) return now;
   for (const c of list) {
-    const now = ctx.snap[c];
     const before = ctx.previous[c];
-    if (!now || !before || before.block >= now.block) return false;
+    if (!before || before.block >= (ctx.snap[c] as ChainReading<unknown>).block) return undefined;
   }
-  const now: Readings = { base: ctx.snap.base?.state, bittensor: ctx.snap.bittensor?.state };
-  const before: Readings = { base: ctx.previous.base?.state, bittensor: ctx.previous.bittensor?.state };
-  return cond(now) && cond(before);
+  return cond({ base: ctx.previous.base?.state, bittensor: ctx.previous.bittensor?.state });
 }
 
 /** `twice` holds on one chain and this is its first tick: the reading before the previous one (if older)
  * didn't hold. A rule that holds raises its hold only then, under an id of that occurrence (a cleared
  * hold id is never raised again), and keeps finding the same alert while the condition lasts. */
-export function onset(ctx: RuleCtx, chain: ChainName, cond: (r: Readings) => boolean): boolean {
+export function onset(ctx: RuleCtx, chain: ChainName, cond: Cond): boolean {
   if (!twice(ctx, chain, cond)) return false;
   const [p, e] = ctx.history[chain];
   if (!p || !e || e.block >= p.block) return true;

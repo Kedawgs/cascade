@@ -45,6 +45,7 @@ const note = (m: Map<string, Set<Hex>>, k: string, uid: Hex) => m.set(k, (m.get(
  * bridge.check_stuck. One batch_checks row per delivery. */
 export const bridgeBatches: Rule = {
   name: "bridge.batches",
+  conditions: ["bridge.check_stuck"],
   run(ctx) {
     const d = ctx.cfg.deployment;
     const found = new Map<string, Finding>();
@@ -181,6 +182,7 @@ const payoutMismatch = (key: Hex, chunk: number, landedUid: Hex, landedTx: Hex, 
  * forged duplicate landing is judged on its own row. */
 export const bridgePayouts: Rule = {
   name: "bridge.payouts",
+  conditions: ["bridge.payout_unchecked"],
   run(ctx) {
     const d = ctx.cfg.deployment;
     const found = new Map<string, Finding>();

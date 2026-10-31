@@ -2,11 +2,12 @@ import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import type { ChainName } from "../config.ts";
 import type { Thresholds } from "../thresholds.ts";
-import { type RuleCtx, utc } from "./context.ts";
+import { type RuleCtx, unjudged, utc } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.3 (operational warnings), 6.4 rail.alpha_vault, and the monitor's own health: indexer.lag and
-// indexer.blind on `head_time − settled_time`, with limits that follow the on-chain payoutDelay.
+// indexer.blind on `head_time − settled_time`, with limits that follow the on-chain payoutDelay. A condition whose
+// reading is missing, or lacks a field it needs, is unjudged (its open alert left as it is), never cleared.
 
 const E18 = 10n ** 18n;
 const RAO = 10n ** 9n;
@@ -32,7 +33,8 @@ export const batchPastMaxWait: Rule = {
   run(ctx) {
     const b = ctx.snap.base;
     const ob = b?.state.openBatch;
-    if (!b || !ob || ob.nDeposits + ob.nRedeems === 0 || b.state.batchInterval === undefined) return [];
+    if (!b || !ob || b.state.batchInterval === undefined) return unjudged(ctx, "batch.past_max_wait");
+    if (ob.nDeposits + ob.nRedeems === 0) return [];
     const due = ob.start + Math.max(b.state.batchInterval, ctx.cfg.deployment.batchMaxWaitS) + ctx.t.maxWaitGraceS;
     if (b.time <= due) return [];
     return one("batch.past_max_wait", `batch.past_max_wait:${ob.id}`, `Batch ${ob.id} is ${Math.floor((b.time - due) / 60) + ctx.t.maxWaitGraceS / 60} minutes past its close`, {
@@ -49,10 +51,11 @@ export const payoutOverdue: Rule = {
   name: "payout.overdue",
   run(ctx) {
     const v = ctx.snap.bittensor;
-    if (!v) return [];
+    if (!v) return unjudged(ctx, "payout.overdue");
     return ctx.pendingPayoutKeys.flatMap((key) => {
       const p = v.state.payoutBatches[key];
-      if (!p || p.count <= p.cursor || v.time < p.queuedAt + ctx.payoutDelayS + ctx.t.payoutGraceS) return [];
+      if (!p) return unjudged(ctx, "payout.overdue", `payout.overdue:${key}`);
+      if (p.count <= p.cursor || v.time < p.queuedAt + ctx.payoutDelayS + ctx.t.payoutGraceS) return [];
       return one("payout.overdue", `payout.overdue:${key}`, "A payout batch is overdue", { key, queued: utc(p.queuedAt), paid: `${p.cursor} of ${p.count} entries` });
     });
   },
@@ -64,13 +67,14 @@ export const deliveryOverdue: Rule = {
   name: "delivery.overdue",
   run(ctx) {
     const b = ctx.snap.base;
-    if (!b) return [];
+    if (!b) return unjudged(ctx, "delivery.overdue");
     return ctx.payoutUsers.flatMap(({ user, at }) => {
       const key = user.toLowerCase() as Hex;
       const claimable = b.state.claimable[key] ?? b.state.claimable[user];
       const pref = b.state.deliveryOf[key] ?? b.state.deliveryOf[user];
+      if (claimable === undefined || (claimable > 0n && pref === undefined)) return unjudged(ctx, "delivery.overdue", `delivery.overdue:${key}`);
       const live = pref !== undefined && pref.minUsdcPerTao > 0n && pref.deadline > b.time;
-      if (!claimable || claimable <= 0n || !live || b.time - at < ctx.t.deliveryGraceS) return [];
+      if (claimable <= 0n || !live || b.time - at < ctx.t.deliveryGraceS) return [];
       return one("delivery.overdue", `delivery.overdue:${key}`, "A user's USDC delivery is overdue", { user: key, claimable: tao(claimable), "payout received": utc(at) });
     });
   },
@@ -80,7 +84,8 @@ export const keeperLowEth: Rule = {
   name: "keeper.low_eth",
   run(ctx) {
     const bal = ctx.snap.base?.state.keeperBalance;
-    if (bal === undefined || bal >= ctx.t.keeperMinEthWei) return [];
+    if (bal === undefined) return unjudged(ctx, "keeper.low_eth", "keeper.low_eth");
+    if (bal >= ctx.t.keeperMinEthWei) return [];
     return one("keeper.low_eth", "keeper.low_eth", `The keeper has ${eth(bal)} on Base`, { balance: eth(bal) });
   },
 };
@@ -88,17 +93,18 @@ export const keeperLowEth: Rule = {
 /** keeper.low_tao: the keeper's TAO on Bittensor below what its next claim needs: a round of its actions
  * (keeperMinTaoWei) plus the claim's gas up front, (claimGasRequired + claimGasMargin) × the base fee (Bittensor takes
  * the whole gas limit's fee before running a transaction and refunds the rest; ops sends a claim with that limit).
- * The round alone while the vault's claimGasRequired or the base fee is unread. */
+ * The round alone while the vault's claimGasRequired or the base fee is unread: below it is found, above it unjudged
+ * (whether it covers a claim can't be told). */
 export const keeperLowTao: Rule = {
   name: "keeper.low_tao",
   run(ctx) {
     const s = ctx.snap.bittensor?.state;
     const bal = s?.keeperBalance;
-    if (bal === undefined) return [];
+    if (bal === undefined) return unjudged(ctx, "keeper.low_tao", "keeper.low_tao");
     const gas = s?.claimGasRequired === undefined ? undefined : s.claimGasRequired + BigInt(ctx.t.claimGasMargin);
     const upfront = gas === undefined || s?.baseFee === undefined ? undefined : gas * s.baseFee;
     const need = ctx.t.keeperMinTaoWei + (upfront ?? 0n);
-    if (bal >= need) return [];
+    if (bal >= need) return upfront === undefined ? unjudged(ctx, "keeper.low_tao", "keeper.low_tao") : [];
     const facts: Record<string, string> = { balance: tao(bal), needed: tao(need), "a round of actions": tao(ctx.t.keeperMinTaoWei) };
     if (upfront !== undefined) facts["a claim's gas up front"] = `${tao(upfront)} (${gas} gas at ${formatUnits(s?.baseFee as bigint, 9)} gwei)`;
     return one("keeper.low_tao", "keeper.low_tao", `The keeper has ${tao(bal)} on Bittensor; ${upfront === undefined ? "a round" : "a claim"} needs ${tao(need)}`, facts);
@@ -111,7 +117,7 @@ export const keeperIdleUnstaked: Rule = {
   name: "keeper.idle_unstaked",
   run(ctx) {
     const s = ctx.snap.bittensor?.state;
-    if (s?.balance === undefined || s.pendingPayouts === undefined || s.minStakeRao === undefined) return [];
+    if (s?.balance === undefined || s.pendingPayouts === undefined || s.minStakeRao === undefined) return unjudged(ctx, "keeper.idle_unstaked", "keeper.idle_unstaked");
     const idle = s.balance - ED_RESERVE - s.pendingPayouts;
     const since = num(ctx.meta.idle_since);
     if (idle < s.minStakeRao * RAO) {
@@ -131,17 +137,19 @@ export const adapterLowReserve: Rule = {
   name: "adapter.low_reserve",
   run(ctx) {
     const bal = ctx.snap.bittensor?.state.adapterBalance;
-    if (bal === undefined || bal >= ctx.t.adapterMinReserveWei) return [];
+    if (bal === undefined) return unjudged(ctx, "adapter.low_reserve", "adapter.low_reserve");
+    if (bal >= ctx.t.adapterMinReserveWei) return [];
     return one("adapter.low_reserve", "adapter.low_reserve", "The Bittensor adapter's reserve is low", { balance: `${bal} wei`, adapter: ctx.cfg.deployment.bitAdapter });
   },
 };
 
-/** cap.nearly_full: netForwarded + the open batch's deposits at capNearlyFullPct of depositCap. */
+/** cap.nearly_full: netForwarded + the open batch's deposits at capNearlyFullPct of depositCap (a cap of 0 is none). */
 export const capNearlyFull: Rule = {
   name: "cap.nearly_full",
   run(ctx) {
     const s = ctx.snap.base?.state;
-    if (!s?.openBatch || s.netForwarded === undefined || !s.depositCap) return [];
+    if (!s?.openBatch || s.netForwarded === undefined || s.depositCap === undefined) return unjudged(ctx, "cap.nearly_full", "cap.nearly_full");
+    if (s.depositCap === 0n) return [];
     const used = s.netForwarded + s.openBatch.totalDeposits;
     if (used * 100n < s.depositCap * BigInt(ctx.t.capNearlyFullPct)) return [];
     return one("cap.nearly_full", "cap.nearly_full", "Cascade's deposit cap is nearly full", { used: tao(used), cap: tao(s.depositCap) });
@@ -161,7 +169,7 @@ export const batchOneWallet: Rule = {
   name: "batch.one_wallet",
   run(ctx) {
     const s = ctx.snap.base?.state;
-    if (!s?.openBatch) return [];
+    if (!s?.openBatch) return unjudged(ctx, "batch.one_wallet");
     const by = new Map<Hex, { amount: bigint; users: Set<string> }>();
     for (const l of openBatchLogs(ctx, "DepositRequested")) {
       let payer = String(l.args.payer).toLowerCase() as Hex;
@@ -207,7 +215,8 @@ export const unstakesTinyWave: Rule = {
             .range("base", "frontDoor", "RedeemRequested")
             .filter((l) => (ctx.blockTime("base", l.block) ?? ctx.nowS) >= since && (BigInt(String(l.args.shares)) * price) / E18 < ctx.t.tinyUnstakeWei).length;
     const full = s?.openBatch && s.maxRedeems ? s.openBatch.nRedeems * 100 >= s.maxRedeems * ctx.t.redeemListPct : false;
-    if (tiny < ctx.t.tinyUnstakeCount && !full) return [];
+    // neither found: unjudged while the price (the requests' worth) or the redeem list is unread
+    if (tiny < ctx.t.tinyUnstakeCount && !full) return price === undefined || !s?.openBatch || s.maxRedeems === undefined ? unjudged(ctx, "unstakes.tiny_wave", "unstakes.tiny_wave") : [];
     return one("unstakes.tiny_wave", "unstakes.tiny_wave", tiny >= ctx.t.tinyUnstakeCount ? `${tiny} tiny redeem requests in 24 hours` : "The open batch's redeem list is nearly full", {
       "tiny requests (24 h)": String(tiny),
       "redeem list": s?.openBatch ? `${s.openBatch.nRedeems} of ${s.maxRedeems}` : "unknown",
@@ -223,7 +232,9 @@ export const outflowNearLimit: Rule = {
   run(ctx) {
     const v = ctx.snap.bittensor;
     const s = v?.state;
-    if (!v || !s || s.rootStakeRao === undefined || s.balance === undefined || s.maxDailyOutflowBps === undefined || s.minDailyOutflow === undefined || s.price === undefined) return [];
+    if (!v || !s || s.rootStakeRao === undefined || s.balance === undefined || s.maxDailyOutflowBps === undefined || s.minDailyOutflow === undefined || s.price === undefined) {
+      return unjudged(ctx, "outflow.near_limit", "outflow.near_limit");
+    }
     const gross = s.rootStakeRao * RAO + s.balance - ED_RESERVE;
     const byBps = (gross * s.maxDailyOutflowBps) / 10_000n;
     const allowance = byBps > s.minDailyOutflow ? byBps : s.minDailyOutflow;
@@ -243,10 +254,10 @@ export const rewardsUncollected: Rule = {
   run(ctx) {
     const v = ctx.snap.bittensor;
     const s = v?.state;
-    if (!v || !s) return [];
+    if (!v || !s) return unjudged(ctx, "rewards.uncollected", "rewards.uncollected");
     const old = s.lastClaimAt !== undefined && v.time - s.lastClaimAt > ctx.t.rewardsMaxAgeS;
     const due = s.unclaimed !== undefined && s.unclaimed >= ctx.t.rewardsDueWei;
-    if (!old && !due) return [];
+    if (!old && !due) return s.lastClaimAt === undefined || s.unclaimed === undefined ? unjudged(ctx, "rewards.uncollected", "rewards.uncollected") : [];
     return one("rewards.uncollected", "rewards.uncollected", "Root rewards are waiting to be claimed", {
       "last claim": s.lastClaimAt === undefined ? "unknown" : utc(s.lastClaimAt),
       unclaimed: s.unclaimed === undefined ? "unknown" : tao(s.unclaimed),
@@ -261,10 +272,12 @@ export const validatorNotEarning: Rule = {
   run(ctx) {
     const v = ctx.snap.bittensor;
     const s = v?.state;
-    if (!v || s?.unclaimed === undefined) return [];
+    const blind = () => unjudged(ctx, "validator.not_earning", "validator.not_earning");
+    if (!v || s?.unclaimed === undefined) return blind();
     const dayAgo = Math.floor((ctx.nowS - ctx.t.notEarningS) / 3600) * 3600;
     const then = ctx.hours.find((r) => r.hour === dayAgo)?.unclaimedLast;
-    if (then === undefined || s.unclaimed > then) return [];
+    if (then === undefined) return blind();
+    if (s.unclaimed > then) return [];
     if (s.lastClaimAt !== undefined && s.lastClaimAt >= v.time - ctx.t.notEarningS) return [];
     return one("validator.not_earning", "validator.not_earning", "The validator hasn't earned in a day", { unclaimed: tao(s.unclaimed), "a day ago": tao(then), hotkey: ctx.cfg.deployment.stakeHotkey });
   },
@@ -277,7 +290,7 @@ export const railAlphaVault: Rule = {
   run(ctx) {
     const r = ctx.snap.bittensor;
     const a = r?.state.alpha;
-    if (!r || !a) return [];
+    if (!r || !a) return unjudged(ctx, "rail.alpha_vault", "rail.alpha_vault");
     const set = (x: bigint | undefined) => x !== undefined && x !== 0n;
     const target = a.migrationTarget && a.migrationTarget !== "0x0000000000000000000000000000000000000000" ? a.migrationTarget : undefined;
     const why = [
@@ -288,7 +301,9 @@ export const railAlphaVault: Rule = {
       a.migrationExecuted ? "a migration was executed" : "",
       a.migrationFinished ? "migrated" : "",
     ].filter(Boolean);
-    if (why.length === 0) return [];
+    // nothing found: clear only when every field it looks at was read
+    const unread = [a.isPaused, a.pausedUntil, a.migrationTarget, a.migrationReadyAt, a.migrationExecuted, a.migrationFinished].some((x) => x === undefined);
+    if (why.length === 0) return unread ? unjudged(ctx, "rail.alpha_vault", "rail.alpha_vault") : [];
     const at = (x: bigint | undefined) => (x === undefined ? "unknown" : x === 0n ? "none" : utc(Number(x)));
     return one("rail.alpha_vault", "rail.alpha_vault", `ForeverMoney's AlphaVault is ${why.join(", ")}`, {
       alphaVault: ctx.cfg.tokens.bittensor.alphaVault,
@@ -308,12 +323,13 @@ export const railAlphaVault: Rule = {
  * each chain's `head_time − settled_time`. */
 export const indexerLag: Rule = {
   name: "indexer.lag",
+  conditions: ["indexer.blind"],
   run(ctx) {
     const limit = lagLimitOf(ctx.payoutDelayS, ctx.t);
     const blind = Math.max(2 * limit, ctx.t.blindMinS);
     return (["base", "bittensor"] as ChainName[]).flatMap((chain) => {
       const s = ctx.settled[chain];
-      if (s.headTime === undefined) return [];
+      if (s.headTime === undefined) return [...unjudged(ctx, "indexer.lag", `indexer.lag:${chain}`), ...unjudged(ctx, "indexer.blind", `indexer.blind:${chain}`)];
       const lag = s.headTime - s.time;
       const facts = { chain, lag: `${Math.floor(lag / 60)} minutes`, limit: `${Math.floor(limit / 60)} minutes`, "settled to": utc(s.time) };
       if (lag > blind) return one("indexer.blind", `indexer.blind:${chain}`, `The monitor can't see ${chain}: ${Math.floor(lag / 60)} minutes behind`, facts);

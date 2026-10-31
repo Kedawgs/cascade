@@ -1,7 +1,7 @@
 import { formatUnits } from "viem";
 import type { Finding } from "../alerts.ts";
 import { poolPriceUsd } from "../prices.ts";
-import { type Readings, type RuleCtx, twice, utc } from "./context.ts";
+import { type Readings, type RuleCtx, twice, unjudged, utc } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.1 fmtao.unbacked and fmtao.depeg, 6.3 twap.divergence, price.reference_unavailable and
@@ -28,8 +28,13 @@ export const fmtaoUnbacked: Rule = {
   run(ctx) {
     const excess = (r: Readings) =>
       r.base?.fmTaoSupply === undefined || r.bittensor?.lockPoolFmTao === undefined ? undefined : r.base.fmTaoSupply - r.bittensor.lockPoolFmTao;
-    const over = (r: Readings) => (excess(r) ?? 0n) > ctx.t.fmtaoBackingSlackWei;
-    if (!twice(ctx, ["base", "bittensor"], over)) return [];
+    const over = (r: Readings) => {
+      const e = excess(r);
+      return e === undefined ? undefined : e > ctx.t.fmtaoBackingSlackWei;
+    };
+    const held = twice(ctx, ["base", "bittensor"], over);
+    if (held === undefined) return unjudged(ctx, "fmtao.unbacked", "fmtao.unbacked");
+    if (!held) return [];
     const now: Readings = { base: ctx.snap.base?.state, bittensor: ctx.snap.bittensor?.state };
     const e = excess(now) as bigint;
     return [
@@ -141,12 +146,13 @@ const WINDOW_S = 1800;
 
 /** twap.divergence: the front door's oracle (usdcValue of 1 TAO) differs by more than twapDivergenceBps from
  * the mean of this monitor's own spot prices over the last 30 minutes, on this tick and the last. The oracle's call
- * reverting is the critical oracle.reverted (src/rules/deps.ts). */
+ * reverting is the critical oracle.reverted (src/rules/deps.ts). Without the oracle's value or a spot price in the
+ * window it is unjudged, its mark (twap_off_since) left as it is. */
 export const twapDivergence: Rule = {
   name: "twap.divergence",
   run(ctx) {
     const b = ctx.snap.base;
-    if (!b) return [];
+    if (!b) return unjudged(ctx, "twap.divergence", "twap.divergence");
     const out: Finding[] = [];
     const spot = poolPriceUsd(b.state, ctx.cfg.tokens);
     const window = (json<[number, number][]>(ctx.meta.spot_30m) ?? []).filter(([t]) => t < ctx.nowS);
@@ -155,10 +161,7 @@ export const twapDivergence: Rule = {
     ctx.writes.meta.push({ k: "spot_30m", v: JSON.stringify(kept) });
     const since = num(ctx.meta.twap_off_since);
     const clear = () => since !== undefined && ctx.writes.meta.push({ k: "twap_off_since", v: "" });
-    if (b.state.oracleValue === undefined || kept.length === 0) {
-      clear();
-      return out;
-    }
+    if (b.state.oracleValue === undefined || kept.length === 0) return unjudged(ctx, "twap.divergence", "twap.divergence");
     const mean = kept.reduce((s, [, p]) => s + p, 0) / kept.length;
     const oracleUsd = Number(b.state.oracleValue) / 1e6;
     const off = Math.abs(oracleUsd / mean - 1) * 10_000;
@@ -187,21 +190,23 @@ const median = (xs: bigint[]): bigint | undefined => {
 };
 
 /** pool.liquidity: the TAO/WETH pool's TAO, or its in-range liquidity, below liquidityDropPct of its 7-day
- * median (hour rows; at least a day of them). */
+ * median (hour rows; at least a day of them). Unjudged without the reading, the day of rows, or (neither low) either
+ * amount or its median. */
 export const poolLiquidity: Rule = {
   name: "pool.liquidity",
   run(ctx) {
+    const blind = () => unjudged(ctx, "pool.liquidity", "pool.liquidity");
     const pool = ctx.snap.base?.state.taoWethPool;
-    if (!pool) return [];
+    if (!pool) return blind();
     const week = ctx.hours.filter((r) => r.hour >= ctx.nowS - 7 * 86400);
-    if (week.length < 24) return [];
+    if (week.length < 24) return blind();
     const pct = BigInt(ctx.t.liquidityDropPct);
-    const low = (now: bigint | undefined, m: bigint | undefined) => now !== undefined && m !== undefined && m > 0n && now * 100n < m * pct;
+    const low = (now: bigint | undefined, m: bigint | undefined) => (now === undefined || m === undefined ? undefined : m > 0n && now * 100n < m * pct);
     const taoMedian = median(week.flatMap((r) => (r.poolTaoLast === undefined ? [] : [r.poolTaoLast])));
     const liqMedian = median(week.flatMap((r) => (r.liquidityLast === undefined ? [] : [r.liquidityLast])));
     const lowTao = low(pool.tao, taoMedian);
     const lowLiq = low(pool.liquidity, liqMedian);
-    if (!lowTao && !lowLiq) return [];
+    if (!lowTao && !lowLiq) return lowTao === undefined || lowLiq === undefined ? blind() : [];
     return [
       {
         rule: "pool.liquidity",

@@ -2,7 +2,7 @@ import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import type { StoredLog } from "../logs.ts";
 import type { BaseState, BitState } from "../snapshot.ts";
-import { CONTRACT_NAMES, isNew, onset, type Readings, type RuleCtx, twice, txLink } from "./context.ts";
+import { CONTRACT_NAMES, isNew, onset, type Readings, type RuleCtx, twice, txLink, unjudged } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.1 and 6.2: what the front door and vault hold against what they owe, and the vault's edge cases.
@@ -21,12 +21,16 @@ const vaultSide = (s?: BitState): Side =>
   s?.rootStakeRao === undefined || s.balance === undefined || s.pendingPayouts === undefined
     ? undefined
     : { has: s.rootStakeRao * RAO + s.balance, owes: s.pendingPayouts + MARGIN_WEI };
-const short = (x: Side) => x !== undefined && x.has < x.owes;
+/** Short of what it owes; undefined while a side is unread. */
+const short = (x: Side) => (x === undefined ? undefined : x.has < x.owes);
 
-/** A shortfall found on two readings: one alert while it lasts, the hold raised on its first tick. */
+/** A shortfall found on two readings: one alert while it lasts, the hold raised on its first tick; unjudged while a
+ * reading or a side is unread. */
 function shortfall(ctx: RuleCtx, o: { chain: "base" | "bittensor"; side: (r: Readings) => Side; rule: "frontdoor.solvency" | "vault.solvency"; key: string; what: string; unit: string }): Finding[] {
   const cond = (r: Readings) => short(o.side(r));
-  if (!twice(ctx, o.chain, cond)) return [];
+  const held = twice(ctx, o.chain, cond);
+  if (held === undefined) return unjudged(ctx, o.rule, o.key);
+  if (!held) return [];
   const now = ctx.snap[o.chain]!;
   const p = ctx.previous[o.chain]!;
   const x = o.side({ [o.chain]: now.state }) as { has: bigint; owes: bigint };

@@ -48,6 +48,20 @@ Dependencies: exact versions, a committed lockfile, install scripts blocked exce
 week ago, and checks every lockfile entry against that on each install, frozen or not. A bump waits
 out the week; an urgent fix can be let through by name with `minimumReleaseAgeExclude`.
 
+Known advisories in packages the site doesn't ship (as of 31 Oct 2026): `pnpm audit --prod` reports
+two high advisories under `@base-org/account > @coinbase/cdp-sdk`, zod 3.25.76
+(GHSA-mrhx-c7xc-m3w5) and follow-redirects 1.16.1 (GHSA-mrwp-f3q8-3g9p). Neither reaches the
+browser: cdp-sdk is imported only by Base Account's Node entry points (`index.node.js` and
+`interface/payment/*.node.js`, its server-side subscription charge and revoke features), the browser
+build takes the browser entry, and a search of every chunk in `out/` after `pnpm build` finds no
+trace of zod (`ZodError`, `ZodType`), axios (`AxiosError`), follow-redirects (`maxRedirects`,
+`beforeRedirect`) or cdp-sdk, while the wallet code (`wallet.coinbase.com`, `baseAccount`) is there.
+Neither can be fixed by an override yet: zod's fix exists only in 4.6.6+, a different major that
+cdp-sdk (`^3.25.76`) doesn't declare support for, and 3.x has no patched release; follow-redirects
+1.16.2 was published on 25 Oct 2026, inside the week `minimumReleaseAge` holds it for. From 1 Nov 2026
+a `pnpm.overrides` entry `"follow-redirects": "1.16.2"` closes that one (a later `@base-org/account`
+is the proper fix for both). Re-check with `pnpm audit --prod` after any bump.
+
 ## Response headers
 
 The site is hosted as static files on Cloudflare Pages, which reads `out/_headers`. `public/_headers`

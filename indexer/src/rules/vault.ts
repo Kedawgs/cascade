@@ -26,6 +26,7 @@ const senderOf = (ctx: RuleCtx, l: StoredLog) => ctx.txs.get(`${l.chain}:${l.txH
  * once, is critical. The transaction is fetched (attribute.ts), so the sender is named. */
 export const stakeMoved: Rule = {
   name: "vault.stake_moved",
+  raises: ["vault.stake_moved_unexpected"],
   run(ctx) {
     const expected = ctx.cfg.deployment.stakeHotkey;
     return newVaultLogs(ctx, ["StakeMoved"]).map((l): Finding => {
@@ -65,6 +66,7 @@ export const stakeMoved: Rule = {
  * at it. The user is msg.sender, named by the event. */
 export const directUse: Rule = {
   name: "vault.direct_use",
+  raises: ["vault.direct_use_large"],
   run(ctx) {
     return newVaultLogs(ctx, ["DepositedDirect", "RedeemedDirect", "FrontDoorRedeemsAllowed"]).map((l): Finding => {
       const user = lower(l.args.user);

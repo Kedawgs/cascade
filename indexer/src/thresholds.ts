@@ -120,6 +120,9 @@ export const DEFAULTS = {
   logsCheckUnverifiedS: 3 * 3600,
   /** monitor.unjudged: a critical condition its rule couldn't judge for this long, tick after tick */
   unjudgedCriticalS: 1800,
+  /** monitor.unjudged for site.integrity: about three incomplete site passes in a row (a pass an hour; one alone is
+   * site.unreachable's warning) */
+  siteUnjudgedS: 3 * 3600,
   /** rule ids switched off (the proposed rules, open question 13, can be turned off here) */
   rules: { off: [] as string[] },
 };

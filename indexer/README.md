@@ -273,11 +273,15 @@ the next reading that still shows it continues the same alert rather than openin
 
 A read that breaks for good while the chain still answers (a Subtensor runtime change breaking the `Delegates`,
 `Uids` or `TotalHotkeyAlpha` decode, an AlphaVault upgrade dropping `backing()`) would leave its rule blind with no
-alert of its own, so **`monitor.unjudged`** (critical) pages once any critical condition has been unjudged on every
-tick for `unjudgedCriticalS` (30 minutes; since when: meta `unjudged_since:<rule>`). It is one alert for all of them
-(a whole chain out is one email, listing each rule and since when), resolves when every one is judged again, and
-doesn't count rules switched off in `rules.off`, or `site.integrity` (an incomplete site pass is
-`site.unreachable`'s warning). The email says what to check.
+alert of its own, so **`monitor.unjudged`** (critical) pages once any critical rule has been unjudged on every tick
+for `unjudgedCriticalS` (30 minutes; since when: meta `unjudged_since:<rule>`): a critical condition whose reading or
+field is missing, or any rule that keeps throwing and can raise a critical, events included (`keys.unexplained_tx`,
+`fmtao.role_change_critical`, the price and stake rules). `site.integrity` waits `siteUnjudgedS` (3 hours): it is
+judged once an hourly pass, so one incomplete pass stays `site.unreachable`'s warning and about three in a row page.
+Its alerts are grouped by onset (key `monitor.unjudged:<since, floored to 10 minutes>`, each listing its rules and
+since when): a whole chain out is one email, a rule going blind later is a new alert and email of its own (even with
+the first acknowledged, or past its last resend), and each group resolves when its rules are judged again. Rules
+switched off in `rules.off` aren't counted. The email says what to check.
 
 Two consequences, both erring toward alerting:
 
@@ -474,7 +478,8 @@ the store (or on acknowledgement, `pnpm alerts:ack`).
   run time (by string concatenation, or fetched from elsewhere) isn't seen; what stops such a script loading is
   the page's Content-Security-Policy (`script-src 'self'` and the build's own inline-script hashes), which the
   check compares with the build's on every page. A site that serves the monitor a clean copy and its users a
-  tampered one can't be caught from outside. A file that stopped a site-check run points to the CPU
+  tampered one can't be caught from outside, and telling them apart is easy: a Worker's requests carry a `CF-Worker`
+  header naming its zone. The site check is for accidental and CDN failures, not a determined site owner. A file that stopped a site-check run points to the CPU
   limit (Workers Paid, or `SITE_FILES_PER_RUN=1`), not the byte cap.
 - **FM-TAO's Base-only backing check is a weak backstop.** `fmtao.unbacked` compares FM-TAO's supply on Base with
   the Bittensor lock pool, which also backs FM-TAO on Robinhood (and any other lane), so the lock is far above Base's

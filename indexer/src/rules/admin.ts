@@ -101,6 +101,7 @@ const kindOf = (what: string): CodeKind => (what.startsWith("no code") ? "accoun
  * Kept in meta (code_seen:{chain}:{address}), written only when it changes. */
 export const keysDelegated: Rule = {
   name: "keys.delegated",
+  raises: ["keys.code_changed"],
   run(ctx) {
     const out: Finding[] = [];
     for (const w of roleWallets(ctx.snap)) {
@@ -173,7 +174,7 @@ const keeperOnly = (roles: readonly string[]) => roles.every((r) => r.endsWith("
  * once. A newly watched address starts at its current count. Writes the watched rows that changed. */
 export const keys: Rule = {
   name: "keys",
-  conditions: ["keys.safe_unread"],
+  raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"],
   run(ctx) {
     const out: Finding[] = [];
     const stored = new Map(ctx.nonces.map((r) => [`${r.chain}:${lower(r.address)}`, r]));

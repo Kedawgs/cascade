@@ -53,7 +53,7 @@ describe("runRules", () => {
     expect(ctx.writes).toEqual({ batchChecks: [{ ...row, batchId: 7n }], chunkChecks: [], nonces: [], meta: [] });
   });
 
-  it("leaves the open conditions of a rule that throws as they are (it couldn't judge them): its own, and the others it raises", () => {
+  it("marks everything a rule that throws can raise unjudged (it couldn't judge them): its name's, and the others it raises", () => {
     const boom = () => {
       throw new Error("boom");
     };
@@ -61,23 +61,30 @@ describe("runRules", () => {
     runRules(
       [
         { name: "keeper.low_eth", run: boom },
-        { name: "bridge.payouts", conditions: ["bridge.payout_unchecked"], run: boom },
-        { name: "indexer.lag", conditions: ["indexer.blind"], run: boom },
+        { name: "bridge.payouts", raises: ["bridge.payout_mismatch", "bridge.payout_unchecked"], run: boom },
+        { name: "indexer.lag", raises: ["indexer.blind"], run: boom },
         { name: "fine", run: () => [] },
       ],
       ctx,
     );
-    expect(ctx.unjudged).toEqual([{ rule: "keeper.low_eth" }, { rule: "bridge.payout_unchecked" }, { rule: "indexer.lag" }, { rule: "indexer.blind" }]);
+    expect(ctx.unjudged).toEqual([
+      { rule: "keeper.low_eth" },
+      { rule: "bridge.payout_mismatch" },
+      { rule: "bridge.payout_unchecked" },
+      { rule: "indexer.lag" },
+      { rule: "indexer.blind" },
+    ]);
   });
 
-  it("names every condition a tick rule raises: its name, or in its conditions, so a rule that throws keeps them", () => {
-    // raised outside the tick's rules: the watchdog's, the tick's own failure, and runRules' own for a rule that throws
-    const elsewhere = new Set(["monitor.stalled", "monitor.db_failing", "monitor.rule_failed", "monitor.bridge_rule_failed"]);
-    const named = new Set(TICK_RULES.flatMap((r) => [r.name, ...(r.conditions ?? [])]));
-    const conditions = (Object.keys(RULES) as RuleId[]).filter((id) => RULES[id].kind === "condition" && !elsewhere.has(id));
-    expect(conditions.filter((id) => !named.has(id))).toEqual([]);
-    // and a rule declares only conditions
-    for (const r of TICK_RULES) for (const id of r.conditions ?? []) expect(RULES[id].kind, `${r.name}: ${id}`).toBe("condition");
+  it("names every alert a tick rule raises: its name, or in its raises, so a rule that throws keeps its conditions open and monitor.unjudged counts its criticals", () => {
+    // raised outside the tick's rules: the watchdog's, the tick's own failure, runRules' own for a rule that throws, and
+    // the hourly logs cross-check's
+    const elsewhere = new Set(["monitor.stalled", "monitor.db_failing", "monitor.rule_failed", "monitor.bridge_rule_failed", "indexer.logs_omitted", "indexer.logs_extra"]);
+    const named = new Set(TICK_RULES.flatMap((r) => [r.name, ...(r.raises ?? [])]));
+    const ids = (Object.keys(RULES) as RuleId[]).filter((id) => !elsewhere.has(id));
+    expect(ids.filter((id) => !named.has(id))).toEqual([]);
+    // a rule's raises are rule ids, never its own name again
+    for (const r of TICK_RULES) for (const id of r.raises ?? []) expect(id in RULES && id !== r.name, `${r.name}: ${id}`).toBe(true);
   });
 
   it("raises a bridge rule's failure as the critical monitor.bridge_rule_failed: its checks stay waiting", () => {

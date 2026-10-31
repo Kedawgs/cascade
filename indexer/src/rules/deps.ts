@@ -38,7 +38,7 @@ const num = (s: string | undefined) => (s === undefined || s === "" || !Number.i
  *   fmtao.unbacked (Base) can see that one's result. A reading that couldn't read the lock leaves the marks alone. */
 export const fmtaoBackingTrue: Rule = {
   name: "fmtao.backing_true",
-  conditions: ["fmtao.lock_outside"],
+  raises: ["fmtao.lock_outside"],
   run(ctx) {
     const out: Finding[] = [];
     const now = ctx.snap.bittensor;
@@ -226,6 +226,7 @@ function judge(l: StoredLog): { critical: boolean; what: string } {
  * all stored on the same tick. */
 export const fmtaoRoleChange: Rule = {
   name: "fmtao.role_change",
+  raises: ["fmtao.role_change_critical"],
   run(ctx) {
     const byTx = new Map<string, StoredLog[]>();
     for (const l of ctx.logs.all()) {
@@ -303,7 +304,7 @@ const takeText = (t: number | null | undefined) => (t === undefined ? "unknown" 
  * validatorTakeMaxBps on two readings. 0 at launch. */
 export const validatorTake: Rule = {
   name: "validator.take",
-  conditions: ["validator.take_high"],
+  raises: ["validator.take_changed", "validator.take_high"],
   run(ctx) {
     const s = ctx.snap.bittensor;
     const [p, e] = ctx.history.bittensor;

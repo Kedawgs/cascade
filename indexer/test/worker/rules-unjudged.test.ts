@@ -331,6 +331,7 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     expect(TICK_RULES[TICK_RULES.length - 1]).toBe(ops.monitorUnjudged);
     expect(RULES["monitor.unjudged"]).toEqual({ tier: "critical", kind: "condition", canHold: false, mutedByHold: false });
     expect(DEFAULTS.unjudgedCriticalS).toBe(1800);
+    expect(DEFAULTS.siteUnjudgedS).toBe(10_800);
     expect(RUNBOOK["monitor.unjudged"]({ rules: "validator.take_high" })).toContain("validator.take_high");
   });
 
@@ -350,7 +351,8 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     expect(runRules([deps.validatorTake, ops.monitorUnjudged], later)).toEqual([]);
     expect(later.writes.meta).toEqual([]);
     const [f] = runRules([deps.validatorTake, ops.monitorUnjudged], at(NOW + 1800, { bit: blindTake, meta }));
-    expect(f).toMatchObject({ rule: "monitor.unjudged", key: "monitor.unjudged", facts: { rules: "validator.take_high", "validator.take_high": expect.stringContaining("30 minutes") } });
+    // keyed by when it went blind (floored to 10 minutes)
+    expect(f).toMatchObject({ rule: "monitor.unjudged", key: `monitor.unjudged:${NOW}`, facts: { rules: "validator.take_high", "validator.take_high": expect.stringContaining("30 minutes") } });
     expect(f.subject).toBe("The monitor hasn't been able to judge validator.take_high for 30 minutes");
     // the take decodes again: judged, the mark cleared, nothing found (the alert resolves)
     const back = at(NOW + 1860, { bit: { ...blindTake, validator: { ...blindTake.validator, take: 0 } }, meta });
@@ -358,16 +360,36 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     expect(metaOf(back)).toEqual({ "unjudged_since:validator.take_high": "" });
   });
 
-  it("counts a critical rule that throws (runRules' mark), but not warnings, events or rules switched off", () => {
-    const boom = { name: "vault.solvency", run: () => {
+  it("counts a critical rule that throws (runRules' mark), its critical events too, but not warnings or rules switched off", () => {
+    const boom = () => {
       throw new Error("boom");
-    } };
+    };
     const c = at(NOW, { bit: {} });
-    runRules([boom, ops.keeperLowEth, ops.monitorUnjudged], c);
+    runRules([{ name: "vault.solvency", run: boom }, ops.keeperLowEth, ops.monitorUnjudged], c);
     expect(metaOf(c)).toEqual({ "unjudged_since:vault.solvency": String(NOW) });
+    // a rule raising critical events that keeps throwing (the keys rule: keys.unexplained_tx) pages after its threshold
+    const keys = { name: "keys", raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"] as const, run: boom };
+    const k = at(NOW, { bit: {} });
+    runRules([keys, ops.monitorUnjudged], k);
+    expect(metaOf(k)).toEqual({ "unjudged_since:keys.unexplained_tx": String(NOW) });
+    const [f] = runRules([keys, ops.monitorUnjudged], at(NOW + 1800, { bit: {}, meta: metaOf(k) })).filter((x) => x.rule === "monitor.unjudged");
+    expect(f.facts.rules).toBe("keys.unexplained_tx");
     const off = ruleCtx({ ...at(NOW, { bit: blindTake }), t: { ...DEFAULTS, rules: { off: ["validator.take_high"] } } });
     runRules([deps.validatorTake, ops.monitorUnjudged], off);
     expect(off.writes.meta).toEqual([]);
+  });
+
+  it("site.integrity pages only after about three incomplete passes in a row (siteUnjudgedS, 3 hours): one is site.unreachable's warning", () => {
+    const incomplete = JSON.stringify({ finishedAt: NOW - 60, complete: false, files: [], unapproved: [], missing: [], problems: [{ kind: "unreadable", file: "b.js", detail: "HTTP 503" }], capped: false });
+    const run = (nowS: number, meta: Record<string, string>) => runRules([site.siteIntegrity, ops.monitorUnjudged], at(nowS, { meta: { site_result: incomplete, ...meta } }));
+    const first = at(NOW, { meta: { site_result: incomplete } });
+    runRules([site.siteIntegrity, ops.monitorUnjudged], first);
+    const marks = metaOf(first);
+    expect(marks).toEqual({ "unjudged_since:site.integrity": String(NOW) });
+    // two more incomplete passes (2 hours and more): still only the warning
+    expect(run(NOW + 2 * 3600 + 1800, marks)).toEqual([]);
+    const [f] = run(NOW + 3 * 3600, marks);
+    expect(f).toMatchObject({ key: `monitor.unjudged:${NOW}`, facts: { rules: "site.integrity" } });
   });
 
   it("a whole chain unread is one alert listing every critical rule it blinds, not one each", () => {
@@ -380,6 +402,38 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     const found = run(at(NOW + 1800, { base: { oracleValue: 400_000_000n }, meta: marks })).filter((f) => f.rule === "monitor.unjudged");
     expect(found).toHaveLength(1);
     expect(found[0].facts.rules.split(", ")).toEqual(expect.arrayContaining(["vault.solvency", "validator.take_high", "validator.root_uid_lost", "root.unlock_interval", "fmtao.backing_true"]));
+  });
+
+  it("a rule going blind later is a new alert of its own, though the first one was acknowledged; each group resolves on its own", async () => {
+    const db = env.DB;
+    await wipe(db);
+    const meta: Record<string, string> = {};
+    /** one tick of the take and solvency rules and monitor.unjudged, against D1, its meta writes kept */
+    const tick = async (nowS: number, bit: Partial<BitState>) => {
+      const c = at(nowS, { bit, bitBefore: bit, meta: { ...meta } });
+      const findings = runRules([deps.validatorTake, solvency.vaultSolvency, ops.monitorUnjudged], c);
+      for (const w of c.writes.meta) meta[w.k] = w.v;
+      const state = await loadTickState(db, nowS);
+      const out = reconcile(db, { open: state.openAlerts, findings, nowS, t: DEFAULTS, holdActive: false, unjudged: c.unjudged });
+      if (out.statements.length) await db.batch(out.statements);
+      const marks = markSent(db, out.due, nowS);
+      if (marks.length) await db.batch(marks);
+      return out.due.filter((d) => d.rule === "monitor.unjudged").map((d) => [d.key, d.reason]);
+    };
+    const solvent = { rootStakeRao: 10n ** 9n, balance: E18, pendingPayouts: 0n };
+    const take = { validator: { hotkey: HK, take: 0, rootStake: 100n, rootUid: 1 } };
+    // the take's decode breaks at NOW: paged half an hour later, then acknowledged
+    await tick(NOW, { ...solvent, ...blindTake });
+    expect(await tick(NOW + 1800, { ...solvent, ...blindTake })).toEqual([[`monitor.unjudged:${NOW}`, "alert"]]);
+    await db.prepare("UPDATE alerts SET acknowledged_at = ?1 WHERE alert_key = ?2").bind(NOW + 1900, `monitor.unjudged:${NOW}`).run();
+    // pendingPayouts() starts reverting 40 minutes in: its own group, its own critical, though the first is acknowledged
+    const both = { ...blindTake, rootStakeRao: 10n ** 9n, balance: E18 };
+    expect(await tick(NOW + 2400, both)).toEqual([]);
+    expect(await tick(NOW + 4200, both)).toEqual([[`monitor.unjudged:${NOW + 2400}`, "alert"]]);
+    // the take reads again: its group resolves (a critical that was sent: its "resolved" email), the solvency group stays open
+    expect(await tick(NOW + 4260, { ...take, rootStakeRao: 10n ** 9n, balance: E18 })).toEqual([[`monitor.unjudged:${NOW}`, "resolved"]]);
+    const open = await db.prepare("SELECT alert_key FROM alerts WHERE rule = 'monitor.unjudged' AND resolved_at IS NULL").all<{ alert_key: string }>();
+    expect(open.results.map((r) => r.alert_key)).toEqual([`monitor.unjudged:${NOW + 2400}`]);
   });
 });
 

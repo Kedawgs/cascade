@@ -288,6 +288,7 @@ function unexplainedFall(ctx: RuleCtx, a: ChainReading<BitState>, b: ChainReadin
  * hotkey. One alert per hotkey while it lasts; the hold's id is the hotkey's first sight, so it is raised once. */
 export const stakeDivergence: Rule = {
   name: "stake.divergence",
+  raises: ["stake.unlisted"],
   run(ctx) {
     const s = ctx.snap.bittensor;
     const p = ctx.previous.bittensor;

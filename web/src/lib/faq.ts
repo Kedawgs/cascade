@@ -67,6 +67,8 @@ export const FAQ_FACTS = {
   vestingDays: 7,
   /** The launch cadence pairs a 24-hour payout delay with its 24-hour batch max wait; the test cadence uses 1 hour. */
   payoutDelayH: { launch: 24, test: 1 },
+  /** The front door's batch interval each cadence deploys with: anyone may send a batch once it's this old. */
+  batchIntervalS: { launch: 3_600, test: 600 },
   registryDelayDays: 7,
   keeperFallbackDays: 7,
   timelockH: 48,
@@ -303,6 +305,15 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
               ? `Deposits travel to Bittensor together in batches, which shares the bridge fee. A batch leaves once the fees it carries cover the trip, and after ${waitText(batchWaitS)} at the latest. It then takes about 20 minutes to cross and is staked straight away.`
               : "Deposits travel to Bittensor together in batches that leave every few minutes, then take about 20 minutes to cross and are staked straight away. Most deposits are staked within the hour.",
             "The stake form shows the expected time, and your receipt follows each step.",
+          ],
+        },
+        {
+          id: "send-sooner",
+          q: "Can I make my deposit leave sooner?",
+          a: [
+            launch
+              ? `Yes. Once its batch is ${waitText(F.batchIntervalS.launch)} old, Send it now on the Stake page or its receipt sends the batch at once: you pay the whole batch's bridge fee in ETH, usually a dollar or two, and anything extra is refunded. Otherwise it leaves on its own within ${waitText(batchWaitS)}.`
+              : "There's no need: batches leave on their own every few minutes, as soon as they can.",
           ],
         },
         {

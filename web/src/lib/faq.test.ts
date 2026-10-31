@@ -370,6 +370,17 @@ describe("the FAQ's timing follows the deployment", () => {
     expect(answer(LAUNCH, "how-to-unstake")).toContain("waits out a 24-hour safety delay");
   });
 
+  it("says a deposit can leave sooner, at the launch, by paying its batch's bridge fee once the batch is an hour old", () => {
+    expect(items(LAUNCH_SITE).find((i) => i.id === "send-sooner")?.q).toBe("Can I make my deposit leave sooner?");
+    expect(answer(LAUNCH_SITE, "send-sooner")).toBe(
+      "Yes. Once its batch is 1 hour old, Send it now on the Stake page or its receipt sends the batch at once: you pay the whole batch's bridge fee in ETH, usually a dollar or two, and anything extra is refunded. Otherwise it leaves on its own within 24 hours.",
+    );
+    expect(answer(LAUNCH, "send-sooner")).toBe(answer(LAUNCH_SITE, "send-sooner"));
+    // without a max wait the keeper sends each batch as soon as it can: there is nothing to speed up
+    expect(answer(TEST, "send-sooner")).toBe("There's no need: batches leave on their own every few minutes, as soon as they can.");
+    expect(answer(null, "send-sooner")).toBeTruthy();
+  });
+
   it("adds up the batch wait, the payout delay and about an hour for the whole exit", () => {
     expect(answer(LIVE_LAUNCH, "how-to-unstake")).toContain("All in, it can take up to about 2 days, usually less.");
     expect(answer(LIVE_TEST, "how-to-unstake")).toContain("All in, it can take up to about 2 hours, usually less.");
@@ -500,6 +511,11 @@ describe("the FAQ's numbers match the code", () => {
   it("the payout delays the cadences deploy with", () => {
     expect(Number(field(launch, "payoutDelay"))).toBe(FAQ_FACTS.payoutDelayH.launch * 3_600);
     expect(Number(field(v3, "payoutDelay"))).toBe(FAQ_FACTS.payoutDelayH.test * 3_600);
+  });
+
+  it("the batch intervals the cadences deploy with: when anyone may send a batch", () => {
+    expect(Number(field(launch, "batchInterval"))).toBe(FAQ_FACTS.batchIntervalS.launch);
+    expect(Number(field(v3, "batchInterval"))).toBe(FAQ_FACTS.batchIntervalS.test);
   });
 
   it("the fees and limits the v3 deployment is set up with", () => {

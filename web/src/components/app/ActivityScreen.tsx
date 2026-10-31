@@ -29,6 +29,7 @@ import { ReceiptLink } from "../ReceiptLink";
 import { Trail } from "../Trail";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
+import { SendItNow } from "./SendItNow";
 import styles from "./ActivityScreen.module.css";
 
 function BackLink({ href = "/activity" }: { href?: string }) {
@@ -145,6 +146,8 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
             </div>
           )}
         </dl>
+        {/* still in its open batch: when it leaves, and Send it now */}
+        <SendItNow account={account} waiting={deposit.cancellableWei !== undefined} href={`/activity?deposit=${id}`} />
         {(deposit.status === "needs_you" || deposit.retryable || deposit.restake || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
           <Actions>
             {deposit.status === "needs_you" && (
@@ -203,7 +206,7 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
   );
 }
 
-function WithdrawalDetail({ account, id }: { account: string; id: string }) {
+export function WithdrawalDetail({ account, id }: { account: string; id: string }) {
   const { data: withdrawal, isPending, isFetching, isError, refetch } = useWithdrawal(account, id);
   const entry = usePendingEntry(account, "withdrawal", id);
   // the same query as the receipt's: one read serves both
@@ -267,6 +270,8 @@ function WithdrawalDetail({ account, id }: { account: string; id: string }) {
             )
           )}
         </dl>
+        {/* still in its open batch: when it leaves, and Send it now */}
+        <SendItNow account={account} waiting={withdrawal.cancellableShares !== undefined} href={`/activity?withdrawal=${id}`} />
         {withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
           <Actions>
             <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>

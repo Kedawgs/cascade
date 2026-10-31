@@ -75,7 +75,18 @@ export interface ClaimOp extends OpBase {
   withdrawalIds?: string[];
 }
 
-export type Operation = DepositOp | WithdrawalOp | ClaimOp;
+/** "Send it now": closeBatch on the open batch `batchId`, paying its bridge fee (`value` is what was
+ * sent; the front door refunds what the fee doesn't take). Recorded before the wallet is asked, so a
+ * reload while it is on its way shows it as sending rather than offering it again. */
+export interface CloseOp extends OpBase {
+  kind: "close";
+  batchId: bigint;
+  value: bigint;
+  hashes: Partial<Record<"close", Hex>>;
+  callsId?: string;
+}
+
+export type Operation = DepositOp | WithdrawalOp | ClaimOp | CloseOp;
 
 /** The TAO price a deposit was made at, when it has one. Deposits of wallet TAO were once recorded at $0
  * when no price was at hand: that is none too, never a price to show or average in. */

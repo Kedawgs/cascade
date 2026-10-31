@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
-import { cancelCall, FlowError, runFlow, type WalletPort } from "./flows";
-import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
+import { cancelCall, FlowError, runFlow, sendNowCall, type WalletPort } from "./flows";
+import { type CloseOp, createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import { cancelStore, opStore } from "./op-store";
 
 const FD = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750" as const;
@@ -26,6 +26,29 @@ const op: DepositOp = {
 };
 
 describe("opStore", () => {
+  it("keeps a Send it now on its own record: the close's hash before its receipt is waited for, then sent", async () => {
+    const log = createOpLog(memoryStorage(), FD);
+    const close: CloseOp = { id: "c1", kind: "close", account: ME, createdAt: 1, batchId: 7n, value: 969_000_000_000_000n, hashes: {}, state: "running" };
+    log.put(close);
+    const hash = `0x${"44".repeat(32)}` as Hex;
+    const seenWhileWaiting: unknown[] = [];
+    const port = {
+      switchToBase: async () => undefined,
+      canBatch: async () => true,
+      send: async () => hash,
+      wait: async () => {
+        seenWhileWaiting.push((log.get(ME, "c1") as CloseOp).hashes.close);
+        return { status: "success" as const };
+      },
+    } as unknown as WalletPort;
+    await runFlow(port, opStore(log, ME, "c1"), [sendNowCall(969_000_000_000_000n, D)]);
+    // one call is never sent as a wallet batch
+    expect(seenWhileWaiting).toEqual([hash]);
+    expect(log.get(ME, "c1")).toMatchObject({ hashes: { close: hash }, state: "sent", mode: "sequential", batchId: 7n, value: 969_000_000_000_000n });
+    // it is no deposit or unstake: it never shows among them, and is never removed as unsent
+    expect(log.removeUnsent(ME, "c1")).toBe(false);
+  });
+
   it("puts its entry back if it was removed while the flow was still running, keeping the new hash", () => {
     const log = createOpLog(memoryStorage(), FD);
     log.put(op);

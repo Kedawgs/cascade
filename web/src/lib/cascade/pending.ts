@@ -21,7 +21,7 @@ export interface PendingEntry {
  * them (state "sent") and that no cancel took back out; null for anything else (still running, waiting
  * for the user, failed, a claim). */
 export function pendingEntry(op: Operation): PendingEntry | null {
-  if (op.state !== "sent" || op.kind === "claim" || op.cancelled) return null;
+  if (op.state !== "sent" || op.kind === "claim" || op.kind === "close" || op.cancelled) return null;
   const createdAt = new Date(op.createdAt);
   if (op.kind === "withdrawal") {
     return {

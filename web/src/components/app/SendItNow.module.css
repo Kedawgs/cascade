@@ -1,0 +1,49 @@
+/* Send it now: under the lane in "Where your money is", and on a receipt still in its open batch. */
+
+.box {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.leaves {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.line {
+  margin-top: 4px;
+}
+
+.button {
+  margin-top: 12px;
+  /* a long label ("Send it now: about $1.74 in ETH") wraps inside the pill on a narrow phone */
+  max-width: 100%;
+  white-space: normal;
+}
+
+.note {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.warning {
+  margin-top: 8px;
+  color: var(--amber);
+  font-weight: 600;
+}
+
+.error {
+  margin-top: 8px;
+  color: #b42318;
+}
+
+.link {
+  color: var(--water-deep);
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+}

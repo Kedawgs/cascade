@@ -145,11 +145,14 @@ const dayLabel = (at: Date, now: Date): string => {
 };
 const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long" });
 
+/** A time as the receipts say it: "2:05 PM", with "tomorrow" or the weekday when it isn't today. */
+export const timeAt = (at: Date, now: Date): string => `${hhmm(at)}${dayLabel(at, now)}`;
+
 const waitForClose = (f: { closesAt: Date; now: Date; closesBy?: boolean }) =>
   f.closesAt.getTime() <= f.now.getTime()
     ? "The batch can close now; it crosses as soon as it is sent"
     : f.closesBy
-      ? `Waits for the batch to close, by about ${hhmm(f.closesAt)}${dayLabel(f.closesAt, f.now)}`
+      ? `Waits for the batch to close, by about ${timeAt(f.closesAt, f.now)}`
       : `Waits for the batch to close at ${hhmm(f.closesAt)}`;
 
 function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "failed" | "needs_you" | "done" | "in_progress" {

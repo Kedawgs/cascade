@@ -1,10 +1,10 @@
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { depositNotice, type SentNotice, unstakeNotice } from "@/lib/sent";
+import { batchNotice, depositNotice, type PanelNotice, unstakeNotice } from "@/lib/sent";
 import { launchData, plainText, renderWithCache } from "../test-render";
 import { closedThenFocus, SentDialog } from "./SentDialog";
 
-const html = (notice: SentNotice | null) => renderWithCache(createElement(SentDialog, { notice, onClose: () => undefined }), [], { data: launchData() });
+const html = (notice: PanelNotice | null) => renderWithCache(createElement(SentDialog, { notice, onClose: () => undefined }), [], { data: launchData() });
 
 /** The dialog's accessible name: the element its aria-labelledby points at. */
 function labelOf(h: string): string {
@@ -51,6 +51,16 @@ describe("the panel that confirms an unstake", () => {
   it("follows it live on its receipt trail", () => {
     expect(h).toMatch(/<a[^>]*href="\/activity\?withdrawal=w1"[^>]*>Follow it live<\/a>/);
     expect(h).toMatch(/<button type="button"[^>]*>Done<\/button>/);
+  });
+});
+
+describe("the panel that confirms Send it now", () => {
+  it("says the batch is on its way and what was paid, with no empty table when the receipt couldn't be read", () => {
+    const paid = html(batchNotice("/activity?withdrawal=w1", { paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }));
+    expect(labelOf(paid)).toBe("Your batch is on its way to Bittensor");
+    expect(plainText(paid)).toContain("Bridge fee you paid$1.74 in ETH");
+    expect(paid).toMatch(/<a[^>]*href="\/activity\?withdrawal=w1"[^>]*>Follow it live<\/a>/);
+    expect(html(batchNotice("/activity", {}))).not.toContain("<dl");
   });
 });
 

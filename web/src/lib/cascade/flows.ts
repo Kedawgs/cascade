@@ -4,10 +4,11 @@ import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
 import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
 import type { ClaimOp, DepositOp, OpState } from "./oplog";
 import type { FrontDoorState } from "./reads";
-import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
+import type { Balances, DepositQuote, OpenBatch, WithdrawalQuote } from "./types";
 import { floorRao } from "./units";
 import type { Wiring } from "./wiring";
 import { formatUsdShort } from "../format";
+import { ethNeeded, needEthText, sendNowValue } from "../send-now";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
 export interface FlowCall {
@@ -380,6 +381,61 @@ export function claimCalls(claimable: bigint, minUsdc: bigint, w: Balances, d: D
   return keepTao ? out : [...out, ...sellTaoCalls(claimable, minUsdc, w, account)];
 }
 
+// ---- Send it now: the open batch on its way, the user paying its bridge fee ----
+
+/** closeBatch with `value`: the front door pays the bridge fee from the batch's pot first, then from the
+ * value, and refunds the rest to the sender. */
+export const sendNowCall = (value: bigint, d: Deployment): FlowCall => call("close", d.frontDoor, FRONT_DOOR, "closeBatch", [], value);
+
+export const SEND_UNREAD = "We couldn't read the batch on Base just now, so nothing was sent. Try again in a moment.";
+export const SEND_PAUSED = "Cascade is paused right now, so the batch can't be sent. Nothing was sent.";
+export const SEND_GONE = "It's already on its way, so nothing was sent.";
+export const SEND_NOT_YOURS = "Nothing of yours is waiting in this batch any more, so nothing was sent.";
+export const SEND_NOT_YET = "This batch can't be sent yet, so nothing was sent.";
+export const SEND_NO_FEE = "We couldn't read the bridge fee just now, so nothing was sent. Try again in a moment.";
+export const SEND_FEE_ROSE = "The bridge fee rose just now, so nothing was sent. Try again.";
+export const SEND_NOT_NOW = "This batch can't be sent right now (it may have just left), so nothing was sent.";
+const SEND_UNREACHABLE = "We couldn't reach Base just now, so nothing was sent. Try again in a moment.";
+
+/** Send it now, checked right before the wallet is asked: the open batch is read again, and nothing is
+ * sent while Cascade is paused, once the batch the user saw (`batchId`) has left, while it can't close,
+ * when nothing of the account's is in it any more, when its fee can't be read, or when the wallet can't
+ * cover the value and the network fee. The call is then run from the account (`simulate`) and goes only
+ * if Base says it would go through. Gives the call and the batch it was priced from. */
+export async function planSendNow(x: {
+  d: Deployment;
+  batchId: bigint;
+  read: () => Promise<OpenBatch>;
+  simulate: (c: FlowCall) => Promise<Simulation>;
+}): Promise<{ call: FlowCall; batch: OpenBatch }> {
+  let b: OpenBatch;
+  try {
+    b = await x.read();
+  } catch {
+    throw new FlowError(SEND_UNREAD, "needs-you");
+  }
+  if (b.paused) throw new FlowError(SEND_PAUSED, "failed");
+  if (b.id !== x.batchId) throw new FlowError(SEND_GONE, "failed");
+  if (b.mine.depositWei === 0n && b.mine.redeemShares === 0n) throw new FlowError(SEND_NOT_YOURS, "failed");
+  if (!b.canClose) throw new FlowError(SEND_NOT_YET, "failed");
+  if (b.feeWei === undefined) throw new FlowError(SEND_NO_FEE, "needs-you");
+  const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d);
+  const need = ethNeeded(b);
+  if (b.ethWei !== undefined && b.ethWei < need) throw new FlowError(needEthText(need, b.ethPriceUsd), "needs-you");
+  let sim: Simulation;
+  try {
+    sim = await x.simulate(c);
+  } catch (e) {
+    throw new FlowError(noGas(e) ? needEthText(need, b.ethPriceUsd) : SEND_UNREACHABLE, "needs-you");
+  }
+  if (!sim.ok) {
+    if (sim.revert === "InsufficientFee") throw new FlowError(SEND_FEE_ROSE, "needs-you");
+    if (sim.revert === "EnforcedPause") throw new FlowError(SEND_PAUSED, "failed");
+    throw new FlowError(SEND_NOT_NOW, "failed");
+  }
+  return { call: c, batch: b };
+}
+
 export function cancelCall(kind: "deposit" | "withdrawal", amount: bigint, d: Deployment): FlowCall {
   return kind === "deposit"
     ? call("cancel", d.frontDoor, FRONT_DOOR, "cancelDeposit", [amount])
@@ -606,6 +662,7 @@ const NO_BATCH = new Set([5750, 5760, 5710, 5700, 4100, -32601]);
 function revertMessage(key: string): string {
   if (key === "swap") return "The price moved before the swap went through, so nothing was deposited. Try again.";
   if (key === "stake") return "The price moved before the stake went through, so no USDC left your wallet. Stake again at today's price.";
+  if (key === "close") return "Sending the batch didn't go through, usually because it had just left. Only Base's network fee was spent.";
   return "A transaction failed on Base. Nothing after it was sent.";
 }
 

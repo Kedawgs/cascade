@@ -4,7 +4,7 @@ import Link from "next/link";
 import { type RefObject, useEffect, useId, useRef } from "react";
 import { useCascadeData } from "@/lib/cascade/context";
 import { useIsV3 } from "@/lib/cascade/hooks";
-import { sentCopy, type SentNotice, sentTiming, type SentTiming } from "@/lib/sent";
+import { type PanelNotice, sentCopy, sentTiming, type SentTiming } from "@/lib/sent";
 import styles from "./SentDialog.module.css";
 
 /** The deployment's timing, or none when the site isn't connected to one. */
@@ -38,7 +38,7 @@ export function SentDialog({
   onClose,
   returnFocus,
 }: {
-  notice: SentNotice | null;
+  notice: PanelNotice | null;
   onClose: () => void;
   returnFocus?: RefObject<HTMLElement | null>;
 }) {
@@ -76,14 +76,16 @@ export function SentDialog({
           <h2 id={titleId} className={styles.title}>
             {copy.title}
           </h2>
-          <dl className={styles.rows}>
-            {copy.rows.map(([label, value]) => (
-              <div key={label}>
-                <dt>{label}</dt>
-                <dd>{value}</dd>
-              </div>
-            ))}
-          </dl>
+          {copy.rows.length > 0 && (
+            <dl className={styles.rows}>
+              {copy.rows.map(([label, value]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
           <p id={nextId} className={styles.next}>
             {copy.next}
           </p>

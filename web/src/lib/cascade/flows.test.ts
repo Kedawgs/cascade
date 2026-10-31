@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it, vi } from "vitest";
 import type { Deployment } from "./config";
-import { STAKER } from "./abi";
+import { FRONT_DOOR, STAKER } from "./abi";
 import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
 import {
   assertWired,
@@ -32,7 +32,17 @@ import {
   permitTypedData,
   planResumeStakeV3,
   planStakeV3,
+  planSendNow,
   planUnstake,
+  SEND_FEE_ROSE,
+  SEND_GONE,
+  SEND_NO_FEE,
+  SEND_NOT_NOW,
+  SEND_NOT_YET,
+  SEND_NOT_YOURS,
+  SEND_PAUSED,
+  SEND_UNREAD,
+  sendNowCall,
   resumeStakeV3Calls,
   revertReason,
   type Simulation,
@@ -55,7 +65,7 @@ import {
   WIRING_UNCHECKED,
   wiringNotice,
 } from "./flows";
-import type { Balances, DepositQuote, WithdrawalQuote } from "./types";
+import type { Balances, DepositQuote, OpenBatch, WithdrawalQuote } from "./types";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -529,7 +539,9 @@ describe("the wiring gate before any flow", () => {
   it("leaves open exactly the ways out, by the labels the app's flows run under", () => {
     const src = readFileSync(new URL("./use-flows.ts", import.meta.url), "utf8");
     const labels = [...new Set([...src.matchAll(/\bflow\("([^"]+)"/g)].map((m) => m[1]))];
-    expect(labels).toEqual(expect.arrayContaining(["stake", "unstake", "claim", "cancel", "swap"]));
+    expect(labels).toEqual(expect.arrayContaining(["stake", "unstake", "claim", "cancel", "swap", "send"]));
+    // Send it now pays ETH into the front door: it waits for the contracts to check out
+    expect(needsWiring("send")).toBe(true);
     expect(labels.filter((l) => !needsWiring(l)).sort()).toEqual(["cancel", "claim", "swap"]);
   });
 
@@ -550,6 +562,105 @@ describe("the wiring gate before any flow", () => {
         if (c.functionName === "exactInput") expect((c.args[0] as { recipient: string }).recipient, name).toBe(ME);
       }
     }
+  });
+});
+
+describe("Send it now", () => {
+  /** The open batch as read again at the click: batch 7, which can close, with the account's deposit in it. */
+  const open = (over: Partial<OpenBatch> = {}): OpenBatch => ({
+    id: 7n,
+    start: 1_800_000_000,
+    interval: 3_600,
+    canClose: true,
+    paused: false,
+    chainTime: 1_800_007_200,
+    mine: { depositWei: 10n ** 17n, redeemShares: 0n },
+    potWei: 0n,
+    feeWei: 744_898_037_875_672n,
+    ethWei: 10n ** 16n,
+    gasWei: 10n ** 13n,
+    ethPriceUsd: 2_330,
+    ...over,
+  });
+  const ok = () => vi.fn<(c: FlowCall) => Promise<Simulation>>(async () => ({ ok: true }));
+  const plan = (batch: OpenBatch | (() => Promise<OpenBatch>), simulate = ok()) =>
+    planSendNow({ d: D, batchId: 7n, read: typeof batch === "function" ? batch : async () => batch, simulate });
+  const refused = async (p: Promise<unknown>) => {
+    const e = await p.catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(FlowError);
+    return (e as FlowError).message;
+  };
+
+  it("sends closeBatch to the listed front door, with the fee to pay plus 30%, checked from the account first", async () => {
+    const simulate = ok();
+    const { call } = await plan(open(), simulate);
+    expect(call).toEqual({ key: "close", to: D.frontDoor, abi: FRONT_DOOR, functionName: "closeBatch", args: [], value: 969_000_000_000_000n });
+    expect(call).toEqual(sendNowCall(969_000_000_000_000n, D));
+    expect(simulate).toHaveBeenCalledExactlyOnceWith(call);
+  });
+
+  it("takes the batch's pot off what is sent, and sends nothing extra once the pot covers the fee and the margin", async () => {
+    expect((await plan(open({ feeWei: 10n ** 15n, potWei: 4n * 10n ** 14n }))).call.value).toBe(9n * 10n ** 14n);
+    expect((await plan(open({ feeWei: 10n ** 15n, potWei: 2n * 10n ** 15n }))).call.value).toBe(0n);
+  });
+
+  it("reads the batch again right before sending, and sends nothing once its id has moved on: it's already on its way", async () => {
+    const read = vi.fn(async () => open({ id: 8n }));
+    const simulate = ok();
+    expect(await refused(plan(read, simulate))).toBe(SEND_GONE);
+    expect(SEND_GONE).toBe("It's already on its way, so nothing was sent.");
+    expect(read).toHaveBeenCalledOnce();
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it("never sends while Cascade is paused", async () => {
+    const simulate = ok();
+    expect(await refused(plan(open({ paused: true }), simulate))).toBe(SEND_PAUSED);
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when the batch can't close (it rolled, or a setting changed)", async () => {
+    expect(await refused(plan(open({ canClose: false })))).toBe(SEND_NOT_YET);
+  });
+
+  it("sends nothing when nothing of the account's is in the batch any more: it would pay for others' alone", async () => {
+    expect(await refused(plan(open({ mine: { depositWei: 0n, redeemShares: 0n } })))).toBe(SEND_NOT_YOURS);
+    // an unstake request waiting in it counts as the account's
+    await expect(plan(open({ mine: { depositWei: 0n, redeemShares: 10n ** 21n } }))).resolves.toBeDefined();
+  });
+
+  it("sends nothing when the fee can't be read, nor when the batch can't be", async () => {
+    expect(await refused(plan(open({ feeWei: undefined })))).toBe(SEND_NO_FEE);
+    expect(await refused(plan(async () => Promise.reject(new Error("HTTP request failed. URL: https://mainnet.base.org"))))).toBe(SEND_UNREAD);
+  });
+
+  it("sends nothing when the wallet can't cover the value and the network fee, and says how much it needs", async () => {
+    const simulate = ok();
+    // 0.000969 sent + 0.00001 for gas, at $2,330
+    expect(await refused(plan(open({ ethWei: 5n * 10n ** 14n }), simulate))).toBe("You need about $2.28 of ETH on Base for this.");
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it("says why when Base says it wouldn't go through", async () => {
+    const reverting = (revert?: string) => vi.fn(async () => ({ ok: false, ...(revert ? { revert } : {}) }));
+    expect(await refused(plan(open(), reverting("InsufficientFee")))).toBe(SEND_FEE_ROSE);
+    expect(await refused(plan(open(), reverting("EnforcedPause")))).toBe(SEND_PAUSED);
+    expect(await refused(plan(open(), reverting("BatchNotReady")))).toBe(SEND_NOT_NOW);
+    expect(await refused(plan(open(), reverting()))).toBe(SEND_NOT_NOW);
+  });
+
+  it("sends nothing when Base can't be asked, and names missing ETH when that's why", async () => {
+    expect(await refused(plan(open(), vi.fn(async () => Promise.reject(new Error("HTTP request failed")))))).toMatch(/couldn't reach Base/);
+    const broke = vi.fn(async () => Promise.reject(new Error("insufficient funds for gas * price + value")));
+    expect(await refused(plan(open({ ethWei: undefined }), broke))).toBe("You need about $2.28 of ETH on Base for this.");
+  });
+
+  it("explains a send Base reverted: usually the batch had just left", async () => {
+    const p = port({ wait: vi.fn(async () => ({ status: "reverted" as const })) });
+    const t = tracker();
+    await expect(runFlow(p, t.store as never, [sendNowCall(10n ** 15n, D)])).rejects.toThrow(
+      "Sending the batch didn't go through, usually because it had just left. Only Base's network fee was spent.",
+    );
   });
 });
 

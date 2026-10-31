@@ -8,6 +8,7 @@ import { deriveLane } from "@/lib/lane";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { LoadError } from "../LoadError";
 import { ReceiptLink } from "../ReceiptLink";
+import { SendItNow } from "./SendItNow";
 import styles from "./WhereIsMyMoney.module.css";
 
 /** The three-stop lane: wallet, in transit, staked. */
@@ -74,6 +75,8 @@ export function WhereIsMyMoney({ account }: { account: string }) {
             </li>
           ))}
         </ol>
+        {/* a deposit waiting in the open batch: when it leaves, and Send it now */}
+        <SendItNow account={account} waiting={(deposits.data ?? []).some((d) => d.cancellableWei !== undefined)} href="/activity" />
       </div>
     </section>
   );

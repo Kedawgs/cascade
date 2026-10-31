@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BRIDGE_MINUTES, EXPECTED_DEPLOYMENTS, STAKE_MINUTES } from "./cascade/config";
-import { depositNotice, sentCopy, sentTiming, unstakeNotice, walletTaoNotice } from "./sent";
+import { batchNotice, depositNotice, sentCopy, sentTiming, unstakeNotice, walletTaoNotice } from "./sent";
 
 const launch = EXPECTED_DEPLOYMENTS["v3-launch"];
 /** The launch as the site is built for it: 24-hour batches at the latest, a 24-hour payout delay, v3. */
@@ -79,6 +79,23 @@ describe("the panel after an unstake", () => {
     expect(sentCopy({ ...unstake, batchIntervalS: undefined }, { v3: false, payoutDelayS: 0 }).next).toBe(
       "Next it goes to Bittensor in a batch. Then it comes back to Base, where you claim it as USDC from its receipt.",
     );
+  });
+});
+
+describe("the panel after Send it now", () => {
+  it("says the batch is on its way, what the user paid toward its bridge fee, and follows it from where it was sent", () => {
+    const copy = sentCopy(batchNotice("/activity?deposit=d1", { paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }), LAUNCH);
+    expect(copy.title).toBe("Your batch is on its way to Bittensor");
+    expect(copy.rows).toEqual([["Bridge fee you paid", "$1.74 in ETH"]]);
+    expect(copy.next).toBe("It reaches Bittensor in about 20–30 minutes; your receipts in Activity follow it from here. Anything you sent beyond the fee is back in your wallet.");
+    expect(copy.href).toBe("/activity?deposit=d1");
+  });
+
+  it("says so when the batch's own fees paid it all, gives ETH without a price, and nothing it couldn't read", () => {
+    expect(sentCopy(batchNotice("/activity", { paidWei: 0n, ethPriceUsd: 2_330 }), LAUNCH).rows).toEqual([["Bridge fee you paid", "nothing: the batch's fees covered it"]]);
+    expect(sentCopy(batchNotice("/activity", { paidWei: 744_898_037_875_672n }), LAUNCH).rows).toEqual([["Bridge fee you paid", "0.000745 ETH"]]);
+    // the receipt couldn't be read: no figure in place of the one it would have given
+    expect(sentCopy(batchNotice("/activity", { ethPriceUsd: 2_330 }), LAUNCH).rows).toEqual([]);
   });
 });
 

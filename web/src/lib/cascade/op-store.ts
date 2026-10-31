@@ -69,7 +69,7 @@ export function cancelStore(log: OpLog, account: Address, id: string, now: () =>
     setHash(k, h) {
       run.setHash(k, h);
       const o = log.get(account, id);
-      if (!o || o.kind === "claim") return;
+      if (!o || o.kind === "claim" || o.kind === "close") return;
       if (!sent) before = o.cancelled;
       sent = true;
       log.update(account, id, { cancelled: { hash: h, at: now() } } as Partial<Operation>);

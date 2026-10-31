@@ -3,6 +3,7 @@ import type { DepositQuote, WithdrawalQuote } from "./cascade/types";
 import { toDisplay } from "./cascade/units";
 import { waitText } from "./faq";
 import { formatTao, formatUsdc, formatUsdcCents } from "./format";
+import { inEth } from "./send-now";
 
 /** A deposit or unstake that has just gone through, for the panel that confirms it: its amounts as its
  * quote gave them (an estimate until Activity reads the chain), and how often a batch can leave (the
@@ -17,6 +18,27 @@ export type SentNotice =
       batchIntervalS?: number;
     }
   | { kind: "unstake"; id: string; tao: number; usdc: number; batchIntervalS?: number };
+
+/** Send it now went through: the batch is on its way. What the user paid toward its bridge fee, from the
+ * send's receipt (none when that couldn't be read), at the ETH price it was priced at; `href` is where it
+ * was sent from. */
+export interface BatchNotice {
+  kind: "batch";
+  href: string;
+  paidWei?: bigint;
+  ethPriceUsd?: number;
+}
+
+/** What the panel confirms: a deposit or unstake just sent, or a batch sent on its way. */
+export type PanelNotice = SentNotice | BatchNotice;
+
+/** The panel after Send it now, from what the send gave back. */
+export const batchNotice = (href: string, r: { paidWei?: bigint; ethPriceUsd?: number }): BatchNotice => ({
+  kind: "batch",
+  href,
+  ...(r.paidWei !== undefined ? { paidWei: r.paidWei } : {}),
+  ...(r.ethPriceUsd !== undefined ? { ethPriceUsd: r.ethPriceUsd } : {}),
+});
 
 export const depositNotice = (id: string, q: Pick<DepositQuote, "amountUsd" | "estTao" | "batchIntervalS">): SentNotice => ({
   kind: "deposit",
@@ -83,7 +105,11 @@ function batchText(interval: number | undefined, maxWaitS: number | undefined): 
 
 /** What was sent, as the panel and an unconfirmed receipt show it: estimates are "about", a deposit of
  * wallet TAO's exact TAO isn't. */
-export function sentRows(n: SentNotice): [string, string][] {
+export function sentRows(n: PanelNotice): [string, string][] {
+  if (n.kind === "batch") {
+    if (n.paidWei === undefined) return [];
+    return [["Bridge fee you paid", n.paidWei === 0n ? "nothing: the batch's fees covered it" : inEth(n.paidWei, n.ethPriceUsd)]];
+  }
   if (n.kind === "unstake") {
     return [
       ["Unstaking", `about ${formatTao(n.tao, 4)} TAO`],
@@ -98,7 +124,16 @@ export function sentRows(n: SentNotice): [string, string][] {
     : [["Amount", `${formatTao(n.tao, 4)} TAO`]];
 }
 
-export function sentCopy(n: SentNotice, t: SentTiming): SentCopy {
+export function sentCopy(n: PanelNotice, t: SentTiming): SentCopy {
+  if (n.kind === "batch") {
+    return {
+      title: "Your batch is on its way to Bittensor",
+      rows: sentRows(n),
+      // the front door refunds what the fee doesn't take in the same transaction
+      next: "It reaches Bittensor in about 20–30 minutes; your receipts in Activity follow it from here. Anything you sent beyond the fee is back in your wallet.",
+      href: n.href,
+    };
+  }
   const batch = batchText(n.batchIntervalS, t.batchMaxWaitS);
   if (n.kind === "deposit") {
     return {

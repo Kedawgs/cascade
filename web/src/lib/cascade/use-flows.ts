@@ -31,6 +31,7 @@ import {
   type FlowStore,
   isRevert,
   planResumeStakeV3,
+  planSendNow,
   planStakeV3,
   planUnstake,
   type Replacement,
@@ -48,8 +49,8 @@ import {
 } from "./flows";
 import { cascadeKeys, useWiring } from "./hooks";
 import { cancelStore, opStore, scratchStore } from "./op-store";
-import { type ClaimOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
-import { quoteSell, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
+import { type ClaimOp, type CloseOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
+import { quoteSell, readBatchClosed, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
 import { lessSlippage } from "./units";
 
@@ -381,5 +382,35 @@ export function useFlows(account: string | null) {
     /** Takes an entry back out of the open batch, recorded on that entry as soon as the wallet sends it. */
     cancel: (kind: "deposit" | "withdrawal", id: string, amount: bigint) =>
       flow("cancel", () => runFlow(port(), cancelStore(data.opLog, a, id), [cancelCall(kind, amount, d())])),
+
+    /** Send it now: the open batch `batchId` (the one the user saw) on its way, closeBatch paying its bridge
+     * fee plus 30% (the front door refunds the rest). Only once the contracts check out; the batch is read
+     * again and the call run from the account first (planSendNow), and nothing is sent if it moved on.
+     * Recorded before the wallet is asked, so a reload shows it as sending. Resolves with what the send
+     * paid toward the fee, from its receipt, when that can be read. */
+    sendNow: (batchId: bigint) =>
+      flow("send", async (): Promise<{ paidWei?: bigint; ethPriceUsd?: number }> => {
+        const wallet = port();
+        const { call, batch } = await planSendNow({ d: d(), batchId, read: () => data.getOpenBatch(a), simulate: (c) => wallet.simulate(c) });
+        const op: CloseOp = {
+          id: newOpId(),
+          kind: "close",
+          account: a,
+          createdAt: Date.now(),
+          batchId,
+          value: call.value ?? 0n,
+          hashes: {},
+          state: "running",
+        };
+        data.opLog.put(op);
+        await send(op.id, async () => [call]);
+        const hash = (data.opLog.get(a, op.id) as CloseOp | null)?.hashes.close;
+        const closed = hash ? await readBatchClosed(data.clients, d(), hash) : undefined;
+        return {
+          // the bridge fee less what the batch's pot paid of it
+          ...(closed ? { paidWei: closed.feeWei - closed.potUsedWei } : {}),
+          ...(batch.ethPriceUsd !== undefined ? { ethPriceUsd: batch.ethPriceUsd } : {}),
+        };
+      }),
   };
 }

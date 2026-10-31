@@ -1024,7 +1024,8 @@ export async function stakerDepositsIn(
 }
 
 /** Every log matching `filter` in Base's last `blocks` blocks, oldest first, read in windows of at most
- * 2,000 blocks up to the newer of the two servers' heads. Throws when a window can't be read (or its
+ * 2,000 blocks up to the newer of the two servers' heads less BASE_SETTLE, as Base's other scans read (a
+ * block still being made or replaced is read next time). Throws when a window can't be read (or its
  * server is behind), which must never be taken for "none". */
 export async function recentBaseLogs(
   c: Pick<Clients, "base" | "baseLogs">,
@@ -1032,9 +1033,10 @@ export async function recentBaseLogs(
   blocks: bigint,
 ): Promise<RawLog[]> {
   const head = await baseHead(c);
+  const end = head > BASE_SETTLE ? head - BASE_SETTLE : 0n;
   const out: RawLog[] = [];
-  for (let a = head > blocks ? head - blocks : 0n; a <= head; a += BASE_LOG_WINDOW) {
-    const b = a + BASE_LOG_WINDOW - 1n < head ? a + BASE_LOG_WINDOW - 1n : head;
+  for (let a = end > blocks ? end - blocks : 0n; a <= end; a += BASE_LOG_WINDOW) {
+    const b = a + BASE_LOG_WINDOW - 1n < end ? a + BASE_LOG_WINDOW - 1n : end;
     out.push(...(await baseWindowLogs(c, filter, a, b)));
   }
   return out;

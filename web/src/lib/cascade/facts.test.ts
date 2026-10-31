@@ -1531,16 +1531,23 @@ describe("the open batch's deposits the staker made, as the keeper counts them",
       requested(7n, ME, 10n ** 18n, STAKER_AT, HEAD - 40n, D.baseAdapter),
     ]);
     expect(await stakerDepositsIn(rpc.clients, D3, 7n, 600)).toEqual({ count: 2, tao: 4n * 10n ** 17n });
-    // only batch 7's deposits at the front door, from ten minutes back (300 blocks) and five minutes more
+    // only batch 7's deposits at the front door, from ten minutes back (300 blocks) and five minutes more,
+    // up to two blocks short of the head, as Base's other scans read
     expect(rpc.asked[0]).toEqual({ address: D.frontDoor, topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId: 7n } }) });
-    expect(rpc.windows).toEqual([[HEAD - 450n, HEAD]]);
+    expect(rpc.windows).toEqual([[HEAD - 2n - 450n, HEAD - 2n]]);
+  });
+
+  it("leaves Base's newest two blocks for the next read: one still being made or replaced is read then", async () => {
+    const rpc = logsRpc([requested(7n, ME, 10n ** 17n, STAKER_AT, HEAD - 1n)]);
+    expect(await stakerDepositsIn(rpc.clients, D3, 7n, 600)).toEqual({ count: 0, tao: 0n });
+    expect(rpc.windows.at(-1)![1]).toBe(HEAD - 2n);
   });
 
   it("reads an older batch in windows of at most 2,000 blocks, and throws when the logs can't be read", async () => {
     const rpc = logsRpc([]);
     expect(await stakerDepositsIn(rpc.clients, D3, 7n, 3_900)).toEqual({ count: 0, tao: 0n });
     for (const [from, to] of rpc.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
-    expect(rpc.windows[0][0]).toBe(HEAD - 1_950n - 150n);
+    expect(rpc.windows[0][0]).toBe(HEAD - 2n - 1_950n - 150n);
     await expect(stakerDepositsIn(logsRpc([], true).clients, D3, 7n, 600)).rejects.toThrow();
   });
 

@@ -72,7 +72,7 @@ async function scheduled(controller: ScheduledController, env: Env, _ctx: Execut
       return;
     }
     case CRONS.hourly: {
-      const r = await runHourly({ env, cfg, nowS: scheduledS });
+      const r = await runHourly({ env, cfg, nowS: scheduledS, fetch });
       console.log(`hourly: ${JSON.stringify(r)}`);
       return;
     }

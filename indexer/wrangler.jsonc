@@ -74,6 +74,11 @@
         "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
         // the archive node: the lite node keeps only minutes of logs
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
+        // the hourly cross-check's second logs endpoint per chain, from another provider than the primary (the
+        // config refuses the same registrable domain): a lying or pruning primary is noticed. Overridden by
+        // BASE_LOGS_RPC_URL_2_SECRET and BITTENSOR_RPC_URL_2_SECRET (keyed URLs).
+        "BASE_LOGS_RPC_URL_2": "https://base.drpc.org",
+        "BITTENSOR_RPC_URL_2": "https://bittensor.drpc.org",
         "BASE_LOG_WINDOW": "100",
         // the Workers Paid profile (see the table above; Free: 45, 100, 2)
         "SUBREQUEST_BUDGET": "200",
@@ -154,6 +159,9 @@
         "BASE_RPC_URL": "https://base-rpc.publicnode.com",
         "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
+        // the second logs endpoints (as test's): another provider than the primary, for the hourly cross-check
+        "BASE_LOGS_RPC_URL_2": "https://base.drpc.org",
+        "BITTENSOR_RPC_URL_2": "https://bittensor.drpc.org",
         "BASE_LOG_WINDOW": "100",
         // the Workers Paid profile (see the table above; Free: 45, 100, 2)
         "SUBREQUEST_BUDGET": "200",

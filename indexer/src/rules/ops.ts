@@ -327,6 +327,27 @@ export const emailFailing: Rule = {
   },
 };
 
+/** indexer.unverified: the hourly logs cross-check (src/logs-check.ts) failing on a chain's second endpoint for
+ * logsCheckUnverifiedS (since: meta logs_check_fail_since:{chain}, kept by the job; its last error beside it). */
+export const indexerUnverified: Rule = {
+  name: "indexer.unverified",
+  run(ctx) {
+    return (["base", "bittensor"] as ChainName[]).flatMap((chain) => {
+      const since = num(ctx.meta[`logs_check_fail_since:${chain}`]);
+      if (since === undefined || ctx.nowS - since < ctx.t.logsCheckUnverifiedS) return [];
+      const hours = Math.floor((ctx.nowS - since) / 3600);
+      const name = chain === "base" ? "Base" : "Bittensor";
+      return one("indexer.unverified", `indexer.unverified:${chain}`, `${name}'s logs haven't been cross-checked for ${hours} hour${hours === 1 ? "" : "s"}`, {
+        chain,
+        chainName: name,
+        since: utc(since),
+        for: `${hours} hour${hours === 1 ? "" : "s"}`,
+        error: ctx.meta[`logs_check_error:${chain}`] || "unknown",
+      });
+    });
+  },
+};
+
 export const OPS_RULES: Rule[] = [
   batchPastMaxWait,
   payoutOverdue,
@@ -346,5 +367,6 @@ export const OPS_RULES: Rule[] = [
   indexerReorg,
   chainUnreadable,
   emailFailing,
+  indexerUnverified,
 ];
 

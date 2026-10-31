@@ -43,6 +43,9 @@ export const RULES = {
   "bridge.payout_unchecked": critical("condition"),
   "site.integrity": critical("condition"),
   "indexer.blind": critical("condition"),
+  // the hourly cross-check: a second RPC served a watched log the primary never did (the primary is lying or
+  // pruning): raised by the hourly job itself
+  "indexer.logs_omitted": critical("event"),
   "checks.owner_approved": critical("event"),
   "monitor.stalled": critical("condition"),
   "monitor.db_failing": critical("condition"),
@@ -76,6 +79,10 @@ export const RULES = {
   "rewards.uncollected": warning("condition"),
   "validator.not_earning": warning("condition"),
   "vault.events": warning("event"),
+  // the hourly cross-check: the store holds a log the second RPC (REREAD blocks past it) lacks
+  "indexer.logs_extra": warning("event"),
+  // the second RPC of a chain hasn't answered the cross-check for logsCheckUnverifiedS: its logs go unverified
+  "indexer.unverified": warning("condition"),
   // the owner moved stake onto the stake hotkey (moveStake, removeHotkey): an owner action, every one reported
   "vault.stake_moved": warning("event"),
   // depositDirect, redeemDirect or allowFrontDoorRedeems: the launch offers none of them

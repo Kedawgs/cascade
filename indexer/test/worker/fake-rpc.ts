@@ -4,17 +4,22 @@ import type { ChainName } from "../../src/config.ts";
 import type { RawLog } from "../../src/logs.ts";
 import { MULTICALL3_ADDRESS } from "../../src/multicall.ts";
 
-/** RPC URLs for tests: keyed-looking paths and queries, so a test can check none of it leaks. */
+/** RPC URLs for tests: keyed-looking paths and queries, so a test can check none of it leaks. The second
+ * endpoints (the hourly cross-check's) are on another domain, as the config requires. */
 export const TEST_URLS = {
   base: "https://base.rpc.test/v2/base-key-0123456789",
   baseLogs: "https://base-logs.rpc.test/rpc?apikey=logs-key-0123456789",
   bittensor: "https://bittensor.rpc.test/v1/bit-key-0123456789",
+  baseLogs2: "https://base-logs-2.second.test/v1/second-key-0123456789",
+  bittensor2: "https://bittensor-2.second.test/v1/second-key-0123456789",
 } as const;
 
 const CHAIN_OF_HOST: Record<string, ChainName> = {
   "base.rpc.test": "base",
   "base-logs.rpc.test": "base",
   "bittensor.rpc.test": "bittensor",
+  "base-logs-2.second.test": "base",
+  "bittensor-2.second.test": "bittensor",
 };
 
 /** How one fake chain behaves. `head` is the true head; the node serving a request may be behind it. */

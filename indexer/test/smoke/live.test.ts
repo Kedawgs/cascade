@@ -4,6 +4,7 @@ import { handleScan } from "../../src/api.ts";
 import { parseConfig, VAR_NAMES } from "../../src/config.ts";
 import { buildDigest } from "../../src/digest.ts";
 import { renderDigest } from "../../src/email.ts";
+import { runLogsCheck } from "../../src/logs-check.ts";
 import { expandHour } from "../../src/snapshot.ts";
 import { loadTickState } from "../../src/store.ts";
 import { historyOf, runTick } from "../../src/tick.ts";
@@ -80,5 +81,11 @@ describe.skipIf(!live)("live smoke: one tick against the v3 test deployment", ()
       meta: state.meta,
     });
     console.log(renderDigest(digest).text);
+
+    // the hourly logs cross-check against the live second endpoints (BASE_LOGS_RPC_URL_2, BITTENSOR_RPC_URL_2):
+    // whether they answer from here, and whether they agree with the primaries over the newest settled range
+    const check = await runLogsCheck({ env: { DB: db }, cfg, nowS: Math.floor(Date.now() / 1000), fetch: (i, init) => globalThis.fetch(i, init) });
+    console.log(`logs cross-check: ${JSON.stringify(check, (_k, v) => (typeof v === "bigint" ? String(v) : v))}`);
+    for (const c of ["base", "bittensor"] as const) expect(check[c], `${c}'s second endpoint`).not.toBe("failed");
   });
 });

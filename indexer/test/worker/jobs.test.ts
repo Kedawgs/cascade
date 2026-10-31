@@ -70,7 +70,7 @@ describe("the watchdog", () => {
   it("gives a database no tick ever completed in its 15 minutes from when it first looked", async () => {
     const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
     const email = { send: async (m: SentEmail) => void w.sent.push(m) } as unknown as SendEmail;
-    const deps = (nowS: number) => ({ env: { DB: db, EMAIL: email }, cfg: w.cfg, nowS });
+    const deps = (nowS: number) => ({ env: { DB: db, EMAIL: email }, cfg: w.cfg, nowS, fetch: w.net.fetch });
     expect((await watchdog(deps(T0))).stalled).toBe(false);
     expect((await watchdog(deps(T0 + 600))).stalled).toBe(false);
     expect(await watchdog(deps(T0 + 3600))).toEqual({ stalled: true, recorded: true, emailed: true });
@@ -88,7 +88,7 @@ describe("the hourly job", () => {
       setMeta(db, "last_complete_tick", String(now)),
     ]);
     const w = tickWorld();
-    expect((await runHourly({ env: { DB: db }, cfg: w.cfg, nowS: now })).pruned).toBe(true);
+    expect((await runHourly({ env: { DB: db }, cfg: w.cfg, nowS: now, fetch: w.net.fetch })).pruned).toBe(true);
     expect(await rows("SELECT COUNT(*) AS n FROM readings")).toEqual([{ n: 120 }]);
     expect(await rows("SELECT COUNT(*) AS n FROM hours")).toEqual([{ n: 1 }]);
   });

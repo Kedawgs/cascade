@@ -80,6 +80,13 @@ export const DEFAULTS = {
   /** monitor.chain_unreadable: this many ticks in a row without a usable reading */
   chainUnreadableTicks: 5,
   emailFailingS: 1800,
+  /** the hourly logs cross-check: at most this many of each chain's newest settled blocks are re-read through the
+   * second endpoint per run (Base: 20 minutes of 2-second blocks, 6 windows of 100; Bittensor: an hour of
+   * 12-second blocks, one window) */
+  logsCheckBaseBlocks: 600,
+  logsCheckBittensorBlocks: 300,
+  /** indexer.unverified: the second endpoint failing the cross-check for this long */
+  logsCheckUnverifiedS: 3 * 3600,
   /** rule ids switched off (the proposed rules, open question 13, can be turned off here) */
   rules: { off: [] as string[] },
 };

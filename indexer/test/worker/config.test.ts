@@ -110,6 +110,25 @@ describe("parseConfig", () => {
     expect(e.message).not.toContain("keyed.example");
   });
 
+  it("takes the second logs RPC of each chain from its var, or its secret, and refuses one on the primary's domain", () => {
+    const cfg = parseConfig(vars());
+    expect(cfg.rpc.baseLogs2).toBe("https://base.drpc.org");
+    expect(cfg.rpc.bittensor2).toBe("https://bittensor.drpc.org");
+    const keyed = parseConfig(withVars({ BASE_LOGS_RPC_URL_2_SECRET: "https://second.example/v1/abc123", BITTENSOR_RPC_URL_2_SECRET: "https://other.example/v1/abc123" }));
+    expect([keyed.rpc.baseLogs2, keyed.rpc.bittensor2]).toEqual(["https://second.example/v1/abc123", "https://other.example/v1/abc123"]);
+    // not an https URL, or missing
+    expect(refused(withVars({ BASE_LOGS_RPC_URL_2: "http://base.drpc.org" })).message).toContain("BASE_LOGS_RPC_URL_2");
+    expect(refused(withVars({ BITTENSOR_RPC_URL_2: undefined })).message).toContain("BITTENSOR_RPC_URL_2");
+    // the same registrable domain as the primary isn't a second opinion (the lite node next to the archive node,
+    // a keyed URL at the provider the second defaults to), and the error names neither URL
+    const same = refused(withVars({ BITTENSOR_RPC_URL_2: "https://lite.chain.opentensor.ai" }));
+    expect(same.message).toContain("BITTENSOR_RPC_URL_2");
+    expect(same.message).not.toContain("opentensor");
+    const primaryAtSecond = refused(withVars({ BASE_LOGS_RPC_URL_SECRET: "https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY" }));
+    expect(primaryAtSecond.message).toContain("BASE_LOGS_RPC_URL_2");
+    expect(primaryAtSecond.message).not.toContain("SECRETKEY");
+  });
+
   it("refuses an ALERT_MODE other than send or log", () => {
     expect(refused(withVars({ ALERT_MODE: "email" })).message).toContain("ALERT_MODE");
   });

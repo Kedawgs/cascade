@@ -44,9 +44,7 @@ export async function readApy(rpc: Rpc, hotkey: Hex, rewardCutBps: number): Prom
   }
 }
 
-export interface DailyDeps extends JobDeps {
-  fetch: typeof fetch;
-}
+export type DailyDeps = JobDeps;
 
 /** The daily job: the watchdog, then the digest if today's hasn't gone out. */
 export async function runDaily(deps: DailyDeps): Promise<{ watchdog: WatchdogResult; digest: "sent" | "already" | "failed" }> {

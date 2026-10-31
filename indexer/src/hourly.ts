@@ -1,19 +1,23 @@
 import { type Due, type Finding, markSent, reconcile, renderFacts } from "./alerts.ts";
 import type { Config } from "./config.ts";
 import { renderCritical, sendAll } from "./email.ts";
+import { type LogsCheckResult, runLogsCheck } from "./logs-check.ts";
 import { utc } from "./rules/context.ts";
 import { RULES } from "./rules/ids.ts";
 import { RUNBOOK } from "./runbook.ts";
 import { type AlertRow, alertOf, pruneHours, pruneReadings, returnedIds, setMeta } from "./store.ts";
 
-// The hourly job (minute 17): the watchdog, and pruning. The watchdog is the one thing besides the tick that
-// sends alert email: a tick killed for CPU commits nothing, so only another job can notice it (spec 1).
+// The hourly job (minute 17): the watchdog, the logs cross-check, and pruning. The watchdog is the one thing
+// besides the tick (and the cross-check's mismatches) that sends alert email: a tick killed for CPU commits
+// nothing, so only another job can notice it (spec 1).
 
 export interface JobDeps {
   env: { DB: D1Database; EMAIL?: SendEmail };
   cfg: Config;
   /** when the job runs, seconds */
   nowS: number;
+  /** every external request goes through this (the logs cross-check's second endpoints, the digest's APY reads) */
+  fetch: typeof fetch;
 }
 
 const num = (s: string | undefined) => (s === undefined || s === "" || !Number.isFinite(Number(s)) ? undefined : Number(s));
@@ -121,10 +125,12 @@ export async function watchdog(deps: JobDeps): Promise<WatchdogResult> {
   return { stalled: true, recorded: true, emailed: sent.sent.length > 0 };
 }
 
-/** The hourly job: the watchdog, then readings pruned to the newest 120 and hour rows to 35 days. The hour
- * rows themselves are kept up to date by every tick (there is nothing to close). */
-export async function runHourly(deps: JobDeps): Promise<{ watchdog: WatchdogResult; pruned: boolean }> {
+/** The hourly job: the watchdog, the logs cross-check through the second endpoints (src/logs-check.ts), then
+ * readings pruned to the newest 120 and hour rows to 35 days. The hour rows themselves are kept up to date by
+ * every tick (there is nothing to close). */
+export async function runHourly(deps: JobDeps): Promise<{ watchdog: WatchdogResult; logsCheck: LogsCheckResult; pruned: boolean }> {
   const w = await watchdog(deps);
+  const logsCheck = await runLogsCheck(deps);
   const db = deps.env.DB;
   let pruned = false;
   try {
@@ -133,5 +139,5 @@ export async function runHourly(deps: JobDeps): Promise<{ watchdog: WatchdogResu
   } catch (e) {
     console.error(`hourly: pruning failed: ${message(e)}`);
   }
-  return { watchdog: w, pruned };
+  return { watchdog: w, logsCheck, pruned };
 }

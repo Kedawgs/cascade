@@ -23,7 +23,7 @@ It holds no key and never sends a transaction. Nothing over HTTP can write anyth
 |---|---|
 | `* * * * *` | the **tick**: lease, scan both chains, read their state, run the rules, commit, then send email |
 | `*/2 * * * *` | the **site check**: the live site's pages and scripts against the approved lists, in its own invocation |
-| `17 * * * *` | the **hourly job**: the watchdog, and pruning readings (120 kept) and hour rows (35 days) |
+| `17 * * * *` | the **hourly job**: the watchdog, the **logs cross-check** (each chain's newest settled blocks re-read through a second RPC and compared with the store), and pruning readings (120 kept) and hour rows (35 days) |
 | `0 13 * * *` | the **daily digest** (once per UTC day), and the watchdog again |
 
 The site check's cron is how often a run may work, not how often the site is judged: a **pass** starts an hour
@@ -106,6 +106,17 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   logs URL must **not** be `https://mainnet.base.org`: it refuses `eth_getLogs`. The default,
   `https://base-rpc.publicnode.com`, answers 100-block windows. Bittensor must be an archive node
   (`https://archive.chain.opentensor.ai`): the lite node keeps only minutes of logs.
+- **The second logs RPCs**: `BASE_LOGS_RPC_URL_2` and `BITTENSOR_RPC_URL_2` (defaults `https://base.drpc.org` and
+  `https://bittensor.drpc.org`; a keyed URL goes in `BASE_LOGS_RPC_URL_2_SECRET` / `BITTENSOR_RPC_URL_2_SECRET`).
+  The hourly job re-reads each chain's newest settled blocks through them (`logsCheckBaseBlocks` 600 and
+  `logsCheckBittensorBlocks` 300 at most per run, in the chain's windows, within 12 requests) and compares the
+  logs with what the primary had the tick store, so a primary that omits a watched log is noticed. A second
+  opinion has to come from another provider: the config refuses a second URL on the same registrable domain as
+  its primary (the lite node next to the archive node; a keyed dRPC primary next to the dRPC default: set another
+  provider for one of them, e.g. `https://base-mainnet.public.blastapi.io` or `https://base.llamarpc.com` for
+  Base). An archive endpoint is best (a pruning second node reads as `indexer.logs_extra` warnings); a second
+  endpoint that stops answering is `indexer.unverified` after 3 hours, and `pnpm smoke` tries both from your
+  machine.
 - **Budgets** (two profiles; both environments are set to Paid):
 
   | Var | Workers Paid (set) | Workers Free (fallback, not viable for a full batch) |
@@ -125,8 +136,9 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   Amounts are decimal strings; unknown keys are refused.
 - **Secrets** (`pnpm wrangler secret put <NAME> --env <env>`): `ALERT_TO` (the recipients, comma-separated:
   never in the repo); optionally `THRESHOLDS_SECRET`, and keyed RPC URLs as `BASE_RPC_URL_SECRET`,
-  `BASE_LOGS_RPC_URL_SECRET` and `BITTENSOR_RPC_URL_SECRET`. A secret can't share a var's name (the Worker sees
-  one value per name), so each override is the var's name plus `_SECRET`, and it wins over the var.
+  `BASE_LOGS_RPC_URL_SECRET`, `BITTENSOR_RPC_URL_SECRET`, `BASE_LOGS_RPC_URL_2_SECRET` and
+  `BITTENSOR_RPC_URL_2_SECRET`. A secret can't share a var's name (the Worker sees one value per name), so each
+  override is the var's name plus `_SECRET`, and it wins over the var.
 
 ## Deploying (the owner does these)
 
@@ -257,6 +269,23 @@ listed ones and the configured stake hotkey), so the monitor names the hotkey to
 The three thresholds (`stakeDustRao`, `stakeMoveCriticalRao`, `directCriticalWei`) are in `src/thresholds.ts`
 and can be set in `THRESHOLDS`. The `StakingHotkeys` storage key is worked out offline (`src/subtensor.ts`);
 `pnpm smoke` checks the live chain answers it with a list that holds the stake hotkey.
+
+### The logs cross-check
+
+The tick reads each chain's logs through one RPC. A node that omits a watched log (lying, or pruning) would
+blind the monitor to that event with no lag, blind or reorg signal, so every hour a second, independent endpoint
+per chain re-reads the newest settled blocks of the watched addresses, and its logs are compared, by the uid the
+scan gives every log, with what the store holds for that range (`src/logs-check.ts`; the counts and a hash of
+each side are in every alert's facts):
+
+| Alert | Tier | What it means | What to do |
+|---|---|---|---|
+| `indexer.logs_omitted` | critical | the second RPC served a watched log the primary never did, so the monitor's history and its rules missed it (the event, block and transaction are named) | open the transaction on the explorer; if it is real, read the event and act on it as its own alert would have had you, and switch the primary (`BASE_LOGS_RPC_URL` / `BITTENSOR_RPC_URL`, or the `_SECRET`) to another provider, then redeploy. The tick re-reads only 70 (Base) or 400 (Bittensor) blocks back, so the missed log isn't added by itself |
+| `indexer.logs_extra` | warning | the store holds a log the second RPC, 70 or 400 blocks past it, doesn't serve | usually the second node pruned it (set an archive endpoint in `*_RPC_URL_2`) or lags its log index; if the explorer doesn't have the transaction either, the primary served a log that isn't on the chain: switch it and re-check what the rules decided on it |
+| `indexer.unverified` | warning (condition) | the second RPC of a chain hasn't answered the cross-check for `logsCheckUnverifiedS` (3 hours): the primary's logs go unverified meanwhile | check `BASE_LOGS_RPC_URL_2` / `BITTENSOR_RPC_URL_2`: the public default may refuse Cloudflare's egress; set a keyed URL in its `_SECRET` (another provider than the primary's), redeploy. Clears on the next run that answers |
+
+A chain still catching up in its first backfill isn't cross-checked (an old range a non-archive second node may
+not have), and a second node that hasn't settled the range yet is asked again next hour.
 
 ## Limits worth knowing
 

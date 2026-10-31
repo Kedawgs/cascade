@@ -44,7 +44,9 @@ export interface Config {
   /** the bridges a batch (on Bittensor) or a payout (on Base) may arrive through */
   bridges: { base: Hex[]; bittensor: Hex[] };
   tokens: Tokens;
-  rpc: { base: string; baseLogs: string; bittensor: string };
+  /** the RPCs: Base's state reads, Base's log scans, Bittensor's; and a second, independent logs endpoint per
+   * chain (another registrable domain than the primary's) for the hourly cross-check of the stored logs */
+  rpc: { base: string; baseLogs: string; bittensor: string; baseLogs2: string; bittensor2: string };
   budgets: {
     /** external fetches per invocation (Workers Free allows 50) */
     subrequests: number;
@@ -72,6 +74,8 @@ export const VAR_NAMES = [
   "BASE_RPC_URL",
   "BASE_LOGS_RPC_URL",
   "BITTENSOR_RPC_URL",
+  "BASE_LOGS_RPC_URL_2",
+  "BITTENSOR_RPC_URL_2",
   "BASE_LOG_WINDOW",
   "SUBREQUEST_BUDGET",
   "DECODE_BUDGET",
@@ -90,7 +94,10 @@ export const VAR_NAMES = [
 
 /** The secrets (`wrangler secret put`, or a git-ignored .dev.vars locally). A secret can't share a
  * var's name (the Worker sees one value per name), so each override is the var's name + _SECRET. */
-export const SECRET_NAMES = ["ALERT_TO", "THRESHOLDS_SECRET", "BASE_RPC_URL_SECRET", "BASE_LOGS_RPC_URL_SECRET", "BITTENSOR_RPC_URL_SECRET"] as const;
+export const SECRET_NAMES = ["ALERT_TO", "THRESHOLDS_SECRET", "BASE_RPC_URL_SECRET", "BASE_LOGS_RPC_URL_SECRET", "BITTENSOR_RPC_URL_SECRET", "BASE_LOGS_RPC_URL_2_SECRET", "BITTENSOR_RPC_URL_2_SECRET"] as const;
+
+/** The RPC URL settings, each with a secret override (<name>_SECRET). */
+type RpcVar = "BASE_RPC_URL" | "BASE_LOGS_RPC_URL" | "BITTENSOR_RPC_URL" | "BASE_LOGS_RPC_URL_2" | "BITTENSOR_RPC_URL_2";
 
 export type ConfigEnv = { readonly [K in (typeof VAR_NAMES)[number] | (typeof SECRET_NAMES)[number]]?: unknown };
 
@@ -226,19 +233,27 @@ function stringList(field: string, raw: unknown): string[] {
 const PRICE_SOURCES: readonly PriceSource[] = ["coingecko", "coinbase"];
 
 /** The setting from a secret when it is set, else from its var. */
-const secretOr = (env: ConfigEnv, name: "BASE_RPC_URL" | "BASE_LOGS_RPC_URL" | "BITTENSOR_RPC_URL") => {
+const secretOr = (env: ConfigEnv, name: RpcVar) => {
   const secret = env[`${name}_SECRET`];
   return secret !== undefined && secret !== "" ? ([`${name}_SECRET`, secret] as const) : ([name, env[name]] as const);
 };
 
 /** The Worker's whole configuration, checked: every address checksummed, every block whole, every
- * number in range, every URL https. Throws a ConfigError naming the field (never a value); the Worker
- * then refuses to run, with a log line only. */
+ * number in range, every URL https, each second logs RPC on another registrable domain than its primary.
+ * Throws a ConfigError naming the field (never a value); the Worker then refuses to run, with a log line
+ * only. */
 export function parseConfig(env: ConfigEnv): Config {
   const deployment = parseDeployment(env.DEPLOYMENT);
-  const rpc = (name: "BASE_RPC_URL" | "BASE_LOGS_RPC_URL" | "BITTENSOR_RPC_URL") => {
+  const rpc = (name: RpcVar) => {
     const [field, value] = secretOr(env, name);
     return httpsUrl(field, value);
+  };
+  /** a second opinion must come from another provider: the same domain (a keyed URL at the provider the second
+   * defaults to, the lite node next to the archive node) isn't one */
+  const second = (name: "BASE_LOGS_RPC_URL_2" | "BITTENSOR_RPC_URL_2", primary: string) => {
+    const url = rpc(name);
+    if (hostDomain(url) === hostDomain(primary)) throw new ConfigError(name, "is on the same domain as the primary: not a second opinion");
+    return url;
   };
 
   const scanWallS = int("SCAN_WALL_S", env.SCAN_WALL_S, 1, 900);
@@ -278,7 +293,13 @@ export function parseConfig(env: ConfigEnv): Config {
     deployment,
     bridges: parseBridges(env.BRIDGES, deployment),
     tokens: parseTokens(env.TOKENS),
-    rpc: { base: rpc("BASE_RPC_URL"), baseLogs: rpc("BASE_LOGS_RPC_URL"), bittensor: rpc("BITTENSOR_RPC_URL") },
+    rpc: {
+      base: rpc("BASE_RPC_URL"),
+      baseLogs: rpc("BASE_LOGS_RPC_URL"),
+      bittensor: rpc("BITTENSOR_RPC_URL"),
+      baseLogs2: second("BASE_LOGS_RPC_URL_2", rpc("BASE_LOGS_RPC_URL")),
+      bittensor2: second("BITTENSOR_RPC_URL_2", rpc("BITTENSOR_RPC_URL")),
+    },
     budgets: {
       subrequests: int("SUBREQUEST_BUDGET", env.SUBREQUEST_BUDGET, 10, 10_000),
       decode: int("DECODE_BUDGET", env.DECODE_BUDGET, 1, 100_000),

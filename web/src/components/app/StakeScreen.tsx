@@ -5,6 +5,7 @@ import { Loading } from "../Loading";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import { Faq } from "./Faq";
+import { NextBatchLine } from "./NextBatchLine";
 import { StakeCard } from "./StakeCard";
 import { StatsCardForAccount } from "./StatsCard";
 import { WhereIsMyMoney } from "./WhereIsMyMoney";
@@ -23,6 +24,7 @@ export function StakeScreen() {
       ) : (
         <>
           <StakeCard account={account} />
+          <NextBatchLine />
           {account && <WhereIsMyMoney account={account} />}
           <StatsCardForAccount />
           <Faq />

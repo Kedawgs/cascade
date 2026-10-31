@@ -83,3 +83,12 @@
   color: var(--ink-3);
 }
 
+/* The public "Next batch" line under the stake card: one line, as its "–" is, so nothing moves */
+.nextBatch {
+  margin-top: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-align: center;
+}
+

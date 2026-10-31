@@ -369,23 +369,32 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   /** The accounts whose seeded history passed the tripwire this visit. */
   const tripwired = new Set<string>();
 
-  /** Once per visit, for an account whose history came from the indexer: the account's Deposited and
-   * Redeemed (every one confirmed by its receipt by now, shares included) must add up to its csTAO at the
-   * scan's last block (csTAO is non-transferable). A seed that left one out, or added one, fails here at
-   * once: the scan starts over and the indexer is distrusted (HistoryMismatchError). A balance that can't
-   * be read leaves the figure hidden for this read, never wrong. */
-  async function tripwire(account: Address, scan: VaultScan): Promise<void> {
-    const key = account.toLowerCase();
-    if (scan.accountSeededTo === undefined || tripwired.has(key)) return;
+  /** Once per visit, for an account whose history came from the indexer: the account's csTAO at the scan's
+   * last block, read while the account's events are being confirmed by their receipts (csTAO is
+   * non-transferable, so those events, shares included, must add up to it: tripwire). Undefined when
+   * there is nothing to check. */
+  function balanceForTripwire(account: Address, scan: VaultScan): Promise<{ balance: bigint } | { failed: unknown }> | undefined {
+    if (scan.accountSeededTo === undefined || tripwired.has(account.toLowerCase())) return undefined;
+    return deps.readSharesAt(history, d, account, scan.next - 1n).then(
+      (balance) => ({ balance }),
+      (failed: unknown) => ({ failed }),
+    );
+  }
+
+  /** The seeded history's events (every one confirmed by its receipt by now) against the balance: a seed
+   * that left one out, or added one, fails here at once: the scan starts over and the indexer is
+   * distrusted (HistoryMismatchError). A balance that couldn't be read leaves the figure hidden for this
+   * read, never wrong. */
+  function tripwire(account: Address, scan: VaultScan, read: { balance: bigint } | { failed: unknown }): void {
+    if ("failed" in read) throw read.failed;
     const events = [...scan.deposited, ...scan.redeemed];
     if (events.some((e) => e.shares === undefined)) return;
     const expected = sum(scan.deposited.map((e) => e.shares!)) - sum(scan.redeemed.map((e) => e.shares!));
-    const balance = await deps.readSharesAt(history, d, account, scan.next - 1n);
-    if (balance !== expected) {
+    if (read.balance !== expected) {
       restartScan(scan);
       throw new HistoryMismatchError(true, true);
     }
-    tripwired.add(key);
+    tripwired.add(account.toLowerCase());
   }
 
   /** The scan brought up to date, with the account's saved amounts confirmed by their receipts (and, for
@@ -397,8 +406,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       .then(() =>
         serial(account, (scan) =>
           confirming(account, scan, async () => {
+            const balance = balanceForTripwire(account, scan);
             await confirmAccountEvents(history, d, scan, account);
-            await tripwire(account, scan);
+            if (balance) tripwire(account, scan, await balance);
           }),
         ),
       )

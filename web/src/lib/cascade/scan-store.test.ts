@@ -383,3 +383,90 @@ describe("seedHalves", () => {
     expect(storage.m.get(GLOBAL_KEY)).not.toContain("seededTo");
   });
 });
+
+describe("the background check's progress, kept inside each half (review 2, N1)", () => {
+  const halves = (s = scanned()) => {
+    const state = scanState(s);
+    return { shared: { ...state, deposited: [], redeemed: [] }, own: { ...state, delivered: [], staked: [], payouts: [] } };
+  };
+  const seededScan = () => {
+    const scan = newScan(D);
+    const { shared, own } = halves();
+    seedHalves(scan, shared, own);
+    scan.next = 6_000n;
+    return scan;
+  };
+
+  it("writes each half's progress in the one write with its events, and reads it back with that half only", () => {
+    const storage = memoryStorage();
+    const store = createScanStore(storage, D);
+    const scan = seededScan();
+    scan.sharedCheckedTo = 3_000n;
+    scan.accountCheckedTo = 2_000n;
+    store.save(ME, scan);
+    expect(JSON.parse(storage.m.get(GLOBAL_KEY)!).checkedTo).toBe("3000");
+    expect(JSON.parse(storage.m.get(MY_KEY)!).checkedTo).toBe("2000");
+    const back = store.load(ME);
+    expect(back.sharedCheckedTo).toBe(3_000n);
+    expect(back.accountCheckedTo).toBe(2_000n);
+    // no progress of its own: a half with none is unchecked from its first block
+    const bare = seededScan();
+    store.save(ME, bare);
+    expect(JSON.parse(storage.m.get(GLOBAL_KEY)!)).not.toHaveProperty("checkedTo");
+    expect(store.load(ME).sharedCheckedTo).toBeUndefined();
+  });
+
+  it("never lets one account's progress cover the deployment half another account's seed wrote over it", () => {
+    const storage = memoryStorage();
+    const store = createScanStore(storage, D);
+    // this account checked the deployment half its own seed brought, to 4,000
+    const mine = seededScan();
+    mine.sharedCheckedTo = mine.accountCheckedTo = 4_000n;
+    store.save(ME, mine);
+    // another account's visit, seeded too, writes the deployment half with nothing checked
+    const yours = seededScan();
+    store.save(YOU, yours);
+    const back = store.load(ME);
+    expect(back.sharedSeededTo).toBe(4_990n);
+    expect(back.sharedCheckedTo).toBeUndefined();
+    // while this account's own half keeps its own progress
+    expect(back.accountCheckedTo).toBe(4_000n);
+  });
+
+  it("refuses a half whose progress lies outside its own mark, or a first-version half (the indexer's form) that claims any", () => {
+    const good = scanState(scanned());
+    const marked = { ...good, v: 2, seededFrom: "1000", seededTo: "3000" };
+    const load = (shared: unknown) => {
+      const storage = memoryStorage();
+      storage.setItem(GLOBAL_KEY, JSON.stringify(shared));
+      storage.setItem(MY_KEY, JSON.stringify(good));
+      return createScanStore(storage, D).load(ME);
+    };
+    expect(load({ ...marked, checkedTo: "2000" }).sharedCheckedTo).toBe(2_000n);
+    for (const bad of [{ ...good, checkedTo: "2000" }, { ...marked, checkedTo: "3001" }, { ...marked, checkedTo: "999" }, { ...marked, checkedTo: "x" }]) {
+      expect(load(bad).next, JSON.stringify(bad)).toBe(D.bitBlock);
+    }
+    // nor may the indexer's seed bring progress of its own
+    const scan = newScan(D);
+    const { shared, own } = halves();
+    expect(seedHalves(scan, { ...shared, checkedTo: "2000" }, own)).toBe(false);
+  });
+
+  it("seeds no scan that still holds seeded blocks the browser hasn't finished reading: its marks would be overwritten, those blocks taken for read", () => {
+    const scan = seededScan();
+    scan.sharedCheckedTo = 2_000n;
+    const later = scanned();
+    later.next = 9_000n;
+    const { shared, own } = halves(later);
+    expect(seedHalves(scan, shared, own)).toBe(false);
+    expect([scan.sharedSeededTo, scan.sharedCheckedTo, scan.next]).toEqual([4_990n, 2_000n, 6_000n]);
+  });
+
+  it("drops the progress when the scan starts over", () => {
+    const scan = seededScan();
+    scan.sharedCheckedTo = scan.accountCheckedTo = 3_000n;
+    restartScan(scan);
+    expect(scan.sharedCheckedTo).toBeUndefined();
+    expect(scan.accountCheckedTo).toBeUndefined();
+  });
+});

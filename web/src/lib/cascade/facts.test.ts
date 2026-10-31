@@ -8,6 +8,7 @@ import {
   confirmAccountEvents,
   confirmedChunks,
   confirmedStakeAfter,
+  deliveryMayBeSeeded,
   depositFacts,
   findStakeTx,
   HistoryMismatchError,
@@ -1035,6 +1036,17 @@ describe("v3: what happened to a payout once it was back on Base", () => {
   const factsOf = (b: ReturnType<typeof backOnBase>, claimable = 0n, d = D3, claims: ClaimOp[] = []) =>
     withdrawalFacts(b.clients, d, op, { fd: { ...fd, claimable }, vault, scan: b.scan, claims }).then((r) => r.facts);
 
+  it("shows the USDC a delivery paid while seeded blocks after the payout are still being checked: the chunks it uses are the ones confirmed whole against the delivery's entries (review 2)", async () => {
+    const b = backOnBase({ logs: [landedFor(ME, HEAD - 4_000n), deliveredUsdc(2_431_337n, HEAD - 3_990n, H(62))] });
+    // the indexer's blocks after the chunk haven't been read by the browser yet
+    b.scan.next = 3_000n;
+    b.scan.sharedSeededTo = 3_000n;
+    const f = await factsOf(b);
+    expect(f.traceFailed).toBeUndefined();
+    expect(f.usdcDelivered?.hash).toBe(H(62));
+    expect(f.payoutUnknown).toBeUndefined();
+  });
+
   it("reads the USDC a delivery paid from the front door's Delivered log after the payout landed, in windows of at most 2,000 blocks", async () => {
     const b = backOnBase({
       logs: [
@@ -1698,10 +1710,57 @@ describe("stakes and payout chunks confirmed on use", () => {
     const empty = scanWith(() => undefined, 2_500n);
     expect(await confirmedStakeAfter(none.clients, D, empty, 1_500n)).toBe("unknown");
     // the same scan once the browser's own read got past those blocks: none
-    empty.checkedTo = 2_500n;
+    empty.sharedCheckedTo = 2_500n;
     expect(await confirmedStakeAfter(none.clients, D, empty, 1_500n)).toBeUndefined();
     // and with no seed at all: none, as before
     expect(await confirmedStakeAfter(none.clients, D, scanWith(() => undefined), 1_500n)).toBeUndefined();
+  });
+
+  it("blames the indexer for an earlier stake the blocks between show only when it sits in the indexer's own blocks (review 2)", async () => {
+    const receipts = { ...deliveryReceipt, [H(10)]: { status: "success", blockNumber: 1_600n, logs: [stakedLog(1_600n, H(10))] } };
+    // the seed covers 1,560 on: blocks 1,501–1,559 were the browser's own read
+    const from1560 = (s: VaultScan) => {
+      s.staked.push({ block: 1_600n, txHash: H(10), unconfirmed: true });
+      s.sharedSeededFrom = 1_560n;
+    };
+    const outside = chains({ latest: 2_500n, bitLogs: [stakedLog(1_550n, H(60))], bitReceipts: receipts });
+    const e1 = await confirmedStakeAfter(outside.clients, D, scanWith(from1560, 2_500n), 1_500n).catch((e: unknown) => e);
+    expect(e1).toBeInstanceOf(HistoryMismatchError);
+    expect((e1 as HistoryMismatchError).seeded).toBe(false);
+    const inside = chains({ latest: 2_500n, bitLogs: [stakedLog(1_570n, H(60))], bitReceipts: receipts });
+    const e2 = await confirmedStakeAfter(inside.clients, D, scanWith(from1560, 2_500n), 1_500n).catch((e: unknown) => e);
+    expect((e2 as HistoryMismatchError).seeded).toBe(true);
+  });
+
+  it("reads no log window for a deposit known only from the chain: while the seeded blocks after it are unchecked it says 'checking', and the background read settles it (review 2)", async () => {
+    const c = chains({ latest: 2_500n, bitReceipts: { ...deliveryReceipt, [H(10)]: { status: "success", blockNumber: 1_600n, logs: [stakedLog(1_600n, H(10))] } } });
+    const scan = scanWith((s) => s.staked.push({ block: 1_600n, txHash: H(10), unconfirmed: true }), 2_500n);
+    expect((await chainDeposits(c.clients, D, scan)).map((e) => e.staked)).toEqual(["unknown"]);
+    expect(c.windows).toEqual([]);
+    // once the background read has got past them, the stake shows
+    scan.sharedCheckedTo = 2_500n;
+    expect((await chainDeposits(c.clients, D, scan)).map((e) => e.staked)).toEqual([true]);
+    expect(c.windows).toEqual([]);
+  });
+
+  it("keeps the indexer's unconfirmed stakes and chunks in the last blocks a read covers again, so a read that stops leaves no gap the seed would be blamed for", async () => {
+    const scan = newScan(D);
+    scan.next = 2_500n;
+    scan.sharedSeededTo = 2_500n;
+    scan.staked.push({ block: 2_495n, txHash: H(10), unconfirmed: true });
+    scan.payouts.set(KEY, [{ txHash: H(11), block: 2_496n, chunk: 0, taken: 1, unconfirmed: true }]);
+    const down = chains({ latest: 3_000n });
+    (down.clients as unknown as { bittensor: { getLogs: () => Promise<never> } }).bittensor.getLogs = async () => {
+      throw new Error("archive busy");
+    };
+    await expect(scanVault(down.clients, D, scan, ME)).rejects.toThrow();
+    expect(scan.staked).toEqual([{ block: 2_495n, txHash: H(10), unconfirmed: true }]);
+    expect(scan.payouts.get(KEY)).toHaveLength(1);
+    // read again, they are confirmed by their logs
+    const up = chains({ latest: 3_000n, bitLogs: [stakedLog(2_495n, H(10)), chunkLog(0, 1, 2_496n, H(11))] });
+    await scanVault(up.clients, D, scan, ME);
+    expect(scan.staked).toEqual([{ block: 2_495n, txHash: H(10) }]);
+    expect(scan.payouts.get(KEY)).toEqual([{ txHash: H(11), block: 2_496n, chunk: 0, taken: 1 }]);
   });
 
   it("refuses a stake whose receipt, from a server well past its block, shows no vault Staked, naming the indexer when the seed supplied it", async () => {
@@ -1902,5 +1961,37 @@ describe("the account's events, confirmed by their receipts", () => {
     fine.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n, unconfirmed: true });
     await confirmAccountEvents(c.clients, D, fine, ME);
     expect(fine.deposited[0].shares).toBe(10n ** 22n);
+  });
+});
+
+describe("whether a delivery the scan doesn't hold could still be in the indexer's unchecked blocks (review 2, N2)", () => {
+  /** A scan seeded to 2,500, its last seeded block made at 1,800,000,000 (the mock's time for any block). */
+  const seededScan = () => {
+    const s = newScan(D);
+    s.next = 2_600n;
+    s.sharedSeededTo = 2_500n;
+    return s;
+  };
+  it("not for the batch before the open one when it closed at or after the seed's last block: its delivery comes later", async () => {
+    const c = chains();
+    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_800_000_000 })).toBe(false);
+    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_800_000_600 })).toBe(false);
+  });
+  it("yes for one that closed before it, or an older batch whose close isn't known here, or when the seed's time can't be read", async () => {
+    const c = chains();
+    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_799_999_999 })).toBe(true);
+    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 2n, { openBatchId: 4n, openStart: 1_800_000_600 })).toBe(true);
+    const blind = chains();
+    (blind.clients as unknown as { bittensor: { getBlock: () => Promise<never> } }).bittensor.getBlock = async () => {
+      throw new Error("archive busy");
+    };
+    expect(await deliveryMayBeSeeded(blind.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_800_000_600 })).toBe(true);
+  });
+  it("never once the browser has read the seeded blocks itself, or with no seed", async () => {
+    const c = chains();
+    const read = seededScan();
+    read.sharedCheckedTo = 2_500n;
+    expect(await deliveryMayBeSeeded(c.clients, read, 2n, fd)).toBe(false);
+    expect(await deliveryMayBeSeeded(c.clients, newScan(D), 2n, fd)).toBe(false);
   });
 });

@@ -16,6 +16,7 @@ import {
   chainDeposits,
   confirmAccountEvents,
   checkDeliveries,
+  deliveryMayBeSeeded,
   depositFacts,
   droppedRequestMined,
   HistoryMismatchError,
@@ -26,7 +27,6 @@ import {
   restartScan,
   scanVault,
   seededShared,
-  sharedUnverified,
   stakerDepositsIn,
   type VaultScan,
   withdrawalFacts,
@@ -36,7 +36,7 @@ import { DISTRUST_MS, distrustIndexer, fetchSeed, indexerDistrusted, type SeedHa
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type StringStorage, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore, seedHalves } from "./scan-store";
-import { checkSeededHistory, SEED_MIN_BLOCKS, type SeedVerdict, seededRanges, verifySeed } from "./seed";
+import { type CheckMemo, checkSeededHistory, SEED_MIN_BLOCKS, type SeedVerdict, seededRanges, verifySeed } from "./seed";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
 import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay, unstakeMostWei } from "./units";
@@ -70,7 +70,7 @@ export interface LiveDeps {
   scan(c: Clients, d: Deployment, scan: VaultScan, account?: Address, onWindow?: () => void): Promise<void>;
   /** Where each account's scan is saved between visits. */
   scanStore: ScanStore;
-  /** The browser's storage (the op log's): the indexer's distrust and the background check's progress live there too. */
+  /** The browser's storage (the op log's): the indexer's distrust lives there too. */
   storage: StringStorage;
   /** The history indexer's two seed halves for an account, or null (indexer.ts). */
   fetchSeed(d: Deployment, account: Address): Promise<SeedHalves | null>;
@@ -139,6 +139,9 @@ export const SEED_VERIFY_TIMEOUT_MS = 10_000;
 export const CHECK_PACE_MS = 1_200;
 /** How long after the background check stopped (a window it couldn't read) it is started again. */
 export const CHECK_EVERY_MS = 25_000;
+/** How often a running background check saves the scan, for the progress it carries in each half (a
+ * window's progress is otherwise kept when the run stops, or is done). */
+export const CHECK_SAVE_MS = 15_000;
 /** How many reads in a row may fail to confirm a seed's events (a node that won't answer for them)
  * before the seed is given up and the chain read from the deploy block instead, with no blame. */
 export const SEED_CONFIRM_TRIES = 3;
@@ -260,8 +263,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       restartPending.add(key);
       save(account, newScan(d), true);
     }
-    // whatever the background check had read, and the tripwire's pass, were of the history now discarded
-    progress.save(account, {});
+    // the tripwire's pass was of the history now discarded (the check's progress went with the scan's marks)
     tripwired.delete(key);
     seedFailures.delete(key);
     if (e.seeded) distrust();
@@ -297,13 +299,13 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   }
 
   /** The account's scan as far as it has been read: this visit's, or the one saved by an earlier visit
-   * (with how far the background check of its seeded blocks got). */
+   * (each seeded half with how far the background check of it got, saved inside that half). Read from
+   * storage once a visit: what another tab writes there later is never taken for this one's. */
   function known(account: Address): VaultScan {
     const key = account.toLowerCase();
     let s = scans.get(key);
     if (!s) {
       s = deps.scanStore.load(account);
-      if (seededRanges(s)) s.checkedTo = progress.load(account).next;
       scans.set(key, s);
     }
     return s;
@@ -326,6 +328,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * for a day. Asked at most once per SEED_RETRY_MS per account. Never throws. */
   async function seedIfWorthwhile(account: Address, scan: VaultScan): Promise<void> {
     if (!d.indexerUrl) return;
+    // seeded blocks the browser hasn't finished reading: a new seed would take them for read
+    if (seededRanges(scan)) return;
     const key = account.toLowerCase();
     const asked = seedAsked.get(key);
     if (asked !== undefined && deps.now() - asked < SEED_RETRY_MS) return;
@@ -375,9 +379,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       note("the history indexer's seed reached no further than the saved history, so the vault's history is read from the chain");
       return;
     }
-    // the background check of this seed starts from its first block, whatever an earlier one had read
-    progress.save(account, {});
-    delete scan.checkedTo;
+    // the background check of this seed starts from its first block (seedHalves marks it unchecked)
     tripwired.delete(key);
     save(account, scan, true);
     note(`the vault's history up to block ${verdict.next} came from the history indexer, checked against the chain; the rest is read from the chain`);
@@ -414,6 +416,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     inFlight.set(key, p);
     const clear = () => void inFlight.delete(key);
     p.then(clear, clear);
+    // whatever page asked: seeded blocks are checked whenever the scan is read
+    p.then(
+      () => checkInBackground(account),
+      () => undefined,
+    );
     return p;
   }
 
@@ -473,39 +480,21 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       });
   }
 
-  /** Where the background check of a seeded account got to, kept between visits. */
-  const progressKey = (account: Address) => `cascade.check.${d.frontDoor.toLowerCase()}.${d.bitBlock}.${account.toLowerCase()}`;
-  const progress = {
-    load(account: Address): { next?: bigint } {
-      try {
-        const raw = storage.getItem(progressKey(account));
-        const next = raw === null ? undefined : (JSON.parse(raw) as { next?: unknown }).next;
-        return typeof next === "string" && /^\d{1,30}$/.test(next) ? { next: BigInt(next) } : {};
-      } catch {
-        return {};
-      }
-    },
-    save(account: Address, p: { next?: bigint }): void {
-      try {
-        if (p.next === undefined) storage.removeItem?.(progressKey(account));
-        else storage.setItem(progressKey(account), JSON.stringify({ next: String(p.next) }));
-      } catch {
-        // blocked or full: the check starts over next visit
-      }
-    },
-  };
   const checking = new Set<string>();
   const checkedAt = new Map<string, number>();
   const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
   /** Runs the browser's own read of the blocks the indexer seeded (seed.ts, checkSeededHistory), one
    * window every CHECK_PACE_MS until it is done, outside the account's lock (it only reads the scan and
-   * confirms its entries; a restart waits for the next read in any case), so no read waits behind it:
-   * when the chain's logs match the seed throughout, both halves are the browser's own from then on
-   * (the marks clear, the figures show); when they don't, the scan starts over at its next read and the
-   * indexer is distrusted (or, for an event the seed's form can't carry, simply read again). A window
-   * that can't be read stops the run, which starts again CHECK_EVERY_MS later from its progress; a run
-   * whose scan changed under it (started over, or seeded again) keeps nothing. */
+   * confirms its entries; a restart waits for the next read in any case), so no read waits behind it.
+   * Started whenever the scan is read or what can be unstaked is asked (scanFor, getAvailable), one run
+   * per account at a time. Its progress is this visit's scan's own (each half's, loaded with that half
+   * and saved inside it: never read back from storage another tab or account may have written): when the
+   * chain's logs match a half to its end, that half is the browser's own from then on (its marks clear;
+   * with both, the figures show); when they don't, the scan starts over at its next read and the indexer
+   * is distrusted (or, for an event the seed's form can't carry, simply read again). A window that can't
+   * be read stops the run, which starts again CHECK_EVERY_MS later from where it got; a run whose scan
+   * changed under it (started over) keeps nothing. */
   function checkInBackground(account: Address): void {
     const key = account.toLowerCase();
     const scan = known(account);
@@ -514,25 +503,25 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     if (last !== undefined && deps.now() - last < CHECK_EVERY_MS) return;
     checking.add(key);
     checkedAt.set(key, deps.now());
-    const p = progress.load(account);
+    const memo: CheckMemo = {};
+    let savedAt = deps.now();
+    /** The scan saved with the progress it carries, unless it is to start over (its empty copy stays). */
+    const keep = () => {
+      if (!restartPending.has(key)) save(account, scan, true);
+      savedAt = deps.now();
+    };
     void (async () => {
       try {
         for (;;) {
           if (restartPending.has(key)) return;
-          const r = await checkSeededHistory(background, d, scan, account, p, 1);
+          const r = await checkSeededHistory(background, d, scan, account, 1, memo);
           if (r === "stopped") return;
-          progress.save(account, p);
           if (r === "done") {
-            delete scan.sharedSeededFrom;
-            delete scan.sharedSeededTo;
-            delete scan.accountSeededFrom;
-            delete scan.accountSeededTo;
-            delete scan.checkedTo;
-            progress.save(account, {});
-            if (!restartPending.has(key)) save(account, scan, true);
+            keep();
             note("the history from the history indexer matches this browser's own read of the chain");
             return;
           }
+          if (deps.now() - savedAt >= CHECK_SAVE_MS) keep();
           await pause(deps.checkPaceMs ?? CHECK_PACE_MS);
         }
       } catch (e) {
@@ -543,7 +532,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
               ? "the history from the history indexer didn't match this browser's own read of the chain: it is read again from the deploy block"
               : "the account has events the history indexer's seed can't describe: its history is read again from the deploy block",
           );
-        } else progress.save(account, p);
+        } else keep();
       } finally {
         checking.delete(key);
       }
@@ -673,14 +662,16 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * browser's unstakes whose batch closed and hasn't reached the vault. The scan as far as it has been
    * read places most of them; only one it hasn't seen arrive waits for the scan to catch up. While
    * whether one arrived rests on the indexer's word the chain hasn't confirmed (a seeded delivery whose
-   * receipt can't be read yet, or none in seeded blocks the browser hasn't read), there is no figure:
-   * `checking`, never a low one. */
+   * receipt can't be read yet, or none while seeded blocks the browser hasn't read could hold it:
+   * deliveryMayBeSeeded), there is no figure: `checking`, never a low one; the background check of
+   * those blocks is started here, so this page alone gets there. */
   function getAvailable(account: string): Promise<Available> {
     const a = account as Address;
     return trails(a, async () => {
       let [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
       const withdrawals = await placedWithdrawals(a, deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal"));
       let scan = known(a);
+      checkInBackground(a);
       /** In a closed batch that hasn't arrived as far as anyone can tell: a saved delivery counts only once
        * its receipt shows it, and one that can't be shown yet leaves the unstake on the bridge. */
       const arrived = (batchId: bigint) => {
@@ -705,11 +696,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       }
       // one request carries at most the vault's maxEntryValue, this batch's earlier request included
       const most = v.maxEntryValue !== undefined ? unstakeMostWei(v.maxEntryValue, taoFor(fd.redeemOf, v.totalAssets, v.totalSupply)) : undefined;
-      const unsure = away().some((w) => {
-        if (w.batchId === undefined) return false;
-        const hit = scan.delivered.get(String(w.batchId));
-        return hit ? hit.unconfirmed === true && seededShared(scan, hit.block) : sharedUnverified(scan, scan.from, scan.next - 1n);
-      });
+      const doubts = await Promise.all(
+        away().map(async (w) => {
+          if (w.batchId === undefined) return false;
+          const hit = scan.delivered.get(String(w.batchId));
+          return hit ? hit.unconfirmed === true && seededShared(scan, hit.block) : deliveryMayBeSeeded(history, scan, w.batchId, fd);
+        }),
+      );
+      const unsure = doubts.some(Boolean);
       if (unsure) return { availableShares: 0n, availableTaoWei: 0n, ...(most !== undefined ? { mostTaoWei: most } : {}), checking: true };
       const asked = fd.redeemOf + sum(away().map((w) => w.shares));
       const availableShares = v.shares > asked ? v.shares - asked : 0n;
@@ -803,9 +797,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         if (facts.delivered) seen.add(facts.delivered.txHash.toLowerCase());
         found.push({ op: { ...op, batchId: batchId ?? op.batchId }, facts: { ...facts, interrupted: op.interrupted } });
       }
-      // TAO this account deposited that hasn't reached the vault yet (open batch or bridge) counts toward the staking minimum
+      // TAO this account deposited that hasn't reached the vault yet (open batch or bridge) counts toward the
+      // staking minimum; one whose arrival is still being checked may be in the vault already, so it isn't
+      // said to be on its way
       const incomingWei = found
-        .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !isCancelled(op, facts))
+        .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !facts.deliveryUnknown && !isCancelled(op, facts))
         .reduce((sum, { op }) => sum + op.targetTao, 0n);
       for (const { op, facts } of found) out.push(depositRecord(op, { ...facts, incomingWei }));
       for (const e of await chainDeposits(c, d, scan)) if (!seen.has(e.txHash.toLowerCase())) out.push(chainOnlyDeposit(e));

@@ -32,6 +32,11 @@ export interface ScanState {
    * HistoryMismatchError), and nothing from them shows until the chain confirms it. */
   seededFrom?: string;
   seededTo?: string;
+  /** Version 2 only: how far this browser's own read of the half's seeded blocks has got (seed.ts,
+   * checkSeededHistory): its seeded events below it matched the chain. Written with the half's events,
+   * in the one write, so it never vouches for another seed's: a half replaced by another account's seed,
+   * or another tab's, carries that one's progress, or none. */
+  checkedTo?: string;
 }
 
 /** A scan's settled events in their saved form: its progress is saved SETTLE blocks short of where it
@@ -72,10 +77,13 @@ export function decodeScanState(x: unknown, scan: Pick<VaultScan, "vault" | "fro
   const next = BigInt(x.next);
   if (next < scan.from) return null;
   const seeded = x.v === SEEDED_SCAN_VERSION;
-  if (!seeded && (x.seededFrom !== undefined || x.seededTo !== undefined)) return null;
+  if (!seeded && (x.seededFrom !== undefined || x.seededTo !== undefined || x.checkedTo !== undefined)) return null;
   if (seeded && !(isDecimal(x.seededFrom) && isDecimal(x.seededTo) && BigInt(x.seededFrom) >= scan.from && BigInt(x.seededFrom) <= BigInt(x.seededTo) && BigInt(x.seededTo) <= next)) return null;
   const seededFrom = seeded ? BigInt(x.seededFrom as string) : undefined;
   const seededTo = seeded ? BigInt(x.seededTo as string) : undefined;
+  // the check's progress lies within the half's own mark, or the half isn't sound
+  if (x.checkedTo !== undefined && !(isDecimal(x.checkedTo) && BigInt(x.checkedTo) >= seededFrom! && BigInt(x.checkedTo) <= seededTo!)) return null;
+  const checkedTo = x.checkedTo !== undefined ? BigInt(x.checkedTo as string) : undefined;
   const lists = ["delivered", "staked", "payouts", "deposited", "redeemed"] as const;
   if (!lists.every((k) => Array.isArray(x[k]) && (x[k] as unknown[]).every(isRecord))) return null;
   if (x.adjustments !== undefined && !(Array.isArray(x.adjustments) && x.adjustments.every(isRecord))) return null;
@@ -102,6 +110,7 @@ export function decodeScanState(x: unknown, scan: Pick<VaultScan, "vault" | "fro
   return {
     next,
     ...(seeded ? { seededFrom, seededTo } : {}),
+    ...(checkedTo !== undefined ? { checkedTo } : {}),
     delivered: list("delivered").map((e) => ({ batchId: e.batchId as string, key: e.key as Hex, txHash: e.txHash as Hex, block: block(e), unconfirmed: true as const })),
     staked: list("staked").map((e): Stake => ({ block: block(e), txHash: e.txHash as Hex, ...(inSeed(block(e)) ? { unconfirmed: true as const } : {}) })),
     payouts: list("payouts").map((e) => ({ key: e.key as Hex, chunk: e.chunk as number, taken: e.taken as number, txHash: e.txHash as Hex, block: block(e), ...(inSeed(block(e)) ? { unconfirmed: true as const } : {}) })),
@@ -121,8 +130,9 @@ const max = (a: bigint, b: bigint) => (a > b ? a : b);
 /** Carries `scan` forward with the two decoded halves of a saved or seeded state (the deployment's events
  * in `shared`, the account's in `own`), merged at the earlier of their two blocks: the events from where
  * the scan stopped up to there are added, and the scan resumes from there. A half marked as the indexer's
- * marks the scan so, over the blocks the merge took from it. Halves that don't reach past the scan
- * change nothing. True when the scan moved forward. The one path for saved and seeded history alike. */
+ * marks the scan so, over the blocks the merge took from it, with how far the browser's own check of
+ * that half got (its own, never the other half's). Halves that don't reach past the scan change nothing.
+ * True when the scan moved forward. The one path for saved and seeded history alike. */
 export function mergeHalves(scan: VaultScan, shared: DecodedScanState, own: DecodedScanState): boolean {
   const next = min(shared.next, own.next);
   const was = scan.next;
@@ -144,6 +154,9 @@ export function mergeHalves(scan: VaultScan, shared: DecodedScanState, own: Deco
       if (lo < hi) {
         scan.sharedSeededFrom = lo;
         scan.sharedSeededTo = hi;
+        const checked = checkedWithin(shared.checkedTo, lo, hi);
+        if (checked !== undefined) scan.sharedCheckedTo = checked;
+        else delete scan.sharedCheckedTo;
       }
     }
     if (own.seededTo !== undefined && own.seededFrom !== undefined) {
@@ -152,17 +165,26 @@ export function mergeHalves(scan: VaultScan, shared: DecodedScanState, own: Deco
       if (lo < hi) {
         scan.accountSeededFrom = lo;
         scan.accountSeededTo = hi;
+        const checked = checkedWithin(own.checkedTo, lo, hi);
+        if (checked !== undefined) scan.accountCheckedTo = checked;
+        else delete scan.accountCheckedTo;
       }
     }
   }
   return moved;
 }
 
+/** A half's check progress within the blocks the merge marked: none below or at their start. */
+const checkedWithin = (checked: bigint | undefined, lo: bigint, hi: bigint): bigint | undefined => (checked === undefined || checked <= lo ? undefined : min(checked, hi));
+
 /** Seeds `scan` from the indexer's two halves (fetchSeed), through the same merge a load uses, with
  * every event unconfirmed and both halves marked as the indexer's over the blocks the merge took from
- * them. Halves that aren't both valid for this scan's deployment, or don't reach past it, change nothing.
- * True when the scan moved forward. seed.ts verifies the halves against the chain before calling this. */
+ * them, none of them checked yet. Halves that aren't both valid for this scan's deployment, or don't
+ * reach past it, change nothing; nor does a seed of a scan still holding seeded blocks the browser hasn't
+ * finished reading (its marks would be overwritten, and those blocks taken for read). True when the
+ * scan moved forward. seed.ts verifies the halves against the chain before calling this. */
 export function seedHalves(scan: VaultScan, shared: unknown, own: unknown): boolean {
+  if (scan.sharedSeededTo !== undefined || scan.accountSeededTo !== undefined) return false;
   const [s, o] = [decodeScanState(shared, scan), decodeScanState(own, scan)];
   if (!s || !o || s.seededTo !== undefined || o.seededTo !== undefined) return false;
   const mark = (x: DecodedScanState): DecodedScanState => ({
@@ -242,16 +264,19 @@ export function createScanStore(storage: StringStorage, d: Deployment) {
     save(account: Address, scan: VaultScan): void {
       if (crowded.has(storage)) return;
       const state = scanState(scan);
-      // each half keeps its own mark, no further than the save reaches; a half with none is the first version
-      const seeded = (from: bigint | undefined, to: bigint | undefined): Partial<ScanState> => {
+      // each half keeps its own mark and its own check's progress, no further than the save reaches, in
+      // the same write as its events; a half with no mark is the first version
+      const seeded = (from: bigint | undefined, to: bigint | undefined, checked: bigint | undefined): Partial<ScanState> => {
         if (to === undefined) return {};
         const hi = min(to, BigInt(state.next));
         const lo = from ?? scan.from;
-        return lo < hi ? { v: SEEDED_SCAN_VERSION, seededFrom: String(lo), seededTo: String(hi) } : {};
+        if (lo >= hi) return {};
+        const c = checkedWithin(checked, lo, hi);
+        return { v: SEEDED_SCAN_VERSION, seededFrom: String(lo), seededTo: String(hi), ...(c !== undefined ? { checkedTo: String(c) } : {}) };
       };
       try {
-        write(deployment, { ...state, deposited: [], redeemed: [], adjustments: undefined, ...seeded(scan.sharedSeededFrom, scan.sharedSeededTo) });
-        write(key(account), { ...state, delivered: [], staked: [], payouts: [], ...seeded(scan.accountSeededFrom, scan.accountSeededTo) });
+        write(deployment, { ...state, deposited: [], redeemed: [], adjustments: undefined, ...seeded(scan.sharedSeededFrom, scan.sharedSeededTo, scan.sharedCheckedTo) });
+        write(key(account), { ...state, delivered: [], staked: [], payouts: [], ...seeded(scan.accountSeededFrom, scan.accountSeededTo, scan.accountCheckedTo) });
       } catch {
         // storage full or blocked: this visit keeps its scan in memory
       }

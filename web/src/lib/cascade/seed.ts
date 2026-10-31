@@ -33,13 +33,22 @@ export const SEED_MAX_LAG = 600n;
 /** How many of a seed's events, chosen at random, are checked against their receipts before it is used:
  * a bug detector, never the proof (every event is still confirmed before it is used). */
 export const SEED_SAMPLE = 8;
-/** The account half may hold at most two events per delivery (a deposit and a redeem in one batch) plus
- * this many more (the account's direct deposits and redeems, which the indexer's first seed form doesn't
- * carry; room for a later one that does). More is padding. */
+/** The most entries one batch message carries of each kind (CascadeMessages.MAX_ENTRIES; the front door
+ * refuses a maxDeposits or maxRedeems above it). */
+const MAX_ENTRIES = 100;
+/** A batch's payout list holds its bounced deposits and its redeems, at most MAX_ENTRIES of each, and
+ * every chunk takes at least one entry (CascadeVault._takeChunk): more chunks for one batch than this is
+ * a shape no chain can have. */
+export const MAX_SEED_CHUNKS_PER_KEY = 2 * MAX_ENTRIES;
+/** The account's events that belong to no delivery of the seed's (direct deposits and redeems, reward
+ * cuts: the indexer's first seed form carries none, a later one may), past which a seed isn't used: an
+ * honest account can have more, so it is read from the chain instead, with no blame. A batch's events
+ * have their own bound (each delivery carries at most one deposit and one redeem of the account's). */
 export const MAX_SEED_ACCOUNT_EVENTS_EXTRA = 50;
-/** A payout batch has at most a few dozen entries, each chunk takes at least one. */
-export const MAX_SEED_CHUNKS_PER_KEY = 64;
-/** The most events both halves may hold together: years of a deployment, well short of a receipt storm. */
+/** The most events both halves may hold together and still be checked here: under the 2 MB a half may
+ * weigh (indexer.ts) at the keeper's fastest cadence (a batch an hour: a delivery, a stake and a chunk,
+ * about 450 bytes) that is roughly six months of a deployment, years at the launch's. An honest history
+ * past it is read from the chain instead, with no blame. */
 export const MAX_SEED_EVENTS = 50_000;
 
 const WINDOW = 1_000n;
@@ -236,13 +245,25 @@ export async function verifySeed(
   const s = decodeScanState(halves.shared, scan);
   const o2 = decodeScanState(halves.own, scan);
   if (!s || !o2) return no("a half isn't a valid scan state");
-  const shared = s.delivered.length + s.staked.length + s.payouts.length;
-  const own = o2.deposited.length + o2.redeemed.length + o2.adjustments.length;
-  if (shared + own > MAX_SEED_EVENTS) return no("it is bigger than any history could be", true);
-  if (own > 2 * s.delivered.length + MAX_SEED_ACCOUNT_EVENTS_EXTRA) return no("its account half holds more events than its deliveries allow", true);
+  // shapes no chain can have distrust; an honest history merely too big to check here is read instead
+  const batchEvents = [...o2.deposited, ...o2.redeemed].filter((e) => e.kind === undefined);
+  if (batchEvents.length > 2 * s.delivered.length) return no("its account half holds more events than its deliveries allow", true);
+  for (const list of [o2.deposited, o2.redeemed]) {
+    const txOf = new Map<string, string>();
+    for (const e of list) {
+      if (e.kind !== undefined) continue;
+      const seen = txOf.get(e.key.toLowerCase());
+      if (seen !== undefined && seen !== e.txHash.toLowerCase()) return no("its account half has two of one batch's entries for one account", true);
+      txOf.set(e.key.toLowerCase(), e.txHash.toLowerCase());
+    }
+  }
   const perKey = new Map<string, number>();
   for (const p of s.payouts) perKey.set(p.key.toLowerCase(), (perKey.get(p.key.toLowerCase()) ?? 0) + 1);
   if ([...perKey.values()].some((n) => n > MAX_SEED_CHUNKS_PER_KEY)) return no("it holds more payout chunks for one batch than a batch can have", true);
+  const shared = s.delivered.length + s.staked.length + s.payouts.length;
+  const own = o2.deposited.length + o2.redeemed.length + o2.adjustments.length;
+  if (own - batchEvents.length > MAX_SEED_ACCOUNT_EVENTS_EXTRA) return no("the account has more events of its own than are checked here");
+  if (shared + own > MAX_SEED_EVENTS) return no("it is bigger than the history checked here");
   const next = min(s.next, o2.next);
   if (next <= scan.next) return no("it reaches no further than the saved scan");
   if (next > head + 1n) return no("it is ahead of the chain");
@@ -302,8 +323,63 @@ export function seededRanges(scan: VaultScan): { lo: bigint; hi: bigint } | unde
   return { lo: froms.reduce((a, b) => min(a, b)), hi: tos.reduce((a, b) => max(a, b)) };
 }
 
-/** Marks the scan's entries in [from, to] as confirmed: the chain's logs for those blocks held exactly
- * them (a stake there is also known to be the first after any block from `from`). */
+/** A half's seeded blocks not yet read by the browser's own check: [start, to), or none. */
+function unchecked(from: bigint | undefined, to: bigint | undefined, checked: bigint | undefined, scanFrom: bigint): { start: bigint; to: bigint } | undefined {
+  if (to === undefined) return undefined;
+  const lo = from ?? scanFrom;
+  const start = checked !== undefined && checked > lo ? checked : lo;
+  return start < to ? { start, to } : undefined;
+}
+
+/** The deployment half's events, tagged as the check compares them and sorted by block: built once and
+ * kept while the scan holds the same events there (`CheckMemo`), so each window costs a search of it,
+ * never a pass over the whole history. */
+type SharedIndex = { stamp: string; events: Tagged[]; keys: Set<string> };
+
+/** What the caller keeps between steps of the check of one scan (live.ts keeps one per run). */
+export type CheckMemo = { shared?: SharedIndex };
+
+/** What would change the deployment half's events as the check compares them: a start over, their
+ * numbers and the half's mark (a confirmation keeps an event's identity; a read that adds or drops one
+ * changes a count). */
+function sharedStamp(scan: VaultScan): string {
+  let chunks = 0;
+  for (const c of scan.payouts.values()) chunks += c.length;
+  return [scan.restarts, scan.delivered.size, scan.staked.length, chunks, scan.sharedSeededFrom, scan.sharedSeededTo].join(":");
+}
+
+function sharedIndex(scan: VaultScan, memo: CheckMemo): SharedIndex {
+  const stamp = sharedStamp(scan);
+  if (memo.shared?.stamp === stamp) return memo.shared;
+  const events = tagged(
+    {
+      delivered: [...scan.delivered].map(([batchId, e]) => ({ batchId, key: e.key, txHash: e.txHash, block: e.block })),
+      staked: scan.staked,
+      payouts: [...scan.payouts].flatMap(([key, chunks]) => chunks.map((p) => ({ key, chunk: p.chunk, taken: p.taken, txHash: p.txHash, block: p.block }))),
+      deposited: [],
+      redeemed: [],
+      adjustments: [],
+    },
+    SHARED_KINDS,
+  ).sort((a, b) => (a.e.block < b.e.block ? -1 : a.e.block > b.e.block ? 1 : 0));
+  memo.shared = { stamp, events, keys: new Set([...scan.delivered.values()].map((e) => e.key.toLowerCase())) };
+  return memo.shared;
+}
+
+/** The first index in `xs` (sorted by block) at or after `block`. */
+function firstAt(xs: Tagged[], block: bigint): number {
+  let [lo, hi] = [0, xs.length];
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid].e.block < block) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Marks the deployment half's entries in [from, to] as confirmed: the chain's logs for those blocks were
+ * compared with exactly them (the caller passes only blocks it judged), and a stake there is also known
+ * to be the only one the chain has from `from` up to it. Nothing outside the range is touched. */
 function confirmWindow(scan: VaultScan, from: bigint, to: bigint): void {
   const inside = (e: { block: bigint }) => e.block >= from && e.block <= to;
   for (const [id, e] of scan.delivered) if (inside(e) && e.unconfirmed) scan.delivered.set(id, { key: e.key, txHash: e.txHash, block: e.block });
@@ -317,40 +393,47 @@ function confirmWindow(scan: VaultScan, from: bigint, to: bigint): void {
 }
 
 /** One step of the browser's own read of the blocks the indexer seeded, every vault log of each window
- * (`windows` of 1,000 blocks a step), from `progress.next` (or the seeded ranges' start), moved after
- * each window so a later step, or visit, goes on from there; `scan.checkedTo` follows it. Each window's
- * chain events must be exactly the scan's for those blocks, kind by kind, within the half's seeded range:
- * an event the chain shows that the scan lacks is a definite omission (HistoryMismatchError naming the
- * indexer, or, for an event the seed's form can't carry, naming no one: the browser then reads this
- * account itself); one the scan has that the window lacks is judged by its receipt (a node's logs can
- * lag). An entry of the account's in a delivery that moved no shares must have its delivery in the scan.
- * A window that matched confirms the scan's entries in it. "done" once the ranges are read (the caller
- * clears the marks), "more" while there is further to read, "stopped" when the marks changed under the
- * read (it started over, or was seeded again). A window that can't be read throws, keeping the progress
- * made. Runs outside the account's lock: it only reads the scan, and confirms. */
-export async function checkSeededHistory(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account: Address, progress: { next?: bigint }, windows = 1): Promise<"more" | "done" | "stopped"> {
-  const ranges = seededRanges(scan);
-  if (!ranges) return "done";
-  const marks = [scan.sharedSeededFrom, scan.sharedSeededTo, scan.accountSeededFrom, scan.accountSeededTo].join(":");
-  const inShared = (b: bigint) => scan.sharedSeededTo !== undefined && b >= (scan.sharedSeededFrom ?? scan.from) && b < scan.sharedSeededTo;
-  const inAccount = (b: bigint) => scan.accountSeededTo !== undefined && b >= (scan.accountSeededFrom ?? scan.from) && b < scan.accountSeededTo;
-  let from = max(scan.from, progress.next ?? ranges.lo);
-  for (let i = 0; i < windows && from < ranges.hi; i++) {
-    const end = min(from + WINDOW - 1n, ranges.hi - 1n);
+ * (`windows` of 1,000 blocks a step), each half from where its own check got (`sharedCheckedTo`,
+ * `accountCheckedTo` on the scan, kept with the half's events and nowhere else: never another tab's or
+ * account's progress), moved after each window so a later step, or visit, goes on from there. Each
+ * window's chain events must be exactly the scan's, kind by kind, over the blocks of it that each half
+ * still has unchecked: an event the chain shows that the scan lacks is a definite omission
+ * (HistoryMismatchError naming the indexer, or, for an event the seed's form can't carry, naming no one:
+ * the browser then reads this account itself); one the scan has that the window lacks is judged by its
+ * receipt (a node's logs can lag). An entry of the account's in a delivery that moved no shares must have
+ * its delivery in the scan. A window that matched confirms the deployment half's entries in the blocks it
+ * judged. A half read to its end is the browser's own from then on: its marks clear. "done" once neither
+ * half has a mark, "more" while there is further to read, "stopped" when the marks changed under the read
+ * (it started over). A window that can't be read throws, keeping the progress made. Runs outside the
+ * account's lock: it only reads the scan, and confirms. `memo`: kept by the caller between steps, so the
+ * scan's events are indexed once (CheckMemo). */
+export async function checkSeededHistory(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, account: Address, windows = 1, memo: CheckMemo = {}): Promise<"more" | "done" | "stopped"> {
+  const marks = () => [scan.restarts, scan.sharedSeededFrom, scan.sharedSeededTo, scan.accountSeededFrom, scan.accountSeededTo].join(":");
+  for (let i = 0; i < windows; i++) {
+    const shared = unchecked(scan.sharedSeededFrom, scan.sharedSeededTo, scan.sharedCheckedTo, scan.from);
+    const own = unchecked(scan.accountSeededFrom, scan.accountSeededTo, scan.accountCheckedTo, scan.from);
+    clearDone(scan, shared, own);
+    if (!shared && !own) return "done";
+    const was = marks();
+    const from = max(scan.from, min(shared?.start ?? own!.start, own?.start ?? shared!.start));
+    const end = min(from + WINDOW - 1n, max(shared?.to ?? 0n, own?.to ?? 0n) - 1n);
     const raw = await windowLogs(c, d, from, end);
-    if ([scan.sharedSeededFrom, scan.sharedSeededTo, scan.accountSeededFrom, scan.accountSeededTo].join(":") !== marks) return "stopped";
+    if (marks() !== was) return "stopped";
     const found = vaultEvents(raw, d, account);
-    const scanEvents: Omit<WindowEvents, "entries"> = {
-      delivered: [...scan.delivered].map(([batchId, e]) => ({ batchId, key: e.key, txHash: e.txHash, block: e.block })),
-      staked: scan.staked,
-      payouts: [...scan.payouts].flatMap(([key, chunks]) => chunks.map((p) => ({ key, chunk: p.chunk, taken: p.taken, txHash: p.txHash, block: p.block }))),
-      deposited: scan.deposited,
-      redeemed: scan.redeemed,
-      adjustments: scan.adjustments,
+    // the blocks of this window each half judges: its unchecked ones
+    const span = (h: { start: bigint; to: bigint } | undefined) => (h && h.start <= end && h.to > from ? { lo: max(h.start, from), hi: min(h.to - 1n, end) } : undefined);
+    const sharedSpan = span(shared);
+    const ownSpan = span(own);
+    const judged = (t: Tagged) => {
+      const sp = SHARED_KINDS.includes(t.kind) ? sharedSpan : ownSpan;
+      return sp !== undefined && t.e.block >= sp.lo && t.e.block <= sp.hi;
     };
-    const judged = (t: Tagged) => (SHARED_KINDS.includes(t.kind) ? inShared(t.e.block) : inAccount(t.e.block)) && t.e.block >= from && t.e.block <= end;
     const chain = tagged(found).filter(judged);
-    const have = tagged(scanEvents).filter(judged);
+    const index = sharedSpan ? sharedIndex(scan, memo) : undefined;
+    const have = [
+      ...(index && sharedSpan ? index.events.slice(firstAt(index.events, sharedSpan.lo), firstAt(index.events, sharedSpan.hi + 1n)) : []),
+      ...(ownSpan ? tagged({ delivered: [], staked: [], payouts: [], deposited: scan.deposited, redeemed: scan.redeemed, adjustments: scan.adjustments }, ACCOUNT_KINDS).filter(judged) : []),
+    ];
     const haveIds = new Set(have.map((t) => t.id));
     const chainIds = new Set(chain.map((t) => t.id));
     for (const t of chain) {
@@ -364,14 +447,33 @@ export async function checkSeededHistory(c: Pick<Clients, "bittensor">, d: Deplo
       const r = await receiptAt(c, scan, t.e.txHash, t.e.block);
       if (!shows(r, d, account, t)) throw new HistoryMismatchError(true);
     }
-    if (scan.sharedSeededTo !== undefined) {
-      const keys = new Set([...scan.delivered.values()].map((e) => e.key.toLowerCase()));
-      for (const e of found.entries) if (inShared(e.block) && !keys.has(e.key.toLowerCase())) throw new HistoryMismatchError(true);
+    if (index && sharedSpan) {
+      for (const e of found.entries) if (e.block >= sharedSpan.lo && e.block <= sharedSpan.hi && !index.keys.has(e.key.toLowerCase())) throw new HistoryMismatchError(true);
+      confirmWindow(scan, sharedSpan.lo, sharedSpan.hi);
     }
-    confirmWindow(scan, from, end);
-    from = end + 1n;
-    progress.next = from;
-    scan.checkedTo = from;
+    // each half's progress, as far as this window read its unchecked blocks
+    if (sharedSpan) scan.sharedCheckedTo = sharedSpan.hi + 1n;
+    if (ownSpan) scan.accountCheckedTo = ownSpan.hi + 1n;
   }
-  return from >= ranges.hi ? "done" : "more";
+  const left = [
+    unchecked(scan.sharedSeededFrom, scan.sharedSeededTo, scan.sharedCheckedTo, scan.from),
+    unchecked(scan.accountSeededFrom, scan.accountSeededTo, scan.accountCheckedTo, scan.from),
+  ] as const;
+  clearDone(scan, ...left);
+  return left[0] || left[1] ? "more" : "done";
+}
+
+/** A half whose seeded blocks the browser has read to the end is its own reading from then on: its
+ * mark and its check's progress go. */
+function clearDone(scan: VaultScan, shared: { start: bigint } | undefined, own: { start: bigint } | undefined): void {
+  if (!shared && scan.sharedSeededTo !== undefined) {
+    delete scan.sharedSeededFrom;
+    delete scan.sharedSeededTo;
+    delete scan.sharedCheckedTo;
+  }
+  if (!own && scan.accountSeededTo !== undefined) {
+    delete scan.accountSeededFrom;
+    delete scan.accountSeededTo;
+    delete scan.accountCheckedTo;
+  }
 }

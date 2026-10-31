@@ -1383,7 +1383,10 @@ describe("the indexer's seed", () => {
     const h = halvesOf(CHAIN);
     const omitted = { shared: h.shared, own: { ...h.own, deposited: [] } };
     const n = node();
-    const v = visit(n, omitted);
+    // the background read can't read yet (it would pin the omission on the seed: a deposit the chain shows
+    // in the seed's blocks): the balance alone has caught it
+    const busy = { ...n.bittensor, getLogs: async () => Promise.reject(new Error("archive busy")) };
+    const v = visit(n, omitted, { clients: { bittensor: n.bittensor, bittensorHistory: busy } as never });
     await expect(v.data.getPositionHistory(ME)).rejects.toThrow(/didn't match Bittensor/);
     expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(false);
     expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
@@ -1426,15 +1429,24 @@ describe("the indexer's seed", () => {
     const clock = 1_800_000_100_000;
     const n = node();
     const storage = memory();
-    // this visit's background read is paced a minute apart: one window, then a wait
-    const v = visit(n, halvesOf(CHAIN), { now: () => clock }, storage);
+    // this visit's background read gets one window, then the archive node stops answering: the run stops,
+    // keeping its progress in the saved halves, and isn't started again until CHECK_EVERY_MS later
+    const stalls = { ...n.bittensor, getLogs: async (q: { fromBlock: bigint; toBlock: bigint }) => (q.fromBlock > 1n ? Promise.reject(new Error("archive busy")) : n.bittensor.getLogs(q)) };
+    const v = visit(n, halvesOf(CHAIN), { now: () => clock, checkPaceMs: 0, clients: { bittensor: n.bittensor, bittensorHistory: stalls } as never }, storage);
     expect((await v.data.getPositionHistory(ME)).provisional).toBe(true);
-    await settled();
+    for (let i = 0; i < 5; i++) await settled();
     const background = () => n.windows.filter(([from]) => from < NEXT - REREAD);
     expect(background()).toEqual([[1n, 1_000n]]);
     await v.data.getPositionHistory(ME);
     await settled();
     expect(background()).toHaveLength(1);
+    // each half carries its own check's progress, in the one write with its events
+    const half = (k: string) => JSON.parse(storage.getItem(k)!) as { checkedTo?: string };
+    const base = `cascade.scan.${DI.frontDoor.toLowerCase()}.${DI.bitBlock}`;
+    expect(half(base).checkedTo).toBe("1001");
+    expect(half(`${base}.${ME.toLowerCase()}`).checkedTo).toBe("1001");
+    // and no progress of its own anywhere else, for another tab or account to mistake for theirs
+    expect(storage.getItem(`cascade.check.${DI.frontDoor.toLowerCase()}.${DI.bitBlock}.${ME.toLowerCase()}`)).toBeNull();
     // a new visit picks the read up where it stopped, and runs it to the end
     const m = node();
     const w = visit(m, halvesOf(CHAIN), { now: () => clock, checkPaceMs: 0 }, storage);
@@ -1449,8 +1461,9 @@ describe("the indexer's seed", () => {
     // the background windows (the visit's own read starts 400 blocks before the saved progress, near the end)
     const resumed = m.windows.filter(([from]) => from < 29_400n);
     expect(resumed[0]).toEqual([1_001n, 2_000n]);
-    // up to the saved mark (the seed's block less the save's unsettled blocks) and no further
-    expect(resumed[resumed.length - 1]).toEqual([29_001n, NEXT - 11n]);
+    // up to the saved mark (the seed's block: the run that stopped saved the scan once it had read on past
+    // it) and no further
+    expect(resumed[resumed.length - 1]).toEqual([29_001n, NEXT - 1n]);
     expect(indexerDistrusted(storage, DI, clock)).toBe(false);
     // both halves are the browser's own from here on
     const saved = createScanStore(storage, DI).load(ME);

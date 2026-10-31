@@ -53,9 +53,15 @@ export interface VaultScan {
    * them matches. */
   accountSeededFrom?: bigint;
   accountSeededTo?: bigint;
-  /** How far the browser's own read of the seeded blocks has got (seed.ts, checkSeededHistory): blocks
-   * below it are as good as read by the scan itself. */
-  checkedTo?: bigint;
+  /** How far the browser's own read of each half's seeded blocks has got (seed.ts, checkSeededHistory):
+   * that half's blocks below it are as good as read by the scan itself. Each belongs to its half's events
+   * alone, and is saved inside that half, in the same write (scan-store.ts): another account's seed, or
+   * another tab's, can replace a half, never vouch for one it didn't check. */
+  sharedCheckedTo?: bigint;
+  accountCheckedTo?: bigint;
+  /** How many times the scan started over (restartScan): a reading of the seeded blocks begun before a
+   * start over keeps nothing of it, even when a later seed brings the very same marks. */
+  restarts?: number;
 }
 
 export interface Stake {
@@ -124,7 +130,9 @@ export function restartScan(scan: VaultScan): void {
   delete scan.sharedSeededTo;
   delete scan.accountSeededFrom;
   delete scan.accountSeededTo;
-  delete scan.checkedTo;
+  delete scan.sharedCheckedTo;
+  delete scan.accountCheckedTo;
+  scan.restarts = (scan.restarts ?? 0) + 1;
 }
 const restart = restartScan;
 
@@ -133,12 +141,35 @@ export const seededShared = (scan: VaultScan, block: bigint) => scan.sharedSeede
 export const seededAccount = (scan: VaultScan, block: bigint) => scan.accountSeededTo !== undefined && block >= (scan.accountSeededFrom ?? scan.from) && block < scan.accountSeededTo;
 
 /** Whether some block in [lo, hi] is in the deployment half's seeded range and not yet read by the
- * browser itself (checkedTo): an absence there isn't known, and what is there isn't confirmed. */
+ * browser itself (sharedCheckedTo): an absence there isn't known, and what is there isn't confirmed. */
 export function sharedUnverified(scan: VaultScan, lo: bigint, hi: bigint): boolean {
   if (scan.sharedSeededTo === undefined || lo > hi) return false;
   const from = scan.sharedSeededFrom ?? scan.from;
-  const start = (scan.checkedTo ?? from) > from ? scan.checkedTo! : from;
-  return hi >= start && lo < scan.sharedSeededTo;
+  const start = scan.sharedCheckedTo !== undefined && scan.sharedCheckedTo > from ? scan.sharedCheckedTo : from;
+  // the unread blocks are [start, sharedSeededTo): none once the check has reached the mark's end
+  return start < scan.sharedSeededTo && hi >= start && lo < scan.sharedSeededTo;
+}
+
+/** Whether batch `batchId`'s delivery, which the scan doesn't hold, could still be in seeded blocks the
+ * browser hasn't read (sharedUnverified): then its absence isn't known. Not when the batch is known to
+ * have closed on Base after the seed's last block (the batch before the open one closed when the open one
+ * started, `fd.openStart`): its delivery comes after that, so it can't be in the seeded blocks, and its
+ * absence is as normal as the browser's own read says. An older batch's close isn't known here, nor is
+ * the seed's last block's time when it can't be read: both count as possibly there. */
+export async function deliveryMayBeSeeded(
+  c: Pick<Clients, "bittensor">,
+  scan: VaultScan,
+  batchId: bigint,
+  fd: Pick<FrontDoorState, "openBatchId" | "openStart">,
+): Promise<boolean> {
+  if (!sharedUnverified(scan, scan.from, scan.next - 1n)) return false;
+  if (batchId !== fd.openBatchId - 1n || scan.sharedSeededTo === undefined) return true;
+  try {
+    const last = await blockTime(c, scan, scan.sharedSeededTo - 1n);
+    return fd.openStart * 1000 < last.getTime();
+  } catch {
+    return true;
+  }
 }
 
 /** How far past the chain's newest block saved progress may claim to be (an hour of 12-second blocks)
@@ -164,13 +195,16 @@ const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
  * unstaked), so a batch just delivered doesn't flip back to "on the bridge". */
 function forget(scan: VaultScan, from: bigint, to: bigint): void {
   const kept = (e: { block: bigint }) => e.block < from || e.block > to;
+  // the indexer's own, still unconfirmed, stay: they are read again over them (and confirmed by their
+  // logs), and a read that stops before then mustn't leave a gap the seed would be blamed for
+  const stays = (e: { block: bigint; unconfirmed?: true }) => kept(e) || (e.unconfirmed === true && seededShared(scan, e.block));
   for (const [id, e] of scan.delivered) if (!kept(e)) scan.delivered.set(id, { ...e, unconfirmed: true });
   for (const [key, chunks] of scan.payouts) {
-    const left = chunks.filter(kept);
+    const left = chunks.filter(stays);
     if (left.length > 0) scan.payouts.set(key, left);
     else scan.payouts.delete(key);
   }
-  scan.staked.splice(0, scan.staked.length, ...scan.staked.filter(kept));
+  scan.staked.splice(0, scan.staked.length, ...scan.staked.filter(stays));
   for (const list of [scan.deposited, scan.redeemed, scan.adjustments]) {
     for (let i = 0; i < list.length; i++) if (!kept(list[i])) list[i] = { ...list[i], unconfirmed: true };
   }
@@ -412,12 +446,19 @@ const STAKE_CHECK_WINDOWS = 3n;
 /** The first stake after `block`, as a trail may use it: as the browser's own scan read it, or, for one
  * the indexer seeded, once its receipt shows the vault's Staked at that very block and the chain's logs
  * between `block` and it show no earlier stake (read here, a few windows at most, or by the background
- * read). Undefined when there is none and the blocks after `block` were read by the browser; "unknown"
- * while that can't be told yet (a receipt that can't be read, blocks the browser hasn't read): the
- * trail says so, never a step. Throws HistoryMismatchError when the chain contradicts a seeded stake
- * (not at its block, not there, or not the first): the caller starts the scan over (live.ts),
- * distrusting the indexer when the seed supplied it. */
-export async function confirmedStakeAfter(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, block: bigint): Promise<Stake | undefined | "unknown"> {
+ * read; `read: false` leaves it to the background read, for rows that can wait for it). Undefined when
+ * there is none and the blocks after `block` were read by the browser; "unknown" while that can't be told
+ * yet (a receipt that can't be read, blocks the browser hasn't read): the trail says so, never a step.
+ * Throws HistoryMismatchError when the chain contradicts a seeded stake (not at its block, not there, or
+ * not the first): the caller starts the scan over (live.ts), distrusting the indexer when the seed
+ * supplied the stake, or left out the earlier one from its own blocks. */
+export async function confirmedStakeAfter(
+  c: Pick<Clients, "bittensor">,
+  d: Deployment,
+  scan: VaultScan,
+  block: bigint,
+  o: { read?: boolean } = {},
+): Promise<Stake | undefined | "unknown"> {
   const i = scan.staked.findIndex((x) => x.block > block);
   const s = i >= 0 ? scan.staked[i] : undefined;
   if (!s) return sharedUnverified(scan, block + 1n, scan.next - 1n) ? "unknown" : undefined;
@@ -432,13 +473,15 @@ export async function confirmedStakeAfter(c: Pick<Clients, "bittensor">, d: Depl
   const hi = s.block - 1n;
   const known = scan.staked[i].clearBefore;
   if (lo <= hi && sharedUnverified(scan, lo, hi) && !(known !== undefined && known <= lo)) {
-    if (hi - lo + 1n > STAKE_CHECK_WINDOWS * WINDOW) return "unknown";
+    if (o.read === false || hi - lo + 1n > STAKE_CHECK_WINDOWS * WINDOW) return "unknown";
     try {
       for (let a = lo; a <= hi; a += WINDOW) {
         const b = a + WINDOW - 1n < hi ? a + WINDOW - 1n : hi;
         const raw = await windowLogs(c, d, a, b);
-        const earlier = parseEventLogs({ abi: VAULT, logs: raw as never, eventName: "Staked", strict: false }).some((l) => same(l.address, d.vault));
-        if (earlier) throw new HistoryMismatchError(true);
+        const earlier = parseEventLogs({ abi: VAULT, logs: raw as never, eventName: "Staked", strict: false }).filter((l) => same(l.address, d.vault));
+        // the seed's omission only when the stake it left out sits in its own blocks; one in blocks the
+        // browser read itself is the browser's to read again, with no blame
+        if (earlier.length > 0) throw new HistoryMismatchError(earlier.some((l) => l.blockNumber !== null && seededShared(scan, BigInt(l.blockNumber))));
       }
     } catch (e) {
       if (e instanceof HistoryMismatchError) throw e;
@@ -577,7 +620,8 @@ async function bitReceipt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: 
   return r;
 }
 
-async function blockTime(c: Pick<Clients, "bittensor">, scan: VaultScan, block: bigint): Promise<Date> {
+/** When Bittensor made `block` (its timestamp), kept on the scan. */
+export async function blockTime(c: Pick<Clients, "bittensor">, scan: VaultScan, block: bigint): Promise<Date> {
   const cached = scan.blockTimes.get(block);
   if (cached) return cached;
   const b = await c.bittensor.getBlock({ blockNumber: block });
@@ -776,10 +820,17 @@ async function cancelInFlight(c: Pick<Clients, "base">, account: Address, hash: 
  * its block showing otherwise) is HistoryMismatchError: the saved history is wrong, the caller starts
  * the scan over. `unknown`: whether the batch arrived can't be told yet, so the trail says so rather than
  * a step: a saved entry whose receipt can't be read yet (a lagging node, or a block since replaced), or
- * no entry while the indexer's blocks the delivery could be in haven't been read by the browser. */
-async function deliveryOf(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchId: bigint | undefined): Promise<{ hit?: { key: Hex; txHash: Hex; block: bigint }; r: Receipt | null; unknown?: true }> {
+ * no entry while the indexer's blocks the delivery could be in haven't been read by the browser
+ * (deliveryMayBeSeeded). */
+async function deliveryOf(
+  c: Pick<Clients, "bittensor">,
+  d: Deployment,
+  scan: VaultScan,
+  batchId: bigint | undefined,
+  fd: Pick<FrontDoorState, "openBatchId" | "openStart">,
+): Promise<{ hit?: { key: Hex; txHash: Hex; block: bigint }; r: Receipt | null; unknown?: true }> {
   const saved = batchId !== undefined ? scan.delivered.get(String(batchId)) : undefined;
-  if (!saved) return batchId !== undefined && sharedUnverified(scan, scan.from, scan.next - 1n) ? { hit: undefined, r: null, unknown: true } : { hit: undefined, r: null };
+  if (!saved) return batchId !== undefined && (await deliveryMayBeSeeded(c, scan, batchId, fd)) ? { hit: undefined, r: null, unknown: true } : { hit: undefined, r: null };
   if (!saved.unconfirmed) {
     const r = await bitReceipt(c, scan, saved.txHash);
     return { hit: deliveryIn(r, d, String(batchId), saved.key) ? saved : undefined, r };
@@ -851,7 +902,7 @@ export async function depositFacts(
     ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
   };
   // taken back out of its batch: what the batch did after isn't this deposit's
-  const { hit, r, unknown } = !facts.cancelMined ? await deliveryOf(c, d, ctx.scan, batchId) : { hit: undefined, r: null };
+  const { hit, r, unknown } = !facts.cancelMined ? await deliveryOf(c, d, ctx.scan, batchId, ctx.fd) : { hit: undefined, r: null };
   if (unknown) facts.deliveryUnknown = true;
   if (hit) {
     const mine = accountEvents(r, d, hit.key, op.account);
@@ -903,10 +954,12 @@ export async function withdrawalFacts(
   };
   // taken back out of its batch: a Redeemed there is another request of the account's, not this one
   if (facts.cancelMined) return { batchId, facts };
-  const { hit, r, unknown } = await deliveryOf(c, d, ctx.scan, batchId);
+  const { hit, r, unknown } = await deliveryOf(c, d, ctx.scan, batchId, ctx.fd);
   if (unknown) facts.deliveryUnknown = true;
   /** This request's part of an amount paid on the account's entry in its batch. */
   let part = (amount: bigint) => amount;
+  /** The batch's payout chunks, once confirmed whole: what the payout's trace on Base starts from. */
+  let paidIn: PayoutChunk[] | undefined;
   if (hit) {
     const mine = accountEvents(r, d, hit.key, op.account);
     const redeemed = mine.find((l) => l.eventName === "Redeemed");
@@ -919,7 +972,8 @@ export async function withdrawalFacts(
 
     const chunks = redeemed ? await confirmedChunks(c, d, ctx.scan, hit.key, { entries: entriesIn(r, d, hit.key), since: hit.block }) : undefined;
     if (chunks === "unknown") facts.payoutUnknown = true;
-    const sent = chunks && chunks !== "unknown" ? chunkOf(chunks, entryIndex(r, d, hit.key, op.account)) : undefined;
+    if (chunks && chunks !== "unknown") paidIn = chunks;
+    const sent = paidIn ? chunkOf(paidIn, entryIndex(r, d, hit.key, op.account)) : undefined;
     if (redeemed && sent) {
       const pr = await bitReceipt(c, ctx.scan, sent.txHash);
       const at = await blockTime(c, ctx.scan, sent.block);
@@ -944,7 +998,7 @@ export async function withdrawalFacts(
   if (claim) facts.claimed = await claimResult(c, claim);
   if (claim && !facts.claimed && (claim.state === "running" || claim.state === "sent")) facts.claimPending = true;
   // v3: once the payout is back on Base, what took it, and how much of it was this payout's
-  if (isV3(d) && hit && facts.payout?.state === 2) await deliveryFacts(c, d, op, ctx, hit.key, facts, part);
+  if (isV3(d) && hit && facts.payout?.state === 2 && paidIn) await deliveryFacts(c, d, op, ctx, hit.key, paidIn, facts, part);
   return { batchId, facts };
 }
 
@@ -990,13 +1044,15 @@ async function deliveryFacts(
   op: WithdrawalOp,
   ctx: { fd: FrontDoorState; scan: VaultScan },
   key: Hex,
+  /** The batch's payout chunks as withdrawalFacts confirmed them (confirmedChunks, with the entries its
+   * delivery made: the whole list, never one still waiting on the seeded blocks' check). */
+  chunks: PayoutChunk[],
   facts: WithdrawalFacts,
   /** This request's part of the account's credit (see partOf). */
   part: (amount: bigint) => bigint,
 ): Promise<void> {
   // the batch's first chunk left Bittensor first: no part of the payout can land on Base before it
-  const chunks = await confirmedChunks(c, d, ctx.scan, key);
-  const first = chunks && chunks !== "unknown" ? chunks[0] : undefined;
+  const first = [...chunks].sort((a, b) => a.chunk - b.chunk)[0];
   if (!first) {
     facts.traceFailed = true;
     return;
@@ -1365,12 +1421,14 @@ async function searchBaseSince<T>(
 
 /** The account's deposits as the vault recorded them (its batch deposits, confirmed by their receipts;
  * never one the chain hasn't confirmed), with when they arrived and whether staking followed (a stake
- * after it the trail may use: confirmedStakeAfter; "unknown" while that can't be told). */
+ * after it the trail may use: confirmedStakeAfter; "unknown" while that can't be told). No log window is
+ * read here for one: while seeded blocks after it are unchecked, the background read settles it (a
+ * first seeded visit may list dozens). */
 export async function chainDeposits(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan) {
   const out: { key: Hex; txHash: Hex; at: Date; assets: bigint; staked: boolean | "unknown" }[] = [];
   for (const e of scan.deposited) {
     if (e.unconfirmed || e.kind !== undefined) continue;
-    const staked = await confirmedStakeAfter(c, d, scan, e.block);
+    const staked = await confirmedStakeAfter(c, d, scan, e.block, { read: false });
     out.push({ key: e.key, txHash: e.txHash, assets: e.assets, at: await blockTime(c, scan, e.block), staked: staked === "unknown" ? "unknown" : staked !== undefined });
   }
   return out;

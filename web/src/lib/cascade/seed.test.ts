@@ -5,7 +5,7 @@ import type { Deployment } from "./config";
 import { HistoryMismatchError, newScan, REREAD } from "./facts";
 import { StaleChainError } from "./fresh";
 import { scanState, seedHalves } from "./scan-store";
-import { checkSeededHistory, MAX_SEED_ACCOUNT_EVENTS_EXTRA, SEED_MAX_LAG, SEED_SAMPLE, vaultEvents, verifySeed } from "./seed";
+import { type CheckMemo, checkSeededHistory, MAX_SEED_ACCOUNT_EVENTS_EXTRA, MAX_SEED_CHUNKS_PER_KEY, MAX_SEED_EVENTS, SEED_MAX_LAG, SEED_SAMPLE, vaultEvents, verifySeed } from "./seed";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -298,10 +298,30 @@ describe("verifySeed", () => {
     expect(padded).toEqual({ ok: false, distrust: true, reason: "its account half holds more events than its deliveries allow" });
     expect(n.asked).toEqual([]);
     expect(n.windows).toEqual([]);
-    const manyChunks = { ...h.shared, payouts: Array.from({ length: 65 }, (_, i) => ({ key: H(2), chunk: i, taken: 1, txHash: H(20_000 + i), block: String(5_300 + i) })) };
-    expect(await verify(node(), { shared: manyChunks, own: h.own })).toMatchObject({ ok: false, distrust: true });
-    // the allowance: two account events per delivery, plus a few direct ones
+    // a batch's payout list holds at most 100 bounced deposits and 100 redeems, each chunk taking one or more
+    const chunks = (k: number) => ({ ...h.shared, payouts: Array.from({ length: k }, (_, i) => ({ key: H(2), chunk: i, taken: 1, txHash: H(20_000 + i), block: String(5_300 + i) })) });
+    expect(MAX_SEED_CHUNKS_PER_KEY).toBe(200);
+    expect(await verify(node(), { shared: chunks(201), own: h.own })).toMatchObject({ ok: false, distrust: true, reason: "it holds more payout chunks for one batch than a batch can have" });
+    expect(await verify(node(), { shared: chunks(200), own: h.own })).not.toMatchObject({ reason: "it holds more payout chunks for one batch than a batch can have" });
+    // the allowance for events of the account's beyond its batches'
     expect(MAX_SEED_ACCOUNT_EVENTS_EXTRA).toBeLessThanOrEqual(100);
+  });
+
+  it("distrusts only a shape no chain can have: an honest history merely too big to check here is read from the chain, with no blame", async () => {
+    const h = honest();
+    // two of one batch's deposits for one account (the front door keeps one entry per account a batch)
+    const twice = { shared: h.shared, own: { ...h.own, deposited: [...h.own.deposited, { ...h.own.deposited[0], txHash: H(4_242) }] } };
+    expect(await verify(node(), twice)).toMatchObject({ ok: false, distrust: true });
+    // more direct deposits than are checked here: honest accounts can have them
+    const direct = Array.from({ length: MAX_SEED_ACCOUNT_EVENTS_EXTRA + 1 }, (_, i) => ({ key: H(0), txHash: H(30_000 + i), block: String(2_000 + i), assets: "1", kind: "direct" }));
+    const n = node();
+    expect(await verify(n, { shared: h.shared, own: { ...h.own, deposited: [...h.own.deposited, ...direct] } })).toMatchObject({ ok: false, distrust: false });
+    expect(n.asked).toEqual([]);
+    // years of an honest deployment past what is checked here
+    const many = Array.from({ length: MAX_SEED_EVENTS + 1 }, (_, i) => ({ block: String(1_000 + (i % 18_000)), txHash: H(40_000 + i) }));
+    const big = node();
+    expect(await verify(big, { shared: { ...h.shared, staked: many }, own: h.own })).toMatchObject({ ok: false, distrust: false });
+    expect(big.asked).toEqual([]);
   });
 
   it("asks nothing of the chain for halves that already fail on their own", async () => {
@@ -324,25 +344,27 @@ describe("checkSeededHistory", () => {
   it("reads every vault log of the seeded blocks, in windows of at most 1,000 blocks from the seed's first block to its mark, a few per step, resuming", async () => {
     const n = node();
     const scan = seeded();
-    const progress: { next?: bigint } = {};
-    expect(await checkSeededHistory(n.clients, D, scan, ME, progress, 3)).toBe("more");
+    expect(await checkSeededHistory(n.clients, D, scan, ME, 3)).toBe("more");
     expect(n.windows).toEqual([
       [1_000n, 1_999n],
       [2_000n, 2_999n],
       [3_000n, 3_999n],
     ]);
-    expect(progress.next).toBe(4_000n);
-    expect(scan.checkedTo).toBe(4_000n);
+    // each half's progress, on the scan, saved with that half
+    expect(scan.sharedCheckedTo).toBe(4_000n);
+    expect(scan.accountCheckedTo).toBe(4_000n);
     // the whole vault's logs, not one account's topic: the deployment's half is checked too
     expect(n.topics).toEqual([]);
     // the rest, in later steps, up to the mark and no further
     let r: "more" | "done" | "stopped" = "more";
-    for (let i = 0; i < 20 && r === "more"; i++) r = await checkSeededHistory(n.clients, D, scan, ME, progress, 3);
+    for (let i = 0; i < 20 && r === "more"; i++) r = await checkSeededHistory(n.clients, D, scan, ME, 3);
     expect(r).toBe("done");
     expect(n.windows[n.windows.length - 1]).toEqual([19_000n, NEXT - 1n]);
     expect(n.windows).toHaveLength(19);
+    // both halves read to their end: the browser's own, marks and progress gone
+    expect([scan.sharedSeededTo, scan.accountSeededTo, scan.sharedCheckedTo, scan.accountCheckedTo]).toEqual([undefined, undefined, undefined, undefined]);
     // done again at once, without reading
-    expect(await checkSeededHistory(n.clients, D, scan, ME, progress, 3)).toBe("done");
+    expect(await checkSeededHistory(n.clients, D, scan, ME, 3)).toBe("done");
     expect(n.windows).toHaveLength(19);
   });
 
@@ -351,11 +373,11 @@ describe("checkSeededHistory", () => {
     const scan = seeded();
     delete scan.accountSeededFrom;
     delete scan.accountSeededTo;
-    expect(await checkSeededHistory(n.clients, D, scan, ME, {}, 1)).toBe("more");
+    expect(await checkSeededHistory(n.clients, D, scan, ME, 1)).toBe("more");
     expect(n.windows).toHaveLength(1);
     delete scan.sharedSeededFrom;
     delete scan.sharedSeededTo;
-    expect(await checkSeededHistory(n.clients, D, scan, ME, {}, 3)).toBe("done");
+    expect(await checkSeededHistory(n.clients, D, scan, ME, 3)).toBe("done");
     expect(n.windows).toHaveLength(1);
   });
 
@@ -363,15 +385,14 @@ describe("checkSeededHistory", () => {
     const n = node();
     const scan = seeded();
     expect(scan.staked[0].unconfirmed).toBe(true);
-    const progress: { next?: bigint } = {};
-    await checkSeededHistory(n.clients, D, scan, ME, progress, 2);
+    await checkSeededHistory(n.clients, D, scan, ME, 2);
     expect(scan.staked[0]).toEqual({ block: 1_600n, txHash: H(102), clearBefore: 1_000n });
     expect(scan.delivered.get("1")?.unconfirmed).toBeUndefined();
-    expect(scan.checkedTo).toBe(3_000n);
+    expect(scan.sharedCheckedTo).toBe(3_000n);
     // amounts are confirmed by receipt, not by a matching window: a seeded deposit stays unconfirmed
     const fresh = newScan(D);
     seedHalves(fresh, honest().shared, honest().own);
-    await checkSeededHistory(n.clients, D, fresh, ME, {}, 2);
+    await checkSeededHistory(n.clients, D, fresh, ME, 2);
     expect(fresh.deposited.find((e) => e.block === 1_500n)?.unconfirmed).toBe(true);
   });
 
@@ -384,9 +405,8 @@ describe("checkSeededHistory", () => {
     ];
     for (const [what, shared] of cases) {
       const scan = seeded({ shared, own: h.own });
-      const progress: { next?: bigint } = {};
       let err: unknown;
-      for (let i = 0; i < 20 && err === undefined; i++) err = await checkSeededHistory(node().clients, D, scan, ME, progress, 1).then(() => undefined, (e: unknown) => e);
+      for (let i = 0; i < 20 && err === undefined; i++) err = await checkSeededHistory(node().clients, D, scan, ME, 1).then(() => undefined, (e: unknown) => e);
       expect(err, what).toBeInstanceOf(HistoryMismatchError);
       expect((err as HistoryMismatchError).seeded, what).toBe(true);
     }
@@ -396,8 +416,7 @@ describe("checkSeededHistory", () => {
     const h = honest();
     const omitted = { shared: h.shared, own: { ...h.own, deposited: h.own.deposited.filter((e) => e.block !== "1500"), redeemed: [] } };
     const scan = seeded(omitted);
-    const progress: { next?: bigint } = {};
-    const err = await checkSeededHistory(node().clients, D, scan, ME, progress, 1).catch((e: unknown) => e);
+    const err = await checkSeededHistory(node().clients, D, scan, ME, 1).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HistoryMismatchError);
     expect((err as HistoryMismatchError).seeded).toBe(true);
     expect((err as HistoryMismatchError).restarted).toBe(false);
@@ -406,9 +425,9 @@ describe("checkSeededHistory", () => {
   it("catches an event of the account's the seed invented, and a wrong transaction for a real one", async () => {
     const h = honest();
     const invented = { shared: h.shared, own: { ...h.own, redeemed: [...h.own.redeemed, { key: H(1), txHash: H(555), block: "1700", assets: "1" }] } };
-    await expect(checkSeededHistory(node().clients, D, seeded(invented), ME, {}, 1)).rejects.toBeInstanceOf(HistoryMismatchError);
+    await expect(checkSeededHistory(node().clients, D, seeded(invented), ME, 1)).rejects.toBeInstanceOf(HistoryMismatchError);
     const wrongTx = { shared: h.shared, own: { ...h.own, deposited: h.own.deposited.map((e) => (e.block === "1500" ? { ...e, txHash: H(102) } : e)) } };
-    await expect(checkSeededHistory(node().clients, D, seeded(wrongTx), ME, {}, 1)).rejects.toBeInstanceOf(HistoryMismatchError);
+    await expect(checkSeededHistory(node().clients, D, seeded(wrongTx), ME, 1)).rejects.toBeInstanceOf(HistoryMismatchError);
   });
 
   it("catches a delivery the seed left out of a batch the account took part in, bounced deposits included; not one the browser's own read is still catching up on", async () => {
@@ -417,23 +436,25 @@ describe("checkSeededHistory", () => {
     const chainWithBounce = [...CHAIN, deliveredLog(7n, H(7), 7_000n, H(177)), bounced];
     // the seed has neither the delivery nor (it carries no bounces) the bounce: the delivery's absence gives it away
     const scan = seeded(h);
-    const progress = { next: 7_000n };
-    const err = await checkSeededHistory(node({ logs: chainWithBounce }).clients, D, scan, ME, progress, 1).catch((e: unknown) => e);
+    scan.sharedCheckedTo = scan.accountCheckedTo = 7_000n;
+    const err = await checkSeededHistory(node({ logs: chainWithBounce }).clients, D, scan, ME, 1).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HistoryMismatchError);
     expect((err as HistoryMismatchError).seeded).toBe(true);
     // the same with the deployment's half read by the browser itself: a trail may lag, the seed isn't blamed
     const own = seeded(h);
     delete own.sharedSeededTo;
-    expect(await checkSeededHistory(node({ logs: chainWithBounce }).clients, D, own, ME, { next: 7_000n }, 1)).toBe("more");
+    own.accountCheckedTo = 7_000n;
+    expect(await checkSeededHistory(node({ logs: chainWithBounce }).clients, D, own, ME, 1)).toBe("more");
   });
 
   it("stops at a window a server hasn't reached, keeping the progress made, to go on later", async () => {
     const n = node({ heads: [5_000n, 5_000n, 5_000n, 5_000n, 5_000n, 5_000n, 5_000n, 5_000n] });
     const scan = seeded();
-    const progress: { next?: bigint } = { next: 4_000n };
-    await expect(checkSeededHistory(n.clients, D, scan, ME, progress, 3)).rejects.toBeInstanceOf(StaleChainError);
+    scan.sharedCheckedTo = scan.accountCheckedTo = 4_000n;
+    await expect(checkSeededHistory(n.clients, D, scan, ME, 3)).rejects.toBeInstanceOf(StaleChainError);
     // the first window (to 4,999) was within reach; the second (to 5,999) wasn't
-    expect(progress.next).toBe(5_000n);
+    expect(scan.sharedCheckedTo).toBe(5_000n);
+    expect(scan.accountCheckedTo).toBe(5_000n);
   });
 
   it("passes an honest seed whose account has bounced and skipped entries too, as long as their deliveries are there", async () => {
@@ -442,15 +463,77 @@ describe("checkSeededHistory", () => {
     const withBatch7 = { ...h, shared: { ...h.shared, delivered: [...h.shared.delivered, { batchId: "7", key: H(7), txHash: H(177), block: "7000" }] } };
     const scan = seeded(withBatch7);
     let r: "more" | "done" | "stopped" = "more";
-    const progress: { next?: bigint } = {};
-    for (let i = 0; i < 30 && r === "more"; i++) r = await checkSeededHistory(node({ logs: chain }).clients, D, scan, ME, progress, 5);
+    for (let i = 0; i < 30 && r === "more"; i++) r = await checkSeededHistory(node({ logs: chain }).clients, D, scan, ME, 5);
     expect(r).toBe("done");
+  });
+
+  it("reads each half on from its own progress: a window below one half's progress judges only the other half there", async () => {
+    // the deployment half was checked to 9,000 (an earlier visit); the account half not at all
+    const h = honest();
+    const lacking = { shared: { ...h.shared, staked: h.shared.staked.filter((x) => x.block !== "1600") }, own: { ...h.own, deposited: h.own.deposited.filter((e) => e.block !== "1500") } };
+    // a stake left out below the deployment half's progress isn't judged again; a deposit left out of the
+    // account half, unchecked there, is caught
+    const scan = seeded(lacking);
+    scan.sharedCheckedTo = 9_000n;
+    const err = await checkSeededHistory(node().clients, D, scan, ME, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HistoryMismatchError);
+    const sharedOnly = seeded({ shared: lacking.shared, own: h.own });
+    sharedOnly.sharedCheckedTo = 9_000n;
+    expect(await checkSeededHistory(node().clients, D, sharedOnly, ME, 1)).toBe("more");
+    expect(sharedOnly.sharedCheckedTo).toBe(9_000n);
+    expect(sharedOnly.accountCheckedTo).toBe(2_000n);
+  });
+
+  it("clears a half's mark once it is read to its end, while the other half's goes on", async () => {
+    const scan = seeded();
+    // the deployment half read to its last block in an earlier step
+    scan.sharedCheckedTo = NEXT;
+    expect(await checkSeededHistory(node().clients, D, scan, ME, 1)).toBe("more");
+    expect(scan.sharedSeededTo).toBeUndefined();
+    expect(scan.sharedCheckedTo).toBeUndefined();
+    expect(scan.accountSeededTo).toBe(NEXT);
+    expect(scan.accountCheckedTo).toBe(2_000n);
+  });
+
+  it("confirms nothing outside the blocks each half judged: a window read for the account half leaves the deployment half's entries as they were", async () => {
+    const scan = seeded();
+    // the deployment half's own progress is past this window: its entries here aren't compared again
+    scan.sharedCheckedTo = 3_000n;
+    await checkSeededHistory(node().clients, D, scan, ME, 1);
+    expect(scan.delivered.get("1")?.unconfirmed).toBe(true);
+    expect(scan.staked.find((x) => x.block === 1_600n)?.unconfirmed).toBe(true);
+    // a saved delivery past the deployment half's mark, inside a window judged for the account half only
+    const past = seeded();
+    past.sharedSeededTo = 5_000n;
+    past.accountCheckedTo = 9_000n;
+    past.sharedCheckedTo = 4_000n;
+    past.delivered.set("8", { key: H(8), txHash: H(188), block: 4_500n, unconfirmed: true });
+    const chain = [...CHAIN, deliveredLog(8n, H(8), 4_500n, H(188))];
+    await checkSeededHistory(node({ logs: chain }).clients, D, past, ME, 1);
+    // compared (it is in the deployment half's window 4,000–4,999): confirmed; nothing past 4,999 was
+    expect(past.delivered.get("8")?.unconfirmed).toBeUndefined();
+    expect(past.delivered.get("3")?.unconfirmed).toBe(true);
+  });
+
+  it("indexes the deployment half's events once, keeping the index while they stay the same, and building it again when they change", async () => {
+    const n = node();
+    const scan = seeded();
+    const memo: CheckMemo = {};
+    await checkSeededHistory(n.clients, D, scan, ME, 1, memo);
+    const first = memo.shared;
+    expect(first?.events.length).toBe(scan.delivered.size + scan.staked.length + [...scan.payouts.values()].flat().length);
+    await checkSeededHistory(n.clients, D, scan, ME, 3, memo);
+    expect(memo.shared).toBe(first);
+    // the scan read on and found a stake: the index follows
+    scan.staked.push({ block: NEXT + 5n, txHash: H(999) });
+    await checkSeededHistory(n.clients, D, scan, ME, 1, memo);
+    expect(memo.shared).not.toBe(first);
   });
 
   it("stops, judging nothing and moving no progress, when the scan's mark changed under a window read: it started over, or was seeded again", async () => {
     const n = node();
     const scan = seeded();
-    const progress: { next?: bigint } = { next: 3_000n };
+    scan.sharedCheckedTo = scan.accountCheckedTo = 3_000n;
     // the scan starts over (a trail caught something) while the first window is being read
     const real = (n.clients as { bittensor: { request: (q: unknown) => Promise<unknown> } }).bittensor.request;
     (n.clients as { bittensor: { request: (q: unknown) => Promise<unknown> } }).bittensor.request = async (q) => {
@@ -458,8 +541,8 @@ describe("checkSeededHistory", () => {
       delete scan.accountSeededTo;
       return r;
     };
-    expect(await checkSeededHistory(n.clients, D, scan, ME, progress, 3)).toBe("stopped");
-    expect(progress.next).toBe(3_000n);
+    expect(await checkSeededHistory(n.clients, D, scan, ME, 3)).toBe("stopped");
+    expect(scan.sharedCheckedTo).toBe(3_000n);
     expect(n.windows).toHaveLength(1);
   });
 });

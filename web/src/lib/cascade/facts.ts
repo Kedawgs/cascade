@@ -26,7 +26,9 @@ export interface VaultScan {
   /** BatchDelivered from our front door, by batch id. `unconfirmed` when it came from storage or a seed:
    * what can be unstaked relies on it only once its receipt confirms it (confirmDelivery). */
   delivered: Map<string, { key: Hex; txHash: Hex; block: bigint; unconfirmed?: true }>;
-  staked: { block: bigint; txHash: Hex }[];
+  /** Staked events. `unconfirmed` when from storage or a seed: a trail uses one only once its receipt
+   * shows it (confirmedStakeAfter). */
+  staked: Stake[];
   /** PayoutChunkSent by batch key: each chunk's number and how many of the batch's payout entries it took. */
   payouts: Map<Hex, PayoutChunk[]>;
   /** The account's own Deposited events (to show deposits made from another browser). */
@@ -37,6 +39,19 @@ export interface VaultScan {
   blockTimes: Map<bigint, Date>;
   /** v3: each payout's life on Base after it left the vault, by batch key (lowercase). */
   onBase: Map<string, BasePayout>;
+  /** The deployment's events below this block came from the history indexer's seed, not this browser's
+   * own read of the chain (seed.ts, scan-store.ts): a contradiction found on one of them is the
+   * indexer's, and the indexer is then distrusted. Cleared only when the scan starts over. */
+  sharedSeededTo?: bigint;
+  /** The account's events below this block came from the indexer's seed: "rewards earned" stays
+   * provisional until the browser's own read of them (seed.ts, checkSeededAccount) matches, which clears it. */
+  accountSeededTo?: bigint;
+}
+
+export interface Stake {
+  block: bigint;
+  txHash: Hex;
+  unconfirmed?: true;
 }
 
 export interface PayoutChunk {
@@ -44,16 +59,20 @@ export interface PayoutChunk {
   block: bigint;
   chunk: number;
   taken: number;
+  /** From storage or a seed: used only once its receipt shows it (confirmedChunks). */
+  unconfirmed?: true;
 }
 
 /** One of the account's Deposited or Redeemed events. `unconfirmed` when it came from the browser's
  * storage (or a seed) rather than this session's reading of the chain: its amount isn't used until its
- * receipt confirms it (confirmAccountEvents). */
+ * receipt confirms it (confirmAccountEvents). `shares` is known once the event was read from the chain
+ * or its receipt (a saved form carries only `assets`). */
 export interface AccountEvent {
   key: Hex;
   txHash: Hex;
   block: bigint;
   assets: bigint;
+  shares?: bigint;
   unconfirmed?: true;
 }
 
@@ -71,15 +90,19 @@ export const newScan = (d: Deployment): VaultScan => ({
   onBase: new Map(),
 });
 
-/** Forgets every event read, to read again from the deploy block. */
-function restart(scan: VaultScan): void {
+/** Forgets every event read, to read again from the deploy block; what the indexer seeded goes with
+ * them, so nothing read from here on is taken for the indexer's. */
+export function restartScan(scan: VaultScan): void {
   scan.next = scan.from;
   scan.delivered.clear();
   scan.staked.length = 0;
   scan.payouts.clear();
   scan.deposited.length = 0;
   scan.redeemed.length = 0;
+  delete scan.sharedSeededTo;
+  delete scan.accountSeededTo;
 }
+const restart = restartScan;
 
 /** How far past the chain's newest block saved progress may claim to be (an hour of 12-second blocks)
  * before it is taken for a corrupt entry rather than a node a little behind. */

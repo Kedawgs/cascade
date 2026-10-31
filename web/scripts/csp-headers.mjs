@@ -112,7 +112,9 @@ function htmlFiles(dir) {
 }
 
 /** Writes `out`'s _headers from the pages exported there, with the indexer's origin in connect-src when
- * `env` names one (NEXT_PUBLIC_CASCADE_INDEXER_URL, the value the site was built with). */
+ * `env` names one (NEXT_PUBLIC_CASCADE_INDEXER_URL, the value the site was built with).
+ * @param {string} out
+ * @param {Record<string, string | undefined>} [env] */
 export function build(out, env = process.env) {
   const headersPath = join(out, "_headers");
   const files = htmlFiles(out).map((file) => ({ route: routeOf(relative(out, file).split(sep).join("/")), html: readFileSync(file, "utf8") }));

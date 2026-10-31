@@ -59,7 +59,8 @@ describe("fetchSeed", () => {
 
   it("asks nothing, and is null, without an indexer URL", async () => {
     const f = fakeFetch({ [SHARED_URL]: ok(shared), [OWN_URL]: ok(account) });
-    const { indexerUrl: _, ...none } = D;
+    const none: Deployment = { ...D };
+    delete none.indexerUrl;
     expect(await fetchSeed(none, ME, { fetch: f.fetch })).toBeNull();
     expect(f.asked).toEqual([]);
   });

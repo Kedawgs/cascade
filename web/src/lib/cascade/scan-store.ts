@@ -4,10 +4,10 @@ import { type AccountEvent, newScan, type PayoutChunk, SETTLE, type VaultScan } 
 import type { StringStorage } from "./oplog";
 
 /** The saved form of a vault scan: how far it read and the events it found, bigints as decimal strings.
- * The same shape can seed a scan from a starting point published elsewhere (seedScan): the global
- * events (deliveries from our front door, stakes, payout chunks) and one account's own Deposited and
- * Redeemed. Bump the version whenever the shape or meaning changes: an entry of another version is
- * discarded, never read. */
+ * The same shape seeds a scan from the history indexer (seedHalves; indexer/src/seed.ts builds it): the
+ * global events (deliveries from our front door, stakes, payout chunks) in one half and one account's
+ * own Deposited and Redeemed in the other. Bump the version whenever the shape or meaning changes: an
+ * entry of another version is discarded, never read. */
 export const SCAN_VERSION = 1;
 
 export interface ScanState {
@@ -22,6 +22,10 @@ export interface ScanState {
   payouts: { key: Hex; chunk: number; taken: number; txHash: Hex; block: string }[];
   deposited: { key: Hex; txHash: Hex; block: string; assets: string }[];
   redeemed: { key: Hex; txHash: Hex; block: string; assets: string }[];
+  /** Saved halves only: the events below this block came from the indexer's seed, not this browser's own
+   * read of the chain (in [from, next]). Absent on a half the browser read itself, and on older saves. A
+   * contradiction found later on an event below it is the indexer's (facts.ts, HistoryMismatchError). */
+  seededTo?: string;
 }
 
 /** A scan's settled events in their saved form: its progress is saved SETTLE blocks short of where it
@@ -51,12 +55,15 @@ const isDecimal = (x: unknown): x is string => typeof x === "string" && /^(0|[1-
 const isUint32 = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 0xffff_ffff;
 
 /** `x` as a valid state for the scan's vault and deploy block, decoded; null if anything about it is
- * off (another version or deployment, a malformed field, an event outside [from, next)), so a corrupt
- * entry or seed is dropped whole rather than half-trusted. */
-function decode(x: unknown, scan: Pick<VaultScan, "vault" | "from">) {
+ * off (another version or deployment, a malformed field, an event outside [from, next), a seeded mark
+ * outside [from, next]), so a corrupt entry or seed is dropped whole rather than half-trusted. Every
+ * event comes out `unconfirmed`: a delivery, stake or chunk is used only once its receipt shows it, an
+ * amount only once its receipt confirms it (facts.ts). */
+export function decodeScanState(x: unknown, scan: Pick<VaultScan, "vault" | "from">) {
   if (!isRecord(x) || x.v !== SCAN_VERSION || x.vault !== scan.vault.toLowerCase() || x.from !== String(scan.from) || !isDecimal(x.next)) return null;
   const next = BigInt(x.next);
   if (next < scan.from) return null;
+  if (x.seededTo !== undefined && !(isDecimal(x.seededTo) && BigInt(x.seededTo) >= scan.from && BigInt(x.seededTo) <= next)) return null;
   const lists = ["delivered", "staked", "payouts", "deposited", "redeemed"] as const;
   if (!lists.every((k) => Array.isArray(x[k]) && (x[k] as unknown[]).every(isRecord))) return null;
   const list = (k: (typeof lists)[number]) => x[k] as Record<string, unknown>[];
@@ -71,29 +78,55 @@ function decode(x: unknown, scan: Pick<VaultScan, "vault" | "from">) {
   const account = (e: Record<string, unknown>): AccountEvent => ({ key: e.key as Hex, txHash: e.txHash as Hex, block: block(e), assets: BigInt(e.assets as string), unconfirmed: true });
   return {
     next,
+    ...(x.seededTo !== undefined ? { seededTo: BigInt(x.seededTo as string) } : {}),
     delivered: list("delivered").map((e) => ({ batchId: e.batchId as string, key: e.key as Hex, txHash: e.txHash as Hex, block: block(e), unconfirmed: true as const })),
-    staked: list("staked").map((e) => ({ block: block(e), txHash: e.txHash as Hex })),
-    payouts: list("payouts").map((e) => ({ key: e.key as Hex, chunk: e.chunk as number, taken: e.taken as number, txHash: e.txHash as Hex, block: block(e) })),
+    staked: list("staked").map((e) => ({ block: block(e), txHash: e.txHash as Hex, unconfirmed: true as const })),
+    payouts: list("payouts").map((e) => ({ key: e.key as Hex, chunk: e.chunk as number, taken: e.taken as number, txHash: e.txHash as Hex, block: block(e), unconfirmed: true as const })),
     deposited: list("deposited").map(account),
     redeemed: list("redeemed").map(account),
   };
 }
 
-type Decoded = NonNullable<ReturnType<typeof decode>>;
+export type DecodedScanState = NonNullable<ReturnType<typeof decodeScanState>>;
 
 const byBlock = <T extends { block: bigint }>(xs: T[]) => [...xs].sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0));
 
-/** Carries `scan` forward with a saved or published state that reaches further than it has read: the
- * state's events from where the scan stopped up to the state's `next` are added, and the scan resumes
- * from there. The account's Deposited and Redeemed, and the deliveries, come in unconfirmed (they wait
- * for their receipts before an amount is summed or a delivery relied on). A state that isn't valid for this scan's deployment, or doesn't reach past it, changes
- * nothing. True when the scan moved forward. */
-export function seedScan(scan: VaultScan, seed: unknown): boolean {
-  const s = decode(seed, scan);
-  return s !== null && merge(scan, s);
+const min = (a: bigint, b: bigint) => (a < b ? a : b);
+
+/** Carries `scan` forward with the two decoded halves of a saved or seeded state (the deployment's events
+ * in `shared`, the account's in `own`), merged at the earlier of their two blocks: the events from where
+ * the scan stopped up to there are added, and the scan resumes from there. A half marked as the indexer's
+ * (`seededTo`) marks the scan so, as far as the merge reached. Halves that don't reach past the scan
+ * change nothing. True when the scan moved forward. The one path for saved and seeded history alike. */
+export function mergeHalves(scan: VaultScan, shared: DecodedScanState, own: DecodedScanState): boolean {
+  const next = min(shared.next, own.next);
+  const below = <T extends { block: bigint }>(xs: T[]) => xs.filter((e) => e.block < next);
+  const moved = merge(scan, {
+    next,
+    delivered: below(shared.delivered),
+    staked: below(shared.staked),
+    payouts: below(shared.payouts),
+    deposited: below(own.deposited),
+    redeemed: below(own.redeemed),
+  });
+  if (moved) {
+    if (shared.seededTo !== undefined) scan.sharedSeededTo = min(shared.seededTo, next);
+    if (own.seededTo !== undefined) scan.accountSeededTo = min(own.seededTo, next);
+  }
+  return moved;
 }
 
-function merge(scan: VaultScan, s: Decoded): boolean {
+/** Seeds `scan` from the indexer's two halves (fetchSeed), through the same merge a load uses, with
+ * every event unconfirmed and both halves marked as the indexer's up to where the merge reached. Halves
+ * that aren't both valid for this scan's deployment, or don't reach past it, change nothing. True when
+ * the scan moved forward. seed.ts verifies the halves against the chain before calling this. */
+export function seedHalves(scan: VaultScan, shared: unknown, own: unknown): boolean {
+  const [s, o] = [decodeScanState(shared, scan), decodeScanState(own, scan)];
+  if (!s || !o) return false;
+  return mergeHalves(scan, { ...s, seededTo: s.next }, { ...o, seededTo: o.next });
+}
+
+function merge(scan: VaultScan, s: Omit<DecodedScanState, "seededTo">): boolean {
   if (s.next <= scan.next) return false;
   // what the scan already read stays as it read it
   const unread = <T extends { block: bigint }>(xs: T[]) => byBlock(xs.filter((e) => e.block >= scan.next));
@@ -149,18 +182,8 @@ export function createScanStore(storage: StringStorage, d: Deployment) {
     load(account: Address): VaultScan {
       const scan = newScan(d);
       try {
-        const [shared, own] = [decode(read(deployment), scan), decode(read(key(account)), scan)];
-        if (!shared || !own) return scan;
-        const next = shared.next < own.next ? shared.next : own.next;
-        const below = <T extends { block: bigint }>(xs: T[]) => xs.filter((e) => e.block < next);
-        merge(scan, {
-          next,
-          delivered: below(shared.delivered),
-          staked: below(shared.staked),
-          payouts: below(shared.payouts),
-          deposited: below(own.deposited),
-          redeemed: below(own.redeemed),
-        });
+        const [shared, own] = [decodeScanState(read(deployment), scan), decodeScanState(read(key(account)), scan)];
+        if (shared && own) mergeHalves(scan, shared, own);
       } catch {
         // storage blocked, or not JSON: start from the deploy block
       }
@@ -169,9 +192,11 @@ export function createScanStore(storage: StringStorage, d: Deployment) {
     save(account: Address, scan: VaultScan): void {
       if (crowded.has(storage)) return;
       const state = scanState(scan);
+      // each half keeps its own mark, no further than the save reaches
+      const seeded = (to: bigint | undefined) => (to !== undefined ? { seededTo: String(min(to, BigInt(state.next))) } : {});
       try {
-        write(deployment, { ...state, deposited: [], redeemed: [] });
-        write(key(account), { ...state, delivered: [], staked: [], payouts: [] });
+        write(deployment, { ...state, deposited: [], redeemed: [], ...seeded(scan.sharedSeededTo) });
+        write(key(account), { ...state, delivered: [], staked: [], payouts: [], ...seeded(scan.accountSeededTo) });
       } catch {
         // storage full or blocked: this visit keeps its scan in memory
       }

@@ -1,8 +1,8 @@
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
-import { newScan, type VaultScan } from "./facts";
-import { createScanStore, dropSavedScans, SCAN_VERSION, scanState, seedScan } from "./scan-store";
+import { newScan, restartScan, type VaultScan } from "./facts";
+import { createScanStore, dropSavedScans, SCAN_VERSION, scanState, seedHalves } from "./scan-store";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -46,8 +46,9 @@ describe("scan store", () => {
     const back = createScanStore(storage, D).load(ME);
     expect(back.next).toBe(4_990n);
     expect(back.delivered.get("3")).toEqual({ key: H(77), txHash: H(9), block: 1_500n, unconfirmed: true });
-    expect(back.staked).toEqual([{ block: 1_600n, txHash: H(10) }]);
-    expect(back.payouts.get(H(77))).toEqual(scanned().payouts.get(H(77)));
+    // stakes and chunks from storage wait for their receipts too (facts.ts, confirmedStakeAfter and confirmedChunks)
+    expect(back.staked).toEqual([{ block: 1_600n, txHash: H(10), unconfirmed: true }]);
+    expect(back.payouts.get(H(77))).toEqual(scanned().payouts.get(H(77))!.map((p) => ({ ...p, unconfirmed: true })));
     expect(back.deposited).toEqual([{ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true }]);
     expect(back.redeemed).toEqual([{ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n, unconfirmed: true }]);
   });
@@ -195,58 +196,174 @@ describe("scan store", () => {
   });
 });
 
-describe("seedScan", () => {
-  it("adds a starting point's events past where the scan stopped, and resumes from its block", () => {
+describe("seedHalves", () => {
+  /** The indexer's two halves of `scanned()`: the deployment's events in one, the account's in the other. */
+  const halves = (s = scanned()) => {
+    const state = scanState(s);
+    return { shared: { ...state, deposited: [], redeemed: [] }, own: { ...state, delivered: [], staked: [], payouts: [] } };
+  };
+
+  it("adds the halves' events past where the scan stopped, every one unconfirmed, and resumes from their block, marking both halves as the indexer's up to there", () => {
     const scan = newScan(D);
     scan.next = 1_550n;
     scan.delivered.set("3", { key: H(77), txHash: H(9), block: 1_500n });
     scan.deposited.push({ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n });
-    expect(seedScan(scan, scanState(scanned()))).toBe(true);
+    const { shared, own } = halves();
+    expect(seedHalves(scan, shared, own)).toBe(true);
     expect(scan.next).toBe(4_990n);
+    expect(scan.sharedSeededTo).toBe(4_990n);
+    expect(scan.accountSeededTo).toBe(4_990n);
     // what the scan read stays as it read it, once
     expect(scan.delivered.size).toBe(1);
     expect(scan.deposited).toEqual([{ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n }]);
-    // the rest comes in, the account's amounts unconfirmed
-    expect(scan.staked).toEqual([{ block: 1_600n, txHash: H(10) }]);
-    expect(scan.payouts.get(H(77))?.map((p) => p.chunk)).toEqual([0, 1]);
+    // the rest comes in: stakes and chunks wait for their receipts too, like deliveries and amounts
+    expect(scan.staked).toEqual([{ block: 1_600n, txHash: H(10), unconfirmed: true }]);
+    expect(scan.payouts.get(H(77))).toEqual([
+      { txHash: H(11), block: 1_900n, chunk: 0, taken: 100, unconfirmed: true },
+      { txHash: H(12), block: 1_950n, chunk: 1, taken: 3, unconfirmed: true },
+    ]);
     expect(scan.redeemed).toEqual([{ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n, unconfirmed: true }]);
   });
 
-  it("changes nothing for a starting point that doesn't reach past the scan, or isn't valid for its vault", () => {
-    const ahead = newScan(D);
-    ahead.next = 4_990n;
-    expect(seedScan(ahead, scanState(scanned()))).toBe(false);
-    expect(ahead.next).toBe(4_990n);
-    const fresh = newScan(D);
-    expect(seedScan(fresh, { ...scanState(scanned()), vault: D.frontDoor.toLowerCase() })).toBe(false);
-    expect(seedScan(fresh, null)).toBe(false);
-    expect(fresh.next).toBe(D.bitBlock);
+  it("merges the halves at the earlier of their two blocks, as a load does, and marks both only up to there", () => {
+    const { shared, own } = halves();
+    const scan = newScan(D);
+    // the account half from an earlier tick: it stops at 3,000 and so holds no redeem at 4,000
+    expect(seedHalves(scan, shared, { ...own, next: "3000", redeemed: [] })).toBe(true);
+    expect(scan.next).toBe(3_000n);
+    expect(scan.sharedSeededTo).toBe(3_000n);
+    expect(scan.accountSeededTo).toBe(3_000n);
+    // the redeem at block 4,000 is past that: it is read, not taken from the seed
+    expect(scan.redeemed).toEqual([]);
+    expect(scan.deposited).toHaveLength(1);
   });
 
-  it("counts an account event listed twice once", () => {
-    const state = scanState(scanned());
-    state.deposited = [...state.deposited, ...state.deposited];
-    state.redeemed = [...state.redeemed, { ...state.redeemed[0], assets: "1" }];
+  it("changes nothing, and marks nothing, for halves that don't reach past the scan, or aren't both valid for its deployment", () => {
+    const { shared, own } = halves();
+    const ahead = newScan(D);
+    ahead.next = 4_990n;
+    expect(seedHalves(ahead, shared, own)).toBe(false);
+    expect(ahead.next).toBe(4_990n);
+    expect(ahead.sharedSeededTo).toBeUndefined();
+    for (const [a, b] of [
+      [{ ...shared, vault: D.frontDoor.toLowerCase() }, own],
+      [shared, { ...own, from: "999" }],
+      [shared, { ...own, v: SCAN_VERSION + 1 }],
+      [null, own],
+      [shared, "not an object"],
+      // one half's events outside its own range
+      [{ ...shared, staked: [{ block: "4990", txHash: H(10) }] }, own],
+    ] as [unknown, unknown][]) {
+      const fresh = newScan(D);
+      expect(seedHalves(fresh, a, b)).toBe(false);
+      expect(fresh.next).toBe(D.bitBlock);
+      expect(fresh.delivered.size + fresh.staked.length + fresh.deposited.length + fresh.redeemed.length).toBe(0);
+      expect(fresh.sharedSeededTo).toBeUndefined();
+      expect(fresh.accountSeededTo).toBeUndefined();
+    }
+  });
+
+  it("counts an account event listed twice once, and never adds one the scan already holds", () => {
+    const { shared, own } = halves();
+    const twice = { ...own, deposited: [...own.deposited, ...own.deposited], redeemed: [...own.redeemed, { ...own.redeemed[0], assets: "1" }] };
     const scan = newScan(D);
-    seedScan(scan, state);
+    seedHalves(scan, shared, twice);
     expect(scan.deposited).toHaveLength(1);
     expect(scan.redeemed).toHaveLength(1);
-    // and one the scan already holds isn't added again
     const again = newScan(D);
     again.next = 4_500n;
     again.redeemed.push({ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n });
-    seedScan(again, { ...scanState(scanned()), redeemed: [{ key: H(78), txHash: H(13), block: "4600", assets: "5000000000000000" }] });
+    seedHalves(again, shared, { ...own, redeemed: [{ key: H(78), txHash: H(13), block: "4600", assets: "5000000000000000" }] });
     expect(again.redeemed).toHaveLength(1);
   });
 
-  it("puts a starting point's events in block order, whatever order it lists them in", () => {
-    const state = scanState(scanned());
-    state.staked = [
-      { block: "3000", txHash: H(21) },
-      { block: "2000", txHash: H(20) },
-    ];
+  it("puts the halves' events in block order, whatever order they list them in", () => {
+    const { shared, own } = halves();
     const scan = newScan(D);
-    seedScan(scan, state);
+    seedHalves(scan, { ...shared, staked: [{ block: "3000", txHash: H(21) }, { block: "2000", txHash: H(20) }] }, own);
     expect(scan.staked.map((s) => s.block)).toEqual([2_000n, 3_000n]);
+  });
+
+  it("keeps both marks through a save and a load, each on its own half, short of the unsettled blocks like the rest", () => {
+    const storage = memoryStorage();
+    const store = createScanStore(storage, D);
+    const scan = newScan(D);
+    const { shared, own } = halves();
+    seedHalves(scan, shared, own);
+    // the scan then read on, past the seed
+    scan.next = 6_000n;
+    store.save(ME, scan);
+    expect(JSON.parse(storage.m.get(GLOBAL_KEY)!).seededTo).toBe("4990");
+    expect(JSON.parse(storage.m.get(MY_KEY)!).seededTo).toBe("4990");
+    const back = store.load(ME);
+    expect(back.next).toBe(5_990n);
+    expect(back.sharedSeededTo).toBe(4_990n);
+    expect(back.accountSeededTo).toBe(4_990n);
+    // a seed the scan hadn't read past is marked only as far as the save reached
+    const fresh = newScan(D);
+    seedHalves(fresh, shared, own);
+    createScanStore(memoryStorage(), D);
+    const s2 = memoryStorage();
+    createScanStore(s2, D).save(ME, fresh);
+    expect(JSON.parse(s2.m.get(GLOBAL_KEY)!).seededTo).toBe("4980");
+    expect(createScanStore(s2, D).load(ME).sharedSeededTo).toBe(4_980n);
+  });
+
+  it("gives a second account of the same deployment the shared half's mark, while its own half, read by this browser, carries none", () => {
+    const storage = memoryStorage();
+    const store = createScanStore(storage, D);
+    // an earlier visit of the other account read the chain itself
+    const yours = newScan(D);
+    yours.next = 5_000n;
+    yours.deposited.push({ key: H(79), txHash: H(14), block: 2_500n, assets: 3n });
+    store.save(YOU, yours);
+    // then this account's visit seeded the deployment's half from the indexer
+    const scan = newScan(D);
+    const { shared, own } = halves();
+    seedHalves(scan, shared, own);
+    store.save(ME, scan);
+    const back = store.load(YOU);
+    expect(back.next).toBe(4_980n);
+    expect(back.sharedSeededTo).toBe(4_980n);
+    expect(back.accountSeededTo).toBeUndefined();
+    expect(back.deposited).toEqual([{ key: H(79), txHash: H(14), block: 2_500n, assets: 3n, unconfirmed: true }]);
+    // and once the other account's own read rewrites the deployment's half, the mark is gone
+    const again = store.load(YOU);
+    restartScan(again);
+    again.next = 5_000n;
+    store.save(YOU, again);
+    expect(store.load(ME).sharedSeededTo).toBeUndefined();
+  });
+
+  it("loads older saves without the marks unseeded, and drops a save whose mark isn't a block within what it read", () => {
+    const good = scanState(scanned());
+    const load = (shared: unknown, own: unknown) => {
+      const storage = memoryStorage();
+      storage.setItem(GLOBAL_KEY, JSON.stringify(shared));
+      storage.setItem(MY_KEY, JSON.stringify(own));
+      return createScanStore(storage, D).load(ME);
+    };
+    const plain = load(good, good);
+    expect(plain.next).toBe(4_990n);
+    expect(plain.sharedSeededTo).toBeUndefined();
+    expect(plain.accountSeededTo).toBeUndefined();
+    expect(load({ ...good, seededTo: "3000" }, good).sharedSeededTo).toBe(3_000n);
+    expect(load(good, { ...good, seededTo: "3000" }).accountSeededTo).toBe(3_000n);
+    for (const bad of ["4991", "999", "-1", 3000, "", "abc"]) {
+      expect(load({ ...good, seededTo: bad }, good).next, JSON.stringify(bad)).toBe(D.bitBlock);
+    }
+  });
+
+  it("clears both marks when the scan starts over from the deploy block, so the browser's own read of that half isn't taken for the indexer's", () => {
+    const scan = newScan(D);
+    const { shared, own } = halves();
+    seedHalves(scan, shared, own);
+    restartScan(scan);
+    expect(scan.next).toBe(D.bitBlock);
+    expect(scan.sharedSeededTo).toBeUndefined();
+    expect(scan.accountSeededTo).toBeUndefined();
+    const storage = memoryStorage();
+    createScanStore(storage, D).save(ME, scan);
+    expect(storage.m.get(GLOBAL_KEY)).not.toContain("seededTo");
   });
 });

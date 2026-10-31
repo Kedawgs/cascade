@@ -170,6 +170,28 @@ describe("the Workers Cache in front of /v1/status and /v1/health", () => {
     });
   }
 
+  it("answers a HEAD as the GET without a body, for an uptime checker that defaults to HEAD, and it is cached and counted like the GET", async () => {
+    for (const path of ["/v1/health", "/v1/status"]) {
+      const r = await exports.default.fetch(new Request(`https://api.test${path}`, { method: "HEAD" }));
+      expect([r.status, await r.text(), r.headers.get("Cache-Control")], path).toEqual([200, "", CACHED]);
+    }
+    await purge();
+    const keys: string[] = [];
+    const limiter = { limit: async ({ key }: { key: string }) => ({ success: keys.push(key) <= 1 }) } as RateLimit;
+    const IP = { "cf-connecting-ip": "203.0.113.9" };
+    const a = await fetchCounted("/v1/health", { limiter, init: { method: "HEAD", headers: IP } });
+    expect([a.r.status, a.queries, await a.r.text()]).toEqual([200, 1, ""]);
+    // the GET right after is the cached answer: the limiter isn't asked
+    const b = await fetchCounted("/v1/health", { limiter, init: { headers: IP } });
+    expect([b.r.status, b.queries, await b.r.text()]).toEqual([200, 0, "ok"]);
+    expect(keys).toEqual(["health:203.0.113.9"]);
+    // a 503 (no complete tick) is a 503 on HEAD too, with its reason in the status only
+    await db.prepare("DELETE FROM meta WHERE k = 'last_complete_tick'").run();
+    await purge();
+    const c = await exports.default.fetch(new Request("https://api.test/v1/health", { method: "HEAD" }));
+    expect([c.status, await c.text()]).toEqual([503, ""]);
+  });
+
   it("a request past the client's rate limit is refused with 429 before D1, under the route's own key, and a cached answer never counts", async () => {
     const keys: string[] = [];
     const limiter = { limit: async ({ key }: { key: string }) => ({ success: keys.push(key) <= 1 }) } as RateLimit;
@@ -301,8 +323,8 @@ describe("no route writes", () => {
     const v = cfg.deployment.vault;
     const paths = [`/v1/scan/${v}`, `/v1/scan/${v}/0x${"a".repeat(40)}`, "/v1/status", "/v1/health", "/nope", "/v1/hold/clear"];
     for (const path of paths) {
-      for (const method of ["GET", "POST", "PUT", "DELETE", "PATCH"]) {
-        const r = await exports.default.fetch(new Request(`https://api.test${path}`, { method, body: method === "GET" ? undefined : '{"hold":false}' }));
+      for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"]) {
+        const r = await exports.default.fetch(new Request(`https://api.test${path}`, { method, body: method === "GET" || method === "HEAD" ? undefined : '{"hold":false}' }));
         await r.text();
       }
     }

@@ -19,7 +19,9 @@ export function UnstakeSummary({ account }: { account: string }) {
   const position = usePosition(account);
   const available = useAvailable(account);
   const p = position.data;
-  const free = p && available.data ? available.data.availableTaoWei : undefined;
+  // while whether an unstake arrived is still being checked against the chain, no figure at all
+  const free = p && available.data && !available.data.checking ? available.data.availableTaoWei : undefined;
+  const checking = available.data?.checking === true;
   return (
     <>
       <div>
@@ -42,6 +44,10 @@ export function UnstakeSummary({ account }: { account: string }) {
             <>
               {formatUsd(Math.floor(toDisplay(free, 18) * p.taoPriceUsd * 100) / 100)}
               <small>{formatTao(toDisplay(free, 18), 4)} TAO</small>
+            </>
+          ) : checking ? (
+            <>
+              –<small>checking…</small>
             </>
           ) : (
             <Dash loading={!position.isError && !available.isError} />

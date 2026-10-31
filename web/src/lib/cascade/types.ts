@@ -37,6 +37,10 @@ export interface Available {
   availableTaoWei: bigint;
   /** v3: the most TAO one more unstake request can carry (units.unstakeMostWei). Absent on v2. */
   mostTaoWei?: bigint;
+  /** Whether one of this browser's unstakes arrived can't be told yet: the history indexer's word on
+   * those blocks hasn't been confirmed by the chain. The figures above are then zero and shown as
+   * "checking…", never as an amount (live.ts, getAvailable). */
+  checking?: true;
 }
 
 /** Figures that need the vault's history (its logs since deployment, scanned from where this browser
@@ -48,10 +52,10 @@ export interface PositionHistory {
   rewardsEarnedTao?: number;
   /** Average price paid across this browser's deposits, or null. */
   avgEntryPriceUsd: number | null;
-  /** The account's history came from the history indexer's seed, every event confirmed by its receipt
-   * and the total checked against the account's balance, but not yet read from the chain by this
-   * browser itself: an event left out of a seed could still move the figures (the UI says "checking"),
-   * until the background read matches (live.ts) and this clears. */
+  /** The account's history came from the history indexer's seed and this browser hasn't read it all from
+   * the chain itself yet: an event left out of a seed could move the figures, so `rewardsEarnedTao` is
+   * left out and the UI says "checking…" (no number), until the background read matches (live.ts) and
+   * this clears. */
   provisional?: true;
 }
 

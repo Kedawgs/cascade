@@ -80,7 +80,7 @@ export function DepositList({ deposits, pending = [] }: { deposits: DepositRecor
       ))}
       {deposits.map((d) => {
         const done = d.steps.filter((s) => s.status === "done").length;
-        const current = d.steps.find((s) => s.status === "active" || s.status === "action" || s.status === "failed");
+        const current = d.steps.find((s) => s.status === "active" || s.status === "action" || s.status === "failed" || s.status === "checking");
         return (
           <li key={d.id}>
             <Link href={`/activity?deposit=${d.id}`} className={styles.row}>

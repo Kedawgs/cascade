@@ -1,6 +1,8 @@
 /** The activity records the screens show. Shared by the trail builder and the data contract. */
 
-export type StepStatus = "done" | "active" | "pending" | "failed" | "action";
+/** "checking": whether this step happened can't be told yet (the chain hasn't confirmed what the history
+ * indexer said about it): neither done nor not done, and shown as neither. */
+export type StepStatus = "done" | "active" | "pending" | "failed" | "action" | "checking";
 export type DepositStepKey = "swap" | "deposit" | "bridge" | "stake";
 export type WithdrawalStepKey = "request" | "unstake" | "return" | "claim";
 

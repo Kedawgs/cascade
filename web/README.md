@@ -136,18 +136,29 @@ for display only (`units.ts`).
   happens), a scan more than a day behind the chain asks the indexer for its two seed pages
   (`indexer.ts`: the deployment's deliveries, stakes and payout chunks, and the account's own deposits
   and redeems, in exactly the form the scan store saves) instead of reading every 1,000-block window
-  since the deploy block from the rate-limited archive node. Nothing from the seed is shown on its own
-  word (`seed.ts`, `live.ts`): both pages are decoded as strictly as saved history; the seed's last 400
-  blocks must hold exactly what the chain's logs hold there, and a sample of its older events must each
-  be in their receipt, before any of it is merged (through the same merge saved history goes through,
-  every event unconfirmed); every delivery, stake, chunk and amount is then confirmed by its receipt
-  before a trail or figure uses it, as saved history is; the account's deposits and redeems must add up
-  to its balance at the scan's last block; and "Earned so far" is marked "checking…" until the browser
-  has read the account's own events from the deploy block itself in the background (a few windows per
-  poll, resumable across visits) and they match. Any failure, refusal (a 429 included), timeout, stale
-  seed or disagreement falls back to today's full scan with a line in the console; a seed shown to
-  contradict the chain also leaves the indexer alone for a day in that browser. Balances, prices,
-  limits, quotes and anything a wallet signs never come from the indexer.
+  since the deploy block from the rate-limited archive node. **Nothing from the seed is ever shown as a
+  number or a definite step until the chain has confirmed it** (`seed.ts`, `live.ts`, `facts.ts`): both
+  pages are decoded as strictly as saved history and refused when padded (sizes, counts); the seed's
+  last 400 blocks must hold exactly what the chain's logs hold there, and a random sample of its events
+  must each be in their receipt at their block, before any of it is merged (through the same merge
+  saved history goes through, every event unconfirmed and marked as the indexer's). A trail then uses a
+  seeded delivery only once its receipt shows that batch under that key from our front door, a stake
+  only once its receipt shows it at that block and the chain's logs between the delivery and it show no
+  earlier stake (read then, a few windows at most), payout chunks only once each receipt shows them and
+  they account for every entry the delivery made, and an amount only once its receipt gives it; until
+  then the step says "checking…", and "Available to unstake" says "checking…" while whether an unstake
+  arrived rests on seeded blocks the browser hasn't read. "Earned so far" shows no figure until the
+  browser has read every seeded block itself in the background (`checkSeededHistory`: every vault log,
+  one window every 1.2 s, resumable across visits) and found exactly the seed's events; a year of a
+  deployment's blocks takes under an hour of an open tab, the launch's first days seconds. A definite
+  contradiction (a receipt that shows otherwise, an event the chain shows that the seed lacks) starts
+  the scan over from the deploy block and leaves the indexer alone for a day in that browser; a history
+  the seed's form can't describe (a direct deposit on Bittensor, a reversed redeem, the reward cut), a
+  balance that doesn't add up, or a node that won't confirm the seed's events after a few reads starts
+  the scan over without blame. Any failure, refusal (a 429 included), timeout or stale seed falls back
+  to today's full scan with a line in the console. With no indexer named, saved history loads and shows
+  exactly as before. Balances, prices, limits, quotes and anything a wallet signs never come from the
+  indexer.
 - **Prices and fees:** TAO from Uniswap's quoter (what selling 0.01 TAO pays), swap fees from the
   route's pool fees, the bridge fee from the Bittensor adapter's own `quoteFee`.
 - **Nothing is sent on one source's word.** Every figure above comes from `https://mainnet.base.org`,

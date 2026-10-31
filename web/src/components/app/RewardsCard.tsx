@@ -56,12 +56,14 @@ function RewardsForAccount({ account }: { account: string }) {
           <p className={card.v}>
             {!history.data ? (
               <Dash loading={!history.isError} />
+            ) : history.data.provisional ? (
+              // the history came from the indexer and the chain hasn't confirmed all of it: no figure yet
+              <>
+                –<small>checking…</small>
+              </>
             ) : earned !== undefined ? (
               <>
-                {formatUsd(earned * position.data.taoPriceUsd)}{" "}
-                <small>
-                  {formatTao(earned, 6)} TAO{history.data.provisional ? " · checking…" : ""}
-                </small>
+                {formatUsd(earned * position.data.taoPriceUsd)} <small>{formatTao(earned, 6)} TAO</small>
               </>
             ) : (
               "–"

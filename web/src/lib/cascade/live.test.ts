@@ -9,7 +9,7 @@ import { createScanStore, scanState } from "./scan-store";
 import { newScan, REREAD, scanVault } from "./facts";
 import { DISTRUST_MS, indexerDistrusted } from "./indexer";
 import { SEED_MIN_BLOCKS, vaultEvents, verifySeed } from "./seed";
-import { CHECK_EVERY_MS, SEED_RETRY_MS, SEED_VERIFY_TIMEOUT_MS } from "./live";
+import { SEED_RETRY_MS, SEED_VERIFY_TIMEOUT_MS } from "./live";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -87,6 +87,8 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     fetchSeed: async () => Promise.reject(new Error("the indexer wasn't expected to be asked")),
     verifySeed,
     readSharesAt: async () => Promise.reject(new Error("the balance at a block wasn't expected to be read")),
+    // the background check reads one window, then waits: the tests that need it done run it flat out
+    checkPaceMs: 60_000,
     now,
     ...over,
   };
@@ -327,7 +329,7 @@ describe("the vault's history", () => {
     expect(scans).toBe(1);
   });
 
-  it("counts an unstake as on the bridge while its saved delivery can't be confirmed, never failing or touching the history", async () => {
+  it("counts an unstake as on the bridge while its saved delivery can't be confirmed yet, never failing; a receipt that shows otherwise starts the history over", async () => {
     const storage = savedDelivery();
     let scans = 0;
     const visit = (bittensor: unknown) => {
@@ -336,14 +338,15 @@ describe("the vault's history", () => {
       return createLiveCascadeData(D, d).getAvailable(ME);
     };
     const onTheBridge = 8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n;
-    // a node behind the delivery, and one whose receipt shows no such delivery: on the bridge, as far as anyone can tell
-    for (const node of [deliveryAt(300n), deliveryAt(2_000n, false)]) {
-      expect((await visit(node)).availableShares).toBe(onTheBridge);
-      expect(createScanStore(storage, D).load(ME).delivered.has("3")).toBe(true);
-    }
-    // the scan was brought up to date each time, in case it finds the delivery again
-    expect(scans).toBe(2);
+    // a node behind the delivery: on the bridge, as far as anyone can tell, and the saved history untouched
+    expect((await visit(deliveryAt(300n))).availableShares).toBe(onTheBridge);
+    expect(createScanStore(storage, D).load(ME).delivered.has("3")).toBe(true);
+    // the scan was brought up to date, in case it finds the delivery again
+    expect(scans).toBe(1);
     expect((await visit(deliveryAt(2_000n))).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    // a node well past the delivery whose receipt shows no such delivery: the saved history is wrong
+    await expect(visit(deliveryAt(2_000n, false))).rejects.toThrow(/didn't match Bittensor/);
+    expect(createScanStore(storage, D).load(ME).next).toBe(D.bitBlock);
   });
 
   it("isn't failed by one saved delivery whose receipt can't be read: the others still count as arrived", async () => {
@@ -1284,31 +1287,34 @@ describe("the indexer's seed", () => {
     return { data: createLiveCascadeData(DI, d), asked, balances, storage, opLog: d.opLog };
   }
 
-  it("starts a first visit far behind the chain from the indexer's seed: one window read instead of thirty, the amounts confirmed by their receipts, the figure provisional, the balance checked at the scan's last block", async () => {
+  it("starts a first visit far behind the chain from the indexer's seed: two windows read in front of the user instead of thirty, the amounts confirmed by their receipts, no figure until the browser's own read is done, the balance checked at the last seeded block", async () => {
     const n = node();
     const v = visit(n, halvesOf(CHAIN));
     const h = await v.data.getPositionHistory(ME);
-    // 0.08 now + 0.01 out − 0.07 in
-    expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    // the history is the indexer's until the browser has read it all: no figure, "checking…"
     expect(h.provisional).toBe(true);
+    expect(h.rewardsEarnedTao).toBeUndefined();
     expect(v.asked).toEqual([ME]);
-    // the seed's last 400 blocks checked against the chain, then the scan's own read from there: two windows, not thirty
-    expect(n.windows).toHaveLength(2);
-    for (const [from] of n.windows) expect(from).toBeGreaterThanOrEqual(NEXT - REREAD);
-    // the account's deposit and redeem were confirmed by their receipts before the figure showed
+    // in front of the user: the seed's last 400 blocks checked against the chain, then the scan's own read
+    // from there (two windows, not thirty); the background read of the seeded blocks has begun with one more
+    const foreground = n.windows.filter(([from]) => from >= NEXT - REREAD);
+    expect(foreground).toHaveLength(2);
+    expect(n.windows.length).toBeLessThanOrEqual(3);
+    // the account's deposit and redeem were confirmed by their receipts
     expect(n.asked).toEqual(expect.arrayContaining([H(101), H(103)]));
-    // and their shares checked against the balance at the scan's last block
-    expect(v.balances).toEqual([HEAD - 2n]);
+    // and their shares checked against the balance at the last seeded block
+    expect(v.balances).toEqual([NEXT - 1n]);
     // saved as the indexer's, up to its block (less the blocks a save leaves unsettled: the mark never outruns the save)
     const saved = createScanStore(v.storage, DI).load(ME);
     expect(saved.sharedSeededTo).toBe(NEXT - 10n);
     expect(saved.accountSeededTo).toBe(NEXT - 10n);
+    expect(saved.sharedSeededFrom).toBe(DI.bitBlock);
     // a later poll asks the indexer nothing: the scan is caught up
     n.windows.length = 0;
     await v.data.getPositionHistory(ME);
     expect(v.asked).toHaveLength(1);
-    expect(n.windows).toHaveLength(1);
-    // the same visit without a seed reads the whole history, and shows the same figure, final
+    expect(n.windows.filter(([from]) => from >= NEXT - REREAD)).toHaveLength(1);
+    // the same visit without a seed reads the whole history, and shows the figure, final
     const plain = node();
     const bare = visit(plain, null);
     const h2 = await bare.data.getPositionHistory(ME);
@@ -1373,18 +1379,19 @@ describe("the indexer's seed", () => {
     expect(again.asked).toEqual([]);
   });
 
-  it("shows no figure from a seed whose account half left a deposit out: the balance doesn't add up, the scan starts over, the indexer is distrusted", async () => {
+  it("shows no figure from a seed whose account half left a deposit out: the balance doesn't add up, the scan starts over without the seed, and the indexer isn't blamed (the cause can't be pinned on it)", async () => {
     const h = halvesOf(CHAIN);
     const omitted = { shared: h.shared, own: { ...h.own, deposited: [] } };
     const n = node();
     const v = visit(n, omitted);
     await expect(v.data.getPositionHistory(ME)).rejects.toThrow(/didn't match Bittensor/);
-    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
+    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(false);
     expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
-    // the next read is the browser's own, and right
+    // the next read is the browser's own, and right; the seed isn't asked for again this visit
     const h2 = await v.data.getPositionHistory(ME);
     expect(h2.rewardsEarnedTao).toBeCloseTo(0.02, 12);
     expect(h2.provisional).toBeUndefined();
+    expect(v.asked).toEqual([ME]);
   });
 
   it("catches, in the background, a matched set the seed left out that the balance couldn't show: the figure was provisional, and is then read again from the chain", async () => {
@@ -1395,14 +1402,16 @@ describe("the indexer's seed", () => {
     const h = halvesOf(CHAIN);
     const omitted = { shared: honest.shared, own: h.own };
     const n = node(chain);
-    const v = visit(n, omitted);
+    const v = visit(n, omitted, { checkPaceMs: 0 });
     const first = await v.data.getPositionHistory(ME);
-    expect(first.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    // no figure while the history is the indexer's
+    expect(first.rewardsEarnedTao).toBeUndefined();
     expect(first.provisional).toBe(true);
-    // the background check's first step (outside the lock, so no read waits for it) read the first windows
-    // of the account's own events and found the deposit
+    // the background read (outside the lock, so no read waits for it) read the first window of the vault's
+    // logs and found the deposit the seed left out
     await settled();
-    expect(n.checks[0]).toEqual([1n, 1_000n]);
+    await settled();
+    expect(n.windows.some(([from, to]) => from === 1n && to === 1_000n)).toBe(true);
     expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
     // the saved copy is already empty; the scan in memory starts over at the next read
     expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
@@ -1413,58 +1422,56 @@ describe("the indexer's seed", () => {
     expect(n.windows.length).toBeGreaterThanOrEqual(32);
   });
 
-  it("finishes the background check of an honest seed over later reads, a few windows at a time, resuming across visits, and the figure turns final", async () => {
-    let clock = 1_800_000_100_000;
+  it("finishes the background read of an honest seed's blocks, one window after another, resuming across visits, and then the figure shows", async () => {
+    const clock = 1_800_000_100_000;
     const n = node();
     const storage = memory();
+    // this visit's background read is paced a minute apart: one window, then a wait
     const v = visit(n, halvesOf(CHAIN), { now: () => clock }, storage);
     expect((await v.data.getPositionHistory(ME)).provisional).toBe(true);
-    // one step per poll, three windows a step
     await settled();
-    expect(n.checks).toHaveLength(3);
-    expect(n.checks[0]).toEqual([1n, 1_000n]);
+    const background = () => n.windows.filter(([from]) => from < NEXT - REREAD);
+    expect(background()).toEqual([[1n, 1_000n]]);
     await v.data.getPositionHistory(ME);
     await settled();
-    expect(n.checks).toHaveLength(3);
-    clock += CHECK_EVERY_MS;
-    await v.data.getPositionHistory(ME);
-    await settled();
-    expect(n.checks).toHaveLength(6);
-    // a new visit picks the check up where it stopped
+    expect(background()).toHaveLength(1);
+    // a new visit picks the read up where it stopped, and runs it to the end
     const m = node();
-    const w = visit(m, halvesOf(CHAIN), { now: () => clock }, storage);
+    const w = visit(m, halvesOf(CHAIN), { now: () => clock, checkPaceMs: 0 }, storage);
     let h = await w.data.getPositionHistory(ME);
-    await settled();
-    expect(h.provisional).toBe(true);
     expect(w.asked).toEqual([]);
-    for (let i = 0; i < 20 && h.provisional; i++) {
-      clock += CHECK_EVERY_MS;
-      h = await w.data.getPositionHistory(ME);
+    for (let i = 0; i < 40 && h.provisional; i++) {
       await settled();
+      h = await w.data.getPositionHistory(ME);
     }
     expect(h.provisional).toBeUndefined();
     expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
-    expect(m.checks[0]).toEqual([6_001n, 7_000n]);
+    // the background windows (the visit's own read starts 400 blocks before the saved progress, near the end)
+    const resumed = m.windows.filter(([from]) => from < 29_400n);
+    expect(resumed[0]).toEqual([1_001n, 2_000n]);
     // up to the saved mark (the seed's block less the save's unsettled blocks) and no further
-    expect(m.checks[m.checks.length - 1]).toEqual([29_001n, NEXT - 11n]);
+    expect(resumed[resumed.length - 1]).toEqual([29_001n, NEXT - 11n]);
     expect(indexerDistrusted(storage, DI, clock)).toBe(false);
-    // the account half is the browser's own from here on; the deployment's half stays marked as the indexer's
+    // both halves are the browser's own from here on
     const saved = createScanStore(storage, DI).load(ME);
     expect(saved.accountSeededTo).toBeUndefined();
-    expect(saved.sharedSeededTo).toBe(NEXT - 10n);
+    expect(saved.sharedSeededTo).toBeUndefined();
   });
 
-  it("fails a trail whose seeded stake isn't on the chain, starts the scan over under the account's lock and distrusts the indexer; the next read is the browser's own", async () => {
+  it("never shows a stake the seed invented: the seed's random sample or the trail's own check catches it, the scan starts over and the indexer is distrusted; the next read is the browser's own", async () => {
     const h = halvesOf(CHAIN);
     // a stake the seed invented, right after the delivery, which the trail would show first
     const forged = { shared: { ...h.shared, staked: [{ block: "505", txHash: H(999) }, ...h.shared.staked] }, own: h.own };
     const n = node();
-    // the first checks pass it (its sample happened not to pick the stake): the trail is the last line
-    const v = visit(n, forged, { verifySeed: async () => ({ ok: true, next: NEXT }) });
+    const v = visit(n, forged);
     v.opLog.put({ id: "d", kind: "deposit", account: ME, createdAt: T0 + 1, usdcIn: 0n, targetTao: 7n * 10n ** 16n, hashes: {}, batchId: 1n, state: "sent" });
-    await expect(v.data.listDeposits(ME)).rejects.toThrow(/didn't match Bittensor/);
+    // the first read either refuses (the trail's check), or is already the browser's own (the sample caught it)
+    const first = await v.data.listDeposits(ME).catch(() => undefined);
+    const step = first?.find((r) => r.id === "d")?.steps.find((s) => s.key === "stake");
+    if (step?.status === "done") expect(step.txUrl).toContain(H(102));
+    expect(step?.txUrl ?? "").not.toContain(H(999));
     expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
-    expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
+    expect(createScanStore(v.storage, DI).load(ME).next === DI.bitBlock || first !== undefined).toBe(true);
     const list = await v.data.listDeposits(ME);
     const stake = list.find((r) => r.id === "d")?.steps.find((s) => s.key === "stake");
     expect(stake?.status).toBe("done");

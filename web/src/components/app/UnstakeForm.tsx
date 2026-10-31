@@ -84,6 +84,8 @@ function UnstakeWithBalance({ account, ...sending }: { account: string } & Sendi
     );
   }
   if (!available.data) return <Loading />;
+  // whether one of this browser's unstakes arrived is still being checked against the chain: no figure, no form on it
+  if (available.data.checking) return <p className="small">Checking your history against the chain before showing what you can unstake…</p>;
   return <UnstakeFormBody account={account} position={{ ...position.data, ...available.data }} {...sending} />;
 }
 

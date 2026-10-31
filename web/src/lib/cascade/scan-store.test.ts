@@ -46,9 +46,9 @@ describe("scan store", () => {
     const back = createScanStore(storage, D).load(ME);
     expect(back.next).toBe(4_990n);
     expect(back.delivered.get("3")).toEqual({ key: H(77), txHash: H(9), block: 1_500n, unconfirmed: true });
-    // stakes and chunks from storage wait for their receipts too (facts.ts, confirmedStakeAfter and confirmedChunks)
-    expect(back.staked).toEqual([{ block: 1_600n, txHash: H(10), unconfirmed: true }]);
-    expect(back.payouts.get(H(77))).toEqual(scanned().payouts.get(H(77))!.map((p) => ({ ...p, unconfirmed: true })));
+    // stakes and chunks this browser read itself come back as read: only the indexer's wait for their receipts
+    expect(back.staked).toEqual([{ block: 1_600n, txHash: H(10) }]);
+    expect(back.payouts.get(H(77))).toEqual(scanned().payouts.get(H(77)));
     expect(back.deposited).toEqual([{ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true }]);
     expect(back.redeemed).toEqual([{ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n, unconfirmed: true }]);
   });
@@ -347,10 +347,26 @@ describe("seedHalves", () => {
     expect(plain.next).toBe(4_990n);
     expect(plain.sharedSeededTo).toBeUndefined();
     expect(plain.accountSeededTo).toBeUndefined();
-    expect(load({ ...good, seededTo: "3000" }, good).sharedSeededTo).toBe(3_000n);
-    expect(load(good, { ...good, seededTo: "3000" }).accountSeededTo).toBe(3_000n);
-    for (const bad of ["4991", "999", "-1", 3000, "", "abc"]) {
-      expect(load({ ...good, seededTo: bad }, good).next, JSON.stringify(bad)).toBe(D.bitBlock);
+    // a marked half is the store's second version, with both ends of the mark
+    const marked = { ...good, v: 2, seededFrom: "1000", seededTo: "3000" };
+    expect(load(marked, good).sharedSeededTo).toBe(3_000n);
+    expect(load(marked, good).sharedSeededFrom).toBe(1_000n);
+    expect(load(good, marked).accountSeededTo).toBe(3_000n);
+    // its stakes and chunks in the mark wait for their receipts; those outside it are the browser's own
+    const half = load({ ...marked, seededTo: "1700" }, good);
+    expect(half.staked).toEqual([{ block: 1_600n, txHash: H(10), unconfirmed: true }]);
+    expect(half.payouts.get(H(77))?.every((p) => p.unconfirmed === undefined)).toBe(true);
+    for (const bad of [
+      { ...good, seededTo: "3000" },
+      { ...good, v: 2 },
+      { ...marked, seededTo: "4991" },
+      { ...marked, seededFrom: "999" },
+      { ...marked, seededFrom: "3001" },
+      { ...marked, seededTo: -1 },
+      { ...marked, seededTo: "" },
+      { ...marked, seededTo: "abc" },
+    ]) {
+      expect(load(bad, good).next, JSON.stringify(bad.seededTo)).toBe(D.bitBlock);
     }
   });
 

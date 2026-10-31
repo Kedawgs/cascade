@@ -27,7 +27,12 @@ export interface DepositFacts {
   /** The deposit's batch is still the open one. */
   stillOpen: boolean;
   delivered?: { at: Date; txHash: Hex; messageId?: Hex; outcome: "deposited" | "bounced" | "skipped" };
+  /** Whether the batch arrived can't be told yet: the history indexer's word on those blocks hasn't been
+   * confirmed by the chain (facts.ts, deliveryOf). The trail says "checking", never a step. */
+  deliveryUnknown?: true;
   staked?: { at: Date; txHash: Hex };
+  /** Whether it was staked can't be told yet (facts.ts, confirmedStakeAfter): "checking", never a step. */
+  stakeUnknown?: true;
   /** In the vault but not staked yet, because one position must reach the 0.02-TAO nominator minimum. */
   waitingForMinimum: boolean;
   /** TAO the vault has toward that minimum (staked plus idle), and the minimum itself. */
@@ -58,9 +63,13 @@ export interface WithdrawalFacts {
   closesBy?: boolean;
   stillOpen: boolean;
   delivered?: { at: Date; txHash: Hex; outcome: "redeemed" | "skipped" | "deferred"; taoWei?: bigint };
+  /** Whether the batch arrived can't be told yet (facts.ts, deliveryOf): "checking", never a step. */
+  deliveryUnknown?: true;
   /** The chunk that carried this account's entry. `dust` when the entry was worth less than its share of
    * the bridge fee: the vault kept it, and nothing comes back. */
   payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date; dust?: true };
+  /** Whether the payout left can't be told yet (facts.ts, confirmedChunks): "checking", never a step. */
+  payoutUnknown?: true;
   claimable: bigint;
   /** The claim's receipts: TAO claimed, the USDC the swap paid (if it ran), and whether it was kept as TAO
    * or the swap failed after the claim (the TAO then sits in the wallet). `shared` when the claim named
@@ -91,6 +100,9 @@ const hhmm = (d: Date) => timeOfDay.format(d);
 const BRIDGE_TIME = "usually 20–30 minutes";
 /** An interrupted flow this old has no wallet prompt still waiting on it. */
 const STALE_MS = 10 * 60_000;
+/** A step whose outcome the chain hasn't confirmed yet (what the history indexer said about those blocks
+ * is still being checked against the chain): neither done nor not, and said so. */
+const CHECKING = { status: "checking" as const, detail: "Checking this against the chain…", summary: "checking…" };
 
 /** Delivered but not staked: Bittensor stakes a position only from 0.02 TAO, so it waits for more deposits. */
 const STEP = 10n ** 14n; // 0.0001 TAO, the smallest amount these messages show
@@ -158,6 +170,7 @@ const waitForClose = (f: { closesAt: Date; now: Date; closesBy?: boolean }) =>
 function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "failed" | "needs_you" | "done" | "in_progress" {
   if (steps.some((s) => s.status === "failed")) return "failed";
   if (steps.some((s) => s.status === "action")) return "needs_you";
+  // a step still being checked against the chain leaves the record in progress, never done
   return steps.every((s) => s.status === "done") ? (doneStatus as "done") : "in_progress";
 }
 
@@ -248,6 +261,8 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     }
   } else if (cancelling && op.cancelled) {
     bridge = { ...bridge, status: "active", detail: cancellingDetail(op, f), txUrl: explorer.baseTx(op.cancelled.hash) };
+  } else if (f.depositMined && f.deliveryUnknown && !f.stillOpen) {
+    bridge = { ...bridge, ...CHECKING };
   } else if (f.depositMined) {
     bridge = {
       ...bridge,
@@ -262,6 +277,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   let stake: TrailStep<DepositStepKey> = { key: "stake", title: "Stake on Bittensor", status: "pending" };
   if (!cancelled && f.delivered?.outcome === "deposited") {
     if (f.staked) stake = { ...stake, status: "done", at: f.staked.at, txUrl: explorer.bittensorTx(f.staked.txHash), txLabel: "View on Bittensor" };
+    else if (f.stakeUnknown) stake = { ...stake, ...CHECKING };
     else if (f.waitingForMinimum) stake = { ...stake, ...waitingForMinimum(f) };
     else stake = { ...stake, status: "active", detail: "Staking shortly" };
   }
@@ -297,18 +313,19 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
 }
 
 /** A deposit known only from the vault's `Deposited` event (made from another browser). */
-export function chainOnlyDeposit(e: { key: Hex; txHash: Hex; at: Date; assets: bigint; staked: boolean }): DepositRecord {
+export function chainOnlyDeposit(e: { key: Hex; txHash: Hex; at: Date; assets: bigint; staked: boolean | "unknown" }): DepositRecord {
   const done = (key: DepositStepKey, title: string): TrailStep<DepositStepKey> => ({ key, title, status: "done" });
+  const stake: TrailStep<DepositStepKey> = { key: "stake", title: "Stake on Bittensor", status: "active" };
   return {
     id: `chain-${e.txHash}`,
     createdAt: e.at,
     sourceChain: "base",
-    status: e.staked ? "staked" : "in_progress",
+    status: e.staked === true ? "staked" : "in_progress",
     steps: [
       done("swap", "Swap USDC for TAO"),
       done("deposit", "Deposit into Cascade"),
       { ...done("bridge", "Cross to Bittensor"), at: e.at, txUrl: explorer.bittensorTx(e.txHash), txLabel: "View on Bittensor" },
-      e.staked ? done("stake", "Stake on Bittensor") : { key: "stake", title: "Stake on Bittensor", status: "active" },
+      e.staked === true ? done("stake", "Stake on Bittensor") : e.staked === "unknown" ? { ...stake, ...CHECKING } : stake,
     ],
     taoWei: e.assets,
     taoAmount: toDisplay(e.assets, 18),
@@ -351,6 +368,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     }
   } else if (cancelling && op.cancelled) {
     unstake = { ...unstake, status: "active", detail: cancellingDetail(op, f), txUrl: explorer.baseTx(op.cancelled.hash) };
+  } else if (f.requestMined && f.deliveryUnknown && !f.stillOpen) {
+    unstake = { ...unstake, ...CHECKING };
   } else if (f.requestMined) {
     unstake = {
       ...unstake,
@@ -363,7 +382,9 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   }
 
   let ret: TrailStep<WithdrawalStepKey> = { key: "return", title: "Return to Base", status: "pending" };
-  if (d?.outcome === "redeemed") {
+  if (d?.outcome === "redeemed" && f.payoutUnknown && !f.payout) {
+    ret = { ...ret, ...CHECKING };
+  } else if (d?.outcome === "redeemed") {
     const p = f.payout;
     if (p?.dust) ret = { ...ret, status: "failed", at: p.at, detail: "Too small to send back after the bridge fee, so nothing came back" };
     else if (p && p.state === 2) ret = { ...ret, status: "done", at: p.at, ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };

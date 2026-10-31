@@ -615,29 +615,42 @@ describe("facts", () => {
         deposit: (await depositFacts(c.clients, D, dep, { fd, vault, scan })).facts,
       };
     };
-    // the transaction delivered batch 5, with the account's redeem there: not this batch's delivery
-    const wrong = await factsWith([batch5, redeemedIn(OTHER_KEY, 99n, 1), depositedIn(OTHER_KEY, 2)]);
-    expect(wrong.unstake.delivered).toBeUndefined();
-    expect(wrong.deposit.delivered).toBeUndefined();
+    // the transaction delivered batch 5, with the account's redeem there: not this batch's delivery, and
+    // the saved entry that said so is wrong (the scan starts over; no amount from it is ever shown)
+    await expect(factsWith([batch5, redeemedIn(OTHER_KEY, 99n, 1), depositedIn(OTHER_KEY, 2)])).rejects.toBeInstanceOf(HistoryMismatchError);
     // batch 3's delivery: of the account's redeems in the transaction, only batch 3's is this one's
     const right = await factsWith([delivered, redeemedIn(OTHER_KEY, 99n, 1), redeemedIn(KEY, 10n ** 16n, 2)]);
     expect(right.unstake.delivered).toMatchObject({ outcome: "redeemed", taoWei: 10n ** 16n });
     expect(right.deposit.delivered?.outcome).toBe("deposited");
   });
 
-  it("shows no delivery, rather than failing the trail, while an unconfirmed one's receipt can't be read", async () => {
+  it("says it can't tell yet, rather than a step, while an unconfirmed delivery's receipt can't be read; a server well past its block that has no such transaction is a contradiction", async () => {
     const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
-    for (const failure of [new TransactionReceiptNotFoundError({ hash: H(9) }), new HttpRequestError({ url: "https://archive.chain.opentensor.ai", status: 503 })]) {
-      const c = chains();
+    const saved = () => {
+      const scan = newScan(D);
+      scan.next = 2_000n;
+      scan.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n, unconfirmed: true });
+      return scan;
+    };
+    // a node only 200 blocks past the delivery that doesn't have its receipt yet, and one whose read fails
+    for (const [latest, failure] of [
+      [1_700n, new TransactionReceiptNotFoundError({ hash: H(9) })],
+      [2_500n, new HttpRequestError({ url: "https://archive.chain.opentensor.ai", status: 503 })],
+    ] as const) {
+      const c = chains({ latest });
       (c.clients as unknown as { bittensor: { getTransactionReceipt: () => Promise<never> } }).bittensor.getTransactionReceipt = async () => {
         throw failure;
       };
-      // read in the last blocks, then not returned by a node that lags (or its block was replaced)
-      const scan = newScan(D);
-      scan.delivered.set("3", { key: KEY, txHash: H(9), block: 1_500n, unconfirmed: true });
-      const { facts } = await withdrawalFacts(c.clients, D, w, { fd, vault, scan, claims: [] });
+      const { facts } = await withdrawalFacts(c.clients, D, w, { fd, vault, scan: saved(), claims: [] });
       expect(facts.delivered, failure.name).toBeUndefined();
+      expect(facts.deliveryUnknown, failure.name).toBe(true);
     }
+    // a node 1,000 blocks past it with no such transaction: the saved history is wrong
+    const far = chains({ latest: 2_500n });
+    (far.clients as unknown as { bittensor: { getTransactionReceipt: () => Promise<never> } }).bittensor.getTransactionReceipt = async () => {
+      throw new TransactionReceiptNotFoundError({ hash: H(9) });
+    };
+    await expect(withdrawalFacts(far.clients, D, w, { fd, vault, scan: saved(), claims: [] })).rejects.toBeInstanceOf(HistoryMismatchError);
   });
 
   it("knows when the account's entry was too small to send back after the bridge fee", async () => {
@@ -1633,38 +1646,62 @@ describe("stakes and payout chunks confirmed on use", () => {
     expect(await confirmedStakeAfter(c.clients, D, scan, 1_600n)).toBeUndefined();
   });
 
-  it("uses a stake from storage or a seed only once its receipt shows the vault's Staked, at the receipt's block, asking once", async () => {
+  it("uses a seeded stake only once its receipt shows the vault's Staked at that very block and the blocks before it hold no earlier stake, asking for the receipt once", async () => {
     let asked = 0;
-    const c = chains({ latest: 2_500n, bitReceipts: { ...deliveryReceipt, [H(10)]: { status: "success", blockNumber: 1_601n, logs: [stakedLog(1_601n, H(10))] } } });
+    const c = chains({ latest: 2_500n, bitReceipts: { ...deliveryReceipt, [H(10)]: { status: "success", blockNumber: 1_600n, logs: [stakedLog(1_600n, H(10))] } } });
     const real = (c.clients as unknown as Node).bittensor.getTransactionReceipt;
     (c.clients as unknown as Node).bittensor.getTransactionReceipt = (q) => {
       if (q.hash === H(10)) asked++;
       return real(q);
     };
     const scan = scanWith((s) => s.staked.push({ block: 1_600n, txHash: H(10), unconfirmed: true }), 2_500n);
-    expect(await confirmedStakeAfter(c.clients, D, scan, 1_500n)).toEqual({ block: 1_601n, txHash: H(10) });
-    expect(scan.staked).toEqual([{ block: 1_601n, txHash: H(10) }]);
+    expect(await confirmedStakeAfter(c.clients, D, scan, 1_500n)).toEqual({ block: 1_600n, txHash: H(10), clearBefore: 1_501n });
+    // the blocks between the delivery and the stake were read once, from the chain's logs
+    expect(c.windows).toEqual([[1_501n, 1_599n]]);
     const f = await depositFacts(c.clients, D, dep, { fd, vault, scan });
     expect(f.facts.staked).toMatchObject({ txHash: H(10) });
     expect((await chainDeposits(c.clients, D, scan)).map((e) => e.staked)).toEqual([true]);
     expect(asked).toBe(1);
+    expect(c.windows).toHaveLength(1);
+    // a receipt that puts the stake at another block than the seed said is a contradiction, the indexer's
+    const moved = chains({ latest: 2_500n, bitReceipts: { ...deliveryReceipt, [H(10)]: { status: "success", blockNumber: 1_601n, logs: [stakedLog(1_601n, H(10))] } } });
+    const err = await confirmedStakeAfter(moved.clients, D, scanWith((s) => s.staked.push({ block: 1_600n, txHash: H(10), unconfirmed: true }), 2_500n), 1_500n).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HistoryMismatchError);
+    expect((err as HistoryMismatchError).seeded).toBe(true);
+    // a stake the seed left out, before the one it gave: caught by the blocks between
+    const omitted = chains({ latest: 2_500n, bitLogs: [stakedLog(1_550n, H(60))], bitReceipts: { ...deliveryReceipt, [H(10)]: { status: "success", blockNumber: 1_600n, logs: [stakedLog(1_600n, H(10))] } } });
+    const err2 = await confirmedStakeAfter(omitted.clients, D, scanWith((s) => s.staked.push({ block: 1_600n, txHash: H(10), unconfirmed: true }), 2_500n), 1_500n).catch((e: unknown) => e);
+    expect(err2).toBeInstanceOf(HistoryMismatchError);
+    expect((err2 as HistoryMismatchError).seeded).toBe(true);
   });
 
-  it("leaves the trail at its previous step, never a guess, while a stake's receipt can't be read or the server isn't past its block", async () => {
+  it("says it can't tell yet ('checking'), never a step, while a stake's receipt can't be read, the server isn't past its block, or the seeded blocks after a delivery haven't been read", async () => {
     // a server only 100 blocks past the stake: its receipts may lag that far
     const behind = chains({ latest: 1_700n, bitReceipts: deliveryReceipt });
     const scan = scanWith((s) => s.staked.push({ block: 1_600n, txHash: H(10), unconfirmed: true }), 2_500n);
-    expect(await confirmedStakeAfter(behind.clients, D, scan, 1_500n)).toBeUndefined();
-    expect((await depositFacts(behind.clients, D, dep, { fd, vault, scan })).facts.staked).toBeUndefined();
-    expect((await chainDeposits(behind.clients, D, scan)).map((e) => e.staked)).toEqual([false]);
+    expect(await confirmedStakeAfter(behind.clients, D, scan, 1_500n)).toBe("unknown");
+    const f = await depositFacts(behind.clients, D, dep, { fd, vault, scan });
+    expect(f.facts.staked).toBeUndefined();
+    expect(f.facts.stakeUnknown).toBe(true);
+    expect(f.facts.waitingForMinimum).toBe(false);
+    expect((await chainDeposits(behind.clients, D, scan)).map((e) => e.staked)).toEqual(["unknown"]);
     // a receipt read that fails
     const failing = chains({ latest: 2_500n, bitReceipts: deliveryReceipt });
     (failing.clients as unknown as Node).bittensor.getTransactionReceipt = async (q) => {
       if (q.hash === H(10)) throw new HttpRequestError({ url: "https://archive.chain.opentensor.ai", status: 503 });
       return deliveryReceipt[H(9)];
     };
-    expect(await confirmedStakeAfter(failing.clients, D, scan, 1_500n)).toBeUndefined();
+    expect(await confirmedStakeAfter(failing.clients, D, scan, 1_500n)).toBe("unknown");
     expect(scan.staked[0].unconfirmed).toBe(true);
+    // no stake at all in the scan, with seeded blocks after the delivery the browser hasn't read: not "none" yet
+    const none = chains({ latest: 2_500n, bitReceipts: deliveryReceipt });
+    const empty = scanWith(() => undefined, 2_500n);
+    expect(await confirmedStakeAfter(none.clients, D, empty, 1_500n)).toBe("unknown");
+    // the same scan once the browser's own read got past those blocks: none
+    empty.checkedTo = 2_500n;
+    expect(await confirmedStakeAfter(none.clients, D, empty, 1_500n)).toBeUndefined();
+    // and with no seed at all: none, as before
+    expect(await confirmedStakeAfter(none.clients, D, scanWith(() => undefined), 1_500n)).toBeUndefined();
   });
 
   it("refuses a stake whose receipt, from a server well past its block, shows no vault Staked, naming the indexer when the seed supplied it", async () => {
@@ -1732,13 +1769,23 @@ describe("stakes and payout chunks confirmed on use", () => {
     const seeded = (chunks: number[]) =>
       scanWith((s) => s.payouts.set(KEY, chunks.map((n) => ({ txHash: H(10 + n), block: 1_900n + BigInt(n) * 30n, chunk: n, taken: 1, unconfirmed: true }))), 2_500n);
     const scan = seeded([2, 0, 1]);
-    expect(await confirmedChunks(c.clients, D, scan, KEY)).toEqual([
+    // the batch had three entries: three chunks of one each account for them all
+    expect(await confirmedChunks(c.clients, D, scan, KEY, { entries: 3 })).toEqual([
       { txHash: H(10), block: 1_900n, chunk: 0, taken: 1 },
       { txHash: H(11), block: 1_930n, chunk: 1, taken: 1 },
       { txHash: H(12), block: 1_960n, chunk: 2, taken: 1 },
     ]);
     const f = (await withdrawalFacts(c.clients, D, w, { fd, vault, scan, claims: [] })).facts;
     expect(f.payout).toMatchObject({ txHash: H(12), messageId: H(8), state: 1 });
+    // with only chunks 0 and 1 seeded (the final one left out) nothing is said about the payout yet
+    const short = seeded([0, 1]);
+    expect(await confirmedChunks(c.clients, D, short, KEY, { entries: 3 })).toBe("unknown");
+    const f2 = (await withdrawalFacts(c.clients, D, w, { fd, vault, scan: short, claims: [] })).facts;
+    expect(f2.payout).toBeUndefined();
+    expect(f2.payoutUnknown).toBe(true);
+    // seeded chunks taking more entries than the batch had are a contradiction
+    const over = seeded([0, 1, 2]);
+    await expect(confirmedChunks(c.clients, D, over, KEY, { entries: 2 })).rejects.toBeInstanceOf(HistoryMismatchError);
     // chunk 1 left out by the seed: no mapping, and the indexer is caught
     const gapped = seeded([0, 2]);
     const err = await withdrawalFacts(c.clients, D, w, { fd, vault, scan: gapped, claims: [] }).catch((e: unknown) => e);
@@ -1776,8 +1823,10 @@ describe("stakes and payout chunks confirmed on use", () => {
     }
     const behind = chains({ latest: 2_000n, bitReceipts: deliveryReceipt });
     const scan = scanWith((s) => s.payouts.set(KEY, [{ txHash: H(10), block: 1_900n, chunk: 0, taken: 1, unconfirmed: true }]), 2_500n);
-    expect(await confirmedChunks(behind.clients, D, scan, KEY)).toBeUndefined();
-    expect((await withdrawalFacts(behind.clients, D, w, { fd, vault, scan, claims: [] })).facts.payout).toBeUndefined();
+    expect(await confirmedChunks(behind.clients, D, scan, KEY)).toBe("unknown");
+    const f = (await withdrawalFacts(behind.clients, D, w, { fd, vault, scan, claims: [] })).facts;
+    expect(f.payout).toBeUndefined();
+    expect(f.payoutUnknown).toBe(true);
     expect(scan.payouts.get(KEY)?.[0].unconfirmed).toBe(true);
   });
 });

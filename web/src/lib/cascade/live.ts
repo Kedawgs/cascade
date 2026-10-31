@@ -25,6 +25,8 @@ import {
   requestReplacement,
   restartScan,
   scanVault,
+  seededShared,
+  sharedUnverified,
   stakerDepositsIn,
   type VaultScan,
   withdrawalFacts,
@@ -34,7 +36,7 @@ import { DISTRUST_MS, distrustIndexer, fetchSeed, indexerDistrusted, type SeedHa
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type StringStorage, type WithdrawalOp } from "./oplog";
 import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore, seedHalves } from "./scan-store";
-import { checkSeededAccount, SEED_MIN_BLOCKS, type SeedVerdict, verifySeed } from "./seed";
+import { checkSeededHistory, SEED_MIN_BLOCKS, type SeedVerdict, seededRanges, verifySeed } from "./seed";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
 import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay, unstakeMostWei } from "./units";
@@ -76,6 +78,8 @@ export interface LiveDeps {
   verifySeed: typeof verifySeed;
   /** The account's csTAO as of a block, for the seed's tripwire (reads.ts). */
   readSharesAt: typeof reads.readSharesAt;
+  /** The pause between the windows the background check reads (CHECK_PACE_MS; tests run it flat out). */
+  checkPaceMs?: number;
   now(): number;
 }
 
@@ -129,10 +133,15 @@ export const SEED_RETRY_MS = 5 * 60_000;
 /** How long the checks of a seed against the chain may take before the scan reads the chain itself:
  * the archive node can hang on a request for a minute or more, and a seed is only a shortcut. */
 export const SEED_VERIFY_TIMEOUT_MS = 10_000;
-/** How often one step of the background check of a seeded account's history runs (a few windows a step,
- * seed.ts CHECK_WINDOWS_PER_STEP): about once per poll of the history, well under the archive node's
- * requests per minute alongside the screens' own reads. */
+/** The pause between the windows the background check of seeded history reads, once it is running: about
+ * 50 windows a minute, under the archive node's requests per minute alongside the screens' own reads. A
+ * year of a deployment's blocks (about 2,600 windows) is read in under an hour of an open tab. */
+export const CHECK_PACE_MS = 1_200;
+/** How long after the background check stopped (a window it couldn't read) it is started again. */
 export const CHECK_EVERY_MS = 25_000;
+/** How many reads in a row may fail to confirm a seed's events (a node that won't answer for them)
+ * before the seed is given up and the chain read from the deploy block instead, with no blame. */
+export const SEED_CONFIRM_TRIES = 3;
 
 /** A line in the browser's console about the indexer's seed: never anything on screen. */
 const note = (msg: string) => console.info(`Cascade: ${msg}`);
@@ -194,7 +203,12 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   function serial<T>(account: Address, step: (scan: VaultScan) => Promise<T>): Promise<T> {
     const key = account.toLowerCase();
-    const p = (queues.get(key) ?? Promise.resolve()).then(() => step(known(account)));
+    const p = (queues.get(key) ?? Promise.resolve()).then(() => {
+      const scan = known(account);
+      // history the chain showed to be wrong since the last step: start over before anything reads it
+      if (restartPending.delete(key)) restartScan(scan);
+      return step(scan);
+    });
     queues.set(
       key,
       p.catch(() => undefined),
@@ -225,10 +239,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   }
   const distrusted = () => deps.now() < distrustedUntil || indexerDistrusted(storage, d, deps.now());
 
-  /** Accounts whose scan is to start over at its next read (scanFor): saved history the chain showed to be
-   * wrong, found where the scan couldn't be emptied on the spot. Reads already under way keep the scan
-   * they have (every amount they show was confirmed by its receipt); the saved copy is already empty. */
+  /** Accounts whose scan is to start over at its next step under the lock (serial): saved history the
+   * chain showed to be wrong, found where the scan couldn't be emptied on the spot. Reads already under
+   * way keep the scan they have (every amount they show was confirmed by its receipt); the saved copy
+   * is already empty. */
   const restartPending = new Set<string>();
+  /** Accounts whose seed was given up this visit for a reason that isn't the indexer's fault (a history
+   * the seed's form can't describe, events a node won't confirm): not asked for again this visit. */
+  const seedGivenUp = new Set<string>();
 
   /** Saved history the chain showed to be wrong (HistoryMismatchError): the indexer is distrusted when
    * its seed was the source, and the scan starts over. One whose thrower held the account's lock and
@@ -236,34 +254,56 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * never sees its events vanish under it, and an empty copy is saved at once, so a reload doesn't start
    * from the history that was wrong. */
   function discarded(account: Address, e: HistoryMismatchError): void {
+    const key = account.toLowerCase();
     if (e.restarted) save(account, known(account), true);
     else {
-      restartPending.add(account.toLowerCase());
+      restartPending.add(key);
       save(account, newScan(d), true);
     }
-    // whatever the background check had read was of the history now discarded
+    // whatever the background check had read, and the tripwire's pass, were of the history now discarded
     progress.save(account, {});
+    tripwired.delete(key);
+    seedFailures.delete(key);
     if (e.seeded) distrust();
+    else seedGivenUp.add(key);
   }
 
+  /** How many reads in a row couldn't confirm a seeded history's events (SEED_CONFIRM_TRIES). */
+  const seedFailures = new Map<string, number>();
+
   /** A confirmation of saved history by the chain: when the chain shows it was wrong, the scan has gone
-   * back to the deploy block, and that is saved at once. */
+   * back to the deploy block, and that is saved at once. A seeded history whose events a node won't
+   * confirm, SEED_CONFIRM_TRIES reads running, is given up: the chain is read from the deploy block
+   * instead, with no blame on the indexer. */
   async function confirming(account: Address, scan: VaultScan, confirm: () => Promise<void>): Promise<VaultScan> {
+    const key = account.toLowerCase();
     try {
       await confirm();
+      seedFailures.delete(key);
     } catch (e) {
       if (e instanceof HistoryMismatchError) discarded(account, e);
+      else if (seededRanges(scan)) {
+        const n = (seedFailures.get(key) ?? 0) + 1;
+        seedFailures.set(key, n);
+        if (n >= SEED_CONFIRM_TRIES) {
+          restartScan(scan);
+          discarded(account, new HistoryMismatchError(false, true));
+          note("the history indexer's seed couldn't be confirmed against the chain after several tries, so the vault's history is read from the chain");
+        }
+      }
       throw e;
     }
     return scan;
   }
 
-  /** The account's scan as far as it has been read: this visit's, or the one saved by an earlier visit. */
+  /** The account's scan as far as it has been read: this visit's, or the one saved by an earlier visit
+   * (with how far the background check of its seeded blocks got). */
   function known(account: Address): VaultScan {
     const key = account.toLowerCase();
     let s = scans.get(key);
     if (!s) {
       s = deps.scanStore.load(account);
+      if (seededRanges(s)) s.checkedTo = progress.load(account).next;
       scans.set(key, s);
     }
     return s;
@@ -289,7 +329,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const key = account.toLowerCase();
     const asked = seedAsked.get(key);
     if (asked !== undefined && deps.now() - asked < SEED_RETRY_MS) return;
-    if (distrusted()) return;
+    if (distrusted() || seedGivenUp.has(key)) return;
     /** The chain's head, read now unless read moments ago. */
     const head = async (): Promise<bigint> => {
       const h = heads.get(key);
@@ -335,8 +375,10 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       note("the history indexer's seed reached no further than the saved history, so the vault's history is read from the chain");
       return;
     }
-    // the background check of this seed starts from the deploy block, whatever an earlier one had read
+    // the background check of this seed starts from its first block, whatever an earlier one had read
     progress.save(account, {});
+    delete scan.checkedTo;
+    tripwired.delete(key);
     save(account, scan, true);
     note(`the vault's history up to block ${verdict.next} came from the history indexer, checked against the chain; the rest is read from the chain`);
   }
@@ -350,8 +392,6 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const running = inFlight.get(key);
     if (running) return running;
     const p = serial(account, async (scan) => {
-      // history the chain showed to be wrong since the last read: start over (discarded)
-      if (restartPending.delete(key)) restartScan(scan);
       await seedIfWorthwhile(account, scan);
       let saved = deps.now();
       try {
@@ -364,10 +404,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         });
       } catch (e) {
         // a read that stopped keeps the progress it made
-        save(account, scan, true);
+        if (!restartPending.has(key)) save(account, scan, true);
         throw e;
       }
-      save(account, scan);
+      // not over a saved empty copy: history found wrong meanwhile is read again at the next read
+      if (!restartPending.has(key)) save(account, scan);
       return scan;
     });
     inFlight.set(key, p);
@@ -379,30 +420,34 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   /** The accounts whose seeded history passed the tripwire this visit. */
   const tripwired = new Set<string>();
 
-  /** Once per visit, for an account whose history came from the indexer: the account's csTAO at the scan's
-   * last block, read while the account's events are being confirmed by their receipts (csTAO is
-   * non-transferable, so those events, shares included, must add up to it: tripwire). Undefined when
-   * there is nothing to check. */
+  /** Once per visit, for an account whose history came from the indexer: the account's csTAO at the last
+   * seeded block, read while the account's events are being confirmed by their receipts (csTAO is
+   * non-transferable, so its events below that block, shares included, must add up to it: tripwire).
+   * Undefined when there is nothing to check. */
   function balanceForTripwire(account: Address, scan: VaultScan): Promise<{ balance: bigint } | { failed: unknown }> | undefined {
     if (scan.accountSeededTo === undefined || tripwired.has(account.toLowerCase())) return undefined;
-    return deps.readSharesAt(history, d, account, scan.next - 1n).then(
+    return deps.readSharesAt(history, d, account, scan.accountSeededTo - 1n).then(
       (balance) => ({ balance }),
       (failed: unknown) => ({ failed }),
     );
   }
 
-  /** The seeded history's events (every one confirmed by its receipt by now) against the balance: a seed
-   * that left one out, or added one, fails here at once: the scan starts over and the indexer is
-   * distrusted (HistoryMismatchError). A balance that couldn't be read leaves the figure hidden for this
-   * read, never wrong. */
+  /** The seeded history's events below the last seeded block (every one confirmed by its receipt by now)
+   * against the balance there: a seed that left one out, or added one, fails here at once, and the scan
+   * starts over without the seed (HistoryMismatchError; no blame: the cause can't be pinned on the seed,
+   * which may simply not describe this account's events). A balance that couldn't be read, or an event
+   * whose shares aren't known, decides nothing: the figures stay hidden until the background read is
+   * done, as they do in any case. */
   function tripwire(account: Address, scan: VaultScan, read: { balance: bigint } | { failed: unknown }): void {
-    if ("failed" in read) throw read.failed;
-    const events = [...scan.deposited, ...scan.redeemed];
+    if ("failed" in read || scan.accountSeededTo === undefined) return;
+    const to = scan.accountSeededTo;
+    const below = (xs: typeof scan.deposited) => xs.filter((e) => e.block < to);
+    const events = [...below(scan.deposited), ...below(scan.redeemed), ...below(scan.adjustments)];
     if (events.some((e) => e.shares === undefined)) return;
-    const expected = sum(scan.deposited.map((e) => e.shares!)) - sum(scan.redeemed.map((e) => e.shares!));
+    const expected = sum(below(scan.deposited).map((e) => e.shares!)) - sum(below(scan.redeemed).map((e) => e.shares!)) + sum(below(scan.adjustments).map((e) => e.shares!));
     if (read.balance !== expected) {
       restartScan(scan);
-      throw new HistoryMismatchError(true, true);
+      throw new HistoryMismatchError(false, true);
     }
     tripwired.add(account.toLowerCase());
   }
@@ -451,40 +496,58 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   };
   const checking = new Set<string>();
   const checkedAt = new Map<string, number>();
+  const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-  /** Moves the background check of a seeded account's history on a step (seed.ts, checkSeededAccount),
-   * once per CHECK_EVERY_MS, outside the account's lock (it only reads the scan, and a restart waits for
-   * the next read in any case), so no read waits behind it: when the browser's own read of the account's
-   * events matches the seed, the account half is the browser's own from then on ("rewards earned" stops
-   * being provisional); when it doesn't, the scan starts over at its next read and the indexer is
-   * distrusted. A step that can't read the chain keeps its progress and is tried again later; one whose
-   * scan changed under it (started over, or seeded again) keeps nothing. */
+  /** Runs the browser's own read of the blocks the indexer seeded (seed.ts, checkSeededHistory), one
+   * window every CHECK_PACE_MS until it is done, outside the account's lock (it only reads the scan and
+   * confirms its entries; a restart waits for the next read in any case), so no read waits behind it:
+   * when the chain's logs match the seed throughout, both halves are the browser's own from then on
+   * (the marks clear, the figures show); when they don't, the scan starts over at its next read and the
+   * indexer is distrusted (or, for an event the seed's form can't carry, simply read again). A window
+   * that can't be read stops the run, which starts again CHECK_EVERY_MS later from its progress; a run
+   * whose scan changed under it (started over, or seeded again) keeps nothing. */
   function checkInBackground(account: Address): void {
     const key = account.toLowerCase();
     const scan = known(account);
-    if (scan.accountSeededTo === undefined || checking.has(key)) return;
+    if (!seededRanges(scan) || checking.has(key) || restartPending.has(key)) return;
     const last = checkedAt.get(key);
     if (last !== undefined && deps.now() - last < CHECK_EVERY_MS) return;
     checking.add(key);
     checkedAt.set(key, deps.now());
     const p = progress.load(account);
-    const step = checkSeededAccount(background, d, scan, account, p).then(
-      (r) => {
-        if (r === "done") {
-          delete scan.accountSeededTo;
-          progress.save(account, {});
-          save(account, scan, true);
-          note("the account's history from the history indexer matches this browser's own read of the chain");
-        } else if (r === "more") progress.save(account, p);
-      },
-      (e: unknown) => {
+    void (async () => {
+      try {
+        for (;;) {
+          if (restartPending.has(key)) return;
+          const r = await checkSeededHistory(background, d, scan, account, p, 1);
+          if (r === "stopped") return;
+          progress.save(account, p);
+          if (r === "done") {
+            delete scan.sharedSeededFrom;
+            delete scan.sharedSeededTo;
+            delete scan.accountSeededFrom;
+            delete scan.accountSeededTo;
+            delete scan.checkedTo;
+            progress.save(account, {});
+            if (!restartPending.has(key)) save(account, scan, true);
+            note("the history from the history indexer matches this browser's own read of the chain");
+            return;
+          }
+          await pause(deps.checkPaceMs ?? CHECK_PACE_MS);
+        }
+      } catch (e) {
         if (e instanceof HistoryMismatchError) {
           discarded(account, e);
-          note("the account's history from the history indexer didn't match this browser's own read of the chain: it is read again from the deploy block");
+          note(
+            e.seeded
+              ? "the history from the history indexer didn't match this browser's own read of the chain: it is read again from the deploy block"
+              : "the account has events the history indexer's seed can't describe: its history is read again from the deploy block",
+          );
         } else progress.save(account, p);
-      },
-    );
-    void step.finally(() => checking.delete(key));
+      } finally {
+        checking.delete(key);
+      }
+    })();
   }
 
   /** Settled cancels never change: each answer is kept, so a read asks Base only about new ones. */
@@ -515,9 +578,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   /** When the open batch can be expected to close: a launch-cadence deployment may wait up to its max wait. */
   const closesAt = (fd: reads.FrontDoorState) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
-  /** Sent, its batch closed, not yet arrived in the vault (as far as `scan` has read). */
+  /** Sent, its batch closed, not yet arrived in the vault (as far as `scan` has read and confirmed). */
   const onTheBridge = (op: { batchId?: bigint }, fd: reads.FrontDoorState, scan: VaultScan) =>
-    op.batchId !== undefined && op.batchId < fd.openBatchId && !scan.delivered.has(String(op.batchId));
+    op.batchId !== undefined && op.batchId < fd.openBatchId && !deliveredFor(scan, op.batchId);
+  /** The batch's delivery is in the scan and confirmed by the chain. */
+  const deliveredFor = (scan: VaultScan, batchId: bigint) => {
+    const hit = scan.delivered.get(String(batchId));
+    return hit !== undefined && !hit.unconfirmed;
+  };
 
   /** This browser's deposits still counted: one taken back out of a batch that has since closed is
    * neither on the bridge nor delivered (see cancelTook). */
@@ -603,43 +671,54 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
 
   /** Shares not already asked back: the open batch's request (the front door's own figure) and this
    * browser's unstakes whose batch closed and hasn't reached the vault. The scan as far as it has been
-   * read places most of them; only one it hasn't seen arrive waits for the scan to catch up. */
-  async function getAvailable(account: string): Promise<Available> {
+   * read places most of them; only one it hasn't seen arrive waits for the scan to catch up. While
+   * whether one arrived rests on the indexer's word the chain hasn't confirmed (a seeded delivery whose
+   * receipt can't be read yet, or none in seeded blocks the browser hasn't read), there is no figure:
+   * `checking`, never a low one. */
+  function getAvailable(account: string): Promise<Available> {
     const a = account as Address;
-    let [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
-    const withdrawals = await placedWithdrawals(a, deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal"));
-    let scan = known(a);
-    /** In a closed batch that hasn't arrived as far as anyone can tell: a saved delivery counts only once
-     * its receipt shows it, and one that can't be shown yet leaves the unstake on the bridge. */
-    const arrived = (batchId: bigint) => {
-      const hit = scan.delivered.get(String(batchId));
-      return hit !== undefined && !hit.unconfirmed;
-    };
-    // one whose batch can't be known right now counts as asked too: at worst the figure is a little low
-    const away = () => withdrawals.filter((w) => w.unsure || (w.batchId !== undefined && w.batchId < fd.openBatchId && !arrived(w.batchId)));
-    const saved = away()
-      .filter((w) => scan.delivered.has(String(w.batchId)))
-      .map((w) => String(w.batchId));
-    if (saved.length > 0) await serial(a, (s) => checkDeliveries(history, d, s, saved));
-    if (away().length > 0) {
-      scan = await scanFor(a);
-      // a delivery the indexer's seed brought in counts, like a saved one, only once its receipt shows it
-      const seeded = away()
-        .filter((w) => scan.delivered.get(String(w.batchId))?.unconfirmed)
+    return trails(a, async () => {
+      let [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
+      const withdrawals = await placedWithdrawals(a, deps.opLog.list(a).filter((o): o is WithdrawalOp => o.kind === "withdrawal"));
+      let scan = known(a);
+      /** In a closed batch that hasn't arrived as far as anyone can tell: a saved delivery counts only once
+       * its receipt shows it, and one that can't be shown yet leaves the unstake on the bridge. */
+      const arrived = (batchId: bigint) => {
+        const hit = scan.delivered.get(String(batchId));
+        return hit !== undefined && !hit.unconfirmed;
+      };
+      // one whose batch can't be known right now counts as asked too: at worst the figure is a little low
+      const away = () => withdrawals.filter((w) => w.unsure || (w.batchId !== undefined && w.batchId < fd.openBatchId && !arrived(w.batchId)));
+      const saved = away()
+        .filter((w) => scan.delivered.has(String(w.batchId)))
         .map((w) => String(w.batchId));
-      if (seeded.length > 0) await serial(a, (s) => checkDeliveries(history, d, s, seeded));
-      // a delivery the scan found may have burned the shares since the first reads: read them again
-      [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
-    }
-    const asked = fd.redeemOf + sum(away().map((w) => w.shares));
-    const availableShares = v.shares > asked ? v.shares - asked : 0n;
-    // one request carries at most the vault's maxEntryValue, this batch's earlier request included
-    const most = v.maxEntryValue !== undefined ? unstakeMostWei(v.maxEntryValue, taoFor(fd.redeemOf, v.totalAssets, v.totalSupply)) : undefined;
-    return {
-      availableShares,
-      availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply),
-      ...(most !== undefined ? { mostTaoWei: most } : {}),
-    };
+      if (saved.length > 0) await serial(a, (s) => checkDeliveries(history, d, s, saved));
+      if (away().length > 0) {
+        scan = await scanFor(a);
+        // a delivery the indexer's seed brought in counts, like a saved one, only once its receipt shows it
+        const seeded = away()
+          .filter((w) => scan.delivered.get(String(w.batchId))?.unconfirmed)
+          .map((w) => String(w.batchId));
+        if (seeded.length > 0) await serial(a, (s) => checkDeliveries(history, d, s, seeded));
+        // a delivery the scan found may have burned the shares since the first reads: read them again
+        [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
+      }
+      // one request carries at most the vault's maxEntryValue, this batch's earlier request included
+      const most = v.maxEntryValue !== undefined ? unstakeMostWei(v.maxEntryValue, taoFor(fd.redeemOf, v.totalAssets, v.totalSupply)) : undefined;
+      const unsure = away().some((w) => {
+        if (w.batchId === undefined) return false;
+        const hit = scan.delivered.get(String(w.batchId));
+        return hit ? hit.unconfirmed === true && seededShared(scan, hit.block) : sharedUnverified(scan, scan.from, scan.next - 1n);
+      });
+      if (unsure) return { availableShares: 0n, availableTaoWei: 0n, ...(most !== undefined ? { mostTaoWei: most } : {}), checking: true };
+      const asked = fd.redeemOf + sum(away().map((w) => w.shares));
+      const availableShares = v.shares > asked ? v.shares - asked : 0n;
+      return {
+        availableShares,
+        availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply),
+        ...(most !== undefined ? { mostTaoWei: most } : {}),
+      };
+    });
   }
 
   /** What needs the vault's history: TAO on its way in, rewards earned, the average entry price. */
@@ -650,23 +729,26 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
     const pendingWei = fd.depositOf + sum(deposits.filter((o) => onTheBridge(o, fd, scan)).map((o) => o.targetTao));
     const putIn = sum(scan.deposited.map((e) => e.assets));
-    const takenOut = sum(scan.redeemed.map((e) => e.assets));
+    // a redeem reversed by a cancelled payout batch never left: its TAO isn't taken out
+    const takenOut = sum(scan.redeemed.map((e) => e.assets)) - sum(scan.adjustments.filter((e) => e.kind === "reversed").map((e) => e.assets));
     const earned = taoWei + takenOut - putIn;
     // the deposits that reached the vault, each at the price it was made at (one without a price is left out)
     const priced = deposits.flatMap((o) => {
       const price = entryPriceUsd(o);
-      return price !== undefined && o.batchId !== undefined && scan.delivered.has(String(o.batchId)) ? [{ price, tao: o.targetTao }] : [];
+      return price !== undefined && o.batchId !== undefined && deliveredFor(scan, o.batchId) ? [{ price, tao: o.targetTao }] : [];
     });
     const pricedTao = sum(priced.map((o) => o.tao));
+    // history from the indexer this browser hasn't read from the chain itself yet: no figure that an
+    // event left out of the seed could move
+    const provisional = seededRanges(scan) !== undefined;
     return {
       pendingTao: toDisplay(pendingWei, 18),
-      ...(putIn > 0n ? { rewardsEarnedTao: toDisplay(earned > 0n ? earned : 0n, 18) } : {}),
+      ...(putIn > 0n && !provisional ? { rewardsEarnedTao: toDisplay(earned > 0n ? earned : 0n, 18) } : {}),
       avgEntryPriceUsd:
         pricedTao > 0n
           ? priced.reduce((acc, o) => acc + o.price * toDisplay(o.tao, 18), 0) / toDisplay(pricedTao, 18)
           : null,
-      // the account's events came from the indexer and this browser hasn't read them all itself yet
-      ...(scan.accountSeededTo !== undefined ? { provisional: true as const } : {}),
+      ...(provisional ? { provisional: true as const } : {}),
     };
   }
 

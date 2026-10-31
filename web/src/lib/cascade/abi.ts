@@ -107,6 +107,12 @@ export const VAULT = parseAbi([
   "event Staked(bytes32 indexed hotkey, uint256 rao, uint256 measured)",
   "event PayoutChunkSent(bytes32 indexed key, uint32 chunk, uint32 taken, uint256 gross, uint256 net, uint256 fee)",
   "event PayoutDust(bytes32 indexed key, address indexed user, uint256 assets)",
+  // the other ways an account's shares move: a deposit or redeem made on Bittensor directly, a payout
+  // batch cancelled by the owner (shares re-minted), and the reward cut minted to the treasury
+  "event DepositedDirect(address indexed user, uint256 assets, uint256 shares)",
+  "event RedeemedDirect(address indexed user, uint256 shares, uint256 assets)",
+  "event RedeemReversed(bytes32 indexed key, address indexed user, uint256 shares, uint256 assets)",
+  "event RewardCutMinted(address indexed treasury, uint256 assets, uint256 shares)",
 ]);
 
 export const STAKING = parseAbi([

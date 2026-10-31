@@ -95,7 +95,6 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   OffRamps) and the rail's contracts it watches for admin events: `base.fmTao` and `base.tokenPool` (FM-TAO's CCIP
   burn-mint pool, `0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794`), `bittensor.fmTao` (wTAO), `bittensor.lockPool` and
   `bittensor.alphaVault`. A watched contract can't share an address with the deployment's on its chain.
-
 - **`DEPLOYMENT`**: the deployment's addresses and blocks. `pnpm config:from-record <ops record>` prints it from
   a verified ops record (addresses checksummed, Bittensor starting at the Bittensor adapter's block, which is the
   site's `NEXT_PUBLIC_CASCADE_BIT_BLOCK`). `env.test` already holds the v3 test deployment's; `env.production`

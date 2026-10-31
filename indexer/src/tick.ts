@@ -93,6 +93,9 @@ const LEASE_MARGIN_S = 30;
 export const CATCH_UP_GAIN_S = 60;
 /** The findings quiet while a chain catches up: a check waiting on the other chain is expected to. */
 const QUIET_WHILE_CATCHING_UP: ReadonlySet<string> = new Set(["bridge.check_stuck", "bridge.payout_unchecked"]);
+/** The alerts the hourly logs cross-check raises, re-sends and resolves itself (src/logs-check.ts): the tick
+ * leaves them as they are. */
+const JOB_OWNED: ReadonlySet<string> = new Set(["indexer.logs_omitted", "indexer.logs_extra"]);
 /** Base blocks in 24 hours (2-second blocks): the redeem requests unstakes.tiny_wave counts. */
 const DAY_BASE_BLOCKS = 43_200n;
 /** At most this many transactions wait in the retry list (meta tx_backlog), the newest kept. */
@@ -612,7 +615,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   // up, its lag alerts and the reports of checks stuck waiting are quiet: dropped if new, left as they are if open
   const findings = runRules(TICK_RULES, ctx);
   const quiet = (a: { rule: string; key: string }) =>
-    catchingUp.length > 0 && (QUIET_WHILE_CATCHING_UP.has(a.rule) || catchingUp.some((c) => a.key === `indexer.lag:${c}` || a.key === `indexer.blind:${c}`));
+    JOB_OWNED.has(a.rule) || (catchingUp.length > 0 && (QUIET_WHILE_CATCHING_UP.has(a.rule) || catchingUp.some((c) => a.key === `indexer.lag:${c}` || a.key === `indexer.blind:${c}`)));
   const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at), quiet });
   const holds = holdStatements(db, r.holds, state.holdIds, nowS);
 

@@ -14,9 +14,13 @@ import { type AlertRow, alertOf, returnedIds, setMeta } from "./store.ts";
 // _SECRET) re-reads the newest settled range of the watched addresses, and its logs are compared, by the same uid
 // the scan gives them, with what the store holds for that range. A log the second serves and the store lacks is
 // the critical indexer.logs_omitted (the primary omitted a watched event); a stored log the second, REREAD blocks
-// past it, doesn't serve is the warning indexer.logs_extra. A second endpoint that fails is noted in meta, and the
-// tick's indexer.unverified warns once it has failed for logsCheckUnverifiedS. The cost is bounded: at most
-// logsCheck{Base,Bittensor}Blocks per chain per run, in the chain's windows, within LOGS_CHECK_BUDGET requests.
+// past it, doesn't serve is the warning indexer.logs_extra. One alert per chain, the logs listed in its facts,
+// raised and re-sent by this job and resolved by it once the store holds every omitted log (the tick leaves these
+// two rules' alerts alone). Only blocks the tick has itself re-read from a node REREAD past them are judged, so
+// the primary's log index lagging its head is never read as an omission. A second endpoint that fails is noted in
+// meta, and the tick's indexer.unverified warns once it has failed for logsCheckUnverifiedS. The cost is bounded:
+// at most logsCheck{Base,Bittensor}Blocks per chain per run, in the chain's windows, within LOGS_CHECK_BUDGET
+// requests.
 
 export interface LogsCheckDeps {
   env: { DB: D1Database; EMAIL?: SendEmail };
@@ -32,20 +36,31 @@ export interface LogsCheckDeps {
 export const LOGS_CHECK_BUDGET = 12;
 /** The windows the second endpoints are asked in (Base's from BASE_LOG_WINDOW at run time). */
 export const LOGS_CHECK_WINDOW: Record<ChainName, bigint> = { base: WINDOW.base, bittensor: WINDOW.bittensor };
-/** At most this many mismatches are reported per chain per run (each is an alert); the counts say the rest. */
+/** At most this many mismatched logs are listed in a chain's alert; the counts say the rest. */
 const MAX_FINDINGS = 20;
-/** The run's wall time at most, and each request's. */
+/** The omitted uids kept (meta logs_omitted_uids:{chain}) until the store has them all, at most. */
+const MAX_TRACKED = 100;
+const OMITTED_UIDS = "logs_omitted_uids:";
 const RUN_MS = 120_000;
 const TIMEOUT_MS = 15_000;
 
 /** What a run did on a chain: the range compared and the counts, or why nothing was compared. */
 export type ChainCheck = { from: bigint; to: bigint; primary: number; second: number; omitted: number; extra: number } | "behind" | "failed" | "catching up" | "no cursor";
+/** The run's wall time at most, and each request's (OnFinality's public Bittensor node answers in 1.3-5 s). */
 export type LogsCheckResult = Record<ChainName, ChainCheck>;
 
 const CHAINS: readonly ChainName[] = ["bittensor", "base"];
 const NAMES: Record<ChainName, string> = { base: "Base", bittensor: "Bittensor" };
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const num = (s: string | undefined) => (s === undefined || s === "" || !Number.isFinite(Number(s)) ? undefined : Number(s));
+const json = <T>(s: string | undefined): T | undefined => {
+  if (!s) return undefined;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return undefined;
+  }
+};
 const max = (a: bigint, b: bigint) => (a > b ? a : b);
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
 /** The hash of a set of uids, for the facts. */
@@ -68,7 +83,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   try {
     const rs = await db.batch<Row>([
       db.prepare("SELECT chain, settled_to FROM cursors"),
-      db.prepare("SELECT k, v FROM meta WHERE k IN ('catching_up', 'last_warning_at', 'logs_check_to:base', 'logs_check_to:bittensor', 'logs_check_fail_since:base', 'logs_check_fail_since:bittensor')"),
+      db.prepare("SELECT k, v FROM meta WHERE k IN ('catching_up', 'last_warning_at') OR k LIKE 'logs_check_%' OR k LIKE 'logs_omitted_uids:%'"),
       db.prepare("SELECT * FROM alerts WHERE rule IN ('indexer.logs_omitted', 'indexer.logs_extra') AND resolved_at IS NULL ORDER BY id"),
     ]);
     settled = Object.fromEntries(rs[0].results.map((r) => [r.chain as ChainName, BigInt(r.settled_to as number)]));
@@ -77,6 +92,25 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   } catch (e) {
     console.error(`logs check: the database can't be read: ${message(e)}`);
     return result;
+  }
+  const writes: D1PreparedStatement[] = [];
+
+  // an omission alert heals once the store has every log it named (a re-read found them, or the owner added
+  // them): resolved here, since the tick leaves this job's alerts alone
+  for (const chain of CHAINS) {
+    const alert = open.find((a) => a.alertKey === `indexer.logs_omitted:${chain}`);
+    const uids = json<Hex[]>(meta[`${OMITTED_UIDS}${chain}`]) ?? [];
+    if (!alert || uids.length === 0) continue;
+    try {
+      const have = await db.prepare("SELECT COUNT(*) AS n FROM logs WHERE chain = ?1 AND removed = 0 AND uid IN (SELECT value FROM json_each(?2))").bind(chain, JSON.stringify(uids)).first<number>("n");
+      if (Number(have) >= uids.length) {
+        writes.push(db.prepare("UPDATE alerts SET resolved_at = ?1 WHERE id = ?2").bind(nowS, alert.id), setMeta(db, `${OMITTED_UIDS}${chain}`, ""));
+        open = open.filter((a) => a.id !== alert.id);
+        result[chain] = "no cursor";
+      }
+    } catch (e) {
+      console.error(`logs check: the omitted ${chain} logs couldn't be looked up: ${message(e)}`);
+    }
   }
 
   const budget = new Budget(LOGS_CHECK_BUDGET);
@@ -95,10 +129,11 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   const addresses = scanAddresses(cfg);
   const catchingUp = (meta.catching_up ?? "").split(",").filter(Boolean);
   const findings: Finding[] = [];
-  const writes: D1PreparedStatement[] = [];
 
   for (const chain of CHAINS) {
-    const to = settled[chain];
+    // only blocks the tick has re-read from a node REREAD past them: a log still missing there isn't the primary's
+    // log index lagging its head (which the next tick's re-read would have added), it is omitted
+    const to = settled[chain] === undefined ? undefined : (settled[chain] as bigint) - REREAD[chain];
     const start = cfg.deployment[chain].startBlock;
     if (to === undefined || to < start) continue;
     if (catchingUp.includes(chain)) {
@@ -177,29 +212,38 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
       "primary endpoint": hostDomain(primaryUrl),
       "second endpoint": hostDomain(secondUrl),
     };
-    for (const log of omitted.slice(0, MAX_FINDINGS)) {
-      const event = `${CONTRACT_NAMES[log.contract]} ${log.event}`;
+    const eventOf = (contract: string, event: string) => `${CONTRACT_NAMES[contract as keyof typeof CONTRACT_NAMES] ?? contract} ${event}`;
+    const listed = (logs: { contract: string; event: string; block: bigint | number; txHash: Hex }[]) =>
+      Object.fromEntries(logs.slice(0, MAX_FINDINGS).map((l, i) => [`log ${i + 1}`, `${eventOf(l.contract, l.event)}, block ${l.block}, ${txLink(chain, l.txHash)}`]));
+    const andMore = (n: number) => (n > 1 ? ` and ${n - 1} more` : "");
+    // one alert per chain (a lying primary can't send one critical per log): its logs are in the facts, and
+    // the omitted uids are kept in meta, so the alert is resolved once the store has them all
+    if (omitted.length) {
+      const first = omitted[0];
       findings.push({
         rule: "indexer.logs_omitted",
-        key: `indexer.logs_omitted:${log.uid}`,
-        subject: `The ${NAMES[chain]} logs RPC omitted a watched event: ${event}`,
-        facts: { ...common, event, block: String(log.block), transaction: txLink(chain, log.txHash), omitted: String(omitted.length) },
+        key: `indexer.logs_omitted:${chain}`,
+        subject: `The ${NAMES[chain]} logs RPC omitted ${omitted.length} watched event${omitted.length === 1 ? "" : "s"}: ${eventOf(first.contract, first.event)}${andMore(omitted.length)}`,
+        facts: { ...common, omitted: `${omitted.length} of the ${secondUids.size} logs the second served`, ...listed(omitted) },
       });
+      const known = json<Hex[]>(meta[`${OMITTED_UIDS}${chain}`]) ?? [];
+      writes.push(setMeta(db, `${OMITTED_UIDS}${chain}`, JSON.stringify([...new Set([...known, ...omitted.map((l) => l.uid)])].slice(-MAX_TRACKED))));
     }
-    for (const r of extra.slice(0, MAX_FINDINGS)) {
-      const event = `${CONTRACT_NAMES[r.contract as keyof typeof CONTRACT_NAMES] ?? r.contract} ${r.event}`;
+    if (extra.length) {
+      const first = extra[0];
       findings.push({
         rule: "indexer.logs_extra",
-        key: `indexer.logs_extra:${r.uid}`,
-        subject: `The second ${NAMES[chain]} RPC lacks a log the ${NAMES[chain]} logs RPC served: ${event}`,
-        facts: { ...common, event, block: String(r.block), transaction: txLink(chain, r.tx_hash as Hex), lacking: String(extra.length) },
+        key: `indexer.logs_extra:${chain}`,
+        subject: `The second ${NAMES[chain]} RPC lacks ${extra.length} log${extra.length === 1 ? "" : "s"} the ${NAMES[chain]} logs RPC served: ${eventOf(first.contract as string, first.event as string)}${andMore(extra.length)}`,
+        facts: { ...common, lacking: `${extra.length} of the ${stored.length} logs stored`, ...listed(extra.map((r) => ({ contract: r.contract as string, event: r.event as string, block: r.block as number, txHash: r.tx_hash as Hex }))) },
       });
     }
     writes.push(setMeta(db, `logs_check_to:${chain}`, String(checkedTo)), setMeta(db, `logs_check_at:${chain}`, String(nowS)));
     result[chain] = { from, to: checkedTo, primary: stored.length, second: secondUids.size, omitted: omitted.length, extra: extra.length };
   }
 
-  // the alerts, as the watchdog raises its own: opened or kept here, re-sent by the tick while unacknowledged
+  // the alerts, as the watchdog raises its own: opened or kept here, and re-sent here while unacknowledged (the
+  // tick leaves this job's alerts alone)
   const r = reconcile(db, { open, findings, nowS, t, holdActive: false, lastWarningSentAt: num(meta.last_warning_at) });
   if (writes.length === 0 && r.statements.length === 0) return result;
   let ids: ReturnType<typeof returnedIds>;

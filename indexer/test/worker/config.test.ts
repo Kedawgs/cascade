@@ -113,7 +113,7 @@ describe("parseConfig", () => {
   it("takes the second logs RPC of each chain from its var, or its secret, and refuses one on the primary's domain", () => {
     const cfg = parseConfig(vars());
     expect(cfg.rpc.baseLogs2).toBe("https://base.drpc.org");
-    expect(cfg.rpc.bittensor2).toBe("https://bittensor.drpc.org");
+    expect(cfg.rpc.bittensor2).toBe("https://bittensor-finney.api.onfinality.io/public");
     const keyed = parseConfig(withVars({ BASE_LOGS_RPC_URL_2_SECRET: "https://second.example/v1/abc123", BITTENSOR_RPC_URL_2_SECRET: "https://other.example/v1/abc123" }));
     expect([keyed.rpc.baseLogs2, keyed.rpc.bittensor2]).toEqual(["https://second.example/v1/abc123", "https://other.example/v1/abc123"]);
     // not an https URL, or missing

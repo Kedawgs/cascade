@@ -1,4 +1,4 @@
-import { type Abi, decodeFunctionData, encodeFunctionResult, type Hex, hexToBigInt, numberToHex } from "viem";
+import { type Abi, type AbiFunction, decodeFunctionData, encodeFunctionResult, type Hex, hexToBigInt, numberToHex, toFunctionSelector } from "viem";
 import { MULTICALL3 } from "../../src/abi.ts";
 import type { ChainName } from "../../src/config.ts";
 import type { RawLog } from "../../src/logs.ts";
@@ -159,6 +159,17 @@ export interface FakeContracts {
   [address: Hex]: { abi: Abi; fns: Record<string, View> } | { raw: (data: Hex, at: bigint) => Hex | typeof REVERT };
 }
 
+const selectorMaps = new WeakMap<Abi, Map<string, AbiFunction>>();
+/** An ABI's functions by their 4-byte selector, worked out once. */
+function selectorsOf(abi: Abi): Map<string, AbiFunction> {
+  let m = selectorMaps.get(abi);
+  if (!m) {
+    m = new Map(abi.filter((x): x is AbiFunction => x.type === "function").map((f) => [toFunctionSelector(f).toLowerCase(), f]));
+    selectorMaps.set(abi, m);
+  }
+  return m;
+}
+
 /** An eth_call handler for `fakeChains`' `calls`: views of the given contracts, called directly or
  * through Multicall3's aggregate3 (with getBlockNumber, getCurrentBlockTimestamp and getEthBalance
  * answered from the block the node is at). A view returning REVERT (or throwing) reverts. */
@@ -182,9 +193,13 @@ export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => nu
       const out = c.raw(data, at);
       return out === REVERT ? null : out;
     }
+    // the function by its selector, from a map worked out once per ABI (viem would hash every function's signature on
+    // every call: the readings make about 70 calls a chain a tick)
+    const item = selectorsOf(c.abi).get(data.slice(0, 10).toLowerCase());
+    if (!item) return null;
     let call: { functionName: string; args?: readonly unknown[] };
     try {
-      call = decodeFunctionData({ abi: c.abi, data }) as typeof call;
+      call = decodeFunctionData({ abi: [item], data }) as typeof call;
     } catch {
       return null;
     }
@@ -198,7 +213,7 @@ export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => nu
     }
     if (value === REVERT) return null;
     if (typeof value === "object" && value !== null && RAW in value) return (value as Record<symbol, Hex>)[RAW];
-    return encodeFunctionResult({ abi: c.abi, functionName: call.functionName, result: value } as never);
+    return encodeFunctionResult({ abi: [item], functionName: call.functionName, result: value } as never);
   }
 
   return (params: unknown[], at: bigint): Hex => {

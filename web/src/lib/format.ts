@@ -79,14 +79,18 @@ function normalizeSpaces(s: string): string {
   return s.replace(/[  ]/g, " ");
 }
 
+/** A date that isn't one (an invalid Date) shows as a dash: Intl would throw, and a throw while
+ * rendering blanks the whole screen. */
+const valid = (d: Date) => Number.isFinite(d.getTime());
+
 /** "Oct 1" */
 export function formatDay(d: Date): string {
-  return dayFmt.format(d);
+  return valid(d) ? dayFmt.format(d) : "–";
 }
 
 /** "Oct 1, 9:14 AM" */
 export function formatDateTime(d: Date): string {
-  return normalizeSpaces(dateTimeFmt.format(d));
+  return valid(d) ? normalizeSpaces(dateTimeFmt.format(d)) : "–";
 }
 
 function plural(n: number, unit: string): string {

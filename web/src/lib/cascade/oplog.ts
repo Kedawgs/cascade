@@ -105,29 +105,214 @@ export type StringStorage = {
 };
 
 const replacer = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);
-const reviver = (_k: string, v: unknown) =>
-  v && typeof v === "object" && "$bigint" in v ? BigInt((v as { $bigint: string }).$bigint) : v;
+
+// ---- What is read back from storage is checked, field by field, before it is believed ----
+// Anyone with the browser's storage (an extension, another script on a shared origin in development, a
+// sync that went wrong) can write under the log's keys. A record is read only if every field has the
+// type, range and meaning the log writes (as scan-store.ts checks a saved scan); one that doesn't is
+// dropped whole, with a warning, and never reaches a screen or a flow. Amounts stay exact bigints within
+// what their token can be, dates are sane, and kinds, states and step names are the known ones.
+
+/** A field that isn't as the log writes it: the record is dropped. */
+class Bad extends Error {}
+const need = <T>(v: T | undefined): T => {
+  if (v === undefined) throw new Bad();
+  return v;
+};
+/** An optional field: absent is fine, present means it must check out. */
+const maybe = <T>(x: unknown, f: (x: unknown) => T | undefined): T | undefined => (x === undefined ? undefined : need(f(x)));
+const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
+const HASH = /^0x[0-9a-fA-F]{64}$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const DECIMAL = /^(0|[1-9]\d{0,77})$/;
+/** Ids come from newOpId (base 36) and go into URLs and React keys: nothing else is one. */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** No record is older than this (Cascade's first transaction was in 2026)… */
+const EPOCH_FLOOR = Date.UTC(2025, 0, 1);
+/** …nor dated further ahead than a device's clock plausibly runs fast. */
+const CLOCK_AHEAD_MS = 60 * 60_000;
+
+const hash = (x: unknown): Hex | undefined => (typeof x === "string" && HASH.test(x) ? (x as Hex) : undefined);
+const text = (max: number) => (x: unknown): string | undefined => (typeof x === "string" && x.length > 0 && x.length <= max ? x : undefined);
+const oneOf = <T extends string>(choices: readonly T[]) => (x: unknown): T | undefined => (typeof x === "string" && (choices as readonly string[]).includes(x) ? (x as T) : undefined);
+const bool = (x: unknown): boolean | undefined => (typeof x === "boolean" ? x : undefined);
+/** A bigint as the log writes it ({ $bigint: decimal }), from 0 up to `bits` bits. */
+const big = (bits: number) => (x: unknown): bigint | undefined => {
+  if (!isRecord(x) || !DECIMAL.test(String(x.$bigint))) return undefined;
+  const v = BigInt(x.$bigint as string);
+  return v < 1n << BigInt(bits) ? v : undefined;
+};
+/** USDC units (6 decimals): 96 bits is far past its supply. */
+const usdc = big(96);
+/** TAO wei, csTAO share units, ETH wei: 128 bits. */
+const wei = big(128);
+const uint64 = big(64);
+/** A whole non-negative number up to 32 bits (a nonce, a deadline in seconds). */
+const uint32 = (x: unknown): number | undefined => (typeof x === "number" && Number.isInteger(x) && x >= 0 && x < 2 ** 32 ? x : undefined);
+/** Dollars for display: a finite non-negative number. */
+const usd = (x: unknown): number | undefined => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined);
+const time = (now: number) => (x: unknown): number | undefined =>
+  typeof x === "number" && Number.isInteger(x) && x >= EPOCH_FLOOR && x <= now + CLOCK_AHEAD_MS ? x : undefined;
+/** The step hashes a record keeps: only the named steps, each a transaction hash. */
+const hashesOf = <K extends string>(keys: readonly K[]) => (x: unknown): Partial<Record<K, Hex>> | undefined => {
+  if (!isRecord(x)) return undefined;
+  const out: Partial<Record<K, Hex>> = {};
+  for (const [k, v] of Object.entries(x)) {
+    if (!(keys as readonly string[]).includes(k)) return undefined;
+    const h = hash(v);
+    if (h === undefined) return undefined;
+    out[k as K] = h;
+  }
+  return out;
+};
+const cancelledOf = (now: number) => (x: unknown): { hash: Hex; at: number } | undefined =>
+  isRecord(x) ? { hash: need(hash(x.hash)), at: need(time(now)(x.at)) } : undefined;
+const deliveryOf = (x: unknown): { minUsdcPerTao: bigint; deadline: number } | undefined =>
+  isRecord(x) ? { minUsdcPerTao: need(usdc(x.minUsdcPerTao)), deadline: need(uint32(x.deadline)) } : undefined;
+const idList = (x: unknown): string[] | undefined => (Array.isArray(x) && x.length <= 1_000 ? x.map((id) => need(text(64)(id))) : undefined);
+
+const STATES = ["running", "needs-you", "sent", "failed"] as const satisfies OpState[];
+const MODES = ["batch", "sequential"] as const;
+const DEPOSIT_CALLS = ["approveUsdc", "swap", "approveTao", "deposit", "stake"] as const satisfies DepositCall[];
+const CLAIM_CALLS = ["claim", "approveTao", "swap"] as const satisfies ClaimCall[];
+
+/** A record from every field it may have (so a forgotten one fails to compile), keeping only those with
+ * a value: a decoded record carries no field the log doesn't write. */
+const defined = <T extends object>(o: { [K in keyof Required<T>]: Required<T>[K] | undefined }): T =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
+
+/** `x` as a record of `account`'s, every field checked; null for anything else. */
+export function decodeOperation(x: unknown, account: Address, now: number): Operation | null {
+  try {
+    if (!isRecord(x)) throw new Bad();
+    const at = time(now);
+    const own = typeof x.account === "string" && ADDRESS.test(x.account) && x.account.toLowerCase() === account.toLowerCase() ? (x.account as Address) : undefined;
+    const base = {
+      id: need(typeof x.id === "string" && ID.test(x.id) ? x.id : undefined),
+      account: need(own),
+      createdAt: need(at(x.createdAt)),
+      mode: maybe(x.mode, oneOf(MODES)),
+      state: need(oneOf(STATES)(x.state)),
+      error: maybe(x.error, text(1_000)),
+    };
+    if (x.kind === "deposit") {
+      return defined<DepositOp>({
+        ...base,
+        kind: "deposit",
+        v: maybe(x.v, (v) => (v === 3 ? (3 as const) : undefined)),
+        usdcIn: need(usdc(x.usdcIn)),
+        targetTao: need(wei(x.targetTao)),
+        minTaoOut: maybe(x.minTaoOut, wei),
+        priceUsd: maybe(x.priceUsd, usd),
+        feesUsd: maybe(x.feesUsd, usd),
+        hashes: need(hashesOf(DEPOSIT_CALLS)(x.hashes)),
+        callsId: maybe(x.callsId, text(256)),
+        batchId: maybe(x.batchId, uint64),
+        cancelled: maybe(x.cancelled, cancelledOf(now)),
+      });
+    }
+    if (x.kind === "withdrawal") {
+      return defined<WithdrawalOp>({
+        ...base,
+        kind: "withdrawal",
+        shares: need(wei(x.shares)),
+        taoEstimate: need(wei(x.taoEstimate)),
+        usdcEstimate: need(usdc(x.usdcEstimate)),
+        fee: need(wei(x.fee)),
+        delivery: maybe(x.delivery, deliveryOf),
+        hash: maybe(x.hash, hash),
+        sentAt: maybe(x.sentAt, at),
+        nonce: maybe(x.nonce, uint32),
+        searchedTo: maybe(x.searchedTo, uint64),
+        droppedAt: maybe(x.droppedAt, at),
+        batchId: maybe(x.batchId, uint64),
+        cancelled: maybe(x.cancelled, cancelledOf(now)),
+      });
+    }
+    if (x.kind === "claim") {
+      return defined<ClaimOp>({
+        ...base,
+        kind: "claim",
+        amount: need(wei(x.amount)),
+        keepTao: need(bool(x.keepTao)),
+        minUsdc: need(usdc(x.minUsdc)),
+        hashes: need(hashesOf(CLAIM_CALLS)(x.hashes)),
+        callsId: maybe(x.callsId, text(256)),
+        withdrawalIds: maybe(x.withdrawalIds, idList),
+      });
+    }
+    if (x.kind === "close") {
+      return defined<CloseOp>({
+        ...base,
+        kind: "close",
+        batchId: need(uint64(x.batchId)),
+        value: need(wei(x.value)),
+        hashes: need(hashesOf(["close"] as const)(x.hashes)),
+        callsId: maybe(x.callsId, text(256)),
+      });
+    }
+    throw new Bad();
+  } catch (e) {
+    if (e instanceof Bad) return null;
+    throw e;
+  }
+}
+
+/** A stored list as its records, `account`'s and sound (decodeOperation), with how many were dropped;
+ * null when `raw` isn't a JSON list at all. */
+export function decodeOperations(raw: string, account: Address, now: number): { ops: Operation[]; dropped: number } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const ops: Operation[] = [];
+  for (const x of parsed) {
+    const op = decodeOperation(x, account, now);
+    if (op) ops.push(op);
+  }
+  return { ops, dropped: parsed.length - ops.length };
+}
 
 /** The transactions this site sent, per account and deployment, kept in the browser. There is no
- * indexer: the activity trails start from these and read the rest from the chain. When storage is full,
- * `makeRoom` may free some (saved history, which can be read again) before a write is kept in memory
- * only: these records can't be read back from anywhere else. */
-export function createOpLog(storage: StringStorage, frontDoor: Address, makeRoom?: () => boolean) {
+ * indexer: the activity trails start from these and read the rest from the chain. What is read back is
+ * checked first (decodeOperations): a record that isn't as the log writes it is dropped with a warning.
+ * When storage is full, `makeRoom` may free some (saved history, which can be read again) before a
+ * write is kept in memory only: these records can't be read back from anywhere else. */
+export function createOpLog(storage: StringStorage, frontDoor: Address, makeRoom?: () => boolean, now: () => number = Date.now) {
   const memory = new Map<string, Operation[]>();
   /** Lists whose last write storage refused (full, or blocked): this tab's memory is newer than what is stored. */
   const unsaved = new Set<string>();
   const key = (account: Address) => `cascade.ops.${frontDoor.toLowerCase()}.${account.toLowerCase()}`;
+  /** What was last warned about under each key: the same stored text isn't warned about on every read. */
+  const warned = new Map<string, string>();
+
+  function warnOnce(k: string, raw: string, what: string): void {
+    if (warned.get(k) === raw) return;
+    warned.set(k, raw);
+    console.warn(`Cascade: ${what} in this browser's storage; it is left out.`);
+  }
 
   function read(account: Address): Operation[] {
     const k = key(account);
     if (unsaved.has(k)) return memory.get(k) ?? [];
+    let raw: string | null;
     try {
-      const raw = storage.getItem(k);
-      if (raw !== null) return JSON.parse(raw, reviver) as Operation[];
+      raw = storage.getItem(k);
     } catch {
-      // storage blocked or unreadable: fall back to this tab's memory
+      // storage blocked: fall back to this tab's memory
+      return memory.get(k) ?? [];
     }
-    return memory.get(k) ?? [];
+    if (raw === null) return memory.get(k) ?? [];
+    const decoded = decodeOperations(raw, account, now());
+    if (decoded === null) {
+      warnOnce(k, raw, "the activity records aren't a readable list");
+      return memory.get(k) ?? [];
+    }
+    if (decoded.dropped > 0) warnOnce(k, raw, `${decoded.dropped} activity record${decoded.dropped === 1 ? "" : "s"} couldn't be read`);
+    return decoded.ops;
   }
 
   function write(account: Address, ops: Operation[]) {

@@ -55,10 +55,14 @@ function memory() {
   return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
 }
 
+/** Records are dated around the deps' clock (the op log drops a record dated outside what is sane). */
+const T0 = 1_800_000_000_000;
+
 function deps(over: Partial<LiveDeps> = {}): LiveDeps {
+  const now = over.now ?? (() => 1_800_000_100_000);
   return {
     clients: {} as never,
-    opLog: createOpLog(memory(), D.frontDoor),
+    opLog: createOpLog(memory(), D.frontDoor, undefined, now),
     readFrontDoor: async () => fd,
     readOpenBatch: async () => Promise.reject(new Error("the open batch wasn't expected to be read")),
     readNextBatch: async () => Promise.reject(new Error("the next batch wasn't expected to be read")),
@@ -76,7 +80,7 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     checkWiring: async () => "ok",
     scan: async () => undefined,
     scanStore: createScanStore(memory(), D),
-    now: () => 1_800_000_100_000,
+    now,
     ...over,
   };
 }
@@ -149,7 +153,7 @@ describe("average entry price", () => {
     id,
     kind: "deposit",
     account: ME,
-    createdAt: 1,
+    createdAt: T0 + 1,
     usdcIn: 0n,
     targetTao,
     ...(priceUsd !== undefined ? { priceUsd } : {}),
@@ -198,10 +202,10 @@ describe("cancelled requests", () => {
 
   it("aren't on the bridge, in shares or TAO, once their cancel went through, even after their batch closed with others", async () => {
     const d = deps({ clients: base({ [H(12)]: { eventName: "RedeemCancelled", batchId: 3n }, [H(13)]: { eventName: "DepositCancelled", batchId: 3n } }) as never });
-    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
-    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 1, usdcIn: 0n, targetTao: TAO, hashes: {}, batchId: 3n, state: "sent" };
-    d.opLog.put({ ...w, cancelled: { hash: H(12), at: 2 } });
-    d.opLog.put({ ...dep, cancelled: { hash: H(13), at: 2 } });
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: T0 + 1, usdcIn: 0n, targetTao: TAO, hashes: {}, batchId: 3n, state: "sent" };
+    d.opLog.put({ ...w, cancelled: { hash: H(12), at: T0 + 2 } });
+    d.opLog.put({ ...dep, cancelled: { hash: H(13), at: T0 + 2 } });
     const data = createLiveCascadeData(D, d);
     // only the open batch's request is asked back
     expect((await data.getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
@@ -217,14 +221,14 @@ describe("cancelled requests", () => {
       id,
       kind: "deposit",
       account: ME,
-      createdAt: 1,
+      createdAt: T0 + 1,
       usdcIn: 0n,
       targetTao: TAO,
       priceUsd,
       hashes: {},
       batchId: 3n,
       state: "sent",
-      ...(cancelled ? { cancelled: { hash: H(13), at: 2 } } : {}),
+      ...(cancelled ? { cancelled: { hash: H(13), at: T0 + 2 } } : {}),
     });
     d.opLog.put(dep("kept", 200));
     d.opLog.put(dep("cancelled", 300, true));
@@ -233,9 +237,9 @@ describe("cancelled requests", () => {
 
   it("still count while their cancel can't be read, or came out of a later batch", async () => {
     const d = deps({ clients: base({ [H(14)]: { eventName: "RedeemCancelled", batchId: 4n } }) as never });
-    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
-    d.opLog.put({ ...w, cancelled: { hash: H(14), at: 2 } });
-    d.opLog.put({ ...w, id: "w2", cancelled: { hash: H(15), at: 2 } });
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
+    d.opLog.put({ ...w, cancelled: { hash: H(14), at: T0 + 2 } });
+    d.opLog.put({ ...w, id: "w2", cancelled: { hash: H(15), at: T0 + 2 } });
     const p = await createLiveCascadeData(D, d).getAvailable(ME);
     expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 4n * 10n ** 21n);
   });
@@ -256,7 +260,7 @@ describe("the vault's history", () => {
     id: `w${batchId}`,
     kind: "withdrawal",
     account: ME,
-    createdAt: 1,
+    createdAt: T0 + 1,
     shares: 2n * 10n ** 21n,
     taoEstimate: 0n,
     usdcEstimate: 0n,
@@ -603,7 +607,7 @@ describe("unstakes sharing a batch", () => {
       id,
       kind: "withdrawal",
       account: ME,
-      createdAt: 1,
+      createdAt: T0 + 1,
       shares: 5n * 10n ** 21n,
       taoEstimate: 0n,
       usdcEstimate: 0n,
@@ -615,7 +619,7 @@ describe("unstakes sharing a batch", () => {
     d.opLog.put(w("a", H(20), { batchId: 3n }));
     // its batch isn't recorded yet: the request's receipt says
     d.opLog.put(w("b", H(21)));
-    d.opLog.put(w("c", H(22), { batchId: 3n, cancelled: { hash: H(30), at: 2 } }));
+    d.opLog.put(w("c", H(22), { batchId: 3n, cancelled: { hash: H(30), at: T0 + 2 } }));
     return d;
   }
 
@@ -625,7 +629,7 @@ describe("unstakes sharing a batch", () => {
   });
 
   it("count as still asked while their batch can't be found out, but not once their request shows it reverted", async () => {
-    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), state: "sent" };
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), state: "sent" };
     const availableWith = async (receipt: () => Promise<unknown>) => {
       const d = deps({ clients: { base: { getTransactionReceipt: receipt } } as never });
       d.opLog.put(w);
@@ -688,7 +692,7 @@ describe("unstakes sharing a batch", () => {
     });
     const setUp = (b: ReturnType<typeof base>, sentAt: number, over: Partial<WithdrawalOp> = {}) => {
       const d = deps({ clients: b.clients as never });
-      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent", ...over });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt, state: "sent", ...over });
       return { d, data: createLiveCascadeData(D, d) };
     };
     const HOUR = 60 * 60_000;
@@ -760,7 +764,7 @@ describe("unstakes sharing a batch", () => {
       const b = base(opts);
       let now = NOW;
       const d = deps({ clients: b.clients as never, now: () => now });
-      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: LONG_AGO, nonce: 3, state: "sent" });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: LONG_AGO, nonce: 3, state: "sent" });
       const data = createLiveCascadeData(D, d);
       // the logs can't be read: still counted
       expect((await data.getAvailable(ME)).availableShares).toBe(all - SHARES);
@@ -795,7 +799,7 @@ describe("unstakes sharing a batch", () => {
       const b = base({ nonce: 4, receipts });
       let now = NOW;
       const d = deps({ clients: b.clients as never, now: () => now });
-      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: LONG_AGO, nonce: 3, state: "sent" });
+      d.opLog.put({ id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: SHARES, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, hash: H(20), sentAt: LONG_AGO, nonce: 3, state: "sent" });
       const data = createLiveCascadeData(D, d);
       await data.getAvailable(ME);
       expect(d.opLog.get(ME, "w")).toMatchObject({ state: "failed", droppedAt: NOW });
@@ -844,8 +848,8 @@ describe("unstakes sharing a batch", () => {
           nonce: 3,
           state: "sent",
         });
-        d.opLog.put(w("older", 1, H(20)));
-        d.opLog.put(w("newer", 2, H(21)));
+        d.opLog.put(w("older", T0 + 1, H(20)));
+        d.opLog.put(w("newer", T0 + 2, H(21)));
         return { d, data: createLiveCascadeData(D, d) };
       };
 
@@ -933,7 +937,7 @@ describe("live data", () => {
 
   it("also subtracts a request whose batch closed but has not arrived", async () => {
     const d = deps();
-    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" };
     d.opLog.put(w);
     const p = await createLiveCascadeData(D, d).getAvailable(ME);
     expect(p.availableShares).toBe(8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n);

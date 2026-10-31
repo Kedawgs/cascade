@@ -117,10 +117,12 @@ const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
 export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = {}): CascadeData {
   const storage = browserStorage();
+  const now = given.now ?? Date.now;
   const deps: LiveDeps = {
     clients: given.clients ?? createClients(),
-    // the op log wins the browser's storage: saved history is dropped to make room for it
-    opLog: given.opLog ?? createOpLog(storage, d.frontDoor, () => dropSavedScans(storage)),
+    // the op log wins the browser's storage: saved history is dropped to make room for it; it judges
+    // what it reads back (a record's dates) by the same clock as everything here
+    opLog: given.opLog ?? createOpLog(storage, d.frontDoor, () => dropSavedScans(storage), now),
     scanStore: given.scanStore ?? createScanStore(storage, d),
     readFrontDoor: reads.readFrontDoor,
     readOpenBatch: reads.readOpenBatch,
@@ -138,7 +140,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     readApyPercent: reads.readApyPercent,
     checkWiring,
     scan: scanVault,
-    now: Date.now,
+    now,
     ...given,
   };
   const c = deps.clients;

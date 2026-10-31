@@ -13,11 +13,14 @@ function memoryStorage() {
   return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
 }
 
+/** Records are dated in 2026 (the op log drops a record dated before Cascade existed). */
+const T0 = Date.UTC(2026, 9, 1);
+
 const op: DepositOp = {
   id: "d1",
   kind: "deposit",
   account: ME,
-  createdAt: 1,
+  createdAt: T0 + 1,
   usdcIn: 20_000_000n,
   targetTao: 78_000_000_000_000_000n,
   priceUsd: 251.6,
@@ -28,7 +31,7 @@ const op: DepositOp = {
 describe("opStore", () => {
   it("keeps a Send it now on its own record: the close's hash before its receipt is waited for, then sent", async () => {
     const log = createOpLog(memoryStorage(), FD);
-    const close: CloseOp = { id: "c1", kind: "close", account: ME, createdAt: 1, batchId: 7n, value: 969_000_000_000_000n, hashes: {}, state: "running" };
+    const close: CloseOp = { id: "c1", kind: "close", account: ME, createdAt: T0 + 1, batchId: 7n, value: 969_000_000_000_000n, hashes: {}, state: "running" };
     log.put(close);
     const hash = `0x${"44".repeat(32)}` as Hex;
     const seenWhileWaiting: unknown[] = [];
@@ -62,15 +65,15 @@ describe("opStore", () => {
 
   it("dates an unstake request's hash when it is recorded, again when a sped-up one takes its place", () => {
     const log = createOpLog(memoryStorage(), FD);
-    const w: WithdrawalOp = { id: "w1", kind: "withdrawal", account: ME, createdAt: 1, shares: 1n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, state: "running" };
+    const w: WithdrawalOp = { id: "w1", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: 1n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, state: "running" };
     log.put(w);
-    let now = 5_000;
+    let now = T0 + 5_000;
     const store = opStore(log, ME, "w1", () => now);
     store.setHash("request", `0x${"22".repeat(32)}`);
-    expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"22".repeat(32)}`, sentAt: 5_000 });
-    now = 9_000;
+    expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"22".repeat(32)}`, sentAt: T0 + 5_000 });
+    now = T0 + 9_000;
     store.setHash("request", `0x${"33".repeat(32)}`);
-    expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"33".repeat(32)}`, sentAt: 9_000 });
+    expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"33".repeat(32)}`, sentAt: T0 + 9_000 });
   });
 });
 
@@ -96,9 +99,9 @@ describe("cancelStore", () => {
     const lost = wallet(async () => {
       throw new Error("the connection dropped");
     });
-    await expect(runFlow(lost, cancelStore(log, ME, "d1", () => 42), [cancelCall("deposit", 1n, D)])).rejects.toBeInstanceOf(FlowError);
+    await expect(runFlow(lost, cancelStore(log, ME, "d1", () => T0 + 42), [cancelCall("deposit", 1n, D)])).rejects.toBeInstanceOf(FlowError);
     const after = log.get(ME, "d1") as DepositOp;
-    expect(after.cancelled).toEqual({ hash: CANCEL, at: 42 });
+    expect(after.cancelled).toEqual({ hash: CANCEL, at: T0 + 42 });
     // the record's own flow is left as it was
     expect(after.state).toBe("sent");
     expect(after.error).toBeUndefined();
@@ -107,19 +110,19 @@ describe("cancelStore", () => {
   it("keeps a cancel that went through, and the record's state", async () => {
     const log = createOpLog(memoryStorage(), FD);
     log.put(sent);
-    await runFlow(wallet(async () => ({ status: "success" })), cancelStore(log, ME, "d1", () => 42), [cancelCall("deposit", 1n, D)]);
-    expect(log.get(ME, "d1")).toMatchObject({ state: "sent", cancelled: { hash: CANCEL, at: 42 } });
+    await runFlow(wallet(async () => ({ status: "success" })), cancelStore(log, ME, "d1", () => T0 + 42), [cancelCall("deposit", 1n, D)]);
+    expect(log.get(ME, "d1")).toMatchObject({ state: "sent", cancelled: { hash: CANCEL, at: T0 + 42 } });
   });
 
   it("forgets a cancel Base reverted, keeping the one recorded before it", async () => {
     const log = createOpLog(memoryStorage(), FD);
-    const earlier = { hash: `0x${"ee".repeat(32)}` as Hex, at: 7 };
+    const earlier = { hash: `0x${"ee".repeat(32)}` as Hex, at: T0 + 7 };
     log.put({ ...sent, cancelled: earlier });
     const reverted = wallet(async () => ({ status: "reverted" }));
-    await expect(runFlow(reverted, cancelStore(log, ME, "d1", () => 42), [cancelCall("deposit", 1n, D)])).rejects.toBeInstanceOf(FlowError);
+    await expect(runFlow(reverted, cancelStore(log, ME, "d1", () => T0 + 42), [cancelCall("deposit", 1n, D)])).rejects.toBeInstanceOf(FlowError);
     expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual(earlier);
     log.update(ME, "d1", { cancelled: undefined });
-    await expect(runFlow(reverted, cancelStore(log, ME, "d1", () => 42), [cancelCall("deposit", 1n, D)])).rejects.toBeInstanceOf(FlowError);
+    await expect(runFlow(reverted, cancelStore(log, ME, "d1", () => T0 + 42), [cancelCall("deposit", 1n, D)])).rejects.toBeInstanceOf(FlowError);
     expect((log.get(ME, "d1") as DepositOp).cancelled).toBeUndefined();
   });
 });

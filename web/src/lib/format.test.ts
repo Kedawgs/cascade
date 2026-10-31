@@ -58,6 +58,12 @@ describe("money", () => {
 });
 
 describe("time", () => {
+  it("shows a dash for a date that isn't one, rather than throwing and blanking the screen", () => {
+    const bad = new Date(Number.NaN);
+    expect(formatDay(bad)).toBe("–");
+    expect(formatDateTime(bad)).toBe("–");
+  });
+
   const oct1 = new Date(2026, 9, 1, 9, 14);
 
   it("formats days and times like the mockup", () => {

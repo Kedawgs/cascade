@@ -255,23 +255,23 @@ describe("the oracle's price, for the check before any stake", () => {
     };
   };
 
-  it("reads the oracle's TWAP of one TAO on the second Base RPC, not the one the quote came from", async () => {
+  it("reads the oracle's TWAP of one TAO on the second Base RPC's short-timeout connection, not the one the quote came from", async () => {
     const [first, second] = [rpc(250), rpc(255)];
-    expect(await readOraclePrice({ base: first.client, baseLogs: second.client }, D3)).toBe(255_000_000n);
+    expect(await readOraclePrice({ base: first.client, baseCheck: second.client }, D3)).toBe(255_000_000n);
     expect(second.asked).toEqual([{ address: D3.oracle, functionName: "usdcValue", args: [10n ** 18n], abi: expect.anything() }]);
     expect(first.asked).toEqual([]);
   });
 
   it("falls back to the first RPC when the second can't answer (the TWAP contract is still another source than the quoter), and fails when neither can", async () => {
     const first = rpc(250);
-    expect(await readOraclePrice({ base: first.client, baseLogs: rpc().client }, D3)).toBe(250_000_000n);
+    expect(await readOraclePrice({ base: first.client, baseCheck: rpc().client }, D3)).toBe(250_000_000n);
     expect(first.asked.map((c) => c.functionName)).toEqual(["usdcValue"]);
-    await expect(readOraclePrice({ base: rpc().client, baseLogs: rpc().client }, D3)).rejects.toThrow();
+    await expect(readOraclePrice({ base: rpc().client, baseCheck: rpc().client }, D3)).rejects.toThrow();
   });
 
   it("has nothing to read for a deployment without an oracle (v2)", async () => {
     const first = rpc(250);
-    await expect(readOraclePrice({ base: first.client, baseLogs: first.client }, D)).rejects.toThrow(/no price oracle/);
+    await expect(readOraclePrice({ base: first.client, baseCheck: first.client }, D)).rejects.toThrow(/no price oracle/);
     expect(first.asked).toEqual([]);
   });
 });
@@ -352,8 +352,8 @@ describe("the open batch, for Send it now", () => {
         return { maxFeePerGas: (over.gas ?? (() => 7_000_000n))(), maxPriorityFeePerGas: 1_000_000n };
       },
     };
-    /** The second Base RPC: asked the bridge fee again, nothing else. */
-    const baseLogs = {
+    /** The second Base RPC's short-timeout connection: asked the bridge fee again, nothing else. */
+    const baseCheck = {
       async readContract(c: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }) {
         logsCalls.push(c);
         if (c.functionName === "quoteFee") return (over.quote2 ?? over.quote ?? (() => FEE))();
@@ -369,7 +369,7 @@ describe("the open batch, for Send it now", () => {
       },
     };
     return {
-      c: { base: base as never, baseLogs: baseLogs as never, bittensor: bittensor as never },
+      c: { base: base as never, baseCheck: baseCheck as never, bittensor: bittensor as never },
       calls,
       logsCalls,
       asked,

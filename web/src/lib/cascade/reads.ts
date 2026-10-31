@@ -233,18 +233,18 @@ export async function taoPriceUsd(c: Pick<Clients, "base">): Promise<number> {
 
 /** The oracle's price of one TAO, in USDC units: the 30-minute TWAP of Cascade's own CascadeTwapOracle
  * (`usdcValue(1e18)`), for the check every stake makes of the quote it is priced from (flows.ts,
- * assertPriceAgrees). It is read on the second Base RPC (`baseLogs`, the other one the CSP allows), so
- * the quote and what it is checked against come from different servers as well as different sources;
- * when that one can't answer, on the first, where the TWAP contract's answer still stands apart from
- * the quoter's. Rejects when neither answers (nothing is then sent), and for a deployment without an
- * oracle (v2). */
-export async function readOraclePrice(c: Pick<Clients, "base" | "baseLogs">, d: Deployment): Promise<bigint> {
+ * assertPriceAgrees). It is read on the second Base RPC (`baseCheck`: the other one the CSP allows, on
+ * a connection that gives up in seconds), so the quote and what it is checked against come from
+ * different servers as well as different sources; when that one can't answer, on the first, where the
+ * TWAP contract's answer still stands apart from the quoter's. Rejects when neither answers (nothing
+ * is then sent), and for a deployment without an oracle (v2). */
+export async function readOraclePrice(c: Pick<Clients, "base" | "baseCheck">, d: Deployment): Promise<bigint> {
   const oracle = d.oracle;
   if (!oracle) throw new Error("This deployment has no price oracle (v2), so a quote can't be checked against one");
   const read = (client: Pick<PublicClient, "readContract">) =>
     client.readContract({ address: oracle, abi: TWAP_ORACLE, functionName: "usdcValue", args: [10n ** 18n] }) as Promise<bigint>;
   try {
-    return await read(c.baseLogs);
+    return await read(c.baseCheck);
   } catch {
     return read(c.base);
   }
@@ -386,12 +386,12 @@ export type StakerDeposits = (batchId: bigint, ageS: number) => Promise<{ count:
  *   price and ETH's, null when any of it can't be read (the keeper then holds it too) or on v2;
  * - once it can close: the account's ETH, a gas allowance, ETH's price, and whether Bittensor's side can
  *   take it (false when that can't be read);
- * - either way the bridge fee, for this batch's exact message, asked of both Base RPCs: the larger when
- *   they agree (feesAgree), left out and marked unconfirmed when they don't (a send is never priced on
- *   one server's word), left out when either can't answer. Each figure is left out when its read fails,
- *   never guessed. */
+ * - either way the bridge fee, for this batch's exact message, asked of both Base RPCs (the second on
+ *   `baseCheck`, which gives up in seconds): the larger when they agree (feesAgree), left out and marked
+ *   unconfirmed when they don't (a send is never priced on one server's word), left out when either
+ *   can't answer. Each figure is left out when its read fails, never guessed. */
 export async function readOpenBatch(
-  c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
+  c: Pick<Clients, "base" | "baseCheck" | "bittensor">,
   d: Deployment,
   account: Address,
   stakerDeposits?: StakerDeposits,
@@ -430,7 +430,7 @@ export async function readOpenBatch(
   const message = { id, deposits, redeems, totalDeposits };
   const [fee, fee2, ethUsdc, eth, gas, bitSide, tao, staker, staked] = await Promise.allSettled([
     quoteCloseFee(c, d, message),
-    quoteCloseFee({ base: c.baseLogs }, d, message),
+    quoteCloseFee({ base: c.baseCheck }, d, message),
     ethPriceUsdc(c),
     canClose ? c.base.getBalance({ address: account }) : none,
     canClose ? c.base.estimateFeesPerGas().then((f) => CLOSE_GAS * f.maxFeePerGas) : none,

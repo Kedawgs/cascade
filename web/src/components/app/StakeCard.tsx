@@ -107,6 +107,12 @@ function ClaimReady({ account }: { account: string }) {
         >
           {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
         </button>
+        {/* a sale held by the price check (flows.error says why): the TAO itself is always there to claim */}
+        {flows.saleHeld && (
+          <button type="button" className="pill pill-ghost" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, true).catch(() => undefined)}>
+            Claim as TAO instead
+          </button>
+        )}
       </div>
       {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
     </div>

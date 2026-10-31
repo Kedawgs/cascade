@@ -139,7 +139,11 @@ for display only (`units.ts`).
   (`flows.ts`, `assertPriceAgrees`; the 5% is justified from live data in `config.ts`,
   `PRICE_CHECK_BPS`). Send it now reads the bridge fee on both RPCs and offers it only when they agree
   within 10%, at the larger (`reads.ts`, `readOpenBatch`); when they don't, the receipt says the fee
-  couldn't be confirmed.
+  couldn't be confirmed. The ways out that sell TAO for USDC (Claim as USDC, Swap it to USDC, Swap
+  your TAO back) make the same check on the sale: one that would pay more than 5% under the oracle
+  isn't made, and **Claim as TAO instead** is offered; a claim kept as TAO never waits on any price
+  check (`flows.ts`, `saleFloor`). These second-RPC reads go over their own connection with a 3-second
+  timeout and one retry (`chain.ts`, `baseCheck`), so a server that hangs can't hold a wallet prompt.
 
 ## How it sends transactions
 
@@ -198,9 +202,13 @@ the record only.
 
 The browser's own records (the op log) are checked field by field when read back (`oplog.ts`,
 `decodeOperations`): known kinds, states and step names, exact amounts within their token's range,
-dates that make sense, hashes and accounts that are what they say. A record that isn't is dropped
-with a console warning and never reaches a screen or a flow. With the re-quoting above, nothing that
-moves money is ever taken from storage without a fresh read from the chain.
+wallet batch ids up to EIP-5792's 8,194 characters, dates that make sense (one more than a day ahead
+of the clock, a clock since corrected, is read as now rather than lost), hashes and accounts that are
+what they say. A record that isn't is dropped with a console warning and never reaches a screen or a
+flow. A flow keeps its own copy of its record while it runs (`op-store.ts`), so a write the log won't
+read back never stops it between a send and its receipt; it says so on the console instead. With the
+re-quoting above, nothing that moves money is ever taken from storage without a fresh read from the
+chain.
 
 ## Copy rules
 

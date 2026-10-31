@@ -6,7 +6,7 @@ import type { ClaimOp, DepositOp, OpState } from "./oplog";
 import type { FrontDoorState } from "./reads";
 import { STAKE_LAPSED } from "./trail";
 import type { Balances, DepositQuote, OpenBatch, WithdrawalQuote } from "./types";
-import { floorRao, toDisplay } from "./units";
+import { floorRao, lessSlippage, toDisplay } from "./units";
 import type { Wiring } from "./wiring";
 import { formatTao, formatUsdShort } from "../format";
 import { ethNeeded, needEthText, sendGate, sendNowValue } from "../send-now";
@@ -408,6 +408,30 @@ export async function planResumeStakeV3(x: {
   return resumeStakeV3Calls(x.op, x.w, x.d, x.account, x.now, q);
 }
 
+/** Carrying on a v2 stake, or a deposit of TAO already in the wallet (usdcIn 0). What the chain shows
+ * done is dropped first (stillToSend: the deposit already in the open batch, the swap's TAO already in
+ * the wallet), so a deposit whose hash was lost to a reload is never made twice. A v2 swap that was
+ * sent (its hash recorded) or shows done is never quoted again; one never sent goes at today's terms
+ * (freshStakeTerms), never the recorded ones. A deposit of wallet TAO has no price to quote. */
+export async function planResumeDeposit(x: {
+  op: Pick<DepositOp, "usdcIn" | "targetTao" | "hashes" | "createdAt">;
+  w: Balances;
+  d: Deployment;
+  account: Address;
+  now: number;
+  /** What the chain shows for the account: TAO in the wallet, and TAO in the open batch. */
+  chain: { walletTao: bigint; depositOf: bigint };
+  quote: FreshTermsInput["quote"];
+  accepted?: bigint;
+  record: FreshTermsInput["record"];
+}): Promise<FlowCall[]> {
+  if (x.op.usdcIn === 0n) return stillToSend(depositTaoCalls(x.op.targetTao, x.w, x.d), x.op, x.chain);
+  const left = stillToSend(stakeCalls(x.op, x.w, x.d, x.account), x.op, x.chain);
+  if (x.op.hashes.swap || !left.some((c) => c.key === "swap")) return left;
+  const q = await freshStakeTerms({ op: x.op, now: x.now, quote: x.quote, accepted: x.accepted, record: x.record });
+  return stakeCalls(q, x.w, x.d, x.account);
+}
+
 /** TAO already in the wallet into the front door: an exact approval, then the deposit, in whole rao. */
 export function depositTaoCalls(taoWei: bigint, w: Balances, d: Deployment): FlowCall[] {
   const amount = floorRao(taoWei);
@@ -455,6 +479,55 @@ export async function walletTaoDepositOp(x: {
     hashes: {},
     state: "running",
   };
+}
+
+// ---- The ways out: a sale of TAO to USDC is checked against the oracle; claiming TAO never is ----
+
+/** A sale as quoted: the TAO sold and the USDC it pays. */
+export interface SaleQuote {
+  taoWei: bigint;
+  usdcOut: bigint;
+}
+
+/** The USDC units a sale pays per TAO. Zero for a sale of nothing. */
+export const saleUsdcPerTao = (s: SaleQuote): bigint => (s.taoWei > 0n ? (s.usdcOut * 10n ** 18n) / s.taoWei : 0n);
+
+/** Whether a sale's price agrees with the oracle's: a sale pays a little under it (the pools' fees,
+ * this size's impact), but not more than `bps` under; anything over it is the user's gain. A price of
+ * nothing agrees with nothing. */
+export function saleAgrees(sale: bigint, oracle: bigint, bps: bigint = PRICE_CHECK_BPS): boolean {
+  if (sale <= 0n || oracle <= 0n) return false;
+  return sale >= oracle || (oracle - sale) * 10_000n <= oracle * bps;
+}
+
+export const SALE_DISAGREES =
+  "The price we were quoted for selling your TAO is more than 5% under Cascade's price oracle, so it wasn't sold. Keep it as TAO for now, or try again in a few minutes.";
+export const SALE_UNCHECKED = "We couldn't double-check today's price just now, so your TAO wasn't sold. Keep it as TAO for now, or try again in a moment.";
+
+/** A sale held by the price check: nothing was sold, and the TAO is the user's to claim or keep as
+ * TAO, which no check ever holds (useFlows offers "Claim as TAO instead"). */
+export class SaleRefusedError extends FlowError {
+  constructor(message: string) {
+    super(message, "needs-you");
+    this.name = "SaleRefusedError";
+  }
+}
+
+/** The floor of a sale of `taoWei` to USDC (0.5% under today's quote), once the quote checks out
+ * against the oracle (`oracle`, when the deployment has one: v2 has none, and sells unchecked). The
+ * one price check on the ways out, and only on the sale: a claim kept as TAO asks nothing of it. */
+export async function saleFloor(x: { taoWei: bigint; quote: () => Promise<bigint>; oracle?: () => Promise<bigint> }): Promise<bigint> {
+  const out = await x.quote();
+  if (x.oracle) {
+    let o: bigint;
+    try {
+      o = await x.oracle();
+    } catch {
+      throw new SaleRefusedError(SALE_UNCHECKED);
+    }
+    if (!saleAgrees(saleUsdcPerTao({ taoWei: x.taoWei, usdcOut: out }), o)) throw new SaleRefusedError(SALE_DISAGREES);
+  }
+  return lessSlippage(out);
 }
 
 /** TAO in the wallet back to USDC (TAO –0.3%→ WETH –0.05%→ USDC) with a minimum. When the router's
@@ -842,10 +915,11 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
     fail(store, (e as FlowError).message, "needs-you");
   }
 
+  // a wallet batch already sent is only ever waited for, whatever the record's mode says: its calls
+  // here are rebuilt only so its receipts line up, and must never go out one at a time
   const pendingBatch = store.callsId();
   const nothingSent = calls.every((c) => !store.hashes()[c.key]);
-  const batchable =
-    store.mode() !== "sequential" && (pendingBatch !== undefined || (nothingSent && calls.length > 1 && (await port.canBatch().catch(() => false))));
+  const batchable = pendingBatch !== undefined || (store.mode() !== "sequential" && nothingSent && calls.length > 1 && (await port.canBatch().catch(() => false)));
   if (batchable) {
     let id = pendingBatch;
     if (!id) {

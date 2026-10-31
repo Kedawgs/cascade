@@ -307,9 +307,11 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
                 >
                   {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
                 </button>
-                {claimFailed && (
+                {(claimFailed || flows.saleHeld) && (
+                  // the TAO itself is always there to claim: after a sale held by the price check (flows.error says
+                  // why), or a claim whose swap failed
                   <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
-                    Claim now and swap to USDC separately
+                    {flows.saleHeld ? "Claim as TAO instead" : "Claim now and swap to USDC separately"}
                   </button>
                 )}
               </>

@@ -29,11 +29,13 @@ import {
   type FlowCall,
   FlowError,
   type FlowStore,
-  freshStakeTerms,
   isRevert,
+  planResumeDeposit,
   planResumeStakeV3,
   type QuoteMove,
   QuoteMovedError,
+  saleFloor,
+  SaleRefusedError,
   planSendNow,
   planStakeV3,
   planUnstake,
@@ -46,7 +48,6 @@ import {
   userMessage,
   walletTaoDepositOp,
   stakeCalls,
-  stillToSend,
   type WalletPort,
   wiringNotice,
 } from "./flows";
@@ -55,7 +56,6 @@ import { cancelStore, opStore, scratchStore } from "./op-store";
 import { type ClaimOp, type CloseOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
 import { quoteSell, readCloseOutcome, readFrontDoor, readOraclePrice, readPermitNonce, taoPriceUsd } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
-import { lessSlippage } from "./units";
 
 /** The wallet as a flow sees it, through wagmi (EIP-5792 batches when the wallet offers them); Base's
  * public RPC (`reader`) answers what the wallet doesn't need to: code at the account, and simulations. */
@@ -147,6 +147,9 @@ export function useFlows(account: string | null) {
   /** A stake being carried on whose quote moved: today's figure against the one shown, awaiting the
    * user's say-so (resumeStake with `accepted`). In this component's memory only, never stored. */
   const [moved, setMoved] = useState<(QuoteMove & { id: string }) | null>(null);
+  /** The last flow held a sale of TAO to USDC by the price check (flows.ts, saleFloor): the TAO can
+   * still be claimed or kept as TAO, which no check holds. */
+  const [saleHeld, setSaleHeld] = useState(false);
   const guard = appGuard;
   useEffect(() => appGuard.subscribe(setBusy), []);
 
@@ -165,6 +168,7 @@ export function useFlows(account: string | null) {
     if (!account) throw new Error("Connect a wallet first");
     setError(null);
     setMoved(null);
+    setSaleHeld(false);
     try {
       return await guard.run(label, async () => {
         if (needsWiring(label)) await assertWired(() => data.checkWiring());
@@ -172,6 +176,7 @@ export function useFlows(account: string | null) {
       });
     } catch (e) {
       setError(userMessage(e));
+      if (e instanceof SaleRefusedError) setSaleHeld(true);
       throw e;
     } finally {
       void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
@@ -210,6 +215,10 @@ export function useFlows(account: string | null) {
 
   /** The oracle's price, for the check every stake makes of its quote (flows.ts, assertPriceAgrees). */
   const oracle = () => readOraclePrice(data.clients, d());
+  /** The same for a sale of TAO on the ways out (flows.ts, saleFloor); v2 has no oracle and sells unchecked. */
+  const saleOracle = () => (isV3(d()) ? oracle : undefined);
+  /** The floor of a sale of `taoWei` to USDC at today's price, once it checks out against the oracle. */
+  const sale = (taoWei: bigint) => saleFloor({ taoWei, quote: () => quoteSell(data.clients, taoWei), oracle: saleOracle() });
 
   return {
     busy,
@@ -217,6 +226,9 @@ export function useFlows(account: string | null) {
     /** A stake being carried on (`id`) whose quote moved since the user last saw a figure: the figures,
      * for a button that continues at today's price (resumeStake(id, moved.nowTao)). Null otherwise. */
     moved,
+    /** The last flow held a sale of TAO to USDC (the price check: flows.error says why): offer the TAO
+     * instead (claim(ids, true)), which is always available. */
+    saleHeld,
     /** Why no stake or unstake can be sent from this site (the contracts don't match), or null. */
     blocked,
     /** No stake or unstake can start: a flow is running, or the contracts don't match (the ways out use busy alone). */
@@ -297,13 +309,11 @@ export function useFlows(account: string | null) {
                 record,
               });
             }
+            // v2, or a deposit of wallet TAO: what the chain shows done is never sent again (a deposit whose
+            // hash was lost to a reload included); a v2 swap not yet sent goes at today's terms (v2 has no
+            // oracle to check them against)
             const [w, fd] = await Promise.all([data.getBalances(a), readFrontDoor(data.clients, d(), a)]);
-            if (op.usdcIn === 0n) return depositTaoCalls(op.targetTao, w, d());
-            const left = stillToSend(stakeCalls(op, w, d(), a), op, { walletTao: w.tao, depositOf: fd.depositOf });
-            // the swap was sent, or the chain shows it done: only what follows it is left
-            if (op.hashes.swap || !left.some((c) => c.key === "swap")) return left;
-            // v2 has no oracle to check against; the terms are still today's, never the recorded ones
-            return stakeCalls(await freshStakeTerms({ op, now: Date.now(), quote, accepted, record }), w, d(), a);
+            return planResumeDeposit({ op, w, d: d(), account: a, now: Date.now(), chain: { walletTao: w.tao, depositOf: fd.depositOf }, quote, accepted, record });
           });
         } catch (e) {
           if (e instanceof QuoteMovedError) setMoved({ id, ...e.move });
@@ -322,11 +332,12 @@ export function useFlows(account: string | null) {
         return op.id;
       }),
 
-    /** Swaps TAO sitting in the wallet back to USDC (0.5% slippage). */
+    /** Swaps TAO sitting in the wallet back to USDC (0.5% slippage), once today's sale price checks out
+     * against the oracle; held, with the TAO staying in the wallet, when it doesn't. */
     sellWalletTao: (taoWei: bigint) =>
       flow("swap", async () => {
-        const [w, out] = await Promise.all([data.getBalances(a), quoteSell(data.clients, taoWei)]);
-        await runFlow(port(), scratchStore(), sellTaoCalls(taoWei, lessSlippage(out), w, a));
+        const [w, minUsdc] = await Promise.all([data.getBalances(a), sale(taoWei)]);
+        await runFlow(port(), scratchStore(), sellTaoCalls(taoWei, minUsdc, w, a));
       }),
 
     unstake: (q: WithdrawalQuote, onStart?: (id: string) => void) =>
@@ -360,12 +371,14 @@ export function useFlows(account: string | null) {
         return op.id;
       }),
 
-    /** Claims what is back on Base for the given unstakes and, unless `keepTao`, swaps it to USDC. */
+    /** Claims what is back on Base for the given unstakes and, unless `keepTao`, swaps it to USDC. The
+     * swap's floor is today's price, checked against the oracle first; a claim kept as TAO is never
+     * held by that check, so the way out stays open whatever the price. */
     claim: (withdrawalIds: string[], keepTao: boolean) =>
       flow("claim", async () => {
         const fd = await readFrontDoor(data.clients, d(), a);
         if (fd.claimable === 0n) throw new FlowError("Nothing is waiting to be claimed yet", "needs-you");
-        const minUsdc = keepTao ? 0n : lessSlippage(await quoteSell(data.clients, fd.claimable));
+        const minUsdc = keepTao ? 0n : await sale(fd.claimable);
         const op: ClaimOp = {
           id: newOpId(),
           kind: "claim",
@@ -395,8 +408,8 @@ export function useFlows(account: string | null) {
         await send(op.id, async () => {
           const w = await data.getBalances(a);
           if (op.keepTao) return claimCalls(op.amount, 0n, w, d(), a, true);
-          // what the claim paid (or pays), swapped at today's price
-          const minUsdc = lessSlippage(await quoteSell(data.clients, op.amount));
+          // what the claim paid (or pays), swapped at today's price, once that checks out against the oracle
+          const minUsdc = await sale(op.amount);
           data.opLog.update(a, op.id, { minUsdc });
           return claimCalls(op.amount, minUsdc, w, d(), a, false);
         });

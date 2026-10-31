@@ -32,6 +32,7 @@ import {
   isRevert,
   permitTypedData,
   freshStakeTerms,
+  planResumeDeposit,
   planResumeStakeV3,
   planStakeV3,
   planSendNow,
@@ -42,6 +43,12 @@ import {
   QuoteMovedError,
   quoteMoved,
   RESUME_UNQUOTED,
+  SALE_DISAGREES,
+  SALE_UNCHECKED,
+  saleAgrees,
+  saleFloor,
+  SaleRefusedError,
+  saleUsdcPerTao,
   spotUsdcPerTao,
   SEND_BLOCKED,
   SEND_COVERED,
@@ -423,6 +430,17 @@ describe("flow control", () => {
     await runFlow(again, t.store as never, calls);
     expect(again.sendBatch).not.toHaveBeenCalled();
     expect(again.send).toHaveBeenCalledTimes(4);
+  });
+
+  it("waits for a wallet batch already sent whatever the record's mode: a batch rebuilt to be waited for is never sent one step at a time", async () => {
+    const p = port({ canBatch: vi.fn(async () => false) });
+    const t = tracker({}, { callsId: "batch-1", mode: "sequential" });
+    await runFlow(p, t.store as never, calls);
+    expect(p.waitBatch).toHaveBeenCalledWith("batch-1");
+    expect(p.send).not.toHaveBeenCalled();
+    expect(p.sendBatch).not.toHaveBeenCalled();
+    expect(p.canBatch).not.toHaveBeenCalled();
+    expect(t.states.at(-1)).toBe("sent");
   });
 
   it("a batch whose status could not be read is checked again, not sent again", async () => {
@@ -1273,6 +1291,109 @@ describe("a stopped stake's terms, quoted again (freshStakeTerms)", () => {
     await expect(terms({ record, check })).rejects.toThrow(PRICE_DISAGREES);
     expect(check).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ usdcIn: q3.usdcIn }));
     expect(record).not.toHaveBeenCalled();
+  });
+});
+
+describe("carrying on a v2 stake or a deposit of wallet TAO (planResumeDeposit)", () => {
+  const TAO = 78_000_000_000_000_000n;
+  const walletTao = { usdcIn: 0n, targetTao: TAO, hashes: {} as Partial<Record<string, Hex>>, createdAt: NOW - 60_000 };
+  const v2 = { usdcIn: 20_000_000n, targetTao: TAO, hashes: {} as Partial<Record<string, Hex>>, createdAt: NOW - 60_000 };
+  const today = { ...q3, targetTao: 77_800_000_000_000_000n, minTaoOut: 77_800_000_000_000_000n } as DepositQuote;
+  const resume = (op: typeof v2, chain: { walletTao: bigint; depositOf: bigint }, over: Partial<Parameters<typeof planResumeDeposit>[0]> = {}) =>
+    planResumeDeposit({ op, w: none, d: D, account: ME, now: NOW, chain, quote: async () => today, record: vi.fn(), ...over });
+
+  it("sends nothing for a deposit of wallet TAO the chain shows already in the batch, though its hash was lost (a reload while the wallet sent it)", async () => {
+    const quote = vi.fn(async () => today);
+    expect(await resume(walletTao, { walletTao: 0n, depositOf: TAO }, { quote })).toEqual([]);
+    expect(await resume(walletTao, { walletTao: 0n, depositOf: TAO + 1n }, { quote })).toEqual([]);
+    expect(quote).not.toHaveBeenCalled();
+  });
+
+  it("deposits wallet TAO still in the wallet, an exact approval then the deposit, never quoting (there is no price to quote)", async () => {
+    const quote = vi.fn(async () => today);
+    const calls = await resume(walletTao, { walletTao: TAO, depositOf: 0n }, { quote });
+    expect(calls.map((c) => c.key)).toEqual(["approveTao", "deposit"]);
+    expect(calls[1].args).toEqual([TAO]);
+    expect(quote).not.toHaveBeenCalled();
+  });
+
+  it("a v2 stake whose swap the chain shows done (the TAO is in the wallet) goes on from the deposit, at the TAO it bought, without a quote", async () => {
+    const quote = vi.fn(async () => today);
+    const record = vi.fn();
+    const calls = await resume(v2, { walletTao: TAO, depositOf: 0n }, { quote, record });
+    expect(calls.map((c) => c.key)).toEqual(["approveTao", "deposit"]);
+    expect(quote).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    // or already deposited: nothing
+    expect(await resume(v2, { walletTao: 0n, depositOf: TAO }, { quote })).toEqual([]);
+  });
+
+  it("a v2 stake whose swap was sent (its hash recorded) is only waited for, never quoted again", async () => {
+    const quote = vi.fn(async () => today);
+    const calls = await resume({ ...v2, hashes: { swap: H(1) } }, { walletTao: 0n, depositOf: 0n }, { quote });
+    expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "swap", "approveTao", "deposit"]);
+    expect(calls[1].args).toEqual([expect.objectContaining({ amountOut: TAO })]);
+    expect(quote).not.toHaveBeenCalled();
+  });
+
+  it("a v2 stake whose swap was never sent goes at today's terms, never the recorded ones", async () => {
+    const record = vi.fn();
+    const calls = await resume(v2, { walletTao: 0n, depositOf: 0n }, { record });
+    expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "swap", "approveTao", "deposit"]);
+    expect(calls[1].args).toEqual([expect.objectContaining({ amountOut: today.targetTao, amountInMaximum: v2.usdcIn })]);
+    expect(record).toHaveBeenCalledExactlyOnceWith({ targetTao: today.targetTao, minTaoOut: today.minTaoOut, priceUsd: today.taoPriceUsd, feesUsd: today.feesUsd });
+    // and a day on, isn't carried on at all
+    expect(((await resume({ ...v2, createdAt: NOW - RESUME_WINDOW_MS }, { walletTao: 0n, depositOf: 0n }).catch((e: unknown) => e)) as FlowError).message).toBe(STAKE_LAPSED);
+  });
+});
+
+describe("the sale of TAO to USDC on the ways out (saleFloor)", () => {
+  const TAO = 10n ** 17n;
+  /** Selling 0.1 TAO pays $25.41: $254.10 a TAO, a touch under the oracle's $255 (pool fees, impact). */
+  const OUT = 25_410_000n;
+  const floor = (over: Partial<Parameters<typeof saleFloor>[0]> = {}) => saleFloor({ taoWei: TAO, quote: async () => OUT, oracle: ORACLE, ...over });
+
+  it("prices a sale as the USDC it pays per TAO", () => {
+    expect(saleUsdcPerTao({ taoWei: TAO, usdcOut: OUT })).toBe(254_100_000n);
+    expect(saleUsdcPerTao({ taoWei: 0n, usdcOut: OUT })).toBe(0n);
+  });
+
+  it("gives the floor, 0.5% under today's quote, when the sale pays within 5% of the oracle, or more than the oracle", async () => {
+    expect(await floor()).toBe((OUT * 9_950n) / 10_000n);
+    // paying more than the oracle says is no reason to hold a sale
+    expect(await floor({ quote: async () => 30_000_000n })).toBe((30_000_000n * 9_950n) / 10_000n);
+    // 5% under exactly: still sold
+    expect(await floor({ quote: async () => (255_000_000n * 9_500n) / 10_000n / 10n })).toBe((((255_000_000n * 9_500n) / 10_000n / 10n) * 9_950n) / 10_000n);
+  });
+
+  it("holds a sale that would pay more than 5% under the oracle, in words that offer the TAO instead, and sells nothing", async () => {
+    const err = await floor({ quote: async () => 23_000_000n }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SaleRefusedError);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect((err as FlowError).message).toBe(SALE_DISAGREES);
+    expect(SALE_DISAGREES).toBe("The price we were quoted for selling your TAO is more than 5% under Cascade's price oracle, so it wasn't sold. Keep it as TAO for now, or try again in a few minutes.");
+  });
+
+  it("holds the sale when the oracle can't be read, saying so, and never on a quote of nothing", async () => {
+    const err = await floor({ oracle: async () => Promise.reject(new Error("HTTP request failed. URL: https://base-rpc.publicnode.com")) }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SaleRefusedError);
+    expect((err as FlowError).message).toBe(SALE_UNCHECKED);
+    expect((err as FlowError).message).not.toMatch(/publicnode/);
+    expect(((await floor({ quote: async () => 0n }).catch((e: unknown) => e)) as FlowError).message).toBe(SALE_DISAGREES);
+  });
+
+  it("makes no check on a deployment without an oracle (v2): the floor is today's quote less 0.5%", async () => {
+    expect(await floor({ oracle: undefined, quote: async () => 23_000_000n })).toBe((23_000_000n * 9_950n) / 10_000n);
+  });
+
+  it("agrees a sale within 5% under the oracle, any amount over it, and not beyond", () => {
+    const oracle = 255_000_000n;
+    expect(saleAgrees((oracle * 9_500n) / 10_000n, oracle)).toBe(true);
+    expect(saleAgrees((oracle * 9_500n) / 10_000n - 1n, oracle)).toBe(false);
+    expect(saleAgrees(oracle * 2n, oracle)).toBe(true);
+    expect(saleAgrees(0n, oracle)).toBe(false);
+    expect(saleAgrees(oracle, 0n)).toBe(false);
   });
 });
 

@@ -7,7 +7,8 @@
 // writes a few inline scripts into every page (the RSC payload and the chunk list), and they change with
 // every build. Fails the build rather than write a file Cloudflare Pages would refuse (a line over 2,000
 // characters, more than 100 rules).
-import { loadEnvConfig } from "@next/env";
+// a CommonJS bundle: Node's ESM loader sees no named exports on it, so the module object is imported whole
+import nextEnv from "@next/env";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -136,7 +137,7 @@ function jsFiles(dir) {
  * so the policy reads the same NEXT_PUBLIC_CASCADE_INDEXER_URL the bundle inlined.
  * @param {string} dir */
 export function buildEnv(dir) {
-  return loadEnvConfig(dir, false, { info: () => undefined, error: console.error }, true).combinedEnv;
+  return nextEnv.loadEnvConfig(dir, false, { info: () => undefined, error: console.error }, true).combinedEnv;
 }
 
 /** Writes `out`'s _headers from the pages exported there, with the indexer's origin in connect-src when

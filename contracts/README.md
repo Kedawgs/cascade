@@ -24,7 +24,8 @@ because it ports the maths of Uniswap's `OracleLibrary`.
 ## Launch configuration (v3-launch)
 
 Live on Base and Bittensor mainnet since 2026-10-30, holding only the founder's own money. Not
-professionally audited, and the source is not yet verified on the explorers. These are the only
+professionally audited. The source is verified: an exact match on Sourcify for all six (links in
+[`SECURITY.md`](../SECURITY.md)). These are the only
 Cascade contracts: the old test deployments (`v3-test` and `test-2026-10`) still exist on-chain but
 are not the product. See also [`SECURITY.md`](../SECURITY.md).
 

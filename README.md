@@ -51,7 +51,7 @@ Cascade's product. The only site is https://cascadefi.xyz.
 Live on Base and Bittensor mainnet since 2026-10-30 (deployment `v3-launch`). It is early: so far it
 holds only the founder's own money, deposits are capped at 40 TAO, and the other launch limits are in
 `SECURITY.md`. The contracts have been reviewed many times internally but are not professionally
-audited, and their source is not yet verified on the explorers. The owner is a single hardware-wallet
+audited. Their source is verified (an exact match on Sourcify for all six; links in `SECURITY.md`). The owner is a single hardware-wallet
 account with no timelock; an audit, and a Safe plus a timelock as owner, come before other people's
 money. The CCIP + ForeverMoney bridge adapters were fork-tested on both mainnets through the deployed
 CCIP 2.0 OffRamp and their inbound conversion simulated against the live Bittensor node. `ops/`

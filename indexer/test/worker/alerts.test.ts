@@ -158,20 +158,41 @@ describe("what is dropped", () => {
     ]);
   });
 
-  it("leaves a condition its rule couldn't judge as it is: not resolved, not sent again, and no 'resolved' email until a reading clears it", async () => {
+  it("keeps a condition its rule couldn't judge open, re-sent as usual, with no 'resolved' email until a reading clears it", async () => {
     // a critical condition opened and sent
     expect((await tick(T0, [finding("vault.solvency", "vault.solvency")])).due.map((x) => x.reason)).toEqual(["alert"]);
-    // an hour on (a resend would be due), the vault's reading is missing: the rule couldn't judge it
+    // a minute on, the vault's reading is missing: the rule couldn't judge it, so it stays open, nothing due yet
+    expect((await tick(T0 + 60, [], { unjudged: [{ rule: "vault.solvency", key: "vault.solvency" }] })).due).toEqual([]);
+    // an hour on, still unjudged: not resolved, and its hourly resend goes out as for any open critical
     const blind = await tick(T0 + 3600, [], { unjudged: [{ rule: "vault.solvency", key: "vault.solvency" }] });
-    expect(blind.due).toEqual([]);
-    expect(await rows()).toEqual([expect.objectContaining({ alert_key: "vault.solvency", resolved_at: null, notify_count: 1 })]);
+    expect(blind.due.map((x) => [x.key, x.reason])).toEqual([["vault.solvency", "resend"]]);
+    expect(await rows()).toEqual([expect.objectContaining({ alert_key: "vault.solvency", resolved_at: null, notify_count: 2 })]);
     // a rule-wide mark (no key) keeps every open alert of the rule the same way
-    expect((await tick(T0 + 7200, [], { unjudged: [{ rule: "vault.solvency" }] })).due).toEqual([]);
+    expect((await tick(T0 + 7200, [], { unjudged: [{ rule: "vault.solvency" }] })).due.map((x) => x.reason)).toEqual(["resend"]);
     expect((await rows())[0].resolved_at).toBeNull();
     // a reading that shows it cleared: resolved, and the one "resolved" email goes out
     const cleared = await tick(T0 + 7260, []);
     expect(cleared.due.map((x) => [x.key, x.reason])).toEqual([["vault.solvency", "resolved"]]);
     expect(await rows()).toEqual([expect.objectContaining({ alert_key: "vault.solvency", resolved_at: T0 + 7260 })]);
+  });
+
+  it("retries an unjudged critical whose first email failed, and sends an unjudged warning with the next digest", async () => {
+    // the critical's first email didn't go out (never marked sent); the warning waits for the digest (one went out at T0)
+    await db.prepare("INSERT INTO meta (k, v) VALUES ('last_warning_at', ?)").bind(String(T0)).run();
+    const first = await tick(T0 + 60, [finding("vault.solvency", "vault.solvency"), finding("keeper.low_eth", "keeper.low_eth")], { send: false });
+    expect(first.due.map((x) => [x.key, x.reason])).toEqual([["vault.solvency", "alert"]]);
+    const unjudged: Unjudged[] = [{ rule: "vault.solvency" }, { rule: "keeper.low_eth" }];
+    // the next tick can't judge either: the critical is due again (its first send), the warning not yet (digest)
+    expect((await tick(T0 + 120, [], { unjudged })).due.map((x) => [x.key, x.reason])).toEqual([["vault.solvency", "alert"]]);
+    // 30 minutes after the last digest, still unjudged: the warning goes out with it, once
+    expect((await tick(T0 + 1800, [], { unjudged })).due.map((x) => [x.key, x.reason])).toEqual([["keeper.low_eth", "alert"]]);
+    // and the critical, first sent at T0 + 120, is re-sent an hour after that
+    expect((await tick(T0 + 3719, [], { unjudged })).due).toEqual([]);
+    expect((await tick(T0 + 3720, [], { unjudged })).due.map((x) => x.reason)).toEqual(["resend"]);
+    expect((await rows()).map((x) => [x.alert_key, x.resolved_at])).toEqual([
+      ["vault.solvency", null],
+      ["keeper.low_eth", null],
+    ]);
   });
 
   it("an unjudged mark keeps only what it names, opens nothing, and never hides a finding", async () => {

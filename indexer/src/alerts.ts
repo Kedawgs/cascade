@@ -22,8 +22,9 @@ export interface Finding {
 
 /** A condition a rule couldn't judge this tick: the reading it reads is missing, or lacks a field it needs (a
  * sub-call failed, an answer didn't decode), or a ×2 rule holds now with no older reading to confirm it. The open
- * alerts it names (its key's, or with no key every open alert of the rule) are left as they are, neither resolved nor
- * sent again; it opens nothing. A condition resolves only on a reading that shows it cleared. */
+ * alerts it names (its key's, or with no key every open alert of the rule) stay open: never resolved (no "resolved"
+ * email), and sent as any open alert is (a failed first send retried, the digest, a critical's hourly resend); it
+ * opens nothing. A condition resolves only on a reading that shows it cleared. */
 export interface Unjudged {
   rule: RuleId;
   key?: string;
@@ -86,7 +87,7 @@ const asDue = (a: Live, reason: Due["reason"]): Due => ({
  * - Findings of rules switched off (`rules.off`), and of rules a hold mutes while one is on, are dropped.
  * - A new key opens an alert; a key still found updates its last-seen time (and its facts).
  * - A *condition* not found any more resolves; a critical one that was sent is due again as "resolved". One its
- *   rule couldn't judge this tick (`unjudged`) is left as it is instead: not resolved, not sent again.
+ *   rule couldn't judge this tick (`unjudged`) stays open instead, and is sent as any open alert is (below).
  *   An *event* not found any more stays open until acknowledged, or closes quietly 7 days after opening.
  * - A critical is due when never sent, and again every `criticalResendS` while open and unacknowledged,
  *   at most `criticalMaxSends` times in all. Warnings are due once each, all together, when the last
@@ -104,7 +105,7 @@ export function reconcile(
     /** alerts quieted this tick (a chain catching up): their findings are dropped, and their open alerts are
      * left as they are, neither resolved nor sent again */
     quiet?: (a: { rule: string; key: string }) => boolean;
-    /** conditions the rules couldn't judge this tick: their open alerts are left as they are */
+    /** conditions the rules couldn't judge this tick: their open alerts stay open (and are sent as usual) */
     unjudged?: readonly Unjudged[];
   },
 ): { statements: D1PreparedStatement[]; due: Due[]; holds: { id: string; rule: RuleId; summary: string }[] } {
@@ -148,7 +149,7 @@ export function reconcile(
   }
 
   for (const a of o.open) {
-    if (kept.has(a.alertKey) || quiet({ rule: a.rule, key: a.alertKey }) || unjudged(a)) continue;
+    if (kept.has(a.alertKey) || quiet({ rule: a.rule, key: a.alertKey })) continue;
     const row: Live = {
       key: a.alertKey,
       rule: a.rule as RuleId,
@@ -162,7 +163,11 @@ export function reconcile(
       notifyCount: a.notifyCount,
       acknowledgedAt: a.acknowledgedAt,
     };
-    if (a.kind === "condition") {
+    if (unjudged(a)) {
+      // its rule couldn't judge it: still open (never resolved, no "resolved" email), and sent as any open alert is
+      // (a first send that failed is retried, a warning goes out with the digest, a critical is re-sent hourly)
+      live.push(row);
+    } else if (a.kind === "condition") {
       statements.push(resolve.bind(nowS, a.id));
       if (a.tier === "critical" && a.notifiedAt !== null) due.push(asDue(row, "resolved"));
     } else if (a.acknowledgedAt !== null || nowS - a.openedAt >= EVENT_CLOSES_AFTER_S) {

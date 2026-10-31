@@ -306,12 +306,12 @@ describe("no flapping, end to end", () => {
     expect(await alerts()).toEqual([{ alert_key: "oracle.cardinality:taoWeth", resolved_at: NOW + 240 }]);
   });
 
-  it("vault.solvency (critical): no 'resolved' email while the vault is unread; one when a reading shows it covered", async () => {
+  it("vault.solvency (critical): no 'resolved' email while the vault is unread, its hourly resend still; one 'resolved' when a reading shows it covered", async () => {
     const short = { rootStakeRao: 0n, balance: 10n ** 12n, pendingPayouts: E18 };
     const at = (nowS: number, now: Partial<BitState> | undefined) => ({ ...ctx({ bit: now, bitBefore: short }), nowS });
     expect(await tick(solvency.vaultSolvency, at(NOW, short))).toEqual([["vault.solvency", "alert"]]);
-    // an hour on, Bittensor unread, then read without pendingPayouts: neither resolved nor re-sent
-    expect(await tick(solvency.vaultSolvency, at(NOW + 3600, undefined))).toEqual([]);
+    // an hour on, Bittensor unread: not resolved, re-sent hourly as before; then read without pendingPayouts: still open
+    expect(await tick(solvency.vaultSolvency, at(NOW + 3600, undefined))).toEqual([["vault.solvency", "resend"]]);
     expect(await tick(solvency.vaultSolvency, at(NOW + 3660, { rootStakeRao: 0n, balance: 10n ** 12n }))).toEqual([]);
     expect(await alerts()).toEqual([{ alert_key: "vault.solvency", resolved_at: null }]);
     // covered: resolved, with its one "resolved" email

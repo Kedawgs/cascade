@@ -13,8 +13,8 @@ export interface Rule {
 }
 
 /** Runs every rule; one that throws never stops the others. Its writes are dropped (it may have pushed a
- * row before failing, e.g. a mismatch without its alert), its conditions are left as they are (unjudged: it
- * couldn't judge them, so they neither resolve nor are sent again), and it becomes a finding: the critical
+ * row before failing, e.g. a mismatch without its alert), its conditions stay open (unjudged: it couldn't judge
+ * them, so they don't resolve, and are sent as usual), and it becomes a finding: the critical
  * `monitor.bridge_rule_failed` for a bridge cross-check rule, whose deliveries then stay waiting and
  * unchecked, and the `monitor.rule_failed` warning (a bug to fix) for any other. */
 export function runRules(rules: readonly Rule[], ctx: RuleCtx): Finding[] {

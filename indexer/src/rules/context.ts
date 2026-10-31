@@ -118,8 +118,8 @@ export interface RuleCtx {
 }
 
 /** A condition `rule` couldn't judge this tick (`key`'s, or with no key every alert of the rule): the reading it reads
- * is missing, or lacks a field it needs. Its open alerts are left as they are, neither resolved nor sent again, so a
- * condition resolves only on a reading that shows it cleared. Returns no findings, for `return unjudged(…)`. */
+ * is missing, or lacks a field it needs. Its open alerts stay open (never resolved, still sent and re-sent as usual),
+ * so a condition resolves only on a reading that shows it cleared. Returns no findings, for `return unjudged(…)`. */
 export function unjudged(ctx: RuleCtx, rule: RuleId, key?: string): Finding[] {
   ctx.unjudged.push(key === undefined ? { rule } : { rule, key });
   return [];

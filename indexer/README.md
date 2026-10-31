@@ -251,9 +251,10 @@ your own tools, never from a link in an email.
 
 A condition resolves only on a reading that shows it cleared. A tick that can't judge it (that chain's reading
 missing, a field the rule needs unread or undecodable, a ×2 rule with no older reading to confirm, or the rule
-throwing) leaves its open alert as it is: not resolved, not re-sent, no "resolved" email, and the next reading that
-still shows it continues the same alert rather than opening a new one (`unjudged` in `src/rules/context.ts`). So a
-condition alert stays open through an RPC hiccup; if readings stay missing, `monitor.chain_unreadable` says so.
+throwing) keeps its open alert open: not resolved, no "resolved" email, and sent as any open alert is (a first send
+that failed is retried, a warning goes out with the next digest, a critical is re-sent hourly until acknowledged);
+the next reading that still shows it continues the same alert rather than opening a new one (`unjudged` in
+`src/rules/context.ts`). So a condition alert stays open through an RPC hiccup.
 
 The owner's scripts run `wrangler d1 execute --remote`, so they need `wrangler login`; each takes `--dry-run` to
 print what it would run:

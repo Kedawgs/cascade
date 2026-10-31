@@ -11,6 +11,10 @@ export const DEFAULTS = {
   /** stake.unexplained_drop: a hotkey's stake may fall this much without a vault event; stake.divergence: stake
    * on an unlisted hotkey up to this much is dust, not a divergence */
   stakeDustRao: 1000n,
+  /** stake.divergence: stake on an unlisted hotkey holds only when it is at least this share of the vault's
+   * stake (counted plus unlisted) and the counted stake fell by as much; a smaller or unmatched amount (a
+   * stranger's transfer_stake gift) is the stake.unlisted warning */
+  stakeDivergenceMinBps: 100,
   /** vault.stake_moved: a StakeMoved of this much or more (100 TAO) is critical, whatever its destination */
   stakeMoveCriticalRao: 100n * 10n ** 9n,
   /** vault.direct_use: a direct deposit or redeem of this much or more (10 TAO) is critical */

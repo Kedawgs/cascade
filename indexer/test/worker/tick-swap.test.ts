@@ -35,26 +35,31 @@ describe("a simulated hotkey swap", () => {
     x.totalAssets = E18 - 10n ** 12n;
     x.price = (x.totalAssets * E18) / x.totalSupply;
 
-    // reading 3 learns the chain's list, 4 reads the stake on NEW, 5 confirms it
+    // reading 3 learns the chain's list (the counted stake before it is remembered), 4 reads the stake on NEW, 5
+    // confirms it, and the pair is judged once Bittensor is settled past it (two more ticks)
     const reports = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 6; i++) {
       w.advance();
       reports.push(await w.tick());
     }
     expect(reports.every((r) => r.outcome === "done")).toBe(true);
     const alerts = await rows<{ alert_key: string; tier: string; subject: string }>("SELECT alert_key, tier, subject FROM alerts WHERE resolved_at IS NULL ORDER BY id");
     const divergence = alerts.find((a) => a.alert_key === `stake.divergence:${NEW}`);
-    expect(divergence).toMatchObject({ tier: "critical", subject: "49 TAO of the vault's stake sits on a hotkey the vault doesn't list" });
-    const holds = await rows<{ id: string; cleared_at: number | null }>("SELECT id, cleared_at FROM holds");
-    expect(holds.some((r) => r.id.startsWith(`stake.divergence:${NEW}:`) && r.cleared_at === null)).toBe(true);
+    expect(divergence).toMatchObject({ tier: "critical", subject: "49 TAO of the vault's stake sits on a hotkey the vault doesn't list, and its counted stake fell by as much" });
+    expect(alerts.find((a) => a.alert_key === `stake.unlisted:${NEW}`)).toBeUndefined();
+    // one hold for the incident: stake.unexplained_drop's (it saw the stake leave the listed hotkey first), else this rule's
+    const holds = await rows<{ id: string; cleared_at: number | null }>("SELECT id, cleared_at FROM holds WHERE cleared_at IS NULL");
+    const fromDrop = holds.filter((r) => r.id.startsWith("stake.unexplained_drop:"));
+    const fromDivergence = holds.filter((r) => r.id.startsWith(`stake.divergence:${NEW}:`));
+    expect(fromDivergence).toHaveLength(fromDrop.length ? 0 : 1);
     expect((await w.status()).hold.active).toBe(true);
-    const email = w.sent.find((m) => m.subject === "[CASCADE CRITICAL] 49 TAO of the vault's stake sits on a hotkey the vault doesn't list");
+    const email = w.sent.find((m) => m.subject === "[CASCADE CRITICAL] 49 TAO of the vault's stake sits on a hotkey the vault doesn't list, and its counted stake fell by as much");
     expect(email).toBeDefined();
     expect(email?.text).toContain(`hotkey: ${NEW}`);
     expect(email?.text).toContain(`listed by the vault: ${old}`);
     expect(email?.text).toContain("Guardian: pause() the vault now");
     expect(email?.text).toContain(`addHotkey(${NEW})`);
-    expect(email?.text).toContain("The hold is on");
+    expect(email?.text).toContain(fromDrop.length ? "the hold: on, from stake.unexplained_drop" : "The hold is on");
 
     // the owner re-adds the hotkey: the price recovers, nothing new is raised, and the hold stays until cleared
     x.hotkeys = [old, NEW];
@@ -62,14 +67,35 @@ describe("a simulated hotkey swap", () => {
     x.totalAssets = 50n * E18;
     x.price = E18;
     const sentBefore = w.sent.length;
-    for (let i = 0; i < 2; i++) {
+    const holdsBefore = (await rows("SELECT id FROM holds")).length;
+    for (let i = 0; i < 3; i++) {
       w.advance();
       await w.tick();
     }
-    const after = await rows<{ id: string }>("SELECT id FROM holds WHERE id LIKE 'stake.divergence:%'");
-    expect(after).toHaveLength(1);
+    expect((await rows("SELECT id FROM holds")).length).toBe(holdsBefore);
     expect(w.sent.slice(sentBefore).filter((m) => m.subject.includes("doesn't list"))).toEqual([]);
     expect((await w.status()).hold.active).toBe(true);
+  });
+
+  it("a stranger's transfer_stake gift onto the vault's coldkey: the stake.unlisted warning names the hotkey, nothing holds", async () => {
+    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+    const GIFT = h("a stranger's validator hotkey");
+    await w.tick();
+    w.advance();
+    await w.tick();
+    const x = w.state.bit;
+    x.stakingHotkeys = [w.cfg.deployment.stakeHotkey, GIFT];
+    x.stakes[GIFT] = 500_000n;
+    for (let i = 0; i < 6; i++) {
+      w.advance();
+      await w.tick();
+    }
+    const alerts = await rows<{ alert_key: string; tier: string; subject: string }>("SELECT alert_key, tier, subject FROM alerts WHERE resolved_at IS NULL ORDER BY id");
+    expect(alerts.find((a) => a.alert_key === `stake.unlisted:${GIFT}`)).toMatchObject({ tier: "warning", subject: "0.0005 TAO sits on a hotkey the vault doesn't list (the vault's counted stake didn't fall)" });
+    expect(alerts.filter((a) => a.alert_key.startsWith("stake.divergence"))).toEqual([]);
+    expect(await rows("SELECT id FROM holds")).toEqual([]);
+    expect((await w.status()).hold.active).toBe(false);
+    expect(w.sent.filter((m) => m.subject.startsWith("[CASCADE CRITICAL]"))).toEqual([]);
   });
 
   it("never fires through honest ticks: the keeper stakes, unstakes and claims on the listed hotkey", async () => {

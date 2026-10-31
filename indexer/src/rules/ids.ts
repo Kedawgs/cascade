@@ -18,8 +18,8 @@ export const RULES = {
   "price.drop": critical("event", true),
   "stake.unexplained_drop": critical("event", true),
   "stake.hotkey_changed": critical("event", true),
-  // the vault's coldkey holds stake on a hotkey the vault doesn't list (a validator's hotkey swap): the price
-  // doesn't count it, so shares mint cheaply until it is re-added
+  // the vault's counted stake fell by what now sits on a hotkey the vault doesn't list (a validator's hotkey
+  // swap): the price doesn't count it, so shares mint cheaply until it is re-added
   "stake.divergence": critical("event", true),
   "admin.event": critical("event"),
   // the owner moved stake to a hotkey that isn't the configured stake hotkey, or a large amount at once
@@ -79,6 +79,9 @@ export const RULES = {
   "rewards.uncollected": warning("condition"),
   "validator.not_earning": warning("condition"),
   "vault.events": warning("event"),
+  // stake on a hotkey the vault doesn't list without a matching fall in its counted stake: a stranger's
+  // transfer_stake gift (anyone can push stake onto the vault's coldkey), to be swept, never a hold
+  "stake.unlisted": warning("event"),
   // the hourly cross-check: the store holds a log the second RPC (REREAD blocks past it) lacks
   "indexer.logs_extra": warning("event"),
   // the second RPC of a chain hasn't answered the cross-check for logsCheckUnverifiedS: its logs go unverified

@@ -120,6 +120,8 @@ const SAVE_EVERY_MS = 5_000;
 /** How often a scan that found nothing new is saved anyway, for its progress: a later visit reads the
  * last 400 blocks (over an hour) again in any case. */
 const SAVE_IDLE_MS = 60_000;
+/** A scan that read on this far (one log window) since its last save is saved whatever it found. */
+const SAVE_MOVED_BLOCKS = 1_000n;
 /** How long after the indexer was asked for an account's seed, and it couldn't be used, it is left alone
  * (its API allows 60 requests a minute per address; the scan reads on meanwhile, and once caught up has no
  * reason to ask). */
@@ -194,17 +196,18 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     return p;
   }
 
-  /** When each account's scan was last saved, and what it held then. */
-  const lastSaved = new Map<string, { at: number; shape: string }>();
+  /** When each account's scan was last saved, what it held then, and how far it had read. */
+  const lastSaved = new Map<string, { at: number; shape: string; next: bigint }>();
   /** Saves the account's scan: always when `now`, otherwise when it holds something new since the last
-   * save or that was a minute ago (serialising a whole scan on every read is wasted work). */
+   * save, read on a whole window since (a first visit's end mustn't be lost to the rule below), or that
+   * was a minute ago (serialising a whole scan on every read is wasted work). */
   function save(account: Address, scan: VaultScan, now = false): void {
     const key = account.toLowerCase();
     const shape = shapeOf(scan);
     const last = lastSaved.get(key);
-    if (!now && last && last.shape === shape && deps.now() - last.at < SAVE_IDLE_MS) return;
+    if (!now && last && last.shape === shape && scan.next - last.next < SAVE_MOVED_BLOCKS && deps.now() - last.at < SAVE_IDLE_MS) return;
     deps.scanStore.save(account, scan);
-    lastSaved.set(key, { at: deps.now(), shape });
+    lastSaved.set(key, { at: deps.now(), shape, next: scan.next });
   }
 
   /** Until when this visit leaves the indexer alone, when storage couldn't keep the decision. */

@@ -390,12 +390,13 @@ describe("the vault's history", () => {
     let clock = 0;
     let found = false;
     let saves = 0;
+    let step = 3n;
     const store = createScanStore(memory(), D);
     const d = deps({
       now: () => clock,
       scanStore: { load: store.load, save: (a, s) => (saves++, store.save(a, s)) },
       scan: async (_c, _d, s) => {
-        s.next += 3n;
+        s.next += step;
         if (found) s.staked.push({ block: s.next - 1n, txHash: H(Number(s.next)) });
       },
     });
@@ -408,6 +409,13 @@ describe("the vault's history", () => {
     found = true;
     await data.getPositionHistory(ME);
     expect(saves).toBe(3);
+    // a read that moved on a whole window, finding nothing, is saved too: a first visit's end isn't lost
+    // to the once-a-minute rule, and the next visit doesn't read those blocks again
+    found = false;
+    step = 1_000n;
+    await data.getPositionHistory(ME);
+    expect(saves).toBe(4);
+    expect(store.load(ME).next).toBeGreaterThan(1_000n);
   });
 
   it("reads the history on its own connection, so its log windows never share a batch with the balance reads", async () => {

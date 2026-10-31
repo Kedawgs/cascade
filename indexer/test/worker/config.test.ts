@@ -292,6 +292,15 @@ describe("BACKING_HOLD", () => {
     expect(refused(withVars({ BACKING_HOLD: "yes" })).message).toContain("BACKING_HOLD");
     expect(refused(withVars({ BACKING_HOLD: 1 })).message).toContain("BACKING_HOLD");
   });
+
+  it("reads true and false in any case, around spaces, and still refuses anything else", () => {
+    for (const on of ["TRUE", "True", " true ", "tRuE\n"]) expect(parseConfig(withVars({ BACKING_HOLD: on })).backingHold, JSON.stringify(on)).toBe(true);
+    for (const off of ["FALSE", "False", " false", "  "]) expect(parseConfig(withVars({ BACKING_HOLD: off })).backingHold, JSON.stringify(off)).toBe(false);
+    for (const bad of ["t", "1", "on", "yes", "true!", "tr ue", "falsey"]) {
+      const e = refused(withVars({ BACKING_HOLD: bad }));
+      expect(e.message, JSON.stringify(bad)).toBe('BACKING_HOLD is not "true" or "false"');
+    }
+  });
 });
 
 describe("redact", () => {

@@ -96,7 +96,8 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   burn-mint pool, `0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794`), `bittensor.fmTao` (wTAO), `bittensor.lockPool` and
   `bittensor.alphaVault`. A watched contract can't share an address with the deployment's on its chain.
 - **`BACKING_HOLD`**: `"false"` as shipped in both; `"true"` lets `fmtao.backing_true`'s AlphaVault side raise the
-  keeper's hold (switch it on as "What Cascade depends on" says, after a week of readings).
+  keeper's hold (switch it on as "What Cascade depends on" says, after a week of readings). Read in any case, spaces
+  around it ignored; anything but true or false (or blank, which is false) is refused.
 - **`DEPLOYMENT`**: the deployment's addresses and blocks. `pnpm config:from-record <ops record>` prints it from
   a verified ops record (addresses checksummed, Bittensor starting at the Bittensor adapter's block, which is the
   site's `NEXT_PUBLIC_CASCADE_BIT_BLOCK`). `env.test` already holds the v3 test deployment's; `env.production`
@@ -340,7 +341,7 @@ Bittensor's rules for root stake apply to it. None of that is Cascade's to chang
 |---|---|---|---|
 | `fmtao.backing_true` | critical; the `alpha` side holds only once `BACKING_HOLD` is on (off as shipped) | `alpha`: on two readings, the AlphaVault's `backing(wTAO)` below wTAO's supply by more than `backingToleranceBps` (0.1%): FM-TAO on every lane is under-backed (read live 2026-10-31: 13,992.86 TAO against 13,985.65 wTAO, 100.05%). `lock`: more than `lockOutsideCriticalBps` (5%) of wTAO's supply outside the lock pool for over `lockOutsideS` (an hour; meta `lock_outside_critical_since`): wTAO left the pool without FM-TAO being burned (a drain or a forged release), seen while it is held. Never a hold: anyone can mint wTAO with `depositLiquid` (simulated live) and keep it; and a drain unwrapped at once burns the wTAO, keeping supply and lock level, which only `fmtao.unbacked` (Base) sees | `alpha`: guardian `pause()` the front door and the vault (a payout sends TAO into this rail); tell ForeverMoney and Chainlink; unpause (and clear the hold, if one was raised) only once the backing is back. `lock`: look at wTAO's largest holders and the pool's last transfers; a release to someone who burned no FM-TAO is a drain (pause both, tell ForeverMoney), a holder that deposited for it is not (acknowledge). Users' TAO in the vault is staked on Bittensor, not held as wTAO |
 | `fmtao.lock_outside` | warning | `lockOutsideMinWei` (100 TAO) or more of wTAO outside the lock pool for over an hour (meta `lock_outside_since`; 0.047 TAO was on 2026-10-31). Usually someone holding wTAO unwrapped (anyone can mint it; unwrapping and re-wrapping toggles it); possibly a drain starting | look at wTAO's largest holders and the pool's last transfers; acknowledge a holder; act as `fmtao.backing_true` says on a drain |
-| `fmtao.role_change_critical` | critical | a transaction with a watched admin event that can mint, release or move the rail's tokens: `MINTER_ROLE` (or FM-TAO's admin role) granted, a role's admin changed, a remote pool or lane added, a pool's router changed, the lock pool's liquidity withdrawn, the AlphaVault's admin transfer scheduled, a pool's ownership transfer requested, a lane bucket switched off, or Cascade's lane removed. One alert per transaction (keyed `<chain>:<tx>`), every watched event in it listed, so a pool upgrade is one email. A bucket at capacity 0 is a bucket switched off: on TokenPool 1.5.1 capacity 0 is only allowed with the limit disabled, so that direction has **no limit**; only `ChainRemoved` freezes a lane | ask ForeverMoney whether it was planned (a pool upgrade grants `MINTER_ROLE` to the new pool and adds remote pools). If not, or until you know, guardian `pause()` the front door and the vault, and watch `fmtao.backing_true`, `fmtao.mint_surge`, `fmtao.depeg`. **After a planned pool upgrade**, set `TOKENS.base.tokenPool` and `TOKENS.bittensor.lockPool` in `wrangler.jsonc` to the new pools and redeploy: otherwise the lane buckets, `fmtao.unbacked`, the lock readings and these events keep watching the old pools |
+| `fmtao.role_change_critical` | critical | a transaction with a watched admin event that can mint, release or move the rail's tokens: `MINTER_ROLE` (or FM-TAO's admin role) granted, a role's admin changed, a remote pool or lane added, a pool's router changed, the lock pool's liquidity withdrawn, the AlphaVault's admin transfer scheduled, a pool's ownership transfer requested, a lane bucket switched off, or Cascade's lane removed. One alert per transaction (keyed `<chain>:<tx>`), every watched event in it listed, so a pool upgrade is one email. A bucket at capacity 0 is a bucket switched off: on TokenPool 1.5.1 capacity 0 is only allowed with the limit disabled, so that direction has **no limit**; only `ChainRemoved` freezes a lane | ask ForeverMoney whether it was planned (a pool upgrade grants `MINTER_ROLE` to the new pool and adds remote pools). If not, or until you know, guardian `pause()` the front door and the vault, and watch `fmtao.backing_true`, `fmtao.mint_surge`, `fmtao.depeg`. **After a planned pool upgrade**, set `TOKENS.base.tokenPool` and `TOKENS.bittensor.lockPool` in `wrangler.jsonc` to the new pools and redeploy: otherwise the lane buckets, `fmtao.unbacked`, the lock readings and these events keep watching the old pools. Deploy it **at least three hours after the new pool's own setup transactions**: the hourly logs cross-check judges each block once, with the addresses watched then, about 80–140 minutes after it on Bittensor (3–25 on Base), so a run after the change would find the new pool's setup events, which the tick wasn't watching for yet, as one `indexer.logs_omitted` critical; sooner, expect that alert, check it lists only the new pool's setup, and acknowledge it |
 | `fmtao.role_change` | warning | a transaction with only other watched admin events: a role revoked or another role granted, the CCIP admin moved, an ownership accepted, the rate-limit admin set, a rate limit tuned, a remote pool or another lane removed | check it matches something ForeverMoney announced, and acknowledge; ask them if not |
 | `rail.alpha_vault` | critical | the AlphaVault paused (`isPaused`, or a guardian's `pausedUntil` still to come), a migration announced (`migrationReadyAt` or `migrationTarget` set), executed or finished | guardian `pause()` the front door (deliveries and payouts through a paused AlphaVault revert, so nothing is lost meanwhile); ask ForeverMoney why and until when; before a migration executes, decide with them whether the adapter can use the new vault |
 | `rail.alpha_vault_admin` | warning | the AlphaVault has a default-admin transfer pending (`pendingDefaultAdmin`; it can be accepted once its schedule, 2 days after it was scheduled, passes) | ask ForeverMoney if it is theirs; if not, tell them now (the current admin can cancel it) and be ready to pause as `rail.alpha_vault` says |
@@ -367,11 +368,23 @@ million (`backingPpmLow`, `backingPpmHigh`). After at least 7 days of them:
 
 ```sh
 pnpm --dir indexer wrangler d1 execute cascade-indexer-<env> --remote --env <env> --command \
-  "SELECT MIN(json_extract(json, '$.backingPpmLow')) AS low, MAX(json_extract(json, '$.backingPpmHigh')) AS high, COUNT(*) AS hours FROM hours WHERE hour >= unixepoch() - 7 * 86400"
+  "SELECT MIN(json_extract(json, '$.backingPpmLow')) AS low, MAX(json_extract(json, '$.backingPpmHigh')) AS high, (MIN(json_extract(json, '$.backingPpmLow')) - 1000000) / 100.0 AS cushion_bps, (MAX(json_extract(json, '$.backingPpmHigh')) - MIN(json_extract(json, '$.backingPpmLow'))) / 100.0 AS spread_bps, COUNT(*) AS hours FROM hours WHERE hour >= unixepoch() - 7 * 86400"
 ```
 
-The observed deviation is `(high - low) / 100` basis points. Set `backingToleranceBps` in `THRESHOLDS` to
-`max(10, 3 × that deviation)` (rounded up), set `"BACKING_HOLD": "true"` in that environment's vars, and redeploy.
+Look at both numbers, the spread **and the low**:
+
+1. **The spread**, `spread_bps = (high - low) / 100`: how far the ratio swings in a normal week. Start from
+   `backingToleranceBps = max(10, 3 × spread_bps)`, rounded up.
+2. **The low**, how close the worst hour came to 1,000,000 ppm (100%: exactly backed). `cushion_bps = (low -
+   1,000,000) / 100` is how far above 100% it stayed (negative: below). The hold fires once the ratio drops under
+   `1,000,000 - 100 × backingToleranceBps` ppm, so the worst hour cleared that line by `cushion_bps +
+   backingToleranceBps` basis points: that must be at least `spread_bps` again (a normal week's swing from the low
+   must not reach it); if it isn't, raise `backingToleranceBps` until it is. A `low` under 1,000,000 means wTAO was
+   under-backed in some hour of the week: ask ForeverMoney why before switching the hold on, whatever the tolerance.
+   With fewer than 168 `hours`, wait.
+
+Then set `backingToleranceBps` in `THRESHOLDS`, set `"BACKING_HOLD": "true"` in that environment's vars (any case
+works), and redeploy.
 
 ### The logs cross-check
 

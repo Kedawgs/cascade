@@ -274,10 +274,12 @@ export function watchFilters(cfg: Pick<Config, "tokens">): Record<ChainName, { a
   };
 }
 
-/** A switch: true or false, as a string or a JSON boolean; absent is false. */
+/** A switch: true or false, as a JSON boolean or a string in any case, spaces around it ignored; absent or blank is
+ * false. Anything else is refused. */
 function flag(field: string, x: unknown): boolean {
-  if (x === undefined || x === null || x === "" || x === false || x === "false") return false;
-  if (x === true || x === "true") return true;
+  const s = typeof x === "string" ? x.trim().toLowerCase() : x;
+  if (s === undefined || s === null || s === "" || s === false || s === "false") return false;
+  if (s === true || s === "true") return true;
   throw new ConfigError(field, 'is not "true" or "false"');
 }
 

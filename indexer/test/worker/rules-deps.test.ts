@@ -13,6 +13,7 @@ import { keeperLowTao, railAlphaVault } from "../../src/rules/ops.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import type { BaseState, BitState, Bucket, ChainReading, HourAgg } from "../../src/snapshot.ts";
 import { logOf, upsertLogs } from "../../src/store.ts";
+import { REREAD } from "../../src/scan.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { TICK_RULES } from "../../src/tick.ts";
 import { wipe } from "./d1-count.ts";
@@ -206,6 +207,10 @@ describe("fmtao.role_change", () => {
     expect(f.facts).toMatchObject({ contract: "FM-TAO (Base)", role: "MINTER_ROLE", account: STRANGER, sender: SAFE, "sent by": STRANGER });
     expect(f.hold).toBeUndefined();
     expect(RUNBOOK["fmtao.role_change_critical"](f.facts)).toContain("ForeverMoney");
+    // pointing TOKENS at a new pool too soon after its setup makes the hourly cross-check call its setup events omitted
+    // (Bittensor's blocks are judged once REREAD, 400 blocks of 12 s, behind the settled point, over the hour before)
+    expect(Number(REREAD.bittensor) * 12 + DEFAULTS.logsCheckBittensorBlocks * 12).toBeLessThan(3 * 3600);
+    expect(RUNBOOK["fmtao.role_change_critical"](f.facts)).toMatch(/at least three hours after the new pool's own setup.*indexer\.logs_omitted.*acknowledge/);
   });
 
   it("an admin moving is critical: FM-TAO's admin role granted, a role's admin changed, the AlphaVault's admin transfer scheduled, a pool's ownership transfer requested", () => {

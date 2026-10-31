@@ -32,7 +32,7 @@ describe.runIf(process.env.LIVE === "1" && d)("live smoke", () => {
       // today's bridge fee is about 0.0005–0.0008 ETH, and Bittensor's side was read
       expect(open.feeWei).toBeGreaterThan(10n ** 14n);
       expect(open.feeWei).toBeLessThan(10n ** 16n);
-      expect(typeof open.bittensorOpen).toBe("boolean");
+      expect(["open", "paused", "unchecked"]).toContain(open.bittensor);
     }
     // the FAQ's "once its batch is 1 hour old" is the launch front door's batchInterval
     if (d!.batchMaxWaitS) expect(next.interval).toBe(FAQ_FACTS.batchIntervalS.launch);

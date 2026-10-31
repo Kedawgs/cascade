@@ -398,16 +398,18 @@ export const SEND_NOT_NOW = "This batch can't be sent right now (it may have jus
 export const SEND_FREE = "It leaves on its own any moment now, at no cost to you, so nothing was sent.";
 export const SEND_COVERED = "Its fees cover the bridge fee, so it leaves on its own within the hour. Nothing was sent.";
 export const SEND_BLOCKED = "Bittensor's side isn't accepting batches right now, so nothing was sent.";
+export const SEND_UNCHECKED = "We couldn't check Bittensor's side just now, so nothing was sent. Try again in a minute.";
 export const SEND_NO_REFUND = "Your wallet couldn't receive the refund of what the fee doesn't take, so nothing was sent.";
 const SEND_UNREACHABLE = "We couldn't reach Base just now, so nothing was sent. Try again in a moment.";
 
 /** Why a batch sendGate doesn't open isn't sent (send-now.ts). */
-const GATE_REFUSAL = { blocked: SEND_BLOCKED, free: SEND_FREE, covered: SEND_COVERED, early: SEND_NOT_YET } as const;
+const GATE_REFUSAL = { blocked: SEND_BLOCKED, unchecked: SEND_UNCHECKED, free: SEND_FREE, covered: SEND_COVERED, early: SEND_NOT_YET } as const;
 
 /** Send it now, checked right before the wallet is asked: the open batch is read again, and nothing is
  * sent while Cascade is paused, once the batch the user saw (`batchId`) has left, when nothing of the
- * account's is in it any more, unless sendGate opens it on the read's own clock (Bittensor's side can take
- * it, the keeper wouldn't send it for free, and it's five minutes past its interval), when its fee can't
+ * account's is in it any more, unless sendGate opens it on the read's own clock (Bittensor's side was
+ * checked and can take it, and the keeper is holding it five minutes past its interval, or hasn't sent it
+ * five minutes past its max wait), when its fee can't
  * be read, or when the wallet can't cover the value and the network fee. The call is then run from the
  * account (`simulate`) and goes only if Base says it would go through. Gives the call and the batch it
  * was priced from. */
@@ -428,7 +430,7 @@ export async function planSendNow(x: {
   if (b.mine.depositWei === 0n && b.mine.redeemShares === 0n) throw new FlowError(SEND_NOT_YOURS, "failed");
   // just read: Base's clock is the read's block time
   const gate = sendGate(b, x.d.batchMaxWaitS, b.chainTime);
-  if (gate !== "open") throw new FlowError(GATE_REFUSAL[gate], "failed");
+  if (gate !== "open") throw new FlowError(GATE_REFUSAL[gate], gate === "unchecked" ? "needs-you" : "failed");
   if (b.feeWei === undefined) throw new FlowError(SEND_NO_FEE, "needs-you");
   const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d);
   const need = ethNeeded(b);

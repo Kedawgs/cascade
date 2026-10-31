@@ -380,7 +380,7 @@ describe("the open batch, for Send it now", () => {
       // a generous allowance for closeBatch's gas at today's price
       gasWei: CLOSE_GAS * 7_000_000n,
       ethPriceUsd: 2_330,
-      bittensorOpen: true,
+      bittensor: "open",
     });
     // the keeper's own reads of Bittensor's side: the vault's pause, and AlphaVault's pause and migration
     expect(b.bitAsked).toEqual([
@@ -393,10 +393,14 @@ describe("the open batch, for Send it now", () => {
     expect(b.calls.map((c) => c.functionName)).not.toContain("usdcValue");
   });
 
-  it("takes Bittensor's side as closed when the vault or AlphaVault is paused, a migration is announced or done, or it can't be read", async () => {
-    for (const bittensor of [{ paused: true }, { isPaused: true }, { migrationReadyAt: 1_800_000_000n }, { migrationFinished: true }, "down"] as const) {
-      expect((await readOpenBatch(chains({ bittensor }).c, D3, ME)).bittensorOpen, String(Object.keys(bittensor === "down" ? { down: 1 } : bittensor))).toBe(false);
+  it("takes Bittensor's side as paused when the vault or AlphaVault is paused, or a migration is announced or done", async () => {
+    for (const bittensor of [{ paused: true }, { isPaused: true }, { migrationReadyAt: 1_800_000_000n }, { migrationFinished: true }] as const) {
+      expect((await readOpenBatch(chains({ bittensor }).c, D3, ME)).bittensor, String(Object.keys(bittensor))).toBe("paused");
     }
+  });
+
+  it("says it couldn't check Bittensor's side when it can't be read, never open", async () => {
+    expect((await readOpenBatch(chains({ bittensor: "down" }).c, D3, ME)).bittensor).toBe("unchecked");
   });
 
   it("while the keeper may still send it for free, weighs its fees against its bridge fee as the keeper does", async () => {
@@ -412,7 +416,7 @@ describe("the open batch, for Send it now", () => {
     // it can't close yet: no wallet, gas or Bittensor reads
     expect(b.asked).not.toContain("getBalance");
     expect(b.bitAsked).toEqual([]);
-    expect(batch).not.toHaveProperty("bittensorOpen");
+    expect(batch).not.toHaveProperty("bittensor");
     expect(batch).not.toHaveProperty("ethWei");
   });
 

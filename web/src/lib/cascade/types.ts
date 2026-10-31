@@ -193,9 +193,10 @@ export interface OpenBatch {
    * not full): the keeper's own weighing of its fees against its bridge fee (send-now.ts,
    * closeEconomicsOf). null when any of it can't be read: the keeper then holds the batch too. */
   economics?: CloseEconomics | null;
-  /** Read once it can close: whether Bittensor's side can take a batch (the vault not paused, ForeverMoney's
-   * AlphaVault not paused, with no migration announced or finished). false when that can't be read. */
-  bittensorOpen?: boolean;
+  /** Read once it can close: whether Bittensor's side can take a batch: "open" (the vault not paused,
+   * ForeverMoney's AlphaVault not paused, with no migration announced or finished), "paused" (any of
+   * those), or "unchecked" (it couldn't be read). Only "open" lets a batch be sent from here. */
+  bittensor?: "open" | "paused" | "unchecked";
 }
 
 /** What closing the open batch earns and costs, as the keeper weighs it, in USDC units (6 decimals):

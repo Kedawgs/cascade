@@ -33,11 +33,11 @@ const batch = (over: Partial<OpenBatch> = {}): OpenBatch => ({
   ethWei: 10n ** 16n,
   gasWei: 10n ** 13n,
   ethPriceUsd: 2_330,
-  bittensorOpen: true,
+  bittensor: "open",
   ...over,
 });
 /** Ten minutes in: it can't close yet, and its fees were weighed against its bridge fee. */
-const young = (over: Partial<OpenBatch> = {}) => batch({ canClose: false, chainTime: START + 600, economics: SHORT, bittensorOpen: undefined, ...over });
+const young = (over: Partial<OpenBatch> = {}) => batch({ canClose: false, chainTime: START + 600, economics: SHORT, bittensor: undefined, ...over });
 
 /** The view for a launch deployment (24-hour max wait), `after` ms since the read landed. */
 const view = (over: Partial<OpenBatch> = {}, x: { after?: number; maxWaitS?: number; sending?: { hash: Hex }; what?: "deposit" | "unstake" } = {}) =>
@@ -128,8 +128,16 @@ describe("when Send it now is offered", () => {
     // full: it could close before its interval was up
     expect(gate({ chainTime: START + 600 }, START + 600)).toBe("free");
     expect(gate({}, START + DAY_S)).toBe("free");
+    expect(gate({}, START + DAY_S + SEND_GRACE_S - 1)).toBe("free");
     // without a max wait, the keeper sends each batch as soon as it can close
-    expect(gate({}, START + 7_200, 3_600)).toBe("free");
+    expect(gate({}, START + 3_600, 3_600)).toBe("free");
+  });
+
+  it("again once the keeper is overdue: five minutes past its max wait (or its interval, without one), it isn't running", () => {
+    expect(gate({}, START + DAY_S + SEND_GRACE_S)).toBe("open");
+    expect(gate({}, START + 3_600 + SEND_GRACE_S, 3_600)).toBe("open");
+    // Bittensor's side still decides
+    expect(gate({ bittensor: "paused" }, START + DAY_S + SEND_GRACE_S)).toBe("blocked");
   });
 
   it("not while its fees cover the bridge fee (the keeper sends it at the interval), until the keeper has had its turns", () => {
@@ -141,11 +149,12 @@ describe("when Send it now is offered", () => {
     expect(gate({ canClose: false, chainTime: START + 600, economics: null }, START + 600)).toBe("early");
   });
 
-  it("not when Bittensor's side can't take the batch, or couldn't be checked", () => {
-    expect(gate({ bittensorOpen: false }, START + 7_200)).toBe("blocked");
-    expect(gate({ bittensorOpen: undefined }, START + 7_200)).toBe("blocked");
+  it("not when Bittensor's side can't take the batch, nor when it couldn't be checked", () => {
+    expect(gate({ bittensor: "paused" }, START + 7_200)).toBe("blocked");
+    expect(gate({ bittensor: "unchecked" }, START + 7_200)).toBe("unchecked");
+    expect(gate({ bittensor: undefined }, START + 7_200)).toBe("unchecked");
     // checked only once it can close
-    expect(gate({ canClose: false, chainTime: START + 600, bittensorOpen: undefined, economics: SHORT }, START + 600)).toBe("early");
+    expect(gate({ canClose: false, chainTime: START + 600, bittensor: undefined, economics: SHORT }, START + 600)).toBe("early");
   });
 });
 
@@ -251,6 +260,17 @@ describe("Send it now, once it's offered", () => {
     });
   });
 
+  it("offers it again once the keeper is overdue, five minutes past the max wait, saying when it was due", () => {
+    expect(view({ chainTime: START + DAY_S + 400 })).toEqual({
+      leaves: "It was due to leave by 8:00 AM and hasn't left yet; you can send it yourself.",
+      button: {
+        label: "Send it now: about $1.74 in ETH",
+        note: "You pay the bridge fee for the whole batch. Your wallet sends up to $2.26 in ETH; anything extra is refunded.",
+        disabled: false,
+      },
+    });
+  });
+
   it("shows a dash and holds the button when the fee can't be read", () => {
     expect(view({ feeWei: undefined })).toEqual({
       leaves: LEAVES,
@@ -273,12 +293,21 @@ describe("Send it now isn't offered", () => {
   });
 
   it("when Bittensor's side can't take the batch: it says so, and that it can still be cancelled", () => {
-    expect(view({ bittensorOpen: false })).toEqual({
+    expect(view({ bittensor: "paused" })).toEqual({
       leaves: "Bittensor's side isn't accepting batches right now; your deposit waits on Base and you can still cancel it.",
     });
-    expect(view({ bittensorOpen: undefined }, { what: "unstake" })).toEqual({
+    expect(view({ bittensor: "paused" }, { what: "unstake" })).toEqual({
       leaves: "Bittensor's side isn't accepting batches right now; your unstake waits on Base and you can still cancel it.",
     });
+  });
+
+  it("when Bittensor's side couldn't be checked: it says so honestly, never as paused, and to try again", () => {
+    expect(view({ bittensor: "unchecked" })).toEqual({
+      leaves: "We couldn't check Bittensor's side just now; your deposit waits on Base and you can still cancel it. Try again in a minute.",
+    });
+    expect(view({ bittensor: undefined }, { what: "unstake" })?.leaves).toBe(
+      "We couldn't check Bittensor's side just now; your unstake waits on Base and you can still cancel it. Try again in a minute.",
+    );
   });
 
   it("while Cascade is paused", () => {

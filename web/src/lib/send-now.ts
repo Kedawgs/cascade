@@ -42,19 +42,24 @@ export function closeEconomicsOf(r: {
 const feesCover = (e: CloseEconomics | null | undefined): boolean => !!e && e.feesUsdc >= e.bridgeFeeUsdc;
 
 /** Whether the user may send the batch now (on Base's clock, `nowS`):
- * - "blocked": it can close, but Bittensor's side can't take it, or that couldn't be checked;
+ * - "blocked": it can close, but Bittensor's side can't take it (paused, or migrating);
+ * - "unchecked": it can close, but Bittensor's side couldn't be checked: never sent on a guess;
  * - "free": the keeper sends it any moment at no cost to the user: it's full, or past its max wait (with
  *   no max wait, as soon as it can close);
  * - "covered": its fees cover the bridge fee, so the keeper sends it at its interval;
  * - "early": before five minutes past its interval (or Base hasn't yet said it can close);
  * - "open": the keeper is holding it for more fees, and the user may send it, paying the bridge fee.
- * A batch its fees cover that is still open five minutes past its interval is one the keeper is holding
- * after all (its own reads differ, or it isn't running): "open". */
-export type SendGate = "blocked" | "free" | "covered" | "early" | "open";
+ * A batch the keeper should already have sent, still open five minutes later, is one the keeper is
+ * holding after all (its reads differ) or isn't running for: "open". That is one its fees cover, five
+ * minutes past its interval, and any batch five minutes past its max wait. */
+export type SendGate = "blocked" | "unchecked" | "free" | "covered" | "early" | "open";
 
 export function sendGate(b: OpenBatch, maxWaitS: number | undefined, nowS: number): SendGate {
-  if (b.canClose && b.bittensorOpen !== true) return "blocked";
-  if (isFull(b) || nowS >= leavesBy(b, maxWaitS)) return "free";
+  if (b.canClose && b.bittensor === "paused") return "blocked";
+  if (b.canClose && b.bittensor !== "open") return "unchecked";
+  const by = leavesBy(b, maxWaitS);
+  if (nowS >= by + SEND_GRACE_S) return "open";
+  if (isFull(b) || nowS >= by) return "free";
   const offerFrom = b.start + b.interval + SEND_GRACE_S;
   if (nowS < offerFrom && feesCover(b.economics)) return "covered";
   if (nowS < offerFrom || !b.canClose) return "early";
@@ -153,6 +158,10 @@ const DASH_NOTE = "We can't read the batch on Base right now, so it can't be sen
 export const blockedText = (what: "deposit" | "unstake") =>
   `Bittensor's side isn't accepting batches right now; your ${what} waits on Base and you can still cancel it.`;
 
+/** Bittensor's side couldn't be read: said as that, not as a pause, and nothing is offered meanwhile. */
+export const uncheckedText = (what: "deposit" | "unstake") =>
+  `We couldn't check Bittensor's side just now; your ${what} waits on Base and you can still cancel it. Try again in a minute.`;
+
 /** What "Send it now" shows for the account's deposit or unstake in the open batch, or null when nothing
  * is: while paused, with nothing of the account's in the batch, or without a max wait. What it offers
  * follows sendGate. A figure that can't be read is never guessed: a stale read shows "–" for every time
@@ -169,11 +178,16 @@ export function sendNowView(x: SendNowInput): SendNowView | null {
   const by = leavesBy(b, x.maxWaitS);
   const gate = sendGate(b, x.maxWaitS, nowS);
   if (!stale && gate === "blocked") return { leaves: blockedText(x.what) };
+  if (!stale && gate === "unchecked") return { leaves: uncheckedText(x.what) };
   if (!stale && gate === "free") return { leaves: "Leaves any moment now." };
   if (!stale && gate === "covered") return { leaves: "Leaves within the hour: its fees cover the bridge fee." };
+  const byText = timeAt(new Date(by * 1000), today);
   const leaves = stale
     ? "Leaves in –"
-    : `Leaves in ${countdown(by - nowS)} (by ${timeAt(new Date(by * 1000), today)}), or sooner once its fees cover the bridge fee.`;
+    : by - nowS <= 0
+      ? // past its max wait and five minutes more: the keeper hasn't sent it
+        `It was due to leave by ${byText} and hasn't left yet; you can send it yourself.`
+      : `Leaves in ${countdown(by - nowS)} (by ${byText}), or sooner once its fees cover the bridge fee.`;
   if (x.sending) return { leaves, sending: { text: "Sending your batch to Bittensor…", txUrl: explorer.baseTx(x.sending.hash) } };
 
   if (stale) return b.canClose ? { leaves, button: { label: "Send it now: about –", note: DASH_NOTE, disabled: true } } : { leaves, yourself: "Send it yourself in –" };

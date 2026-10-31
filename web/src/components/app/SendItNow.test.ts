@@ -36,7 +36,7 @@ const ready = (over: Partial<OpenBatch> = {}) =>
     canClose: true,
     chainTime: START + 7_200,
     economics: undefined,
-    bittensorOpen: true,
+    bittensor: "open",
     feeWei: 744_898_037_875_672n,
     ethWei: 10n ** 16n,
     gasWei: 10n ** 13n,
@@ -74,10 +74,22 @@ describe("Send it now on a deposit waiting in the open batch", () => {
   });
 
   it("offers nothing when Bittensor's side can't take the batch, and says it can still be cancelled", () => {
-    expect(plainText(card([batchRead(ready({ bittensorOpen: false }))]))).toBe(
+    expect(plainText(card([batchRead(ready({ bittensor: "paused" }))]))).toBe(
       "Bittensor's side isn't accepting batches right now; your deposit waits on Base and you can still cancel it.",
     );
-    expect(plainText(card([batchRead(ready({ bittensorOpen: false }))], true, [], "unstake"))).toContain("your unstake waits on Base");
+    expect(plainText(card([batchRead(ready({ bittensor: "paused" }))], true, [], "unstake"))).toContain("your unstake waits on Base");
+  });
+
+  it("offers nothing when Bittensor's side couldn't be checked, and says so rather than calling it paused", () => {
+    expect(plainText(card([batchRead(ready({ bittensor: "unchecked" }))]))).toBe(
+      "We couldn't check Bittensor's side just now; your deposit waits on Base and you can still cancel it. Try again in a minute.",
+    );
+  });
+
+  it("offers it again once the keeper is overdue, five minutes past the max wait", () => {
+    const h = card([batchRead(ready({ chainTime: START + 86_400 + 400 }))]);
+    expect(plainText(h)).toContain("It was due to leave by 8:00 AM and hasn't left yet; you can send it yourself.");
+    expect(h).toMatch(/<button[^>]*>Send it now: about \$1\.74 in ETH<\/button>/);
   });
 
   it("once it can close: the button with the fee in dollars of ETH, and what the wallet sends at most", () => {

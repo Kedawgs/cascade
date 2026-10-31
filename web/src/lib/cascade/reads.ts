@@ -329,10 +329,11 @@ export async function ethPriceUsdc(c: Pick<Clients, "base">): Promise<bigint> {
   return quote(c, "quoteExactInput", encodePacked(["address", "uint24", "address"], [TOKENS.weth, 500, TOKENS.usdc]), 10n ** 18n);
 }
 
-/** Whether Bittensor's side can take a batch now, as the keeper checks before sending one: the vault not
- * paused, and ForeverMoney's AlphaVault (which the Bittensor adapter deposits the batch's TAO into) not
- * paused, with no migration announced or finished. False when any of it can't be read: never guessed open. */
-export async function readBittensorOpen(c: Pick<Clients, "bittensor">, d: Deployment): Promise<boolean> {
+/** Whether Bittensor's side can take a batch now, as the keeper checks before sending one: "open" when
+ * the vault isn't paused and ForeverMoney's AlphaVault (which the Bittensor adapter deposits the batch's
+ * TAO into) isn't paused, with no migration announced or finished; "paused" when any of that holds;
+ * "unchecked" when it can't be read, never guessed open. */
+export async function readBittensorSide(c: Pick<Clients, "bittensor">, d: Deployment): Promise<"open" | "paused" | "unchecked"> {
   try {
     const [vaultPaused, alphaPaused, migrationReadyAt, migrationFinished] = await c.bittensor.multicall({
       allowFailure: false,
@@ -343,9 +344,9 @@ export async function readBittensorOpen(c: Pick<Clients, "bittensor">, d: Deploy
         { address: ALPHA_VAULT, abi: ALPHA_VAULT_ABI, functionName: "migrationFinished" },
       ],
     });
-    return !vaultPaused && !alphaPaused && migrationReadyAt === 0n && !migrationFinished;
+    return !vaultPaused && !alphaPaused && migrationReadyAt === 0n && !migrationFinished ? "open" : "paused";
   } catch {
-    return false;
+    return "unchecked";
   }
 }
 
@@ -399,12 +400,12 @@ export async function readOpenBatch(
   if (!canClose && !weigh) return batch;
 
   const none = Promise.resolve(undefined);
-  const [fee, ethUsdc, eth, gas, bitOpen, tao, staker, staked] = await Promise.allSettled([
+  const [fee, ethUsdc, eth, gas, bitSide, tao, staker, staked] = await Promise.allSettled([
     quoteCloseFee(c, d, { id, deposits, redeems, totalDeposits }),
     ethPriceUsdc(c),
     canClose ? c.base.getBalance({ address: account }) : none,
     canClose ? c.base.estimateFeesPerGas().then((f) => CLOSE_GAS * f.maxFeePerGas) : none,
-    canClose ? readBittensorOpen(c, d) : none,
+    canClose ? readBittensorSide(c, d) : none,
     weigh ? c.base.readContract({ address: d.oracle as Address, abi: TWAP_ORACLE, functionName: "usdcValue", args: [10n ** 18n] }) : none,
     weigh ? readStakerFees(c, d) : none,
     weigh && stakerDeposits ? stakerDeposits(id, batch.chainTime - batch.start) : none,
@@ -440,7 +441,7 @@ export async function readOpenBatch(
     ...(canClose && gasWei !== undefined ? { gasWei } : {}),
     ...(ethPrice ? { ethPriceUsd: toDisplay(ethPrice, 6) } : {}),
     ...(economics !== undefined ? { economics } : {}),
-    ...(canClose ? { bittensorOpen: settled(bitOpen) === true } : {}),
+    ...(canClose ? { bittensor: settled(bitSide) ?? "unchecked" } : {}),
   };
 }
 

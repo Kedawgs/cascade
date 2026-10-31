@@ -45,6 +45,7 @@ import {
   SEND_NO_REFUND,
   SEND_NOT_YOURS,
   SEND_PAUSED,
+  SEND_UNCHECKED,
   SEND_UNREAD,
   sendNowCall,
   resumeStakeV3Calls,
@@ -588,7 +589,7 @@ describe("Send it now", () => {
     ethWei: 10n ** 16n,
     gasWei: 10n ** 13n,
     ethPriceUsd: 2_330,
-    bittensorOpen: true,
+    bittensor: "open",
     ...over,
   });
   const ok = () => vi.fn<(c: FlowCall) => Promise<Simulation>>(async () => ({ ok: true }));
@@ -632,22 +633,30 @@ describe("Send it now", () => {
     const simulate = ok();
     expect(await refused(plan(open({ chainTime: START + 600 }), simulate))).toBe(SEND_FREE);
     expect(await refused(plan(open({ chainTime: START + 86_400 }), simulate))).toBe(SEND_FREE);
+    expect(await refused(plan(open({ chainTime: START + 86_400 + 299 }), simulate))).toBe(SEND_FREE);
     expect(SEND_FREE).toBe("It leaves on its own any moment now, at no cost to you, so nothing was sent.");
     expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it("sends it once the keeper is overdue: still open five minutes past its max wait", async () => {
+    const { call } = await plan(open({ chainTime: START + 86_400 + 300 }));
+    expect(call).toEqual(sendNowCall(969_000_000_000_000n, D));
   });
 
   it("sends nothing while its fees cover the bridge fee (the keeper sends it at its interval), nor before five minutes past it", async () => {
     const covered = { feesUsdc: 1_380_000n, bridgeFeeUsdc: 1_380_000n };
     expect(await refused(plan(open({ chainTime: START + 3_700, economics: covered })))).toBe(SEND_COVERED);
     expect(await refused(plan(open({ chainTime: START + 3_700 })))).toBe(SEND_NOT_YET);
-    expect(await refused(plan(open({ canClose: false, chainTime: START + 600, bittensorOpen: undefined })))).toBe(SEND_NOT_YET);
+    expect(await refused(plan(open({ canClose: false, chainTime: START + 600, bittensor: undefined })))).toBe(SEND_NOT_YET);
   });
 
-  it("sends nothing when Bittensor's side can't take the batch, or couldn't be checked", async () => {
+  it("sends nothing when Bittensor's side can't take the batch, or couldn't be checked, and says which", async () => {
     const simulate = ok();
-    expect(await refused(plan(open({ bittensorOpen: false }), simulate))).toBe(SEND_BLOCKED);
-    expect(await refused(plan(open({ bittensorOpen: undefined }), simulate))).toBe(SEND_BLOCKED);
+    expect(await refused(plan(open({ bittensor: "paused" }), simulate))).toBe(SEND_BLOCKED);
+    expect(await refused(plan(open({ bittensor: "unchecked" }), simulate))).toBe(SEND_UNCHECKED);
+    expect(await refused(plan(open({ bittensor: undefined }), simulate))).toBe(SEND_UNCHECKED);
     expect(SEND_BLOCKED).toBe("Bittensor's side isn't accepting batches right now, so nothing was sent.");
+    expect(SEND_UNCHECKED).toBe("We couldn't check Bittensor's side just now, so nothing was sent. Try again in a minute.");
     expect(simulate).not.toHaveBeenCalled();
   });
 

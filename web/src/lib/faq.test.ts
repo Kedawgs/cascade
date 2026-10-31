@@ -370,10 +370,10 @@ describe("the FAQ's timing follows the deployment", () => {
     expect(answer(LAUNCH, "how-to-unstake")).toContain("waits out a 24-hour safety delay");
   });
 
-  it("says a deposit can leave sooner, at the launch, by paying its batch's bridge fee once the batch is an hour old", () => {
+  it("says a deposit can leave sooner, at the launch, by paying its batch's bridge fee a few minutes after the batch is an hour old", () => {
     expect(items(LAUNCH_SITE).find((i) => i.id === "send-sooner")?.q).toBe("Can I make my deposit leave sooner?");
     expect(answer(LAUNCH_SITE, "send-sooner")).toBe(
-      "Yes. Once its batch is 1 hour old, Send it now on the Stake page or its receipt sends the batch at once: you pay the whole batch's bridge fee in ETH, usually a dollar or two, and anything extra is refunded. Otherwise it leaves on its own within 24 hours.",
+      "Yes. A few minutes after its batch is 1 hour old, Send it now on the Stake page or its receipt can send the batch at once: you pay the whole batch's bridge fee in ETH, usually a dollar or two, and anything extra is refunded. Otherwise it leaves on its own within 24 hours, sooner once its fees cover the bridge fee.",
     );
     expect(answer(LAUNCH, "send-sooner")).toBe(answer(LAUNCH_SITE, "send-sooner"));
     // without a max wait the keeper sends each batch as soon as it can: there is nothing to speed up

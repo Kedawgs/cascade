@@ -76,7 +76,7 @@ export function WhereIsMyMoney({ account }: { account: string }) {
           ))}
         </ol>
         {/* a deposit waiting in the open batch: when it leaves, and Send it now */}
-        <SendItNow account={account} waiting={(deposits.data ?? []).some((d) => d.cancellableWei !== undefined)} href="/activity" />
+        <SendItNow account={account} what="deposit" waiting={(deposits.data ?? []).some((d) => d.cancellableWei !== undefined)} href="/activity" />
       </div>
     </section>
   );

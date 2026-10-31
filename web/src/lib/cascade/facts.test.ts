@@ -2,7 +2,7 @@ import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpReque
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import type { Deployment } from "./config";
-import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, requestBatch, requestReplacement, scanVault, withdrawalFacts } from "./facts";
+import { claimWentThrough, confirmAccountEvents, depositFacts, findStakeTx, newScan, requestBatch, requestReplacement, scanVault, stakerDepositsIn, withdrawalFacts } from "./facts";
 import { StaleChainError } from "./fresh";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState } from "./reads";
@@ -1488,5 +1488,65 @@ describe("finding a v3 stake that went through before its hash was recorded", ()
     const rpc = logsRpc({ baseHead: HEAD + 50n, logs: [staked(ME, 20_000_000n, HEAD + 10n, H(55))] });
     await expect(find(rpc)).rejects.toThrow();
     expect(rpc.windows.at(-1)![1]).toBe(HEAD + 50n);
+  });
+});
+
+describe("the open batch's deposits the staker made, as the keeper counts them", () => {
+  const STAKER_AT = getAddress("0x00000000000000000000000000000000005a4e12");
+  const D3: Deployment = { ...D, staker: STAKER_AT, oracle: getAddress("0x000000000000000000000000000000000000041e") };
+  const HEAD = 10_000_000n;
+  const requested = (batchId: bigint, user: Hex, amount: bigint, payer: Hex, block: bigint, address: string = D.frontDoor) =>
+    log(
+      address,
+      encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId, user } }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("uint256, address"), [amount, payer]),
+      block,
+      H(Number(block % 1_000n)),
+    );
+  function logsRpc(logs: ReturnType<typeof requested>[], fail = false) {
+    const windows: [bigint, bigint][] = [];
+    const asked: unknown[] = [];
+    const baseLogs = {
+      request: async ({ method, params }: { method: string; params?: { address: string; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }[] }) => {
+        if (method === "eth_blockNumber") return `0x${HEAD.toString(16)}`;
+        if (fail) throw new Error("HTTP request failed. URL: https://base-rpc.publicnode.com Status: 503");
+        const q = params![0];
+        const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+        windows.push([from, to]);
+        asked.push({ address: q.address, topics: q.topics });
+        return logs.filter((l) => l.blockNumber >= from && l.blockNumber <= to);
+      },
+    };
+    return { clients: { base: { getBlockNumber: async () => HEAD }, baseLogs } as never, windows, asked };
+  }
+
+  it("counts the batch's deposits the staker paid for, and their TAO, back to the batch's start", async () => {
+    const OTHER = getAddress("0x000000000000000000000000000000000000b0b0");
+    const rpc = logsRpc([
+      requested(7n, ME, 10n ** 17n, STAKER_AT, HEAD - 200n),
+      requested(7n, OTHER, 3n * 10n ** 17n, STAKER_AT, HEAD - 100n),
+      // TAO deposited straight into the front door paid no staker fees
+      requested(7n, ME, 5n * 10n ** 16n, ME, HEAD - 50n),
+      // another contract's event of the same shape
+      requested(7n, ME, 10n ** 18n, STAKER_AT, HEAD - 40n, D.baseAdapter),
+    ]);
+    expect(await stakerDepositsIn(rpc.clients, D3, 7n, 600)).toEqual({ count: 2, tao: 4n * 10n ** 17n });
+    // only batch 7's deposits at the front door, from ten minutes back (300 blocks) and five minutes more
+    expect(rpc.asked[0]).toEqual({ address: D.frontDoor, topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId: 7n } }) });
+    expect(rpc.windows).toEqual([[HEAD - 450n, HEAD]]);
+  });
+
+  it("reads an older batch in windows of at most 2,000 blocks, and throws when the logs can't be read", async () => {
+    const rpc = logsRpc([]);
+    expect(await stakerDepositsIn(rpc.clients, D3, 7n, 3_900)).toEqual({ count: 0, tao: 0n });
+    for (const [from, to] of rpc.windows) expect(to - from + 1n).toBeLessThanOrEqual(2_000n);
+    expect(rpc.windows[0][0]).toBe(HEAD - 1_950n - 150n);
+    await expect(stakerDepositsIn(logsRpc([], true).clients, D3, 7n, 600)).rejects.toThrow();
+  });
+
+  it("has none on v2, which has no staker, without reading", async () => {
+    const rpc = logsRpc([]);
+    expect(await stakerDepositsIn(rpc.clients, D, 7n, 600)).toEqual({ count: 0, tao: 0n });
+    expect(rpc.windows).toEqual([]);
   });
 });

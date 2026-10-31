@@ -8,7 +8,7 @@ import type { Balances, DepositQuote, OpenBatch, WithdrawalQuote } from "./types
 import { floorRao } from "./units";
 import type { Wiring } from "./wiring";
 import { formatUsdShort } from "../format";
-import { ethNeeded, needEthText, sendNowValue } from "../send-now";
+import { ethNeeded, needEthText, sendGate, sendNowValue } from "../send-now";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
 export interface FlowCall {
@@ -395,13 +395,22 @@ export const SEND_NOT_YET = "This batch can't be sent yet, so nothing was sent."
 export const SEND_NO_FEE = "We couldn't read the bridge fee just now, so nothing was sent. Try again in a moment.";
 export const SEND_FEE_ROSE = "The bridge fee rose just now, so nothing was sent. Try again.";
 export const SEND_NOT_NOW = "This batch can't be sent right now (it may have just left), so nothing was sent.";
+export const SEND_FREE = "It leaves on its own any moment now, at no cost to you, so nothing was sent.";
+export const SEND_COVERED = "Its fees cover the bridge fee, so it leaves on its own within the hour. Nothing was sent.";
+export const SEND_BLOCKED = "Bittensor's side isn't accepting batches right now, so nothing was sent.";
+export const SEND_NO_REFUND = "Your wallet couldn't receive the refund of what the fee doesn't take, so nothing was sent.";
 const SEND_UNREACHABLE = "We couldn't reach Base just now, so nothing was sent. Try again in a moment.";
 
+/** Why a batch sendGate doesn't open isn't sent (send-now.ts). */
+const GATE_REFUSAL = { blocked: SEND_BLOCKED, free: SEND_FREE, covered: SEND_COVERED, early: SEND_NOT_YET } as const;
+
 /** Send it now, checked right before the wallet is asked: the open batch is read again, and nothing is
- * sent while Cascade is paused, once the batch the user saw (`batchId`) has left, while it can't close,
- * when nothing of the account's is in it any more, when its fee can't be read, or when the wallet can't
- * cover the value and the network fee. The call is then run from the account (`simulate`) and goes only
- * if Base says it would go through. Gives the call and the batch it was priced from. */
+ * sent while Cascade is paused, once the batch the user saw (`batchId`) has left, when nothing of the
+ * account's is in it any more, unless sendGate opens it on the read's own clock (Bittensor's side can take
+ * it, the keeper wouldn't send it for free, and it's five minutes past its interval), when its fee can't
+ * be read, or when the wallet can't cover the value and the network fee. The call is then run from the
+ * account (`simulate`) and goes only if Base says it would go through. Gives the call and the batch it
+ * was priced from. */
 export async function planSendNow(x: {
   d: Deployment;
   batchId: bigint;
@@ -417,7 +426,9 @@ export async function planSendNow(x: {
   if (b.paused) throw new FlowError(SEND_PAUSED, "failed");
   if (b.id !== x.batchId) throw new FlowError(SEND_GONE, "failed");
   if (b.mine.depositWei === 0n && b.mine.redeemShares === 0n) throw new FlowError(SEND_NOT_YOURS, "failed");
-  if (!b.canClose) throw new FlowError(SEND_NOT_YET, "failed");
+  // just read: Base's clock is the read's block time
+  const gate = sendGate(b, x.d.batchMaxWaitS, b.chainTime);
+  if (gate !== "open") throw new FlowError(GATE_REFUSAL[gate], "failed");
   if (b.feeWei === undefined) throw new FlowError(SEND_NO_FEE, "needs-you");
   const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d);
   const need = ethNeeded(b);
@@ -431,6 +442,7 @@ export async function planSendNow(x: {
   if (!sim.ok) {
     if (sim.revert === "InsufficientFee") throw new FlowError(SEND_FEE_ROSE, "needs-you");
     if (sim.revert === "EnforcedPause") throw new FlowError(SEND_PAUSED, "failed");
+    if (sim.revert === "TransferFailed") throw new FlowError(SEND_NO_REFUND, "failed");
     throw new FlowError(SEND_NOT_NOW, "failed");
   }
   return { call: c, batch: b };
@@ -667,6 +679,9 @@ function revertMessage(key: string): string {
 }
 
 const LOST = "We couldn't confirm the transaction yet. Continue to check it again; nothing is sent twice.";
+/** Send it now has nothing to continue: it is offered again, or shows as sending, from the chain's reads. */
+const CLOSE_DECLINED = "You declined in your wallet, so nothing was sent.";
+const CLOSE_LOST = "We couldn't confirm it yet. Check its status in a few minutes.";
 const REPLACED = "This step was cancelled or replaced in your wallet, so it didn't go through. Nothing after it was sent.";
 
 function fail(store: FlowStore, message: string, state: OpState): never {
@@ -740,7 +755,7 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
       try {
         hash = await port.send(c);
       } catch (e) {
-        if (rejected(e)) fail(store, "You cancelled in your wallet. Continue when you're ready.", "needs-you");
+        if (rejected(e)) fail(store, c.key === "close" ? CLOSE_DECLINED : "You cancelled in your wallet. Continue when you're ready.", "needs-you");
         fail(store, noGas(e) ? NO_ETH : "Your wallet couldn't send this step. Try again.", "failed");
       }
       store.setHash(c.key, hash);
@@ -755,7 +770,7 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
         else replaced = true;
       });
     } catch {
-      fail(store, LOST, "needs-you");
+      fail(store, c.key === "close" ? CLOSE_LOST : LOST, "needs-you");
     }
     if (replaced) fail(store, REPLACED, "failed");
     if (r.status !== "success") fail(store, revertMessage(c.key), "failed");

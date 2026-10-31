@@ -1,13 +1,13 @@
-import { decodeAbiParameters, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, size } from "viem";
+import { type Address, decodeAbiParameters, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, size } from "viem";
 import { describe, expect, it } from "vitest";
-import { type Deployment, MULTICALL3 } from "./config";
+import { ALPHA_VAULT, type Deployment, MULTICALL3 } from "./config";
 import { FRONT_DOOR } from "./abi";
 import { basketTwrKey, STORAGE_QUERY } from "./apy";
 import {
   CLOSE_GAS,
   encodeBatch,
   readApyPercent,
-  readBatchClosed,
+  readCloseOutcome,
   readFrontDoor,
   readNextBatch,
   readOpenBatch,
@@ -244,14 +244,27 @@ describe("the open batch, for Send it now", () => {
   ];
   const redeems = [{ user: BOB, amount: 5n * 10n ** 21n }];
   const FEE = 744_898_037_875_672n;
+  const START = 1_800_000_000;
+  const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000005A4E12" as Address, oracle: "0x000000000000000000000000000000000000041E" as Address };
 
-  /** Base as the front door, its adapter, the wallet and Uniswap's quoter answer it; each eth_call recorded. */
-  function base(over: { canClose?: boolean; paused?: boolean; entries?: boolean; quote?: () => bigint; gas?: () => bigint } = {}) {
+  /** Base and Bittensor as the front door, its adapter, the staker, the oracle, the wallet, Uniswap's quoter,
+   * the vault and ForeverMoney's AlphaVault answer them, `at` seconds into the batch; each read recorded. */
+  function chains(
+    over: {
+      at?: number;
+      canClose?: boolean;
+      paused?: boolean;
+      entries?: boolean;
+      quote?: () => bigint;
+      gas?: () => bigint;
+      bittensor?: Record<string, unknown> | "down";
+    } = {},
+  ) {
     const calls: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }[] = [];
     const asked: string[] = [];
     const empty = over.entries === false;
     const answers: Record<string, unknown> = {
-      openBatch: [7n, 1_800_000_000n, empty ? 0n : 3n * 10n ** 17n, 10n ** 14n, empty ? 0n : 2n, empty ? 0n : 1n],
+      openBatch: [7n, BigInt(START), empty ? 0n : 3n * 10n ** 17n, 10n ** 14n, empty ? 0n : 2n, empty ? 0n : 1n],
       openDeposits: empty ? [] : deposits,
       openRedeems: empty ? [] : redeems,
       canClose: over.canClose ?? true,
@@ -259,10 +272,12 @@ describe("the open batch, for Send it now", () => {
       paused: over.paused ?? false,
       depositOf: empty ? 0n : 10n ** 17n,
       redeemOf: 0n,
-      getCurrentBlockTimestamp: 1_800_007_200n,
+      getCurrentBlockTimestamp: BigInt(START + (over.at ?? 7_200)),
+      swapFeeBps: 15,
+      depositFeeUsdc: 50_000n,
     };
     let multicalls = 0;
-    const client = {
+    const base = {
       async multicall({ contracts }: { contracts: { address: string; functionName: string; args?: readonly unknown[] }[] }) {
         multicalls++;
         return contracts.map((c) => {
@@ -277,7 +292,10 @@ describe("the open batch, for Send it now", () => {
       async readContract(c: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }) {
         calls.push(c);
         if (c.functionName === "quoteFee") return (over.quote ?? (() => FEE))();
-        if (c.functionName === "quoteExactInput") return [2_330_000n, [], [], 0n];
+        // 1 ETH sells for $2,330
+        if (c.functionName === "quoteExactInput") return [((c.args?.[1] as bigint) * 2_330_000_000n) / 10n ** 18n, [], [], 0n];
+        // the oracle: 1 TAO is worth $250
+        if (c.functionName === "usdcValue") return ((c.args?.[0] as bigint) * 250_000_000n) / 10n ** 18n;
         throw new Error(`unexpected ${c.functionName}`);
       },
       async getBalance({ address }: { address: string }) {
@@ -290,10 +308,19 @@ describe("the open batch, for Send it now", () => {
         return { maxFeePerGas: (over.gas ?? (() => 7_000_000n))(), maxPriorityFeePerGas: 1_000_000n };
       },
     };
+    const bitAnswers: Record<string, unknown> = { paused: false, isPaused: false, migrationReadyAt: 0n, migrationFinished: false, ...(over.bittensor === "down" ? {} : over.bittensor) };
+    const bitAsked: { address: string; functionName: string }[] = [];
+    const bittensor = {
+      async multicall({ contracts }: { contracts: { address: string; functionName: string }[] }) {
+        if (over.bittensor === "down") throw new Error("HTTP request failed");
+        return contracts.map((c) => (bitAsked.push({ address: c.address, functionName: c.functionName }), bitAnswers[c.functionName]));
+      },
+    };
     return {
-      client: client as never,
+      c: { base: base as never, bittensor: bittensor as never },
       calls,
       asked,
+      bitAsked,
       get multicalls() {
         return multicalls;
       },
@@ -301,20 +328,21 @@ describe("the open batch, for Send it now", () => {
   }
 
   it("for anyone: when it started, what waits in it and Base's clock, in one multicall and nothing else", async () => {
-    const b = base();
-    expect(await readNextBatch({ base: b.client }, D)).toEqual({
+    const b = chains();
+    expect(await readNextBatch(b.c, D)).toEqual({
       id: 7n,
-      start: 1_800_000_000,
+      start: START,
       interval: 3_600,
       canClose: true,
       paused: false,
       deposits: 2,
       redeems: 1,
-      chainTime: 1_800_007_200,
+      chainTime: START + 7_200,
     });
     expect(b.multicalls).toBe(1);
     expect(b.asked).toEqual(["openBatch", "canClose", "batchInterval", "paused", "getCurrentBlockTimestamp"]);
     expect(b.calls).toEqual([]);
+    expect(b.bitAsked).toEqual([]);
   });
 
   it("encodes the batch exactly as the front door does: abi.encode(1, id, deposits, redeems)", () => {
@@ -331,20 +359,20 @@ describe("the open batch, for Send it now", () => {
     expect(size(message)).toBe(32 * (6 + 2 * 3));
   });
 
-  it("asks the bridge for the fee of this batch's exact message, as the front door asks it", async () => {
-    const b = base();
-    const batch = await readOpenBatch({ base: b.client }, D, ME);
+  it("once it can close, asks the bridge for the fee of this batch's exact message as the front door asks it, and Bittensor whether it can take it", async () => {
+    const b = chains();
+    const batch = await readOpenBatch(b.c, D3, ME, async () => Promise.reject(new Error("no weighing two hours in")));
     const quote = b.calls.find((c) => c.functionName === "quoteFee");
     // the primary bridge (wiring.ts checks it is this adapter), to the vault on Bittensor (chain 964),
     // for the batch's TAO, from the front door: the call closeBatch makes inside
     expect(quote).toMatchObject({ address: D.baseAdapter, args: [964n, D.vault, encodeBatch(7n, deposits, redeems), 3n * 10n ** 17n], account: D.frontDoor });
     expect(batch).toEqual({
       id: 7n,
-      start: 1_800_000_000,
+      start: START,
       interval: 3_600,
       canClose: true,
       paused: false,
-      chainTime: 1_800_007_200,
+      chainTime: START + 7_200,
       mine: { depositWei: 10n ** 17n, redeemShares: 0n },
       potWei: 10n ** 14n,
       feeWei: FEE,
@@ -352,17 +380,66 @@ describe("the open batch, for Send it now", () => {
       // a generous allowance for closeBatch's gas at today's price
       gasWei: CLOSE_GAS * 7_000_000n,
       ethPriceUsd: 2_330,
+      bittensorOpen: true,
     });
+    // the keeper's own reads of Bittensor's side: the vault's pause, and AlphaVault's pause and migration
+    expect(b.bitAsked).toEqual([
+      { address: D.vault, functionName: "paused" },
+      { address: ALPHA_VAULT, functionName: "isPaused" },
+      { address: ALPHA_VAULT, functionName: "migrationReadyAt" },
+      { address: ALPHA_VAULT, functionName: "migrationFinished" },
+    ]);
+    // past five minutes after its interval the keeper has had its turns: its fees aren't weighed
+    expect(b.calls.map((c) => c.functionName)).not.toContain("usdcValue");
   });
 
-  it("before the batch can close, reads nothing it can't use yet: no fee, balance, gas or price", async () => {
-    for (const over of [{ canClose: false }, { paused: true }, { entries: false }]) {
-      const b = base(over);
-      const batch = await readOpenBatch({ base: b.client }, D, ME);
+  it("takes Bittensor's side as closed when the vault or AlphaVault is paused, a migration is announced or done, or it can't be read", async () => {
+    for (const bittensor of [{ paused: true }, { isPaused: true }, { migrationReadyAt: 1_800_000_000n }, { migrationFinished: true }, "down"] as const) {
+      expect((await readOpenBatch(chains({ bittensor }).c, D3, ME)).bittensorOpen, String(Object.keys(bittensor === "down" ? { down: 1 } : bittensor))).toBe(false);
+    }
+  });
+
+  it("while the keeper may still send it for free, weighs its fees against its bridge fee as the keeper does", async () => {
+    const b = chains({ canClose: false, at: 600 });
+    const asked: [bigint, number][] = [];
+    const batch = await readOpenBatch(b.c, D3, ME, async (id, ageS) => (asked.push([id, ageS]), { count: 1, tao: 10n ** 17n }));
+    // the staker's deposits in batch 7, ten minutes old
+    expect(asked).toEqual([[7n, 600]]);
+    // one staked deposit of 0.1 TAO at $250 (the oracle's price): $0.05 + 0.15% of $25; the 0.0001 ETH pot
+    // at $2,330; against 0.000745 ETH at $2,330
+    expect(batch.economics).toEqual({ feesUsdc: 50_000n + 37_500n + 233_000n, bridgeFeeUsdc: (FEE * 2_330_000_000n) / 10n ** 18n });
+    expect(batch.feeWei).toBe(FEE);
+    // it can't close yet: no wallet, gas or Bittensor reads
+    expect(b.asked).not.toContain("getBalance");
+    expect(b.bitAsked).toEqual([]);
+    expect(batch).not.toHaveProperty("bittensorOpen");
+    expect(batch).not.toHaveProperty("ethWei");
+  });
+
+  it("counts fees it can't weigh as not covering the bridge fee, as the keeper does", async () => {
+    const at = { canClose: false, at: 600 };
+    expect((await readOpenBatch(chains(at).c, D3, ME, async () => Promise.reject(new Error("logs server behind")))).economics).toBeNull();
+    expect((await readOpenBatch(chains(at).c, D3, ME)).economics).toBeNull();
+    expect((await readOpenBatch(chains({ ...at, quote: () => 0n }).c, D3, ME, async () => ({ count: 1, tao: 10n ** 17n }))).economics).toBeNull();
+  });
+
+  it("weighs nothing for a full batch (the keeper sends it at once), nor on v2, which has no staker", async () => {
+    // it could close ten minutes in: it's full
+    const full = await readOpenBatch(chains({ at: 600 }).c, D3, ME, async () => ({ count: 1, tao: 10n ** 17n }));
+    expect(full).not.toHaveProperty("economics");
+    const b = chains({ canClose: false, at: 600 });
+    expect(await readOpenBatch(b.c, D, ME, async () => ({ count: 1, tao: 10n ** 17n }))).not.toHaveProperty("economics");
+    expect(b.calls).toEqual([]);
+  });
+
+  it("reads nothing more for an empty or paused batch", async () => {
+    for (const over of [{ paused: true }, { entries: false }]) {
+      const b = chains(over);
+      const batch = await readOpenBatch(b.c, D3, ME);
       expect(b.calls, JSON.stringify(over)).toEqual([]);
       expect(b.asked).not.toContain("getBalance");
+      expect(b.bitAsked).toEqual([]);
       expect(batch).not.toHaveProperty("feeWei");
-      expect(batch).not.toHaveProperty("ethPriceUsd");
     }
   });
 
@@ -370,20 +447,42 @@ describe("the open batch, for Send it now", () => {
     const fail = (): never => {
       throw new Error("rate limited");
     };
-    const batch = await readOpenBatch({ base: base({ quote: fail, gas: fail }).client }, D, ME);
+    const batch = await readOpenBatch(chains({ quote: fail, gas: fail }).c, D3, ME);
     expect(batch).not.toHaveProperty("feeWei");
     expect(batch).not.toHaveProperty("gasWei");
     expect(batch).toMatchObject({ ethWei: 10n ** 16n, ethPriceUsd: 2_330, canClose: true });
   });
 
-  it("reads what a send paid from its receipt: the front door's BatchClosed, its fee and the pot's share", async () => {
-    const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "BatchClosed", args: { id: 7n } });
-    const data = encodeAbiParameters(parseAbiParameters("uint256, uint256, uint256, uint256, uint256"), [3n * 10n ** 17n, 2n, 1n, FEE, 10n ** 14n]);
-    const log = (address: string) => ({ address, topics, data, blockNumber: 1n, logIndex: 0, transactionHash: H32, transactionIndex: 0, blockHash: H32, removed: false });
+  describe("what a send did, from its receipt", () => {
+    const closed = (id: bigint, address: string = D.frontDoor) => ({
+      address,
+      topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "BatchClosed", args: { id } }),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256, uint256, uint256, uint256"), [3n * 10n ** 17n, 2n, 1n, FEE, 10n ** 14n]),
+      blockNumber: 1n,
+      logIndex: 0,
+      transactionHash: H32,
+      transactionIndex: 0,
+      blockHash: H32,
+      removed: false,
+    });
+    const rolled = (id: bigint) => ({ ...closed(id), topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "BatchRolled", args: { id } }), data: "0x" });
     const receipt = (logs: unknown[]) => ({ base: { getTransactionReceipt: async () => ({ logs }) } as never });
-    expect(await readBatchClosed(receipt([log(D.frontDoor)]), D, H32)).toEqual({ feeWei: FEE, potUsedWei: 10n ** 14n });
-    // another contract's event of the same shape isn't the front door's
-    expect(await readBatchClosed(receipt([log(D.baseAdapter)]), D, H32)).toBeUndefined();
-    expect(await readBatchClosed({ base: { getTransactionReceipt: async () => Promise.reject(new Error("not found")) } as never }, D, H32)).toBeUndefined();
+
+    it("sent the batch the user meant: its fee and the pot's share of it", async () => {
+      expect(await readCloseOutcome(receipt([closed(7n)]), D, H32, 7n)).toEqual({ kind: "sent", feeWei: FEE, potUsedWei: 10n ** 14n });
+    });
+
+    it("sent another batch: the one meant had already left, and the next one went in its place", async () => {
+      expect(await readCloseOutcome(receipt([closed(8n)]), D, H32, 7n)).toEqual({ kind: "other", feeWei: FEE, potUsedWei: 10n ** 14n });
+    });
+
+    it("only rolled an empty batch: the one meant had already left, and all the ETH came back", async () => {
+      expect(await readCloseOutcome(receipt([rolled(8n)]), D, H32, 7n)).toEqual({ kind: "rolled" });
+    });
+
+    it("can't say, from another contract's event of the same shape or a receipt it can't read", async () => {
+      expect(await readCloseOutcome(receipt([closed(7n, D.baseAdapter)]), D, H32, 7n)).toBeUndefined();
+      expect(await readCloseOutcome({ base: { getTransactionReceipt: async () => Promise.reject(new Error("not found")) } as never }, D, H32, 7n)).toBeUndefined();
+    });
   });
 });

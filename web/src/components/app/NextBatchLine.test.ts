@@ -24,7 +24,7 @@ describe("the public Next batch line", () => {
   const line = (cached: Cached[]) => plainText(renderWithCache(createElement(NextBatchLine), cached, { data: launchData() }));
 
   it("says when the next batch leaves and what waits in it, with no wallet connected", () => {
-    expect(line([{ key: cascadeKeys.nextBatch(), data: next(), at: Date.now() }])).toBe("Next batch leaves within 23 h 50 min · 1 deposit waiting");
+    expect(line([{ key: cascadeKeys.nextBatch(), data: next(), at: Date.now() }])).toBe("Next batch leaves within 23 h 50 min · 1 depositor waiting");
   });
 
   it("waits for the first deposit when the batch is empty", () => {

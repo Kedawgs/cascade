@@ -87,7 +87,7 @@ describe("the open batch", () => {
     const data = createLiveCascadeData(
       D,
       deps({
-        readOpenBatch: async (_c, d, account) => (asked.push(["open", d.frontDoor, account]), { id: 7n } as never),
+        readOpenBatch: async (_c, d, account, stakerDeposits) => (asked.push(["open", d.frontDoor, account, typeof stakerDeposits]), { id: 7n } as never),
         readNextBatch: async (_c, d) => (asked.push(["next", d.frontDoor]), { id: 7n } as never),
         readVault: async () => Promise.reject(new Error("Bittensor wasn't expected to be read")),
       }),
@@ -95,7 +95,8 @@ describe("the open batch", () => {
     expect(await data.getOpenBatch(ME)).toEqual({ id: 7n });
     expect(await data.getNextBatch()).toEqual({ id: 7n });
     expect(asked).toEqual([
-      ["open", D.frontDoor, ME],
+      // with the staker's deposits from Base's logs, for the keeper's fee rule
+      ["open", D.frontDoor, ME, "function"],
       ["next", D.frontDoor],
     ]);
   });

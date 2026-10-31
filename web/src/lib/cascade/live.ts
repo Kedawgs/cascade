@@ -23,6 +23,7 @@ import {
   requestBatch,
   requestReplacement,
   scanVault,
+  stakerDepositsIn,
   type VaultScan,
   withdrawalFacts,
 } from "./facts";
@@ -651,7 +652,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       };
     },
 
-    getOpenBatch: (account) => deps.readOpenBatch(c, d, account as Address),
+    // the staker's deposits in it come from Base's logs, as the keeper counts them
+    getOpenBatch: (account) => deps.readOpenBatch(c, d, account as Address, (id, ageS) => stakerDepositsIn(c, d, id, ageS)),
     getNextBatch: () => deps.readNextBatch(c, d),
   };
 }

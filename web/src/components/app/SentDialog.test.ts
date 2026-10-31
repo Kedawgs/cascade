@@ -56,7 +56,7 @@ describe("the panel that confirms an unstake", () => {
 
 describe("the panel that confirms Send it now", () => {
   it("says the batch is on its way and what was paid, with no empty table when the receipt couldn't be read", () => {
-    const paid = html(batchNotice("/activity?withdrawal=w1", { paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }));
+    const paid = html(batchNotice("/activity?withdrawal=w1", { outcome: "sent", paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }));
     expect(labelOf(paid)).toBe("Your batch is on its way to Bittensor");
     expect(plainText(paid)).toContain("Bridge fee you paid$1.74 in ETH");
     expect(paid).toMatch(/<a[^>]*href="\/activity\?withdrawal=w1"[^>]*>Follow it live<\/a>/);

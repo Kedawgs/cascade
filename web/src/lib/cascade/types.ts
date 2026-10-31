@@ -189,6 +189,21 @@ export interface OpenBatch {
   ethWei?: bigint;
   gasWei?: bigint;
   ethPriceUsd?: number;
+  /** Read while the keeper may still send it for free at its interval (until five minutes after it, and
+   * not full): the keeper's own weighing of its fees against its bridge fee (send-now.ts,
+   * closeEconomicsOf). null when any of it can't be read: the keeper then holds the batch too. */
+  economics?: CloseEconomics | null;
+  /** Read once it can close: whether Bittensor's side can take a batch (the vault not paused, ForeverMoney's
+   * AlphaVault not paused, with no migration announced or finished). false when that can't be read. */
+  bittensorOpen?: boolean;
+}
+
+/** What closing the open batch earns and costs, as the keeper weighs it, in USDC units (6 decimals):
+ * Cascade's fees in the batch (the staker's deposit and swap fees on the deposits it made, and the pot)
+ * and the bridge fee. The keeper sends a batch at its interval once the first covers the second. */
+export interface CloseEconomics {
+  feesUsdc: bigint;
+  bridgeFeeUsdc: bigint;
 }
 
 export interface CascadeData {

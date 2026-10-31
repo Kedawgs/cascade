@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { STALE_MS } from "./batch-clock";
 import type { CloseOp, Operation } from "./cascade/oplog";
 import type { OpenBatch } from "./cascade/types";
-import { closeSentFromHere, feeToPay, sendNowValue, sendNowView } from "./send-now";
+import { closeEconomicsOf, closeSentFromHere, feeToPay, SEND_GRACE_S, sendGate, sendNowValue, sendNowView } from "./send-now";
 
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 const ME = "0x000000000000000000000000000000000000a11c" as const;
@@ -14,8 +14,12 @@ const DAY_S = 86_400;
 const READ = 1_000_000_000_000;
 /** Today's bridge fee for a one-entry batch, as the adapter quoted it on Base (0.000745 ETH). */
 const FEE = 744_898_037_875_672n;
+/** One deposit's fees against today's bridge fee: they don't cover it. */
+const SHORT = { feesUsdc: 430_000n, bridgeFeeUsdc: 1_380_000n };
+const COVERED = { feesUsdc: 1_380_000n, bridgeFeeUsdc: 1_380_000n };
 
-/** The open batch as read two hours in (10:00 AM on Base's clock): it can close, and the account has a deposit in it. */
+/** The open batch as read two hours in (10:00 AM on Base's clock): it can close, Bittensor can take it,
+ * and the account has a deposit in it. */
 const batch = (over: Partial<OpenBatch> = {}): OpenBatch => ({
   id: 7n,
   start: START,
@@ -29,21 +33,25 @@ const batch = (over: Partial<OpenBatch> = {}): OpenBatch => ({
   ethWei: 10n ** 16n,
   gasWei: 10n ** 13n,
   ethPriceUsd: 2_330,
+  bittensorOpen: true,
   ...over,
 });
+/** Ten minutes in: it can't close yet, and its fees were weighed against its bridge fee. */
+const young = (over: Partial<OpenBatch> = {}) => batch({ canClose: false, chainTime: START + 600, economics: SHORT, bittensorOpen: undefined, ...over });
 
 /** The view for a launch deployment (24-hour max wait), `after` ms since the read landed. */
-const view = (over: Partial<OpenBatch> = {}, x: { after?: number; maxWaitS?: number; sending?: { hash: Hex } } = {}) =>
+const view = (over: Partial<OpenBatch> = {}, x: { after?: number; maxWaitS?: number; sending?: { hash: Hex }; what?: "deposit" | "unstake" } = {}) =>
   sendNowView({
     batch: batch(over),
     maxWaitS: "maxWaitS" in x ? x.maxWaitS : DAY_S,
     readAt: READ,
     now: READ + (x.after ?? 0),
+    what: x.what ?? "deposit",
     ...(x.sending ? { sending: x.sending } : {}),
   });
 const button = (over: Partial<OpenBatch> = {}) => view(over)?.button;
 
-const LEAVES = "Leaves in 22 h (by 8:00 AM tomorrow), or sooner if more deposits share the bridge fee.";
+const LEAVES = "Leaves in 22 h (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.";
 
 describe("what the user pays toward the bridge fee", () => {
   it("is the fee less what the batch's unstake fees (its pot) already hold", () => {
@@ -87,41 +95,100 @@ describe("what closeBatch is sent with", () => {
   });
 });
 
-describe("Send it now, before the batch can close", () => {
-  it("counts down to when it leaves on its own and to when the user can send it, on Base's clock", () => {
-    // read ten minutes in
-    expect(view({ canClose: false, chainTime: START + 600 })).toEqual({
-      leaves: "Leaves in 23 h 50 min (by 8:00 AM tomorrow), or sooner if more deposits share the bridge fee.",
-      yourself: "Send it yourself in 50 min (from 9:00 AM).",
-    });
-    // two minutes later by this device's clock, before the next read
-    expect(view({ canClose: false, chainTime: START + 600 }, { after: 120_000 })).toEqual({
-      leaves: "Leaves in 23 h 48 min (by 8:00 AM tomorrow), or sooner if more deposits share the bridge fee.",
-      yourself: "Send it yourself in 48 min (from 9:00 AM).",
-    });
-  });
-
-  it("says under a minute, then any moment now while Base hasn't yet said it can close", () => {
-    expect(view({ canClose: false, chainTime: START + 3_570 })?.yourself).toBe("Send it yourself in under a minute (from 9:00 AM).");
-    expect(view({ canClose: false, chainTime: START + 3_620 })?.yourself).toBe("Send it yourself any moment now.");
-  });
-
-  it("shows a dash in place of every time once the read is stale", () => {
-    expect(view({ canClose: false, chainTime: START + 600 }, { after: STALE_MS + 1_000 })).toEqual({
-      leaves: "Leaves in –",
-      yourself: "Send it yourself in –",
-    });
+describe("the keeper's fee rule (ops closeEconomicsOf), ported", () => {
+  it("adds the staker's deposit fee and swap fee on its deposits and the pot, against the bridge fee, in USDC units", () => {
+    // ops/test/base-logs.test.ts's batch: one staked deposit of 0.4 TAO at $250, 15 bps, a 0.0001 ETH pot,
+    // a 0.0006 ETH bridge fee, ETH at $2,300
+    expect(
+      closeEconomicsOf({
+        nStaked: 1,
+        depositFeeUsdc: 50_000n,
+        stakedTao: 4n * 10n ** 17n,
+        taoPriceUsdc: 250_000_000n,
+        swapFeeBps: 15,
+        feePot: 10n ** 14n,
+        ethPriceUsdc: 2_300_000_000n,
+        bridgeFeeWei: 6n * 10n ** 14n,
+      }),
+    ).toEqual({ feesUsdc: 50_000n + 150_000n + 230_000n, bridgeFeeUsdc: 1_380_000n });
   });
 });
 
-describe("Send it now, once the batch can close", () => {
+describe("when Send it now is offered", () => {
+  const gate = (over: Partial<OpenBatch>, nowS: number, maxWaitS = DAY_S) => sendGate(batch(over), maxWaitS, nowS);
+
+  it("only from five minutes past the interval: the keeper, a round a minute, has had its turns by then", () => {
+    expect(SEND_GRACE_S).toBe(300);
+    expect(gate({ canClose: false, economics: SHORT }, START + 600)).toBe("early");
+    expect(gate({ economics: SHORT }, START + 3_600 + 299)).toBe("early");
+    expect(gate({}, START + 3_600 + 300)).toBe("open");
+  });
+
+  it("never when the keeper sends it at no cost to the user: full, or past its max wait", () => {
+    // full: it could close before its interval was up
+    expect(gate({ chainTime: START + 600 }, START + 600)).toBe("free");
+    expect(gate({}, START + DAY_S)).toBe("free");
+    // without a max wait, the keeper sends each batch as soon as it can close
+    expect(gate({}, START + 7_200, 3_600)).toBe("free");
+  });
+
+  it("not while its fees cover the bridge fee (the keeper sends it at the interval), until the keeper has had its turns", () => {
+    expect(gate({ canClose: false, chainTime: START + 600, economics: COVERED }, START + 600)).toBe("covered");
+    expect(gate({ chainTime: START + 3_700, economics: COVERED }, START + 3_700)).toBe("covered");
+    // still open five minutes past the interval: the keeper is holding it after all
+    expect(gate({ economics: COVERED }, START + 3_900)).toBe("open");
+    // fees that couldn't be weighed don't close it early for the keeper either
+    expect(gate({ canClose: false, chainTime: START + 600, economics: null }, START + 600)).toBe("early");
+  });
+
+  it("not when Bittensor's side can't take the batch, or couldn't be checked", () => {
+    expect(gate({ bittensorOpen: false }, START + 7_200)).toBe("blocked");
+    expect(gate({ bittensorOpen: undefined }, START + 7_200)).toBe("blocked");
+    // checked only once it can close
+    expect(gate({ canClose: false, chainTime: START + 600, bittensorOpen: undefined, economics: SHORT }, START + 600)).toBe("early");
+  });
+});
+
+describe("Send it now, before it's offered", () => {
+  it("counts down to when the batch leaves on its own and to when the user can send it, on Base's clock", () => {
+    expect(view(young())).toEqual({
+      leaves: "Leaves in 23 h 50 min (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.",
+      yourself: "Send it yourself in 55 min (from 9:05 AM).",
+    });
+    // two minutes later by this device's clock, before the next read
+    expect(view(young(), { after: 120_000 })).toEqual({
+      leaves: "Leaves in 23 h 48 min (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.",
+      yourself: "Send it yourself in 53 min (from 9:05 AM).",
+    });
+  });
+
+  it("keeps counting down past the interval, to five minutes after it", () => {
+    expect(view({ chainTime: START + 3_700 })?.yourself).toBe("Send it yourself in 4 min (from 9:05 AM).");
+    expect(view({ chainTime: START + 3_870 })?.yourself).toBe("Send it yourself in under a minute (from 9:05 AM).");
+    expect(view({ chainTime: START + 3_700 })).not.toHaveProperty("button");
+  });
+
+  it("says any moment now while Base hasn't yet said the batch can close", () => {
+    expect(view(young({ chainTime: START + 3_920 }))?.yourself).toBe("Send it yourself any moment now.");
+  });
+
+  it("says it leaves within the hour when its fees cover the bridge fee, offering nothing", () => {
+    expect(view(young({ economics: COVERED }))).toEqual({ leaves: "Leaves within the hour: its fees cover the bridge fee." });
+  });
+
+  it("shows a dash in place of every time once the read is stale", () => {
+    expect(view(young(), { after: STALE_MS + 1_000 })).toEqual({ leaves: "Leaves in –", yourself: "Send it yourself in –" });
+  });
+});
+
+describe("Send it now, once it's offered", () => {
   it("offers the fee the user pays, in dollars of ETH, and what the wallet sends at most", () => {
     expect(view()).toEqual({
       leaves: LEAVES,
       button: {
         // 0.000744898 ETH at $2,330
         label: "Send it now: about $1.74 in ETH",
-        // 0.000969 ETH at $2,330
+        // 0.000969 ETH at $2,330, to the cent above
         note: "You pay the bridge fee for the whole batch. Your wallet sends up to $2.26 in ETH; anything extra is refunded.",
         disabled: false,
       },
@@ -150,11 +217,19 @@ describe("Send it now, once the batch can close", () => {
     });
   });
 
+  it("says under $0.01, never $0.00, for a tiny amount, and rounds what the wallet may send up to the cent", () => {
+    // 0.000002 ETH at $2,330 is $0.0047; 0.000003 sent is $0.007
+    expect(button({ feeWei: 2n * 10n ** 12n })).toMatchObject({
+      label: "Send it now: under $0.01 in ETH",
+      note: "You pay the bridge fee for the whole batch. Your wallet sends up to $0.01 in ETH; anything extra is refunded.",
+    });
+  });
+
   it("asks for the ETH the wallet is short of, the network fee included, and holds the button", () => {
-    // 0.000969 sent + 0.00001 for gas = 0.000979 ETH at $2,330
+    // 0.000969 sent + 0.00001 for gas = 0.000979 ETH at $2,330 = $2.281, to the cent above
     expect(button({ ethWei: 5n * 10n ** 14n })).toMatchObject({
       label: "Send it now: about $1.74 in ETH",
-      warning: "You need about $2.28 of ETH on Base for this.",
+      warning: "You need about $2.29 of ETH on Base for this.",
       disabled: true,
     });
     // exactly enough is enough
@@ -189,19 +264,23 @@ describe("Send it now, once the batch can close", () => {
       button: { label: "Send it now: about –", note: "We can't read the batch on Base right now, so it can't be sent from here yet.", disabled: true },
     });
   });
-
-  it("says it leaves any moment now past the max wait, and still lets the user send it", () => {
-    const v = view({ chainTime: START + DAY_S + 60 });
-    expect(v?.leaves).toBe("Leaves any moment now.");
-    expect(v?.button?.disabled).toBe(false);
-  });
-
-  it("says it leaves any moment now when it's full (it could close before its interval)", () => {
-    expect(view({ chainTime: START + 600 })?.leaves).toBe("Leaves any moment now.");
-  });
 });
 
 describe("Send it now isn't offered", () => {
+  it("past the max wait, or for a full batch: the keeper sends it any moment, at no cost to the user", () => {
+    expect(view({ chainTime: START + DAY_S + 60 })).toEqual({ leaves: "Leaves any moment now." });
+    expect(view({ chainTime: START + 600 })).toEqual({ leaves: "Leaves any moment now." });
+  });
+
+  it("when Bittensor's side can't take the batch: it says so, and that it can still be cancelled", () => {
+    expect(view({ bittensorOpen: false })).toEqual({
+      leaves: "Bittensor's side isn't accepting batches right now; your deposit waits on Base and you can still cancel it.",
+    });
+    expect(view({ bittensorOpen: undefined }, { what: "unstake" })).toEqual({
+      leaves: "Bittensor's side isn't accepting batches right now; your unstake waits on Base and you can still cancel it.",
+    });
+  });
+
   it("while Cascade is paused", () => {
     expect(view({ paused: true })).toBeNull();
     expect(view({ paused: true, canClose: false })).toBeNull();

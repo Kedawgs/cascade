@@ -11,6 +11,10 @@ import type { NextBatch } from "./cascade/types";
  * is several missed in a row (a failing node, or a tab back from the background before its next read). */
 export const STALE_MS = 150_000;
 
+/** The keeper looks at the open batch every minute (ops `run`): five minutes past its interval, a batch
+ * still open is one it is holding, not one it is about to send. Send it now is offered only from then. */
+export const SEND_GRACE_S = 300;
+
 /** No read yet (`readAt` 0), or one older than STALE_MS. */
 export const isStale = (readAt: number, now: number): boolean => !(readAt > 0) || now - readAt > STALE_MS;
 
@@ -41,13 +45,14 @@ export function countdown(seconds: number): string {
 
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
-/** "1 deposit", "2 deposits and 1 unstake", "3 unstakes". */
+/** "1 depositor", "2 depositors and 1 unstaker", "3 unstakers": the front door keeps one entry per account
+ * per list (a second deposit adds to the first), so its counts are of accounts, not of deposits. */
 function waiting(b: Pick<NextBatch, "deposits" | "redeems">): string {
-  const parts = [...(b.deposits > 0 ? [count(b.deposits, "deposit")] : []), ...(b.redeems > 0 ? [count(b.redeems, "unstake")] : [])];
+  const parts = [...(b.deposits > 0 ? [count(b.deposits, "depositor")] : []), ...(b.redeems > 0 ? [count(b.redeems, "unstaker")] : [])];
   return parts.join(" and ");
 }
 
-/** The Stake page's public line: "Next batch leaves within 3 h 12 min · 1 deposit waiting". "Within", as
+/** The Stake page's public line: "Next batch leaves within 3 h 12 min · 1 depositor waiting". "Within", as
  * the time is the latest it leaves: the keeper sends it sooner once its fees cover the bridge fee. An
  * empty batch waits for its first deposit; a paused one names no time; a read that hasn't come, failed
  * or is stale shows "–". */

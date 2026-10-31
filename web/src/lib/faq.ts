@@ -312,7 +312,7 @@ export function faqSections(d: Deployment | null = DEPLOYMENT, o: FaqOptions = {
           q: "Can I make my deposit leave sooner?",
           a: [
             launch
-              ? `Yes. Once its batch is ${waitText(F.batchIntervalS.launch)} old, Send it now on the Stake page or its receipt sends the batch at once: you pay the whole batch's bridge fee in ETH, usually a dollar or two, and anything extra is refunded. Otherwise it leaves on its own within ${waitText(batchWaitS)}.`
+              ? `Yes. A few minutes after its batch is ${waitText(F.batchIntervalS.launch)} old, Send it now on the Stake page or its receipt can send the batch at once: you pay the whole batch's bridge fee in ETH, usually a dollar or two, and anything extra is refunded. Otherwise it leaves on its own within ${waitText(batchWaitS)}, sooner once its fees cover the bridge fee.`
               : "There's no need: batches leave on their own every few minutes, as soon as they can.",
           ],
         },

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { createClients } from "./chain";
 import { readDeployment } from "./config";
 import { nextBatchLine } from "../batch-clock";
+import { FAQ_FACTS } from "../faq";
 import { readFrontDoor, readNextBatch, readOpenBatch, readVault, taoPriceUsd } from "./reads";
+import { stakerDepositsIn } from "./facts";
 import { checkWiring } from "./wiring";
 
 /** Reads the live deployment over the public RPCs. Runs only with LIVE=1 and the settings in the environment. */
@@ -27,10 +29,17 @@ describe.runIf(process.env.LIVE === "1" && d)("live smoke", () => {
     const open = await readOpenBatch(c, d!, "0x0000000000000000000000000000000000000001");
     expect(open.id).toBe(next.id);
     if (open.canClose && !open.paused && next.deposits + next.redeems > 0) {
-      // today's bridge fee is about 0.0005–0.0008 ETH
+      // today's bridge fee is about 0.0005–0.0008 ETH, and Bittensor's side was read
       expect(open.feeWei).toBeGreaterThan(10n ** 14n);
       expect(open.feeWei).toBeLessThan(10n ** 16n);
+      expect(typeof open.bittensorOpen).toBe("boolean");
     }
+    // the FAQ's "once its batch is 1 hour old" is the launch front door's batchInterval
+    if (d!.batchMaxWaitS) expect(next.interval).toBe(FAQ_FACTS.batchIntervalS.launch);
+    // the keeper's count of the batch's staker deposits, from Base's logs back to its start
+    const staked = await stakerDepositsIn(c, d!, next.id, next.chainTime - next.start);
+    expect(staked.count).toBeLessThanOrEqual(next.deposits + 50);
+    console.log({ staked });
     console.log({ next, open, line: nextBatchLine(next, { readAt: Date.now(), now: Date.now(), maxWaitS: d!.batchMaxWaitS }) });
   }, 60_000);
 

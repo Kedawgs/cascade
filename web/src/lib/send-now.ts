@@ -1,9 +1,9 @@
 import type { Hex } from "viem";
-import { chainNow, countdown, isFull, isStale, leavesBy } from "./batch-clock";
+import { chainNow, countdown, isFull, isStale, leavesBy, SEND_GRACE_S } from "./batch-clock";
 import { explorer } from "./cascade/config";
 import type { CloseOp, Operation } from "./cascade/oplog";
 import { timeAt } from "./cascade/trail";
-import type { OpenBatch } from "./cascade/types";
+import type { CloseEconomics, OpenBatch } from "./cascade/types";
 import { toDisplay } from "./cascade/units";
 import { formatUsd } from "./format";
 
@@ -11,8 +11,55 @@ import { formatUsd } from "./format";
  * "Send it now": a deposit or unstake waiting in the open batch on Base can be sent on its way by its
  * owner once the batch can close, by paying the batch's bridge fee (CascadeFrontDoor.closeBatch, which
  * anyone may call). Without it nothing changes: the keeper still sends the batch once its fees cover the
- * bridge fee, or at the deployment's max wait.
+ * bridge fee, or at the deployment's max wait. It is offered only when the keeper won't send the batch
+ * for free (sendGate): never for a full batch or one past its max wait, nor while its fees cover the
+ * bridge fee, and only from five minutes past its interval, when the keeper has had several turns.
  */
+
+export { SEND_GRACE_S };
+
+/** The keeper's fee rule (ops/src/keeper/due.ts, closeEconomicsOf), the same arithmetic: the staker's
+ * deposit fee on each deposit it made, its swap fee on their TAO at the oracle's price, and the pot at
+ * ETH's price, against the bridge fee at ETH's price. Prices are USDC units per 1e18 wei. */
+export function closeEconomicsOf(r: {
+  nStaked: number;
+  depositFeeUsdc: bigint;
+  stakedTao: bigint;
+  taoPriceUsdc: bigint;
+  swapFeeBps: number;
+  feePot: bigint;
+  ethPriceUsdc: bigint;
+  bridgeFeeWei: bigint;
+}): CloseEconomics {
+  const E18 = 10n ** 18n;
+  const feesUsdc =
+    BigInt(r.nStaked) * r.depositFeeUsdc + (r.stakedTao * r.taoPriceUsdc * BigInt(r.swapFeeBps)) / 10_000n / E18 + (r.feePot * r.ethPriceUsdc) / E18;
+  return { feesUsdc, bridgeFeeUsdc: (r.bridgeFeeWei * r.ethPriceUsdc) / E18 };
+}
+
+/** Whether the keeper would send the batch at its interval for its own fees (decideNext's isHeld): only
+ * when they were weighed and cover the bridge fee; fees that couldn't be read never close it early. */
+const feesCover = (e: CloseEconomics | null | undefined): boolean => !!e && e.feesUsdc >= e.bridgeFeeUsdc;
+
+/** Whether the user may send the batch now (on Base's clock, `nowS`):
+ * - "blocked": it can close, but Bittensor's side can't take it, or that couldn't be checked;
+ * - "free": the keeper sends it any moment at no cost to the user: it's full, or past its max wait (with
+ *   no max wait, as soon as it can close);
+ * - "covered": its fees cover the bridge fee, so the keeper sends it at its interval;
+ * - "early": before five minutes past its interval (or Base hasn't yet said it can close);
+ * - "open": the keeper is holding it for more fees, and the user may send it, paying the bridge fee.
+ * A batch its fees cover that is still open five minutes past its interval is one the keeper is holding
+ * after all (its own reads differ, or it isn't running): "open". */
+export type SendGate = "blocked" | "free" | "covered" | "early" | "open";
+
+export function sendGate(b: OpenBatch, maxWaitS: number | undefined, nowS: number): SendGate {
+  if (b.canClose && b.bittensorOpen !== true) return "blocked";
+  if (isFull(b) || nowS >= leavesBy(b, maxWaitS)) return "free";
+  const offerFrom = b.start + b.interval + SEND_GRACE_S;
+  if (nowS < offerFrom && feesCover(b.economics)) return "covered";
+  if (nowS < offerFrom || !b.canClose) return "early";
+  return "open";
+}
 
 /** The margin closeBatch carries over the bridge fee, in percent: the fee can move between the read and
  * the block (another entry joining, gas prices on the way), and the front door refunds whatever the fee
@@ -35,18 +82,32 @@ export function sendNowValue(feeWei: bigint, potWei: bigint): bigint {
 }
 
 const eth = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const priced = (p: number | undefined): p is number => p !== undefined && p > 0;
+/** Dollars rounded up to the cent, for a most or a need, never understated ($0.0001 of float noise aside). */
+const usdUp = (n: number) => formatUsd(Math.ceil(Math.round(n * 1e6) / 1e4) / 100);
+/** Dollars to the nearest cent, "under $0.01" below half a cent: never "$0.00" for an amount that isn't nothing. */
+const usdNear = (n: number) => (n > 0 && n < 0.005 ? "under $0.01" : formatUsd(n));
 
-/** An ETH amount in words: "$1.74 in ETH" at the price read, or "0.000745 ETH" without one. */
+/** An ETH amount in words: "$1.74 in ETH" at the price read ("under $0.01 in ETH" for a tiny one), or
+ * "0.000745 ETH" without a price. */
 export function inEth(wei: bigint, ethPriceUsd?: number): string {
   const n = toDisplay(wei, 18);
-  return ethPriceUsd !== undefined && ethPriceUsd > 0 ? `${formatUsd(n * ethPriceUsd)} in ETH` : `${eth.format(n)} ETH`;
+  return priced(ethPriceUsd) ? `${usdNear(n * ethPriceUsd)} in ETH` : `${eth.format(n)} ETH`;
 }
 
-/** "about $2.28 of ETH", or "about 0.000979 ETH" without a price: what a wallet needs to hold. */
-function ofEth(wei: bigint, ethPriceUsd?: number): string {
-  const n = toDisplay(wei, 18);
-  return ethPriceUsd !== undefined && ethPriceUsd > 0 ? `about ${formatUsd(n * ethPriceUsd)} of ETH` : `about ${eth.format(n)} ETH`;
-}
+/** "about $1.74 in ETH", "under $0.01 in ETH", or "about 0.000745 ETH" without a price. */
+const aboutEth = (wei: bigint, ethPriceUsd?: number): string => {
+  const words = inEth(wei, ethPriceUsd);
+  return words.startsWith("under") ? words : `about ${words}`;
+};
+
+/** The most the wallet sends: "$2.26 in ETH", rounded up to the cent, or "0.000969 ETH". */
+const upToEth = (wei: bigint, ethPriceUsd?: number): string =>
+  priced(ethPriceUsd) ? `${usdUp(toDisplay(wei, 18) * ethPriceUsd)} in ETH` : `${eth.format(toDisplay(wei, 18))} ETH`;
+
+/** "about $2.29 of ETH" (rounded up to the cent), or "about 0.000979 ETH" without a price: what a wallet needs to hold. */
+const ofEth = (wei: bigint, ethPriceUsd?: number): string =>
+  priced(ethPriceUsd) ? `about ${usdUp(toDisplay(wei, 18) * ethPriceUsd)} of ETH` : `about ${eth.format(toDisplay(wei, 18))} ETH`;
 
 /** What the wallet must hold to send the batch now: the value and closeBatch's network fee (the value
  * alone when the gas price couldn't be read). */
@@ -56,15 +117,16 @@ export const ethNeeded = (b: Pick<OpenBatch, "feeWei" | "potWei" | "gasWei">): b
 /** "You need about $2.28 of ETH on Base for this." */
 export const needEthText = (wei: bigint, ethPriceUsd?: number): string => `You need ${ofEth(wei, ethPriceUsd)} on Base for this.`;
 
-/** What "Send it now" shows: a countdown to when the batch leaves on its own, and then, before the batch
- * can close, a countdown to when the user can send it; once it can, the button (or, while a send from
- * this browser is on its way, that send). */
+/** What "Send it now" shows: a countdown to when the batch leaves on its own, and then, until it's
+ * offered, a countdown to when the user can send it; once it is, the button (or, while a send from this
+ * browser is on its way, that send). When the keeper sends the batch for free, or Bittensor's side can't
+ * take it, only `leaves`, saying so. */
 export interface SendNowView {
-  /** "Leaves in 3 h 12 min (by 3:45 PM), or sooner if more deposits share the bridge fee." */
+  /** "Leaves in 3 h 12 min (by 3:45 PM), or sooner once its fees cover the bridge fee." */
   leaves: string;
-  /** Before the batch can close: "Send it yourself in 18 min (from 9:00 AM)." */
+  /** Until it's offered: "Send it yourself in 18 min (from 9:05 AM)." */
   yourself?: string;
-  /** Once it can close: the button's words, what it costs, and why it is held when it is. */
+  /** Once it's offered: the button's words, what it costs, and why it is held when it is. */
   button?: { label: string; note: string; warning?: string; disabled: boolean };
   /** A send from this browser Base hasn't shown yet, in place of the button. */
   sending?: { text: string; txUrl: string };
@@ -79,16 +141,23 @@ export interface SendNowInput {
    * the read's block time (batch-clock.ts), and a stale read shows "–". */
   readAt: number;
   now: number;
+  /** What of the account's waits in it, for the words when Bittensor's side can't take it. */
+  what: "deposit" | "unstake";
   /** A send from this browser for this batch that Base hasn't shown yet (closeSentFromHere). */
   sending?: { hash: Hex };
 }
 
 const DASH_NOTE = "We can't read the batch on Base right now, so it can't be sent from here yet.";
 
-/** What "Send it now" shows for the account's deposit or unstake in the open batch, or null when it isn't
- * offered: while paused, with nothing of the account's in the batch, or without a max wait. A figure that
- * can't be read is never guessed: a stale read shows "–" for every time and holds the button, a fee that
- * can't be read shows "–" and holds it too, and without ETH's price amounts show in ETH. */
+/** Bittensor's side can't take a batch: the keeper holds it too, so no time is named. */
+export const blockedText = (what: "deposit" | "unstake") =>
+  `Bittensor's side isn't accepting batches right now; your ${what} waits on Base and you can still cancel it.`;
+
+/** What "Send it now" shows for the account's deposit or unstake in the open batch, or null when nothing
+ * is: while paused, with nothing of the account's in the batch, or without a max wait. What it offers
+ * follows sendGate. A figure that can't be read is never guessed: a stale read shows "–" for every time
+ * and holds the button, a fee that can't be read shows "–" and holds it too, and without ETH's price
+ * amounts show in ETH. */
 export function sendNowView(x: SendNowInput): SendNowView | null {
   const b = x.batch;
   if (b.paused || !x.maxWaitS || x.maxWaitS <= b.interval) return null;
@@ -98,40 +167,38 @@ export function sendNowView(x: SendNowInput): SendNowView | null {
   const nowS = chainNow(b.chainTime, x.readAt, x.now);
   const today = new Date(nowS * 1000);
   const by = leavesBy(b, x.maxWaitS);
-  const left = isFull(b) ? 0 : by - nowS;
+  const gate = sendGate(b, x.maxWaitS, nowS);
+  if (!stale && gate === "blocked") return { leaves: blockedText(x.what) };
+  if (!stale && gate === "free") return { leaves: "Leaves any moment now." };
+  if (!stale && gate === "covered") return { leaves: "Leaves within the hour: its fees cover the bridge fee." };
   const leaves = stale
     ? "Leaves in –"
-    : left <= 0
-      ? "Leaves any moment now."
-      : `Leaves in ${countdown(left)} (by ${timeAt(new Date(by * 1000), today)}), or sooner if more deposits share the bridge fee.`;
+    : `Leaves in ${countdown(by - nowS)} (by ${timeAt(new Date(by * 1000), today)}), or sooner once its fees cover the bridge fee.`;
   if (x.sending) return { leaves, sending: { text: "Sending your batch to Bittensor…", txUrl: explorer.baseTx(x.sending.hash) } };
 
-  if (!b.canClose) {
-    const from = b.start + b.interval;
+  if (stale) return b.canClose ? { leaves, button: { label: "Send it now: about –", note: DASH_NOTE, disabled: true } } : { leaves, yourself: "Send it yourself in –" };
+  if (gate === "early") {
+    const from = b.start + b.interval + SEND_GRACE_S;
     // until a read says it can close, its time is "any moment now", never a time already past
-    const yourself = stale
-      ? "Send it yourself in –"
-      : from - nowS <= 0
-        ? "Send it yourself any moment now."
-        : `Send it yourself in ${countdown(from - nowS)} (from ${timeAt(new Date(from * 1000), today)}).`;
+    const yourself =
+      from - nowS <= 0 ? "Send it yourself any moment now." : `Send it yourself in ${countdown(from - nowS)} (from ${timeAt(new Date(from * 1000), today)}).`;
     return { leaves, yourself };
   }
 
-  if (stale) return { leaves, button: { label: "Send it now: about –", note: DASH_NOTE, disabled: true } };
   if (b.feeWei === undefined) {
     return { leaves, button: { label: "Send it now: about –", note: "We can't read the bridge fee right now, so it can't be sent from here yet.", disabled: true } };
   }
   const pay = feeToPay(b.feeWei, b.potWei);
   const value = sendNowValue(b.feeWei, b.potWei);
   const price = b.ethPriceUsd;
-  const margin = `Your wallet sends up to ${inEth(value, price)}`;
+  const margin = `Your wallet sends up to ${upToEth(value, price)}`;
   const [label, note] =
     pay === 0n
       ? [
           "Send it now: no bridge fee to pay",
           `The fees already in this batch cover its bridge fee, so you pay only Base's network fee.${value > 0n ? ` ${margin} in case the fee rises; anything extra is refunded.` : ""}`,
         ]
-      : [`Send it now: about ${inEth(pay, price)}`, `You pay the bridge fee for the whole batch. ${margin}; anything extra is refunded.`];
+      : [`Send it now: ${aboutEth(pay, price)}`, `You pay the bridge fee for the whole batch. ${margin}; anything extra is refunded.`];
   const need = ethNeeded(b);
   const short = b.ethWei !== undefined && b.ethWei < need;
   return { leaves, button: { label, note, ...(short ? { warning: needEthText(need, price) } : {}), disabled: short } };

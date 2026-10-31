@@ -211,6 +211,10 @@ export const OFFRAMP = {
 
 export const MULTICALL3: Address = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
+/** ForeverMoney's AlphaVault on Bittensor (ops/src/config.ts LIVE.ALPHA_VAULT): a batch can't be taken
+ * while it is paused or migrating, so nothing offers to send one then. */
+export const ALPHA_VAULT: Address = "0x11837459896D96F821a8D88eC93a3C8D152033D4";
+
 /** Public RPCs only: no key ever goes into the site. Base's refuses eth_getLogs, so the site never asks it for logs. */
 /** Public RPCs the browser reads (no keys in the bundle). Bittensor is OpenTensor's archive node: the
  * lite node keeps only minutes of event history, so older deliveries and stakes would look missing. */

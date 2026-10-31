@@ -1001,6 +1001,45 @@ async function baseHead(c: Pick<Clients, "base" | "baseLogs">): Promise<bigint> 
   return logsHead > own ? logsHead : own;
 }
 
+/** The open batch's deposits the staker made, as the keeper counts them (ops/src/keeper/state.ts,
+ * stakerDeposits): the batch's DepositRequested logs naming the staker as the payer, the only deposits
+ * that paid its deposit and swap fees (TAO deposited straight into the front door paid neither). Read
+ * from Base's logs back to the batch's start (its age in 2-second blocks, and five minutes more). None
+ * on v2, which has no staker. Throws when the logs can't be read. */
+export async function stakerDepositsIn(
+  c: Pick<Clients, "base" | "baseLogs">,
+  d: Deployment,
+  batchId: bigint,
+  ageS: number,
+): Promise<{ count: number; tao: bigint }> {
+  const staker = d.staker;
+  if (!staker) return { count: 0, tao: 0n };
+  const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId } }) as (Hex | null)[];
+  const blocks = BigInt(Math.ceil(Math.max(ageS, 0) / 2)) + STAKE_SEARCH_MARGIN;
+  const raw = await recentBaseLogs(c, { address: d.frontDoor, topics }, blocks);
+  const staked = parseEventLogs({ abi: FRONT_DOOR, eventName: "DepositRequested", logs: raw as never, strict: false }).filter(
+    (l) => same(l.address, d.frontDoor) && l.args.batchId === batchId && !!l.args.payer && same(l.args.payer, staker),
+  );
+  return { count: staked.length, tao: staked.reduce((t, l) => t + (l.args.amount ?? 0n), 0n) };
+}
+
+/** Every log matching `filter` in Base's last `blocks` blocks, oldest first, read in windows of at most
+ * 2,000 blocks up to the newer of the two servers' heads. Throws when a window can't be read (or its
+ * server is behind), which must never be taken for "none". */
+export async function recentBaseLogs(
+  c: Pick<Clients, "base" | "baseLogs">,
+  filter: { address: Address; topics: (Hex | Hex[] | null)[] },
+  blocks: bigint,
+): Promise<RawLog[]> {
+  const head = await baseHead(c);
+  const out: RawLog[] = [];
+  for (let a = head > blocks ? head - blocks : 0n; a <= head; a += BASE_LOG_WINDOW) {
+    const b = a + BASE_LOG_WINDOW - 1n < head ? a + BASE_LOG_WINDOW - 1n : head;
+    out.push(...(await baseWindowLogs(c, filter, a, b)));
+  }
+  return out;
+}
+
 /** Searches Base's logs matching `filter` from block `from` to `to`, oldest first, for the first window
  * `pick` finds something in; `progress.next` is the first block not read yet after each window. Null
  * when none does; throws when a window can't be read (or its server is behind), which must never be

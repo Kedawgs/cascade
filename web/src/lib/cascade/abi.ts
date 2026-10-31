@@ -31,11 +31,14 @@ export const FRONT_DOOR = parseAbi([
   "function openRedeems() view returns ((address user, uint256 amount)[])",
   "function paused() view returns (bool)",
   "event BatchClosed(uint64 indexed id, uint256 totalDeposits, uint256 nDeposits, uint256 nRedeems, uint256 fee, uint256 potUsed)",
-  // what closeBatch can revert with, so the pre-send check can say why (EnforcedPause is OpenZeppelin's Pausable)
+  "event BatchRolled(uint64 indexed id)",
+  // what closeBatch can revert with, so the pre-send check can say why (EnforcedPause is OpenZeppelin's
+  // Pausable; TransferFailed is the refund to a sender that can't take ETH)
   "error BatchNotReady()",
   "error InsufficientFee()",
   "error EnforcedPause()",
   "error PrimaryBridgeDisabled()",
+  "error TransferFailed()",
   // how it is wired, read before anything is sent (wiring.ts); oracle and swapper are v3 only
   "function asset() view returns (address)",
   "function vault() view returns (address)",
@@ -80,6 +83,7 @@ export const STAKER = parseAbi([
 ]);
 
 export const VAULT = parseAbi([
+  "function paused() view returns (bool)",
   "function balanceOf(address account) view returns (uint256)",
   "function totalAssets() view returns (uint256)",
   "function totalSupply() view returns (uint256)",
@@ -123,7 +127,18 @@ export const ADAPTER = parseAbi([
 /** Multicall3's own clock: asked in a batch read, it gives the timestamp of the block the read came from. */
 export const MULTICALL3_ABI = parseAbi(["function getCurrentBlockTimestamp() view returns (uint256 timestamp)"]);
 
-export const OFFRAMP_ABI =parseAbi(["function getExecutionState(bytes32 messageId) view returns (uint8)"]);
+/** ForeverMoney's AlphaVault on Bittensor, which the Bittensor adapter deposits a batch's TAO into: the
+ * reads the keeper takes for "can a batch be sent" (ops/src/keeper/state.ts, ops/src/preflight.ts). */
+export const ALPHA_VAULT_ABI = parseAbi([
+  "function isPaused() view returns (bool)",
+  "function migrationReadyAt() view returns (uint256)",
+  "function migrationFinished() view returns (bool)",
+]);
+
+/** The front door's TWAP oracle: what `taoWei` is worth in USDC units, the keeper's TAO price. */
+export const TWAP_ORACLE = parseAbi(["function usdcValue(uint256 taoWei) view returns (uint256)"]);
+
+export const OFFRAMP_ABI = parseAbi(["function getExecutionState(bytes32 messageId) view returns (uint8)"]);
 
 /** QuoterV2's quote functions are not marked view (they revert internally), but eth_call answers them. */
 export const QUOTER = parseAbi([

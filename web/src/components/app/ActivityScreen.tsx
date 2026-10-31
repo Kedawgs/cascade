@@ -147,7 +147,7 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
           )}
         </dl>
         {/* still in its open batch: when it leaves, and Send it now */}
-        <SendItNow account={account} waiting={deposit.cancellableWei !== undefined} href={`/activity?deposit=${id}`} />
+        <SendItNow account={account} what="deposit" waiting={deposit.cancellableWei !== undefined} href={`/activity?deposit=${id}`} />
         {(deposit.status === "needs_you" || deposit.retryable || deposit.restake || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
           <Actions>
             {deposit.status === "needs_you" && (
@@ -271,7 +271,7 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
           )}
         </dl>
         {/* still in its open batch: when it leaves, and Send it now */}
-        <SendItNow account={account} waiting={withdrawal.cancellableShares !== undefined} href={`/activity?withdrawal=${id}`} />
+        <SendItNow account={account} what="unstake" waiting={withdrawal.cancellableShares !== undefined} href={`/activity?withdrawal=${id}`} />
         {withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
           <Actions>
             <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>

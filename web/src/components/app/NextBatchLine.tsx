@@ -6,7 +6,7 @@ import { useNow } from "@/lib/client-state";
 import styles from "./App.module.css";
 
 /** The Stake page's public line, wallet or not: when the open batch leaves at the latest and what waits
- * in it, "Next batch leaves within 3 h 12 min · 1 deposit waiting", counting down on Base's clock. One
+ * in it, "Next batch leaves within 3 h 12 min · 1 depositor waiting", counting down on Base's clock. One
  * multicall on Base every 30 s; "–" until it is read, and whenever the read fails or goes stale. */
 export function NextBatchLine() {
   const batch = useNextBatch();

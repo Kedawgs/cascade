@@ -22,12 +22,12 @@ function opsOf(data: ReturnType<typeof useCascadeData>, account: string): Operat
   }
 }
 
-/** The countdown to when the open batch leaves, for an account with a deposit or unstake waiting in it
- * (`waiting`, from its records), and Send it now: until the batch can close, when the user can send it;
- * after, a button that sends it at once, the user paying its bridge fee. Nothing is read, and nothing
- * shows, unless `waiting`. The panel after a send stays here, so it outlives the record leaving its batch.
- * `href` is where its "Follow it live" goes. */
-export function SendItNow({ account, waiting, href }: { account: string; waiting: boolean; href: string }) {
+/** The countdown to when the open batch leaves, for an account with a deposit or unstake (`what`) waiting
+ * in it (`waiting`, from its records), and Send it now: until it's offered, when the user can send it;
+ * then a button that sends it at once, the user paying its bridge fee (send-now.ts, sendGate). Nothing
+ * is read, and nothing shows, unless `waiting`. The panel after a send stays here, so it outlives the
+ * record leaving its batch. `href` is where its "Follow it live" goes. */
+export function SendItNow({ account, what, waiting, href }: { account: string; what: "deposit" | "unstake"; waiting: boolean; href: string }) {
   const data = useCascadeData();
   const batch = useOpenBatch(account, waiting);
   const maxWaitS = useBatchMaxWait();
@@ -40,7 +40,7 @@ export function SendItNow({ account, waiting, href }: { account: string; waiting
   const sending = b ? closeSentFromHere(opsOf(data, account), b.id, now) : undefined;
   // nothing to offer while the contracts don't match (flows.blocked): the ways out stay on the receipt
   const view =
-    waiting && b && !flows.blocked ? sendNowView({ batch: b, maxWaitS, readAt: batch.dataUpdatedAt, now, ...(sending ? { sending } : {}) }) : null;
+    waiting && b && !flows.blocked ? sendNowView({ batch: b, maxWaitS, readAt: batch.dataUpdatedAt, now, what, ...(sending ? { sending } : {}) }) : null;
 
   return (
     <>

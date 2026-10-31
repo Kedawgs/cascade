@@ -19,12 +19,14 @@ export type SentNotice =
     }
   | { kind: "unstake"; id: string; tao: number; usdc: number; batchIntervalS?: number };
 
-/** Send it now went through: the batch is on its way. What the user paid toward its bridge fee, from the
- * send's receipt (none when that couldn't be read), at the ETH price it was priced at; `href` is where it
- * was sent from. */
+/** Send it now went through. What it did, from its receipt (reads.ts, readCloseOutcome): sent the batch
+ * meant ("sent"), sent the next one because that one had already left ("other"), or only rolled an empty
+ * batch because it had ("rolled"); none when the receipt couldn't be read. What the user paid toward the
+ * bridge fee, at the ETH price it was priced at; `href` is where it was sent from. */
 export interface BatchNotice {
   kind: "batch";
   href: string;
+  outcome?: "sent" | "other" | "rolled";
   paidWei?: bigint;
   ethPriceUsd?: number;
 }
@@ -33,9 +35,10 @@ export interface BatchNotice {
 export type PanelNotice = SentNotice | BatchNotice;
 
 /** The panel after Send it now, from what the send gave back. */
-export const batchNotice = (href: string, r: { paidWei?: bigint; ethPriceUsd?: number }): BatchNotice => ({
+export const batchNotice = (href: string, r: { outcome?: BatchNotice["outcome"]; paidWei?: bigint; ethPriceUsd?: number }): BatchNotice => ({
   kind: "batch",
   href,
+  ...(r.outcome !== undefined ? { outcome: r.outcome } : {}),
   ...(r.paidWei !== undefined ? { paidWei: r.paidWei } : {}),
   ...(r.ethPriceUsd !== undefined ? { ethPriceUsd: r.ethPriceUsd } : {}),
 });
@@ -107,7 +110,7 @@ function batchText(interval: number | undefined, maxWaitS: number | undefined): 
  * wallet TAO's exact TAO isn't. */
 export function sentRows(n: PanelNotice): [string, string][] {
   if (n.kind === "batch") {
-    if (n.paidWei === undefined) return [];
+    if (n.paidWei === undefined || n.outcome === "rolled") return [];
     return [["Bridge fee you paid", n.paidWei === 0n ? "nothing: the batch's fees covered it" : inEth(n.paidWei, n.ethPriceUsd)]];
   }
   if (n.kind === "unstake") {
@@ -126,13 +129,15 @@ export function sentRows(n: PanelNotice): [string, string][] {
 
 export function sentCopy(n: PanelNotice, t: SentTiming): SentCopy {
   if (n.kind === "batch") {
-    return {
-      title: "Your batch is on its way to Bittensor",
-      rows: sentRows(n),
-      // the front door refunds what the fee doesn't take in the same transaction
-      next: "It reaches Bittensor in about 20–30 minutes; your receipts in Activity follow it from here. Anything you sent beyond the fee is back in your wallet.",
-      href: n.href,
-    };
+    // the front door refunds what the fee doesn't take in the same transaction
+    const next =
+      n.outcome === "rolled"
+        ? "It had already left; your ETH came back except the network fee. Your receipts in Activity follow it from here."
+        : n.outcome === "other"
+          ? "A different batch was sent; your ETH beyond the fee came back. Yours had already left, and your receipts in Activity follow it from here."
+          : "It reaches Bittensor in about 20–30 minutes; your receipts in Activity follow it from here. Anything you sent beyond the fee is back in your wallet.";
+    const left = n.outcome === "rolled" || n.outcome === "other";
+    return { title: left ? "Your batch had already left" : "Your batch is on its way to Bittensor", rows: sentRows(n), next, href: n.href };
   }
   const batch = batchText(n.batchIntervalS, t.batchMaxWaitS);
   if (n.kind === "deposit") {

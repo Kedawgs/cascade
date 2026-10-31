@@ -50,7 +50,7 @@ import {
 import { cascadeKeys, useWiring } from "./hooks";
 import { cancelStore, opStore, scratchStore } from "./op-store";
 import { type ClaimOp, type CloseOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
-import { quoteSell, readBatchClosed, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
+import { quoteSell, readCloseOutcome, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
 import { lessSlippage } from "./units";
 
@@ -387,9 +387,10 @@ export function useFlows(account: string | null) {
      * fee plus 30% (the front door refunds the rest). Only once the contracts check out; the batch is read
      * again and the call run from the account first (planSendNow), and nothing is sent if it moved on.
      * Recorded before the wallet is asked, so a reload shows it as sending. Resolves with what the send
-     * paid toward the fee, from its receipt, when that can be read. */
+     * did and paid toward the fee, from its receipt, when that can be read: the batch meant, the one after
+     * it (that one had already left), or only a roll of an empty batch (everything sent came back). */
     sendNow: (batchId: bigint) =>
-      flow("send", async (): Promise<{ paidWei?: bigint; ethPriceUsd?: number }> => {
+      flow("send", async (): Promise<{ outcome?: "sent" | "other" | "rolled"; paidWei?: bigint; ethPriceUsd?: number }> => {
         const wallet = port();
         const { call, batch } = await planSendNow({ d: d(), batchId, read: () => data.getOpenBatch(a), simulate: (c) => wallet.simulate(c) });
         const op: CloseOp = {
@@ -405,10 +406,11 @@ export function useFlows(account: string | null) {
         data.opLog.put(op);
         await send(op.id, async () => [call]);
         const hash = (data.opLog.get(a, op.id) as CloseOp | null)?.hashes.close;
-        const closed = hash ? await readBatchClosed(data.clients, d(), hash) : undefined;
+        const outcome = hash ? await readCloseOutcome(data.clients, d(), hash, batchId) : undefined;
         return {
+          ...(outcome ? { outcome: outcome.kind } : {}),
           // the bridge fee less what the batch's pot paid of it
-          ...(closed ? { paidWei: closed.feeWei - closed.potUsedWei } : {}),
+          ...(outcome && outcome.kind !== "rolled" ? { paidWei: outcome.feeWei - outcome.potUsedWei } : {}),
           ...(batch.ethPriceUsd !== undefined ? { ethPriceUsd: batch.ethPriceUsd } : {}),
         };
       }),

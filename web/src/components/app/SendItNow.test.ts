@@ -16,7 +16,8 @@ const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 /** 8:00 AM UTC (the tests read times in UTC). */
 const START = 1_800_000_000;
 
-/** Batch 7 as read just now, ten minutes in: the account's deposit is in it, and it can't close yet. */
+/** Batch 7 as read just now, ten minutes in: the account's deposit is in it, it can't close yet, and its
+ * fees don't cover its bridge fee. */
 const open = (over: Partial<OpenBatch> = {}): OpenBatch => ({
   id: 7n,
   start: START,
@@ -26,11 +27,22 @@ const open = (over: Partial<OpenBatch> = {}): OpenBatch => ({
   chainTime: START + 600,
   mine: { depositWei: 10n ** 17n, redeemShares: 0n },
   potWei: 0n,
+  economics: { feesUsdc: 430_000n, bridgeFeeUsdc: 1_735_000n },
   ...over,
 });
-/** Two hours in it can close, and what sending it costs has been read. */
+/** Two hours in it can close, Bittensor can take it, and what sending it costs has been read. */
 const ready = (over: Partial<OpenBatch> = {}) =>
-  open({ canClose: true, chainTime: START + 7_200, feeWei: 744_898_037_875_672n, ethWei: 10n ** 16n, gasWei: 10n ** 13n, ethPriceUsd: 2_330, ...over });
+  open({
+    canClose: true,
+    chainTime: START + 7_200,
+    economics: undefined,
+    bittensorOpen: true,
+    feeWei: 744_898_037_875_672n,
+    ethWei: 10n ** 16n,
+    gasWei: 10n ** 13n,
+    ethPriceUsd: 2_330,
+    ...over,
+  });
 const batchRead = (b: OpenBatch, at = Date.now()): Cached => ({ key: cascadeKeys.openBatch(ME), data: b, at });
 
 function withOps(...ops: Operation[]) {
@@ -40,21 +52,38 @@ function withOps(...ops: Operation[]) {
   return launchData(log);
 }
 
-const card = (cached: Cached[], waiting = true, ops: Operation[] = []) =>
-  renderWithCache(createElement(SendItNow, { account: ME, waiting, href: "/activity?deposit=d1" }), cached, { data: withOps(...ops) });
+const card = (cached: Cached[], waiting = true, ops: Operation[] = [], what: "deposit" | "unstake" = "deposit") =>
+  renderWithCache(createElement(SendItNow, { account: ME, what, waiting, href: "/activity?deposit=d1" }), cached, { data: withOps(...ops) });
 
 describe("Send it now on a deposit waiting in the open batch", () => {
-  it("before the batch can close: a countdown to when it leaves, and to when the user can send it", () => {
+  it("before it's offered: a countdown to when the batch leaves, and to five minutes past its interval, when the user can send it", () => {
     const text = plainText(card([batchRead(open())]));
-    expect(text).toContain("Leaves in 23 h 50 min (by 8:00 AM tomorrow), or sooner if more deposits share the bridge fee.");
-    expect(text).toContain("Send it yourself in 50 min (from 9:00 AM).");
+    expect(text).toContain("Leaves in 23 h 50 min (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.");
+    expect(text).toContain("Send it yourself in 55 min (from 9:05 AM).");
     expect(text).not.toContain("Send it now");
+  });
+
+  it("offers nothing while its fees cover the bridge fee: the keeper sends it at its interval", () => {
+    const text = plainText(card([batchRead(open({ economics: { feesUsdc: 2_000_000n, bridgeFeeUsdc: 1_735_000n } }))]));
+    expect(text).toBe("Leaves within the hour: its fees cover the bridge fee.");
+  });
+
+  it("offers nothing when the keeper sends it for free: full, or past its max wait", () => {
+    expect(plainText(card([batchRead(ready({ chainTime: START + 600 }))]))).toBe("Leaves any moment now.");
+    expect(plainText(card([batchRead(ready({ chainTime: START + 86_460 }))]))).toBe("Leaves any moment now.");
+  });
+
+  it("offers nothing when Bittensor's side can't take the batch, and says it can still be cancelled", () => {
+    expect(plainText(card([batchRead(ready({ bittensorOpen: false }))]))).toBe(
+      "Bittensor's side isn't accepting batches right now; your deposit waits on Base and you can still cancel it.",
+    );
+    expect(plainText(card([batchRead(ready({ bittensorOpen: false }))], true, [], "unstake"))).toContain("your unstake waits on Base");
   });
 
   it("once it can close: the button with the fee in dollars of ETH, and what the wallet sends at most", () => {
     const h = card([batchRead(ready())]);
     const text = plainText(h);
-    expect(text).toContain("Leaves in 22 h (by 8:00 AM tomorrow), or sooner if more deposits share the bridge fee.");
+    expect(text).toContain("Leaves in 22 h (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.");
     expect(h).toMatch(/<button type="button" class="pill pill-ghost[^"]*"[^>]*>Send it now: about \$1\.74 in ETH<\/button>/);
     expect(h).not.toMatch(/<button[^>]*disabled=""[^>]*>Send it now/);
     expect(text).toContain("You pay the bridge fee for the whole batch. Your wallet sends up to $2.26 in ETH; anything extra is refunded.");
@@ -63,7 +92,7 @@ describe("Send it now on a deposit waiting in the open batch", () => {
   it("holds the button and says how much ETH it needs when the wallet is short", () => {
     const h = card([batchRead(ready({ ethWei: 0n }))]);
     expect(h).toMatch(/<button[^>]*disabled=""[^>]*>Send it now: about \$1\.74 in ETH<\/button>/);
-    expect(plainText(h)).toContain("You need about $2.28 of ETH on Base for this.");
+    expect(plainText(h)).toContain("You need about $2.29 of ETH on Base for this.");
   });
 
   it("says when the batch's fees already cover it", () => {
@@ -139,6 +168,6 @@ describe("where Send it now shows", () => {
   it("in Where your money is, under the lane, while a deposit waits in its open batch", () => {
     const text = page(createElement(WhereIsMyMoney, { account: ME }), [{ key: cascadeKeys.deposits(ME), data: [deposit()] }, batchRead(open())]);
     expect(text).toContain("Leaves in 23 h 50 min (by 8:00 AM tomorrow)");
-    expect(text).toContain("Send it yourself in 50 min (from 9:00 AM).");
+    expect(text).toContain("Send it yourself in 55 min (from 9:05 AM).");
   });
 });

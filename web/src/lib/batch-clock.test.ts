@@ -69,15 +69,16 @@ describe("the public Next batch line", () => {
     nextBatchLine(batch(over), { readAt: READ, now: READ + (x.after ?? 0), maxWaitS: "maxWaitS" in x ? x.maxWaitS : DAY_S });
 
   it("says when the next batch leaves at the latest, and what waits in it", () => {
-    expect(line()).toBe("Next batch leaves within 23 h 50 min · 1 deposit waiting");
-    expect(line({ deposits: 2, redeems: 1 })).toBe("Next batch leaves within 23 h 50 min · 2 deposits and 1 unstake waiting");
-    expect(line({ deposits: 0, redeems: 3 })).toBe("Next batch leaves within 23 h 50 min · 3 unstakes waiting");
+    // the front door keeps one entry per account per list, so the counts are of depositors and unstakers
+    expect(line()).toBe("Next batch leaves within 23 h 50 min · 1 depositor waiting");
+    expect(line({ deposits: 2, redeems: 1 })).toBe("Next batch leaves within 23 h 50 min · 2 depositors and 1 unstaker waiting");
+    expect(line({ deposits: 0, redeems: 3 })).toBe("Next batch leaves within 23 h 50 min · 3 unstakers waiting");
   });
 
   it("counts down on Base's clock between reads", () => {
-    expect(line({}, { after: 120_000 })).toBe("Next batch leaves within 23 h 48 min · 1 deposit waiting");
+    expect(line({}, { after: 120_000 })).toBe("Next batch leaves within 23 h 48 min · 1 depositor waiting");
     // and by the next read, from its block's time
-    expect(line({ chainTime: START + 3_600 + 600 })).toBe("Next batch leaves within 22 h 50 min · 1 deposit waiting");
+    expect(line({ chainTime: START + 3_600 + 600 })).toBe("Next batch leaves within 22 h 50 min · 1 depositor waiting");
   });
 
   it("says it waits for the first deposit when the batch is empty", () => {
@@ -86,16 +87,16 @@ describe("the public Next batch line", () => {
   });
 
   it("says any moment now once it's due but not yet closed, and within a minute just before", () => {
-    expect(line({ canClose: true, chainTime: START + DAY_S + 30 })).toBe("Next batch leaves any moment now · 1 deposit waiting");
-    expect(line({ canClose: true, chainTime: START + DAY_S - 30 })).toBe("Next batch leaves within a minute · 1 deposit waiting");
+    expect(line({ canClose: true, chainTime: START + DAY_S + 30 })).toBe("Next batch leaves any moment now · 1 depositor waiting");
+    expect(line({ canClose: true, chainTime: START + DAY_S - 30 })).toBe("Next batch leaves within a minute · 1 depositor waiting");
   });
 
   it("says any moment now for a full batch, which can close before its interval and is sent at once", () => {
-    expect(line({ canClose: true, chainTime: START + 600, deposits: 50 })).toBe("Next batch leaves any moment now · 50 deposits waiting");
+    expect(line({ canClose: true, chainTime: START + 600, deposits: 50 })).toBe("Next batch leaves any moment now · 50 depositors waiting");
   });
 
   it("goes by the batch interval alone without a max wait (the keeper then sends each batch once it can close)", () => {
-    expect(line({}, { maxWaitS: undefined })).toBe("Next batch leaves within 50 min · 1 deposit waiting");
+    expect(line({}, { maxWaitS: undefined })).toBe("Next batch leaves within 50 min · 1 depositor waiting");
   });
 
   it("shows a dash, never a time, when the read failed, hasn't come, or is stale", () => {

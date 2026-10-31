@@ -34,11 +34,15 @@ import {
   planStakeV3,
   planSendNow,
   planUnstake,
+  SEND_BLOCKED,
+  SEND_COVERED,
   SEND_FEE_ROSE,
+  SEND_FREE,
   SEND_GONE,
   SEND_NO_FEE,
   SEND_NOT_NOW,
   SEND_NOT_YET,
+  SEND_NO_REFUND,
   SEND_NOT_YOURS,
   SEND_PAUSED,
   SEND_UNREAD,
@@ -566,25 +570,30 @@ describe("the wiring gate before any flow", () => {
 });
 
 describe("Send it now", () => {
-  /** The open batch as read again at the click: batch 7, which can close, with the account's deposit in it. */
+  /** The launch's cadence: batches wait up to 24 hours. */
+  const DL: Deployment = { ...D, batchMaxWaitS: 86_400 };
+  const START = 1_800_000_000;
+  /** The open batch as read again at the click, two hours in: batch 7, which can close, which Bittensor
+   * can take, and which the keeper is holding, with the account's deposit in it. */
   const open = (over: Partial<OpenBatch> = {}): OpenBatch => ({
     id: 7n,
-    start: 1_800_000_000,
+    start: START,
     interval: 3_600,
     canClose: true,
     paused: false,
-    chainTime: 1_800_007_200,
+    chainTime: START + 7_200,
     mine: { depositWei: 10n ** 17n, redeemShares: 0n },
     potWei: 0n,
     feeWei: 744_898_037_875_672n,
     ethWei: 10n ** 16n,
     gasWei: 10n ** 13n,
     ethPriceUsd: 2_330,
+    bittensorOpen: true,
     ...over,
   });
   const ok = () => vi.fn<(c: FlowCall) => Promise<Simulation>>(async () => ({ ok: true }));
   const plan = (batch: OpenBatch | (() => Promise<OpenBatch>), simulate = ok()) =>
-    planSendNow({ d: D, batchId: 7n, read: typeof batch === "function" ? batch : async () => batch, simulate });
+    planSendNow({ d: DL, batchId: 7n, read: typeof batch === "function" ? batch : async () => batch, simulate });
   const refused = async (p: Promise<unknown>) => {
     const e = await p.catch((x: unknown) => x);
     expect(e).toBeInstanceOf(FlowError);
@@ -619,8 +628,27 @@ describe("Send it now", () => {
     expect(simulate).not.toHaveBeenCalled();
   });
 
-  it("sends nothing when the batch can't close (it rolled, or a setting changed)", async () => {
-    expect(await refused(plan(open({ canClose: false })))).toBe(SEND_NOT_YET);
+  it("never pays for what the keeper sends for free: a full batch, or one past its max wait", async () => {
+    const simulate = ok();
+    expect(await refused(plan(open({ chainTime: START + 600 }), simulate))).toBe(SEND_FREE);
+    expect(await refused(plan(open({ chainTime: START + 86_400 }), simulate))).toBe(SEND_FREE);
+    expect(SEND_FREE).toBe("It leaves on its own any moment now, at no cost to you, so nothing was sent.");
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing while its fees cover the bridge fee (the keeper sends it at its interval), nor before five minutes past it", async () => {
+    const covered = { feesUsdc: 1_380_000n, bridgeFeeUsdc: 1_380_000n };
+    expect(await refused(plan(open({ chainTime: START + 3_700, economics: covered })))).toBe(SEND_COVERED);
+    expect(await refused(plan(open({ chainTime: START + 3_700 })))).toBe(SEND_NOT_YET);
+    expect(await refused(plan(open({ canClose: false, chainTime: START + 600, bittensorOpen: undefined })))).toBe(SEND_NOT_YET);
+  });
+
+  it("sends nothing when Bittensor's side can't take the batch, or couldn't be checked", async () => {
+    const simulate = ok();
+    expect(await refused(plan(open({ bittensorOpen: false }), simulate))).toBe(SEND_BLOCKED);
+    expect(await refused(plan(open({ bittensorOpen: undefined }), simulate))).toBe(SEND_BLOCKED);
+    expect(SEND_BLOCKED).toBe("Bittensor's side isn't accepting batches right now, so nothing was sent.");
+    expect(simulate).not.toHaveBeenCalled();
   });
 
   it("sends nothing when nothing of the account's is in the batch any more: it would pay for others' alone", async () => {
@@ -636,8 +664,8 @@ describe("Send it now", () => {
 
   it("sends nothing when the wallet can't cover the value and the network fee, and says how much it needs", async () => {
     const simulate = ok();
-    // 0.000969 sent + 0.00001 for gas, at $2,330
-    expect(await refused(plan(open({ ethWei: 5n * 10n ** 14n }), simulate))).toBe("You need about $2.28 of ETH on Base for this.");
+    // 0.000969 sent + 0.00001 for gas, at $2,330, to the cent above
+    expect(await refused(plan(open({ ethWei: 5n * 10n ** 14n }), simulate))).toBe("You need about $2.29 of ETH on Base for this.");
     expect(simulate).not.toHaveBeenCalled();
   });
 
@@ -647,12 +675,15 @@ describe("Send it now", () => {
     expect(await refused(plan(open(), reverting("EnforcedPause")))).toBe(SEND_PAUSED);
     expect(await refused(plan(open(), reverting("BatchNotReady")))).toBe(SEND_NOT_NOW);
     expect(await refused(plan(open(), reverting()))).toBe(SEND_NOT_NOW);
+    // the refund of what the fee doesn't take couldn't be paid to this account
+    expect(await refused(plan(open(), reverting("TransferFailed")))).toBe(SEND_NO_REFUND);
+    expect(SEND_NO_REFUND).toBe("Your wallet couldn't receive the refund of what the fee doesn't take, so nothing was sent.");
   });
 
   it("sends nothing when Base can't be asked, and names missing ETH when that's why", async () => {
     expect(await refused(plan(open(), vi.fn(async () => Promise.reject(new Error("HTTP request failed")))))).toMatch(/couldn't reach Base/);
     const broke = vi.fn(async () => Promise.reject(new Error("insufficient funds for gas * price + value")));
-    expect(await refused(plan(open({ ethWei: undefined }), broke))).toBe("You need about $2.28 of ETH on Base for this.");
+    expect(await refused(plan(open({ ethWei: undefined }), broke))).toBe("You need about $2.29 of ETH on Base for this.");
   });
 
   it("explains a send Base reverted: usually the batch had just left", async () => {
@@ -660,6 +691,16 @@ describe("Send it now", () => {
     const t = tracker();
     await expect(runFlow(p, t.store as never, [sendNowCall(10n ** 15n, D)])).rejects.toThrow(
       "Sending the batch didn't go through, usually because it had just left. Only Base's network fee was spent.",
+    );
+  });
+
+  it("asks no one to Continue a send: declined says nothing was sent, and one not confirmed yet is checked again later", async () => {
+    const reject = Object.assign(new Error("User rejected the request."), { name: "UserRejectedRequestError" });
+    await expect(runFlow(port({ send: vi.fn(async () => Promise.reject(reject)) }), tracker().store as never, [sendNowCall(10n ** 15n, D)])).rejects.toThrow(
+      "You declined in your wallet, so nothing was sent.",
+    );
+    await expect(runFlow(port({ wait: vi.fn(async () => Promise.reject(new Error("timed out"))) }), tracker().store as never, [sendNowCall(10n ** 15n, D)])).rejects.toThrow(
+      "We couldn't confirm it yet. Check its status in a few minutes.",
     );
   });
 });

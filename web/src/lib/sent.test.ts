@@ -84,18 +84,33 @@ describe("the panel after an unstake", () => {
 
 describe("the panel after Send it now", () => {
   it("says the batch is on its way, what the user paid toward its bridge fee, and follows it from where it was sent", () => {
-    const copy = sentCopy(batchNotice("/activity?deposit=d1", { paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }), LAUNCH);
+    const copy = sentCopy(batchNotice("/activity?deposit=d1", { outcome: "sent", paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }), LAUNCH);
     expect(copy.title).toBe("Your batch is on its way to Bittensor");
     expect(copy.rows).toEqual([["Bridge fee you paid", "$1.74 in ETH"]]);
     expect(copy.next).toBe("It reaches Bittensor in about 20–30 minutes; your receipts in Activity follow it from here. Anything you sent beyond the fee is back in your wallet.");
     expect(copy.href).toBe("/activity?deposit=d1");
   });
 
-  it("says so when the batch's own fees paid it all, gives ETH without a price, and nothing it couldn't read", () => {
-    expect(sentCopy(batchNotice("/activity", { paidWei: 0n, ethPriceUsd: 2_330 }), LAUNCH).rows).toEqual([["Bridge fee you paid", "nothing: the batch's fees covered it"]]);
-    expect(sentCopy(batchNotice("/activity", { paidWei: 744_898_037_875_672n }), LAUNCH).rows).toEqual([["Bridge fee you paid", "0.000745 ETH"]]);
+  it("says so when the batch's own fees paid it all, gives ETH without a price, under $0.01 for a tiny fee, and nothing it couldn't read", () => {
+    expect(sentCopy(batchNotice("/activity", { outcome: "sent", paidWei: 0n, ethPriceUsd: 2_330 }), LAUNCH).rows).toEqual([["Bridge fee you paid", "nothing: the batch's fees covered it"]]);
+    expect(sentCopy(batchNotice("/activity", { outcome: "sent", paidWei: 744_898_037_875_672n }), LAUNCH).rows).toEqual([["Bridge fee you paid", "0.000745 ETH"]]);
+    expect(sentCopy(batchNotice("/activity", { outcome: "sent", paidWei: 10n ** 12n, ethPriceUsd: 2_330 }), LAUNCH).rows).toEqual([["Bridge fee you paid", "under $0.01 in ETH"]]);
     // the receipt couldn't be read: no figure in place of the one it would have given
     expect(sentCopy(batchNotice("/activity", { ethPriceUsd: 2_330 }), LAUNCH).rows).toEqual([]);
+  });
+
+  it("says what happened when the batch had already left: only a roll, everything back but the network fee", () => {
+    const copy = sentCopy(batchNotice("/activity?deposit=d1", { outcome: "rolled", ethPriceUsd: 2_330 }), LAUNCH);
+    expect(copy.title).toBe("Your batch had already left");
+    expect(copy.rows).toEqual([]);
+    expect(copy.next).toBe("It had already left; your ETH came back except the network fee. Your receipts in Activity follow it from here.");
+  });
+
+  it("says what happened when a different batch was sent in its place, and what that one's fee took", () => {
+    const copy = sentCopy(batchNotice("/activity?deposit=d1", { outcome: "other", paidWei: 744_898_037_875_672n, ethPriceUsd: 2_330 }), LAUNCH);
+    expect(copy.title).toBe("Your batch had already left");
+    expect(copy.rows).toEqual([["Bridge fee you paid", "$1.74 in ETH"]]);
+    expect(copy.next).toBe("A different batch was sent; your ETH beyond the fee came back. Yours had already left, and your receipts in Activity follow it from here.");
   });
 });
 

@@ -1,9 +1,11 @@
 import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters, parseEventLogs } from "viem";
 import { freshTip } from "./fresh";
-import { ADAPTER, ERC20, FRONT_DOOR, MULTICALL3_ABI, QUOTER, STAKER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
+import { isFull, SEND_GRACE_S } from "../batch-clock";
+import { closeEconomicsOf } from "../send-now";
+import { ADAPTER, ALPHA_VAULT_ABI, ERC20, FRONT_DOOR, MULTICALL3_ABI, QUOTER, STAKER, STAKING, STAKING_ADDRESS, TWAP_ORACLE, VAULT } from "./abi";
 import { APY_WINDOW_BLOCKS, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
 import type { Clients } from "./chain";
-import { type Deployment, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
+import { ALPHA_VAULT, type Deployment, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import type { NextBatch, OpenBatch } from "./types";
 import { RAO, toDisplay } from "./units";
 
@@ -322,11 +324,50 @@ export async function readNextBatch(c: Pick<Clients, "base">, d: Deployment): Pr
   };
 }
 
-/** The open batch, the account's entries in it, and, once it can close (with entries, not paused), what
- * sending it now takes: the bridge fee, the account's ETH, a gas allowance and ETH's price. Those four are
- * read only then, and each is left out when its read fails, never guessed. The batch itself comes from
- * one multicall, with the time of the block it read. */
-export async function readOpenBatch(c: Pick<Clients, "base">, d: Deployment, account: Address): Promise<OpenBatch> {
+/** What 1 ETH sells for in USDC units (WETH –0.05%→ USDC): the keeper's ETH price. */
+export async function ethPriceUsdc(c: Pick<Clients, "base">): Promise<bigint> {
+  return quote(c, "quoteExactInput", encodePacked(["address", "uint24", "address"], [TOKENS.weth, 500, TOKENS.usdc]), 10n ** 18n);
+}
+
+/** Whether Bittensor's side can take a batch now, as the keeper checks before sending one: the vault not
+ * paused, and ForeverMoney's AlphaVault (which the Bittensor adapter deposits the batch's TAO into) not
+ * paused, with no migration announced or finished. False when any of it can't be read: never guessed open. */
+export async function readBittensorOpen(c: Pick<Clients, "bittensor">, d: Deployment): Promise<boolean> {
+  try {
+    const [vaultPaused, alphaPaused, migrationReadyAt, migrationFinished] = await c.bittensor.multicall({
+      allowFailure: false,
+      contracts: [
+        { address: d.vault, abi: VAULT, functionName: "paused" },
+        { address: ALPHA_VAULT, abi: ALPHA_VAULT_ABI, functionName: "isPaused" },
+        { address: ALPHA_VAULT, abi: ALPHA_VAULT_ABI, functionName: "migrationReadyAt" },
+        { address: ALPHA_VAULT, abi: ALPHA_VAULT_ABI, functionName: "migrationFinished" },
+      ],
+    });
+    return !vaultPaused && !alphaPaused && migrationReadyAt === 0n && !migrationFinished;
+  } catch {
+    return false;
+  }
+}
+
+/** The open batch's deposits the staker made (facts.ts, stakerDepositsIn), given its id and age in seconds. */
+export type StakerDeposits = (batchId: bigint, ageS: number) => Promise<{ count: number; tao: bigint }>;
+
+/** The open batch, the account's entries in it, and what deciding on Send it now takes. The batch comes
+ * from one multicall, with the time of the block it read; with entries and not paused, more is read:
+ * - while the keeper may still send it for free at its interval (until five minutes after, and not full),
+ *   its fees weighed against its bridge fee as the keeper weighs them (send-now.ts, closeEconomicsOf):
+ *   the staker's deposits in it (`stakerDeposits`, from Base's logs), the staker's fees, the oracle's TAO
+ *   price and ETH's, null when any of it can't be read (the keeper then holds it too) or on v2;
+ * - once it can close: the account's ETH, a gas allowance, ETH's price, and whether Bittensor's side can
+ *   take it (false when that can't be read);
+ * - either way the bridge fee, for this batch's exact message. Each figure is left out when its read
+ *   fails, never guessed. */
+export async function readOpenBatch(
+  c: Pick<Clients, "base" | "bittensor">,
+  d: Deployment,
+  account: Address,
+  stakerDeposits?: StakerDeposits,
+): Promise<OpenBatch> {
   const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
   const [open, deposits, redeems, canClose, interval, paused, depositOf, redeemOf, time] = await c.base.multicall({
     allowFailure: false,
@@ -353,34 +394,70 @@ export async function readOpenBatch(c: Pick<Clients, "base">, d: Deployment, acc
     mine: { depositWei: depositOf, redeemShares: redeemOf },
     potWei: feePot,
   };
-  if (!canClose || paused || deposits.length + redeems.length === 0) return batch;
-  const [fee, eth, gas, price] = await Promise.allSettled([
+  if (paused || deposits.length + redeems.length === 0) return batch;
+  const weigh = isV3(d) && !isFull(batch) && batch.chainTime < batch.start + batch.interval + SEND_GRACE_S;
+  if (!canClose && !weigh) return batch;
+
+  const none = Promise.resolve(undefined);
+  const [fee, ethUsdc, eth, gas, bitOpen, tao, staker, staked] = await Promise.allSettled([
     quoteCloseFee(c, d, { id, deposits, redeems, totalDeposits }),
-    c.base.getBalance({ address: account }),
-    c.base.estimateFeesPerGas().then((f) => CLOSE_GAS * f.maxFeePerGas),
-    ethPriceUsd(c),
+    ethPriceUsdc(c),
+    canClose ? c.base.getBalance({ address: account }) : none,
+    canClose ? c.base.estimateFeesPerGas().then((f) => CLOSE_GAS * f.maxFeePerGas) : none,
+    canClose ? readBittensorOpen(c, d) : none,
+    weigh ? c.base.readContract({ address: d.oracle as Address, abi: TWAP_ORACLE, functionName: "usdcValue", args: [10n ** 18n] }) : none,
+    weigh ? readStakerFees(c, d) : none,
+    weigh && stakerDeposits ? stakerDeposits(id, batch.chainTime - batch.start) : none,
   ]);
   const feeWei = settled(fee);
+  const ethPrice = settled(ethUsdc);
   const ethWei = settled(eth);
   const gasWei = settled(gas);
-  const ethPrice = settled(price);
+  let economics: OpenBatch["economics"];
+  if (weigh) {
+    const taoPriceUsdc = settled(tao);
+    const fees = settled(staker);
+    const deposited = settled(staked);
+    // as the keeper: a price or a bridge fee of 0 would count any batch as covered, so it counts as unread
+    economics =
+      feeWei && ethPrice && taoPriceUsdc && fees && deposited
+        ? closeEconomicsOf({
+            nStaked: deposited.count,
+            depositFeeUsdc: fees.depositFeeUsdc,
+            stakedTao: deposited.tao < totalDeposits ? deposited.tao : totalDeposits,
+            taoPriceUsdc,
+            swapFeeBps: Number(fees.swapFeeBps),
+            feePot,
+            ethPriceUsdc: ethPrice,
+            bridgeFeeWei: feeWei,
+          })
+        : null;
+  }
   return {
     ...batch,
     ...(feeWei !== undefined ? { feeWei } : {}),
-    ...(ethWei !== undefined ? { ethWei } : {}),
-    ...(gasWei !== undefined ? { gasWei } : {}),
-    ...(ethPrice !== undefined && ethPrice > 0 ? { ethPriceUsd: ethPrice } : {}),
+    ...(canClose && ethWei !== undefined ? { ethWei } : {}),
+    ...(canClose && gasWei !== undefined ? { gasWei } : {}),
+    ...(ethPrice ? { ethPriceUsd: toDisplay(ethPrice, 6) } : {}),
+    ...(economics !== undefined ? { economics } : {}),
+    ...(canClose ? { bittensorOpen: settled(bitOpen) === true } : {}),
   };
 }
 
-/** What a send of the batch paid, from its receipt's BatchClosed (the front door's own): the bridge fee
- * and the part of it the batch's pot paid; the sender paid the rest. Undefined when it can't be read. */
-export async function readBatchClosed(c: Pick<Clients, "base">, d: Deployment, hash: Hex): Promise<{ feeWei: bigint; potUsedWei: bigint } | undefined> {
+/** What a send of the batch did, from its receipt: the front door's BatchClosed for the batch the user
+ * meant to send ("sent"), for another batch ("other": that one had left, and the next one, already able
+ * to close, went in its place), each with the bridge fee and the part of it the batch's pot paid (the
+ * sender paid the rest); or its BatchRolled ("rolled": the batch had left and the next was empty, so
+ * closeBatch only restarted its timer and refunded everything sent). Undefined when it can't be read. */
+export type CloseOutcome = { kind: "sent" | "other"; feeWei: bigint; potUsedWei: bigint } | { kind: "rolled" };
+
+export async function readCloseOutcome(c: Pick<Clients, "base">, d: Deployment, hash: Hex, batchId: bigint): Promise<CloseOutcome | undefined> {
   try {
     const receipt = await c.base.getTransactionReceipt({ hash });
     const own = receipt.logs.filter((l) => l.address.toLowerCase() === d.frontDoor.toLowerCase());
     const [closed] = parseEventLogs({ abi: FRONT_DOOR, eventName: "BatchClosed", logs: own });
-    return closed ? { feeWei: closed.args.fee, potUsedWei: closed.args.potUsed } : undefined;
+    if (closed) return { kind: closed.args.id === batchId ? "sent" : "other", feeWei: closed.args.fee, potUsedWei: closed.args.potUsed };
+    return parseEventLogs({ abi: FRONT_DOOR, eventName: "BatchRolled", logs: own }).length > 0 ? { kind: "rolled" } : undefined;
   } catch {
     return undefined;
   }

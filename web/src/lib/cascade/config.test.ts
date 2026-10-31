@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { toFunctionSelector } from "viem";
 import { ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import {
+  ALPHA_VAULT,
   DELIVERY_TOLERANCE_BPS,
   DELIVERY_VALIDITY_S,
   DESTINATION_BASE,
@@ -154,5 +155,15 @@ describe("v3 ABIs match the contracts (selectors from cast sig)", () => {
     const event = FRONT_DOOR.find((x) => x.type === "event" && x.name === "BatchClosed");
     const inputs = event && "inputs" in event ? event.inputs : [];
     expect(inputs.map((i) => `${i.type}${"indexed" in i && i.indexed ? " indexed" : ""} ${i.name}`).join(", ")).toBe(declared);
+    // an empty batch only rolls, and a refund that can't be paid reverts
+    expect(src).toMatch(/event BatchRolled\(uint64 indexed id\);/);
+    expect(FRONT_DOOR.some((x) => x.type === "event" && x.name === "BatchRolled")).toBe(true);
+    expect(src).toMatch(/error TransferFailed\(\);/);
+    expect(FRONT_DOOR.some((x) => x.type === "error" && x.name === "TransferFailed")).toBe(true);
+  });
+
+  it("ForeverMoney's AlphaVault is the one the keeper checks before sending a batch", () => {
+    const ops = readFileSync(new URL("../../../../ops/src/config.ts", import.meta.url), "utf8");
+    expect(ops).toContain(`ALPHA_VAULT: "${ALPHA_VAULT}"`);
   });
 });

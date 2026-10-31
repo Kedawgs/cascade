@@ -9,7 +9,8 @@
   // Wrangler sends no usage telemetry for this project: building and testing stay local.
   "send_metrics": false,
   "observability": { "enabled": true },
-  // Workers Cache serves the seed routes by their Cache-Control without running the Worker.
+  // Workers Cache serves the seed routes (30 s), the status and the health (15 s) by their Cache-Control without
+  // running the Worker.
   "cache": { "enabled": true },
   // Four crons, the same in every environment (a test checks them against src/crons.ts):
   // the tick every minute, the site check every two minutes (a run of the pass under way: a pass of every page
@@ -42,9 +43,10 @@
         }
       ],
       "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
-      // Workers Rate Limiting on /v1/scan/*: 60 requests a minute per client IP, counted per Cloudflare location
-      // (approximate). Cached answers never reach the Worker, so never count. The namespace id is any integer
-      // unique in the account (nothing to create); each environment has its own.
+      // Workers Rate Limiting on every route (/v1/scan/*, /v1/status and /v1/health, each under its own key): 60
+      // requests a minute per client IP, counted per Cloudflare location (approximate). Cached answers never reach
+      // the Worker, so never count. The namespace id is any integer unique in the account (nothing to create);
+      // each environment has its own.
       "ratelimits": [{ "name": "SCAN_LIMITER", "namespace_id": "8453001", "simple": { "limit": 60, "period": 60 } }],
       // Public settings (spec section 9). A secret named <VAR>_SECRET overrides BASE_RPC_URL,
       // BASE_LOGS_RPC_URL, BITTENSOR_RPC_URL and THRESHOLDS (a keyed URL, private thresholds); ALERT_TO

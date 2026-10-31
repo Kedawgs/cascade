@@ -44,12 +44,16 @@ what the outside uptime check on `/v1/health` is for (deploy step 10).
 |---|---|
 | `GET /v1/scan/{vault}` | the site: the deployment-wide half of its scan (cached 30 s, CORS for `SITE_ORIGIN`) |
 | `GET /v1/scan/{vault}/{account}` | the site: one account's half |
-| `GET /v1/status` | the keeper: the hold (opaque ids only), confirmed payout keys, each chain's lag |
-| `GET /v1/health` | an uptime checker: 200 while a tick completed in the last 5 minutes and no chain lags past the lag limit; else 503 and why |
+| `GET /v1/status` | the keeper: the hold (opaque ids only), confirmed payout keys, each chain's lag (cached 15 s; `generatedAt` says when it was computed) |
+| `GET /v1/health` | an uptime checker: 200 while a tick completed in the last 5 minutes and no chain lags past the lag limit; else 503 and why (cached 15 s) |
 
 The vault and account must be lowercase and there must be no query string (one spelling per resource, so the
-cache can't be sidestepped). `/v1/scan/*` answers 429 (with `Retry-After: 60`) past 60 requests a minute from one
-IP; the site falls back to its own scan on it, as on any refusal.
+cache can't be sidestepped). Every route answers 429 (with `Retry-After: 60`) past 60 requests a minute from one
+IP, each route counted on its own (the keeper's status polls and a checker's health probes are minutes apart,
+far under it); the site falls back to its own scan on it, as on any refusal. The status and the health are served
+through the Workers Cache for 15 s, so a burst at them reaches D1 once per 15 s per Cloudflare location, and a
+cached answer is never counted; a D1 failure (503) is never cached, so the next request reaches a recovered
+database.
 
 ## Working on it locally (nothing is deployed)
 
@@ -195,11 +199,12 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
     e.g. `base is 61 minutes behind (limit 30 minutes)`: ticks completing while an RPC refuses a chain is a blind
     monitor, and the outside check sees it even when email is broken. A chain catching up in the first backfill
     isn't counted (one stuck then is). A missing daily digest is the weaker sign.
-11. Rate limiting on the API path needs nothing set up: the Worker counts `/v1/scan/*` requests itself with
-    Workers Rate Limiting (the `SCAN_LIMITER` binding in `wrangler.jsonc`, deployed with it: 60 a minute per
-    client IP, per Cloudflare location, approximate) and answers 429 past it; cached answers never reach the
-    Worker, so never count. A WAF rate-limiting rule on `api.cascadefi.xyz/v1/scan/*` in the dashboard is
-    optional on top (it would also count cached answers, and stop floods before the Worker runs).
+11. Rate limiting on the API needs nothing set up: the Worker counts `/v1/scan/*`, `/v1/status` and `/v1/health`
+    requests itself with Workers Rate Limiting (the `SCAN_LIMITER` binding in `wrangler.jsonc`, deployed with
+    it: 60 a minute per client IP, per Cloudflare location, approximate, each route under its own key) and
+    answers 429 past it; cached answers never reach the Worker, so never count. A WAF rate-limiting rule on
+    `api.cascadefi.xyz/v1/*` in the dashboard is optional on top (it would also count cached answers, and stop
+    floods before the Worker runs).
 12. The site: set `NEXT_PUBLIC_CASCADE_INDEXER_URL` (after the site tasks). The keeper: set `OPS_HOLD_URL`
     (after the keeper tasks).
 13. Production: the same steps with `--env production` (its database `cascade-indexer-production`). Step 5 is

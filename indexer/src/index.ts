@@ -1,4 +1,4 @@
-import { handleHealth, handleScan, handleStatus } from "./api.ts";
+import { cached, handleHealth, handleScan, handleStatus } from "./api.ts";
 import { type Config, parseConfig } from "./config.ts";
 import { CRONS } from "./crons.ts";
 import { runDaily } from "./daily.ts";
@@ -20,7 +20,7 @@ function configOf(env: Env): Config | null {
   }
 }
 
-async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+async function fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const path = new URL(request.url).pathname;
   if (path === "/v1/scan" || path.startsWith("/v1/scan/")) {
     const cfg = configOf(env);
@@ -32,18 +32,19 @@ async function fetch(request: Request, env: Env, _ctx: ExecutionContext): Promis
     }
     return handleScan(request, env, cfg);
   }
+  // the status and the health go through the Workers Cache (a burst reaches D1 once per TTL per location) and,
+  // when they do reach the Worker, through the rate limiter, each route under its own key
   const nowS = Math.floor(Date.now() / 1000);
   if (path === "/v1/status") {
     const cfg = configOf(env);
     // unconfigured: the keeper reads an outage and holds
     if (!cfg) return new Response("not available", { status: 503, headers: { "Cache-Control": "no-store" } });
-    return handleStatus(request, env, cfg, nowS);
+    return cached(request, ctx, () => handleStatus(request, env, cfg, nowS));
   }
   if (path === "/v1/health") {
-    if (request.method !== "GET") return new Response("method not allowed", { status: 405, headers: { Allow: "GET" } });
     // the configured thresholds' lag limit (the defaults' when the config can't be read: no tick runs then, and
     // the last complete tick ages past 5 minutes anyway)
-    return handleHealth(env, nowS, configOf(env)?.thresholds);
+    return cached(request, ctx, () => handleHealth(request, env, nowS, configOf(env)?.thresholds));
   }
   return new Response("Not found", { status: 404 });
 }

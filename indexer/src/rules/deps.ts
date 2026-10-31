@@ -1,7 +1,7 @@
 import { formatUnits, type Hex, keccak256, toBytes } from "viem";
 import { BURNER_ROLE, CCIP_SELECTOR, DEFAULT_ADMIN_ROLE, DEPENDENCY_EVENTS, MINTER_ROLE } from "../abi.ts";
 import type { Finding } from "../alerts.ts";
-import type { ChainName, DependencyRole } from "../config.ts";
+import { type ChainName, DEPENDENCY_ROLES, type DependencyRole } from "../config.ts";
 import type { StoredLog } from "../logs.ts";
 import type { BaseState, BitState, Bucket, ChainReading } from "../snapshot.ts";
 import { addressLink, isNew, onset, type Readings, type RuleCtx, twice, txLink, utc } from "./context.ts";
@@ -19,66 +19,102 @@ const ZERO = "0x0000000000000000000000000000000000000000";
 const pct = (bps: bigint) => `${(Number(bps) / 100).toFixed(2)}%`;
 const num = (s: string | undefined) => (s === undefined || s === "" || !Number.isFinite(Number(s)) ? undefined : Number(s));
 
-/** fmtao.backing_true (critical): the rail under FM-TAO short of what it owes, on two readings of Bittensor. FM-TAO on
- * every lane (Base, Robinhood) is wTAO locked in the lock pool, and wTAO is the AlphaVault's TAO, so:
- * - `alpha`: the AlphaVault's backing(wTAO) below wTAO's supply by more than backingToleranceBps of it: every FM-TAO
- *   is under-backed. It holds, on its first tick: a payout sends users' TAO into this rail. No stranger can cause it
- *   (a deposit raises the backing and the supply together).
- * - `lock`: wTAO's supply outside the lock pool by more than lockToleranceBps of it: wTAO has left the pool without
- *   FM-TAO being burned for it (a drain, or a release a forged message asked for), seen while the wTAO is held. Nearly
- *   all wTAO is locked (13,985.61 of 13,985.65 on 2026-10-31): it is bridged as soon as it is minted. This sees the
- *   Robinhood lane too, which fmtao.unbacked (Base's supply against the whole lock) can't. Never a hold: anyone can
- *   mint wTAO with the AlphaVault's depositLiquid (simulated live) and keep it out of the pool, so a stranger could
- *   otherwise hold the keeper at will (as stake.unlisted is never a hold). A drain unwrapped at once through the
- *   AlphaVault burns the wTAO, keeping supply and lock level: only fmtao.unbacked (Base) can see that one's result.
- * Each is short by at least fmtaoBackingSlackWei. */
+/** fmtao.backing_true (critical) and fmtao.lock_outside (warning): the rail under FM-TAO short of what it owes. FM-TAO
+ * on every lane (Base, Robinhood) is wTAO locked in the lock pool, and wTAO is the AlphaVault's TAO, so:
+ * - `alpha` (fmtao.backing_true:alpha): the AlphaVault's backing(wTAO) below wTAO's supply by more than
+ *   backingToleranceBps of it (at least fmtaoBackingSlackWei), on two readings: every FM-TAO is under-backed. No
+ *   stranger can cause it (a deposit raises the backing and the supply together). It holds on its first tick only
+ *   while BACKING_HOLD is on (a payout sends users' TAO into this rail): off as shipped, since backing(wTAO) is
+ *   ForeverMoney's own view and its normal range isn't known yet (100.05% read live on 2026-10-31); a week of hour
+ *   rows (backingPpmLow/High) sets the tolerance before the hold is switched on (README).
+ * - `lock`: wTAO's supply outside the lock pool. Nearly all wTAO is locked (13,985.61 of 13,985.65 on 2026-10-31):
+ *   it is bridged as soon as it is minted. But anyone can mint wTAO with the AlphaVault's depositLiquid (simulated
+ *   live) and keep it, and unwrapping and re-wrapping toggles it, so wTAO outside the pool alone proves no drain. So:
+ *   lockOutsideMinWei (100 TAO) or more outside for lockOutsideS (an hour: meta lock_outside_since) is the warning
+ *   fmtao.lock_outside; more than lockOutsideCriticalBps (5%) of the supply outside for as long (its own mark,
+ *   lock_outside_critical_since) is the critical fmtao.backing_true:lock. Never a hold. It sees a drain (or a forged
+ *   release) while the wTAO is held, on every lane, which fmtao.unbacked (Base's supply against the whole lock)
+ *   can't; a drain unwrapped at once through the AlphaVault burns the wTAO, keeping supply and lock level: only
+ *   fmtao.unbacked (Base) can see that one's result. A reading that couldn't read the lock leaves the marks alone. */
 export const fmtaoBackingTrue: Rule = {
   name: "fmtao.backing_true",
   run(ctx) {
-    const sides: { side: "alpha" | "lock"; have: (s: BitState) => bigint | undefined; what: string }[] = [
-      { side: "alpha", have: (s) => s.alpha.backing, what: "The AlphaVault's backing is below wTAO's supply" },
-      { side: "lock", have: (s) => s.lockPoolFmTao, what: "wTAO has left the CCIP lock pool" },
-    ];
     const out: Finding[] = [];
-    for (const x of sides) {
-      const tolerance = x.side === "alpha" ? ctx.t.backingToleranceBps : ctx.t.lockToleranceBps;
-      const short = (s: BitState | undefined) => {
-        const supply = s?.wTaoSupply;
-        const have = s ? x.have(s) : undefined;
-        if (supply === undefined || have === undefined || supply === 0n) return undefined;
-        const slack = (supply * BigInt(tolerance)) / 10_000n;
-        return supply - have > (slack > ctx.t.fmtaoBackingSlackWei ? slack : ctx.t.fmtaoBackingSlackWei) ? supply - have : undefined;
-      };
-      const cond = (r: Readings) => short(r.bittensor) !== undefined;
-      if (!twice(ctx, "bittensor", cond)) continue;
-      const now = ctx.snap.bittensor!;
-      const s = now.state;
+    const now = ctx.snap.bittensor;
+    const facts = (s: BitState, block: bigint): Record<string, string> => {
       const supply = s.wTaoSupply as bigint;
+      return {
+        "wTAO supply": tao(supply),
+        "AlphaVault backing (backing(wTAO))": s.alpha.backing === undefined ? "unknown" : tao(s.alpha.backing),
+        "backing / supply": s.alpha.backing === undefined ? "unknown" : pct((s.alpha.backing * 10_000n) / supply),
+        "wTAO in the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(s.lockPoolFmTao),
+        "wTAO outside the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(supply - s.lockPoolFmTao),
+        "share of wTAO's supply": s.lockPoolFmTao === undefined ? "unknown" : pct(((supply - s.lockPoolFmTao) * 10_000n) / supply),
+        block: String(block),
+        alphaVault: addressLink("bittensor", ctx.cfg.tokens.bittensor.alphaVault),
+        lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool),
+      };
+    };
+
+    // alpha: the AlphaVault's backing short of wTAO's supply, on two readings
+    const short = (s: BitState | undefined) => {
+      const supply = s?.wTaoSupply;
+      const have = s?.alpha.backing;
+      if (supply === undefined || have === undefined || supply === 0n) return undefined;
+      const slack = (supply * BigInt(ctx.t.backingToleranceBps)) / 10_000n;
+      return supply - have > (slack > ctx.t.fmtaoBackingSlackWei ? slack : ctx.t.fmtaoBackingSlackWei) ? supply - have : undefined;
+    };
+    const cond = (r: Readings) => short(r.bittensor) !== undefined;
+    if (now && twice(ctx, "bittensor", cond)) {
+      const what = "The AlphaVault's backing is below wTAO's supply";
       const f: Finding = {
         rule: "fmtao.backing_true",
-        key: `fmtao.backing_true:${x.side}`,
-        subject: `${x.what} by ${tao(short(s) as bigint)}: FM-TAO isn't fully backed`,
-        facts: {
-          side: x.side,
-          "wTAO supply": tao(supply),
-          "AlphaVault backing (backing(wTAO))": s.alpha.backing === undefined ? "unknown" : tao(s.alpha.backing),
-          "backing / supply": s.alpha.backing === undefined ? "unknown" : pct((s.alpha.backing * 10_000n) / supply),
-          "wTAO in the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(s.lockPoolFmTao),
-          "wTAO outside the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(supply - s.lockPoolFmTao),
-          tolerance: pct(BigInt(tolerance)),
-          block: String(now.block),
-          alphaVault: addressLink("bittensor", ctx.cfg.tokens.bittensor.alphaVault),
-          lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool),
-        },
+        key: "fmtao.backing_true:alpha",
+        subject: `${what} by ${tao(short(now.state) as bigint)}: FM-TAO isn't fully backed`,
+        facts: { side: "alpha", ...facts(now.state, now.block), tolerance: pct(BigInt(ctx.t.backingToleranceBps)), hold: ctx.cfg.backingHold ? "on (BACKING_HOLD)" : "off (BACKING_HOLD is false)" },
       };
-      if (x.side === "alpha" && onset(ctx, "bittensor", cond)) f.hold = { id: `fmtao.backing_true:${x.side}:${ctx.previous.bittensor!.block}`, summary: `${x.what}: FM-TAO isn't fully backed` };
+      if (ctx.cfg.backingHold && onset(ctx, "bittensor", cond)) f.hold = { id: `fmtao.backing_true:alpha:${ctx.previous.bittensor!.block}`, summary: `${what}: FM-TAO isn't fully backed` };
       out.push(f);
+    }
+
+    // lock: wTAO outside the lock pool, held there an hour (marks in meta)
+    const s = now?.state;
+    if (!now || !s || s.wTaoSupply === undefined || s.lockPoolFmTao === undefined || s.wTaoSupply === 0n) return out;
+    const outside = s.wTaoSupply > s.lockPoolFmTao ? s.wTaoSupply - s.lockPoolFmTao : 0n;
+    const mark = (k: string, on: boolean): number | undefined => {
+      const since = num(ctx.meta[k]);
+      if (!on) {
+        if (since !== undefined) ctx.writes.meta.push({ k, v: "" });
+        return undefined;
+      }
+      if (since === undefined) ctx.writes.meta.push({ k, v: String(ctx.nowS) });
+      return since ?? ctx.nowS;
+    };
+    const since = mark("lock_outside_since", outside >= ctx.t.lockOutsideMinWei);
+    const criticalSince = mark("lock_outside_critical_since", outside * 10_000n > s.wTaoSupply * BigInt(ctx.t.lockOutsideCriticalBps));
+    const lasted = (t: number | undefined) => t !== undefined && ctx.nowS - t > ctx.t.lockOutsideS;
+    const lockFacts = { side: "lock", ...facts(s, now.block) };
+    if (lasted(criticalSince)) {
+      out.push({
+        rule: "fmtao.backing_true",
+        key: "fmtao.backing_true:lock",
+        subject: `${tao(outside)} of wTAO (${pct((outside * 10_000n) / s.wTaoSupply)} of its supply) has been outside the CCIP lock pool since ${utc(criticalSince as number)}: FM-TAO may not be fully backed`,
+        facts: { ...lockFacts, since: utc(criticalSince as number), "critical above": pct(BigInt(ctx.t.lockOutsideCriticalBps)) },
+      });
+    } else if (lasted(since)) {
+      out.push({
+        rule: "fmtao.lock_outside",
+        key: "fmtao.lock_outside",
+        subject: `${tao(outside)} of wTAO has been outside the CCIP lock pool since ${utc(since as number)}`,
+        facts: { ...lockFacts, since: utc(since as number), "warning from": tao(ctx.t.lockOutsideMinWei) },
+      });
     }
     return out;
   },
 };
 
-/** The roles an email names: FM-TAO's (Chainlink BurnMintERC20) and the AlphaVault's (read live). */
+/** The roles an email names: FM-TAO's (it answers MINTER_ROLE and BURNER_ROLE, read live) and the AlphaVault's
+ * (GUARDIAN_ROLE and OPERATOR_ROLE, read live). */
 const ROLE_NAMES: Record<string, string> = Object.fromEntries(
   [
     [MINTER_ROLE, "MINTER_ROLE"],
@@ -95,7 +131,7 @@ const DEP_NAMES: Record<ChainName, Record<DependencyRole, string>> = {
   base: { fmTao: "FM-TAO (Base)", tokenPool: "FM-TAO's CCIP pool (Base)", alphaVault: "AlphaVault" },
   bittensor: { fmTao: "wTAO (Bittensor)", tokenPool: "the CCIP lock pool (Bittensor)", alphaVault: "AlphaVault (Bittensor)" },
 };
-const DEP_ROLES: ReadonlySet<string> = new Set<DependencyRole>(["fmTao", "tokenPool", "alphaVault"]);
+const DEP_ROLES = DEPENDENCY_ROLES;
 const EVENT_NAMES: ReadonlySet<string> = new Set(DEPENDENCY_EVENTS.map((e) => e.name));
 
 /** Cascade's lane on each chain's pool: the other chain's selector. */
@@ -114,7 +150,9 @@ const capacityOf = (x: unknown): bigint | undefined => {
 /** What a watched admin event means, and whether it is critical: a new way to mint or release FM-TAO or wTAO (a
  * MINTER_ROLE grant, a remote pool or lane added, a pool's router changed, the lock pool's liquidity withdrawn), an
  * admin moving (FM-TAO's admin role granted, a role's admin changed, the AlphaVault's admin transfer scheduled, a
- * pool's ownership transfer requested), a lane's bucket set to capacity 0, or Cascade's lane removed. */
+ * pool's ownership transfer requested), a lane's bucket switched off (capacity 0: on TokenPool 1.5.1 that is only
+ * allowed with the limit disabled, so the lane has no limit), or Cascade's lane removed (the only way a lane
+ * freezes). */
 function judge(l: StoredLog): { critical: boolean; what: string } {
   const a = l.args;
   switch (l.event) {
@@ -149,7 +187,7 @@ function judge(l: StoredLog): { critical: boolean; what: string } {
     case "ChainConfigured": {
       const zero = [a.outboundRateLimiterConfig, a.inboundRateLimiterConfig].some((c) => capacityOf(c) === 0n);
       return zero
-        ? { critical: true, what: `a bucket of the lane to chain selector ${a.remoteChainSelector} was set to capacity 0` }
+        ? { critical: true, what: `a bucket of the lane to chain selector ${a.remoteChainSelector} was switched off (capacity 0): that direction has no limit now` }
         : { critical: false, what: `the rate limit of the lane to chain selector ${a.remoteChainSelector} changed` };
     }
     case "ChainRemoved":
@@ -174,36 +212,50 @@ function judge(l: StoredLog): { critical: boolean; what: string } {
   }
 }
 
-/** fmtao.role_change_critical and fmtao.role_change: each admin event of ForeverMoney's watched contracts (FM-TAO,
- * wTAO, the two CCIP pools, the AlphaVault: config.ts watchFilters), on the tick it is first stored, after the
- * deployment's baseline. Critical as `judge` says; a warning otherwise. Never a hold: a role change alone moves no
- * TAO (fmtao.backing_true holds once one does). */
+/** fmtao.role_change_critical and fmtao.role_change: the admin events of ForeverMoney's watched contracts (FM-TAO,
+ * wTAO, the two CCIP pools, the AlphaVault: config.ts watchFilters), on the tick they are first stored, after the
+ * deployment's baseline, one alert per transaction (a pool upgrade grants, adds and revokes in one: one email, every
+ * watched event of the transaction listed). Critical when any of them is (`judge`); a warning otherwise. Never a
+ * hold: a role change alone moves no TAO. A transaction's logs share a block, which the scan takes whole, so they are
+ * all stored on the same tick. */
 export const fmtaoRoleChange: Rule = {
   name: "fmtao.role_change",
   run(ctx) {
-    const out: Finding[] = [];
+    const byTx = new Map<string, StoredLog[]>();
     for (const l of ctx.logs.all()) {
       if (!DEP_ROLES.has(l.contract) || !EVENT_NAMES.has(l.event) || !isNew(ctx, l)) continue;
       if (l.block <= ctx.cfg.deployment[l.chain].baselineBlock) continue;
-      const j = judge(l);
-      const rule = j.critical ? "fmtao.role_change_critical" : "fmtao.role_change";
-      const name = DEP_NAMES[l.chain][l.contract as DependencyRole];
-      const args = Object.fromEntries(Object.entries(l.args).map(([k, v]) => [k, String(v)]));
-      if ("role" in args) args.role = roleName(l.args.role);
+      const k = `${l.chain}:${l.txHash}`;
+      if (!byTx.has(k)) byTx.set(k, []);
+      byTx.get(k)!.push(l);
+    }
+    const out: Finding[] = [];
+    for (const [k, logs] of byTx) {
+      const judged = logs.map((l) => ({ l, j: judge(l), name: DEP_NAMES[l.chain][l.contract as DependencyRole] }));
+      const critical = judged.some((x) => x.j.critical);
+      const rule = critical ? "fmtao.role_change_critical" : "fmtao.role_change";
+      const first = judged.find((x) => x.j.critical) ?? judged[0];
+      const { chain, txHash, block } = first.l;
+      const facts: Record<string, string> = {};
+      if (judged.length === 1) {
+        // one event: its arguments too
+        const args = Object.fromEntries(Object.entries(first.l.args).map(([a, v]) => [a, String(v)]));
+        if ("role" in args) args.role = roleName(first.l.args.role);
+        Object.assign(facts, { contract: first.name, event: first.l.event, ...args, address: addressLink(chain, first.l.address) });
+      } else {
+        judged.forEach((x, i) => (facts[`event ${i + 1}`] = `${x.name} ${x.l.event}: ${x.j.what}${x.j.critical ? " (critical)" : ""}`));
+      }
+      Object.assign(facts, {
+        "what it means": first.j.what,
+        "sent by": ctx.txs.get(k)?.from ?? "not known yet",
+        block: String(block),
+        transaction: txLink(chain, txHash),
+      });
       out.push({
         rule,
-        key: `${rule}:${l.uid}`,
-        subject: `ForeverMoney's ${name}: ${j.what}`,
-        facts: {
-          contract: name,
-          event: l.event,
-          ...args,
-          "what it means": j.what,
-          "sent by": ctx.txs.get(`${l.chain}:${l.txHash}`)?.from ?? "not known yet",
-          address: addressLink(l.chain, l.address),
-          block: String(l.block),
-          transaction: txLink(l.chain, l.txHash),
-        },
+        key: `${rule}:${k}`,
+        subject: judged.length === 1 ? `ForeverMoney's ${first.name}: ${first.j.what}` : `ForeverMoney's rail: ${judged.length} admin changes in one transaction: ${first.j.what}, and ${judged.length - 1} more`,
+        facts,
       });
     }
     return out;
@@ -230,11 +282,17 @@ export const railAlphaVaultAdmin: Rule = {
 
 type Validator = NonNullable<BitState["validator"]>;
 const validatorOf = (r: ChainReading<BitState> | undefined): Validator | undefined => r?.state.validator;
-const takeText = (t: number | null | undefined) => (t === undefined ? "unknown" : t === null ? "no Delegates entry (not open for delegation)" : `${((t * 100) / 65_535).toFixed(2)}%`);
+/** SubtensorModule Delegates is a ValueQuery: a hotkey with no entry has the chain's default take, 11,796 of 65,535
+ * (18%: the storage entry's default, 0x142e, read from the live runtime's metadata on 2026-10-31). */
+export const DEFAULT_DELEGATE_TAKE = 11_796;
+const takeOf = (t: number | null) => (t === null ? DEFAULT_DELEGATE_TAKE : t);
+const share = (t: number) => `${((t * 100) / 65_535).toFixed(2)}%`;
+const takeText = (t: number | null | undefined) => (t === undefined ? "unknown" : t === null ? `no entry: the chain's default take, ${share(DEFAULT_DELEGATE_TAKE)}` : share(t));
 
 /** validator.take_changed (warning, once per change) and validator.take_high (critical, while it lasts): the stake
- * hotkey's take (SubtensorModule Delegates, of 65,535) differs from the reading before last and is the same on the
- * last two readings (one bad answer can't trip it); or it is above validatorTakeMaxBps on two readings. 0 at launch. */
+ * hotkey's take (SubtensorModule Delegates, of 65,535; no entry is the chain's default, 18%) differs from the reading
+ * before last and is the same on the last two readings (one bad answer can't trip it); or it is above
+ * validatorTakeMaxBps on two readings. 0 at launch. */
 export const validatorTake: Rule = {
   name: "validator.take",
   run(ctx) {
@@ -256,7 +314,7 @@ export const validatorTake: Rule = {
     }
     const high = (r: Readings) => {
       const v = r.bittensor?.validator;
-      return v?.hotkey === hk && typeof v.take === "number" && v.take * 10_000 > ctx.t.validatorTakeMaxBps * 65_535;
+      return v?.hotkey === hk && v.take !== undefined && takeOf(v.take) * 10_000 > ctx.t.validatorTakeMaxBps * 65_535;
     };
     if (twice(ctx, "bittensor", high)) {
       out.push({

@@ -108,12 +108,21 @@ export const ADAPTER = parseAbi([
 export const BIT_ADAPTER = [...ADAPTER, ...parseAbi(["event ReserveFunded(address indexed from, uint256 amount)"])] as const;
 
 /** The admin events of ForeverMoney's contracts the rail runs on (config.ts watchFilters), the only events of theirs the
- * scan asks for: FM-TAO on Base (Chainlink's BurnMintERC20: OpenZeppelin AccessControl, a CCIP admin), the CCIP token
- * pools (Chainlink TokenPool 1.5.1, both read live as "BurnMintTokenPool 1.5.1" and "LockReleaseTokenPool 1.5.1" on
- * 2026-10-31: ConfirmedOwner's two-step ownership, the rate-limit admin, each lane's buckets and remote pools, the
- * router, the lock pool's liquidity), and the AlphaVault (AccessControlDefaultAdminRules: its admin moves only after a
- * scheduled delay). One list for all of them: a log whose topic 0 is one of these is decoded the same whichever
- * watched contract emitted it. */
+ * scan asks for. What each watched contract can really emit (read live on 2026-10-31; none of these was observed in a
+ * log, the signatures are the libraries'):
+ * - FM-TAO on Base: not Chainlink's BurnMintERC20, but it answers OpenZeppelin AccessControl's views (MINTER_ROLE,
+ *   BURNER_ROLE, getRoleAdmin, hasRole: ForeverMoney's Safe holds the admin role) and getCCIPAdmin, so its RoleGranted,
+ *   RoleRevoked and RoleAdminChanged are OpenZeppelin's; its CCIPAdminTransferred is Chainlink's signature, assumed.
+ * - wTAO on Bittensor: not AccessControl (only getCCIPAdmin answers; the AlphaVault mints it), so the Role* topics
+ *   watch nothing there; only a CCIPAdminTransferred with Chainlink's signature (assumed) could come from it. The real
+ *   coverage of wTAO is the AlphaVault's events and the backing readings (fmtao.backing_true).
+ * - the CCIP token pools: Chainlink TokenPool 1.5.1 ("BurnMintTokenPool 1.5.1" and "LockReleaseTokenPool 1.5.1"):
+ *   ConfirmedOwner's two-step ownership, the rate-limit admin, each lane's buckets and remote pools, the router, the
+ *   lock pool's liquidity.
+ * - the AlphaVault: AccessControlDefaultAdminRules (defaultAdmin, pendingDefaultAdmin and a 2-day delay answer): its
+ *   roles and its admin, which moves only after a scheduled delay.
+ * One list for all of them: a log whose topic 0 is one of these is decoded the same whichever watched contract emitted
+ * it. */
 export const DEPENDENCY_EVENTS = parseAbi([
   "event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)",
   "event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender)",
@@ -220,12 +229,17 @@ export const VAULT_VIEWS = parseAbi([
   "function getPayoutBatch(bytes32 key) view returns (PayoutBatch)",
   "function claimGasRequired() view returns (uint256)",
   "function maxFeeBps() view returns (uint256)",
+  "function maxMessageValue() view returns (uint256)",
   "function maxFeeAbs() view returns (uint256)",
   "function primaryBridge() view returns (address)",
 ]);
 
 /** CcipAdapterBase's fee quote (the vault asks its primary bridge before each payout chunk). */
-export const BRIDGE_VIEWS = parseAbi(["function quoteFee(uint64 destChain, address recipient, bytes message, uint256 amount) view returns (uint256)"]);
+export const BRIDGE_VIEWS = parseAbi([
+  "function quoteFee(uint64 destChain, address recipient, bytes message, uint256 amount) view returns (uint256)",
+  // the most one message may carry (quoteFee and send revert MessageTooLarge above it)
+  "function maxMessageValue() view returns (uint256)",
+]);
 
 export const FRONT_DOOR_VIEWS = parseAbi([
   "function openBatch() view returns (uint64 id, uint64 start, uint256 totalDeposits, uint256 feePot, uint256 nDeposits, uint256 nRedeems)",

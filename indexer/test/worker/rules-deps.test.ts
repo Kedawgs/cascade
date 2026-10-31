@@ -2,8 +2,9 @@ import { env } from "cloudflare:workers";
 import { type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
 import { reconcile } from "../../src/alerts.ts";
-import { BURNER_ROLE, CCIP_SELECTOR, DEFAULT_ADMIN_ROLE, MINTER_ROLE } from "../../src/abi.ts";
-import type { StoredLog } from "../../src/logs.ts";
+import { BURNER_ROLE, CCIP_SELECTOR, DEFAULT_ADMIN_ROLE, DEPENDENCY_EVENTS, MINTER_ROLE } from "../../src/abi.ts";
+import { type Config, rolesOf } from "../../src/config.ts";
+import { decode, identify, type StoredLog } from "../../src/logs.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
 import * as deps from "../../src/rules/deps.ts";
 import { RULES } from "../../src/rules/ids.ts";
@@ -11,9 +12,11 @@ import type { Rule } from "../../src/rules/index.ts";
 import { keeperLowTao, railAlphaVault } from "../../src/rules/ops.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import type { BaseState, BitState, Bucket, ChainReading, HourAgg } from "../../src/snapshot.ts";
+import { logOf, upsertLogs } from "../../src/store.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { TICK_RULES } from "../../src/tick.ts";
-import { testConfig } from "./fixtures.ts";
+import { wipe } from "./d1-count.ts";
+import { rawLog, testConfig } from "./fixtures.ts";
 import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
 // The rules on what Cascade depends on and doesn't control: ForeverMoney's rail (FM-TAO, wTAO, the CCIP pools and the
@@ -31,10 +34,22 @@ const bit = (block: bigint, o: Partial<BitState> = {}, time = NOW): ChainReading
 const base = (block: bigint, o: Partial<BaseState> = {}, time = NOW): ChainReading<BaseState> => reading(block, time, baseState(o));
 
 /** A context with this tick's readings and the earlier ones (newest first). */
-function ctx(o: { bit?: ChainReading<BitState>; base?: ChainReading<BaseState>; bitBefore?: ChainReading<BitState>[]; baseBefore?: ChainReading<BaseState>[]; meta?: Record<string, string>; hours?: HourAgg[]; logs?: StoredLog[]; nowS?: number; holds?: RuleCtx["holds"] }): RuleCtx {
+function ctx(o: {
+  bit?: ChainReading<BitState>;
+  base?: ChainReading<BaseState>;
+  bitBefore?: ChainReading<BitState>[];
+  baseBefore?: ChainReading<BaseState>[];
+  meta?: Record<string, string>;
+  hours?: HourAgg[];
+  logs?: StoredLog[];
+  nowS?: number;
+  holds?: RuleCtx["holds"];
+  cfg?: Config;
+}): RuleCtx {
   const c = ruleCtx();
   const history = { base: o.baseBefore ?? [], bittensor: o.bitBefore ?? [] };
   return ruleCtx({
+    cfg: o.cfg ?? cfg,
     nowS: o.nowS ?? NOW,
     snap: { ...c.snap, at: o.nowS ?? NOW, base: o.base, bittensor: o.bit },
     previous: { base: history.base[0], bittensor: history.bittensor[0] },
@@ -56,6 +71,7 @@ describe("the dependency rules", () => {
     expect(RULES["fmtao.backing_true"]).toEqual({ tier: "critical", kind: "condition", canHold: true, mutedByHold: false });
     expect(RULES["fmtao.role_change_critical"]).toMatchObject({ tier: "critical", kind: "event", canHold: false });
     expect(RULES["fmtao.role_change"]).toMatchObject({ tier: "warning", kind: "event" });
+    expect(RULES["fmtao.lock_outside"]).toMatchObject({ tier: "warning", kind: "condition", canHold: false });
     expect(RULES["rail.alpha_vault"]).toMatchObject({ tier: "critical", canHold: false });
     expect(RULES["rail.alpha_vault_admin"]).toMatchObject({ tier: "warning", kind: "condition" });
     expect(RULES["validator.take_changed"]).toMatchObject({ tier: "warning", kind: "event" });
@@ -69,6 +85,7 @@ describe("the dependency rules", () => {
     expect(RULES["payout.fee_ceiling"]).toMatchObject({ tier: "warning", kind: "condition" });
     for (const id of [
       "fmtao.backing_true",
+      "fmtao.lock_outside",
       "fmtao.role_change",
       "fmtao.role_change_critical",
       "rail.alpha_vault_admin",
@@ -89,44 +106,74 @@ describe("the dependency rules", () => {
   });
 });
 
-describe("fmtao.backing_true", () => {
+describe("fmtao.backing_true and fmtao.lock_outside", () => {
   // the live rail on 2026-10-31: backing 13,992.86 TAO, wTAO 13,985.65, 13,985.61 of it in the lock pool
   const live = { alpha: { backing: 13_992_856_362_690_000_000_000n }, wTaoSupply: 13_985_652_876_083_000_000_000n, lockPoolFmTao: 13_985_605_961_534_429_495_505n };
   const at = (block: bigint, o: Partial<BitState>) => bit(block, { ...live, ...o, alpha: { ...live.alpha, ...o.alpha } });
+  const holding = testConfig({ BACKING_HOLD: "true" });
 
   it("is quiet on the live rail: backing above wTAO's supply, and nearly all of it locked", () => {
-    expect(deps.fmtaoBackingTrue.run(ctx({ bit: at(11n, {}), bitBefore: [at(10n, {})] }))).toEqual([]);
+    const c = ctx({ bit: at(11n, {}), bitBefore: [at(10n, {})] });
+    expect(deps.fmtaoBackingTrue.run(c)).toEqual([]);
+    expect(c.writes.meta).toEqual([]);
   });
 
-  it("finds the AlphaVault's backing below wTAO's supply by more than 0.1%, on two readings, and holds on the first", () => {
+  it("finds the AlphaVault's backing below wTAO's supply by more than 0.1%, on two readings: critical, without a hold while BACKING_HOLD is off (the default)", () => {
     const short = { alpha: { backing: (live.wTaoSupply * 9985n) / 10_000n } };
     expect(deps.fmtaoBackingTrue.run(ctx({ bit: at(11n, short), bitBefore: [at(10n, {})] }))).toEqual([]);
+    expect(cfg.backingHold).toBe(false);
     const [f] = deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, short), bitBefore: [at(11n, short), at(10n, {})] }));
-    expect(f).toMatchObject({ rule: "fmtao.backing_true", key: "fmtao.backing_true:alpha", hold: { id: "fmtao.backing_true:alpha:11" } });
+    expect(f).toMatchObject({ rule: "fmtao.backing_true", key: "fmtao.backing_true:alpha", facts: { hold: "off (BACKING_HOLD is false)" } });
+    expect(f.hold).toBeUndefined();
     expect(f.facts["backing / supply"]).toBe("99.85%");
-    // still short a tick later: the same alert, no second hold
-    const later = deps.fmtaoBackingTrue.run(ctx({ bit: at(13n, short), bitBefore: [at(12n, short), at(11n, short)] }));
-    expect(later.map((x) => [x.key, x.hold])).toEqual([["fmtao.backing_true:alpha", undefined]]);
     // within the tolerance (0.05% short): nothing
     const near = { alpha: { backing: (live.wTaoSupply * 9995n) / 10_000n } };
     expect(deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, near), bitBefore: [at(11n, near)] }))).toEqual([]);
   });
 
-  it("finds wTAO leaving the lock pool: less than 99.9% of wTAO's supply locked (a drain the Base-only check can't see), and never holds on it", () => {
-    const drained = { lockPoolFmTao: live.wTaoSupply - 5_000n * E18 };
-    const [f] = deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, drained), bitBefore: [at(11n, drained), at(10n, {})] }));
-    expect(f).toMatchObject({ rule: "fmtao.backing_true", key: "fmtao.backing_true:lock" });
-    expect(f.facts["wTAO outside the lock pool"]).toBe("5000 TAO");
-    // anyone can mint wTAO with the AlphaVault's depositLiquid (simulated live on 2026-10-31) and keep it out of the
-    // pool: a stranger could hold the keeper at will, so this side pages but never holds
+  it("holds on the alpha side's first tick once BACKING_HOLD is on, and not again while it lasts", () => {
+    const short = { alpha: { backing: (live.wTaoSupply * 9985n) / 10_000n } };
+    const [f] = deps.fmtaoBackingTrue.run(ctx({ cfg: holding, bit: at(12n, short), bitBefore: [at(11n, short), at(10n, {})] }));
+    expect(f).toMatchObject({ key: "fmtao.backing_true:alpha", hold: { id: "fmtao.backing_true:alpha:11" }, facts: { hold: "on (BACKING_HOLD)" } });
+    const later = deps.fmtaoBackingTrue.run(ctx({ cfg: holding, bit: at(13n, short), bitBefore: [at(12n, short), at(11n, short)] }));
+    expect(later.map((x) => [x.key, x.hold])).toEqual([["fmtao.backing_true:alpha", undefined]]);
+  });
+
+  it("wTAO outside the lock pool: a warning once 100 TAO or more has stayed out an hour, marked in meta; under 100 TAO, or back in, clears it", () => {
+    const out = (tao: bigint) => ({ lockPoolFmTao: live.wTaoSupply - tao * E18 });
+    // first seen: marked, nothing yet
+    const first = ctx({ bit: at(12n, out(150n)) });
+    expect(deps.fmtaoBackingTrue.run(first)).toEqual([]);
+    expect(written(first)).toEqual({ lock_outside_since: String(NOW) });
+    // an hour on, still out: the warning, never a hold
+    expect(deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, out(150n)), meta: { lock_outside_since: String(NOW - 3599) } }))).toEqual([]);
+    const [f] = deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, out(150n)), meta: { lock_outside_since: String(NOW - 3601) } }));
+    expect(f).toMatchObject({ rule: "fmtao.lock_outside", key: "fmtao.lock_outside", facts: { "wTAO outside the lock pool": "150 TAO" } });
     expect(f.hold).toBeUndefined();
-    // its own tolerance: 50 TAO parked outside the pool (0.36%) pages at 0.1%, and can be allowed for
-    const parked = { lockPoolFmTao: live.wTaoSupply - 50n * E18 };
-    const at01 = ctx({ bit: at(12n, parked), bitBefore: [at(11n, parked), at(10n, {})] });
-    expect(keys(deps.fmtaoBackingTrue, at01)).toEqual(["fmtao.backing_true:lock"]);
-    const at1 = ctx({ bit: at(12n, parked), bitBefore: [at(11n, parked), at(10n, {})] });
-    at1.t = { ...DEFAULTS, lockToleranceBps: 100 };
-    expect(deps.fmtaoBackingTrue.run(at1)).toEqual([]);
+    // a stranger's 50 wTAO kept out (anyone can mint it with depositLiquid, simulated live): never marked
+    const small = ctx({ bit: at(12n, out(50n)), meta: { lock_outside_since: String(NOW - 7200) } });
+    expect(deps.fmtaoBackingTrue.run(small)).toEqual([]);
+    expect(written(small)).toEqual({ lock_outside_since: "" });
+    // a reading that couldn't read the lock leaves the mark as it is
+    const unread = ctx({ bit: bit(12n, { wTaoSupply: live.wTaoSupply }), meta: { lock_outside_since: String(NOW - 7200) } });
+    expect(deps.fmtaoBackingTrue.run(unread)).toEqual([]);
+    expect(unread.writes.meta).toEqual([]);
+  });
+
+  it("escalates to critical when more than 5% of wTAO's supply has stayed outside the lock an hour (its own mark), never with a hold", () => {
+    const drained = { lockPoolFmTao: live.wTaoSupply - 1_000n * E18 }; // 7.15%
+    const first = ctx({ cfg: holding, bit: at(12n, drained), meta: { lock_outside_since: String(NOW - 7200) } });
+    // the warning while the critical's own hour runs
+    expect(keys(deps.fmtaoBackingTrue, first)).toEqual(["fmtao.lock_outside"]);
+    expect(written(first)).toEqual({ lock_outside_critical_since: String(NOW) });
+    const [f, ...rest] = deps.fmtaoBackingTrue.run(ctx({ cfg: holding, bit: at(12n, drained), meta: { lock_outside_since: String(NOW - 7200), lock_outside_critical_since: String(NOW - 3601) } }));
+    expect(rest).toEqual([]);
+    expect(f).toMatchObject({ rule: "fmtao.backing_true", key: "fmtao.backing_true:lock", facts: { "wTAO outside the lock pool": "1000 TAO", "share of wTAO's supply": "7.15%" } });
+    expect(f.hold).toBeUndefined();
+    // back under 5% (but still over 100 TAO): the critical's mark clears, the warning stands
+    const back = ctx({ bit: at(12n, { lockPoolFmTao: live.wTaoSupply - 200n * E18 }), meta: { lock_outside_since: String(NOW - 7200), lock_outside_critical_since: String(NOW - 3601) } });
+    expect(keys(deps.fmtaoBackingTrue, back)).toEqual(["fmtao.lock_outside"]);
+    expect(written(back)).toEqual({ lock_outside_critical_since: "" });
   });
 
   it("judges nothing it couldn't read", () => {
@@ -153,7 +200,7 @@ describe("fmtao.role_change", () => {
     const SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
     const l = dep({ contract: "fmTao", chain: "base", event: "RoleGranted", args: { role: MINTER_ROLE, account: STRANGER, sender: SAFE }, tx: "grant tx" });
     const [f] = deps.fmtaoRoleChange.run(ctx({ logs: [l] }));
-    expect(f).toMatchObject({ rule: "fmtao.role_change_critical", key: `fmtao.role_change_critical:${l.uid}` });
+    expect(f).toMatchObject({ rule: "fmtao.role_change_critical", key: `fmtao.role_change_critical:base:${l.txHash}` });
     expect(f.subject).toContain("MINTER_ROLE");
     // the grantor (the event's sender: ForeverMoney's Safe) and who sent the transaction (its from: a signer)
     expect(f.facts).toMatchObject({ contract: "FM-TAO (Base)", role: "MINTER_ROLE", account: STRANGER, sender: SAFE, "sent by": STRANGER });
@@ -187,7 +234,10 @@ describe("fmtao.role_change", () => {
     const configured = (out: bigint, inn: bigint) =>
       dep({ contract: "tokenPool", chain: "bittensor", event: "ChainConfigured", args: { remoteChainSelector: String(CCIP_SELECTOR.base), outboundRateLimiterConfig: config(out, out > 0n), inboundRateLimiterConfig: config(inn, inn > 0n) }, tx: `configured ${out} ${inn}` });
     expect(judged(configured(5000n * E18, 0n))[0][0]).toBe("fmtao.role_change_critical");
-    expect(judged(configured(0n, 5000n * E18))[0][0]).toBe("fmtao.role_change_critical");
+    // on TokenPool 1.5.1 a bucket at capacity 0 is a bucket switched off: no limit (only ChainRemoved freezes a lane)
+    expect(judged(configured(0n, 5000n * E18))[0]).toEqual(["fmtao.role_change_critical", expect.stringContaining("no limit")]);
+    expect(RUNBOOK["fmtao.role_change_critical"]({})).toContain("no limit");
+    expect(RUNBOOK["fmtao.role_change_critical"]({})).not.toContain("freezes the lane or");
     const [[rule, subject]] = judged(configured(4000n * E18, 5000n * E18));
     expect(rule).toBe("fmtao.role_change");
     expect(subject).toContain("rate limit");
@@ -207,6 +257,35 @@ describe("fmtao.role_change", () => {
     }
     const guardian = deps.fmtaoRoleChange.run(ctx({ logs: [dep({ contract: "alphaVault", chain: "bittensor", event: "RoleGranted", args: { role: keccak256(toBytes("GUARDIAN_ROLE")), account: STRANGER, sender: STRANGER } })] }));
     expect(guardian[0].facts).toMatchObject({ contract: "AlphaVault (Bittensor)", role: "GUARDIAN_ROLE" });
+  });
+
+  it("a pool upgrade in one transaction is one critical email listing every watched event in it, keyed by the transaction", () => {
+    const NEW_POOL = "0x00000000000000000000000000000000000000cc" as Hex;
+    const upgrade = [
+      dep({ contract: "fmTao", chain: "base", event: "RoleGranted", args: { role: MINTER_ROLE, account: NEW_POOL, sender: STRANGER }, tx: "upgrade" }),
+      dep({ contract: "fmTao", chain: "base", event: "RoleGranted", args: { role: BURNER_ROLE, account: NEW_POOL, sender: STRANGER }, tx: "upgrade" }),
+      dep({ contract: "tokenPool", chain: "base", event: "RemotePoolAdded", args: { remoteChainSelector: String(CCIP_SELECTOR.bittensor), remotePoolAddress: "0x1234" }, tx: "upgrade" }),
+      dep({ contract: "fmTao", chain: "base", event: "RoleRevoked", args: { role: MINTER_ROLE, account: t.base.tokenPool, sender: STRANGER }, tx: "upgrade" }),
+    ].map((l, i) => ({ ...l, logIndex: i }));
+    const found = deps.fmtaoRoleChange.run(ctx({ logs: upgrade }));
+    expect(found).toHaveLength(1);
+    const [f] = found;
+    expect(f).toMatchObject({ rule: "fmtao.role_change_critical", key: `fmtao.role_change_critical:base:${upgrade[0].txHash}` });
+    expect(f.subject).toContain("4 admin changes in one transaction");
+    expect(Object.keys(f.facts).filter((k) => k.startsWith("event "))).toEqual(["event 1", "event 2", "event 3", "event 4"]);
+    expect(f.facts["event 1"]).toContain("MINTER_ROLE granted to");
+    expect(f.facts["event 4"]).toContain("MINTER_ROLE revoked from");
+    // after a planned upgrade, the monitor must be pointed at the new pools
+    expect(RUNBOOK["fmtao.role_change_critical"](f.facts)).toContain("TOKENS.base.tokenPool");
+    // two transactions: two alerts
+    const other = dep({ contract: "tokenPool", chain: "base", event: "RouterUpdated", args: { oldRouter: ZERO, newRouter: STRANGER }, tx: "another" });
+    expect(deps.fmtaoRoleChange.run(ctx({ logs: [...upgrade, other] }))).toHaveLength(2);
+    // warnings alone in a transaction: one warning for it
+    const quiet = [
+      dep({ contract: "tokenPool", chain: "base", event: "OwnershipTransferred", args: { from: ZERO, to: STRANGER }, tx: "accept" }),
+      { ...dep({ contract: "tokenPool", chain: "base", event: "RateLimitAdminSet", args: { rateLimitAdmin: STRANGER }, tx: "accept" }), logIndex: 1 },
+    ];
+    expect(keys(deps.fmtaoRoleChange, ctx({ logs: quiet }))).toEqual([`fmtao.role_change:base:${quiet[0].txHash}`]);
   });
 
   it("reports each event once, on the tick it is first stored, never the deployment's setup, and never the deployment's own logs", () => {
@@ -256,16 +335,20 @@ describe("the validator", () => {
     const [f] = deps.validatorTake.run(ctx({ bit: v(12n, { take: 3277 }), bitBefore: [v(11n, { take: 3277 }), v(10n, {})] }));
     expect(f).toMatchObject({ rule: "validator.take_changed", key: `validator.take_changed:${HK}:11`, facts: { before: "0.00%", after: "5.00%" } });
     expect(deps.validatorTake.run(ctx({ bit: v(13n, { take: 3277 }), bitBefore: [v(12n, { take: 3277 }), v(11n, { take: 3277 })] }))).toEqual([]);
-    // the entry gone: no longer open for delegation
-    const [gone] = deps.validatorTake.run(ctx({ bit: v(12n, { take: null }), bitBefore: [v(11n, { take: null }), v(10n, {})] }));
-    expect(gone.facts.after).toContain("no Delegates entry");
+    // the entry gone: Delegates is a ValueQuery, so no entry is the chain's default take (11,796 of 65,535: 18%, read
+    // from the runtime metadata): the change is reported, and the take is high (validator.take_high, below)
+    const gone = deps.validatorTake.run(ctx({ bit: v(12n, { take: null }), bitBefore: [v(11n, { take: null }), v(10n, {})] }));
+    expect(gone.find((f) => f.rule === "validator.take_changed")?.facts.after).toBe("no entry: the chain's default take, 18.00%");
   });
 
-  it("validator.take_high: a take above 9% on two readings is critical", () => {
+  it("validator.take_high: a take above 9% on two readings is critical; no Delegates entry is the default 18%", () => {
     const high = 5965; // 9.10%
     const [f] = deps.validatorTake.run(ctx({ bit: v(12n, { take: high }), bitBefore: [v(11n, { take: high }), v(10n, { take: high })] }));
     expect(f).toMatchObject({ rule: "validator.take_high", key: `validator.take_high:${HK}`, facts: { take: "9.10%" } });
     expect(keys(deps.validatorTake, ctx({ bit: v(12n, { take: 5898 }), bitBefore: [v(11n, { take: 5898 }), v(10n, { take: 5898 })] }))).toEqual([]);
+    const [none] = deps.validatorTake.run(ctx({ bit: v(12n, { take: null }), bitBefore: [v(11n, { take: null }), v(10n, { take: null })] }));
+    expect(none).toMatchObject({ rule: "validator.take_high", facts: { take: "no entry: the chain's default take, 18.00%" } });
+    expect(deps.DEFAULT_DELEGATE_TAKE).toBe(11_796);
   });
 
   it("validator.root_stake_drop: root stake more than 25% below the day's high, on two readings", () => {
@@ -326,6 +409,9 @@ describe("root.unlock_interval", () => {
     expect(f).toMatchObject({ rule: "root.unlock_interval", key: "root.unlock_interval", facts: { blocks: "360", "about": "72 minutes" } });
     expect(deps.rootUnlockInterval.run(ctx({ bit: set(12n), bitBefore: [bit(11n, { rootUnlockInterval: 0n })] }))).toEqual([]);
     expect(deps.rootUnlockInterval.run(ctx({ bit: bit(12n, { rootUnlockInterval: 0n }), bitBefore: [bit(11n, { rootUnlockInterval: 0n })] }))).toEqual([]);
+    // the front door has pause() only: no redeem-only pause to point at
+    expect(RUNBOOK["root.unlock_interval"](f.facts)).not.toMatch(/pausing redeems|pause redeems/);
+    expect(RUNBOOK["root.unlock_interval"](f.facts)).toContain("no redeem-only pause");
   });
 });
 
@@ -343,6 +429,8 @@ describe("the oracle", () => {
     const reverted = (block: bigint) => base(block, { oracleReverted: true });
     expect(rules(deps.oracleReverted, ctx({ base: reverted(11n), baseBefore: [reverted(10n)] }))).toEqual(["oracle.reverted"]);
     expect(rules(deps.oracleReverted, ctx({ base: reverted(11n), baseBefore: [base(10n)] }))).toEqual([]);
+    // the reading marks an answer that doesn't decode as reverted too: the runbook says so
+    expect(RUNBOOK["oracle.reverted"]({})).toContain("doesn't decode");
   });
 });
 
@@ -373,12 +461,41 @@ describe("payout.fee_ceiling", () => {
 });
 
 describe("the critical rules hold only where a payout must stop", () => {
-  it("only fmtao.backing_true of the new rules can hold, and it isn't muted by a hold", () => {
-    const findings = deps.fmtaoBackingTrue.run(
-      ctx({ bit: bit(12n, { alpha: { backing: 1n }, wTaoSupply: E18, lockPoolFmTao: E18 }), bitBefore: [bit(11n, { alpha: { backing: 1n }, wTaoSupply: E18, lockPoolFmTao: E18 }), bit(10n, {})] }),
-    );
-    const r = reconcile(env.DB, { open: [], findings, nowS: NOW, t: DEFAULTS, holdActive: true });
+  it("only fmtao.backing_true of the new rules can hold (its alpha side, once BACKING_HOLD is on), and it isn't muted by a hold", () => {
+    const short = { alpha: { backing: 1n }, wTaoSupply: E18, lockPoolFmTao: E18 };
+    const run = (c: Config) => deps.fmtaoBackingTrue.run(ctx({ cfg: c, bit: bit(12n, short), bitBefore: [bit(11n, short), bit(10n, {})] }));
+    const r = reconcile(env.DB, { open: [], findings: run(testConfig({ BACKING_HOLD: "true" })), nowS: NOW, t: DEFAULTS, holdActive: true });
     expect(r.holds.map((h) => h.rule)).toEqual(["fmtao.backing_true"]);
-    expect(Object.entries(RULES).filter(([id, s]) => s.canHold && /^(fmtao\.backing_true|fmtao\.role_change|validator|ccip\.rate|root\.|oracle\.|payout\.fee|rail\.)/.test(id)).map(([id]) => id)).toEqual(["fmtao.backing_true"]);
+    expect(reconcile(env.DB, { open: [], findings: run(cfg), nowS: NOW, t: DEFAULTS, holdActive: true }).holds).toEqual([]);
+    expect(Object.entries(RULES).filter(([id, s]) => s.canHold && /^(fmtao\.backing_true|fmtao\.lock|fmtao\.role_change|validator|ccip\.rate|root\.|oracle\.|payout\.fee|rail\.)/.test(id)).map(([id]) => id)).toEqual(["fmtao.backing_true"]);
+  });
+});
+
+describe("a pool's rate-limit config through the store", () => {
+  it("survives decoding (the struct stored as JSON by plain()), D1 and logOf, so the rule still reads its capacity", async () => {
+    await wipe(env.DB);
+    const raw = rawLog({
+      address: t.bittensor.lockPool,
+      abi: DEPENDENCY_EVENTS,
+      eventName: "ChainConfigured",
+      args: {
+        remoteChainSelector: CCIP_SELECTOR.base,
+        outboundRateLimiterConfig: { isEnabled: false, capacity: 0n, rate: 0n },
+        inboundRateLimiterConfig: { isEnabled: true, capacity: 5000n * E18, rate: 6n * 10n ** 17n },
+      },
+      block: 6_900_500n,
+      logIndex: 0,
+      txHash: keccak256(toBytes("configure the lane")),
+    });
+    const [l] = identify("bittensor", [raw]).map((x) => decode("bittensor", x, rolesOf(cfg.deployment, cfg.bridges, cfg.tokens)) as StoredLog);
+    expect(l).toMatchObject({ contract: "tokenPool", event: "ChainConfigured", args: { remoteChainSelector: String(CCIP_SELECTOR.base) } });
+    expect(JSON.parse(String(l.args.outboundRateLimiterConfig))).toEqual({ isEnabled: false, capacity: "0", rate: "0" });
+    expect(JSON.parse(String(l.args.inboundRateLimiterConfig))).toEqual({ isEnabled: true, capacity: String(5000n * E18), rate: String(6n * 10n ** 17n) });
+    await env.DB.batch(upsertLogs(env.DB, [l]));
+    const back = (await env.DB.prepare("SELECT * FROM logs WHERE contract = 'tokenPool'").all<Record<string, unknown>>()).results.map(logOf);
+    expect(back.map((x) => x.args)).toEqual([l.args]);
+    const [f] = deps.fmtaoRoleChange.run(ctx({ logs: back }));
+    expect(f).toMatchObject({ rule: "fmtao.role_change_critical", key: `fmtao.role_change_critical:bittensor:${l.txHash}` });
+    expect(f.subject).toContain("no limit");
   });
 });

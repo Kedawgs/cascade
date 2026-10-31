@@ -28,6 +28,9 @@ export interface ScanResult {
   head?: bigint;
   /** the head block's time, from this tick's first request */
   headTime?: number;
+  /** the first block of the first window a node answered this tick (the tick records where it first read the watched
+   * contracts: meta watch_from:{chain}) */
+  firstBlock?: bigint;
   stopped?: ScanStop;
   error?: string;
 }
@@ -242,6 +245,7 @@ export async function scanChain(o: {
   }
 
   result.head = head;
+  if (answered.length > 0) result.firstBlock = answered[0].a;
   if (scannedTo !== null && head !== undefined) {
     // everything read this tick runs contiguously from `start`, which is at or before the old settled
     // point (REREAD > SETTLE), so all of it up to here is stored by this tick's commit

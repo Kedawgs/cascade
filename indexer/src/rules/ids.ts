@@ -54,8 +54,8 @@ export const RULES = {
   // 6.4, proposed (switchable in THRESHOLDS rules.off)
   "rail.alpha_vault": critical("condition"),
   "fmtao.mint_surge": warning("event"),
-  // what Cascade depends on and doesn't control (src/rules/deps.ts). Only the AlphaVault's backing short of wTAO holds:
-  // a payout sends TAO into that rail, and no stranger can cause it
+  // what Cascade depends on and doesn't control (src/rules/deps.ts). Only the AlphaVault's backing short of wTAO can
+  // hold, and only once BACKING_HOLD is on: a payout sends TAO into that rail, and no stranger can cause it
   "fmtao.backing_true": critical("condition", true),
   // a new way to mint or release (a MINTER grant, a remote pool, lane or router added), an admin moving, a lane's
   // bucket at capacity 0 or Cascade's lane removed, the lock pool's liquidity withdrawn
@@ -66,6 +66,9 @@ export const RULES = {
   // the TWAP oracle's usdcValue reverts: deliveries to USDC stop (claims still work)
   "oracle.reverted": critical("condition"),
   "fmtao.role_change": warning("event"),
+  // 100 TAO or more of wTAO outside the lock pool for an hour: anyone can mint and keep wTAO, so a warning (more than
+  // 5% of its supply for an hour is fmtao.backing_true's critical lock side)
+  "fmtao.lock_outside": warning("condition"),
   "rail.alpha_vault_admin": warning("condition"),
   "validator.take_changed": warning("event"),
   "validator.root_stake_drop": warning("condition"),

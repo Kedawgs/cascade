@@ -1,6 +1,6 @@
 import { type Hex, keccak256, toBytes } from "viem";
 import { EVENT_CLOSES_AFTER_S, type Finding, markSent, reconcile } from "./alerts.ts";
-import { type ChainName, type Config, hostDomain, rolesOf, scanAddresses, watchFilters } from "./config.ts";
+import { type ChainName, type Config, DEPENDENCY_ROLES, hostDomain, rolesOf, scanAddresses, watchFilters } from "./config.ts";
 import { type AlertItem, type Outgoing, renderCritical, renderWarnings, sendAll } from "./email.ts";
 import { decode, identify, type RawLog } from "./logs.ts";
 import { CONTRACT_NAMES, txLink } from "./rules/context.ts";
@@ -83,7 +83,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   try {
     const rs = await db.batch<Row>([
       db.prepare("SELECT chain, settled_to FROM cursors"),
-      db.prepare("SELECT k, v FROM meta WHERE k IN ('catching_up', 'last_warning_at') OR k LIKE 'logs_check_%' OR k LIKE 'logs_omitted_uids:%'"),
+      db.prepare("SELECT k, v FROM meta WHERE k IN ('catching_up', 'last_warning_at') OR k LIKE 'logs_check_%' OR k LIKE 'logs_omitted_uids:%' OR k LIKE 'watch_from:%'"),
       db.prepare("SELECT * FROM alerts WHERE rule IN ('indexer.logs_omitted', 'indexer.logs_extra') AND resolved_at IS NULL ORDER BY id"),
     ]);
     settled = Object.fromEntries(rs[0].results.map((r) => [r.chain as ChainName, BigInt(r.settled_to as number)]));
@@ -188,6 +188,12 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
       continue;
     }
 
+    // ForeverMoney's watched events are judged only from the first block the tick read with their filter (meta
+    // watch_from:{chain}): below it, a version of the tick that didn't ask for them stored none, and their absence
+    // isn't an omission
+    const watchFrom = num(meta[`watch_from:${chain}`]);
+    const judged = (contract: string, block: bigint | number) => !DEPENDENCY_ROLES.has(contract) || (watchFrom !== undefined && Number(block) >= watchFrom);
+
     // what the store holds for the range
     let stored: Row[];
     try {
@@ -196,7 +202,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
           .prepare("SELECT uid, block, log_index, tx_hash, contract, event FROM logs WHERE chain = ?1 AND block BETWEEN ?2 AND ?3 AND removed = 0 ORDER BY block, log_index")
           .bind(chain, Number(from), Number(checkedTo))
           .all<Row>()
-      ).results;
+      ).results.filter((r) => judged(r.contract as string, r.block as number));
     } catch (e) {
       console.error(`logs check: the stored ${chain} logs can't be read: ${message(e)}`);
       continue;
@@ -205,7 +211,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     // the second's logs, by the uid the scan would give them (its own identity scheme), those at watched addresses
     const secondLogs = identify(chain, second).flatMap((x) => {
       const log = decode(chain, x, roleOf);
-      return log ? [log] : [];
+      return log && judged(log.contract, log.block) ? [log] : [];
     });
     const secondUids = new Set(secondLogs.map((l) => l.uid));
     const omitted = secondLogs.filter((l) => !storedUids.has(l.uid));

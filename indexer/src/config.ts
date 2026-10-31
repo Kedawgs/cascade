@@ -9,9 +9,11 @@ export type ChainName = "base" | "bittensor";
 /** The deployment's own contracts, whose every log is scanned. */
 export type OwnRole = "vault" | "bitAdapter" | "frontDoor" | "baseAdapter" | "staker";
 /** ForeverMoney's contracts the rail runs on, whose admin events only are scanned (watchFilters): FM-TAO on Base and
- * wTAO on Bittensor (`fmTao`), the CCIP token pool on each chain (`tokenPool`: the burn-mint pool on Base, the
- * lock-release pool on Bittensor) and the AlphaVault. */
+ * wTAO on Bittensor (`fmTao`; wTAO isn't AccessControl, so its role watch is inert: abi.ts DEPENDENCY_EVENTS says what
+ * each can emit), the CCIP token pool on each chain (`tokenPool`: the burn-mint pool on Base, the lock-release pool on
+ * Bittensor) and the AlphaVault. */
 export type DependencyRole = "fmTao" | "tokenPool" | "alphaVault";
+export const DEPENDENCY_ROLES: ReadonlySet<string> = new Set<DependencyRole>(["fmTao", "tokenPool", "alphaVault"]);
 /** The contracts whose logs are scanned, by what they are: a log is always keyed by its chain and
  * role, never by its event name alone (names collide, and on v3-test the staker on Base and the
  * Bittensor adapter share an address). */
@@ -73,6 +75,9 @@ export interface Config {
   alerts: { from: string; mode: "send" | "log"; to: string[] };
   thresholds: Thresholds;
   priceSources: PriceSource[];
+  /** fmtao.backing_true's alpha side raises the keeper's hold (BACKING_HOLD): off as shipped, until a week of readings
+   * has set backingToleranceBps (README) */
+  backingHold: boolean;
 }
 
 /** The vars in wrangler.jsonc, all public. */
@@ -99,6 +104,7 @@ export const VAR_NAMES = [
   "ALERT_MODE",
   "THRESHOLDS",
   "PRICE_SOURCES",
+  "BACKING_HOLD",
 ] as const;
 
 /** The secrets (`wrangler secret put`, or a git-ignored .dev.vars locally). A secret can't share a
@@ -267,6 +273,13 @@ export function watchFilters(cfg: Pick<Config, "tokens">): Record<ChainName, { a
   };
 }
 
+/** A switch: true or false, as a string or a JSON boolean; absent is false. */
+function flag(field: string, x: unknown): boolean {
+  if (x === undefined || x === null || x === "" || x === false || x === "false") return false;
+  if (x === true || x === "true") return true;
+  throw new ConfigError(field, 'is not "true" or "false"');
+}
+
 function stringList(field: string, raw: unknown): string[] {
   const x = jsonSetting(field, raw);
   if (!Array.isArray(x) || !x.every((v) => typeof v === "string")) throw new ConfigError(field, "is not a JSON list of strings");
@@ -357,6 +370,7 @@ export function parseConfig(env: ConfigEnv): Config {
     alerts: { from, mode, to },
     thresholds: mergeThresholds(env.THRESHOLDS, env.THRESHOLDS_SECRET),
     priceSources: sources as PriceSource[],
+    backingHold: flag("BACKING_HOLD", env.BACKING_HOLD),
   };
 }
 

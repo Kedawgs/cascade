@@ -261,6 +261,18 @@ describe("ForeverMoney's contracts the scan watches (TOKENS)", () => {
   });
 });
 
+describe("BACKING_HOLD", () => {
+  it("is off in both environments as shipped; true or false (a string or a JSON boolean) switches fmtao.backing_true's hold; anything else is refused", () => {
+    expect(parseConfig(vars()).backingHold).toBe(false);
+    expect(parseConfig(withVars({ BACKING_HOLD: "true" })).backingHold).toBe(true);
+    expect(parseConfig(withVars({ BACKING_HOLD: true })).backingHold).toBe(true);
+    expect(parseConfig(withVars({ BACKING_HOLD: "false" })).backingHold).toBe(false);
+    expect(parseConfig(withVars({ BACKING_HOLD: undefined })).backingHold).toBe(false);
+    expect(refused(withVars({ BACKING_HOLD: "yes" })).message).toContain("BACKING_HOLD");
+    expect(refused(withVars({ BACKING_HOLD: 1 })).message).toContain("BACKING_HOLD");
+  });
+});
+
 describe("redact", () => {
   it("keeps only the host's registrable domain: never a subdomain, path or query, where a key can sit", () => {
     expect(redact("https://x.example/key/abc")).toBe("x.example");

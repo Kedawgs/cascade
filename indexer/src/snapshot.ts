@@ -41,15 +41,24 @@ import {
 const MAX_STAKE_READS = 16;
 
 /** The payout chunk payout.fee_ceiling has the primary bridge quote: the most entries a chunk holds (CascadeMessages
- * MAX_ENTRIES, the keeper's maxEntries), so the costliest message, worth 1 TAO in all (the amount doesn't move the
- * fee: 0.01 and 1 TAO quoted the same live). Its content is a stand-in; the fee follows its size and gas. Built once. */
+ * MAX_ENTRIES, the keeper's maxEntries), so the costliest message, worth the most a chunk can carry: the lower of the
+ * vault's and its bridge's maxMessageValue, from the last reading (15 and 50 TAO live on 2026-10-31; more reverts
+ * MessageTooLarge), so a fee in basis points of the amount is priced too (none today: 1 and 50 TAO quoted the same).
+ * 1 TAO until a reading has named them. Its content is a stand-in; the fee follows its size, gas and amount. */
 const QUOTE_ENTRIES = 100;
-const QUOTE_AMOUNT = 10n ** 18n;
-const QUOTE_MESSAGE = encodePayoutsMessage(
-  keccak256(toBytes("cascade monitor fee quote")),
-  0,
-  Array.from({ length: QUOTE_ENTRIES }, (_, i) => ({ user: `0x${(i + 1).toString(16).padStart(40, "0")}` as Hex, amount: QUOTE_AMOUNT / BigInt(QUOTE_ENTRIES) })),
-);
+const QUOTE_DEFAULT_AMOUNT = 10n ** 18n;
+const quoteMessage = (amount: bigint) =>
+  encodePayoutsMessage(
+    keccak256(toBytes("cascade monitor fee quote")),
+    0,
+    Array.from({ length: QUOTE_ENTRIES }, (_, i) => ({ user: `0x${(i + 1).toString(16).padStart(40, "0")}` as Hex, amount: amount / BigInt(QUOTE_ENTRIES) })),
+  );
+/** The quote's message, kept for the last amount asked (it changes only when a limit does). */
+let quoteCache: { amount: bigint; message: Hex } | undefined;
+const quoteFor = (amount: bigint): Hex => {
+  if (quoteCache?.amount !== amount) quoteCache = { amount, message: quoteMessage(amount) };
+  return quoteCache.message;
+};
 
 /** A CCIP token pool's rate-limit bucket, refilled to the reading's block. */
 export interface Bucket {
@@ -136,8 +145,9 @@ export interface BitState {
   wTaoSupply?: bigint;
   /** the lock pool's buckets for the Base lane */
   lane?: Lane;
-  /** the stake hotkey as a validator: its take (of 65,535; null: no Delegates entry), the stake on it on root (rao,
-   * everyone's) and its root uid (null: not registered on root); a field undefined when its answer didn't decode */
+  /** the stake hotkey as a validator: its take (of 65,535; null: no Delegates entry, which is the chain's default take,
+   * 18%), the stake on it on root (rao, everyone's) and its root uid (null: not registered on root); a field undefined
+   * when its answer didn't decode */
   validator?: { hotkey: Hex; take?: number | null; rootStake?: bigint; rootUid?: number | null };
   /** SubtensorModule.RootStakeUnlockInterval, in blocks (0: unset, no hold) */
   rootUnlockInterval?: bigint;
@@ -149,6 +159,9 @@ export interface BitState {
   /** the vault's payout fee ceiling: a chunk's fee may be at most max(sum × maxFeeBps / 10,000, maxFeeAbs) */
   maxFeeAbs?: bigint;
   maxFeeBps?: bigint;
+  /** the largest chunk the vault sends (its maxMessageValue), and the most its primary bridge carries in a message */
+  maxMessageValue?: bigint;
+  bridgeMaxMessageValue?: bigint;
   /** the primary bridge's fee for a full payout chunk (QUOTE_ENTRIES entries), rounded up to whole rao as the vault does */
   payoutFeeQuote?: bigint;
   /** getPayoutBatch(key) for each pending payout key */
@@ -224,6 +237,8 @@ export interface SnapshotInputs {
   oracle?: Hex;
   /** the vault's primary bridge, which quotes the payout fee */
   bitBridge?: Hex;
+  /** what the payout fee quote's chunk carries: the lower of the vault's and its bridge's maxMessageValue */
+  payoutQuoteAmount?: bigint;
   pendingMessages: { messageId: Hex; direction: "base>bittensor" | "bittensor>base" }[];
   watched: { chain: ChainName; address: Hex; isSafe?: boolean }[];
   /** addresses whose code to read (the role wallets, for keys.delegated), in the same batch as the counts */
@@ -397,7 +412,11 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   vault("primaryBridge", (v) => (bit.primaryBridge = lc(v)));
   vault("maxFeeAbs", (v) => (bit.maxFeeAbs = v));
   vault("maxFeeBps", (v) => (bit.maxFeeBps = v));
-  vp.add({ address: i.bitBridge ?? d.bitAdapter, abi: BRIDGE_VIEWS, functionName: "quoteFee", args: [BigInt(d.base.chainId), d.frontDoor, QUOTE_MESSAGE, QUOTE_AMOUNT] }, (v: bigint) => {
+  vault("maxMessageValue", (v) => (bit.maxMessageValue = v));
+  const bridge = i.bitBridge ?? d.bitAdapter;
+  vp.add({ address: bridge, abi: BRIDGE_VIEWS, functionName: "maxMessageValue" }, (v) => (bit.bridgeMaxMessageValue = v));
+  const amount = i.payoutQuoteAmount && i.payoutQuoteAmount > 0n ? i.payoutQuoteAmount : QUOTE_DEFAULT_AMOUNT;
+  vp.add({ address: bridge, abi: BRIDGE_VIEWS, functionName: "quoteFee", args: [BigInt(d.base.chainId), d.frontDoor, quoteFor(amount), amount] }, (v: bigint) => {
     bit.payoutFeeQuote = ((v + RAO_WEI - 1n) / RAO_WEI) * RAO_WEI;
   });
   for (const p of i.pendingPayoutKeys) {
@@ -529,6 +548,13 @@ export function payoutsDone(s: Snapshot, pending: readonly { key: Hex; queuedBlo
   });
 }
 
+/** The payout fee quote's amount, from a reading: the lower of the vault's and its bridge's maxMessageValue (either
+ * alone when the other is unread); undefined before any reading has named one. */
+export function quoteAmountOf(s?: BitState): bigint | undefined {
+  const xs = [s?.maxMessageValue, s?.bridgeMaxMessageValue].filter((x): x is bigint => x !== undefined && x > 0n);
+  return xs.length ? xs.reduce((a, b) => (a < b ? a : b)) : undefined;
+}
+
 const bigOut = (_k: string, v: unknown) => (typeof v === "bigint" ? { $bigint: v.toString() } : v);
 const bigIn = (_k: string, v: any) => (v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$bigint === "string" ? BigInt(v.$bigint) : v);
 
@@ -569,6 +595,10 @@ export interface HourAgg {
   unclaimedLast?: bigint;
   /** the validator's root stake (everyone's), the hour's highest */
   validatorStakeHigh?: bigint;
+  /** the AlphaVault's backing(wTAO) over wTAO's supply, in parts per million: the hour's lowest and highest (a week of
+   * them sets backingToleranceBps before BACKING_HOLD is switched on: README) */
+  backingPpmLow?: number;
+  backingPpmHigh?: number;
   /** the pool's TAO price in USD, summed over the readings that had one */
   spotSum: number;
   spotCount: number;
@@ -583,6 +613,7 @@ export function hourRollup(prev: HourAgg | undefined, s: Snapshot, spotUsd?: num
   const p: HourAgg = prev && prev.hour === hour ? prev : { hour, ticks: 0, spotSum: 0, spotCount: 0 };
   const bit = s.bittensor?.state;
   const base = s.base?.state;
+  const ppm = bit?.alpha.backing !== undefined && bit.wTaoSupply ? Number((bit.alpha.backing * 1_000_000n) / bit.wTaoSupply) : undefined;
   return {
     hour,
     ticks: p.ticks + 1,
@@ -599,6 +630,8 @@ export function hourRollup(prev: HourAgg | undefined, s: Snapshot, spotUsd?: num
     unclaimedFirst: p.unclaimedFirst ?? bit?.unclaimed,
     unclaimedLast: bit?.unclaimed ?? p.unclaimedLast,
     validatorStakeHigh: hi(p.validatorStakeHigh, bit?.validator?.rootStake),
+    backingPpmLow: ppm === undefined ? p.backingPpmLow : Math.min(p.backingPpmLow ?? ppm, ppm),
+    backingPpmHigh: ppm === undefined ? p.backingPpmHigh : Math.max(p.backingPpmHigh ?? ppm, ppm),
     spotSum: p.spotSum + (spotUsd ?? 0),
     spotCount: p.spotCount + (spotUsd === undefined ? 0 : 1),
   };

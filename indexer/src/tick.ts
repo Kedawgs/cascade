@@ -25,7 +25,7 @@ import { VAULT_RULES } from "./rules/vault.ts";
 import { Budget, createRpc } from "./rpc.ts";
 import { headTimeOf, rereadRange, type ScanResult, type ScanStop, scanChain } from "./scan.ts";
 import { pageEvents, seedEventsOf } from "./seed.ts";
-import { type BaseState, type BitState, type ChainReading, compact, compactHour, expand, expandHour, type HourAgg, hourRollup, payoutsDone, readSnapshot, type Snapshot } from "./snapshot.ts";
+import { type BaseState, type BitState, type ChainReading, compact, compactHour, expand, expandHour, type HourAgg, hourRollup, payoutsDone, quoteAmountOf, readSnapshot, type Snapshot } from "./snapshot.ts";
 import {
   appendStatements,
   type BatchCheckRow,
@@ -416,6 +416,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
       oracle: previous.base?.state.oracle,
       bitBridge: previous.bittensor?.state.primaryBridge,
+      payoutQuoteAmount: quoteAmountOf(previous.bittensor?.state),
       pendingMessages: [...state.pendingMessages, ...pendingFresh].map((m) => ({ messageId: m.messageId, direction: m.direction })),
       // every watched address both ways: its transaction count, and nonce() in case it is a Safe (the keys rule
       // takes a Safe's nonce() over its count). The reading keeps a nonce() only from an address with contract
@@ -634,6 +635,12 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   changes("tx_backlog", txBacklog.length ? JSON.stringify(txBacklog) : "");
   if (snap.bittensor?.state.payoutDelay !== undefined) changes("payout_delay", String(snap.bittensor.state.payoutDelay));
   changes("catching_up", catchingUp.join(","));
+  // the first block each chain was read with the watched contracts' filter, once: the hourly cross-check doesn't judge
+  // their events below it (a version that didn't ask for them stored none)
+  for (const c of CHAINS) {
+    const from = scans[c].firstBlock;
+    if (!state.meta[`watch_from:${c}`] && from !== undefined && watch[c].address.length > 0 && scans[c].cursor.scannedTo !== null) meta.set(`watch_from:${c}`, String(from));
+  }
   if (firstCaughtUp) meta.set("caught_up", String(nowS));
   meta.set("last_complete_tick", String(nowS));
   const hourNow = Math.floor(nowS / 3600) * 3600;

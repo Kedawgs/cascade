@@ -22,6 +22,10 @@ describe("the environments' vars in wrangler.jsonc", () => {
     }
   });
 
+  it("ship fmtao.backing_true without its hold in both (BACKING_HOLD false until a week of readings has set its tolerance)", () => {
+    for (const name of ["test", "production"]) expect(env[name]?.vars?.BACKING_HOLD, name).toBe("false");
+  });
+
   it("bind the /v1/scan rate limiter in both (a binding isn't inherited), 60 a minute, each in its own namespace", () => {
     const limits = ["test", "production"].map((name) => env[name]?.ratelimits ?? []);
     for (const l of limits) expect(l.map(({ name, simple }) => ({ name, simple }))).toEqual([{ name: "SCAN_LIMITER", simple: { limit: 60, period: 60 } }]);

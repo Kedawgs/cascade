@@ -140,6 +140,33 @@ describe("runLogsCheck", () => {
     expect(open).toMatchObject({ alert_key: "indexer.logs_omitted:bittensor", subject: "The Bittensor logs RPC omitted 1 watched event: AlphaVault RoleGranted" });
   });
 
+  it("never judges ForeverMoney's watched events below the first block the tick scanned with the watch: the first run after this version is deployed raises nothing for older ones", async () => {
+    const grant = (cfg: Config, block: bigint) =>
+      rawLog({
+        address: cfg.tokens.bittensor.alphaVault,
+        abi: DEPENDENCY_EVENTS,
+        eventName: "RoleGranted",
+        args: { role: h("GUARDIAN_ROLE"), account: "0x00000000000000000000000000000000000000ee", sender: "0x00000000000000000000000000000000000000ef" },
+        block,
+        logIndex: 0,
+        txHash: h(`a grant at ${block}`),
+      });
+    // the second serves a watched event the tick never asked for: it predates the watch
+    const { w, deps } = await world({ secondLogs: (chain, primary, { cfg }) => (chain === "bittensor" ? [...primary, grant(cfg, 6_900_166n)] : primary) });
+    // the ticks recorded, once, where they began reading with the watch: here the deployment's start (a first backfill)
+    const m = await meta();
+    expect([m["watch_from:base"], m["watch_from:bittensor"]]).toEqual([String(w.cfg.deployment.base.startBlock), String(w.cfg.deployment.bittensor.startBlock)]);
+    // as if this version had been deployed at block 6,900,170, after the grant
+    await db.batch([setMeta(db, "watch_from:bittensor", "6900170")]);
+    const r = await runLogsCheck(deps());
+    expect(r.bittensor).toMatchObject({ primary: 9, second: 9, omitted: 0, extra: 0 });
+    expect(await alerts()).toEqual([]);
+    // a later tick leaves the mark where it is
+    w.advance();
+    await w.tick();
+    expect((await meta())["watch_from:bittensor"]).toBe("6900170");
+  });
+
   it("checks on from where it left off on the next run, never twice, and never more than the cap at once", async () => {
     const { w, deps, to } = await world();
     await runLogsCheck(deps());

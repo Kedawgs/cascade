@@ -92,6 +92,9 @@ export function deploymentState(cfg: Config) {
       primaryBridge: d.bitAdapter,
       maxFeeAbs: 5n * 10n ** 15n,
       maxFeeBps: 100n,
+      /** the vault's largest chunk and its bridge's cap (read live 2026-10-31: a quote above the cap reverts) */
+      maxMessageValue: 15n * 10n ** 18n,
+      bridgeMaxMessageValue: 50n * 10n ** 18n,
       /** what quoteFee answers (a full chunk's fee, as the launch's adapter quoted it on 2026-10-31) */
       payoutFeeQuote: 1_315_669_376_468_497n,
       /** the addresses answering quoteFee: the Bittensor adapter, and any a test adds */
@@ -140,7 +143,7 @@ export function deploymentState(cfg: Config) {
     /** eth_getTransactionCount per chain and address */
     nonces: { base: {} as Record<Hex, bigint>, bittensor: {} as Record<Hex, bigint> },
     /** what the readings asked of the views that take arguments */
-    asked: { bucketSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number }[] },
+    asked: { bucketSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number; amount: bigint; sum: bigint }[] },
   };
 }
 
@@ -261,6 +264,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
               maxFeeAbs: () => x.maxFeeAbs,
               maxFeeBps: () => x.maxFeeBps,
               primaryBridge: () => x.primaryBridge,
+              maxMessageValue: () => x.maxMessageValue,
               getPayoutBatch: ([key]) => {
                 const p = x.payoutBatches[lc(key)];
                 return {
@@ -322,14 +326,18 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
               {
                 abi: BRIDGE_VIEWS,
                 fns: {
-                  quoteFee: v("bridge", "quoteFee", ([destChain, recipient, message]) => {
+                  quoteFee: v("bridge", "quoteFee", ([destChain, recipient, message, amount]) => {
                     const [, , , entries] = decodeAbiParameters(
                       [{ type: "uint8" }, { type: "bytes32" }, { type: "uint32" }, { type: "tuple[]", components: [{ type: "address" }, { type: "uint256" }] }],
                       message as Hex,
                     );
-                    state.asked.quotes.push({ bridge: lc(bridge), destChain: destChain as bigint, recipient: lc(recipient), entries: entries.length });
+                    // the adapter's _checkSend: MessageTooLarge
+                    if ((amount as bigint) > x.bridgeMaxMessageValue) return REVERT;
+                    const sum = (entries as readonly (readonly [Hex, bigint])[]).reduce((t, e) => t + e[1], 0n);
+                    state.asked.quotes.push({ bridge: lc(bridge), destChain: destChain as bigint, recipient: lc(recipient), entries: entries.length, amount: amount as bigint, sum });
                     return x.payoutFeeQuote;
                   }),
+                  maxMessageValue: () => x.bridgeMaxMessageValue,
                 },
               },
             ]),

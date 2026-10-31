@@ -734,10 +734,12 @@ describe("what Cascade depends on, through the tick", () => {
     const kind = (m: string[]) =>
       m[0] === "eth_getLogs" ? "window" : m.join() === "eth_call" ? "multicall" : m[0] === "eth_getTransactionCount" ? "counts" : m.every((x) => x === "eth_getBlockByNumber") ? "times" : m.join("+");
     expect(new Set(steady.map((f) => kind(f.methods)))).toEqual(new Set(["window", "multicall", "counts", "times"]));
+    // the fee quote's chunk carries the most the vault sends, as the last reading named it (15 TAO in the fake, as live)
+    expect(w.state.asked.quotes.at(-1)).toMatchObject({ entries: 100, amount: 15n * 10n ** 18n });
   });
 
-  it("raises fmtao.backing_true and its hold when the AlphaVault's backing falls below wTAO's supply, and a MINTER_ROLE grant on FM-TAO as a critical", async () => {
-    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+  it("raises fmtao.backing_true and, with BACKING_HOLD on, its hold when the AlphaVault's backing falls below wTAO's supply, and a MINTER_ROLE grant on FM-TAO as a critical", async () => {
+    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com", BACKING_HOLD: "true" } });
     await w.tick();
     w.advance();
     await w.tick();
@@ -767,5 +769,38 @@ describe("what Cascade depends on, through the tick", () => {
     expect(w.sent.map((m) => m.subject)).toEqual(
       expect.arrayContaining([expect.stringMatching(/^\[CASCADE CRITICAL\] The AlphaVault's backing is below wTAO's supply/), expect.stringMatching(/^\[CASCADE CRITICAL\] ForeverMoney's FM-TAO \(Base\): MINTER_ROLE granted/)]),
     );
+  });
+
+  it("raises fmtao.backing_true without a hold as shipped (BACKING_HOLD false)", async () => {
+    const w = tickWorld();
+    expect(w.cfg.backingHold).toBe(false);
+    w.state.bit.alpha.backing = 90n * 10n ** 18n;
+    for (let i = 0; i < 3; i++) {
+      await w.tick();
+      w.advance();
+    }
+    expect(await alertKeys()).toContain("fmtao.backing_true:alpha");
+    expect(await rows("SELECT id FROM holds")).toEqual([]);
+    expect((await w.status()).hold.active).toBe(false);
+  });
+
+  it("fetches a watched event's transaction in the tick that stores it, and names its sender in the alert", async () => {
+    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+    await w.tick();
+    w.advance();
+    await w.tick();
+    const tx = h("a router change");
+    w.addLogs("base", [
+      rawLog({ address: w.cfg.tokens.base.tokenPool, abi: DEPENDENCY_EVENTS, eventName: "RouterUpdated", args: { oldRouter: KEEPER, newRouter: "0x00000000000000000000000000000000000000bb" }, block: 37_000_420n, logIndex: 0, txHash: tx }),
+    ]);
+    const before = w.net.fetches.length;
+    w.advance();
+    await w.tick();
+    // its transaction was asked for in that very tick (tick-world's node answers every transaction as the keeper's)
+    expect(w.net.fetches.slice(before).some((f) => f.chain === "base" && f.methods.includes("eth_getTransactionByHash") && JSON.stringify(f.params).includes(tx))).toBe(true);
+    const [alert] = await rows<{ alert_key: string; body: string }>("SELECT alert_key, body FROM alerts WHERE rule = 'fmtao.role_change_critical'");
+    expect(alert.alert_key).toBe(`fmtao.role_change_critical:base:${tx}`);
+    expect(alert.body).toContain(`sent by: ${KEEPER}`);
+    expect(w.sent.find((m) => m.subject.includes("router"))?.text).toContain(`sent by: ${KEEPER}`);
   });
 });

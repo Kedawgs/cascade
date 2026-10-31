@@ -46,7 +46,9 @@ const blake2_128Concat = (key: Hex) => `${bytesToHex(blake2b(hexToBytes(key), { 
 /** A netuid as an `Identity` map key: its u16, little-endian. */
 const netuidKey = (netuid: number) => `${(netuid & 0xff).toString(16).padStart(2, "0")}${((netuid >> 8) & 0xff).toString(16).padStart(2, "0")}`;
 
-/** `Delegates`: MAP (hotkey) → take (u16, of 65,535). An entry says the hotkey is open for delegation. */
+/** `Delegates`: MAP (hotkey) → take (u16, of 65,535), a ValueQuery: a hotkey with no entry reads as the default take,
+ * 11,796 (18%; the entry's default bytes 0x142e in the live runtime's metadata, 2026-10-31). An empty answer here
+ * (decodeU16's null) is that default, not "no take". */
 export const DELEGATES_PREFIX = "0x658faa385070e074c85bf6b568cf055560d1f0ff648e4c86ea413fc0173d4038" as Hex;
 export const delegatesKey = (hotkey: Hex): Hex => `${DELEGATES_PREFIX}${blake2_128Concat(hotkey)}` as Hex;
 

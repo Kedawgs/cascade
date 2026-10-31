@@ -1,10 +1,11 @@
 import { encodeAbiParameters, type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
 import { CCIP_SELECTOR } from "../../src/abi.ts";
-import { compact, compactHour, expand, expandHour, hourRollup, payoutsDone, peerIdOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
+import { compact, compactHour, expand, expandHour, hourRollup, payoutsDone, peerIdOf, quoteAmountOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
 import { decodeAccountId, decodeAccountIds, OWNER_PREFIX, ownerStorageKey, STAKING_HOTKEYS_PREFIX, stakingHotkeysKey } from "../../src/subtensor.ts";
 import { deploymentState, encodeAccountIds, fakeDeployment, GUARDIAN, KEEPER, OWNER, VALIDATOR_OWNER } from "./fake-deployment.ts";
 import { testConfig } from "./fixtures.ts";
+import { bitState } from "./rule-ctx.ts";
 import { reads } from "./v3-test-fixtures.ts";
 
 const cfg = testConfig();
@@ -78,6 +79,9 @@ describe("readSnapshot", () => {
       primaryBridge: d.bitAdapter,
       maxFeeAbs: 5n * 10n ** 15n,
       maxFeeBps: 100n,
+      // the largest chunk the vault sends, and the most its bridge takes (read live 2026-10-31: 15 and 50 TAO)
+      maxMessageValue: 15n * 10n ** 18n,
+      bridgeMaxMessageValue: 50n * 10n ** 18n,
       // the quote rounded up to whole rao, as the vault rounds the fee it checks
       payoutFeeQuote: 1_315_670_000_000_000n,
     });
@@ -110,11 +114,16 @@ describe("readSnapshot", () => {
     // the lane's selectors: the Base pool is asked about Bittensor, the lock pool about Base
     expect(state.asked.bucketSelectors).toEqual(expect.arrayContaining([`base:${CCIP_SELECTOR.bittensor}`, `bittensor:${CCIP_SELECTOR.base}`]));
     expect(state.asked.backingOf).toEqual([cfg.tokens.bittensor.fmTao]);
-    // the quote: a chunk of the most entries a payout chunk holds (100), to the front door on Base, at the primary bridge
-    expect(state.asked.quotes).toEqual([{ bridge: d.bitAdapter, destChain: 8453n, recipient: d.frontDoor, entries: 100 }]);
+    // the quote: a chunk of the most entries a payout chunk holds (100), to the front door on Base, at the primary bridge;
+    // worth 1 TAO until a reading has named the largest chunk the vault sends
+    expect(state.asked.quotes).toEqual([{ bridge: d.bitAdapter, destChain: 8453n, recipient: d.frontDoor, entries: 100, amount: 10n ** 18n, sum: 10n ** 18n }]);
+    // then worth that (the lower of the vault's and its bridge's maxMessageValue), so a fee in basis points is priced;
     // and from the bridge the last reading named, when it moved
-    await readSnapshot(rpc, cfg, inputs({ bitBridge: other }), 2);
-    expect(state.asked.quotes.at(-1)).toMatchObject({ bridge: other });
+    await readSnapshot(rpc, cfg, inputs({ bitBridge: other, payoutQuoteAmount: 15n * 10n ** 18n }), 2);
+    expect(state.asked.quotes.at(-1)).toEqual({ bridge: other, destChain: 8453n, recipient: d.frontDoor, entries: 100, amount: 15n * 10n ** 18n, sum: 15n * 10n ** 18n });
+    // more than the bridge takes reverts (MessageTooLarge): the quote is left unread
+    const s = await readSnapshot(rpc, cfg, inputs({ payoutQuoteAmount: 51n * 10n ** 18n }), 3);
+    expect(s.bittensor?.state.payoutFeeQuote).toBeUndefined();
   });
 
   it("reads the validator's take, root stake and root uid, and an unset RootStakeUnlockInterval as 0; an absent entry as null", async () => {
@@ -338,6 +347,14 @@ describe("readings in D1", () => {
     expect(agg.supplyFirst).toBe(100n * 10n ** 18n);
     // the validator's root stake: the hour's highest (validator.root_stake_drop compares with a day of them)
     expect(agg.validatorStakeHigh).toBe(1_021_436_954_236_042n);
+    // the AlphaVault's backing over wTAO's supply, in ppm: the hour's range (a week of it sets backingToleranceBps)
+    expect([agg.backingPpmLow, agg.backingPpmHigh]).toEqual([1_010_000, 1_010_000]);
+    state.bit.alpha.backing = 99n * 10n ** 18n;
+    const dipped = hourRollup(agg, await readSnapshot(rpc, cfg, inputs(), at(180)));
+    expect([dipped.backingPpmLow, dipped.backingPpmHigh]).toEqual([990_000, 1_010_000]);
+    expect(quoteAmountOf({ ...bitState({}), maxMessageValue: 15n * 10n ** 18n, bridgeMaxMessageValue: 50n * 10n ** 18n })).toBe(15n * 10n ** 18n);
+    expect(quoteAmountOf({ ...bitState({}), bridgeMaxMessageValue: 50n * 10n ** 18n })).toBe(50n * 10n ** 18n);
+    expect(quoteAmountOf(undefined)).toBeUndefined();
     const next = hourRollup(agg, await readSnapshot(rpc, cfg, inputs(), at(3600)));
     expect(next).toMatchObject({ hour: 3600 * 1001, ticks: 1, priceHigh: 10n ** 18n - 3n });
   });

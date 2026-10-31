@@ -72,7 +72,9 @@ committed, the policy allows no inline script. After `next build`, `scripts/csp-
 sha256 of every exported page's inline scripts (the 404 page's too) to it, and gives each page a
 policy of its own allowing only that page's (Next writes a few into every page, different in every
 build). Styles keep `'unsafe-inline'`: the pages have inline `style` attributes and Base Account
-injects a `<style>`.
+injects a `<style>`. When the build names the history indexer (`NEXT_PUBLIC_CASCADE_INDEXER_URL`, an
+https origin and nothing more; see "How it reads the chains"), the same step adds exactly that origin
+to `connect-src`, on the fallback and every page; unset, the committed policy stands as it is.
 
 On Cloudflare Pages:
 - **The build command must be `pnpm build`** (in `web/`, output `out`). `next build` alone leaves

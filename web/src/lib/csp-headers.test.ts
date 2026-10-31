@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { fallbackPolicy, inlineScriptHashes, routeOf, withPageRules } from "../../scripts/csp-headers.mjs";
-import { RPC } from "./cascade/config";
+import { build, fallbackPolicy, indexerOrigin, inlineScriptHashes, routeOf, withPageRules } from "../../scripts/csp-headers.mjs";
+import { indexerOrigin as siteIndexerOrigin, RPC } from "./cascade/config";
 
 const HEADERS = readFileSync(fileURLToPath(new URL("../../public/_headers", import.meta.url)), "utf8");
 const sha = (s: string) => `'sha256-${createHash("sha256").update(s, "utf8").digest("base64")}'`;
@@ -113,6 +115,86 @@ describe("each page's own policy", () => {
     expect(() => withPageRules(HEADERS, [{ route: "/", html: many }])).toThrow(/2,000/);
     const pages = Array.from({ length: 100 }, (_, i) => ({ route: `/p${i}/`, html: "<script>a()</script>" }));
     expect(() => withPageRules(HEADERS, pages)).toThrow(/100/);
+  });
+
+  it("lets the page connect to the indexer's origin when the build names one, exactly that origin and nothing else, on the fallback and every page", () => {
+    const pages = [
+      { route: "/", html: "<script>home()</script>" },
+      { route: "/activity/", html: "<script>activity()</script>" },
+    ];
+    const indexer = "https://api.cascadefi.xyz";
+    const out = withPageRules(HEADERS, pages, ["<script>notFound()</script>"], [indexer]);
+    const committed = directives(fallbackPolicy(HEADERS)).get("connect-src")!;
+    expect(directives(fallbackPolicy(out)).get("connect-src")).toEqual([...committed, indexer]);
+    for (const { route } of pages) expect(directives(policyOf(out, route)).get("connect-src")).toEqual([...committed, indexer]);
+    // nothing else about the policies changes
+    const without = withPageRules(HEADERS, pages, ["<script>notFound()</script>"]);
+    expect(out.replaceAll(` ${indexer}`, "")).toBe(without);
+    // no wildcard, and no second copy when the step runs again on its own output
+    expect(out).not.toMatch(/https:\/\/\*\.cascadefi/);
+    const again = withPageRules(out, pages, ["<script>notFound()</script>"], [indexer]);
+    expect(again.split(indexer)).toHaveLength(out.split(indexer).length);
+    expect(again).toBe(out);
+  });
+
+  it("names no indexer when the build doesn't: the committed connect-src stands as it is", () => {
+    const pages = [{ route: "/", html: "<script>home()</script>" }];
+    const committed = directives(fallbackPolicy(HEADERS)).get("connect-src");
+    for (const out of [withPageRules(HEADERS, pages), withPageRules(HEADERS, pages, [], [])]) {
+      expect(directives(fallbackPolicy(out)).get("connect-src")).toEqual(committed);
+      expect(directives(policyOf(out, "/")).get("connect-src")).toEqual(committed);
+    }
+  });
+
+  it("reads the indexer's origin by the site's own rule, so the policy names exactly where the code connects", () => {
+    for (const v of [
+      "https://api.cascadefi.xyz",
+      "https://cascade-indexer-production.dev-truthpoll.workers.dev",
+      "https://localhost:8787",
+      "https://api.cascadefi.xyz/",
+      "https://api.cascadefi.xyz/v1",
+      "http://api.cascadefi.xyz",
+      "https://*.cascadefi.xyz",
+      "https://API.cascadefi.xyz",
+      "api.cascadefi.xyz",
+      "",
+      undefined,
+    ]) {
+      expect(indexerOrigin(v), String(v)).toBe(siteIndexerOrigin(v));
+    }
+  });
+
+  /** A fake export: the committed headers and three pages, built in a fresh folder. */
+  const exported = () => {
+    const out = mkdtempSync(join(tmpdir(), "cascade-csp-"));
+    writeFileSync(join(out, "_headers"), HEADERS);
+    writeFileSync(join(out, "index.html"), "<html><script>home()</script></html>");
+    mkdirSync(join(out, "activity"));
+    writeFileSync(join(out, "activity", "index.html"), "<html><script>activity()</script></html>");
+    writeFileSync(join(out, "404.html"), "<html><script>notFound()</script></html>");
+    return out;
+  };
+
+  it("builds out/_headers with exactly the indexer's origin in every connect-src when the env names one, and none when it doesn't", () => {
+    const committed = directives(fallbackPolicy(HEADERS)).get("connect-src")!;
+    const named = exported();
+    build(named, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" });
+    const withIt = readFileSync(join(named, "_headers"), "utf8");
+    expect(directives(fallbackPolicy(withIt)).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
+    expect(directives(policyOf(withIt, "/")).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
+    expect(directives(policyOf(withIt, "/activity/")).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
+    expect(withIt.match(/https:\/\/api\.cascadefi\.xyz/g)).toHaveLength(3);
+    // the page hashes are there as before
+    expect(directives(policyOf(withIt, "/activity/")).get("script-src")).toEqual(["'self'", sha("activity()")]);
+    expect(directives(fallbackPolicy(withIt)).get("script-src")).toEqual(["'self'", sha("home()"), sha("activity()"), sha("notFound()")]);
+    for (const env of [{}, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "" }, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz/v1" }]) {
+      const unnamed = exported();
+      build(unnamed, env);
+      const without = readFileSync(join(unnamed, "_headers"), "utf8");
+      expect(without, JSON.stringify(env)).not.toContain("cascadefi.xyz");
+      expect(directives(fallbackPolicy(without)).get("connect-src")).toEqual(committed);
+      expect(directives(policyOf(without, "/")).get("connect-src")).toEqual(committed);
+    }
   });
 
   it("fails the build when the committed fallback's script-src is anything but 'self'", () => {

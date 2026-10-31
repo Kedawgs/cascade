@@ -60,14 +60,39 @@ export const fallbackPolicy = (headers) => fallbackLine(headers).policy;
 /** `policy` with its script-src as 'self' and `hashes`. */
 const withScripts = (policy, hashes) => policy.replace(/(^|;\s*)script-src [^;]*/, (_m, lead) => `${lead}${["script-src 'self'", ...hashes].join(" ")}`);
 
+/** `policy` with `origins` added to its connect-src, each once (a run on its own output adds nothing twice). */
+function withConnect(policy, origins) {
+  if (origins.length === 0) return policy;
+  return policy.replace(/(^|;\s*)connect-src ([^;]*)/, (_m, lead, values) => {
+    const have = values.trim().split(/\s+/);
+    return `${lead}connect-src ${[...have, ...origins.filter((o) => !have.includes(o))].join(" ")}`;
+  });
+}
+
+/** `v` as the history indexer's origin: exactly an https origin (scheme and host, a port at most: no path,
+ * slash, query, fragment, credentials or wildcard), else null. The same rule as the site's
+ * (src/lib/cascade/config.ts, indexerOrigin; a test holds the two together), so the policy names exactly
+ * the origin the code connects to, never a wildcard. */
+export function indexerOrigin(v) {
+  if (!v) return null;
+  let url;
+  try {
+    url = new URL(v);
+  } catch {
+    return null;
+  }
+  return url.protocol === "https:" && url.origin === v && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(url.hostname) ? v : null;
+}
+
 /** `headers` with the fallback allowing every page's inline scripts and those of `others` (the 404 page),
- * and one rule per page after it allowing that page's alone. A previous run's hashes and rules are
- * replaced. The committed fallback's script-src must be 'self' alone. */
-export function withPageRules(headers, pages, others = []) {
+ * and one rule per page after it allowing that page's alone; both with `connect` (the indexer's origin,
+ * when the build names one) added to connect-src. A previous run's hashes and rules are replaced. The
+ * committed fallback's script-src must be 'self' alone. */
+export function withPageRules(headers, pages, others = [], connect = []) {
   const base = headers.includes(MARKER) ? headers.slice(0, headers.indexOf(MARKER)) : headers;
   const { index, policy } = fallbackLine(base);
   // a previous run's hashes are taken off again; what is left must be the committed 'self' alone
-  const committed = policy.replace(/(^|;\s*)script-src 'self'(?: 'sha256-[A-Za-z0-9+/=]+')+/, "$1script-src 'self'");
+  const committed = withConnect(policy.replace(/(^|;\s*)script-src 'self'(?: 'sha256-[A-Za-z0-9+/=]+')+/, "$1script-src 'self'"), connect);
   const scripts = /(?:^|;\s*)script-src ([^;]*)/.exec(committed)?.[1].trim();
   if (scripts !== "'self'") throw new Error(`the fallback Content-Security-Policy's script-src must be 'self' alone, not "${scripts ?? "(none)"}"`);
   const every = [...new Set([...pages.map((p) => p.html), ...others].flatMap(inlineScriptHashes))];
@@ -86,16 +111,26 @@ function htmlFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? htmlFiles(join(dir, e.name)) : e.name.endsWith(".html") ? [join(dir, e.name)] : []));
 }
 
-function main() {
-  const out = fileURLToPath(new URL("../out", import.meta.url));
+/** Writes `out`'s _headers from the pages exported there, with the indexer's origin in connect-src when
+ * `env` names one (NEXT_PUBLIC_CASCADE_INDEXER_URL, the value the site was built with). */
+export function build(out, env = process.env) {
   const headersPath = join(out, "_headers");
   const files = htmlFiles(out).map((file) => ({ route: routeOf(relative(out, file).split(sep).join("/")), html: readFileSync(file, "utf8") }));
   const pages = files.filter((p) => p.route !== null).sort((a, b) => a.route.localeCompare(b.route));
   if (pages.length === 0) throw new Error("no exported pages in out/: run next build first");
   const others = files.filter((p) => p.route === null).map((p) => p.html);
-  writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages, others));
+  const indexer = indexerOrigin(env.NEXT_PUBLIC_CASCADE_INDEXER_URL);
+  if (env.NEXT_PUBLIC_CASCADE_INDEXER_URL && !indexer) {
+    console.warn("csp-headers: NEXT_PUBLIC_CASCADE_INDEXER_URL isn't an https origin; the site ignores it, and the policy doesn't name it");
+  }
+  writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages, others, indexer ? [indexer] : []));
+  return { pages: pages.map((p) => p.route), indexer };
+}
+
+function main() {
+  const { pages, indexer } = build(fileURLToPath(new URL("../out", import.meta.url)));
   console.log(
-    `csp-headers: a Content-Security-Policy for each of ${pages.length} pages in out/_headers (${pages.map((p) => p.route).join(" ")}), and the fallback with all their inline scripts and the 404 page's`,
+    `csp-headers: a Content-Security-Policy for each of ${pages.length} pages in out/_headers (${pages.join(" ")}), and the fallback with all their inline scripts and the 404 page's${indexer ? `; connect-src also allows the indexer at ${indexer}` : ""}`,
   );
 }
 

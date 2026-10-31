@@ -117,6 +117,15 @@ for display only (`units.ts`).
   as the list, so one opened from the list shows at once and the two never read the chain twice.
 - **Prices and fees:** TAO from Uniswap's quoter (what selling 0.01 TAO pays), swap fees from the
   route's pool fees, the bridge fee from the Bittensor adapter's own `quoteFee`.
+- **Nothing is sent on one source's word.** Every figure above comes from `https://mainnet.base.org`,
+  so before a stake is sent its quote (the price its floor is cut from) is checked against the
+  30-minute TWAP of Cascade's own oracle (`CascadeTwapOracle.usdcValue`), read on the other Base RPC
+  the policy allows (`base-rpc.publicnode.com`; on the first only when that one can't answer): a quote
+  more than 5% off the oracle either way, or an oracle that can't be read, sends nothing and says so
+  (`flows.ts`, `assertPriceAgrees`; the 5% is justified from live data in `config.ts`,
+  `PRICE_CHECK_BPS`). Send it now reads the bridge fee on both RPCs and offers it only when they agree
+  within 10%, at the larger (`reads.ts`, `readOpenBatch`); when they don't, the receipt says the fee
+  couldn't be confirmed.
 
 ## How it sends transactions
 
@@ -161,6 +170,23 @@ until the next approval replaces it.
 A wallet that offers EIP-5792 batching (MetaMask's smart account, Base Account) gets one
 confirmation; any other wallet gets the steps one at a time, and a stopped stake continues from its
 receipt in Activity without repeating a confirmed step.
+
+**Continuing a stopped stake never sends the floor it was first quoted with.** A stake whose swap (on
+v3, its one transaction) the chain doesn't show is quoted again, exactly as a fresh stake is, and goes
+at today's floor (`flows.ts`, `freshStakeTerms`), after the same oracle check. If today's TAO figure
+moved from the one the user last saw by more than the 0.5% slippage they accepted, nothing is sent:
+the receipt says "The price moved since you started: you'd now get about X TAO (was Y)" and the button
+becomes **Continue at today's price**, which quotes again on the way (and asks again if it moved again
+from the figure shown). A stake stopped a day or more ago isn't continued at all: its receipt shows it
+as a stake that didn't happen and offers **Stake again at today's price**, the stake form with the
+same amount typed in (`/stake?amount=…`), quoted afresh. The floor a record keeps (`minTaoOut`) is for
+the record only.
+
+The browser's own records (the op log) are checked field by field when read back (`oplog.ts`,
+`decodeOperations`): known kinds, states and step names, exact amounts within their token's range,
+dates that make sense, hashes and accounts that are what they say. A record that isn't is dropped
+with a console warning and never reaches a screen or a flow. With the re-quoting above, nothing that
+moves money is ever taken from storage without a fresh read from the chain.
 
 ## Copy rules
 

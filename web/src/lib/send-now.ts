@@ -200,7 +200,10 @@ export function sendNowView(x: SendNowInput): SendNowView | null {
   }
 
   if (b.feeWei === undefined) {
-    return { leaves, button: { label: "Send it now: about –", note: "We can't read the bridge fee right now, so it can't be sent from here yet.", disabled: true } };
+    const note = b.feeUnconfirmed
+      ? "The bridge fee couldn't be confirmed right now (our two sources for it disagree), so it can't be sent from here yet."
+      : "We can't read the bridge fee right now, so it can't be sent from here yet.";
+    return { leaves, button: { label: "Send it now: about –", note, disabled: true } };
   }
   const pay = feeToPay(b.feeWei, b.potWei);
   const value = sendNowValue(b.feeWei, b.potWei);

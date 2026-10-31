@@ -17,7 +17,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it, vi } from "vitest";
 import type { Deployment } from "./config";
 import { FRONT_DOOR, STAKER } from "./abi";
-import { PATH_TAO_TO_USDC, TOKENS, UNISWAP } from "./config";
+import { PATH_TAO_TO_USDC, PRICE_CHECK_BPS, RESUME_WINDOW_MS, TOKENS, UNISWAP } from "./config";
+import { STAKE_LAPSED } from "./trail";
 import {
   assertWired,
   cancelCall,
@@ -30,15 +31,24 @@ import {
   type FlowCall,
   isRevert,
   permitTypedData,
+  freshStakeTerms,
   planResumeStakeV3,
   planStakeV3,
   planSendNow,
   planUnstake,
+  PRICE_DISAGREES,
+  PRICE_UNCHECKED,
+  pricesAgree,
+  QuoteMovedError,
+  quoteMoved,
+  RESUME_UNQUOTED,
+  spotUsdcPerTao,
   SEND_BLOCKED,
   SEND_COVERED,
   SEND_FEE_ROSE,
   SEND_FREE,
   SEND_GONE,
+  SEND_FEE_UNCONFIRMED,
   SEND_NO_FEE,
   SEND_NOT_NOW,
   SEND_NOT_YET,
@@ -671,6 +681,13 @@ describe("Send it now", () => {
     expect(await refused(plan(async () => Promise.reject(new Error("HTTP request failed. URL: https://mainnet.base.org"))))).toBe(SEND_UNREAD);
   });
 
+  it("sends nothing when the two Base RPCs disagree about the fee (reads.ts leaves it out as unconfirmed), and says so", async () => {
+    const simulate = ok();
+    expect(await refused(plan(open({ feeWei: undefined, feeUnconfirmed: true }), simulate))).toBe(SEND_FEE_UNCONFIRMED);
+    expect(SEND_FEE_UNCONFIRMED).toBe("The bridge fee couldn't be confirmed just now (our two sources for it disagree), so nothing was sent. Try again in a moment.");
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
   it("sends nothing when the wallet can't cover the value and the network fee, and says how much it needs", async () => {
     const simulate = ok();
     // 0.000969 sent + 0.00001 for gas, at $2,330, to the cent above
@@ -820,7 +837,19 @@ describe("createSharedFlowGuard", () => {
 
 const STAKER_AT = getAddress("0x00000000000000000000000000000000005a4e12");
 const D3: Deployment = { ...D, staker: STAKER_AT, oracle: getAddress("0x000000000000000000000000000000000000041e") };
-const q3 = { usdcIn: 20_000_000n, minTaoOut: 77_611_000_000_000_000n } as DepositQuote;
+/** $20 at about $255 a TAO after Cascade's $0.05 and 0.15%: 0.078 TAO expected, 0.0776 the floor. */
+const q3 = {
+  usdcIn: 20_000_000n,
+  expectedTao: 78_000_000_000_000_000n,
+  targetTao: 78_000_000_000_000_000n,
+  minTaoOut: 77_611_000_000_000_000n,
+  depositFeeUsdc: 50_000n,
+  swapFeeUsdc: 29_925n,
+  taoPriceUsd: 256.41,
+  feesUsd: 0.15,
+} as DepositQuote;
+/** The oracle's 30-minute TWAP: $255 a TAO, within the 5% the quote is held to. */
+const ORACLE = async () => 255_000_000n;
 const NOW = 1_800_000_000_000; // ms
 const DEADLINE = 1_800_001_800n; // NOW + 30 minutes, in seconds
 const declined = () => Object.assign(new Error("User rejected the request."), { name: "UserRejectedRequestError", code: 4001 });
@@ -906,9 +935,62 @@ describe("the USDC permit", () => {
   });
 });
 
+describe("the price check before any stake (the quote against the oracle)", () => {
+  it("prices the quote as what the USDC after Cascade's fees pays per TAO: the swap's own price, pool fees and impact included", () => {
+    // (20 - 0.05 - 0.029925) USDC for 0.078 TAO: $255.39 a TAO
+    expect(spotUsdcPerTao(q3)).toBe(255_385_576n);
+    expect(spotUsdcPerTao({ ...q3, expectedTao: 0n })).toBe(0n);
+  });
+
+  it("agrees within 5% of the oracle's price either way, and never with a price of nothing", () => {
+    const oracle = 255_000_000n;
+    expect(pricesAgree(255_385_576n, oracle)).toBe(true);
+    expect(pricesAgree((oracle * 10_500n) / 10_000n, oracle)).toBe(true);
+    expect(pricesAgree((oracle * 9_500n) / 10_000n, oracle)).toBe(true);
+    expect(pricesAgree((oracle * 10_500n) / 10_000n + 1n, oracle)).toBe(false);
+    expect(pricesAgree((oracle * 9_500n) / 10_000n - 1n, oracle)).toBe(false);
+    expect(pricesAgree(0n, oracle)).toBe(false);
+    expect(pricesAgree(oracle, 0n)).toBe(false);
+    expect(PRICE_CHECK_BPS).toBe(500n);
+  });
+
+  it("stops a stake whose quote is off the oracle before the wallet is asked anything, and says why", async () => {
+    const p = port();
+    // the quote pays $255 a TAO; the oracle says $200: the RPC that quoted is lying, or the pool is being pushed
+    const err = await planStakeV3(p, { q: q3, w: none, d: D3, account: ME, nonce: async () => 7n, now: NOW, oracle: async () => 200_000_000n }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect((err as FlowError).message).toBe(PRICE_DISAGREES);
+    expect(PRICE_DISAGREES).toBe("The price we were quoted doesn't match Cascade's price oracle, so nothing was sent. Try again in a few minutes.");
+    expect(p.signPermit).not.toHaveBeenCalled();
+    expect(p.hasCode).not.toHaveBeenCalled();
+    expect(p.simulate).not.toHaveBeenCalled();
+  });
+
+  it("stops a stake when the oracle can't be read: never sent on one source's word", async () => {
+    const p = port();
+    const err = await planStakeV3(p, { q: q3, w: none, d: D3, account: ME, nonce: async () => 7n, now: NOW, oracle: async () => Promise.reject(new HttpRequestError({ url: "https://base-rpc.publicnode.com", status: 429 })) }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("needs-you");
+    expect((err as FlowError).message).toBe(PRICE_UNCHECKED);
+    expect((err as FlowError).message).not.toMatch(/publicnode/);
+    expect(p.signPermit).not.toHaveBeenCalled();
+  });
+
+  it("asks the oracle once per stake, before anything else", async () => {
+    const p = port();
+    const oracle = vi.fn(ORACLE);
+    await planStakeV3(p, { q: q3, w: none, d: D3, account: ME, nonce: async () => 7n, now: NOW, oracle });
+    expect(oracle).toHaveBeenCalledOnce();
+    expect(oracle.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(p.hasCode).mock.invocationCallOrder[0]);
+  });
+});
+
 describe("planStakeV3", () => {
   const plan = (p: ReturnType<typeof port>, w: Balances = none, nonce = 7n) =>
-    planStakeV3(p, { q: q3, w, d: D3, account: ME, nonce: async () => nonce, now: NOW });
+    planStakeV3(p, { q: q3, w, d: D3, account: ME, nonce: async () => nonce, now: NOW, oracle: ORACLE });
 
   it("an account without code signs one permit, on Base, for exactly usdcIn to the staker, then sends one stakeWithPermit", async () => {
     const p = port();
@@ -980,7 +1062,7 @@ describe("planStakeV3", () => {
       port({ simulate: vi.fn(async (c: FlowCall) => (c.functionName === "permit" ? { ok: true as const } : { ok: false as const, revert })) });
     const why = async (revert: string, minUsd?: () => Promise<number>) => {
       const p = refusing(revert);
-      const err = await planStakeV3(p, { q: q3, w: none, d: D3, account: ME, nonce: async () => 7n, now: NOW, minUsd }).catch((e: unknown) => e);
+      const err = await planStakeV3(p, { q: q3, w: none, d: D3, account: ME, nonce: async () => 7n, now: NOW, minUsd, oracle: ORACLE }).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(FlowError);
       expect((err as FlowError).state).toBe("failed");
       expect(p.send).not.toHaveBeenCalled();
@@ -1086,39 +1168,165 @@ describe("planStakeV3", () => {
 
 describe("resumeStakeV3Calls", () => {
   const op = { usdcIn: q3.usdcIn, minTaoOut: q3.minTaoOut, hashes: {} as Partial<Record<string, Hex>>, callsId: undefined as string | undefined };
+  /** Today's quote, a touch under the one recorded. */
+  const fresh = { minTaoOut: 77_200_000_000_000_000n };
 
-  it("carries on by approval at the floor the user agreed to, with a fresh deadline, never asking for a signature again", () => {
-    const calls = resumeStakeV3Calls(op, none, D3, ME, NOW);
+  it("carries on by approval at the fresh quote's floor, with a fresh deadline, never asking for a signature again", () => {
+    const calls = resumeStakeV3Calls(op, none, D3, ME, NOW, fresh);
     expect(calls.map((c) => c.functionName)).toEqual(["approve", "stake"]);
     expect(calls[0].args).toEqual([STAKER_AT, q3.usdcIn]);
-    expect(calls[1].args).toEqual([ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE]);
+    expect(calls[1].args).toEqual([ME, q3.usdcIn, fresh.minTaoOut, 0, DEADLINE]);
   });
 
-  it("only waits for a stake already sent, never approving again in front of it", () => {
+  it("never builds a stake not yet sent from the record alone: the recorded floor is not one to send", () => {
+    expect(() => resumeStakeV3Calls(op, none, D3, ME, NOW)).toThrow(/fresh quote/);
+    expect(() => resumeStakeV3Calls({ ...op, minTaoOut: undefined }, none, D3, ME, NOW)).toThrow(/fresh quote/);
+  });
+
+  it("only waits for a stake already sent, never approving again in front of it, and needs no quote for that", () => {
     const calls = resumeStakeV3Calls({ ...op, hashes: { stake: H(5) } }, none, D3, ME, NOW);
     expect(calls.map((c) => c.key)).toEqual(["stake"]);
   });
 
-  it("rebuilds a wallet batch still being checked exactly as it was sent, so its receipts line up", () => {
+  it("rebuilds a wallet batch still being checked exactly as it was sent, at the floor it was sent with, so its receipts line up", () => {
     const calls = resumeStakeV3Calls({ ...op, callsId: "batch-1" }, { ...none, usdcStakerAllowance: q3.usdcIn }, D3, ME, NOW);
     expect(calls.map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
-  });
-
-  it("needs the floor recorded on the stake", () => {
-    expect(() => resumeStakeV3Calls({ ...op, minTaoOut: undefined }, none, D3, ME, NOW)).toThrow(/no recorded minimum/);
+    expect(calls[1].args[2]).toBe(q3.minTaoOut);
   });
 });
 
-describe("carrying on a v3 stake the chain may already show", () => {
-  const op = { usdcIn: q3.usdcIn, minTaoOut: q3.minTaoOut, hashes: {} as Partial<Record<string, Hex>>, callsId: undefined as string | undefined };
-  const resume = (over: Partial<Parameters<typeof planResumeStakeV3>[0]>) =>
-    planResumeStakeV3({ op, w: none, d: D3, account: ME, now: NOW, findStake: async () => null, adopt: vi.fn(), ...over });
+describe("a stopped stake's terms, quoted again (freshStakeTerms)", () => {
+  const op = { usdcIn: q3.usdcIn, targetTao: q3.targetTao, createdAt: NOW - 60_000 };
+  const terms = (over: Partial<Parameters<typeof freshStakeTerms>[0]> = {}, quote: Partial<DepositQuote> = {}) =>
+    freshStakeTerms({ op, now: NOW, quote: async () => ({ ...q3, ...quote }), record: vi.fn(), ...over });
 
-  it("adopts a stake that already went through as this one's, and sends nothing", async () => {
+  it("tells a quote that moved from one that didn't by the 0.5% the user accepted, either way", () => {
+    const was = 78_000_000_000_000_000n;
+    expect(quoteMoved(was, was)).toBe(false);
+    expect(quoteMoved((was * 10_050n) / 10_000n, was)).toBe(false);
+    expect(quoteMoved((was * 9_950n) / 10_000n, was)).toBe(false);
+    expect(quoteMoved((was * 10_050n) / 10_000n + 1n, was)).toBe(true);
+    expect(quoteMoved((was * 9_950n) / 10_000n - 1n, was)).toBe(true);
+    expect(quoteMoved(was, 0n)).toBe(true);
+  });
+
+  it("gives today's quote, recorded on the stake (its TAO, floor, price and fees), when it is close to the one the user saw", async () => {
+    const record = vi.fn();
+    const q = await terms({ record }, { targetTao: 77_800_000_000_000_000n, minTaoOut: 77_411_000_000_000_000n, taoPriceUsd: 257.07, feesUsd: 0.151 });
+    expect(q.minTaoOut).toBe(77_411_000_000_000_000n);
+    expect(record).toHaveBeenCalledExactlyOnceWith({ targetTao: 77_800_000_000_000_000n, minTaoOut: 77_411_000_000_000_000n, priceUsd: 257.07, feesUsd: 0.151 });
+  });
+
+  it("asks the user again when it moved materially, naming both figures, recording nothing", async () => {
+    const record = vi.fn();
+    const err = await terms({ record }, { targetTao: 70_000_000_000_000_000n, minTaoOut: 69_650_000_000_000_000n, taoPriceUsd: 285.71 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(QuoteMovedError);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as QuoteMovedError).state).toBe("needs-you");
+    expect((err as QuoteMovedError).move).toEqual({ nowTao: 70_000_000_000_000_000n, wasTao: 78_000_000_000_000_000n, priceUsd: 285.71 });
+    expect((err as QuoteMovedError).message).toBe("The price moved since you started: you'd now get about 0.0700 TAO (was 0.0780 TAO). Continue at today's price if that's fine.");
+    expect(record).not.toHaveBeenCalled();
+    // more TAO is a move too: the figures the user saw no longer hold
+    const up = await terms({}, { targetTao: 90_000_000_000_000_000n }).catch((e: unknown) => e);
+    expect((up as QuoteMovedError).message).toMatch(/you'd now get about 0.0900 TAO \(was 0.0780 TAO\)/);
+  });
+
+  it("goes ahead once the user accepts the figure they were shown, and asks again only if it moved again from that one", async () => {
+    const accepted = 70_000_000_000_000_000n;
+    const q = await terms({ accepted }, { targetTao: 70_100_000_000_000_000n, minTaoOut: 69_749_500_000_000_000n });
+    expect(q.targetTao).toBe(70_100_000_000_000_000n);
+    const again = await terms({ accepted }, { targetTao: 65_000_000_000_000_000n }).catch((e: unknown) => e);
+    expect(again).toBeInstanceOf(QuoteMovedError);
+    expect((again as QuoteMovedError).move.wasTao).toBe(accepted);
+  });
+
+  it("refuses a stake stopped a day ago or more: start again at today's price, and reads no quote for it", async () => {
+    const quote = vi.fn(async () => q3);
+    const record = vi.fn();
+    const err = await freshStakeTerms({ op: { ...op, createdAt: NOW - RESUME_WINDOW_MS }, now: NOW, quote, record }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FlowError);
+    expect((err as FlowError).state).toBe("failed");
+    expect((err as FlowError).message).toBe(STAKE_LAPSED);
+    expect(quote).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(RESUME_WINDOW_MS).toBe(24 * 60 * 60_000);
+    // a minute short of a day: carried on
+    await expect(freshStakeTerms({ op: { ...op, createdAt: NOW - RESUME_WINDOW_MS + 60_000 }, now: NOW, quote, record })).resolves.toBeDefined();
+  });
+
+  it("sends nothing when today's price can't be read, or the quote isn't one for this stake", async () => {
+    const record = vi.fn();
+    const down = await terms({ record, quote: async () => Promise.reject(new Error("HTTP request failed. URL: https://mainnet.base.org")) }).catch((e: unknown) => e);
+    expect(down).toBeInstanceOf(FlowError);
+    expect((down as FlowError).state).toBe("needs-you");
+    expect((down as FlowError).message).toBe(RESUME_UNQUOTED);
+    expect((down as FlowError).message).not.toMatch(/mainnet/);
+    for (const quote of [{ targetTao: 0n }, { minTaoOut: 0n }, { usdcIn: q3.usdcIn + 1n }]) {
+      expect(((await terms({ record }, quote).catch((e: unknown) => e)) as FlowError).message, JSON.stringify(quote, (_k, v) => String(v))).toBe(RESUME_UNQUOTED);
+    }
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it("runs the check it is given (the oracle's) on today's quote before recording anything", async () => {
+    const record = vi.fn();
+    const check = vi.fn(async () => Promise.reject(new FlowError(PRICE_DISAGREES, "needs-you")));
+    await expect(terms({ record, check })).rejects.toThrow(PRICE_DISAGREES);
+    expect(check).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ usdcIn: q3.usdcIn }));
+    expect(record).not.toHaveBeenCalled();
+  });
+});
+
+describe("carrying on a v3 stake (planResumeStakeV3)", () => {
+  /** As recorded when it stopped: quoted at 0.078 TAO with a floor of 0.0776. */
+  const op = { usdcIn: q3.usdcIn, targetTao: q3.targetTao, minTaoOut: q3.minTaoOut, hashes: {} as Partial<Record<string, Hex>>, callsId: undefined as string | undefined, createdAt: NOW - 60_000 };
+  /** Today's quote: a touch less TAO, within the 0.5%. */
+  const today = { ...q3, targetTao: 77_800_000_000_000_000n, minTaoOut: 77_411_000_000_000_000n, taoPriceUsd: 257.07 } as DepositQuote;
+  const resume = (over: Partial<Parameters<typeof planResumeStakeV3>[0]> = {}) =>
+    planResumeStakeV3({ op, w: none, d: D3, account: ME, now: NOW, findStake: async () => null, adopt: vi.fn(), quote: async () => today, oracle: ORACLE, record: vi.fn(), ...over });
+
+  it("quotes again before carrying on, and sends today's floor, never the recorded one", async () => {
+    const record = vi.fn();
+    const calls = await resume({ record });
+    expect(calls.map((c) => c.functionName)).toEqual(["approve", "stake"]);
+    expect(calls[1].args).toEqual([ME, q3.usdcIn, today.minTaoOut, 0, DEADLINE]);
+    expect(calls[1].args[2]).not.toBe(op.minTaoOut);
+    expect(record).toHaveBeenCalledExactlyOnceWith({ targetTao: today.targetTao, minTaoOut: today.minTaoOut, priceUsd: 257.07, feesUsd: q3.feesUsd });
+  });
+
+  it("the pen test's case: a week-old floor quoted at $300 while TAO is at $250 is never sent; today's floor is, after the user agrees to today's figure", async () => {
+    const usdcIn = 10_000_000n;
+    const taoAt300 = (usdcIn * 10n ** 18n) / 300_000_000n;
+    const stale = { ...op, usdcIn, targetTao: taoAt300, minTaoOut: (taoAt300 * 9_950n) / 10_000n };
+    const taoAt250 = (usdcIn * 10n ** 18n) / 250_000_000n;
+    const now = { ...q3, usdcIn, expectedTao: taoAt250, targetTao: taoAt250, minTaoOut: (taoAt250 * 9_950n) / 10_000n, depositFeeUsdc: 0n, swapFeeUsdc: 0n, taoPriceUsd: 250 } as DepositQuote;
+    const oracle = async () => 250_000_000n;
+    // a week old: not carried on at all
+    const lapsed = await resume({ op: { ...stale, createdAt: NOW - 7 * 24 * 60 * 60_000 }, quote: async () => now, oracle }).catch((e: unknown) => e);
+    expect((lapsed as FlowError).message).toBe(STAKE_LAPSED);
+    // an hour old: the price moved 20%, so the user is asked, with nothing sent
+    const moved = await resume({ op: { ...stale, createdAt: NOW - 60 * 60_000 }, quote: async () => now, oracle }).catch((e: unknown) => e);
+    expect(moved).toBeInstanceOf(QuoteMovedError);
+    expect((moved as QuoteMovedError).move).toEqual({ nowTao: taoAt250, wasTao: taoAt300, priceUsd: 250 });
+    // the user agrees to today's figure: today's floor goes, 0.5% under today's market
+    const calls = await resume({ op: { ...stale, createdAt: NOW - 60 * 60_000 }, quote: async () => now, oracle, accepted: taoAt250 });
+    expect(calls[1].args[2]).toBe((taoAt250 * 9_950n) / 10_000n);
+    expect(calls[1].args[2]).not.toBe(stale.minTaoOut);
+  });
+
+  it("checks today's quote against the oracle, and sends nothing when they disagree or it can't be read", async () => {
+    const record = vi.fn();
+    expect(((await resume({ record, oracle: async () => 200_000_000n }).catch((e: unknown) => e)) as FlowError).message).toBe(PRICE_DISAGREES);
+    expect(((await resume({ record, oracle: async () => Promise.reject(new Error("down")) }).catch((e: unknown) => e)) as FlowError).message).toBe(PRICE_UNCHECKED);
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it("adopts a stake that already went through as this one's, and sends nothing, without quoting", async () => {
     const t = tracker();
-    const calls = await resume({ findStake: async () => H(61), adopt: (h) => t.store.setHash("stake", h) });
+    const quote = vi.fn(async () => today);
+    const calls = await resume({ findStake: async () => H(61), adopt: (h) => t.store.setHash("stake", h), quote });
     expect(t.hashes.stake).toBe(H(61));
     expect(calls.map((c) => c.key)).toEqual(["stake"]);
+    expect(quote).not.toHaveBeenCalled();
     const p = port({ canBatch: vi.fn(async () => true) });
     await runFlow(p, t.store as never, calls);
     expect(p.send).not.toHaveBeenCalled();
@@ -1127,29 +1335,29 @@ describe("carrying on a v3 stake the chain may already show", () => {
     expect(t.states.at(-1)).toBe("sent");
   });
 
-  it("sends nothing when it can't check, and says so", async () => {
+  it("sends nothing when it can't check whether the stake went through, and says so", async () => {
     const adopt = vi.fn();
-    const err = await resume({ findStake: async () => Promise.reject(new Error("HTTP request failed. URL: https://base-rpc.publicnode.com")), adopt }).catch(
+    const quote = vi.fn(async () => today);
+    const err = await resume({ findStake: async () => Promise.reject(new Error("HTTP request failed. URL: https://base-rpc.publicnode.com")), adopt, quote }).catch(
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(FlowError);
     expect((err as FlowError).state).toBe("needs-you");
     expect((err as FlowError).message).toBe("We couldn't check whether your stake already went through. Try again in a moment.");
     expect(adopt).not.toHaveBeenCalled();
+    expect(quote).not.toHaveBeenCalled();
   });
 
-  it("carries on by approval, as before, when the chain shows no such stake", async () => {
-    const adopt = vi.fn();
-    const calls = await resume({ findStake: async () => null, adopt });
-    expect(calls.map((c) => c.functionName)).toEqual(["approve", "stake"]);
-    expect(calls[1].args).toEqual([ME, q3.usdcIn, q3.minTaoOut, 0, DEADLINE]);
-    expect(adopt).not.toHaveBeenCalled();
-  });
-
-  it("doesn't search when the stake's hash or its wallet batch is recorded (those are only waited for)", async () => {
+  it("neither searches nor quotes when the stake's hash or its wallet batch is recorded (those are only waited for)", async () => {
     const findStake = vi.fn(async () => H(61));
-    expect((await resume({ op: { ...op, hashes: { stake: H(5) } }, findStake })).map((c) => c.key)).toEqual(["stake"]);
-    expect((await resume({ op: { ...op, callsId: "batch-1" }, findStake })).map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+    const quote = vi.fn(async () => today);
+    const oracle = vi.fn(ORACLE);
+    expect((await resume({ op: { ...op, hashes: { stake: H(5) } }, findStake, quote, oracle })).map((c) => c.key)).toEqual(["stake"]);
+    const batch = await resume({ op: { ...op, callsId: "batch-1" }, findStake, quote, oracle });
+    expect(batch.map((c) => c.key)).toEqual(["approveUsdc", "stake"]);
+    expect(batch[1].args[2]).toBe(op.minTaoOut);
     expect(findStake).not.toHaveBeenCalled();
+    expect(quote).not.toHaveBeenCalled();
+    expect(oracle).not.toHaveBeenCalled();
   });
 });

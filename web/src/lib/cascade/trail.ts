@@ -1,5 +1,5 @@
 import type { Hex } from "viem";
-import { explorer } from "./config";
+import { explorer, RESUME_WINDOW_MS } from "./config";
 import { type DepositOp, entryPriceUsd, type WithdrawalOp } from "./oplog";
 import type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRecord, WithdrawalStepKey } from "./records";
 import { formatDay, formatTao, formatUsdc } from "../format";
@@ -191,20 +191,26 @@ function walletStep(mined: boolean, op: { state: string }, started: boolean): St
   return started ? "active" : "pending";
 }
 
+/** A stake waiting for the user a day or more after it stopped, its swap never sent: its quote is a day
+ * stale, so it isn't carried on (flows.ts refuses it too, freshStakeTerms). */
+export const STAKE_LAPSED = "This stake stopped more than a day ago, so it isn't carried on. Stake again at today's price.";
+
 export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   // v3: one `stake` transaction is both the swap and the deposit
   const swapHash = op.v === 3 ? op.hashes.stake : op.hashes.swap;
   const depositHash = op.v === 3 ? op.hashes.stake : op.hashes.deposit;
   const taoWei = f.taoDeposited ?? op.targetTao;
   const price = entryPriceUsd(op);
-  const swapStatus = walletStep(f.swapMined, op, true);
+  // lapsed: it shows as a stake that didn't happen, to be started again at today's price (restake)
+  const lapsed = op.usdcIn > 0n && op.state === "needs-you" && !swapHash && !op.callsId && f.now.getTime() - op.createdAt >= RESUME_WINDOW_MS;
+  const swapStatus: StepStatus = lapsed ? "failed" : walletStep(f.swapMined, op, true);
   const swap: TrailStep<DepositStepKey> = {
     key: "swap",
     title: "Swap USDC for TAO",
     status: swapStatus,
     ...(swapHash && f.swapMined ? { txUrl: explorer.baseTx(swapHash) } : {}),
     ...(!f.swapMined && op.callsId && swapStatus === "active" ? { detail: "Sent from your wallet as one batch" } : {}),
-    ...(swapStatus === "failed" || swapStatus === "action" ? { detail: op.error ?? "Waiting for you to confirm in your wallet" } : {}),
+    ...(lapsed ? { detail: STAKE_LAPSED } : swapStatus === "failed" || swapStatus === "action" ? { detail: op.error ?? "Waiting for you to confirm in your wallet" } : {}),
   };
   const depositStatus = f.swapMined ? walletStep(f.depositMined, op, true) : "pending";
   // the swap went through but the deposit did not: the TAO is sitting in the wallet
@@ -278,8 +284,9 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled && !cancelling ? { cancellableWei: taoWei } : {}),
     // the swap worked but the deposit failed: the deposit alone can be tried again (the TAO is in the wallet)
     ...(op.state === "failed" && f.swapMined && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
-    // the swap itself failed (reverted, or a batch that failed whole): start a new stake at today's price
-    ...(op.state === "failed" && !f.swapMined && !cancelled ? { restake: true as const } : {}),
+    // the swap itself failed (reverted, or a batch that failed whole), or the stake lapsed before it was
+    // sent: start a new stake at today's price
+    ...((op.state === "failed" || lapsed) && !f.swapMined && !cancelled ? { restake: true as const } : {}),
     ...((op.state === "needs-you" || op.state === "failed") &&
     !op.callsId &&
     !Object.values(op.hashes).some(Boolean) &&

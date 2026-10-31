@@ -278,6 +278,17 @@ describe("Send it now, once it's offered", () => {
     });
   });
 
+  it("shows a dash and holds the button when the two Base RPCs disagree about the fee, saying that is why", () => {
+    expect(view({ feeWei: undefined, feeUnconfirmed: true })).toEqual({
+      leaves: LEAVES,
+      button: {
+        label: "Send it now: about –",
+        note: "The bridge fee couldn't be confirmed right now (our two sources for it disagree), so it can't be sent from here yet.",
+        disabled: true,
+      },
+    });
+  });
+
   it("shows a dash and holds the button once the read is stale: its fee and its time may both have moved", () => {
     expect(view({}, { after: STALE_MS + 1_000 })).toEqual({
       leaves: "Leaves in –",

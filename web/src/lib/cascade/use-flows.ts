@@ -29,8 +29,11 @@ import {
   type FlowCall,
   FlowError,
   type FlowStore,
+  freshStakeTerms,
   isRevert,
   planResumeStakeV3,
+  type QuoteMove,
+  QuoteMovedError,
   planSendNow,
   planStakeV3,
   planUnstake,
@@ -50,7 +53,7 @@ import {
 import { cascadeKeys, useWiring } from "./hooks";
 import { cancelStore, opStore, scratchStore } from "./op-store";
 import { type ClaimOp, type CloseOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
-import { quoteSell, readCloseOutcome, readFrontDoor, readPermitNonce, taoPriceUsd } from "./reads";
+import { quoteSell, readCloseOutcome, readFrontDoor, readOraclePrice, readPermitNonce, taoPriceUsd } from "./reads";
 import type { DepositQuote, WithdrawalQuote } from "./types";
 import { lessSlippage } from "./units";
 
@@ -141,6 +144,9 @@ export function useFlows(account: string | null) {
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(appGuard.active);
   const [error, setError] = useState<string | null>(null);
+  /** A stake being carried on whose quote moved: today's figure against the one shown, awaiting the
+   * user's say-so (resumeStake with `accepted`). In this component's memory only, never stored. */
+  const [moved, setMoved] = useState<(QuoteMove & { id: string }) | null>(null);
   const guard = appGuard;
   useEffect(() => appGuard.subscribe(setBusy), []);
 
@@ -158,6 +164,7 @@ export function useFlows(account: string | null) {
   async function flow<T>(label: string, body: () => Promise<T>): Promise<T> {
     if (!account) throw new Error("Connect a wallet first");
     setError(null);
+    setMoved(null);
     try {
       return await guard.run(label, async () => {
         if (needsWiring(label)) await assertWired(() => data.checkWiring());
@@ -201,16 +208,23 @@ export function useFlows(account: string | null) {
     }
   }
 
+  /** The oracle's price, for the check every stake makes of its quote (flows.ts, assertPriceAgrees). */
+  const oracle = () => readOraclePrice(data.clients, d());
+
   return {
     busy,
     error,
+    /** A stake being carried on (`id`) whose quote moved since the user last saw a figure: the figures,
+     * for a button that continues at today's price (resumeStake(id, moved.nowTao)). Null otherwise. */
+    moved,
     /** Why no stake or unstake can be sent from this site (the contracts don't match), or null. */
     blocked,
     /** No stake or unstake can start: a flow is running, or the contracts don't match (the ways out use busy alone). */
     locked: busy !== null || blocked !== null,
 
     /** Starts a stake from a quote; `onStart` gets the operation id before the first wallet prompt. On
-     * v3 it is one CascadeStaker transaction, paid by a USDC permit or, failing that, an exact approval. */
+     * v3 it is one CascadeStaker transaction, paid by a USDC permit or, failing that, an exact approval,
+     * once the quote checks out against the oracle (planStakeV3). */
     stake: (q: DepositQuote, onStart?: (id: string) => void) =>
       flow("stake", async () => {
         const v3 = isV3(d());
@@ -239,44 +253,62 @@ export function useFlows(account: string | null) {
             account: a,
             nonce: () => readPermitNonce(data.clients, a),
             now: Date.now(),
+            oracle,
             minUsd: () => data.getLimits().then((l) => l.minUsd),
           });
         });
         return op.id;
       }),
 
-    /** Carries on a stake that stopped, skipping whatever the chain shows already happened. A v3 stake
-     * whose transaction the chain already shows is adopted, not sent again; otherwise it carries on by
-     * approval at the floor it was quoted with. */
-    resumeStake: (id: string) =>
+    /** Carries on a stake that stopped, skipping whatever the chain shows already happened. A stake
+     * whose swap (v3: its one transaction) the chain already shows is adopted or waited for, not sent
+     * again. One not yet sent goes at today's terms, never the recorded ones (flows.ts, freshStakeTerms):
+     * quoted again as a fresh stake is, and if the figure moved from the one the user saw (`accepted`
+     * when they have since agreed to today's), it stops and asks them (`moved`), sending nothing. */
+    resumeStake: (id: string, accepted?: bigint) =>
       flow("stake", async () => {
         const stored = data.opLog.get(a, id) as DepositOp;
         const patch = stored.v === 3 ? {} : retryPatch(stored);
         if (Object.keys(patch).length > 0) data.opLog.update(a, id, patch as Partial<Operation>);
-        await send(id, async (_wallet, store) => {
-          const op = data.opLog.get(a, id) as DepositOp;
-          if (op.v === 3) {
-            // stakes other records of this browser already own are never adopted for this one
-            const owned = new Set(
-              data.opLog
-                .list(a)
-                .filter((o): o is DepositOp => o.kind === "deposit" && o.id !== id)
-                .flatMap((o) => Object.values(o.hashes).filter((h): h is Hex => !!h)),
-            );
-            return planResumeStakeV3({
-              op,
-              w: await data.getBalances(a),
-              d: d(),
-              account: a,
-              now: Date.now(),
-              findStake: () => findStakeTx(data.clients, d(), { account: a, usdcIn: op.usdcIn, createdAtMs: op.createdAt, nowMs: Date.now(), skip: owned }),
-              adopt: (hash) => store.setHash("stake", hash),
-            });
-          }
-          const [w, fd] = await Promise.all([data.getBalances(a), readFrontDoor(data.clients, d(), a)]);
-          const calls = op.usdcIn === 0n ? depositTaoCalls(op.targetTao, w, d()) : stakeCalls(op, w, d(), a);
-          return stillToSend(calls, op, { walletTao: w.tao, depositOf: fd.depositOf });
-        });
+        try {
+          await send(id, async (_wallet, store) => {
+            const op = data.opLog.get(a, id) as DepositOp;
+            const quote = () => data.quoteDeposit(op.usdcIn);
+            const record = (terms: Partial<DepositOp>) => data.opLog.update(a, id, terms);
+            if (op.v === 3) {
+              // stakes other records of this browser already own are never adopted for this one
+              const owned = new Set(
+                data.opLog
+                  .list(a)
+                  .filter((o): o is DepositOp => o.kind === "deposit" && o.id !== id)
+                  .flatMap((o) => Object.values(o.hashes).filter((h): h is Hex => !!h)),
+              );
+              return planResumeStakeV3({
+                op,
+                w: await data.getBalances(a),
+                d: d(),
+                account: a,
+                now: Date.now(),
+                findStake: () => findStakeTx(data.clients, d(), { account: a, usdcIn: op.usdcIn, createdAtMs: op.createdAt, nowMs: Date.now(), skip: owned }),
+                adopt: (hash) => store.setHash("stake", hash),
+                quote,
+                accepted,
+                oracle,
+                record,
+              });
+            }
+            const [w, fd] = await Promise.all([data.getBalances(a), readFrontDoor(data.clients, d(), a)]);
+            if (op.usdcIn === 0n) return depositTaoCalls(op.targetTao, w, d());
+            const left = stillToSend(stakeCalls(op, w, d(), a), op, { walletTao: w.tao, depositOf: fd.depositOf });
+            // the swap was sent, or the chain shows it done: only what follows it is left
+            if (op.hashes.swap || !left.some((c) => c.key === "swap")) return left;
+            // v2 has no oracle to check against; the terms are still today's, never the recorded ones
+            return stakeCalls(await freshStakeTerms({ op, now: Date.now(), quote, accepted, record }), w, d(), a);
+          });
+        } catch (e) {
+          if (e instanceof QuoteMovedError) setMoved({ id, ...e.move });
+          throw e;
+        }
       }),
 
     /** Deposits TAO already sitting in the wallet (left by a cancel, a claim kept as TAO, a failed step),

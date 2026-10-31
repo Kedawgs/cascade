@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { RESUME_WINDOW_MS } from "./config";
 import type { DepositOp, WithdrawalOp } from "./oplog";
-import { chainOnlyDeposit, type DepositFacts, depositRecord, isDelivering, offersClaim, type WithdrawalFacts, withdrawalRecord } from "./trail";
+import { chainOnlyDeposit, type DepositFacts, depositRecord, isDelivering, offersClaim, STAKE_LAPSED, type WithdrawalFacts, withdrawalRecord } from "./trail";
 
 const ME = "0x000000000000000000000000000000000000A11c" as const;
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
@@ -296,6 +297,43 @@ describe("v3 deposit trail (one stake through CascadeStaker)", () => {
     expect(r.status).toBe("needs_you");
     expect(r.steps[0]).toMatchObject({ status: "action", detail: "You declined the signature in your wallet." });
     expect(r.nothingSent).toBe(true);
+  });
+
+  describe("a stopped stake a day on", () => {
+    const stopped = { ...op3, hashes: {}, state: "needs-you" as const, error: "You declined the signature in your wallet." };
+    const facts = { ...base, swapMined: false, depositMined: false };
+    const dayOn = new Date(T0.getTime() + RESUME_WINDOW_MS);
+
+    it("isn't carried on: it shows as a stake that didn't happen, says why, and offers a fresh stake at today's price", () => {
+      const r = depositRecord(stopped, { ...facts, now: dayOn });
+      expect(r.status).toBe("failed");
+      expect(statuses(r)).toEqual(["failed", "pending", "pending", "pending"]);
+      expect(r.steps[0].detail).toBe(STAKE_LAPSED);
+      expect(STAKE_LAPSED).toBe("This stake stopped more than a day ago, so it isn't carried on. Stake again at today's price.");
+      expect(r.restake).toBe(true);
+      expect(r.retryable).toBeUndefined();
+      // nothing was ever sent, so it can still be removed
+      expect(r.nothingSent).toBe(true);
+    });
+
+    it("is still carried on a minute short of a day, and whatever its age once its stake was sent (that is only waited for)", () => {
+      expect(depositRecord(stopped, { ...facts, now: new Date(dayOn.getTime() - 60_000) }).status).toBe("needs_you");
+      const sent = { ...stopped, hashes: { stake: H(5) } };
+      const r = depositRecord(sent, { ...facts, now: dayOn });
+      expect(r.status).toBe("needs_you");
+      expect(r.restake).toBeUndefined();
+      const batched = { ...stopped, callsId: "batch-1" };
+      expect(depositRecord(batched, { ...facts, now: dayOn }).status).toBe("needs_you");
+    });
+
+    it("applies to a v2 stake whose swap was never sent too, and never to a deposit of wallet TAO (nothing to quote)", () => {
+      const v2 = { ...op, hashes: {}, state: "needs-you" as const };
+      expect(depositRecord(v2, { ...facts, now: dayOn }).restake).toBe(true);
+      // the swap was sent: carried on
+      expect(depositRecord({ ...v2, hashes: { swap: H(1) } }, { ...facts, now: dayOn }).status).toBe("needs_you");
+      const walletTao = { ...v2, usdcIn: 0n };
+      expect(depositRecord(walletTao, { ...facts, now: dayOn }).status).toBe("needs_you");
+    });
   });
 });
 

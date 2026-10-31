@@ -13,6 +13,8 @@ import {
   maxStakeInput,
   stakeMaxInput,
   offerClaim,
+  stakeAgainHref,
+  stakeAmountParam,
   stakeAmountText,
   stakeFootText,
   maxUnstakeInput,
@@ -43,6 +45,25 @@ import { depositNotice } from "./sent";
 import { formatUsdcCents, parseAmount, sanitizeAmountInput } from "./format";
 
 const limits = { minUsd: 10, maxUsd: 50_000, full: null };
+
+describe("a fresh stake from a receipt (Stake again at today's price)", () => {
+  it("links to the stake form with the same amount typed in, to the cent, or without one when it isn't known", () => {
+    expect(stakeAgainHref(20)).toBe("/stake?amount=20.00");
+    expect(stakeAgainHref(19.999999)).toBe("/stake?amount=20.00");
+    expect(stakeAgainHref(1234.5)).toBe("/stake?amount=1234.50");
+    expect(stakeAgainHref(undefined)).toBe("/stake");
+    expect(stakeAgainHref(0)).toBe("/stake");
+  });
+
+  it("types into the form only plain dollars and cents from the link, nothing else", () => {
+    expect(stakeAmountParam("20.00")).toBe("20.00");
+    expect(stakeAmountParam("20")).toBe("20");
+    expect(stakeAmountParam("0.5")).toBe("0.5");
+    for (const bad of [null, "", "-20", "20.000", "1e3", "20,00", "$20", " 20", "20 ", "<script>", "1234567890", "Infinity"]) {
+      expect(stakeAmountParam(bad), String(bad)).toBe("");
+    }
+  });
+});
 
 describe("validateStakeAmount", () => {
   it("accepts amounts within limits", () => {

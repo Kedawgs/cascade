@@ -1,13 +1,14 @@
 import { type Abi, type Address, type Hex, parseSignature, size } from "viem";
 import { base } from "viem/chains";
 import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
-import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
+import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, PRICE_CHECK_BPS, RESUME_WINDOW_MS, SLIPPAGE_BPS, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
 import type { ClaimOp, DepositOp, OpState } from "./oplog";
 import type { FrontDoorState } from "./reads";
+import { STAKE_LAPSED } from "./trail";
 import type { Balances, DepositQuote, OpenBatch, WithdrawalQuote } from "./types";
-import { floorRao } from "./units";
+import { floorRao, toDisplay } from "./units";
 import type { Wiring } from "./wiring";
-import { formatUsdShort } from "../format";
+import { formatTao, formatUsdShort } from "../format";
 import { ethNeeded, needEthText, sendGate, sendNowValue } from "../send-now";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
@@ -28,6 +29,16 @@ const call = (key: string, to: Address, abi: Abi, functionName: string, args: re
   args,
   ...(value !== undefined ? { value } : {}),
 });
+
+/** A stop of a flow's own, in the site's words, with the state it leaves the record in. */
+export class FlowError extends Error {
+  readonly state: OpState;
+
+  constructor(message: string, state: OpState) {
+    super(message);
+    this.state = state;
+  }
+}
 
 /** USDC → exactly `targetTao` TAO (unused USDC never leaves the wallet) → the front door. Every approval
  * is for exactly the most the call after it may spend: Uniswap's router the swap's most (`usdcIn`), the
@@ -167,8 +178,46 @@ export function stakeRefusal(reason: string | undefined, minUsd?: number): strin
   return WONT_GO_THROUGH;
 }
 
+// ---- Before any stake: the quote it is priced from, against Cascade's oracle ----
+
+/** What a stake's price check needs of its quote: the USDC in, the TAO the swap is expected to give for
+ * it, and Cascade's fees, which come off the USDC before the swap (CascadeStaker). */
+export type SpotQuote = Pick<DepositQuote, "usdcIn" | "expectedTao" | "depositFeeUsdc" | "swapFeeUsdc">;
+
+/** The USDC units one TAO costs at the quote: what is swapped (the USDC after Cascade's fees) over the
+ * TAO expected for it, so the pools' fees and this size's impact are in it. Zero for a quote of nothing. */
+export function spotUsdcPerTao(q: SpotQuote): bigint {
+  const swapped = q.usdcIn - q.depositFeeUsdc - q.swapFeeUsdc;
+  return q.expectedTao > 0n && swapped > 0n ? (swapped * 10n ** 18n) / q.expectedTao : 0n;
+}
+
+/** Whether a spot price agrees with the oracle's: within `bps` of the oracle's, either way. A price of
+ * nothing (a read that gave none) agrees with nothing. */
+export function pricesAgree(spot: bigint, oracle: bigint, bps: bigint = PRICE_CHECK_BPS): boolean {
+  if (spot <= 0n || oracle <= 0n) return false;
+  const gap = spot > oracle ? spot - oracle : oracle - spot;
+  return gap * 10_000n <= oracle * bps;
+}
+
+export const PRICE_UNCHECKED = "We couldn't double-check today's price just now, so nothing was sent. Try again in a moment.";
+export const PRICE_DISAGREES = "The price we were quoted doesn't match Cascade's price oracle, so nothing was sent. Try again in a few minutes.";
+
+/** Every stake's check before the wallet is asked anything: the quote's price (from one RPC, Uniswap's
+ * quoter) against the oracle's 30-minute TWAP (`oracle`: reads.ts reads it on the other RPC). The quote
+ * is what the stake's floor is cut from, so a lying RPC, or a pool pushed off its price, would otherwise
+ * set a floor the market can run down to. Disagreement, or an oracle that can't be read, sends nothing. */
+export async function assertPriceAgrees(q: SpotQuote, oracle: () => Promise<bigint>): Promise<void> {
+  let o: bigint;
+  try {
+    o = await oracle();
+  } catch {
+    throw new FlowError(PRICE_UNCHECKED, "needs-you");
+  }
+  if (!pricesAgree(spotUsdcPerTao(q), o)) throw new FlowError(PRICE_DISAGREES, "needs-you");
+}
+
 export interface StakeV3Input {
-  q: Pick<DepositQuote, "usdcIn" | "minTaoOut">;
+  q: Pick<DepositQuote, "usdcIn" | "minTaoOut"> & SpotQuote;
   w: Balances;
   d: Deployment;
   account: Address;
@@ -176,17 +225,21 @@ export interface StakeV3Input {
   nonce: () => Promise<bigint>;
   /** ms since the epoch */
   now: number;
+  /** The oracle's price of one TAO in USDC units (reads.ts, readOraclePrice), for the price check. */
+  oracle: () => Promise<bigint>;
   /** The smallest stake in dollars, as the form shows it; read only to explain a stake under it. */
   minUsd?: () => Promise<number>;
 }
 
-/** v3: how this stake is paid for, as the calls to send. A plain key account signs one USDC permit and
- * sends one `stakeWithPermit`. An account with code (an EIP-7702 smart account, whose permit USDC may
- * refuse), a wallet that can't sign a permit, or a permit USDC refuses in the pre-send check pays by an
- * exact approval and `stake` instead (one batch where the wallet can). An allowance that already covers
- * the stake needs neither. A declined signature stops here, "needs you", with nothing asked again until
- * the user continues; a stake that would revert for its own reasons stops before anything is sent. */
+/** v3: how this stake is paid for, as the calls to send, once its quote checks out against the oracle
+ * (assertPriceAgrees). A plain key account signs one USDC permit and sends one `stakeWithPermit`. An
+ * account with code (an EIP-7702 smart account, whose permit USDC may refuse), a wallet that can't sign
+ * a permit, or a permit USDC refuses in the pre-send check pays by an exact approval and `stake` instead
+ * (one batch where the wallet can). An allowance that already covers the stake needs neither. A
+ * declined signature stops here, "needs you", with nothing asked again until the user continues; a
+ * stake that would revert for its own reasons stops before anything is sent. */
 export async function planStakeV3(port: WalletPort, x: StakeV3Input): Promise<FlowCall[]> {
+  await assertPriceAgrees(x.q, x.oracle);
   const deadline = stakeDeadline(x.now);
   const byApproval = () => stakeV3Calls(x.q, x.w, x.d, x.account, undefined, deadline);
   if (x.w.usdcStakerAllowance >= x.q.usdcIn || (await port.hasCode(x.account))) return byApproval();
@@ -219,31 +272,114 @@ export async function planStakeV3(port: WalletPort, x: StakeV3Input): Promise<Fl
   throw new FlowError(stakeRefusal(stake.revert, minUsd), "failed");
 }
 
-/** Carrying on a v3 stake that stopped: by approval (a declined or refused permit is never asked for
- * again), at the floor the user agreed to, with a fresh deadline. A stake already sent is only waited
- * for, and a wallet batch still being checked is rebuilt as it was sent so its receipts line up. */
+// ---- Carrying on a stake that stopped: at today's terms, never the recorded ones ----
+
+/** Whether a quote has moved from the one the user saw: by more than the slippage margin they accepted
+ * on it (0.5%), either way. Past that, the figures they agreed to no longer hold, and they are asked
+ * again. A figure of nothing is always a move. */
+export function quoteMoved(nowTao: bigint, wasTao: bigint, bps: bigint = SLIPPAGE_BPS): boolean {
+  if (wasTao <= 0n) return true;
+  const gap = nowTao > wasTao ? nowTao - wasTao : wasTao - nowTao;
+  return gap * 10_000n > wasTao * bps;
+}
+
+/** Today's figure against the one the user last saw, for the words that ask them again. */
+export interface QuoteMove {
+  nowTao: bigint;
+  wasTao: bigint;
+  /** Today's price per TAO, in dollars. */
+  priceUsd: number;
+}
+
+const taoText = (wei: bigint) => `${formatTao(toDisplay(wei, 18), 4)} TAO`;
+
+export const quoteMovedText = (m: QuoteMove): string =>
+  `The price moved since you started: you'd now get about ${taoText(m.nowTao)} (was ${taoText(m.wasTao)}). Continue at today's price if that's fine.`;
+
+/** The quote moved materially since the user last saw a figure: nothing is sent until they say today's
+ * is fine (useFlows.resumeStake with `accepted`, the figure shown). A "needs you" stop, like a declined
+ * signature. */
+export class QuoteMovedError extends FlowError {
+  readonly move: QuoteMove;
+
+  constructor(move: QuoteMove) {
+    super(quoteMovedText(move), "needs-you");
+    this.name = "QuoteMovedError";
+    this.move = move;
+  }
+}
+
+export const RESUME_UNQUOTED = "We couldn't get today's price just now, so nothing was sent. Try again in a moment.";
+
+export interface FreshTermsInput {
+  /** The stake as recorded: what it was for, the TAO the user saw, and when it started. */
+  op: Pick<DepositOp, "usdcIn" | "targetTao" | "createdAt">;
+  /** ms since the epoch */
+  now: number;
+  /** Today's quote for the same USDC, exactly as a fresh stake is quoted (CascadeData.quoteDeposit). */
+  quote: () => Promise<DepositQuote>;
+  /** The TAO figure the user agreed to after being told the price moved (the one they were shown), if any. */
+  accepted?: bigint;
+  /** A check of today's quote before it is taken (the oracle's, assertPriceAgrees); it throws to refuse. */
+  check?: (q: DepositQuote) => Promise<void>;
+  /** Writes today's terms to the record, so Activity shows what is being sent. */
+  record: (patch: Pick<DepositOp, "targetTao" | "minTaoOut" | "priceUsd" | "feesUsd">) => void;
+}
+
+/** A stopped stake's terms, quoted again now. The floor a record keeps is the one it was quoted with
+ * when it started, however long ago: carrying it on at that floor would send a stake the market can
+ * fill far under today's price (or one that can't fill), so it is never sent. Instead: a stake stopped
+ * a day or more ago isn't carried on at all (STAKE_LAPSED: start again); today's quote is read, exactly
+ * as a fresh stake's; if its TAO moved from the figure the user last saw (`accepted`, else the
+ * recorded one) by more than the 0.5% they accepted, they are asked again (QuoteMovedError) and nothing
+ * is sent; else, once `check` passes, today's terms are recorded and returned, their floor the one to
+ * send. A quote that can't be read, or isn't one for this stake, sends nothing. */
+export async function freshStakeTerms(x: FreshTermsInput): Promise<DepositQuote> {
+  if (x.now - x.op.createdAt >= RESUME_WINDOW_MS) throw new FlowError(STAKE_LAPSED, "failed");
+  let q: DepositQuote;
+  try {
+    q = await x.quote();
+  } catch {
+    throw new FlowError(RESUME_UNQUOTED, "needs-you");
+  }
+  if (q.usdcIn !== x.op.usdcIn || q.targetTao <= 0n || q.minTaoOut <= 0n) throw new FlowError(RESUME_UNQUOTED, "needs-you");
+  const was = x.accepted ?? x.op.targetTao;
+  if (quoteMoved(q.targetTao, was)) throw new QuoteMovedError({ nowTao: q.targetTao, wasTao: was, priceUsd: q.taoPriceUsd });
+  await x.check?.(q);
+  x.record({ targetTao: q.targetTao, minTaoOut: q.minTaoOut, priceUsd: q.taoPriceUsd, feesUsd: q.feesUsd });
+  return q;
+}
+
+/** The calls that carry on a v3 stake: by approval (a declined or refused permit is never asked for
+ * again), with a fresh deadline. A stake already sent is only waited for, and a wallet batch still being
+ * checked is rebuilt as it was sent, at the floor it was sent with, so its receipts line up (nothing in
+ * it is sent again). One not yet sent goes at `fresh`'s floor, today's quote's (planResumeStakeV3),
+ * and can't be built without it: the recorded floor is never the one sent. */
 export function resumeStakeV3Calls(
   op: Pick<DepositOp, "usdcIn" | "minTaoOut" | "hashes" | "callsId">,
   w: Balances,
   d: Deployment,
   account: Address,
   nowMs: number,
+  fresh?: Pick<DepositQuote, "minTaoOut">,
 ): FlowCall[] {
-  if (op.minTaoOut === undefined) throw new Error("This stake has no recorded minimum, so it can't be carried on");
+  const deadline = stakeDeadline(nowMs);
   // a batch is only ever sent for an approval and the stake together
-  const calls = stakeV3Calls({ usdcIn: op.usdcIn, minTaoOut: op.minTaoOut }, op.callsId ? { ...w, usdcStakerAllowance: 0n } : w, d, account, undefined, stakeDeadline(nowMs));
-  return op.hashes.stake && !op.callsId ? calls.filter((c) => c.key === "stake") : calls;
+  if (op.callsId) return stakeV3Calls({ usdcIn: op.usdcIn, minTaoOut: op.minTaoOut ?? 0n }, { ...w, usdcStakerAllowance: 0n }, d, account, undefined, deadline);
+  if (op.hashes.stake) return stakeV3Calls({ usdcIn: op.usdcIn, minTaoOut: op.minTaoOut ?? 0n }, w, d, account, undefined, deadline).filter((c) => c.key === "stake");
+  if (!fresh) throw new Error("A stake not yet sent is carried on only at a fresh quote's floor (planResumeStakeV3), never the recorded one");
+  return stakeV3Calls({ usdcIn: op.usdcIn, minTaoOut: fresh.minTaoOut }, w, d, account, undefined, deadline);
 }
 
 const UNCHECKED = "We couldn't check whether your stake already went through. Try again in a moment.";
 
-/** Carrying on a v3 stake, first making sure it didn't already go through. Unless its stake hash or its
- * wallet batch is recorded (those are only waited for), the chain is searched (`findStake`) for this
- * account's stake of this amount: one found is adopted as this stake's (`adopt`) and only waited for,
- * so nothing is sent; none found carries on as `resumeStakeV3Calls` does. A search that can't be
- * completed sends nothing. */
+/** Carrying on a v3 stake. One whose stake hash or wallet batch is recorded is only waited for. Otherwise
+ * the chain is searched (`findStake`) for this account's stake of this amount: one found is adopted as
+ * this stake's (`adopt`) and only waited for, so nothing is sent; a search that can't be completed sends
+ * nothing. None found carries on at today's terms (freshStakeTerms: a fresh quote, the user's say-so
+ * when it moved, the oracle's check), by approval at today's floor. */
 export async function planResumeStakeV3(x: {
-  op: Pick<DepositOp, "usdcIn" | "minTaoOut" | "hashes" | "callsId">;
+  op: Pick<DepositOp, "usdcIn" | "targetTao" | "minTaoOut" | "hashes" | "callsId" | "createdAt">;
   w: Balances;
   d: Deployment;
   account: Address;
@@ -251,21 +387,25 @@ export async function planResumeStakeV3(x: {
   /** The stake transaction the chain shows for this record, or null; throws when it can't tell. */
   findStake: () => Promise<Hex | null>;
   adopt: (hash: Hex) => void;
+  quote: FreshTermsInput["quote"];
+  accepted?: bigint;
+  /** The oracle's price of one TAO in USDC units (reads.ts, readOraclePrice), for the price check. */
+  oracle: () => Promise<bigint>;
+  record: FreshTermsInput["record"];
 }): Promise<FlowCall[]> {
-  let hashes = x.op.hashes;
-  if (!hashes.stake && !x.op.callsId) {
-    let found: Hex | null;
-    try {
-      found = await x.findStake();
-    } catch {
-      throw new FlowError(UNCHECKED, "needs-you");
-    }
-    if (found) {
-      x.adopt(found);
-      hashes = { ...hashes, stake: found };
-    }
+  if (x.op.hashes.stake || x.op.callsId) return resumeStakeV3Calls(x.op, x.w, x.d, x.account, x.now);
+  let found: Hex | null;
+  try {
+    found = await x.findStake();
+  } catch {
+    throw new FlowError(UNCHECKED, "needs-you");
   }
-  return resumeStakeV3Calls({ ...x.op, hashes }, x.w, x.d, x.account, x.now);
+  if (found) {
+    x.adopt(found);
+    return resumeStakeV3Calls({ ...x.op, hashes: { ...x.op.hashes, stake: found } }, x.w, x.d, x.account, x.now);
+  }
+  const q = await freshStakeTerms({ op: x.op, now: x.now, quote: x.quote, accepted: x.accepted, check: (fresh) => assertPriceAgrees(fresh, x.oracle), record: x.record });
+  return resumeStakeV3Calls(x.op, x.w, x.d, x.account, x.now, q);
 }
 
 /** TAO already in the wallet into the front door: an exact approval, then the deposit, in whole rao. */
@@ -393,6 +533,7 @@ export const SEND_GONE = "It's already on its way, so nothing was sent.";
 export const SEND_NOT_YOURS = "Nothing of yours is waiting in this batch any more, so nothing was sent.";
 export const SEND_NOT_YET = "This batch can't be sent yet, so nothing was sent.";
 export const SEND_NO_FEE = "We couldn't read the bridge fee just now, so nothing was sent. Try again in a moment.";
+export const SEND_FEE_UNCONFIRMED = "The bridge fee couldn't be confirmed just now (our two sources for it disagree), so nothing was sent. Try again in a moment.";
 export const SEND_FEE_ROSE = "The bridge fee rose just now, so nothing was sent. Try again.";
 export const SEND_NOT_NOW = "This batch can't be sent right now (it may have just left), so nothing was sent.";
 export const SEND_FREE = "It leaves on its own any moment now, at no cost to you, so nothing was sent.";
@@ -409,10 +550,10 @@ const GATE_REFUSAL = { blocked: SEND_BLOCKED, unchecked: SEND_UNCHECKED, free: S
  * sent while Cascade is paused, once the batch the user saw (`batchId`) has left, when nothing of the
  * account's is in it any more, unless sendGate opens it on the read's own clock (Bittensor's side was
  * checked and can take it, and the keeper is holding it five minutes past its interval, or hasn't sent it
- * five minutes past its max wait), when its fee can't
- * be read, or when the wallet can't cover the value and the network fee. The call is then run from the
- * account (`simulate`) and goes only if Base says it would go through. Gives the call and the batch it
- * was priced from. */
+ * five minutes past its max wait), when its fee can't be read or the two Base RPCs disagree about it
+ * (reads.ts, readOpenBatch), or when the wallet can't cover the value and the network fee. The call is
+ * then run from the account (`simulate`) and goes only if Base says it would go through. Gives the call
+ * and the batch it was priced from. */
 export async function planSendNow(x: {
   d: Deployment;
   batchId: bigint;
@@ -431,7 +572,7 @@ export async function planSendNow(x: {
   // just read: Base's clock is the read's block time
   const gate = sendGate(b, x.d.batchMaxWaitS, b.chainTime);
   if (gate !== "open") throw new FlowError(GATE_REFUSAL[gate], gate === "unchecked" ? "needs-you" : "failed");
-  if (b.feeWei === undefined) throw new FlowError(SEND_NO_FEE, "needs-you");
+  if (b.feeWei === undefined) throw new FlowError(b.feeUnconfirmed ? SEND_FEE_UNCONFIRMED : SEND_NO_FEE, "needs-you");
   const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d);
   const need = ethNeeded(b);
   if (b.ethWei !== undefined && b.ethWei < need) throw new FlowError(needEthText(need, b.ethPriceUsd), "needs-you");
@@ -589,15 +730,6 @@ export interface FlowStore {
   setCallsId(id: string): void;
   mode(): "batch" | "sequential" | undefined;
   setMode(mode: "batch" | "sequential"): void;
-}
-
-export class FlowError extends Error {
-  readonly state: OpState;
-
-  constructor(message: string, state: OpState) {
-    super(message);
-    this.state = state;
-  }
 }
 
 /** The contracts aren't wired as this site's build says (wiring.ts): nothing goes in or is asked back

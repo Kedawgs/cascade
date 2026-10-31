@@ -1,11 +1,11 @@
-import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters, parseEventLogs } from "viem";
+import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters, parseEventLogs, type PublicClient } from "viem";
 import { freshTip } from "./fresh";
 import { isFull, SEND_GRACE_S } from "../batch-clock";
 import { closeEconomicsOf } from "../send-now";
 import { ADAPTER, ALPHA_VAULT_ABI, ERC20, FRONT_DOOR, MULTICALL3_ABI, QUOTER, STAKER, STAKING, STAKING_ADDRESS, TWAP_ORACLE, VAULT } from "./abi";
 import { APY_WINDOW_BLOCKS, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
 import type { Clients } from "./chain";
-import { ALPHA_VAULT, type Deployment, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
+import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import type { NextBatch, OpenBatch } from "./types";
 import { RAO, toDisplay } from "./units";
 
@@ -231,6 +231,25 @@ export async function taoPriceUsd(c: Pick<Clients, "base">): Promise<number> {
   return toDisplay((await quoteSell(c, 10n ** 16n)) * 100n, 6);
 }
 
+/** The oracle's price of one TAO, in USDC units: the 30-minute TWAP of Cascade's own CascadeTwapOracle
+ * (`usdcValue(1e18)`), for the check every stake makes of the quote it is priced from (flows.ts,
+ * assertPriceAgrees). It is read on the second Base RPC (`baseLogs`, the other one the CSP allows), so
+ * the quote and what it is checked against come from different servers as well as different sources;
+ * when that one can't answer, on the first, where the TWAP contract's answer still stands apart from
+ * the quoter's. Rejects when neither answers (nothing is then sent), and for a deployment without an
+ * oracle (v2). */
+export async function readOraclePrice(c: Pick<Clients, "base" | "baseLogs">, d: Deployment): Promise<bigint> {
+  const oracle = d.oracle;
+  if (!oracle) throw new Error("This deployment has no price oracle (v2), so a quote can't be checked against one");
+  const read = (client: Pick<PublicClient, "readContract">) =>
+    client.readContract({ address: oracle, abi: TWAP_ORACLE, functionName: "usdcValue", args: [10n ** 18n] }) as Promise<bigint>;
+  try {
+    return await read(c.baseLogs);
+  } catch {
+    return read(c.base);
+  }
+}
+
 /** What 0.001 ETH sells for, per ETH, in dollars (WETH –0.05%→ USDC). */
 export async function ethPriceUsd(c: Pick<Clients, "base">): Promise<number> {
   const path = encodePacked(["address", "uint24", "address"], [TOKENS.weth, 500, TOKENS.usdc]);
@@ -295,6 +314,12 @@ export async function quoteCloseFee(
 }
 
 const settled = <T>(r: PromiseSettledResult<T>): T | undefined => (r.status === "fulfilled" ? r.value : undefined);
+
+/** Whether two quotes of the bridge fee agree: within FEE_CHECK_BPS of the larger. */
+export function feesAgree(a: bigint, b: bigint, bps: bigint = FEE_CHECK_BPS): boolean {
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  return (hi - lo) * 10_000n <= hi * bps;
+}
 
 /** The open batch for anyone, in one multicall on Base: when it started, its interval, whether it can
  * close, whether Cascade is paused, how many deposits and unstake requests wait in it, and the time of
@@ -361,10 +386,12 @@ export type StakerDeposits = (batchId: bigint, ageS: number) => Promise<{ count:
  *   price and ETH's, null when any of it can't be read (the keeper then holds it too) or on v2;
  * - once it can close: the account's ETH, a gas allowance, ETH's price, and whether Bittensor's side can
  *   take it (false when that can't be read);
- * - either way the bridge fee, for this batch's exact message. Each figure is left out when its read
- *   fails, never guessed. */
+ * - either way the bridge fee, for this batch's exact message, asked of both Base RPCs: the larger when
+ *   they agree (feesAgree), left out and marked unconfirmed when they don't (a send is never priced on
+ *   one server's word), left out when either can't answer. Each figure is left out when its read fails,
+ *   never guessed. */
 export async function readOpenBatch(
-  c: Pick<Clients, "base" | "bittensor">,
+  c: Pick<Clients, "base" | "baseLogs" | "bittensor">,
   d: Deployment,
   account: Address,
   stakerDeposits?: StakerDeposits,
@@ -400,8 +427,10 @@ export async function readOpenBatch(
   if (!canClose && !weigh) return batch;
 
   const none = Promise.resolve(undefined);
-  const [fee, ethUsdc, eth, gas, bitSide, tao, staker, staked] = await Promise.allSettled([
-    quoteCloseFee(c, d, { id, deposits, redeems, totalDeposits }),
+  const message = { id, deposits, redeems, totalDeposits };
+  const [fee, fee2, ethUsdc, eth, gas, bitSide, tao, staker, staked] = await Promise.allSettled([
+    quoteCloseFee(c, d, message),
+    quoteCloseFee({ base: c.baseLogs }, d, message),
     ethPriceUsdc(c),
     canClose ? c.base.getBalance({ address: account }) : none,
     canClose ? c.base.estimateFeesPerGas().then((f) => CLOSE_GAS * f.maxFeePerGas) : none,
@@ -410,7 +439,10 @@ export async function readOpenBatch(
     weigh ? readStakerFees(c, d) : none,
     weigh && stakerDeposits ? stakerDeposits(id, batch.chainTime - batch.start) : none,
   ]);
-  const feeWei = settled(fee);
+  const [feeA, feeB] = [settled(fee), settled(fee2)];
+  const agree = feeA !== undefined && feeB !== undefined && feesAgree(feeA, feeB);
+  const feeWei = agree ? (feeA > feeB ? feeA : feeB) : undefined;
+  const feeUnconfirmed = feeA !== undefined && feeB !== undefined && !agree;
   const ethPrice = settled(ethUsdc);
   const ethWei = settled(eth);
   const gasWei = settled(gas);
@@ -437,6 +469,7 @@ export async function readOpenBatch(
   return {
     ...batch,
     ...(feeWei !== undefined ? { feeWei } : {}),
+    ...(feeUnconfirmed ? { feeUnconfirmed: true as const } : {}),
     ...(canClose && ethWei !== undefined ? { ethWei } : {}),
     ...(canClose && gasWei !== undefined ? { gasWei } : {}),
     ...(ethPrice ? { ethPriceUsd: toDisplay(ethPrice, 6) } : {}),

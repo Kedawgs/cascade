@@ -113,8 +113,9 @@ function ClaimReady({ account }: { account: string }) {
   );
 }
 
-/** The main card on the stake page: account summary on top, the stake form below. */
-export function StakeCard({ account }: { account: string | null }) {
+/** The main card on the stake page: account summary on top, the stake form below. `initialAmount` is
+ * what a link typed into the form (`/stake?amount=…`, "Stake again at today's price"), as typed text. */
+export function StakeCard({ account, initialAmount = "" }: { account: string | null; initialAmount?: string }) {
   const balance = useUsdcBalance();
   const avail = availableToStake(balance);
   const [sent, setSent] = useState<SentNotice | null>(null);
@@ -143,7 +144,7 @@ export function StakeCard({ account }: { account: string | null }) {
       {account && <ClaimReady account={account} />}
       {account && <WalletTao account={account} onSent={setSent} />}
       <div className={styles.form}>
-        <StakeForm account={account} maxUsdc={account ? avail.max : null} amountRef={amountRef} />
+        <StakeForm account={account} initialAmount={initialAmount} maxUsdc={account ? avail.max : null} amountRef={amountRef} />
       </div>
       <SentDialog notice={sent} onClose={() => setSent(null)} returnFocus={amountRef} />
     </div>

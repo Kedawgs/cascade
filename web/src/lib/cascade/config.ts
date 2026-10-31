@@ -239,6 +239,22 @@ export const USDC_PERMIT = { name: "USD Coin", version: "2" } as const;
 export const ROOT_YIELD_PCT = 5.9;
 
 export const SLIPPAGE_BPS = 50n;
+/** How long a stopped stake can be carried on: a day. One stopped longer ago is started again at
+ * today's price (flows.ts, freshStakeTerms; trail.ts shows it so). */
+export const RESUME_WINDOW_MS = 24 * 60 * 60_000;
+/** Before any stake is sent, the quote it is priced from is checked against the 30-minute TWAP of
+ * Cascade's own oracle (CascadeTwapOracle.usdcValue), read on the other Base RPC: a spot price more than
+ * this far from the oracle's, either way, in basis points, sends nothing (flows.ts, assertPriceAgrees).
+ * 5%: over the oracle's first 14 hours on mainnet (30–31 Oct 2026, TAO $230–$238, read every 15
+ * minutes), what buying $20 to $1,000 of TAO paid sat between 0.3% under and 0.9% over the oracle (p95
+ * 0.8%), pool fees and impact included; TAO moves about 1% in a typical half hour, so 5% is about five
+ * such moves against a 30-minute average, which an honest market all but never shows, while a quote 5%
+ * off the oracle is one no honest pool gives. */
+export const PRICE_CHECK_BPS = 500n;
+/** The bridge fee is read on both Base RPCs before Send it now is offered: quotes more than this far
+ * apart, in basis points, are trusted from neither (reads.ts, readOpenBatch). 10%: the two reads are
+ * seconds apart, and the fee moves only when the bridge's price feeds update, a step of a few percent. */
+export const FEE_CHECK_BPS = 1_000n;
 /** The smallest unstake (and remainder) the form allows (see units.checkUnstake): 0.011 TAO. The vault
  * defers, without burning, a front-door redeem worth less than 0.01 TAO at the batch's price
  * (MIN_REDEEM_VALUE), and the user would have paid the request fee for nothing; 10% more covers the

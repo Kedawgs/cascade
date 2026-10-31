@@ -1,16 +1,18 @@
 import { type Address, decodeAbiParameters, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, size } from "viem";
 import { describe, expect, it } from "vitest";
-import { ALPHA_VAULT, type Deployment, MULTICALL3 } from "./config";
+import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, MULTICALL3 } from "./config";
 import { FRONT_DOOR } from "./abi";
 import { basketTwrKey, STORAGE_QUERY } from "./apy";
 import {
   CLOSE_GAS,
   encodeBatch,
+  feesAgree,
   readApyPercent,
   readCloseOutcome,
   readFrontDoor,
   readNextBatch,
   readOpenBatch,
+  readOraclePrice,
   readPendingRewards,
   readRewardCutBps,
   readVault,
@@ -235,6 +237,45 @@ describe("readApyPercent", () => {
   });
 });
 
+describe("the oracle's price, for the check before any stake", () => {
+  const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000005A4E12" as Address, oracle: "0x000000000000000000000000000000000000041E" as Address };
+  /** A Base RPC that answers usdcValue at `price` dollars a TAO (or fails), recording what it was asked. */
+  const rpc = (price?: number) => {
+    const asked: { address: string; functionName: string; args?: readonly unknown[] }[] = [];
+    return {
+      asked,
+      client: {
+        async readContract(c: { address: string; functionName: string; args?: readonly unknown[] }) {
+          asked.push(c);
+          if (price === undefined) throw new Error("HTTP request failed. Status: 429");
+          if (c.functionName !== "usdcValue") throw new Error(`unexpected ${c.functionName}`);
+          return ((c.args?.[0] as bigint) * BigInt(Math.round(price * 1e6))) / 10n ** 18n;
+        },
+      } as never,
+    };
+  };
+
+  it("reads the oracle's TWAP of one TAO on the second Base RPC, not the one the quote came from", async () => {
+    const [first, second] = [rpc(250), rpc(255)];
+    expect(await readOraclePrice({ base: first.client, baseLogs: second.client }, D3)).toBe(255_000_000n);
+    expect(second.asked).toEqual([{ address: D3.oracle, functionName: "usdcValue", args: [10n ** 18n], abi: expect.anything() }]);
+    expect(first.asked).toEqual([]);
+  });
+
+  it("falls back to the first RPC when the second can't answer (the TWAP contract is still another source than the quoter), and fails when neither can", async () => {
+    const first = rpc(250);
+    expect(await readOraclePrice({ base: first.client, baseLogs: rpc().client }, D3)).toBe(250_000_000n);
+    expect(first.asked.map((c) => c.functionName)).toEqual(["usdcValue"]);
+    await expect(readOraclePrice({ base: rpc().client, baseLogs: rpc().client }, D3)).rejects.toThrow();
+  });
+
+  it("has nothing to read for a deployment without an oracle (v2)", async () => {
+    const first = rpc(250);
+    await expect(readOraclePrice({ base: first.client, baseLogs: first.client }, D)).rejects.toThrow(/no price oracle/);
+    expect(first.asked).toEqual([]);
+  });
+});
+
 describe("the open batch, for Send it now", () => {
   const ALICE = getAddress("0x00000000000000000000000000000000000a11ce");
   const BOB = getAddress("0x0000000000000000000000000000000000000b0b");
@@ -256,11 +297,14 @@ describe("the open batch, for Send it now", () => {
       paused?: boolean;
       entries?: boolean;
       quote?: () => bigint;
+      /** What the second Base RPC quotes the fee at (the first's quote unless given). */
+      quote2?: () => bigint;
       gas?: () => bigint;
       bittensor?: Record<string, unknown> | "down";
     } = {},
   ) {
     const calls: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }[] = [];
+    const logsCalls: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }[] = [];
     const asked: string[] = [];
     const empty = over.entries === false;
     const answers: Record<string, unknown> = {
@@ -308,6 +352,14 @@ describe("the open batch, for Send it now", () => {
         return { maxFeePerGas: (over.gas ?? (() => 7_000_000n))(), maxPriorityFeePerGas: 1_000_000n };
       },
     };
+    /** The second Base RPC: asked the bridge fee again, nothing else. */
+    const baseLogs = {
+      async readContract(c: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }) {
+        logsCalls.push(c);
+        if (c.functionName === "quoteFee") return (over.quote2 ?? over.quote ?? (() => FEE))();
+        throw new Error(`unexpected ${c.functionName} on the second RPC`);
+      },
+    };
     const bitAnswers: Record<string, unknown> = { paused: false, isPaused: false, migrationReadyAt: 0n, migrationFinished: false, ...(over.bittensor === "down" ? {} : over.bittensor) };
     const bitAsked: { address: string; functionName: string }[] = [];
     const bittensor = {
@@ -317,8 +369,9 @@ describe("the open batch, for Send it now", () => {
       },
     };
     return {
-      c: { base: base as never, bittensor: bittensor as never },
+      c: { base: base as never, baseLogs: baseLogs as never, bittensor: bittensor as never },
       calls,
+      logsCalls,
       asked,
       bitAsked,
       get multicalls() {
@@ -366,6 +419,8 @@ describe("the open batch, for Send it now", () => {
     // the primary bridge (wiring.ts checks it is this adapter), to the vault on Bittensor (chain 964),
     // for the batch's TAO, from the front door: the call closeBatch makes inside
     expect(quote).toMatchObject({ address: D.baseAdapter, args: [964n, D.vault, encodeBatch(7n, deposits, redeems), 3n * 10n ** 17n], account: D.frontDoor });
+    // the same question of the second Base RPC, and nothing else of it
+    expect(b.logsCalls).toEqual([quote]);
     expect(batch).toEqual({
       id: 7n,
       start: START,
@@ -436,11 +491,52 @@ describe("the open batch, for Send it now", () => {
     expect(b.calls).toEqual([]);
   });
 
+  it("takes the bridge fee only when both Base RPCs agree on it, within 10%, and then the larger: a send is never priced on one server's word", async () => {
+    // the second quotes 5% more: agreed, and the larger is the fee
+    const higher = await readOpenBatch(chains({ quote2: () => (FEE * 105n) / 100n }).c, D3, ME);
+    expect(higher.feeWei).toBe((FEE * 105n) / 100n);
+    expect(higher).not.toHaveProperty("feeUnconfirmed");
+    expect((await readOpenBatch(chains({ quote2: () => (FEE * 95n) / 100n }).c, D3, ME)).feeWei).toBe(FEE);
+    // the second quotes a tenth of it (one of the two is lying, or stale): neither is trusted, and the batch says so
+    const apart = await readOpenBatch(chains({ quote2: () => FEE / 10n }).c, D3, ME);
+    expect(apart).not.toHaveProperty("feeWei");
+    expect(apart.feeUnconfirmed).toBe(true);
+    // the second can't answer: the fee is left out, like any read that failed, not called a disagreement
+    const down = await readOpenBatch(
+      chains({
+        quote2: () => {
+          throw new Error("HTTP request failed. Status: 429");
+        },
+      }).c,
+      D3,
+      ME,
+    );
+    expect(down).not.toHaveProperty("feeWei");
+    expect(down).not.toHaveProperty("feeUnconfirmed");
+    // the keeper's weighing uses the agreed fee too, and can't weigh an unconfirmed one
+    const weighed = await readOpenBatch(chains({ canClose: false, at: 600, quote2: () => (FEE * 105n) / 100n }).c, D3, ME, async () => ({ count: 1, tao: 10n ** 17n }));
+    expect(weighed.economics?.bridgeFeeUsdc).toBe((((FEE * 105n) / 100n) * 2_330_000_000n) / 10n ** 18n);
+    expect((await readOpenBatch(chains({ canClose: false, at: 600, quote2: () => FEE / 10n }).c, D3, ME, async () => ({ count: 1, tao: 10n ** 17n }))).economics).toBeNull();
+  });
+
+  it("agrees two fee quotes within 10% of the larger, either way round, and not beyond", () => {
+    expect(feesAgree(FEE, FEE)).toBe(true);
+    // 10% of the larger: the smaller may be down to 90% of it (the larger up to a ninth more than the smaller)
+    expect(feesAgree(FEE, (FEE * 10n) / 9n - 1n)).toBe(true);
+    expect(feesAgree((FEE * 10n) / 9n - 1n, FEE)).toBe(true);
+    expect(feesAgree(FEE, (FEE * 10n) / 9n + 1n)).toBe(false);
+    expect(feesAgree(FEE, FEE / 2n)).toBe(false);
+    expect(feesAgree(0n, 0n)).toBe(true);
+    expect(feesAgree(0n, FEE)).toBe(false);
+    expect(FEE_CHECK_BPS).toBe(1_000n);
+  });
+
   it("reads nothing more for an empty or paused batch", async () => {
     for (const over of [{ paused: true }, { entries: false }]) {
       const b = chains(over);
       const batch = await readOpenBatch(b.c, D3, ME);
       expect(b.calls, JSON.stringify(over)).toEqual([]);
+      expect(b.logsCalls, JSON.stringify(over)).toEqual([]);
       expect(b.asked).not.toContain("getBalance");
       expect(b.bitAsked).toEqual([]);
       expect(batch).not.toHaveProperty("feeWei");

@@ -150,6 +150,17 @@ export function contractWalletNote(w: WalletKind): string | null {
   return w.atomic === "supported" ? CONTRACT_WALLET_NOTE : null;
 }
 
+/** Where "Stake again at today's price" goes: the stake form with the same amount typed in, when it is known. */
+export function stakeAgainHref(amountUsd?: number): string {
+  return amountUsd !== undefined && amountUsd > 0 ? `/stake?amount=${amountUsd.toFixed(2)}` : "/stake";
+}
+
+/** The amount a link may type into the stake form (`/stake?amount=20.00`): plain dollars, to the cent;
+ * anything else types nothing. The form then quotes it afresh and checks it like anything typed. */
+export function stakeAmountParam(raw: string | null): string {
+  return raw !== null && /^\d{1,9}(\.\d{1,2})?$/.test(raw) ? raw : "";
+}
+
 export function stakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";

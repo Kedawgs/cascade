@@ -24,7 +24,8 @@ export interface DepositOp extends OpBase {
   v?: 3;
   usdcIn: bigint;
   targetTao: bigint;
-  /** v3: the least TAO the stake may deposit, as quoted; carrying the stake on later keeps this floor. */
+  /** v3: the least TAO the stake may deposit, as last quoted. For the record only: a stake carried on
+   * later is quoted again, and this is never the floor sent (flows.ts, freshStakeTerms). */
   minTaoOut?: bigint;
   /** The TAO price it was made at, in dollars. None for a deposit of wallet TAO whose price couldn't be
    * read at the click; read it through `entryPriceUsd`. */

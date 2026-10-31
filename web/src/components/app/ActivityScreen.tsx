@@ -21,6 +21,7 @@ import { offersClaim } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { sentRows } from "@/lib/sent";
+import { stakeAgainHref } from "@/lib/stake-form";
 import { DepositList, WithdrawalList } from "../ActivityList";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
@@ -150,18 +151,26 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
         <SendItNow account={account} what="deposit" waiting={deposit.cancellableWei !== undefined} href={`/activity?deposit=${id}`} />
         {(deposit.status === "needs_you" || deposit.retryable || deposit.restake || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
           <Actions>
-            {deposit.status === "needs_you" && (
-              <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
-                {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
-              </button>
-            )}
+            {deposit.status === "needs_you" &&
+              (flows.moved?.id === id ? (
+                // the price moved since the user last saw a figure (flows.error says by how much): today's
+                // quote goes only once they say so, and is quoted again on the way (use-flows.ts, resumeStake)
+                <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id, flows.moved?.nowTao).catch(() => undefined)}>
+                  {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue at today's price"}
+                </button>
+              ) : (
+                <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
+                  {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
+                </button>
+              ))}
             {deposit.status === "failed" && deposit.retryable && (
               <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Try the deposit again"}
               </button>
             )}
             {deposit.status === "failed" && deposit.restake && (
-              <Link href="/stake" className="pill pill-block">
+              // a fresh stake of the same amount, quoted afresh on the stake form
+              <Link href={stakeAgainHref(deposit.amountUsd)} className="pill pill-block">
                 Stake again at today&apos;s price
               </Link>
             )}

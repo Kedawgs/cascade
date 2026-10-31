@@ -183,8 +183,12 @@ export interface OpenBatch {
   /** The unstake-request fees it holds, which pay its bridge fee first. */
   potWei: bigint;
   /** Read only once it can close (with entries, and not paused); each is undefined when its read failed.
-   * The bridge fee to send it now, as the bridge quotes it for this batch's exact message. */
+   * The bridge fee to send it now, as the bridge quotes it for this batch's exact message, read on both
+   * Base RPCs and kept only when they agree (reads.ts, readOpenBatch). */
   feeWei?: bigint;
+  /** The two Base RPCs quoted bridge fees more than FEE_CHECK_BPS apart, so neither is trusted and
+   * `feeWei` is left out. */
+  feeUnconfirmed?: true;
   /** The account's ETH on Base, and an allowance for closeBatch's network fee. */
   ethWei?: bigint;
   gasWei?: bigint;

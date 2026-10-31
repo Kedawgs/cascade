@@ -12,8 +12,8 @@ const WINDOW = 1_000n;
 const BASE_CHAIN_ID = 8453n;
 const ED_RESERVE = 10n ** 12n;
 
-type RawLog = { address: string; topics: readonly Hex[]; data: Hex; blockNumber: bigint | null; transactionHash: Hex | null; logIndex: number | null };
-type Receipt = { status: string; blockNumber?: bigint; logs: RawLog[] };
+export type RawLog = { address: string; topics: readonly Hex[]; data: Hex; blockNumber: bigint | null; transactionHash: Hex | null; logIndex: number | null };
+export type Receipt = { status: string; blockNumber?: bigint; logs: RawLog[] };
 
 /** What the vault has emitted since deployment, scanned once and then only forward. The events (not the
  * caches) are saved in the browser and resumed from (scan-store.ts). */
@@ -235,7 +235,12 @@ const CONFIRM_AT_ONCE = 8;
  * read shows nothing from it meanwhile. `seeded`: the event in question came from the history indexer's
  * seed (below the scan's seeded mark), so the indexer is distrusted (live.ts). */
 export class HistoryMismatchError extends Error {
-  constructor(readonly seeded = false) {
+  /** `restarted`: the scan was already put back to the deploy block by the thrower (which held the
+   * account's lock); otherwise the caller does it under that lock. */
+  constructor(
+    readonly seeded = false,
+    readonly restarted = false,
+  ) {
     super("The history saved in this browser didn't match Bittensor, so it is being read again.");
     this.name = "HistoryMismatchError";
   }
@@ -289,13 +294,13 @@ export async function confirmAccountEvents(c: Pick<Clients, "bittensor">, d: Dep
   if (wrong.length > 0) {
     const seeded = wrong.some((e) => seededAccount(scan, e.block));
     restart(scan);
-    throw new HistoryMismatchError(seeded);
+    throw new HistoryMismatchError(seeded, true);
   }
   for (const e of unconfirmed) {
     const batchId = deliveredBatchIn(receipts.get(e.txHash) ?? null, d, e.key);
     if (batchId !== undefined && !scan.delivered.has(batchId) && seededShared(scan, e.block)) {
       restart(scan);
-      throw new HistoryMismatchError(true);
+      throw new HistoryMismatchError(true, true);
     }
   }
   scan.deposited.splice(0, scan.deposited.length, ...(deposited as AccountEvent[]));
@@ -313,11 +318,11 @@ async function receiptOrUnknown(c: Pick<Clients, "bittensor">, scan: VaultScan, 
 }
 
 /** Whether a receipt holds the vault's Staked. */
-const stakedIn = (r: Receipt | null, d: Deployment) =>
+export const stakedIn = (r: Receipt | null, d: Deployment) =>
   mined(r) && parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "Staked", strict: false }).some((l) => same(l.address, d.vault));
 
 /** Whether a receipt holds the vault's PayoutChunkSent for this key, chunk and taken count. */
-const chunkIn = (r: Receipt | null, d: Deployment, key: Hex, chunk: number, taken: number) =>
+export const chunkIn = (r: Receipt | null, d: Deployment, key: Hex, chunk: number, taken: number) =>
   mined(r) &&
   parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "PayoutChunkSent", strict: false }).some(
     (l) => same(l.address, d.vault) && same(l.args.key as string, key) && Number(l.args.chunk) === chunk && Number(l.args.taken) === taken,
@@ -371,7 +376,7 @@ export async function confirmedChunks(c: Pick<Clients, "bittensor">, d: Deployme
 }
 
 /** Whether a receipt holds the vault's BatchDelivered of batch `batchId` from our front door, under `key`. */
-function deliveryIn(r: Receipt | null, d: Deployment, batchId: string, key: Hex): boolean {
+export function deliveryIn(r: Receipt | null, d: Deployment, batchId: string, key: Hex): boolean {
   return (
     mined(r) &&
     parseEventLogs({ abi: VAULT, logs: r!.logs as never, eventName: "BatchDelivered", strict: false }).some(
@@ -409,7 +414,7 @@ export async function checkDeliveries(c: Pick<Clients, "bittensor">, d: Deployme
  * asks): null only when that server is REREAD blocks past `block` and has no such transaction (a node's
  * log and receipt index can run hundreds of blocks behind the head it reports). Throws while it can't
  * tell (no answer, or a server not that far on), which must never be taken for "not there". */
-async function receiptAt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: Hex, block: bigint): Promise<Receipt | null> {
+export async function receiptAt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: Hex, block: bigint): Promise<Receipt | null> {
   const cached = scan.receipts.get(hash);
   if (cached) return cached;
   const [r, head] = await Promise.all([
@@ -430,7 +435,7 @@ async function receiptAt(c: Pick<Clients, "bittensor">, scan: VaultScan, hash: H
 /** One window of the vault's logs, taken only from a server that has reached the window's end. The
  * logs and the server's head are asked together, so they travel in one request to one server; a
  * server that is behind answers "no logs" for blocks it hasn't seen, which must not count as none. */
-async function windowLogs(c: Pick<Clients, "bittensor">, d: Deployment, from: bigint, to: bigint): Promise<RawLog[]> {
+export async function windowLogs(c: Pick<Clients, "bittensor">, d: Deployment, from: bigint, to: bigint): Promise<RawLog[]> {
   for (let i = 0; i < FRESH_TRIES; i++) {
     const [raw, head] = await Promise.all([
       c.bittensor.getLogs({ address: d.vault, fromBlock: from, toBlock: to } as never) as Promise<unknown>,

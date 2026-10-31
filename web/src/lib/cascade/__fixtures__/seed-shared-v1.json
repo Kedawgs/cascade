@@ -1,0 +1,41 @@
+{
+  "v": 1,
+  "vault": "0x44ceace0b097d9d5ef01e08b12029ad2762cbdc6",
+  "from": "6900000",
+  "next": "6905001",
+  "delivered": [
+    {
+      "batchId": "1",
+      "key": "0x2287fc22c46a1e12c71be3cb49588376faf45ff397760901444cb81c497d864b",
+      "txHash": "0xfc4109b7c1554af28ba4336020585d05b1ec5f97c558702d5b02c6c76428a681",
+      "block": "6900100"
+    },
+    {
+      "batchId": "2",
+      "key": "0x0cc0c669fba03f7f1065898a55a8e357f1b61b280980b9223b3c2cd7adef21ad",
+      "txHash": "0x8aba7a5d2fdd31153ae0821250bf4ae1847a7629797107f54a32eb84a9b34e4a",
+      "block": "6901000"
+    }
+  ],
+  "staked": [
+    {
+      "block": "6900110",
+      "txHash": "0x21223859596dd4103466a933d1635f6e1e9942eadaaab561efa2774ebcd0e4ce"
+    },
+    {
+      "block": "6901012",
+      "txHash": "0x381c508b6720347dfb69877f9a577cb74f1a3ca04fddc62c7aebd718918d7e45"
+    }
+  ],
+  "payouts": [
+    {
+      "key": "0x0cc0c669fba03f7f1065898a55a8e357f1b61b280980b9223b3c2cd7adef21ad",
+      "chunk": 0,
+      "taken": 1,
+      "txHash": "0x2a1cdf9bcc4846a6b019d8e2e02d99ed3612a6a1cd357c00de2373012c7b1d69",
+      "block": "6901300"
+    }
+  ],
+  "deposited": [],
+  "redeemed": []
+}

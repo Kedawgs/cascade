@@ -113,10 +113,11 @@ describe("parseConfig", () => {
 
   it("takes the second logs RPC of each chain from its var, or its secret, and refuses one on the primary's domain", () => {
     const cfg = parseConfig(vars());
-    expect(cfg.rpc.baseLogs2).toBe("https://base.drpc.org");
-    expect(cfg.rpc.bittensor2).toBe("https://bittensor-finney.api.onfinality.io/public");
+    // Base: Tenderly's public gateway, then dRPC's (tried in order, the next one when one fails)
+    expect(cfg.rpc.baseLogs2).toEqual(["https://base.gateway.tenderly.co", "https://base.drpc.org"]);
+    expect(cfg.rpc.bittensor2).toEqual(["https://bittensor-finney.api.onfinality.io/public"]);
     const keyed = parseConfig(withVars({ BASE_LOGS_RPC_URL_2_SECRET: "https://second.example/v1/abc123", BITTENSOR_RPC_URL_2_SECRET: "https://other.example/v1/abc123" }));
-    expect([keyed.rpc.baseLogs2, keyed.rpc.bittensor2]).toEqual(["https://second.example/v1/abc123", "https://other.example/v1/abc123"]);
+    expect([keyed.rpc.baseLogs2, keyed.rpc.bittensor2]).toEqual([["https://second.example/v1/abc123"], ["https://other.example/v1/abc123"]]);
     // not an https URL, or missing
     expect(refused(withVars({ BASE_LOGS_RPC_URL_2: "http://base.drpc.org" })).message).toContain("BASE_LOGS_RPC_URL_2");
     expect(refused(withVars({ BITTENSOR_RPC_URL_2: undefined })).message).toContain("BITTENSOR_RPC_URL_2");
@@ -128,6 +129,26 @@ describe("parseConfig", () => {
     const primaryAtSecond = refused(withVars({ BASE_LOGS_RPC_URL_SECRET: "https://lb.drpc.org/ogrpc?network=base&dkey=SECRETKEY" }));
     expect(primaryAtSecond.message).toContain("BASE_LOGS_RPC_URL_2");
     expect(primaryAtSecond.message).not.toContain("SECRETKEY");
+  });
+
+  it("takes a short list of second logs RPCs, tried in order: a JSON list in the var, or in its secret", () => {
+    const list = ["https://a.example/v1", "https://b.example/v1"];
+    expect(parseConfig(withVars({ BASE_LOGS_RPC_URL_2: list })).rpc.baseLogs2).toEqual(list);
+    expect(parseConfig(withVars({ BITTENSOR_RPC_URL_2: JSON.stringify(list) })).rpc.bittensor2).toEqual(list);
+    expect(parseConfig(withVars({ BASE_LOGS_RPC_URL_2_SECRET: JSON.stringify(["https://keyed.example/v1/k1", "https://base.drpc.org"]) })).rpc.baseLogs2).toEqual([
+      "https://keyed.example/v1/k1",
+      "https://base.drpc.org",
+    ]);
+    // at least one and at most three, each https, none on the primary's domain, none twice; the error names no URL
+    for (const bad of [[], ["https://a.example", "https://b.example", "https://c.example", "https://d.example"], ["https://a.example", "http://b.example/k-SECRET"], ["https://a.example", "https://a.example"], "[oops", [7]]) {
+      const e = refused(withVars({ BASE_LOGS_RPC_URL_2: bad }));
+      expect(e.message, JSON.stringify(bad)).toContain("BASE_LOGS_RPC_URL_2");
+      expect(e.message).not.toContain("example");
+      expect(e.message).not.toContain("SECRET");
+    }
+    const same = refused(withVars({ BASE_LOGS_RPC_URL_2: ["https://a.example", "https://other.publicnode.com/k"] }));
+    expect(same.message).toContain("same domain as the primary");
+    expect(same.message).not.toContain("publicnode");
   });
 
   it("refuses an ALERT_MODE other than send or log", () => {

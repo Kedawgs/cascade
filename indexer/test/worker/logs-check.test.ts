@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DEPENDENCY_EVENTS, VAULT } from "../../src/abi.ts";
 import { type Config, rolesOf } from "../../src/config.ts";
 import { runHourly } from "../../src/hourly.ts";
-import { LOGS_CHECK_WINDOW, runLogsCheck } from "../../src/logs-check.ts";
+import { LOGS_CHECK_BUDGET, LOGS_CHECK_WINDOW, runLogsCheck } from "../../src/logs-check.ts";
 import { decode, identify, type RawLog } from "../../src/logs.ts";
 import { indexerUnverified } from "../../src/rules/ops.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
@@ -351,6 +351,57 @@ describe("runLogsCheck", () => {
     expect(indexerUnverified.run(await ctxAt(t0 + 4 * 3600))).toEqual([]);
   });
 
+  it("tries the next second endpoint in its list when one fails (a public node answering HTTP 429 to Cloudflare's egress), and judges with the one that answered", async () => {
+    const { deps, to, net2 } = await world({
+      // the endpoint that answers lacks the close's two logs, so its alert names it as the second endpoint
+      secondLogs: (chain, primary, { trip }) => (chain === "base" ? primary.filter((l) => l.transactionHash !== trip.closeTx) : primary),
+    });
+    const BUSY = "https://busy.public-node.test/v1/busy-key-0123456789";
+    const asked: string[] = [];
+    const fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      asked.push(new URL(url).host);
+      if (new URL(url).host === new URL(BUSY).host) return Promise.resolve(new Response("too many requests", { status: 429 }));
+      return deps().fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const base = deps();
+    const cfg = { ...base.cfg, rpc: { ...base.cfg.rpc, baseLogs2: [BUSY, TEST_URLS.baseLogs2] } };
+    const r = await runLogsCheck({ ...base, cfg, fetch });
+    expect(r.base).toMatchObject({ to: to.base, extra: 2 });
+    // the busy one asked once and retried once, then the next one asked for every window
+    expect(asked.filter((h) => h === new URL(BUSY).host)).toHaveLength(2);
+    expect(net2.fetches.filter((f) => f.chain === "base").length).toBeGreaterThan(0);
+    const m = await meta();
+    expect(m["logs_check_fail_since:base"] ?? "").toBe("");
+    const [alert] = await alerts();
+    expect(alert.body).toContain("second endpoint: second.test");
+    expect(alert.body).not.toContain("public-node.test");
+  });
+
+  it("fails a chain only when every second endpoint in its list fails, naming each one's error and none of their keys", async () => {
+    const { w, deps } = await world();
+    const BUSY = "https://busy.public-node.test/v1/busy-key-0123456789";
+    const fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const host = new URL(url).host;
+      if (host === new URL(BUSY).host) return Promise.resolve(new Response("too many requests", { status: 429 }));
+      if (host === new URL(TEST_URLS.baseLogs2).host) return Promise.resolve(new Response("busy", { status: 503 }));
+      return deps().fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const base = deps();
+    const t0 = w.nowS();
+    const r = await runLogsCheck({ ...base, cfg: { ...base.cfg, rpc: { ...base.cfg.rpc, baseLogs2: [BUSY, TEST_URLS.baseLogs2] } }, fetch });
+    expect(r.base).toBe("failed");
+    expect(typeof r.bittensor).toBe("object");
+    const m = await meta();
+    expect(m["logs_check_fail_since:base"]).toBe(String(t0));
+    expect(m["logs_check_error:base"]).toContain("public-node.test");
+    expect(m["logs_check_error:base"]).toContain("HTTP 429");
+    expect(m["logs_check_error:base"]).toContain("second.test");
+    expect(m["logs_check_error:base"]).toContain("HTTP 503");
+    expect(m["logs_check_error:base"]).not.toContain("key-0123456789");
+  });
+
   it("skips a chain still catching up in its first backfill (an old range a non-archive second node may not have)", async () => {
     const { deps } = await world();
     await setMeta(db, "catching_up", "bittensor").run();
@@ -365,7 +416,10 @@ describe("runLogsCheck", () => {
     expect(r.watchdog.stalled).toBe(false);
     expect(typeof r.logsCheck.base).toBe("object");
     expect(net2.count()).toBeGreaterThan(0);
-    expect(net2.count()).toBeLessThanOrEqual(12);
+    expect(net2.count()).toBeLessThanOrEqual(LOGS_CHECK_BUDGET);
+    // room for one Base list's endpoint failing on its last window, retried, and the next reading every window,
+    // beside Bittensor's one window and its retry
+    expect(LOGS_CHECK_BUDGET).toBeGreaterThanOrEqual(2 * Math.ceil(DEFAULTS.logsCheckBaseBlocks / Number(w.cfg.baseLogWindow)) + 1 + 2);
     expect(aboutLogs(w.sent)).toEqual([]);
   });
 });

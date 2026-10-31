@@ -56,8 +56,9 @@ export interface Config {
   bridges: { base: Hex[]; bittensor: Hex[] };
   tokens: Tokens;
   /** the RPCs: Base's state reads, Base's log scans, Bittensor's; and a second, independent logs endpoint per
-   * chain (another registrable domain than the primary's) for the hourly cross-check of the stored logs */
-  rpc: { base: string; baseLogs: string; bittensor: string; baseLogs2: string; bittensor2: string };
+   * chain (another registrable domain than the primary's) for the hourly cross-check of the stored logs: a list of
+   * one to MAX_SECONDS, tried in order until one answers */
+  rpc: { base: string; baseLogs: string; bittensor: string; baseLogs2: string[]; bittensor2: string[] };
   budgets: {
     /** external fetches per invocation (Workers Free allows 50) */
     subrequests: number;
@@ -288,6 +289,9 @@ function stringList(field: string, raw: unknown): string[] {
 
 const PRICE_SOURCES: readonly PriceSource[] = ["coingecko", "coinbase"];
 
+/** The most second logs endpoints a chain may list (each costs a range's requests when the one before fails). */
+export const MAX_SECONDS = 3;
+
 /** The setting from a secret when it is set, else from its var. */
 const secretOr = (env: ConfigEnv, name: RpcVar) => {
   const secret = env[`${name}_SECRET`];
@@ -305,11 +309,16 @@ export function parseConfig(env: ConfigEnv): Config {
     return httpsUrl(field, value);
   };
   /** a second opinion must come from another provider: the same domain (a keyed URL at the provider the second
-   * defaults to, the lite node next to the archive node) isn't one */
-  const second = (name: "BASE_LOGS_RPC_URL_2" | "BITTENSOR_RPC_URL_2", primary: string) => {
-    const url = rpc(name);
-    if (hostDomain(url) === hostDomain(primary)) throw new ConfigError(name, "is on the same domain as the primary: not a second opinion");
-    return url;
+   * defaults to, the lite node next to the archive node) isn't one. One URL, or a short list (a JSON list in the var or
+   * its secret) tried in order, so one public node refusing Cloudflare's egress doesn't leave the logs unverified */
+  const seconds = (name: "BASE_LOGS_RPC_URL_2" | "BITTENSOR_RPC_URL_2", primary: string) => {
+    const [field, value] = secretOr(env, name);
+    const list = Array.isArray(value) ? value : typeof value === "string" && value.trimStart().startsWith("[") ? jsonSetting(field, value) : [value];
+    if (!Array.isArray(list) || list.length === 0 || list.length > MAX_SECONDS) throw new ConfigError(field, `is not one URL or a JSON list of 1 to ${MAX_SECONDS}`);
+    const urls = list.map((x) => httpsUrl(field, x));
+    if (new Set(urls).size !== urls.length) throw new ConfigError(field, "lists a URL twice");
+    if (urls.some((url) => hostDomain(url) === hostDomain(primary))) throw new ConfigError(name, "is on the same domain as the primary: not a second opinion");
+    return urls;
   };
 
   const scanWallS = int("SCAN_WALL_S", env.SCAN_WALL_S, 1, 900);
@@ -354,8 +363,8 @@ export function parseConfig(env: ConfigEnv): Config {
       base: rpc("BASE_RPC_URL"),
       baseLogs: rpc("BASE_LOGS_RPC_URL"),
       bittensor: rpc("BITTENSOR_RPC_URL"),
-      baseLogs2: second("BASE_LOGS_RPC_URL_2", rpc("BASE_LOGS_RPC_URL")),
-      bittensor2: second("BITTENSOR_RPC_URL_2", rpc("BITTENSOR_RPC_URL")),
+      baseLogs2: seconds("BASE_LOGS_RPC_URL_2", rpc("BASE_LOGS_RPC_URL")),
+      bittensor2: seconds("BITTENSOR_RPC_URL_2", rpc("BITTENSOR_RPC_URL")),
     },
     budgets: {
       subrequests: int("SUBREQUEST_BUDGET", env.SUBREQUEST_BUDGET, 10, 10_000),

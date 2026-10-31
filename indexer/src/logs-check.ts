@@ -11,7 +11,8 @@ import { type AlertRow, alertOf, returnedIds, setMeta } from "./store.ts";
 // The hourly cross-validation of the logs (the pen test's MON-1): the tick reads each chain's logs through one
 // RPC, and a node that omits a watched log blinds the monitor without any lag, blind or reorg signal. Every hour
 // a second, independent endpoint per chain (another provider: BASE_LOGS_RPC_URL_2, BITTENSOR_RPC_URL_2, or their
-// _SECRET) re-reads the newest settled range of the watched addresses, and its logs are compared, by the same uid
+// _SECRET; each may list up to three, tried in order until one answers) re-reads the newest settled range of the
+// watched addresses, and its logs are compared, by the same uid
 // the scan gives them, with what the store holds for that range. A log the second serves and the store lacks is
 // the critical indexer.logs_omitted (the primary omitted a watched event); a stored log the second, REREAD blocks
 // past it, doesn't serve is the warning indexer.logs_extra. One alert per chain, the logs listed in its facts,
@@ -32,8 +33,10 @@ export interface LogsCheckDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Requests the whole run may make (both chains, retries included). */
-export const LOGS_CHECK_BUDGET = 12;
+/** Requests the whole run may make (both chains, retries included): room for a Base endpoint failing on its last
+ * window, retried, and the next one in its list reading all six, beside Bittensor's window and a retry (15). A
+ * third endpoint, or a second failing too, may run out of it: the chain then fails this run. */
+export const LOGS_CHECK_BUDGET = 20;
 /** The windows the second endpoints are asked in (Base's from BASE_LOG_WINDOW at run time). */
 export const LOGS_CHECK_WINDOW: Record<ChainName, bigint> = { base: WINDOW.base, bittensor: WINDOW.bittensor };
 /** At most this many mismatched logs are listed in a chain's alert; the counts say the rest. */
@@ -122,16 +125,10 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
 
   const budget = new Budget(LOGS_CHECK_BUDGET);
   const now = deps.now ?? Date.now;
-  const rpc = createRpc({
-    urls: { base: cfg.rpc.base, baseLogs: cfg.rpc.baseLogs2, bittensor: cfg.rpc.bittensor2 },
-    fetch: deps.fetch,
-    budget,
-    retries: 1,
-    timeoutMs: TIMEOUT_MS,
-    deadlineMs: now() + RUN_MS,
-    now,
-    sleep: deps.sleep,
-  });
+  const deadlineMs = now() + RUN_MS;
+  /** a client for one second endpoint (the run's budget and deadline shared by all) */
+  const rpcAt = (url: string) =>
+    createRpc({ urls: { base: cfg.rpc.base, baseLogs: url, bittensor: url }, fetch: deps.fetch, budget, retries: 1, timeoutMs: TIMEOUT_MS, deadlineMs, now, sleep: deps.sleep });
   const roleOf = rolesOf(cfg.deployment, cfg.bridges, cfg.tokens);
   const addresses = scanAddresses(cfg);
   // ForeverMoney's watched admin events are stored by the tick, so they are re-read here too (in the same requests)
@@ -158,30 +155,45 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     }
     const window = chain === "base" ? cfg.baseLogWindow : LOGS_CHECK_WINDOW.bittensor;
     const primaryUrl = chain === "base" ? cfg.rpc.baseLogs : cfg.rpc.bittensor;
-    const secondUrl = chain === "base" ? cfg.rpc.baseLogs2 : cfg.rpc.bittensor2;
 
     // the second endpoint's logs, window by window, each accepted only from a node settled past its end; the
-    // lowest head that answered says how far past the range the second node is
-    const second: RawLog[] = [];
-    let checkedTo: bigint | undefined;
-    let lowestHead: bigint | undefined;
-    try {
-      for (let a = from; a <= to; a = checkedTo + 1n) {
-        const b = min(a + window - 1n, to);
-        const r = await rpc.logsWithHead(chain, { address: addresses[chain], fromBlock: a, toBlock: b, watch: watch[chain] });
-        if (r.head < b + SETTLE[chain]) break;
-        second.push(...r.logs);
-        lowestHead = lowestHead === undefined ? r.head : min(lowestHead, r.head);
-        checkedTo = b;
+    // lowest head that answered says how far past the range the second node is. The chain's endpoints are tried in
+    // order, each reading the whole range afresh, until one answers every window it asks (a public node may answer
+    // HTTP 429 to Cloudflare's shared egress); the chain fails only when every one does
+    let read: { second: RawLog[]; checkedTo?: bigint; lowestHead?: bigint } | undefined;
+    let secondUrl = "";
+    const errors: string[] = [];
+    for (const url of chain === "base" ? cfg.rpc.baseLogs2 : cfg.rpc.bittensor2) {
+      const rpc = rpcAt(url);
+      const second: RawLog[] = [];
+      let checkedTo: bigint | undefined;
+      let lowestHead: bigint | undefined;
+      try {
+        for (let a = from; a <= to; a = checkedTo + 1n) {
+          const b = min(a + window - 1n, to);
+          const r = await rpc.logsWithHead(chain, { address: addresses[chain], fromBlock: a, toBlock: b, watch: watch[chain] });
+          if (r.head < b + SETTLE[chain]) break;
+          second.push(...r.logs);
+          lowestHead = lowestHead === undefined ? r.head : min(lowestHead, r.head);
+          checkedTo = b;
+        }
+      } catch (e) {
+        const why = message(e);
+        console.warn(`logs check: ${chain}'s second endpoint ${hostDomain(url)} failed: ${why}`);
+        errors.push(why.slice(0, 200));
+        continue;
       }
-    } catch (e) {
-      const why = message(e);
-      console.warn(`logs check: ${chain}'s second endpoint failed: ${why}`);
+      read = { second, checkedTo, lowestHead };
+      secondUrl = url;
+      break;
+    }
+    if (!read) {
       if (!num(meta[`logs_check_fail_since:${chain}`])) writes.push(setMeta(db, `logs_check_fail_since:${chain}`, String(nowS)));
-      writes.push(setMeta(db, `logs_check_error:${chain}`, why.slice(0, 200)));
+      writes.push(setMeta(db, `logs_check_error:${chain}`, errors.join("; ").slice(0, 500)));
       result[chain] = "failed";
       continue;
     }
+    const { second, checkedTo, lowestHead } = read;
     if (num(meta[`logs_check_fail_since:${chain}`])) writes.push(setMeta(db, `logs_check_fail_since:${chain}`, ""));
     if (checkedTo === undefined || lowestHead === undefined) {
       result[chain] = "behind";

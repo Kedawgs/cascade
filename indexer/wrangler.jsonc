@@ -75,10 +75,17 @@
         // the archive node: the lite node keeps only minutes of logs
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
         // the hourly cross-check's second logs endpoint per chain, from another provider than the primary (the
-        // config refuses the same registrable domain): a lying or pruning primary is noticed. Overridden by
-        // BASE_LOGS_RPC_URL_2_SECRET and BITTENSOR_RPC_URL_2_SECRET (keyed URLs). OnFinality's public Bittensor
-        // node serves batched eth_getLogs and eth_blockNumber (1.3-5 s a call; dRPC's Bittensor needs a paid plan).
-        "BASE_LOGS_RPC_URL_2": "https://base.drpc.org",
+        // config refuses the same registrable domain): a lying or pruning primary is noticed. One URL or a list of
+        // up to three, tried in order until one answers. Overridden by BASE_LOGS_RPC_URL_2_SECRET and
+        // BITTENSOR_RPC_URL_2_SECRET (a keyed URL, or a JSON list). Base: Tenderly's public gateway answered the
+        // check's batch (two eth_getLogs over 100 blocks and eth_blockNumber) in 150-520 ms on 2026-10-31, with the
+        // same logs as dRPC; dRPC's public node has answered the production Worker (Cloudflare's shared egress) with
+        // HTTP 429 since 14:17 UTC that day, so it is only the fallback. Keyless public Base endpoints that don't fit: mainnet.base.org (eth_getLogs "request limit
+        // reached"), 1rpc.io and nodies (50 blocks at most), blastapi and meowrpc (10), llamarpc (a Cloudflare
+        // challenge), onfinality and zan (HTTP 429, a key wanted), blockpi (a key wanted). OnFinality's public
+        // Bittensor node serves batched eth_getLogs and eth_blockNumber (1.3-5 s a call; dRPC's Bittensor needs a
+        // paid plan).
+        "BASE_LOGS_RPC_URL_2": ["https://base.gateway.tenderly.co", "https://base.drpc.org"],
         "BITTENSOR_RPC_URL_2": "https://bittensor-finney.api.onfinality.io/public",
         "BASE_LOG_WINDOW": "100",
         // the Workers Paid profile (see the table above; Free: 45, 100, 2)
@@ -165,8 +172,9 @@
         "BASE_RPC_URL": "https://base-rpc.publicnode.com",
         "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
         "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
-        // the second logs endpoints (as test's): another provider than the primary, for the hourly cross-check
-        "BASE_LOGS_RPC_URL_2": "https://base.drpc.org",
+        // the second logs endpoints (as test's): another provider than the primary, for the hourly cross-check;
+        // Base's tried in order (Tenderly, then dRPC, which answers HTTP 429 to Cloudflare's egress since 2026-10-31)
+        "BASE_LOGS_RPC_URL_2": ["https://base.gateway.tenderly.co", "https://base.drpc.org"],
         "BITTENSOR_RPC_URL_2": "https://bittensor-finney.api.onfinality.io/public",
         "BASE_LOG_WINDOW": "100",
         // the Workers Paid profile (see the table above; Free: 45, 100, 2)

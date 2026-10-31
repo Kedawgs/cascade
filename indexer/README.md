@@ -112,20 +112,28 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   logs URL must **not** be `https://mainnet.base.org`: it refuses `eth_getLogs`. The default,
   `https://base-rpc.publicnode.com`, answers 100-block windows. Bittensor must be an archive node
   (`https://archive.chain.opentensor.ai`): the lite node keeps only minutes of logs.
-- **The second logs RPCs**: `BASE_LOGS_RPC_URL_2` and `BITTENSOR_RPC_URL_2` (defaults `https://base.drpc.org` and
-  `https://bittensor-finney.api.onfinality.io/public`, OnFinality's public node, which serves batched
-  `eth_getLogs` in 1.3–5 s a call; dRPC's Bittensor endpoint needs a paid plan; a keyed URL goes in
-  `BASE_LOGS_RPC_URL_2_SECRET` / `BITTENSOR_RPC_URL_2_SECRET`). The hourly job re-reads each chain's newest
+- **The second logs RPCs**: `BASE_LOGS_RPC_URL_2` and `BITTENSOR_RPC_URL_2`, each one URL or a list of up to three
+  tried in order until one answers (Base: `["https://base.gateway.tenderly.co", "https://base.drpc.org"]`;
+  Bittensor: `https://bittensor-finney.api.onfinality.io/public`, OnFinality's public node, which serves batched
+  `eth_getLogs` in 1.3–5 s a call; dRPC's Bittensor endpoint needs a paid plan). A keyed URL, or a JSON list, goes
+  in `BASE_LOGS_RPC_URL_2_SECRET` / `BITTENSOR_RPC_URL_2_SECRET`. The hourly job re-reads each chain's newest
   re-read blocks through them (the settled point less the tick's re-read depth, 70 on Base and 400 on Bittensor,
   so the primary's log index lagging its head is never read as an omission; `logsCheckBaseBlocks` 600 and
-  `logsCheckBittensorBlocks` 300 at most per run, in the chain's windows, within 12 requests) and compares the
-  logs with what the primary had the tick store, so a primary that omits a watched log is noticed. A second
-  opinion has to come from another provider: the config refuses a second URL on the same registrable domain as
-  its primary (the lite node next to the archive node; a keyed dRPC primary next to the dRPC default: set another
-  provider for one of them, e.g. `https://base-mainnet.public.blastapi.io` or `https://base.llamarpc.com` for
-  Base). An archive endpoint is best (a pruning second node reads as `indexer.logs_extra` warnings); a second
-  endpoint that stops answering is `indexer.unverified` after 3 hours, and `pnpm smoke` tries both from your
-  machine.
+  `logsCheckBittensorBlocks` 300 at most per run, in the chain's windows, within 20 requests) and compares the
+  logs with what the primary had the tick store, so a primary that omits a watched log is noticed. An endpoint
+  that fails (after one retry) hands the whole range to the next in its list; the alert names the one that
+  answered. A second opinion has to come from another provider: the config refuses a second URL on the same
+  registrable domain as its primary (the lite node next to the archive node; a keyed dRPC primary next to the
+  dRPC fallback: drop it from the list). An archive endpoint is best (a pruning second node reads as
+  `indexer.logs_extra` warnings); a chain whose every second endpoint stops answering is `indexer.unverified` after
+  3 hours, and `pnpm smoke` tries them from your machine (not Cloudflare's egress, which public nodes rate-limit
+  harder). **Why this Base list** (tested 2026-10-31 with the check's own batch, two `eth_getLogs` over 100 blocks
+  and `eth_blockNumber`, a few times each): Tenderly answered every time in 150–520 ms with the same logs as dRPC;
+  dRPC answers from a home IP but has answered the production Worker with HTTP 429 since 14:17 UTC that day, so it
+  is the fallback. Keyless Base endpoints that don't fit a 100-block window: `mainnet.base.org` (`eth_getLogs`
+  "request limit reached"), `1rpc.io/base` and `base-public.nodies.app` (50 blocks at most), `base-mainnet.public.blastapi.io`
+  and `base.meowrpc.com` (10), `base.llamarpc.com` (a Cloudflare challenge page), `base.api.onfinality.io/public`
+  and `api.zan.top` (HTTP 429, a key wanted), `base.blockpi.network` (a key wanted).
 - **Budgets** (two profiles; both environments are set to Paid):
 
   | Var | Workers Paid (set) | Workers Free (fallback, not viable for a full batch) |
@@ -325,7 +333,8 @@ Bittensor's rules for root stake apply to it. None of that is Cascade's to chang
   the stored reading and the hour row, and meta written only when a mark changes. Decoding the extra answers takes
   microseconds. Admin events are rare; each is hashed and decoded once (the decode budget counts them) and its
   transaction fetched once for its sender. All four logs endpoints (publicnode and dRPC on Base, OpenTensor's archive
-  and OnFinality on Bittensor) answered the batch with its 21-topic filter on 2026-10-31.
+  and OnFinality on Bittensor) answered the batch with its 21-topic filter on 2026-10-31, and so did Tenderly's Base
+  gateway, the second endpoint since.
 
 | Alert | Tier | What it means | What to do |
 |---|---|---|---|
@@ -376,7 +385,7 @@ each side are in every alert's facts):
 |---|---|---|---|
 | `indexer.logs_omitted` | critical | the second RPC served watched logs the primary never did, in blocks the tick had already re-read from a node well past them, so the monitor's history and its rules missed them. One alert per chain, the logs (event, block, transaction) listed in it; re-sent hourly by the job until acknowledged, resolved by the job once the store holds every log it named | open the transactions on the explorer; if they are real, read the events and act on them as their own alerts would have had you, and switch the primary (`BASE_LOGS_RPC_URL` / `BITTENSOR_RPC_URL`, or the `_SECRET`) to another provider, then redeploy. The tick re-reads only 70 (Base) or 400 (Bittensor) blocks back, so a missed log isn't added by itself |
 | `indexer.logs_extra` | warning | the store holds logs the second RPC, 70 or 400 blocks past them, doesn't serve (one alert per chain, the logs listed) | usually the second node pruned them (set an archive endpoint in `*_RPC_URL_2`) or lags its log index; if the explorer doesn't have a transaction either, the primary served a log that isn't on the chain: switch it and re-check what the rules decided on it |
-| `indexer.unverified` | warning (condition) | the second RPC of a chain hasn't answered the cross-check for `logsCheckUnverifiedS` (3 hours): the primary's logs go unverified meanwhile | check `BASE_LOGS_RPC_URL_2` / `BITTENSOR_RPC_URL_2`: the public default may refuse Cloudflare's egress; set a keyed URL in its `_SECRET` (another provider than the primary's), redeploy. Clears on the next run that answers |
+| `indexer.unverified` | warning (condition) | no second RPC of a chain (every one in its list) has answered the cross-check for `logsCheckUnverifiedS` (3 hours): the primary's logs go unverified meanwhile. The email carries each endpoint's last error | check `BASE_LOGS_RPC_URL_2` / `BITTENSOR_RPC_URL_2`: a public node may refuse Cloudflare's egress (HTTP 429). Add another keyless provider to the list (one that answers a 100-block `eth_getLogs`: the README's "The second logs RPCs" names those that don't), or set a keyed URL in its `_SECRET` (another provider than the primary's); redeploy. Clears on the next run that answers |
 
 A chain still catching up in its first backfill isn't cross-checked (an old range a non-archive second node may
 not have), and a second node that hasn't settled the range yet is asked again next hour.

@@ -9,7 +9,7 @@ interface __BaseEnv_Env {
 	BASE_RPC_URL: string;
 	BASE_LOGS_RPC_URL: string;
 	BITTENSOR_RPC_URL: string;
-	BASE_LOGS_RPC_URL_2: string;
+	BASE_LOGS_RPC_URL_2: string[];
 	BITTENSOR_RPC_URL_2: string;
 	BASE_LOG_WINDOW: string;
 	SUBREQUEST_BUDGET: string;

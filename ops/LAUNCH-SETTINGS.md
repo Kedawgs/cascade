@@ -265,24 +265,43 @@ Each has its own loud line, in capitals, so it stands out in the log.
   most. A user who changes their preference once a round to make the keeper send reverting deliveries
   gets two a day, not one a round. The user can claim by hand throughout, and the keeper's other work
   goes on.
-- **The circuit breaker.** A close, stake or payout whose simulation (or own re-read of the chain)
-  refuses it three rounds in a row is skipped: the round moves on to the next due action (other
-  payouts, deliveries, the stake, the close), and the refused one is tried again 5 minutes later, then
-  10, 20, 40, 60 at most, as long as it keeps being refused (`SKIPPING paying out batch …: refused 3
-  rounds in a row (…); the keeper's other actions go ahead; tried again in 5 min`). A payout the vault
-  refuses for a bridge fee over its ceiling, or a stake on a deregistered hotkey, no longer stops the
-  deliveries and closes behind it. A refused simulation sends nothing, so a skip can never send twice;
-  while skipped the action is not even estimated. An action that goes through, or is no longer due,
-  starts its count again.
-- **A stuck transaction is replaced.** A transaction of the keeper's still pending 15 minutes after it
-  was sent (the receipt wait itself is 5) is sent again at the same nonce with a 12.5% higher fee, the
-  same call if it still passes, else a cancel that only frees the nonce (`REPLACING transaction …
-  (closing the batch, nonce 12): no receipt 15 min after it was sent …`). A replacement stuck in its
-  turn is replaced after 30 minutes, then 60; three at most. Two transactions at one nonce can't both
-  be mined, so a replacement never doubles a send; the keeper checks first that the transaction is
-  still pending, its own, at that nonce, and nothing has been mined at it. `Replaced: … went through
-  (transaction …)` records its bridge message like a late receipt; `Not replaced: …` means it landed
-  meanwhile and its receipt follows.
+- **The circuit breaker.** A close, stake or payout whose simulation (or own re-read of the chain, or
+  the gas price cap below) refuses it three times in a row is skipped: the round moves on to the next
+  due action (other payouts, deliveries, the stake, the close), and the refused one is tried again 5
+  minutes later, then 10, 20, 40, 60 at most, as long as it keeps being refused (`SKIPPING paying out
+  batch …: refused 3 times in a row (…); the keeper's other actions go ahead; tried again in 5 min`;
+  once the wait is at its hour, `STILL SKIPPING …`). The count is of tries, which from the third are a
+  back-off apart, not of rounds. The rounds that failed on those refusals are not followed by a
+  `Recovered` line once the action is skipped: nothing recovered. A payout the vault refuses for a
+  bridge fee over its ceiling, or a stake on a deregistered hotkey, no longer stops the deliveries and
+  closes behind it. A refused simulation sends nothing, so a skip can never send twice; while skipped
+  the action is not even estimated. An action that goes through, or is no longer due, starts its count
+  again.
+- **The gas price cap.** No send goes out at a gas price over `OPS_MAX_GAS_PRICE_BASE` /
+  `OPS_MAX_GAS_PRICE_BITTENSOR` (gwei, decimals allowed; by default 5 and 100, against prices that sit
+  under 0.1 and about 10). Over it the send is refused (`the gas price is … gwei, over the … gwei cap
+  (OPS_MAX_GAS_PRICE_…); … waits for it to fall; nothing sent`) and tried again later, and so is a
+  replacement whose bumped fee would be over it: a fee spike costs a wait, never the wallet's funds.
+- **A stuck transaction is replaced.** A transaction of the keeper's still pending 15 minutes after
+  the keeper stopped waiting for its receipt (a 5-minute wait at the send, so about 20 minutes in all)
+  is sent again at the same nonce with a 12.5% higher fee (fee cap and tip on Base, the tip never under
+  the node's suggestion; the gas price on Bittensor), the same call if it still passes, or, only when
+  its estimate is a genuine revert (the call would fail now), a cancel that only frees the nonce
+  (`REPLACING transaction … (closing the batch, nonce 12): no receipt 15 min after the keeper stopped
+  waiting for one …`). When the node didn't answer the estimate (a rate limit, a timeout) nothing is
+  sent or cancelled, and it is tried again 15 minutes later. Every replacement passes the guards every
+  send passes first: the record still complete and verified, the keeper wallet still without code on
+  either chain, the right keystore and chain; a failure of those stops the keeper, as at any send. A
+  replacement stuck in its turn is replaced after 30 minutes, then 60; three at most. Two transactions
+  at one nonce can't both be mined, so a replacement never doubles a send; the keeper checks first that
+  the transaction is still pending, its own, at that nonce, and nothing has been mined at it. The
+  original's hash and every replacement's are all watched: whichever has a receipt ends the watch
+  (`Replaced: … went through (transaction …)` or `Late receipt: …`, with its bridge message recorded),
+  and so does the wallet's mined nonce passing the call's, two rounds running, with none of them mined
+  (`Watch ended: something else was mined at nonce …`: check the hashes on the explorer). `Not
+  replaced: …` means the node had nothing to replace (it landed or was dropped meanwhile): the watch
+  goes on until a receipt or the nonce ends it. A transaction with no receipt 6 hours after the keeper
+  stopped waiting for one is reported as probably dropped (`NO RECEIPT 6 hours after …`).
 - **A batch's deposits are counted from its first block.** The close rule's fee estimate scans the
   open batch's `DepositRequested` logs from the block the batch opened in, found by its timestamp, so a
   keeper restarted at any hour of a batch counts the staker's deposits (before, a restart more than
@@ -291,23 +310,48 @@ Each has its own loud line, in capitals, so it stands out in the log.
   at a public RPC's 100); when the cut bites, `Base logs: batch N opened at block …, further than the …
   blocks the logs window allows …` says so once, and the variable to raise.
 - **A payout list is rebuilt before it is refused.** A payout list rebuilt from the vault's events that
-  doesn't match the vault's stored hash is scanned again, in full, from the deploy block, before the
-  keeper decides: one short `eth_getLogs` answer (a lagging replica) no longer stops it. Only two full
-  scans that both mismatch do.
+  doesn't match the vault's stored hash fails that round (`Failed this round (the payout list is being
+  rebuilt, …)`), and the vault's events are scanned again, in full, from the deploy block, the next
+  round: one short `eth_getLogs` answer (a lagging replica, given a round to catch up) no longer stops
+  the keeper. Only two full scans in two rounds that both mismatch do.
 
 Lines that need a look when they appear, though the keeper runs on:
 
 - `SENT, BUT NOT SAVED: transaction …, bridge message …`: the transaction went through, but the record
   couldn't be saved. Follow the message with the `pnpm ops track` command the line gives, adding
   `--live`.
-- `NO RECEIPT after 60 rounds for transaction …`: a transaction that timed out never showed a receipt,
-  so it was probably dropped or replaced. Check it on the chain's explorer. One that does land later is
-  logged as `Late receipt: …`, with its bridge message recorded.
-- `DELIVERY HELD: …`, `SKIPPING …`, `REPLACING transaction …`: the holds, skips and replacements above.
-  Each says what it is waiting on and until when; a `SKIPPING` that repeats for hours (a bridge fee
-  over the vault's ceiling, a paused lane) needs the owner, not the keeper.
+- `NO RECEIPT 6 hours after the keeper stopped waiting for one: transaction(s) …`: a transaction that
+  timed out, and its replacements, never showed a receipt, so they probably dropped. Check them on the
+  chain's explorer. One that does land later is logged as `Late receipt: …`, with its bridge message
+  recorded.
+- `Watch ended: something else was mined at nonce …`: the wallet's nonce moved past a watched
+  transaction's without any of its hashes getting a receipt (a node this one can't see took one of
+  them, or you sent something at that nonce by hand). Check the hashes on the explorer; `pnpm ops
+  status` finds a bridge message.
+- `DELIVERY HELD: …`, `SKIPPING …` / `STILL SKIPPING …`, `REPLACING transaction …`: the holds, skips
+  and replacements above. Each says what it is waiting on and until when; a `STILL SKIPPING` that
+  repeats for hours (a bridge fee over the vault's ceiling, a paused lane, a gas price over the cap)
+  needs the owner, not the keeper.
 - `Base logs: batch N opened at block …, further than … the logs window allows`: raise
   `OPS_BASE_LOGS_WINDOW`, or the batch waits its max wait.
+
+**A transaction stuck from before a restart.** The keeper replaces only transactions it sent in this
+run: what it was watching is forgotten when it restarts (a crash, a `-Stop`). If a transaction of the
+keeper's was pending at that moment and stays stuck, every send on that chain is then refused with
+`an earlier transaction from the keeper (nonce N) is still waiting to be mined`, round after round,
+and nothing replaces it. Free it by hand, from a machine with the keeper's keystore (never while the
+supervisor is running another send: `-Stop` first, or do it between rounds):
+
+1. Find the stuck nonce: `cast nonce <keeper> --rpc-url <rpc>` is the mined count, `cast nonce
+   <keeper> --block pending --rpc-url <rpc>` the pending one; the stuck nonce is the mined count when
+   the pending one is higher. The line above names it too.
+2. Cancel it with a transfer of nothing to the keeper itself at that nonce, with a fee at least 12.5%
+   over the stuck transaction's (`cast tx <hash> --rpc-url <rpc>` shows it; the explorer too):
+   `cast send <keeper> --value 0 --nonce <N> --gas-price <wei> --keystore <keystore> --password-file
+   <pw> --rpc-url <rpc>`, adding `--legacy` on Bittensor and `--priority-gas-price <wei>` on Base.
+   Or re-send the stuck call the same way instead of a cancel, if it should still go.
+3. Start the keeper again. The next round decides what is due; nothing is sent twice, since the nonce
+   was taken by the cancel.
 
 `run` takes `deployments/<name>.run.lock` while it runs, so a keeper started by hand can't run beside
 the supervised one. A lock left by a keeper that was killed is taken over once its process is gone.

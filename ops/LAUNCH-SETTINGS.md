@@ -13,7 +13,7 @@ test wallet.
 |---|---|
 | `OPS_LAUNCH_OWNER_BASE`, `OPS_LAUNCH_OWNER_BITTENSOR` | The final owner on each chain: a Safe, a timelock run by a Safe, or a plain account (v3-launch: one hardware-wallet account on both chains). It may be a contract. Per chain, because a Safe at one address on Base may not exist (or may be someone else's) on Bittensor. |
 | `OPS_LAUNCH_GUARDIAN_BASE`, `OPS_LAUNCH_GUARDIAN_BITTENSOR` | The guardian on each chain, set in the constructors (so there is no 8-day wait). A plain account with its own key, or a Safe. |
-| `OPS_LAUNCH_KEEPER` | The keeper on both chains. Must be a plain account. Before each send, the keeper reads its code on both chains, once a round at most. Code on either chain blocks every send, because one key holds the address on both and an EIP-7702 delegation can cover every chain at once. `run` then stops. |
+| `OPS_LAUNCH_KEEPER` | The keeper on both chains. Must be a plain account. Before every send, the keeper reads its code on both chains, fresh each time (never kept for the round). Code on either chain blocks every send, because one key holds the address on both and an EIP-7702 delegation can cover every chain at once. `run` then stops. |
 | `OPS_LAUNCH_TREASURY` | Receives the reward cut and the staker's fees. Must be a plain account (no code on either chain): deploy checks this before planning, and verify checks it again. |
 
 Refused: a guardian equal to any owner or to the keeper; the keeper equal to any owner; the test wallet
@@ -224,21 +224,78 @@ does a skip of one action 10 rounds in a row (another caller beating the same cl
 wallet's guard keeps refusing). Nothing is retried within the round that failed, and every send passes
 the usual guards again. Every line has any URL cut down to its domain, so no RPC key reaches the log.
 
+The keeper stops itself only for states that are unsafe, or wrong, for everyone. One user's delivery,
+one refused payout or one stuck transaction never stops it: those are held, skipped or replaced, as the
+next section says.
+
 | Waits for the next round | Stops for good (exit code 3, never restarted) |
 |---|---|
 | Someone else closed the batch, or paid a batch out, first | The keeper wallet has code (an EIP-7702 delegation): assume its key is stolen |
-| An earlier transaction is still pending; a nonce race | The keystore signs as another account (a wrong key) |
-| The simulation refused the send (the chain changed) | The record isn't complete and verified, a read-back since has failed, or the hand-off isn't accepted |
+| An earlier transaction is still pending; a nonce race (replaced after 15 minutes, below) | The keystore signs as another account (a wrong key) |
+| The simulation refused the send (the chain changed); from the third refusal in a row the action is skipped (below) | The record isn't complete and verified, a read-back since has failed, or the hand-off isn't accepted |
 | No receipt yet (a slow block; the next send waits for it) | The record file is gone, or now holds another deployment |
 | A pause, or the chain changed since the round's read | An RPC answers for another chain |
 | An RPC error, a timeout, a dropped connection | A transaction reverted on chain and nothing explains it (read again the next round if the first read fails) |
-| A delivery that reverted because the user claimed first or the price moved (held up to 30 minutes) | A user's delivery reverted 3 times while its simulation passed on the same facts |
-| A delivery that reverted for no reason it can see, the first and second time (the round counts as failed) | The payout list rebuilt from the vault's events doesn't match the vault's (it would block every other action) |
-| Anything else unexpected | 30 rounds in a row failed on something unexpected |
-| | Another keeper already runs for the deployment (`deployments/<name>.run.lock`) |
+| A delivery that reverted because the price moved or the user claimed or changed their preference first (held up to 30 minutes, or longer once over the user's revert budget) | The payout list rebuilt from the vault's events doesn't match the vault's on two full scans of those events |
+| A delivery that reverted for no reason it can see (the round counts as failed; that user is held) | 30 rounds in a row failed on something unexpected |
+| Anything else unexpected | Another keeper already runs for the deployment (`deployments/<name>.run.lock`) |
 | | Anything `run` refuses at start (no record, a bad setting) |
 
-Two lines need a look when they appear, though the keeper runs on:
+### Holds, back-offs and skips
+
+How the keeper keeps one user's, one action's or one transaction's trouble from stopping the rest.
+Each has its own loud line, in capitals, so it stands out in the log.
+
+- **A delivery needs room.** The keeper sells a user's TAO only when the quote (after the swap fee)
+  clears every floor the front door applies, the user's and the 30-minute TWAP's, by 0.5%; its own
+  minimum is the quote less 0.5%. A quote within 0.5% of a floor waits for a better one (`Delivery to
+  … waits: the quote … clears the user's floor … by less than the 0.5% room …`). Sent at the floor
+  itself, any downtick before the sale landed would revert it, for the gas, round after round for a
+  user whose floor sits at the market price.
+- **A reverted delivery is explained before it is counted.** The keeper replays a reverted
+  transaction's call at its block to decode why. A price race (`BelowMinimum`, `InsufficientOutput`,
+  `Too little received`) or the user's own change (`NoDelivery`, `DeliveryExpired`, `NothingToClaim`)
+  explains it, and so does the user's claimable amount, preference or quote having changed: that user
+  is held for 30 minutes, or until their facts change, and no round fails. A revert nothing explains
+  fails its round (so the log shows it) and holds that user the same way. Neither ever stops the keeper.
+- **The revert budget.** Every reverted delivery of one user, explained or not, counts: two within 24
+  hours and that user is held 6 hours, whatever the price or their preference does (`DELIVERY HELD:
+  deliver to … reverted on chain 2 times within 24 hours …; held 6 hours, until …`). Each time the
+  budget runs out again within a day of the last hold's end, the hold doubles: 12, 24, then 48 hours at
+  most. A user who changes their preference once a round to make the keeper send reverting deliveries
+  gets two a day, not one a round. The user can claim by hand throughout, and the keeper's other work
+  goes on.
+- **The circuit breaker.** A close, stake or payout whose simulation (or own re-read of the chain)
+  refuses it three rounds in a row is skipped: the round moves on to the next due action (other
+  payouts, deliveries, the stake, the close), and the refused one is tried again 5 minutes later, then
+  10, 20, 40, 60 at most, as long as it keeps being refused (`SKIPPING paying out batch …: refused 3
+  rounds in a row (…); the keeper's other actions go ahead; tried again in 5 min`). A payout the vault
+  refuses for a bridge fee over its ceiling, or a stake on a deregistered hotkey, no longer stops the
+  deliveries and closes behind it. A refused simulation sends nothing, so a skip can never send twice;
+  while skipped the action is not even estimated. An action that goes through, or is no longer due,
+  starts its count again.
+- **A stuck transaction is replaced.** A transaction of the keeper's still pending 15 minutes after it
+  was sent (the receipt wait itself is 5) is sent again at the same nonce with a 12.5% higher fee, the
+  same call if it still passes, else a cancel that only frees the nonce (`REPLACING transaction …
+  (closing the batch, nonce 12): no receipt 15 min after it was sent …`). A replacement stuck in its
+  turn is replaced after 30 minutes, then 60; three at most. Two transactions at one nonce can't both
+  be mined, so a replacement never doubles a send; the keeper checks first that the transaction is
+  still pending, its own, at that nonce, and nothing has been mined at it. `Replaced: … went through
+  (transaction …)` records its bridge message like a late receipt; `Not replaced: …` means it landed
+  meanwhile and its receipt follows.
+- **A batch's deposits are counted from its first block.** The close rule's fee estimate scans the
+  open batch's `DepositRequested` logs from the block the batch opened in, found by its timestamp, so a
+  keeper restarted at any hour of a batch counts the staker's deposits (before, a restart more than
+  four hours in read them as $0.00 and held the batch for its whole max wait). The look-back is cut at
+  72 queries of `OPS_BASE_LOGS_WINDOW` (720,000 blocks at the live server's 10,000; 7,200, four hours,
+  at a public RPC's 100); when the cut bites, `Base logs: batch N opened at block …, further than the …
+  blocks the logs window allows …` says so once, and the variable to raise.
+- **A payout list is rebuilt before it is refused.** A payout list rebuilt from the vault's events that
+  doesn't match the vault's stored hash is scanned again, in full, from the deploy block, before the
+  keeper decides: one short `eth_getLogs` answer (a lagging replica) no longer stops it. Only two full
+  scans that both mismatch do.
+
+Lines that need a look when they appear, though the keeper runs on:
 
 - `SENT, BUT NOT SAVED: transaction …, bridge message …`: the transaction went through, but the record
   couldn't be saved. Follow the message with the `pnpm ops track` command the line gives, adding
@@ -246,6 +303,11 @@ Two lines need a look when they appear, though the keeper runs on:
 - `NO RECEIPT after 60 rounds for transaction …`: a transaction that timed out never showed a receipt,
   so it was probably dropped or replaced. Check it on the chain's explorer. One that does land later is
   logged as `Late receipt: …`, with its bridge message recorded.
+- `DELIVERY HELD: …`, `SKIPPING …`, `REPLACING transaction …`: the holds, skips and replacements above.
+  Each says what it is waiting on and until when; a `SKIPPING` that repeats for hours (a bridge fee
+  over the vault's ceiling, a paused lane) needs the owner, not the keeper.
+- `Base logs: batch N opened at block …, further than … the logs window allows`: raise
+  `OPS_BASE_LOGS_WINDOW`, or the batch waits its max wait.
 
 `run` takes `deployments/<name>.run.lock` while it runs, so a keeper started by hand can't run beside
 the supervised one. A lock left by a keeper that was killed is taken over once its process is gone.

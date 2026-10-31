@@ -8,7 +8,6 @@ import {
   encodeAbiParameters,
   type Hex,
   keccak256,
-  toHex,
   type PublicClient,
 } from "viem";
 import { ADAPTER, FRONT_DOOR, STAKER, VAULT } from "./abi";
@@ -122,49 +121,12 @@ export async function checkWiring(c: Pick<Clients, "base" | "bittensor">, d: Dep
 /** How long a check's answer is kept before the chain is read again. */
 export const WIRING_TTL_MS = 15 * 60_000;
 
-/** Where a pass is kept across reloads of the tab. */
-export interface SessionCache {
-  get(key: string): string | null;
-  set(key: string, value: string): void;
-  remove(key: string): void;
-}
-
-/** The tab's sessionStorage (cleared with the tab), or nothing where there is none. */
-export function sessionCache(): SessionCache {
-  const store = () => (typeof window !== "undefined" ? window.sessionStorage : undefined);
-  return {
-    get: (k) => store()?.getItem(k) ?? null,
-    set: (k, v) => store()?.setItem(k, v),
-    remove: (k) => store()?.removeItem(k),
-  };
-}
-
-/** Every read of the check as its pass is keyed: the chain it is made on, the contract, the function, its
- * arguments and the answer it must give (the v2 deployment has the same addresses on both chains, so
- * without the chain a read on one could pass for a read on the other). */
-export function wiringReads(d: Deployment): [chain: "base" | "bittensor", address: string, functionName: string, args: string[], want: string][] {
-  const { base, bittensor } = links(d);
-  const read = (chain: "base" | "bittensor") => (l: Link): [typeof chain, string, string, string[], string] => [
-    chain,
-    l.address.toLowerCase(),
-    l.functionName,
-    (l.args ?? []).map(String),
-    String(l.want).toLowerCase(),
-  ];
-  return [...base.map(read("base")), ...bittensor.map(read("bittensor"))];
-}
-
-/** Where a pass of this deployment's check is kept: by a hash of every read and the answer it must
- * give (wiringReads), so a pass of another deployment, or of a check since changed, is never taken for
- * this one's. */
-export function wiringKey(d: Deployment): string {
-  return `cascade:wiring:${keccak256(toHex(JSON.stringify(wiringReads(d))))}`;
-}
-
-/** The wiring check, as the site asks it: an answer (pass or mismatch) is kept for WIRING_TTL_MS, a pass
- * also in the tab's session storage, dated, so a reload within it asks nothing again; a read that failed
- * is kept by neither, so the next call reads again. Calls while a check runs share it. `forget()` (after
- * each flow) makes the next call read the chain again; a check it came during is not kept. */
+/** The wiring check, as the site asks it: an answer (pass or mismatch) is kept for WIRING_TTL_MS, in
+ * this page's memory only. Nothing about it is ever written to or read from the browser's storage: a
+ * pass kept there could be written there by anything else on the origin, and would then skip the chain
+ * for its lifetime; a reload costs one multicall on each chain instead. A read that failed is not kept,
+ * so the next call reads again. Calls while a check runs share it. `forget()` (after each flow) makes
+ * the next call read the chain again; a check it came during is not kept. */
 export interface WiringCheck {
   (): Promise<Wiring>;
   forget(): void;
@@ -174,38 +136,19 @@ export function createWiringCheck(
   c: Pick<Clients, "base" | "bittensor">,
   d: Deployment,
   check: (c: Pick<Clients, "base" | "bittensor">, d: Deployment) => Promise<Wiring> = checkWiring,
-  session: SessionCache = sessionCache(),
   now: () => number = Date.now,
   ttlMs: number = WIRING_TTL_MS,
 ): WiringCheck {
-  const key = wiringKey(d);
   /** The latest check: its answer and when it came (`at` unset while it runs). */
   let known: { at?: number; answer: Promise<Wiring> } | undefined;
   /** Bumped by forget(): a check started before it is not kept. */
   let generation = 0;
   const fresh = (at: number) => now() >= at && now() - at < ttlMs;
-  const storedPass = (): number | undefined => {
-    try {
-      const at = Number((JSON.parse(session.get(key) ?? "null") as { okAt?: unknown } | null)?.okAt);
-      return Number.isFinite(at) ? at : undefined;
-    } catch {
-      return undefined;
-    }
-  };
   const run = (): Promise<Wiring> => {
     const started = generation;
     const answer = check(c, d).then(
       (w) => {
-        if (started !== generation) return w;
-        const at = now();
-        known = { at, answer };
-        if (w === "ok") {
-          try {
-            session.set(key, JSON.stringify({ okAt: at }));
-          } catch {
-            // storage blocked: kept for this page only
-          }
-        }
+        if (started === generation) known = { at: now(), answer };
         return w;
       },
       (e: unknown) => {
@@ -216,23 +159,10 @@ export function createWiringCheck(
     known = { answer };
     return answer;
   };
-  const wired = (() => {
-    if (known && (known.at === undefined || fresh(known.at))) return known.answer;
-    const at = storedPass();
-    if (at !== undefined && fresh(at)) {
-      known = { at, answer: Promise.resolve("ok" as const) };
-      return known.answer;
-    }
-    return run();
-  }) as WiringCheck;
+  const wired = (() => (known && (known.at === undefined || fresh(known.at)) ? known.answer : run())) as WiringCheck;
   wired.forget = () => {
     generation++;
     known = undefined;
-    try {
-      session.remove(key);
-    } catch {
-      // storage blocked: nothing kept there
-    }
   };
   return wired;
 }

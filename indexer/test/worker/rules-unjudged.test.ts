@@ -10,7 +10,9 @@ import { RUNBOOK } from "../../src/runbook.ts";
 import { TICK_RULES } from "../../src/tick.ts";
 import * as market from "../../src/rules/market.ts";
 import * as ops from "../../src/rules/ops.ts";
+import * as site from "../../src/rules/site.ts";
 import * as solvency from "../../src/rules/solvency.ts";
+import type { SiteResult } from "../../src/site-job.ts";
 import type { BaseState, BitState, Bucket, HourAgg } from "../../src/snapshot.ts";
 import { loadTickState } from "../../src/store.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
@@ -273,6 +275,44 @@ describe("the market and solvency conditions, unread", () => {
     expect(judged(solvency.frontDoorSolvency, ctx({ base: fd }))).toEqual(CLEAR);
     expect(judged(solvency.vaultSolvency, ctx({ bit: { rootStakeRao: 10n ** 9n, balance: E18 } }))).toEqual(blind([{ rule: "vault.solvency", key: "vault.solvency" }]));
     expect(judged(solvency.vaultSolvency, ctx({ bit: { rootStakeRao: 10n ** 9n, balance: E18, pendingPayouts: 0n } }))).toEqual(CLEAR);
+  });
+});
+
+describe("site.integrity on an incomplete pass", () => {
+  const TAINT = "0x00000000000000000000000000000000000000ee";
+  const result = (o: Partial<SiteResult>) => JSON.stringify({ finishedAt: NOW - 60, complete: true, files: ["a.js", "b.js"], unapproved: [], missing: [], problems: [], capped: false, ...o } satisfies SiteResult);
+  const tainted = { unapproved: [{ kind: "address" as const, value: TAINT, file: "b.js" }] };
+  /** b.js answered 5xx: not read, so not judged (a CDN attacker serving the tainted file can do this on purpose) */
+  const unread = { complete: false, problems: [{ kind: "unreadable" as const, file: "b.js", detail: "HTTP 503" }] };
+
+  it("still reports what the pass found, and marks the rule unjudged: an unread file may hold what an open alert named", () => {
+    const c = ruleCtx({ meta: { site_result: result({ ...unread, unapproved: [{ kind: "host", value: "evil.example", file: "a.js" }] }) } });
+    expect(site.siteIntegrity.run(c).map((f) => f.key)).toEqual(["site.integrity:host:evil.example"]);
+    expect(c.unjudged).toEqual([{ rule: "site.integrity" }]);
+    const complete = ruleCtx({ meta: { site_result: result({}) } });
+    expect(site.siteIntegrity.run(complete)).toEqual([]);
+    expect(complete.unjudged).toEqual([]);
+  });
+
+  it("end to end: the tainted file's alert stays open through a pass that couldn't read it, and resolves only on a complete clean pass", async () => {
+    const db = env.DB;
+    await wipe(db);
+    const tick = async (nowS: number, siteResult: string) => {
+      const c = ruleCtx({ nowS, meta: { site_result: siteResult } });
+      const state = await loadTickState(db, nowS);
+      const out = reconcile(db, { open: state.openAlerts, findings: site.siteIntegrity.run(c), nowS, t: DEFAULTS, holdActive: false, unjudged: c.unjudged });
+      if (out.statements.length) await db.batch(out.statements);
+      const marks = markSent(db, out.due, nowS);
+      if (marks.length) await db.batch(marks);
+      return out.due.map((d) => [d.key, d.reason]);
+    };
+    const key = `site.integrity:address:${TAINT}`;
+    expect(await tick(NOW, result(tainted))).toEqual([[key, "alert"]]);
+    // the next pass couldn't read b.js: no "resolved" email, still open
+    expect(await tick(NOW + 3600, result(unread))).toEqual([[key, "resend"]]);
+    expect((await db.prepare("SELECT resolved_at FROM alerts").first<{ resolved_at: number | null }>())?.resolved_at).toBeNull();
+    // a complete pass without it: resolved
+    expect(await tick(NOW + 7200, result({}))).toEqual([[key, "resolved"]]);
   });
 });
 

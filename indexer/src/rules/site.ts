@@ -1,6 +1,6 @@
 import type { Finding } from "../alerts.ts";
 import type { SiteResult } from "../site-job.ts";
-import { utc } from "./context.ts";
+import { unjudged, utc } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.6: the tick turns the site job's last result (meta.site_result) into alerts.
@@ -25,12 +25,15 @@ const UNAPPROVED: Record<SiteResult["unapproved"][number]["kind"], { subject: st
  * not approved as a script source, a page whose Content-Security-Policy is missing or isn't the build's, a
  * configured Cascade address missing (a complete pass only), or a file it couldn't check: over the byte cap,
  * or one that stopped a site-check invocation. One alert per thing found, for as long as passes keep finding
- * it. */
+ * it. A pass that couldn't read every page and file (`complete` false) still reports what it found, and marks the
+ * rule unjudged: an unread file may hold what an open alert named (a CDN serving the tainted file a 5xx must not
+ * resolve its critical), so the open alerts stay open until a complete pass clears them. */
 export const siteIntegrity: Rule = {
   name: "site.integrity",
   run(ctx) {
     const r = json<SiteResult>(ctx.meta.site_result);
     if (!r) return [];
+    if (!r.complete) unjudged(ctx, "site.integrity");
     const pass = utc(r.finishedAt);
     const out: Finding[] = [];
     for (const u of r.unapproved) {

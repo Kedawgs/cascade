@@ -197,6 +197,13 @@ ul {
   width: 100%;
 }
 
+/* A compact pill for an action inside a summary row, beside the figure it acts on. */
+.pill-sm {
+  min-height: 36px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+
 /* Older button classes, still used by screens that Task 9 replaces. */
 .btn {
   display: inline-flex;

@@ -90,26 +90,69 @@
   }
 }
 
-.walletTao {
-  margin: 0 24px 8px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: #fff4e5;
-  color: #5c3b00;
-  font-size: 14px;
+/* Money of the account's waiting on Base (TAO in the wallet, a payout to claim): a third line of the
+   summary, under a rule, spanning both halves, with its actions beside it. */
+.row {
+  grid-column: 1 / -1;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
 
-.walletTaoActions {
+.rowMain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+}
+
+.rowText {
+  margin: 0;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.rowV {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.rowV small {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.rowActions {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
 }
 
-.walletTaoError {
-  margin-top: 8px;
-  color: #b42318;
+.rowNote {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
 }
 
-.walletTaoNote {
-  margin-top: 6px;
+.rowError {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+/* on a phone the actions take their own line, each button an even share of it */
+@media (max-width: 480px) {
+  .rowActions {
+    width: 100%;
+  }
+
+  .rowActions > button {
+    flex: 1;
+  }
 }

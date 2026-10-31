@@ -39,40 +39,48 @@ export function StakedSummary({ account }: { account: string }) {
   );
 }
 
-/** TAO sitting in the wallet on Base (after a cancel, a claim kept as TAO, or a step that stopped):
- * deposit it, or swap it back to USDC. Hidden when there is none (so a deposit of it is confirmed by
- * the card, through `onSent`: once the refresh shows the wallet empty, this is gone). */
+/** TAO sitting in the wallet on Base (after a cancel, a claim kept as TAO, or a step that stopped): a
+ * line of the summary, with staking it or swapping it back to USDC beside it. Hidden when there is none
+ * (so a stake of it is confirmed by the card, through `onSent`: once the refresh shows the wallet empty,
+ * this is gone). */
 function WalletTao({ account, onSent }: { account: string; onSent: (n: SentNotice) => void }) {
   const balances = useBalances(account);
   const limits = useLimits();
+  const price = useTaoPrice();
   const flows = useFlows(account);
   const tao = balances.data?.tao ?? 0n;
   if (tao === 0n) return null;
-  // why it can't be deposited as it is (null when it can); unknown until the limits load
+  // why it can't be staked as it is (null when it can); unknown until the limits load
   const note = limits.data ? walletTaoNote(tao, limits.data) : undefined;
   const canDeposit = note === null;
+  const amount = toDisplay(tao, 18);
   return (
-    <div className={styles.walletTao}>
-      <p>
-        You have <b>{formatTao(toDisplay(tao, 18), 6)} TAO</b> in your wallet on Base.
-      </p>
-      <div className={styles.walletTaoActions}>
-        {canDeposit && (
-          <button
-            type="button"
-            className="pill"
-            disabled={flows.locked}
-            onClick={() => void flows.depositWalletTao(tao).then((id) => onSent(walletTaoNotice(id, tao)), () => undefined)}
-          >
-            Deposit it
+    <div className={styles.row}>
+      <div className={styles.rowMain}>
+        <div>
+          <p className={styles.k}>TAO in your wallet</p>
+          <p className={styles.rowV} title={`${formatTao(amount, 6)} TAO`}>
+            {formatTao(amount, 4)} TAO {price !== undefined && <small>{formatUsd(amount * price)}</small>}
+          </p>
+        </div>
+        <div className={styles.rowActions}>
+          {canDeposit && (
+            <button
+              type="button"
+              className="pill pill-sm"
+              disabled={flows.locked}
+              onClick={() => void flows.depositWalletTao(tao).then((id) => onSent(walletTaoNotice(id, tao)), () => undefined)}
+            >
+              Stake it
+            </button>
+          )}
+          <button type="button" className="pill pill-ghost pill-sm" disabled={flows.busy !== null} onClick={() => void flows.sellWalletTao(tao).catch(() => undefined)}>
+            Swap to USDC
           </button>
-        )}
-        <button type="button" className="pill pill-ghost" disabled={flows.busy !== null} onClick={() => void flows.sellWalletTao(tao).catch(() => undefined)}>
-          Swap to USDC
-        </button>
+        </div>
       </div>
-      {note && <p className={styles.walletTaoNote}>{note}</p>}
-      {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
+      {note && <p className={styles.rowNote}>{note}</p>}
+      {flows.error && <p className={styles.rowError}>{flows.error}</p>}
     </div>
   );
 }
@@ -95,42 +103,46 @@ export function ClaimReady({ account }: { account: string }) {
   const amount = <b>{price !== undefined ? `About ${formatUsd(toDisplay(claimable, 18) * price)}` : `${formatTao(toDisplay(claimable, 18), 6)} TAO`}</b>;
   if (checking) {
     return (
-      <div className={styles.walletTao}>
-        <p>{amount} is back on Base.</p>
-        <p className={styles.walletTaoNote}>{CLAIM_CHECKING}</p>
-        {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.walletTaoNote}>{CLAIM_ENDS_DELIVERY}</p>}
-        <div className={styles.walletTaoActions}>
-          <button type="button" className="pill pill-ghost" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, true).catch(() => undefined)}>
-            {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as TAO"}
-          </button>
+      <div className={styles.row}>
+        <div className={styles.rowMain}>
+          <p className={styles.rowText}>{amount} is back on Base.</p>
+          <div className={styles.rowActions}>
+            <button type="button" className="pill pill-ghost pill-sm" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, true).catch(() => undefined)}>
+              {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as TAO"}
+            </button>
+          </div>
         </div>
-        {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
+        <p className={styles.rowNote}>{CLAIM_CHECKING}</p>
+        {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.rowNote}>{CLAIM_ENDS_DELIVERY}</p>}
+        {flows.error && <p className={styles.rowError}>{flows.error}</p>}
       </div>
     );
   }
   return (
-    <div className={styles.walletTao}>
-      <p>{amount} is back on Base and ready to claim.</p>
-      {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.walletTaoNote}>{CLAIM_ENDS_DELIVERY}</p>}
-      <div className={styles.walletTaoActions}>
-        {/* the claim names the unstakes it pays, so it waits until they have loaded; if they can't be read
-            it claims without naming them (the chain needs no names) */}
-        <button
-          type="button"
-          className="pill"
-          disabled={flows.busy !== null || (!withdrawals.data && !withdrawals.isError)}
-          onClick={() => void flows.claim(ready, false).catch(() => undefined)}
-        >
-          {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
-        </button>
-        {/* a sale held by the price check (flows.error says why): the TAO itself is always there to claim */}
-        {flows.saleHeld && (
-          <button type="button" className="pill pill-ghost" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, true).catch(() => undefined)}>
-            Claim as TAO instead
+    <div className={styles.row}>
+      <div className={styles.rowMain}>
+        <p className={styles.rowText}>{amount} is back on Base and ready to claim.</p>
+        <div className={styles.rowActions}>
+          {/* the claim names the unstakes it pays, so it waits until they have loaded; if they can't be read
+              it claims without naming them (the chain needs no names) */}
+          <button
+            type="button"
+            className="pill pill-sm"
+            disabled={flows.busy !== null || (!withdrawals.data && !withdrawals.isError)}
+            onClick={() => void flows.claim(ready, false).catch(() => undefined)}
+          >
+            {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
           </button>
-        )}
+          {/* a sale held by the price check (flows.error says why): the TAO itself is always there to claim */}
+          {flows.saleHeld && (
+            <button type="button" className="pill pill-ghost pill-sm" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, true).catch(() => undefined)}>
+              Claim as TAO instead
+            </button>
+          )}
+        </div>
       </div>
-      {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
+      {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.rowNote}>{CLAIM_ENDS_DELIVERY}</p>}
+      {flows.error && <p className={styles.rowError}>{flows.error}</p>}
     </div>
   );
 }
@@ -162,9 +174,9 @@ export function StakeCard({ account, initialAmount = "" }: { account: string | n
             <p className={styles.v}>–</p>
           </div>
         )}
+        {account && <ClaimReady account={account} />}
+        {account && <WalletTao account={account} onSent={setSent} />}
       </div>
-      {account && <ClaimReady account={account} />}
-      {account && <WalletTao account={account} onSent={setSent} />}
       <div className={styles.form}>
         <StakeForm account={account} initialAmount={initialAmount} maxUsdc={account ? avail.max : null} amountRef={amountRef} />
       </div>

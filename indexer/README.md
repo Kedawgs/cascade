@@ -242,6 +242,20 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
     (after the keeper tasks).
 13. Production: the same steps with `--env production` (its database `cascade-indexer-production`). Step 5 is
     done: `env.production` already holds v3-launch's `DEPLOYMENT`.
+14. **After any deploy that changes a second logs endpoint** (`BASE_LOGS_RPC_URL_2`, `BITTENSOR_RPC_URL_2` or their
+    `_SECRET`): `pnpm smoke` only shows they answer from your machine, and public nodes treat Cloudflare's egress
+    harder. After the next hourly run (minute 17), confirm from the Worker's own record that the chain's marks
+    cleared and its range moved on:
+
+    ```sh
+    pnpm --dir indexer wrangler d1 execute cascade-indexer-<env> --remote --env <env> --command \
+      "SELECT k, v FROM meta WHERE k IN ('logs_check_fail_since:base', 'logs_check_error:base', 'logs_check_to:base', 'logs_check_at:base')"
+    ```
+
+    `logs_check_fail_since:base` and `logs_check_error:base` both empty, and `logs_check_at:base` at the last run,
+    mean an endpoint verified a window (an open `indexer.unverified` resolves on the next tick). A set mark with an
+    error naming every endpoint means none answered the Worker (or each was behind): add another provider to the
+    list.
 
 ## When an email arrives
 
@@ -264,6 +278,30 @@ tick for `unjudgedCriticalS` (30 minutes; since when: meta `unjudged_since:<rule
 (a whole chain out is one email, listing each rule and since when), resolves when every one is judged again, and
 doesn't count rules switched off in `rules.off`, or `site.integrity` (an incomplete site pass is
 `site.unreachable`'s warning). The email says what to check.
+
+Two consequences, both erring toward alerting:
+
+- **"Since" marks survive an unjudged gap.** A rule that times a condition in meta (`twap_off_since`,
+  `rate_limited_since:*`, `lock_outside_since`, `idle_since` and the like) leaves its mark alone while it can't
+  judge, so the first judged reading after a long gap that still shows the condition can trip at once, without
+  waiting out the window again.
+- **A hold can be raised twice.** A holding rule raises its hold on the first tick of an occurrence (`onset`); when
+  the reading before last couldn't be judged, it can't tell the condition was already there, and raises the hold
+  again under a new id: one more hold to look at and clear (pinned in `test/worker/rules-unjudged.test.ts`).
+
+**Which conditions note what they can't judge.** Every condition rule was audited (2026-10-31). Changed to mark
+unjudged: `batch.past_max_wait`, `payout.overdue`, `delivery.overdue`, `keeper.low_eth`, `keeper.low_tao`,
+`keeper.idle_unstaked`, `adapter.low_reserve`, `cap.nearly_full`, `batch.one_wallet`, `unstakes.tiny_wave`,
+`outflow.near_limit`, `rewards.uncollected`, `validator.not_earning`, `rail.alpha_vault`, `indexer.lag` and
+`indexer.blind`, `fmtao.backing_true` and `fmtao.lock_outside`, `rail.alpha_vault_admin`, `validator.take_high`,
+`validator.root_stake_drop`, `validator.root_uid_lost`, `ccip.rate_limited`, `root.unlock_interval`,
+`oracle.cardinality`, `oracle.reverted`, `payout.fee_ceiling`, `fmtao.unbacked`, `twap.divergence`,
+`pool.liquidity`, `frontdoor.solvency`, `vault.solvency` and `site.integrity` (an incomplete pass). Left as they
+were, because what they judge outlasts a missing reading already: `ccip.failure` and `ccip.undelivered` (the
+message's stored state), `fmtao.depeg` and `price.reference_unavailable` (their verdicts kept in meta),
+`bridge.check_stuck` and `bridge.payout_unchecked` (the check rows in D1), `keys.safe_unread`,
+`indexer.unverified`, `monitor.chain_unreadable`, `monitor.email_failing` and `monitor.rule_failed` (counters and
+marks in meta), and the other `site.*` warnings (the last pass's result). Events never resolve on a missing reading.
 
 The owner's scripts run `wrangler d1 execute --remote`, so they need `wrangler login`; each takes `--dry-run` to
 print what it would run:

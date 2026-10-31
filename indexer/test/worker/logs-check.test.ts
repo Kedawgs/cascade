@@ -345,9 +345,10 @@ describe("runLogsCheck", () => {
     // the second run still fails: the first failure's time is kept
     await runLogsCheck({ ...deps(t0 + 3600), fetch: failing });
     expect((await meta())["logs_check_fail_since:bittensor"]).toBe(String(t0));
-    // a working run clears it (the condition then resolves)
+    // a working run clears it, and the last error with it (the condition then resolves)
     await runLogsCheck(deps(t0 + 7200));
     expect((await meta())["logs_check_fail_since:bittensor"]).toBe("");
+    expect((await meta())["logs_check_error:bittensor"]).toBe("");
     expect(indexerUnverified.run(await ctxAt(t0 + 4 * 3600))).toEqual([]);
   });
 

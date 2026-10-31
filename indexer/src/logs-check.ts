@@ -207,6 +207,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     }
     const { second, checkedTo, lowestHead } = read;
     if (num(meta[`logs_check_fail_since:${chain}`])) writes.push(setMeta(db, `logs_check_fail_since:${chain}`, ""));
+    if ((meta[`logs_check_error:${chain}`] ?? "") !== "") writes.push(setMeta(db, `logs_check_error:${chain}`, ""));
 
     // ForeverMoney's watched events are judged only from the first block the tick read with their filter (meta
     // watch_from:{chain}): below it, a version of the tick that didn't ask for them stored none, and their absence

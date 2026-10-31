@@ -171,7 +171,10 @@ export function twice(ctx: RuleCtx, chains: ChainName | readonly ChainName[], co
 
 /** `twice` holds on one chain and this is its first tick: the reading before the previous one (if older)
  * didn't hold. A rule that holds raises its hold only then, under an id of that occurrence (a cleared
- * hold id is never raised again), and keeps finding the same alert while the condition lasts. */
+ * hold id is never raised again), and keeps finding the same alert while the condition lasts. A reading before the
+ * previous one that couldn't tell (the field unread) counts as not holding: a condition that outlasts an unread
+ * reading raises its hold again under a new id. That fails closed (one more hold to look at and clear), and
+ * test/worker/rules-unjudged.test.ts pins it. */
 export function onset(ctx: RuleCtx, chain: ChainName, cond: Cond): boolean {
   if (!twice(ctx, chain, cond)) return false;
   const [p, e] = ctx.history[chain];

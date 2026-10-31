@@ -383,6 +383,29 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
   });
 });
 
+describe("onset across an unread reading (pinned)", () => {
+  it("a shortfall that outlasts an unread reading raises its hold again under a new id: it fails closed (one more hold to clear)", () => {
+    const short = { rootStakeRao: 0n, balance: 10n ** 12n, pendingPayouts: E18 };
+    const fine = { ...short, pendingPayouts: 0n };
+    const unread = { rootStakeRao: 0n, balance: 10n ** 12n };
+    const at = (now: [bigint, Partial<BitState>], history: [bigint, Partial<BitState>][]) => {
+      const hs = history.map(([b, s]) => reading(b, NOW, bitState(s)));
+      return ruleCtx({ snap: { ...ruleCtx().snap, bittensor: reading(now[0], NOW, bitState(now[1])) }, previous: { bittensor: hs[0] }, history: { base: [], bittensor: hs } });
+    };
+    // its first tick: the hold, keyed by the reading before
+    const [first] = solvency.vaultSolvency.run(at([12n, short], [[11n, short], [10n, fine]]));
+    expect(first.hold?.id).toBe("vault.solvency:11");
+    // while it lasts: the alert, no hold
+    expect(solvency.vaultSolvency.run(at([13n, short], [[12n, short], [11n, short]]))[0].hold).toBeUndefined();
+    // reading 14 couldn't read pendingPayouts (unjudged), 15 confirms nothing (its previous is unread), 16 holds again:
+    // the reading before last is the unread one, so onset can't tell the shortfall was already there, and raises the
+    // hold under a new id (vault.solvency:15), not the cleared one's. Erring that way only asks for one more look
+    expect(solvency.vaultSolvency.run(at([15n, short], [[14n, unread], [13n, short]]))).toEqual([]);
+    const [again] = solvency.vaultSolvency.run(at([16n, short], [[15n, short], [14n, unread]]));
+    expect(again.hold?.id).toBe("vault.solvency:15");
+  });
+});
+
 describe("no flapping, end to end", () => {
   const db = env.DB;
   beforeEach(async () => {

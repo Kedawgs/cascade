@@ -394,6 +394,29 @@ describe("stake.divergence and stake.unlisted", () => {
     expect(k.rule).toBe("stake.divergence");
   });
 
+  it("a partial reading (rootStakeRao unread, a listed hotkey's stake unread) adds no fall: the pair is skipped, never summed short", () => {
+    const H2 = h("the second listed hotkey");
+    const t = ticker();
+    // two listed hotkeys, rootStakeRao() not answering: the counted stake is the two stakes' sum
+    const both = (block: bigint, over: Partial<BitState> = {}) => at(block, { [HOTKEY]: X, [H2]: 10n * RAO }, { hotkeys: [HOTKEY, H2], rootStakeRao: undefined, ...over });
+    t.run(both(100n));
+    t.run(both(105n, { stakedHotkeys: [HOTKEY, H2, GIFT] }));
+    expect(marker(t.meta, GIFT)).toMatchObject({ drop: "0", upTo: "105" });
+    // H2's getStake failed in this reading: no counted stake, so no fall, though the sum of what was read is 10 TAO lower
+    const partial = bit(110n, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY, H2], stakedHotkeys: [HOTKEY, H2, GIFT], rootStakeRao: undefined, stakes: { [HOTKEY]: X, [GIFT]: 10n * RAO } });
+    expect(t.run(partial).found).toEqual([]);
+    expect(marker(t.meta, GIFT)).toMatchObject({ drop: "0", upTo: "110" });
+    // the next full reading: still nothing fell (the pair (110, 115) has no counted stake before either), so the
+    // gift is the warning, never the hold
+    const full = { stakes: { [HOTKEY]: X, [H2]: 10n * RAO, [GIFT]: 10n * RAO }, stakedHotkeys: [HOTKEY, H2, GIFT] };
+    const [w] = t.run(both(115n, full)).found;
+    expect([w.rule, w.hold, w.facts["the vault counts"], w.facts["unexplained fall since the hotkey appeared"]]).toEqual(["stake.unlisted", undefined, `${X + 10n * RAO} rao (59 TAO)`, "0 rao (0 TAO), over blocks 100-115"]);
+    expect(marker(t.meta, GIFT)).toMatchObject({ drop: "0", upTo: "115" });
+    const [v] = t.run(both(120n, full)).found;
+    expect([v.rule, v.hold]).toEqual(["stake.unlisted", undefined]);
+    expect(marker(t.meta, GIFT)).toMatchObject({ drop: "0", upTo: "120" });
+  });
+
   it("accumulates a pair only once Bittensor is settled past it (its logs are stored by then), and writes the marker only when it moves on", () => {
     const t = ticker();
     t.run(healthy(100n));

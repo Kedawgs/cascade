@@ -211,20 +211,18 @@ function unlistedIn(r: ChainReading<BitState>): Set<Hex> | undefined {
   return out;
 }
 
-/** The stake the vault counts (and prices) in a reading: rootStakeRao(), else the listed hotkeys' stakes read. */
+/** The stake the vault counts (and prices) in a reading: rootStakeRao(), else the sum of the listed hotkeys'
+ * stakes, and only when every one of them was read: a partial sum would read as a fall. */
 function countedIn(r: ChainReading<BitState>): bigint | undefined {
   if (r.state.rootStakeRao !== undefined) return r.state.rootStakeRao;
-  if (!r.state.hotkeys) return undefined;
+  if (!r.state.hotkeys || r.state.hotkeys.length === 0) return undefined;
   let sum = 0n;
-  let any = false;
   for (const hk of r.state.hotkeys) {
     const v = r.state.stakes[lc(hk)] ?? r.state.stakes[hk];
-    if (v !== undefined) {
-      sum += v;
-      any = true;
-    }
+    if (v === undefined) return undefined;
+    sum += v;
   }
-  return any ? sum : undefined;
+  return sum;
 }
 
 const stakeOf = (r: ChainReading<BitState>, hk: Hex) => r.state.stakes[hk] ?? r.state.stakes[Object.keys(r.state.stakes).find((k) => lc(k) === hk) as Hex];

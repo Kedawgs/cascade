@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Deployment } from "./config";
 import account from "./__fixtures__/seed-account-v1.json";
 import shared from "./__fixtures__/seed-shared-v1.json";
-import { DISTRUST_MS, distrustIndexer, fetchSeed, indexerDistrusted } from "./indexer";
+import { DISTRUST_MS, distrustIndexer, fetchSeed, indexerDistrusted, MAX_SEED_BYTES } from "./indexer";
 
 /** The fake deployment the indexer's fixtures are for (indexer/test/fixtures/deployment.json). */
 const D: Deployment = {
@@ -83,6 +83,34 @@ describe("fetchSeed", () => {
       throw new Error("no fetch here");
     }) as unknown as typeof globalThis.fetch;
     expect(await fetchSeed(D, ME, { fetch: broken })).toBeNull();
+  });
+
+  it("reads no half bigger than MAX_SEED_BYTES, whether the size is declared or only streamed: a padded seed costs nothing", async () => {
+    const big = JSON.stringify({ ...shared, staked: Array.from({ length: 20_000 }, (_, i) => ({ block: String(6_900_001 + i), txHash: shared.staked[0].txHash })) });
+    expect(big.length).toBeGreaterThan(1_000_000);
+    // declared: refused before the body is read
+    const declared = fakeFetch({ [SHARED_URL]: { status: 200, body: big }, [OWN_URL]: ok(account) });
+    expect(await fetchSeed(D, ME, { fetch: declared.fetch, maxBytes: 1_000_000 })).toBeNull();
+    // streamed without a length: cut off once the limit passes
+    const streaming = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url !== SHARED_URL) return new Response(JSON.stringify(account), { status: 200 });
+      const bytes = new TextEncoder().encode(big);
+      let at = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (init?.signal?.aborted) return controller.error(new DOMException("aborted", "AbortError"));
+          if (at >= bytes.length) return controller.close();
+          controller.enqueue(bytes.slice(at, at + 65_536));
+          at += 65_536;
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }) as typeof globalThis.fetch;
+    expect(await fetchSeed(D, ME, { fetch: streaming, maxBytes: 1_000_000 })).toBeNull();
+    // within the limit, the same halves come through whole
+    expect(await fetchSeed(D, ME, { fetch: fakeFetch({ [SHARED_URL]: ok(shared), [OWN_URL]: ok(account) }).fetch, maxBytes: 1_000_000 })).toEqual({ shared, own: account });
+    expect(MAX_SEED_BYTES).toBe(2_000_000);
   });
 
   it("gives up after the timeout, aborting the request, rather than holding the scan", async () => {

@@ -197,7 +197,8 @@ export const batchOneWallet: Rule = {
         });
       }
     }
-    return [];
+    // nothing found, but without maxBatchValue whether the batch is half full couldn't be told
+    return s.maxBatchValue === undefined ? unjudged(ctx, "batch.one_wallet") : [];
   },
 };
 
@@ -244,7 +245,8 @@ export const outflowNearLimit: Rule = {
       openBatchLogs(ctx, "RedeemRequested").reduce((x, l) => x + BigInt(String(l.args.shares)), 0n) -
       openBatchLogs(ctx, "RedeemCancelled").reduce((x, l) => x + BigInt(String(l.args.shares)), 0n);
     const waiting = ((shares > 0n ? shares : 0n) * s.price) / E18;
-    if ((burned + waiting) * 100n < allowance * BigInt(ctx.t.outflowNearPct)) return [];
+    // nothing found, but with the burn window unread today's burns weren't counted
+    if ((burned + waiting) * 100n < allowance * BigInt(ctx.t.outflowNearPct)) return s.burnWindow === undefined ? unjudged(ctx, "outflow.near_limit", "outflow.near_limit") : [];
     return one("outflow.near_limit", "outflow.near_limit", "Exits are near the vault's daily outflow limit", { burned: tao(burned), waiting: tao(waiting), allowance: tao(allowance) });
   },
 };

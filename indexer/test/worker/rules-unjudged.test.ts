@@ -123,14 +123,19 @@ describe("the operational conditions, unread", () => {
     // a cap of 0 is no cap to fill
     expect(judged(ops.capNearlyFull, ctx({ base: { openBatch: openBatch(), netForwarded: 0n, depositCap: 0n } }))).toEqual(CLEAR);
     expect(judged(ops.batchOneWallet, ctx({ base: {} }))).toEqual(blind([{ rule: "batch.one_wallet" }]));
-    expect(judged(ops.batchOneWallet, ctx({ base: { openBatch: openBatch() } }))).toEqual(CLEAR);
+    // maxBatchValue unread: whether the batch is half full can't be told (review M2)
+    expect(judged(ops.batchOneWallet, ctx({ base: { openBatch: openBatch() } }))).toEqual(blind([{ rule: "batch.one_wallet" }]));
+    expect(judged(ops.batchOneWallet, ctx({ base: { openBatch: openBatch(), maxBatchValue: 10n * E18 } }))).toEqual(CLEAR);
     const tiny = [{ rule: "unstakes.tiny_wave" as const, key: "unstakes.tiny_wave" }];
     // the price unread (the tiny requests can't be priced), or the redeem list unread
     expect(judged(ops.unstakesTinyWave, ctx({ bit: {}, base: { openBatch: openBatch(), maxRedeems: 10 } }))).toEqual(blind(tiny));
     expect(judged(ops.unstakesTinyWave, ctx({ bit: { price: E18 }, base: {} }))).toEqual(blind(tiny));
     expect(judged(ops.unstakesTinyWave, ctx({ bit: { price: E18 }, base: { openBatch: openBatch(), maxRedeems: 10 } }))).toEqual(CLEAR);
-    const outflow = { rootStakeRao: 10n ** 12n, balance: 10n ** 12n, maxDailyOutflowBps: 1000n, minDailyOutflow: E18, price: E18 };
-    expect(judged(ops.outflowNearLimit, ctx({ bit: { ...outflow, price: undefined } }))).toEqual(blind([{ rule: "outflow.near_limit", key: "outflow.near_limit" }]));
+    const outflow = { rootStakeRao: 10n ** 12n, balance: 10n ** 12n, maxDailyOutflowBps: 1000n, minDailyOutflow: E18, price: E18, burnWindow: { start: NOW - 3600, burned: 0n } };
+    const near = [{ rule: "outflow.near_limit" as const, key: "outflow.near_limit" }];
+    expect(judged(ops.outflowNearLimit, ctx({ bit: { ...outflow, price: undefined } }))).toEqual(blind(near));
+    // the burn window unread: what this front door burned today can't be counted (review M1)
+    expect(judged(ops.outflowNearLimit, ctx({ bit: { ...outflow, burnWindow: undefined }, base: { openBatch: openBatch() } }))).toEqual(blind(near));
     expect(judged(ops.outflowNearLimit, ctx({ bit: outflow, base: { openBatch: openBatch() } }))).toEqual(CLEAR);
   });
 

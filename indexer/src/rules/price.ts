@@ -229,23 +229,45 @@ function countedIn(r: ChainReading<BitState>): bigint | undefined {
 
 const stakeOf = (r: ChainReading<BitState>, hk: Hex) => r.state.stakes[hk] ?? r.state.stakes[Object.keys(r.state.stakes).find((k) => lc(k) === hk) as Hex];
 
-/** An unlisted hotkey's first sight (meta unlisted_since:{hotkey}): the reading's block, and the stake the vault
- * counted in the reading before it (the baseline a later fall is measured from). */
-interface UnlistedSince {
+/** An unlisted hotkey's record (meta unlisted_since:{hotkey}): the block of its first sight, the counted stake's
+ * unexplained fall since, accumulated pair of readings by pair of readings (`drop`, rao), and the block of the
+ * last reading accumulated (`upTo`). A running sum, never a frozen baseline: each pair is netted against the
+ * vault's own Staked and Unstaked logs while they are still in the loaded window, so an honest unstake hours
+ * later can't turn into a fall once its log has scrolled out. */
+interface Unlisted {
   block: string;
-  counted: string;
+  /** the reading the accumulation started from: the last one before the first sight whose chain list was known */
+  from: string;
+  drop: string;
+  upTo: string;
 }
 const MARKER = "unlisted_since:";
-const markerOf = (ctx: RuleCtx, hk: Hex): UnlistedSince | undefined => {
+const markerOf = (ctx: RuleCtx, hk: Hex): Unlisted | undefined => {
   const v = ctx.meta[`${MARKER}${hk}`];
   if (!v) return undefined;
   try {
-    const m = JSON.parse(v) as UnlistedSince;
-    return /^\d+$/.test(m.block) && /^\d+$/.test(m.counted) ? m : undefined;
+    const m = JSON.parse(v) as Unlisted;
+    return [m.block, m.from, m.drop, m.upTo].every((x) => typeof x === "string" && /^\d+$/.test(x)) ? m : undefined;
   } catch {
     return undefined;
   }
 };
+
+/** A pair of readings' unexplained fall of the counted stake: what the vault counted before, plus what its
+ * Staked logs in between measured landing, less what its Unstaked logs removed, less what it counts after, when
+ * positive (growth never carries over: each pair stands alone, as stake.unexplained_drop judges). */
+function unexplainedFall(ctx: RuleCtx, a: ChainReading<BitState>, b: ChainReading<BitState>): bigint | undefined {
+  const before = countedIn(a);
+  const after = countedIn(b);
+  if (before === undefined || after === undefined) return undefined;
+  let staked = 0n;
+  let unstaked = 0n;
+  for (const l of ctx.logs.range("bittensor", "vault", ["Staked", "Unstaked"], a.block + 1n, b.block)) {
+    if (l.event === "Staked") staked += big(l.args.measured);
+    else unstaked += max(big(l.args.wantRao), big(l.args.receivedWei) / RAO);
+  }
+  return pos(before + staked - unstaked - after);
+}
 
 /** stake.divergence (critical, holds) and stake.unlisted (warning): the vault's coldkey holds stake on a hotkey
  * the vault doesn't list. The readings ask the staking precompile for the stake on every hotkey the vault lists,
@@ -257,12 +279,15 @@ const markerOf = (ctx: RuleCtx, hk: Hex): UnlistedSince | undefined => {
  * as much (what a validator's hotkey swap does: every nominator's stake moves to its new hotkey, the vault's
  * price no longer counting it, so shares mint cheaply until it is re-added with addHotkey; or stake moved off
  * a listed hotkey) and the stake is a material share of the vault (stakeDivergenceMinBps of counted plus
- * unlisted). The fall is measured from the stake counted in the reading before the hotkey first appeared
- * (remembered in meta), less the vault's own unstakes since (Unstaked logs, so judged once settled). Confirmed
- * on two readings in a row. stake.unexplained_drop sees the same swap as stake leaving the listed hotkey and
- * holds at once; this rule then names where it went and raises no hold of its own while that one is on. Honest
- * operations (stake, unstake, payouts, reward claims and vesting) keep every rao on a listed hotkey. One alert
- * per hotkey while it lasts; the hold's id is the hotkey's first sight, so it is raised once. */
+ * unlisted). The fall is a running sum kept in meta from the hotkey's first sight: each consecutive pair of
+ * settled readings adds its own unexplained fall (unexplainedFall: netted against the vault's Staked and Unstaked
+ * logs, which are loaded for the readings' window), from the last reading before the first sight whose chain list
+ * was known, so a failed read at the first sight still counts the swap's pair, and an honest unstake hours later
+ * is netted while its log is there and never read as a fall once it has scrolled out. Confirmed on the newest
+ * settled pair of readings showing the stake. stake.unexplained_drop sees the same swap as stake leaving the
+ * listed hotkey and holds at once; this rule then names where it went and raises no hold of its own while that
+ * one is on. Honest operations (stake, unstake, payouts, reward claims and vesting) keep every rao on a listed
+ * hotkey. One alert per hotkey while it lasts; the hold's id is the hotkey's first sight, so it is raised once. */
 export const stakeDivergence: Rule = {
   name: "stake.divergence",
   run(ctx) {
@@ -272,77 +297,104 @@ export const stakeDivergence: Rule = {
     const now = unlistedIn(s);
     if (!now) return [];
     const dust = ctx.t.stakeDustRao;
-    // the markers: a first sight remembered (with the stake counted before it), one cleared once the hotkey is
-    // listed again, or gone from the chain's list with no stake left
+    const rs = series(ctx);
+    const settled = ctx.settled.bittensor.block;
+
+    // the records: one cleared once its hotkey is listed again, or gone from the chain's list with no stake left;
+    // a first sight started at the last earlier reading whose chain list was known (a failed read in between
+    // leaves the pairs across it to be accumulated)
+    const records = new Map<Hex, { m: Unlisted; dirty: boolean }>();
+    /** gone: not in the chain's list for the coldkey any more, with no stake left (swept, or unstaked) */
+    const gone = (hk: Hex) => !(s.state.stakedHotkeys ?? []).some((x) => lc(x) === hk) && !((stakeOf(s, hk) ?? 0n) > dust);
     for (const [k, v] of Object.entries(ctx.meta)) {
       if (!k.startsWith(MARKER) || v === "") continue;
       const hk = k.slice(MARKER.length) as Hex;
-      const gone = !(s.state.stakedHotkeys ?? []).some((x) => lc(x) === hk) && !((stakeOf(s, hk) ?? 0n) > dust);
-      if (!now.has(hk) || gone) ctx.writes.meta.push({ k, v: "" });
+      if (!now.has(hk) || gone(hk)) ctx.writes.meta.push({ k, v: "" });
+      else {
+        const m = markerOf(ctx, hk);
+        if (m) records.set(hk, { m, dirty: false });
+      }
     }
     for (const hk of now) {
-      if (markerOf(ctx, hk)) continue;
-      const base = countedIn(p) ?? countedIn(s);
-      if (base !== undefined) ctx.writes.meta.push({ k: `${MARKER}${hk}`, v: JSON.stringify({ block: String(s.block), counted: String(base) } satisfies UnlistedSince) });
+      if (records.has(hk) || gone(hk)) continue;
+      const known = [...rs].reverse().find((r) => r.block < s.block && r.state.stakedHotkeys !== undefined) ?? p;
+      records.set(hk, { m: { block: String(s.block), from: String(known.block), drop: "0", upTo: String(known.block) }, dirty: true });
     }
 
-    // judged on consecutive readings (a, b) that Bittensor is settled past, newest first, one finding per hotkey
-    const out: Finding[] = [];
-    const done = new Set<Hex>();
-    const rs = series(ctx);
+    // the running sum: every consecutive pair of settled readings not yet accumulated
+    for (const rec of records.values()) {
+      let upTo = BigInt(rec.m.upTo);
+      let drop = BigInt(rec.m.drop);
+      for (let i = 1; i < rs.length; i++) {
+        const a = rs[i - 1];
+        const b = rs[i];
+        if (a.block < upTo || a.block >= b.block || b.block > settled) continue;
+        const fall = unexplainedFall(ctx, a, b);
+        if (fall !== undefined) drop += fall;
+        upTo = b.block;
+      }
+      if (String(upTo) !== rec.m.upTo) {
+        rec.m = { ...rec.m, drop: String(drop), upTo: String(upTo) };
+        rec.dirty = true;
+      }
+    }
+    for (const [hk, rec] of records) if (rec.dirty) ctx.writes.meta.push({ k: `${MARKER}${hk}`, v: JSON.stringify(rec.m) });
+
+    // judged on the newest settled pair of readings: both must show the stake on the hotkey (one bad answer can't
+    // trip it), and the fall accumulated so far must match it
+    let bi = -1;
     for (let i = rs.length - 1; i >= 1; i--) {
-      const a = rs[i - 1];
-      const b = rs[i];
-      if (a.block >= b.block || b.block > ctx.settled.bittensor.block) continue;
-      const inB = unlistedIn(b);
-      const inA = unlistedIn(a);
-      const counted = countedIn(b);
-      if (!inB || !inA || counted === undefined) continue;
-      for (const hk of inB) {
-        // only while the hotkey is still unlisted now: a re-added one is no finding, whatever older readings show
-        if (done.has(hk) || !inA.has(hk) || !now.has(hk)) continue;
-        const stake = stakeOf(b, hk);
-        const stakeBefore = stakeOf(a, hk);
-        if (stake === undefined || stake <= dust || stakeBefore === undefined || stakeBefore <= dust) continue;
-        const since = markerOf(ctx, hk);
-        if (!since || BigInt(since.block) > b.block) continue;
-        done.add(hk);
-        // what the vault itself unstaked since the hotkey appeared explains that much of the fall
-        const unstaked = ctx.logs.range("bittensor", "vault", "Unstaked", BigInt(since.block) + 1n, b.block).reduce((sum, l) => sum + max(big(l.args.wantRao), big(l.args.receivedWei) / RAO), 0n);
-        const fell = pos(BigInt(since.counted) - counted - unstaked);
-        const matched = fell >= pos(stake - dust);
-        const shareBps = (stake * 10_000n) / (counted + stake);
-        const material = shareBps >= BigInt(ctx.t.stakeDivergenceMinBps);
-        const total = Object.values(b.state.stakes).reduce((x, y) => x + y, 0n);
-        const facts: Record<string, string> = {
-          hotkey: hk,
-          stake: `${stake} rao (${tao(stake)})`,
-          "listed by the vault": b.state.hotkeys?.join(", ") || "none",
-          "the vault counts": `${counted} rao (${tao(counted)})`,
-          "counted before the hotkey appeared": `${since.counted} rao (${tao(BigInt(since.counted))}), at block ${since.block}`,
-          "share of the vault": `${shareBps} bps`,
-          "the chain holds for its coldkey": `${total} rao (${tao(total)}) on the ${Object.keys(b.state.stakes).length} hotkeys read`,
-          block: String(b.block),
-          taostats: `https://taostats.io/hotkey/${hk}`,
+      if (rs[i].block <= settled && rs[i - 1].block < rs[i].block) {
+        bi = i;
+        break;
+      }
+    }
+    if (bi < 1) return [];
+    const a = rs[bi - 1];
+    const b = rs[bi];
+    const inA = unlistedIn(a);
+    const inB = unlistedIn(b);
+    const counted = countedIn(b);
+    if (!inA || !inB || counted === undefined) return [];
+    const out: Finding[] = [];
+    for (const [hk, rec] of records) {
+      if (!inA.has(hk) || !inB.has(hk)) continue;
+      const stake = stakeOf(b, hk);
+      const stakeBefore = stakeOf(a, hk);
+      if (stake === undefined || stake <= dust || stakeBefore === undefined || stakeBefore <= dust) continue;
+      const drop = BigInt(rec.m.drop);
+      const matched = drop >= pos(stake - dust);
+      const shareBps = (stake * 10_000n) / (counted + stake);
+      const material = shareBps >= BigInt(ctx.t.stakeDivergenceMinBps);
+      const total = Object.values(b.state.stakes).reduce((x, y) => x + y, 0n);
+      const facts: Record<string, string> = {
+        hotkey: hk,
+        stake: `${stake} rao (${tao(stake)})`,
+        "listed by the vault": b.state.hotkeys?.join(", ") || "none",
+        "the vault counts": `${counted} rao (${tao(counted)})`,
+        "unexplained fall since the hotkey appeared": `${drop} rao (${tao(drop)}), over blocks ${rec.m.from}-${rec.m.upTo}`,
+        "share of the vault": `${shareBps} bps`,
+        "the chain holds for its coldkey": `${total} rao (${tao(total)}) on the ${Object.keys(b.state.stakes).length} hotkeys read`,
+        block: String(b.block),
+        taostats: `https://taostats.io/hotkey/${hk}`,
+      };
+      if (material && matched) {
+        const held = ctx.holds.find((h) => h.rule === "stake.unexplained_drop" && h.clearedAt === null);
+        const f: Finding = {
+          rule: "stake.divergence",
+          key: `stake.divergence:${hk}`,
+          subject: `${tao(stake)} of the vault's stake sits on a hotkey the vault doesn't list, and its counted stake fell by as much`,
+          facts: { ...facts, "the hold": held ? "on, from stake.unexplained_drop" : "this alert's" },
         };
-        if (material && matched) {
-          const held = ctx.holds.find((h) => h.rule === "stake.unexplained_drop" && h.clearedAt === null);
-          const f: Finding = {
-            rule: "stake.divergence",
-            key: `stake.divergence:${hk}`,
-            subject: `${tao(stake)} of the vault's stake sits on a hotkey the vault doesn't list, and its counted stake fell by as much`,
-            facts: { ...facts, "the hold": held ? "on, from stake.unexplained_drop" : "this alert's" },
-          };
-          if (!held) f.hold = { id: `stake.divergence:${hk}:${since.block}`, summary: `${tao(stake)} of the vault's stake sits on hotkey ${hk}, which the vault doesn't list, and its counted stake fell by as much` };
-          out.push(f);
-        } else {
-          out.push({
-            rule: "stake.unlisted",
-            key: `stake.unlisted:${hk}`,
-            subject: `${tao(stake)} sits on a hotkey the vault doesn't list (${matched ? `below the hold threshold: ${shareBps} bps of the vault` : "the vault's counted stake didn't fall"})`,
-            facts,
-          });
-        }
+        if (!held) f.hold = { id: `stake.divergence:${hk}:${rec.m.block}`, summary: `${tao(stake)} of the vault's stake sits on hotkey ${hk}, which the vault doesn't list, and its counted stake fell by as much` };
+        out.push(f);
+      } else {
+        out.push({
+          rule: "stake.unlisted",
+          key: `stake.unlisted:${hk}`,
+          subject: `${tao(stake)} sits on a hotkey the vault doesn't list (${matched ? `below the hold threshold: ${shareBps} bps of the vault` : "the vault's counted stake didn't fall"})`,
+          facts,
+        });
       }
     }
     return out;
@@ -350,3 +402,4 @@ export const stakeDivergence: Rule = {
 };
 
 export const PRICE_RULES: Rule[] = [priceDrop, stakeUnexplainedDrop, stakeHotkeyChanged, stakeDivergence];
+

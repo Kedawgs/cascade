@@ -233,25 +233,45 @@ describe("stake.divergence and stake.unlisted", () => {
   const NEW = h("the validator's new hotkey");
   const GIFT = h("a stranger's validator hotkey");
   const X = 49n * 10n ** 9n;
+  const RAO = 10n ** 9n;
   /** the vault lists HOTKEY; the chain's stake sits where `stakes` says, its list naming those hotkeys */
   const at = (block: bigint, stakes: Record<Hex, bigint>, over: Partial<BitState> = {}) =>
     bit(block, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], stakedHotkeys: Object.keys(stakes) as Hex[], rootStakeRao: stakes[HOTKEY] ?? 0n, stakes, ...over });
   const healthy = (block: bigint) => at(block, { [HOTKEY]: X });
-  const marker = (hk: Hex, block: bigint, counted: bigint) => ({ [`unlisted_since:${hk}`]: JSON.stringify({ block: String(block), counted: String(counted) }) });
+  const markerKey = `unlisted_since:${NEW}`;
 
-  it("a simulated hotkey swap: the counted stake fell by what sits on the unlisted hotkey, confirmed by two readings: critical, and holds", () => {
-    // reading 100: all is well; the validator swaps HOTKEY → NEW; 105 learns the chain's list (the stake is gone from
-    // HOTKEY), 110 reads the stake on NEW, 115 confirms it
-    const learned = at(105n, { [HOTKEY]: 0n }, { stakedHotkeys: [NEW] });
-    const seen = at(110n, { [HOTKEY]: 0n, [NEW]: X });
-    const confirmed = at(115n, { [HOTKEY]: 0n, [NEW]: X });
-    // first sight of NEW in the chain's list: the counted stake before it appeared is remembered, nothing judged yet
-    const first = ctx(learned, [healthy(100n)]);
-    expect(stakeDivergence.run(first)).toEqual([]);
-    expect(first.writes.meta).toEqual([{ k: `unlisted_since:${NEW}`, v: JSON.stringify({ block: "105", counted: String(X) }) }]);
-    const m = marker(NEW, 105n, X);
-    expect(stakeDivergence.run(ctx(seen, [learned, healthy(100n)], { meta: m }))).toEqual([]);
-    const [f] = stakeDivergence.run(ctx(confirmed, [seen, learned, healthy(100n)], { meta: m }));
+  /** Ticks in a row: each run sees the meta the one before wrote (the markers), the newest six readings as the
+   * store keeps them, and the logs given (the store's window moves on: a log left out has scrolled out). */
+  function ticker() {
+    const meta: Record<string, string> = {};
+    const readings: ChainReading<BitState>[] = [];
+    const run = (s: ChainReading<BitState>, o: { logs?: StoredLog[]; holds?: HoldRow[]; settledBlock?: bigint; t?: typeof DEFAULTS } = {}) => {
+      const history = [...readings].reverse().slice(0, 6);
+      const c = ctx(s, history, { ...o, meta: { ...meta } });
+      const found = stakeDivergence.run(c);
+      for (const w of c.writes.meta) meta[w.k] = w.v;
+      readings.push(s);
+      return { found, writes: c.writes.meta };
+    };
+    return { run, meta };
+  }
+  const marker = (meta: Record<string, string>, hk = NEW) => JSON.parse(meta[`unlisted_since:${hk}`]) as { block: string; from: string; drop: string; upTo: string };
+
+  it("a simulated hotkey swap: the counted stake's unexplained fall, accumulated pair by pair, matches the stake on the unlisted hotkey: critical, and holds once", () => {
+    const t = ticker();
+    expect(t.run(healthy(100n)).found).toEqual([]);
+    // the swap: 105 learns the chain's list (the stake is gone from HOTKEY): first sight, and the pair (100, 105)
+    // that holds the fall is accumulated at once (the test's readings are all settled)
+    const learned = t.run(at(105n, { [HOTKEY]: 0n }, { stakedHotkeys: [NEW] }));
+    expect(learned.found).toEqual([]);
+    expect(learned.writes).toEqual([{ k: markerKey, v: JSON.stringify({ block: "105", from: "100", drop: String(X), upTo: "105" }) }]);
+    // 110 reads the stake on NEW: not yet confirmed; the marker moves on, nothing else written
+    const seen = t.run(at(110n, { [HOTKEY]: 0n, [NEW]: X }));
+    expect(seen.found).toEqual([]);
+    expect(marker(t.meta)).toEqual({ block: "105", from: "100", drop: String(X), upTo: "110" });
+    // 115 confirms it
+    const { found } = t.run(at(115n, { [HOTKEY]: 0n, [NEW]: X }));
+    const [f] = found;
     expect(f).toMatchObject({ rule: "stake.divergence", key: `stake.divergence:${NEW}` });
     expect(f.subject).toBe("49 TAO of the vault's stake sits on a hotkey the vault doesn't list, and its counted stake fell by as much");
     expect(f.facts).toMatchObject({
@@ -259,7 +279,7 @@ describe("stake.divergence and stake.unlisted", () => {
       stake: `${X} rao (49 TAO)`,
       "listed by the vault": HOTKEY,
       "the vault counts": "0 rao (0 TAO)",
-      "counted before the hotkey appeared": `${X} rao (49 TAO), at block 105`,
+      "unexplained fall since the hotkey appeared": `${X} rao (49 TAO), over blocks 100-115`,
       "share of the vault": "10000 bps",
       block: "115",
       taostats: `https://taostats.io/hotkey/${NEW}`,
@@ -268,108 +288,182 @@ describe("stake.divergence and stake.unlisted", () => {
     expect(RUNBOOK["stake.divergence"](f.facts)).toContain(`addHotkey(${NEW})`);
     expect(RUNBOOK["stake.divergence"](f.facts)).toContain("pause()");
     // still there on the next tick: the same alert and the same hold id (raised once: hold ids are never raised twice)
-    const [g] = stakeDivergence.run(ctx(at(120n, { [HOTKEY]: 0n, [NEW]: X }), [confirmed, seen, learned], { meta: m }));
-    expect([g.key, g.hold?.id]).toEqual([f.key, f.hold?.id]);
+    const again = t.run(at(120n, { [HOTKEY]: 0n, [NEW]: X }));
+    expect([again.found[0].key, again.found[0].hold?.id]).toEqual([f.key, f.hold?.id]);
     // the owner re-adds the hotkey: nothing more is found, and the marker is cleared
-    const fixed = ctx(at(125n, { [HOTKEY]: 0n, [NEW]: X }, { hotkeys: [HOTKEY, NEW], rootStakeRao: X }), [at(120n, { [HOTKEY]: 0n, [NEW]: X }), confirmed], { meta: m });
-    expect(stakeDivergence.run(fixed)).toEqual([]);
-    expect(fixed.writes.meta).toEqual([{ k: `unlisted_since:${NEW}`, v: "" }]);
+    const fixed = t.run(at(125n, { [HOTKEY]: 0n, [NEW]: X }, { hotkeys: [HOTKEY, NEW], rootStakeRao: X }));
+    expect(fixed.found).toEqual([]);
+    expect(fixed.writes).toEqual([{ k: markerKey, v: "" }]);
   });
 
-  it("a stranger's transfer_stake gift: stake appears on an unlisted hotkey but the counted stake didn't fall: a warning naming it, no hold", () => {
-    const gift = 500_000n;
-    const appeared = at(105n, { [HOTKEY]: X }, { stakedHotkeys: [HOTKEY, GIFT] });
-    const read = at(110n, { [HOTKEY]: X, [GIFT]: gift });
-    const again = at(115n, { [HOTKEY]: X, [GIFT]: gift });
-    const first = ctx(appeared, [healthy(100n)]);
-    expect(stakeDivergence.run(first)).toEqual([]);
-    expect(first.writes.meta).toEqual([{ k: `unlisted_since:${GIFT}`, v: JSON.stringify({ block: "105", counted: String(X) }) }]);
-    const m = marker(GIFT, 105n, X);
-    expect(stakeDivergence.run(ctx(read, [appeared, healthy(100n)], { meta: m }))).toEqual([]);
-    const [f] = stakeDivergence.run(ctx(again, [read, appeared], { meta: m }));
-    expect(f).toMatchObject({ rule: "stake.unlisted", key: `stake.unlisted:${GIFT}` });
-    expect(f.subject).toBe("0.0005 TAO sits on a hotkey the vault doesn't list (the vault's counted stake didn't fall)");
-    expect(f.facts).toMatchObject({ hotkey: GIFT, stake: `${gift} rao (0.0005 TAO)`, "the vault counts": `${X} rao (49 TAO)`, "share of the vault": "0 bps" });
-    expect(f.hold).toBeUndefined();
-    expect(RULES["stake.unlisted"]).toMatchObject({ tier: "warning", kind: "event", canHold: false });
-    expect(RUNBOOK["stake.unlisted"](f.facts)).toContain(`addHotkey(${GIFT})`);
-    expect(RUNBOOK["stake.unlisted"](f.facts)).toContain("removeHotkey");
-    // a large gift (a material share) without a matching fall in the counted stake is still only the warning
-    const big = 10n * 10n ** 9n;
-    const [g] = stakeDivergence.run(ctx(at(115n, { [HOTKEY]: X, [GIFT]: big }), [at(110n, { [HOTKEY]: X, [GIFT]: big }), appeared], { meta: m }));
-    expect(g.rule).toBe("stake.unlisted");
-    expect(g.facts["share of the vault"]).toBe("1694 bps");
-  });
-
-  it("a partial move: part of the counted stake left for an unlisted hotkey: critical, and holds", () => {
-    const part = 20n * 10n ** 9n;
-    const m = marker(NEW, 105n, X);
-    const moved = (block: bigint) => at(block, { [HOTKEY]: X - part, [NEW]: part });
-    const [f] = stakeDivergence.run(ctx(moved(115n), [moved(110n), at(105n, { [HOTKEY]: X - part }, { stakedHotkeys: [HOTKEY, NEW] })], { meta: m }));
-    expect([f.rule, f.hold?.id]).toEqual(["stake.divergence", `stake.divergence:${NEW}:105`]);
-    expect(f.facts["share of the vault"]).toBe("4081 bps");
-    // less than stakeDivergenceMinBps (100 bps) of the vault, though the counted stake fell by it: a warning, not a hold
-    const tiny = 10n ** 8n;
-    const dust = (block: bigint) => at(block, { [HOTKEY]: X - tiny, [NEW]: tiny });
-    const [g] = stakeDivergence.run(ctx(dust(115n), [dust(110n)], { meta: m }));
-    expect([g.rule, g.hold]).toEqual(["stake.unlisted", undefined]);
-    // the threshold follows THRESHOLDS
-    const [k] = stakeDivergence.run(ctx(dust(115n), [dust(110n)], { meta: m, t: { ...DEFAULTS, stakeDivergenceMinBps: 1 } }));
-    expect(k.rule).toBe("stake.divergence");
-  });
-
-  it("subtracts the vault's own unstakes between the hotkey's appearance and now from the counted fall (judged once settled)", () => {
-    // the vault unstaked 20 TAO for payouts (an Unstaked log) after a stranger's gift appeared: the fall is explained
-    const gift = 10n ** 9n;
-    const m = marker(GIFT, 105n, X);
-    const after = (block: bigint) => at(block, { [HOTKEY]: X - 20n * 10n ** 9n, [GIFT]: gift });
-    const unstaked = vault("Unstaked", 108n, { hotkey: HOTKEY, wantRao: String(20n * 10n ** 9n), receivedWei: String(20n * 10n ** 18n) });
-    expect(stakeDivergence.run(ctx(after(115n), [after(110n)], { meta: m, logs: [unstaked] }))[0].rule).toBe("stake.unlisted");
-    // without the log the fall reads as the stake's move: critical
-    expect(stakeDivergence.run(ctx(after(115n), [after(110n)], { meta: m }))[0].rule).toBe("stake.divergence");
-    // not judged before Bittensor is settled past the reading (the log may not be stored yet)
-    expect(stakeDivergence.run(ctx(after(115n), [after(110n)], { meta: m, settledBlock: 114n }))).toEqual([]);
-  });
-
-  it("raises no hold of its own while a stake.unexplained_drop hold is on (the same incident: that rule saw the stake leave; this one says where it went), and offers it once that hold is cleared", () => {
-    const m = marker(NEW, 105n, X);
-    const now = at(115n, { [HOTKEY]: 0n, [NEW]: X });
-    const prev = at(110n, { [HOTKEY]: 0n, [NEW]: X });
-    const active: HoldRow = { id: `stake.unexplained_drop:${HOTKEY}:105`, publicId: "h_00000002", rule: "stake.unexplained_drop", summary: "s", raisedAt: NOW - 300, clearedAt: null, clearedNote: null };
-    const [f] = stakeDivergence.run(ctx(now, [prev], { meta: m, holds: [active] }));
-    expect([f.rule, f.hold]).toEqual(["stake.divergence", undefined]);
-    expect(f.facts["the hold"]).toBe("on, from stake.unexplained_drop");
-    const [g] = stakeDivergence.run(ctx(now, [prev], { meta: m, holds: [{ ...active, clearedAt: NOW - 100, clearedNote: "looked" }] }));
-    expect(g.hold?.id).toBe(`stake.divergence:${NEW}:105`);
-  });
-
-  it("never fires on honest operations: a stake, an unstake, a payout, a reward claim, vesting, and a hotkey added", () => {
-    const readings = [
-      healthy(100n),
-      // stakeIdle: more stake on the listed hotkey
-      at(105n, { [HOTKEY]: X + 10n ** 9n }),
-      // an unstake for a payout: less stake, more balance
-      at(110n, { [HOTKEY]: X - 5n * 10n ** 9n }, { balance: 6n * 10n ** 18n }),
-      // a reward claim credited as stake, and the price vesting up
-      at(115n, { [HOTKEY]: X }, { price: E18 + 10n ** 15n }),
-      // the owner adds a second hotkey, empty so far
-      at(120n, { [HOTKEY]: X, [h("second")]: 0n }, { hotkeys: [HOTKEY, h("second")] }),
-      // the chain's list still names a hotkey the vault once used, with dust left on it
-      at(125n, { [HOTKEY]: X, [h("old")]: 1000n }, { hotkeys: [HOTKEY], stakedHotkeys: [HOTKEY, h("old")] }),
-      at(130n, { [HOTKEY]: X, [h("old")]: 1000n }, { hotkeys: [HOTKEY], stakedHotkeys: [HOTKEY, h("old")] }),
-    ];
-    for (let i = 1; i < readings.length; i++) {
-      const c = ctx(readings[i], readings.slice(0, i).reverse());
-      expect(stakeDivergence.run(c), String(readings[i].block)).toEqual([]);
+  it("the attack: a stranger's gift, then hours later an honest payout at least its size whose Unstaked log has scrolled out of the window: never a hold", () => {
+    const gift = 10n * RAO;
+    const t = ticker();
+    t.run(healthy(100n));
+    // the gift appears in the chain's list, then its stake is read: a warning, no hold
+    expect(t.run(at(105n, { [HOTKEY]: X }, { stakedHotkeys: [HOTKEY, GIFT] })).found).toEqual([]);
+    expect(t.run(at(110n, { [HOTKEY]: X, [GIFT]: gift })).found).toEqual([]);
+    const [w] = t.run(at(115n, { [HOTKEY]: X, [GIFT]: gift })).found;
+    expect([w.rule, w.hold]).toEqual(["stake.unlisted", undefined]);
+    expect(w.subject).toBe("10 TAO sits on a hotkey the vault doesn't list (the vault's counted stake didn't fall)");
+    expect(w.facts["unexplained fall since the hotkey appeared"]).toBe("0 rao (0 TAO), over blocks 100-115");
+    // hours on: an honest unstake of 20 TAO for a payout, its Unstaked log in the window when its pair is judged
+    const paid = X - 20n * RAO;
+    for (const b of [120n, 125n, 130n]) t.run(at(b, { [HOTKEY]: X, [GIFT]: gift }));
+    const unstaked = vault("Unstaked", 133n, { hotkey: HOTKEY, wantRao: String(20n * RAO), receivedWei: String(20n * RAO * RAO) });
+    expect(t.run(at(135n, { [HOTKEY]: paid, [GIFT]: gift }), { logs: [unstaked] }).found[0].rule).toBe("stake.unlisted");
+    expect(marker(t.meta, GIFT)).toMatchObject({ drop: "0", upTo: "135" });
+    // the window moves on: the log is no longer loaded, the readings that showed the fall are gone from history
+    for (const b of [140n, 145n, 150n, 155n, 160n, 165n, 170n, 175n, 180n]) {
+      const { found } = t.run(at(b, { [HOTKEY]: paid, [GIFT]: gift }));
+      expect(found.map((f) => [f.rule, f.hold]), String(b)).toEqual([["stake.unlisted", undefined]]);
+    }
+    expect(marker(t.meta, GIFT)).toMatchObject({ drop: "0", upTo: "180" });
+    // and with a gift of a material size the answer is the same
+    const t2 = ticker();
+    t2.run(healthy(200n));
+    t2.run(at(205n, { [HOTKEY]: X }, { stakedHotkeys: [HOTKEY, GIFT] }));
+    t2.run(at(210n, { [HOTKEY]: X, [GIFT]: 30n * RAO }));
+    const big = vault("Unstaked", 213n, { hotkey: HOTKEY, wantRao: String(30n * RAO), receivedWei: String(30n * RAO * RAO) });
+    t2.run(at(215n, { [HOTKEY]: X - 30n * RAO, [GIFT]: 30n * RAO }), { logs: [big] });
+    for (const b of [220n, 225n, 230n, 235n, 240n, 245n, 250n]) {
+      expect(t2.run(at(b, { [HOTKEY]: X - 30n * RAO, [GIFT]: 30n * RAO })).found.map((f) => [f.rule, f.hold]), String(b)).toEqual([["stake.unlisted", undefined]]);
     }
   });
 
+  it("a swap whose first-sight reading couldn't read the chain's list: the pair with the fall is still accumulated, critical, and holds", () => {
+    const t = ticker();
+    t.run(healthy(100n));
+    // the swap lands in (100, 105), but 105's StakingHotkeys read failed; 110 is the first sight
+    expect(t.run(at(105n, { [HOTKEY]: 0n }, { stakedHotkeys: undefined })).found).toEqual([]);
+    const first = t.run(at(110n, { [HOTKEY]: 0n }, { stakedHotkeys: [NEW] }));
+    expect(first.found).toEqual([]);
+    // the accumulation starts at the last reading whose list was known, 100: the fall in (100, 105) counts
+    expect(marker(t.meta)).toEqual({ block: "110", from: "100", drop: String(X), upTo: "110" });
+    t.run(at(115n, { [HOTKEY]: 0n, [NEW]: X }));
+    const [f] = t.run(at(120n, { [HOTKEY]: 0n, [NEW]: X })).found;
+    expect([f.rule, f.hold?.id]).toEqual(["stake.divergence", `stake.divergence:${NEW}:110`]);
+  });
+
+  it("growth in another pair (a stakeIdle, a claim credited as stake) never masks a swap's fall; a stake that didn't land counts as a fall", () => {
+    const t = ticker();
+    t.run(healthy(100n));
+    // a stakeIdle of 10 TAO, its Staked log in the window, lands: no unexplained fall
+    const staked = vault("Staked", 103n, { hotkey: HOTKEY, rao: String(10n * RAO), measured: String(10n * RAO) });
+    t.run(at(105n, { [HOTKEY]: X + 10n * RAO }, { stakedHotkeys: [HOTKEY, NEW] }), { logs: [staked] });
+    expect(marker(t.meta)).toMatchObject({ drop: "0", upTo: "105" });
+    // a claim credited as stake: counted rises by 5 TAO with no log to expect it: no fall either
+    t.run(at(110n, { [HOTKEY]: X + 15n * RAO, [NEW]: 0n }));
+    expect(marker(t.meta)).toMatchObject({ drop: "0", upTo: "110" });
+    // the swap: all of it goes to NEW; the earlier growth doesn't offset the fall
+    t.run(at(115n, { [HOTKEY]: 0n, [NEW]: X + 15n * RAO }));
+    expect(marker(t.meta)).toMatchObject({ drop: String(X + 15n * RAO), upTo: "115" });
+    const [f] = t.run(at(120n, { [HOTKEY]: 0n, [NEW]: X + 15n * RAO })).found;
+    expect([f.rule, f.hold?.id]).toEqual(["stake.divergence", `stake.divergence:${NEW}:105`]);
+    // a stakeIdle whose Staked stake isn't on the listed hotkey afterwards is a fall of that much
+    const t2 = ticker();
+    t2.run(healthy(200n));
+    t2.run(at(205n, { [HOTKEY]: X }, { stakedHotkeys: [HOTKEY, NEW] }));
+    const lost = vault("Staked", 208n, { hotkey: HOTKEY, rao: String(10n * RAO), measured: String(10n * RAO) });
+    t2.run(at(210n, { [HOTKEY]: X, [NEW]: 10n * RAO }), { logs: [lost] });
+    expect(marker(t2.meta)).toMatchObject({ drop: String(10n * RAO), upTo: "210" });
+    const [g] = t2.run(at(215n, { [HOTKEY]: X, [NEW]: 10n * RAO })).found;
+    expect(g.rule).toBe("stake.divergence");
+  });
+
+  it("a partial move: part of the counted stake left for an unlisted hotkey: critical, and holds; below stakeDivergenceMinBps only a warning", () => {
+    const part = 20n * RAO;
+    const t = ticker();
+    t.run(healthy(100n));
+    t.run(at(105n, { [HOTKEY]: X - part }, { stakedHotkeys: [HOTKEY, NEW] }));
+    t.run(at(110n, { [HOTKEY]: X - part, [NEW]: part }));
+    const [f] = t.run(at(115n, { [HOTKEY]: X - part, [NEW]: part })).found;
+    expect([f.rule, f.hold?.id]).toEqual(["stake.divergence", `stake.divergence:${NEW}:105`]);
+    expect(f.facts["share of the vault"]).toBe("4081 bps");
+    // less than 100 bps of the vault, though the counted stake fell by it: a warning, not a hold
+    const tiny = 10n ** 8n;
+    const t2 = ticker();
+    t2.run(healthy(200n));
+    t2.run(at(205n, { [HOTKEY]: X - tiny }, { stakedHotkeys: [HOTKEY, NEW] }));
+    t2.run(at(210n, { [HOTKEY]: X - tiny, [NEW]: tiny }));
+    const [g] = t2.run(at(215n, { [HOTKEY]: X - tiny, [NEW]: tiny })).found;
+    expect([g.rule, g.hold]).toEqual(["stake.unlisted", undefined]);
+    expect(g.subject).toContain("below the hold threshold: 20 bps of the vault");
+    // the threshold follows THRESHOLDS
+    const [k] = t2.run(at(220n, { [HOTKEY]: X - tiny, [NEW]: tiny }), { t: { ...DEFAULTS, stakeDivergenceMinBps: 1 } }).found;
+    expect(k.rule).toBe("stake.divergence");
+  });
+
+  it("accumulates a pair only once Bittensor is settled past it (its logs are stored by then), and writes the marker only when it moves on", () => {
+    const t = ticker();
+    t.run(healthy(100n));
+    // settled only to 102: the pair (100, 105) waits, the marker is created with nothing accumulated
+    const first = t.run(at(105n, { [HOTKEY]: 0n }, { stakedHotkeys: [NEW] }), { settledBlock: 102n });
+    expect(first.writes).toEqual([{ k: markerKey, v: JSON.stringify({ block: "105", from: "100", drop: "0", upTo: "100" }) }]);
+    // still not settled: nothing written
+    expect(t.run(at(110n, { [HOTKEY]: 0n, [NEW]: X }), { settledBlock: 104n }).writes).toEqual([]);
+    // settled past 110: both pairs accumulated in one go
+    const caught = t.run(at(115n, { [HOTKEY]: 0n, [NEW]: X }), { settledBlock: 112n });
+    expect(caught.writes).toEqual([{ k: markerKey, v: JSON.stringify({ block: "105", from: "100", drop: String(X), upTo: "110" }) }]);
+    // judged on the newest settled pair, (105, 110): 105 didn't show the stake yet, so nothing until 115 is settled
+    expect(caught.found).toEqual([]);
+    const [f] = t.run(at(120n, { [HOTKEY]: 0n, [NEW]: X }), { settledBlock: 116n }).found;
+    expect([f.rule, f.facts.block]).toEqual(["stake.divergence", "115"]);
+  });
+
+  it("raises no hold of its own while a stake.unexplained_drop hold is on (the same incident: that rule saw the stake leave; this one says where it went), and offers it once that hold is cleared", () => {
+    const active: HoldRow = { id: `stake.unexplained_drop:${HOTKEY}:105`, publicId: "h_00000002", rule: "stake.unexplained_drop", summary: "s", raisedAt: NOW - 300, clearedAt: null, clearedNote: null };
+    const t = ticker();
+    t.run(healthy(100n));
+    t.run(at(105n, { [HOTKEY]: 0n }, { stakedHotkeys: [NEW] }));
+    t.run(at(110n, { [HOTKEY]: 0n, [NEW]: X }));
+    const [f] = t.run(at(115n, { [HOTKEY]: 0n, [NEW]: X }), { holds: [active] }).found;
+    expect([f.rule, f.hold]).toEqual(["stake.divergence", undefined]);
+    expect(f.facts["the hold"]).toBe("on, from stake.unexplained_drop");
+    const [g] = t.run(at(120n, { [HOTKEY]: 0n, [NEW]: X }), { holds: [{ ...active, clearedAt: NOW - 100, clearedNote: "looked" }] }).found;
+    expect(g.hold?.id).toBe(`stake.divergence:${NEW}:105`);
+  });
+
+  it("clears the marker when the hotkey is listed, or gone from the chain's list with no stake left", () => {
+    const t = ticker();
+    t.run(healthy(100n));
+    t.run(at(105n, { [HOTKEY]: X }, { stakedHotkeys: [HOTKEY, GIFT] }));
+    t.run(at(110n, { [HOTKEY]: X, [GIFT]: 5n * RAO }));
+    expect(t.meta[`unlisted_since:${GIFT}`]).not.toBe("");
+    // swept (addHotkey, then removeHotkey moved it onto the stake hotkey): gone from the list, no stake left
+    const gone = t.run(at(115n, { [HOTKEY]: X + 5n * RAO, [GIFT]: 0n }, { stakedHotkeys: [HOTKEY] }));
+    expect(gone.found).toEqual([]);
+    expect(gone.writes).toEqual([{ k: `unlisted_since:${GIFT}`, v: "" }]);
+    // listed by the vault: cleared too (the swap test covers it); a hotkey still in the list with dust keeps none
+    const t2 = ticker();
+    t2.run(healthy(200n));
+    t2.run(at(205n, { [HOTKEY]: X, [h("old")]: 1000n }, { stakedHotkeys: [HOTKEY, h("old")] }));
+    expect(t2.run(at(210n, { [HOTKEY]: X, [h("old")]: 1000n }, { stakedHotkeys: [HOTKEY, h("old")] })).found).toEqual([]);
+  });
+
+  it("never fires on honest operations: a stake, an unstake, a payout, a reward claim, vesting, and a hotkey added", () => {
+    const t = ticker();
+    const steps: [ChainReading<BitState>, StoredLog[]][] = [
+      [healthy(100n), []],
+      // stakeIdle: more stake on the listed hotkey
+      [at(105n, { [HOTKEY]: X + RAO }), [vault("Staked", 103n, { hotkey: HOTKEY, rao: "1000000000", measured: "1000000000" })]],
+      // an unstake for a payout: less stake, more balance
+      [at(110n, { [HOTKEY]: X - 5n * RAO }, { balance: 6n * 10n ** 18n }), [vault("Unstaked", 108n, { hotkey: HOTKEY, wantRao: "5000000000", receivedWei: "5000000000000000000" })]],
+      // a reward claim credited as stake, and the price vesting up
+      [at(115n, { [HOTKEY]: X }, { price: E18 + 10n ** 15n }), [vault("RewardsClaimed", 113n, { hotkey: HOTKEY, deltaRao: "4000000000" })]],
+      // the owner adds a second hotkey, empty so far
+      [at(120n, { [HOTKEY]: X, [h("second")]: 0n }, { hotkeys: [HOTKEY, h("second")] }), []],
+    ];
+    for (const [s, logs] of steps) expect(t.run(s, { logs }).found, String(s.block)).toEqual([]);
+    expect(Object.keys(t.meta)).toEqual([]);
+  });
+
   it("judges nothing while the vault's set is unknown, from one reading, or from readings out of order", () => {
-    const m = marker(NEW, 105n, X);
-    const blind = at(110n, { [HOTKEY]: 0n, [NEW]: X }, { hotkeys: undefined });
-    expect(stakeDivergence.run(ctx(blind, [at(105n, { [HOTKEY]: 0n, [NEW]: X })], { meta: m }))).toEqual([]);
-    expect(stakeDivergence.run(ctx(at(110n, { [HOTKEY]: 0n, [NEW]: X }), [blind], { meta: m }))).toEqual([]);
-    expect(stakeDivergence.run(ctx(at(110n, { [HOTKEY]: 0n, [NEW]: X }), [], { meta: m }))).toEqual([]);
+    const m = { [markerKey]: JSON.stringify({ block: "105", drop: String(X), upTo: "110" }) };
+    const blind = at(115n, { [HOTKEY]: 0n, [NEW]: X }, { hotkeys: undefined });
+    expect(stakeDivergence.run(ctx(blind, [at(110n, { [HOTKEY]: 0n, [NEW]: X })], { meta: m }))).toEqual([]);
+    expect(stakeDivergence.run(ctx(at(115n, { [HOTKEY]: 0n, [NEW]: X }), [blind], { meta: m }))).toEqual([]);
+    expect(stakeDivergence.run(ctx(at(115n, { [HOTKEY]: 0n, [NEW]: X }), [], { meta: m }))).toEqual([]);
     expect(stakeDivergence.run(ctx(at(105n, { [HOTKEY]: 0n, [NEW]: X }), [at(110n, { [HOTKEY]: 0n, [NEW]: X })], { meta: m }))).toEqual([]);
   });
 });

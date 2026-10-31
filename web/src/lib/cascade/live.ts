@@ -235,6 +235,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       restartPending.add(account.toLowerCase());
       save(account, newScan(d), true);
     }
+    // whatever the background check had read was of the history now discarded
+    progress.save(account, {});
     if (e.seeded) distrust();
   }
 
@@ -320,6 +322,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       note("the history indexer's seed reached no further than the saved history, so the vault's history is read from the chain");
       return;
     }
+    // the background check of this seed starts from the deploy block, whatever an earlier one had read
+    progress.save(account, {});
     save(account, scan, true);
     note(`the vault's history up to block ${verdict.next} came from the history indexer, checked against the chain; the rest is read from the chain`);
   }
@@ -426,37 +430,38 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   const checkedAt = new Map<string, number>();
 
   /** Moves the background check of a seeded account's history on a step (seed.ts, checkSeededAccount),
-   * once per CHECK_EVERY_MS, under the account's lock, never in front of a read: when the browser's own
-   * read of the account's events matches the seed, the account half is the browser's own from then on
-   * ("rewards earned" stops being provisional); when it doesn't, the scan starts over and the indexer is
-   * distrusted. A step that can't read the chain keeps its progress and is tried again later. */
+   * once per CHECK_EVERY_MS, outside the account's lock (it only reads the scan, and a restart waits for
+   * the next read in any case), so no read waits behind it: when the browser's own read of the account's
+   * events matches the seed, the account half is the browser's own from then on ("rewards earned" stops
+   * being provisional); when it doesn't, the scan starts over at its next read and the indexer is
+   * distrusted. A step that can't read the chain keeps its progress and is tried again later; one whose
+   * scan changed under it (started over, or seeded again) keeps nothing. */
   function checkInBackground(account: Address): void {
     const key = account.toLowerCase();
-    if (known(account).accountSeededTo === undefined || checking.has(key)) return;
+    const scan = known(account);
+    if (scan.accountSeededTo === undefined || checking.has(key)) return;
     const last = checkedAt.get(key);
     if (last !== undefined && deps.now() - last < CHECK_EVERY_MS) return;
     checking.add(key);
     checkedAt.set(key, deps.now());
-    const step = serial(account, async (scan) => {
-      if (scan.accountSeededTo === undefined) return;
-      const p = progress.load(account);
-      try {
-        const r = await checkSeededAccount(history, d, scan, account, p);
+    const p = progress.load(account);
+    const step = checkSeededAccount(history, d, scan, account, p).then(
+      (r) => {
         if (r === "done") {
           delete scan.accountSeededTo;
           progress.save(account, {});
           save(account, scan, true);
           note("the account's history from the history indexer matches this browser's own read of the chain");
-        } else progress.save(account, p);
-      } catch (e) {
+        } else if (r === "more") progress.save(account, p);
+      },
+      (e: unknown) => {
         if (e instanceof HistoryMismatchError) {
           discarded(account, e);
-          progress.save(account, {});
           note("the account's history from the history indexer didn't match this browser's own read of the chain: it is read again from the deploy block");
         } else progress.save(account, p);
-      }
-    });
-    step.catch(() => undefined).finally(() => checking.delete(key));
+      },
+    );
+    void step.finally(() => checking.delete(key));
   }
 
   /** Settled cancels never change: each answer is kept, so a read asks Base only about new ones. */

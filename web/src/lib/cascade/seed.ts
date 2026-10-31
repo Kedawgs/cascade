@@ -231,9 +231,11 @@ async function accountWindow(c: Pick<Clients, "bittensor">, d: Deployment, accou
  * Redeemed of the account's must be exactly the scan's for those blocks, and every event of the account's
  * there (bounces and deferrals too) must have its batch's delivery in the scan when the deployment's half
  * was the indexer's: otherwise the seed left something out that no balance check could see, and this
- * throws HistoryMismatchError (naming the indexer; the caller restarts the scan under its lock). "done"
+ * throws HistoryMismatchError (naming the indexer; the caller restarts the scan at its next read). "done"
  * once the mark is reached, or when the account half isn't the indexer's; "more" while there is further
- * to read. A window that can't be read throws, keeping the progress made. */
+ * to read; "stopped" when the scan's mark changed under the read (it started over, or was seeded
+ * again), so what was read says nothing about it and the progress isn't the scan's. A window that can't
+ * be read throws, keeping the progress made. Runs outside the account's lock: it only reads the scan. */
 export async function checkSeededAccount(
   c: Pick<Clients, "bittensor">,
   d: Deployment,
@@ -241,13 +243,14 @@ export async function checkSeededAccount(
   account: Address,
   progress: { next?: bigint },
   windows = CHECK_WINDOWS_PER_STEP,
-): Promise<"more" | "done"> {
+): Promise<"more" | "done" | "stopped"> {
   const to = scan.accountSeededTo;
   if (to === undefined) return "done";
   let from = max(scan.from, progress.next ?? scan.from);
   for (let i = 0; i < windows && from < to; i++) {
     const end = min(from + WINDOW - 1n, to - 1n);
     const raw = await accountWindow(c, d, account, from, end);
+    if (scan.accountSeededTo !== to) return "stopped";
     const found = vaultEvents(raw, d, account);
     for (const kind of ["deposited", "redeemed"] as const) {
       const idOfOwn = (e: AccountEvent) => `${e.key}:${e.txHash}:${e.block}`.toLowerCase();

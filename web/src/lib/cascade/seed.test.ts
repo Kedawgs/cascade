@@ -313,7 +313,7 @@ describe("checkSeededAccount", () => {
       expect(Array.isArray(t[0]) && t[0].length).toBeGreaterThanOrEqual(2);
     }
     // the rest, in later steps, up to the mark and no further
-    let r: "more" | "done" = "more";
+    let r: "more" | "done" | "stopped" = "more";
     for (let i = 0; i < 20 && r === "more"; i++) r = await checkSeededAccount(n.clients, D, scan, ME, progress, 3);
     expect(r).toBe("done");
     expect(n.windows[n.windows.length - 1]).toEqual([19_000n, NEXT - 1n]);
@@ -380,9 +380,25 @@ describe("checkSeededAccount", () => {
     const h = honest();
     const withBatch7 = { ...h, shared: { ...h.shared, delivered: [...h.shared.delivered, { batchId: "7", key: H(7), txHash: H(177), block: "7000" }] } };
     const scan = seeded(withBatch7);
-    let r: "more" | "done" = "more";
+    let r: "more" | "done" | "stopped" = "more";
     const progress: { next?: bigint } = {};
     for (let i = 0; i < 30 && r === "more"; i++) r = await checkSeededAccount(node({ logs: chain }).clients, D, scan, ME, progress, 5);
     expect(r).toBe("done");
+  });
+
+  it("stops, judging nothing and moving no progress, when the scan's mark changed under a window read: it started over, or was seeded again", async () => {
+    const n = node();
+    const scan = seeded();
+    const progress: { next?: bigint } = { next: 3_000n };
+    // the scan starts over (a trail caught something) while the first window is being read
+    const real = (n.clients as { bittensor: { request: (q: unknown) => Promise<unknown> } }).bittensor.request;
+    (n.clients as { bittensor: { request: (q: unknown) => Promise<unknown> } }).bittensor.request = async (q) => {
+      const r = await real(q);
+      delete scan.accountSeededTo;
+      return r;
+    };
+    expect(await checkSeededAccount(n.clients, D, scan, ME, progress, 3)).toBe("stopped");
+    expect(progress.next).toBe(3_000n);
+    expect(n.windows).toHaveLength(1);
   });
 });

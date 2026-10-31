@@ -1206,6 +1206,8 @@ describe("the indexer's seed", () => {
   ];
   /** The account's csTAO after all that: 7e22 − 1e22. */
   const SHARES = 6n * 10n ** 22n;
+  /** Lets a background step that runs on the fake node's promises finish. */
+  const settled = () => new Promise((r) => setTimeout(r, 0));
 
   /** Bittensor from a node at `head` holding `logs` and their receipts. */
   function node(logs: Log[] = CHAIN, head = HEAD) {
@@ -1397,10 +1399,14 @@ describe("the indexer's seed", () => {
     const first = await v.data.getPositionHistory(ME);
     expect(first.rewardsEarnedTao).toBeCloseTo(0.02, 12);
     expect(first.provisional).toBe(true);
-    // the background check's first step read the first windows of the account's own events and found the deposit
-    const second = await v.data.getPositionHistory(ME);
+    // the background check's first step (outside the lock, so no read waits for it) read the first windows
+    // of the account's own events and found the deposit
+    await settled();
     expect(n.checks[0]).toEqual([1n, 1_000n]);
     expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
+    // the saved copy is already empty; the scan in memory starts over at the next read
+    expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
+    const second = await v.data.getPositionHistory(ME);
     // read again from the deploy block by the browser: 0.08 now + 0.03 out − 0.09 in, final
     expect(second.rewardsEarnedTao).toBeCloseTo(0.02, 12);
     expect(second.provisional).toBeUndefined();
@@ -1413,23 +1419,28 @@ describe("the indexer's seed", () => {
     const storage = memory();
     const v = visit(n, halvesOf(CHAIN), { now: () => clock }, storage);
     expect((await v.data.getPositionHistory(ME)).provisional).toBe(true);
-    // one step per poll, three windows a step: the first poll's step has run by the second read
-    await v.data.getPositionHistory(ME);
+    // one step per poll, three windows a step
+    await settled();
     expect(n.checks).toHaveLength(3);
     expect(n.checks[0]).toEqual([1n, 1_000n]);
+    await v.data.getPositionHistory(ME);
+    await settled();
+    expect(n.checks).toHaveLength(3);
     clock += CHECK_EVERY_MS;
     await v.data.getPositionHistory(ME);
-    await v.data.getPositionHistory(ME);
+    await settled();
     expect(n.checks).toHaveLength(6);
     // a new visit picks the check up where it stopped
     const m = node();
     const w = visit(m, halvesOf(CHAIN), { now: () => clock }, storage);
     let h = await w.data.getPositionHistory(ME);
+    await settled();
     expect(h.provisional).toBe(true);
     expect(w.asked).toEqual([]);
     for (let i = 0; i < 20 && h.provisional; i++) {
       clock += CHECK_EVERY_MS;
       h = await w.data.getPositionHistory(ME);
+      await settled();
     }
     expect(h.provisional).toBeUndefined();
     expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);

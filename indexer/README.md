@@ -294,9 +294,11 @@ not have), and a second node that hasn't settled the range yet is asked again ne
 **Backfilling missed logs.** There is no backfill script: the scan itself is the backfill. The tick re-reads from
 `scanned_to + 1 − REREAD` every minute, so rewinding a chain's `scanned_to` below the oldest missing log makes
 the next ticks re-read from there (in windows of 100 blocks on Base, 1,000 on Bittensor: a long rewind takes
-several ticks), store what was missing through `upsertLogs` (so deliveries and landings get their check rows),
-run the rules on it (an omitted admin event pages then, as it should have), and leave the rest as it was (logs
-already stored are recognised by place and cost nothing; `settled_to` never moves back):
+several ticks), store what was missing through `upsertLogs` (so deliveries and landings get their check rows)
+and run the rules on it (an omitted admin event pages then, as it should have). Everything already stored is
+left as it was: the tick loads what the store holds for the whole span it re-reads (up to `settled_to`, which
+never moves back), so every stored log is recognised by place, none is hashed, upserted or judged again, no
+event alert fires twice and no seed page is rebuilt (`test/worker/tick-rewind.test.ts` checks both):
 
 ```sh
 pnpm --dir indexer wrangler d1 execute cascade-indexer-<env> --remote --env <env> \

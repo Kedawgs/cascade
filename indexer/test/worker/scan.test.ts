@@ -74,9 +74,11 @@ describe("scanChain on Bittensor", () => {
       [3101n, 3500n],
       [3501n, 3600n],
     ]);
-    expect(rereadRange("bittensor", { scannedTo: 3500n }, 1000n)).toEqual({ from: 3101n, to: 3500n });
-    expect(rereadRange("bittensor", { scannedTo: 1100n }, 1000n)).toEqual({ from: 1000n, to: 1100n });
-    expect(rereadRange("bittensor", { scannedTo: null }, 1000n)).toBeNull();
+    expect(rereadRange("bittensor", { scannedTo: 3500n, settledTo: 3490n }, 1000n)).toEqual({ from: 3101n, to: 3500n });
+    expect(rereadRange("bittensor", { scannedTo: 1100n, settledTo: 1090n }, 1000n)).toEqual({ from: 1000n, to: 1100n });
+    expect(rereadRange("bittensor", { scannedTo: null, settledTo: 999n }, 1000n)).toBeNull();
+    // after a rewind of scanned_to (a backfill) the stored logs up to the settled point are loaded too
+    expect(rereadRange("bittensor", { scannedTo: 1500n, settledTo: 3490n }, 1000n)).toEqual({ from: 1101n, to: 3490n });
     expect(r.cursor).toEqual({ scannedTo: 3600n, settledTo: 3590n });
     // the head's time came with the first window, in the same request
     expect(net.fetches[0].methods).toEqual(["eth_getLogs", "eth_blockNumber", "eth_getBlockByNumber"]);

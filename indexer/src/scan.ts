@@ -32,12 +32,16 @@ export interface ScanResult {
   error?: string;
 }
 
-/** The blocks a tick reads again, whose stored uids it loads once (store.storedUids): from REREAD
- * blocks before the last head read up to it. Null before the first window. */
-export function rereadRange(chain: ChainName, cursor: { scannedTo: bigint | null }, startBlock: bigint): { from: bigint; to: bigint } | null {
+/** The blocks a tick reads again, whose stored logs it loads once (store.rereadStored): from REREAD blocks
+ * before the last head read up to it, or up to the settled point when that is further: after a rewind of
+ * scanned_to (a backfill, README "Backfilling missed logs") the blocks up to settled_to were scanned and stored
+ * before, and loading them lets the scan recognise every stored log there by place, so none is hashed again,
+ * upserted or replayed as new (no event alert fires twice). settled_to never moves back, so in the normal tick
+ * the range is the REREAD window alone. Null before the first window. */
+export function rereadRange(chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, startBlock: bigint): { from: bigint; to: bigint } | null {
   if (cursor.scannedTo === null) return null;
   const back = cursor.scannedTo + 1n - REREAD[chain];
-  return { from: back > startBlock ? back : startBlock, to: cursor.scannedTo };
+  return { from: back > startBlock ? back : startBlock, to: cursor.settledTo > cursor.scannedTo ? cursor.settledTo : cursor.scannedTo };
 }
 
 /** A chain's head time for this tick (written every tick, so lag = head_time − settled_time grows when

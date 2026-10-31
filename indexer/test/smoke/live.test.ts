@@ -109,7 +109,8 @@ describe.skipIf(!live)("live smoke: one tick against the v3 test deployment", ()
         const check = await runLogsCheck({ env: { DB: db }, cfg: { ...cfg, rpc: { ...cfg.rpc, [field]: [url] } }, nowS, fetch: (i, init) => globalThis.fetch(i, init) });
         const error = (await loadTickState(db, nowS)).meta[`logs_check_error:${c}`];
         console.log(`logs cross-check, ${c} via ${hostDomain(url)}: ${JSON.stringify(check[c], (_k, v) => (typeof v === "bigint" ? String(v) : v))}${error ? ` (${error})` : ""}`);
-        expect(check[c], `${c}'s second endpoint ${hostDomain(url)}`).not.toBe("failed");
+        // it checked a window: neither failed nor behind the range (a lagging endpoint verifies nothing)
+        expect(typeof check[c], `${c}'s second endpoint ${hostDomain(url)}: ${String(check[c])}`).toBe("object");
       }
     }
     await setMeta(db, "catching_up", "").run();

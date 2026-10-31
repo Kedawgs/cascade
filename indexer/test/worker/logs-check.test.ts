@@ -185,6 +185,40 @@ describe("runLogsCheck", () => {
     void healed;
   });
 
+  it("the omitted uids go with their alert: acknowledged, closed after 7 days, or gone, so a later alert heals on its own logs", async () => {
+    const hidden = (cfg: Config) => [rawLog({ address: cfg.deployment.vault, abi: VAULT, eventName: "KeeperSet", args: { keeper: "0x00000000000000000000000000000000000000ee" }, block: 6_900_170n, logIndex: 0, txHash: h("hidden") })];
+    const { w, deps, second, to } = await world({ secondLogs: (chain, primary, { cfg }) => (chain === "bittensor" ? [...primary, ...hidden(cfg)] : primary) });
+    const uidsMeta = async () => (await meta())["logs_omitted_uids:bittensor"] ?? "";
+    const withoutHidden = () => (second.bittensor.logs ?? []).filter((l) => l.transactionHash !== h("hidden") && l.transactionHash !== h("hidden 2"));
+    // acknowledged by the owner: the next run closes the alert (as reconcile does any acknowledged event) and clears the uids
+    await runLogsCheck(deps());
+    expect(JSON.parse(await uidsMeta())).toHaveLength(1);
+    await db.prepare("UPDATE alerts SET acknowledged_at = ?1 WHERE alert_key = 'indexer.logs_omitted:bittensor'").bind(w.nowS()).run();
+    // the second now agrees (the primary stopped lying): nothing re-found
+    second.bittensor.logs = withoutHidden();
+    await runLogsCheck(deps(w.nowS() + 3600));
+    expect(await alerts()).toEqual([]);
+    expect(await uidsMeta()).toBe("");
+    // closed quietly 7 days after opening: the same (a new omission, in the ten blocks that settle next)
+    const hidden2 = rawLog({ address: w.cfg.deployment.vault, abi: VAULT, eventName: "KeeperSet", args: { keeper: "0x00000000000000000000000000000000000000ee" }, block: to.bittensor + 5n, logIndex: 0, txHash: h("hidden 2") });
+    second.bittensor.logs = [...withoutHidden(), hidden2];
+    await db.prepare("UPDATE cursors SET settled_to = settled_to + 10 WHERE chain = 'bittensor'").run();
+    w.specs.bittensor.head += 10n;
+    second.bittensor.head += 10n;
+    await runLogsCheck(deps(w.nowS() + 7200));
+    expect(await alerts()).toHaveLength(1);
+    expect(JSON.parse(await uidsMeta())).toHaveLength(1);
+    await db.prepare("UPDATE alerts SET opened_at = ?1 WHERE alert_key = 'indexer.logs_omitted:bittensor' AND resolved_at IS NULL").bind(w.nowS() - 8 * 86400).run();
+    second.bittensor.logs = withoutHidden();
+    await runLogsCheck(deps(w.nowS() + 10_800));
+    expect(await alerts()).toEqual([]);
+    expect(await uidsMeta()).toBe("");
+    // uids left behind with no open alert at all (whatever closed it): cleared on the next run
+    await setMeta(db, "logs_omitted_uids:bittensor", JSON.stringify([h("stale uid")])).run();
+    await runLogsCheck(deps(w.nowS() + 14_400));
+    expect(await uidsMeta()).toBe("");
+  });
+
   it("the store has logs the second lacks: one warning per chain, and only once the second node is REREAD blocks past them", async () => {
     const { w, deps } = await world({ secondLogs: (chain, primary, { trip }) => (chain === "base" ? primary.filter((l) => l.transactionHash !== trip.closeTx) : primary) });
     const r = await runLogsCheck(deps());

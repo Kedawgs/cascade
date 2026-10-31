@@ -1,5 +1,5 @@
 import { type Hex, keccak256, toBytes } from "viem";
-import { type Finding, markSent, reconcile } from "./alerts.ts";
+import { EVENT_CLOSES_AFTER_S, type Finding, markSent, reconcile } from "./alerts.ts";
 import { type ChainName, type Config, hostDomain, rolesOf, scanAddresses } from "./config.ts";
 import { type AlertItem, type Outgoing, renderCritical, renderWarnings, sendAll } from "./email.ts";
 import { decode, identify, type RawLog } from "./logs.ts";
@@ -95,12 +95,19 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   }
   const writes: D1PreparedStatement[] = [];
 
-  // an omission alert heals once the store has every log it named (a re-read found them, or the owner added
-  // them): resolved here, since the tick leaves this job's alerts alone
+  // an omission alert heals once the store has every log it named (a re-read found them, or the owner backfilled
+  // them): resolved here, since the tick leaves this job's alerts alone. The uids are kept only while their alert
+  // is open: one acknowledged, closed after 7 days or resolved leaves none behind, so a later alert heals on its
+  // own logs alone
   for (const chain of CHAINS) {
     const alert = open.find((a) => a.alertKey === `indexer.logs_omitted:${chain}`);
     const uids = json<Hex[]>(meta[`${OMITTED_UIDS}${chain}`]) ?? [];
-    if (!alert || uids.length === 0) continue;
+    if (uids.length === 0) continue;
+    if (!alert) {
+      writes.push(setMeta(db, `${OMITTED_UIDS}${chain}`, ""));
+      meta[`${OMITTED_UIDS}${chain}`] = "";
+      continue;
+    }
     try {
       const have = await db.prepare("SELECT COUNT(*) AS n FROM logs WHERE chain = ?1 AND removed = 0 AND uid IN (SELECT value FROM json_each(?2))").bind(chain, JSON.stringify(uids)).first<number>("n");
       if (Number(have) >= uids.length) {
@@ -243,7 +250,13 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   }
 
   // the alerts, as the watchdog raises its own: opened or kept here, and re-sent here while unacknowledged (the
-  // tick leaves this job's alerts alone)
+  // tick leaves this job's alerts alone). An omission alert reconcile closes now (acknowledged, or open 7 days)
+  // and not found again this run takes its uids with it
+  for (const chain of CHAINS) {
+    const alert = open.find((a) => a.alertKey === `indexer.logs_omitted:${chain}`);
+    const closing = alert && (alert.acknowledgedAt !== null || nowS - alert.openedAt >= EVENT_CLOSES_AFTER_S) && !findings.some((f) => f.key === alert.alertKey);
+    if (closing && (meta[`${OMITTED_UIDS}${chain}`] ?? "") !== "") writes.push(setMeta(db, `${OMITTED_UIDS}${chain}`, ""));
+  }
   const r = reconcile(db, { open, findings, nowS, t, holdActive: false, lastWarningSentAt: num(meta.last_warning_at) });
   if (writes.length === 0 && r.statements.length === 0) return result;
   let ids: ReturnType<typeof returnedIds>;

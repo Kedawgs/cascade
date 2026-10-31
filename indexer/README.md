@@ -263,7 +263,7 @@ listed ones and the configured stake hotkey), so the monitor names the hotkey to
 
 | Alert | Tier | What it means | What to do |
 |---|---|---|---|
-| `stake.divergence` | critical, **holds** | the vault's counted stake fell by what now sits on a hotkey the vault doesn't list (a material share, `stakeDivergenceMinBps`, of the vault), on two readings in a row and once settled: a hotkey swap, stake moved off a listed hotkey, or the configured stake hotkey removed with stake still on it; the email names the hotkey, the stake on it, what the vault counts, what it counted before the hotkey appeared, and what the chain holds. The fall is measured from the reading before the hotkey first appeared, less the vault's own `Unstaked` since | guardian `pause()` the vault (deliveries, direct deposits and payouts stop); owner, guardian or keeper `addHotkey(<the hotkey>)` (if the set is full, owner `removeHotkey` an empty one first); check the price recovered, clear the hold, unpause. `stake.unexplained_drop` sees the same swap as stake leaving the listed hotkey and holds at once; this alert then names where it went and raises no second hold while that one is on (`price.drop` and `stake.hotkey_changed` fire from their own angles too) |
+| `stake.divergence` | critical, **holds** | the vault's counted stake fell by what now sits on a hotkey the vault doesn't list (a material share, `stakeDivergenceMinBps`, of the vault), on two settled readings in a row: a hotkey swap, stake moved off a listed hotkey, or the configured stake hotkey removed with stake still on it; the email names the hotkey, the stake on it, what the vault counts, the unexplained fall since the hotkey appeared and what the chain holds. The fall is a running sum from the hotkey's first sight: each pair of settled readings adds its own fall net of the vault's `Staked` and `Unstaked` in between (so an honest unstake hours later is netted while its log is there, never counted once it has scrolled out), kept in meta `unlisted_since:<hotkey>` | guardian `pause()` the vault (deliveries, direct deposits and payouts stop); owner, guardian or keeper `addHotkey(<the hotkey>)` (if the set is full, owner `removeHotkey` an empty one first); check the price recovered, clear the hold, unpause. `stake.unexplained_drop` sees the same swap as stake leaving the listed hotkey and holds at once; this alert then names where it went and raises no second hold while that one is on (`price.drop` and `stake.hotkey_changed` fire from their own angles too) |
 | `stake.unlisted` | warning | stake on a hotkey the vault doesn't list **without** a matching fall in its counted stake: a stranger's `transfer_stake` (anyone can push stake onto any coldkey, from about 0.0005 TAO, which also lists their hotkey under it), or an amount below the hold threshold | nothing is held. Sweep it when worth a transaction: `addHotkey(<the hotkey>)`, then owner `removeHotkey(<the hotkey>, true)` moves it onto the stake hotkey (its depositors get it through their shares); acknowledge dust |
 | `vault.stake_moved` | warning | a `StakeMoved` onto the configured stake hotkey below `stakeMoveCriticalRao` (100 TAO): `moveStake` or `removeHotkey`, owner only; the sender is named | your own change: acknowledge. Not yours: the owner key is compromised, guardian `pause()`, rotate |
 | `vault.stake_moved_unexpected` | critical | a `StakeMoved` to a hotkey that isn't the configured stake hotkey (the vault's stake hotkey was changed first: see the `StakeHotkeySet` admin alert), or of `stakeMoveCriticalRao` or more at once | if you didn't, assume the owner key is compromised: guardian `pause()` the vault now, rotate; check where the stake sits on taostats |
@@ -290,6 +290,21 @@ each side are in every alert's facts):
 
 A chain still catching up in its first backfill isn't cross-checked (an old range a non-archive second node may
 not have), and a second node that hasn't settled the range yet is asked again next hour.
+
+**Backfilling missed logs.** There is no backfill script: the scan itself is the backfill. The tick re-reads from
+`scanned_to + 1 − REREAD` every minute, so rewinding a chain's `scanned_to` below the oldest missing log makes
+the next ticks re-read from there (in windows of 100 blocks on Base, 1,000 on Bittensor: a long rewind takes
+several ticks), store what was missing through `upsertLogs` (so deliveries and landings get their check rows),
+run the rules on it (an omitted admin event pages then, as it should have), and leave the rest as it was (logs
+already stored are recognised by place and cost nothing; `settled_to` never moves back):
+
+```sh
+pnpm --dir indexer wrangler d1 execute cascade-indexer-<env> --remote --env <env> \
+  --command "UPDATE cursors SET scanned_to = <a block before the oldest missing log> WHERE chain = '<base|bittensor>'"
+```
+
+The `indexer.logs_omitted` alert then resolves by itself on the next hourly run that finds every log it named in
+the store (or on acknowledgement, `pnpm alerts:ack`).
 
 ## Limits worth knowing
 

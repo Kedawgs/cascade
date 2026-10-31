@@ -1,8 +1,16 @@
-import type { Hex } from "viem";
-import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
+import { decodeAbiParameters, type Hex } from "viem";
+import { ADMIN_VIEWS, ALPHA_VAULT, BRIDGE_VIEWS, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TOKEN_POOL, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
 import type { Config } from "../../src/config.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
-import { STAKING_HOTKEYS_PREFIX, STAKING_PRECOMPILE, STORAGE_QUERY } from "../../src/subtensor.ts";
+import {
+  DELEGATES_PREFIX,
+  ROOT_STAKE_UNLOCK_INTERVAL_KEY,
+  STAKING_HOTKEYS_PREFIX,
+  STAKING_PRECOMPILE,
+  STORAGE_QUERY,
+  TOTAL_HOTKEY_ALPHA_PREFIX,
+  UIDS_PREFIX,
+} from "../../src/subtensor.ts";
 import { type ChainSpec, ethCall, type FetchRecord, fakeChains, REVERT, TEST_URLS } from "./fake-rpc.ts";
 
 const ZERO = "0x0000000000000000000000000000000000000000" as Hex;
@@ -19,6 +27,9 @@ export const GUARDIAN = "0x00000000000000000000000000000000000000a2" as Hex;
 export const KEEPER = "0x00000000000000000000000000000000000000a3" as Hex;
 export const TREASURY_WALLET = "0x00000000000000000000000000000000000000a4" as Hex;
 export const VALIDATOR_OWNER = "0x2222222222222222222222222222222222222222222222222222222222222222" as Hex;
+
+/** A CCIP token pool's rate-limit bucket as getCurrent*RateLimiterState answers it (amounts in TAO). */
+export const bucket = (tokens: bigint, capacity = 5000n, isEnabled = true) => ({ tokens: tokens * 10n ** 18n, lastUpdated: 1_800_000_000, isEnabled, capacity: capacity * 10n ** 18n, rate: 6n * 10n ** 17n });
 
 /** Everything both chains answer, as plain values a test can change between reads. A view listed in
  * `reverts` ("vault.price", "base.oracle.usdcValue") reverts. */
@@ -58,7 +69,33 @@ export function deploymentState(cfg: Config) {
       lockPoolFmTao: 100n * 10n ** 18n,
       adapterBalance: 10n ** 13n,
       keeperBalance: 10n ** 18n,
-      alpha: { isPaused: false, migrationReadyAt: 0n, migrationFinished: false },
+      alpha: {
+        isPaused: false,
+        migrationReadyAt: 0n,
+        migrationFinished: false,
+        pausedUntil: 0n,
+        pauseableAfter: 0n,
+        migrationTarget: ZERO,
+        migrationExecuted: false,
+        pendingAdmin: [ZERO, 0] as [Hex, number],
+        /** backing(wTAO) */
+        backing: 101n * 10n ** 18n,
+      },
+      /** wTAO's total supply (the lock pool holds lockPoolFmTao of it) */
+      wTaoSupply: 100n * 10n ** 18n,
+      /** the lock pool's buckets for the Base lane */
+      lane: { inbound: bucket(5000n), outbound: bucket(4000n) },
+      /** the raw storage the 0x807 query answers for the validator (as the live chain did on 2026-10-31) */
+      storage: { delegates: "0x0000" as Hex, totalHotkeyAlpha: "0x8a54d1d2fda00300" as Hex, uids: "0x0100" as Hex, unlockInterval: "0x" as Hex },
+      claimGasRequired: 55_000_000n,
+      baseFee: 5_000_000_000n,
+      primaryBridge: d.bitAdapter,
+      maxFeeAbs: 5n * 10n ** 15n,
+      maxFeeBps: 100n,
+      /** what quoteFee answers (a full chunk's fee, as the launch's adapter quoted it on 2026-10-31) */
+      payoutFeeQuote: 1_315_669_376_468_497n,
+      /** the addresses answering quoteFee: the Bittensor adapter, and any a test adds */
+      quoteBridges: [d.bitAdapter] as Hex[],
       payoutBatches: {} as Record<Hex, { queuedAt: bigint; cursor: number; count: number; chunk: number; remaining: bigint }>,
       offRamp: {} as Record<Hex, number>,
     },
@@ -85,8 +122,11 @@ export function deploymentState(cfg: Config) {
       frontDoorTao: 0n,
       frontDoorEth: 0n,
       fmTaoSupply: 100n * 10n ** 18n,
-      taoWeth: { slot0: [79228162514264337593543950336n, 0, 0, 1, 1, 0, true] as const, liquidity: 5n * 10n ** 18n, tao: 30n * 10n ** 18n, token0: cfg.tokens.base.fmTao },
-      wethUsdc: { slot0: [3961408125713216879677197516800n, 0, 0, 1, 1, 0, true] as const, liquidity: 9n * 10n ** 18n, token0: cfg.tokens.base.weth },
+      // slot0: the observations as the live pools hold them once TAO/WETH's has grown to its cardinalityNext
+      taoWeth: { slot0: [79228162514264337593543950336n, 0, 0, 2000, 2000, 0, true] as [bigint, number, number, number, number, number, boolean], liquidity: 5n * 10n ** 18n, tao: 30n * 10n ** 18n, token0: cfg.tokens.base.fmTao },
+      wethUsdc: { slot0: [3961408125713216879677197516800n, 0, 0, 5000, 5000, 0, true] as [bigint, number, number, number, number, number, boolean], liquidity: 9n * 10n ** 18n, token0: cfg.tokens.base.weth },
+      /** the Base pool's buckets for the Bittensor lane */
+      lane: { inbound: bucket(5000n), outbound: bucket(5000n) },
       oracleValue: 400_000_000n,
       keeperBalance: 10n ** 17n,
       claimable: {} as Record<Hex, bigint>,
@@ -99,6 +139,8 @@ export function deploymentState(cfg: Config) {
     },
     /** eth_getTransactionCount per chain and address */
     nonces: { base: {} as Record<Hex, bigint>, bittensor: {} as Record<Hex, bigint> },
+    /** what the readings asked of the views that take arguments */
+    asked: { bucketSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number }[] },
   };
 }
 
@@ -111,7 +153,21 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
   const d = cfg.deployment;
   const t = cfg.tokens;
   const heads = o.heads ?? { base: 37_100_000n, bittensor: 6_905_000n };
-  const v = <T>(chain: string, name: string, value: () => T) => () => (state.reverts.has(`${chain}.${name}`) ? REVERT : value());
+  const v =
+    <T>(chain: string, name: string, value: (args: readonly unknown[]) => T) =>
+    (args: readonly unknown[]) =>
+      state.reverts.has(`${chain}.${name}`) ? REVERT : value(args);
+  /** a token pool's buckets: either direction, asked by the remote chain's selector (recorded) */
+  const lane = (chain: string, buckets: { inbound: ReturnType<typeof bucket>; outbound: ReturnType<typeof bucket> }) => ({
+    getCurrentInboundRateLimiterState: v(chain, "pool.inbound", ([sel]) => {
+      state.asked.bucketSelectors.push(`${chain}:${sel}`);
+      return buckets.inbound;
+    }),
+    getCurrentOutboundRateLimiterState: v(chain, "pool.outbound", ([sel]) => {
+      state.asked.bucketSelectors.push(`${chain}:${sel}`);
+      return buckets.outbound;
+    }),
+  });
   const b = state.base;
   const x = state.bit;
   const balances = (chain: "base" | "bittensor") => (a: Hex) => {
@@ -162,6 +218,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
           [t.base.wethUsdcPool]: { abi: UNISWAP_POOL, fns: { slot0: () => b.wethUsdc.slot0, liquidity: () => b.wethUsdc.liquidity, token0: () => b.wethUsdc.token0 } },
           [d.oracle]: { abi: ORACLE, fns: { usdcValue: v("base", "oracle.usdcValue", () => b.oracleValue) } },
           [t.base.offRamp]: { abi: OFFRAMP, fns: { getExecutionState: ([id]) => b.offRamp[lc(id)] ?? 0 } },
+          [t.base.tokenPool]: { abi: TOKEN_POOL, fns: lane("base", b.lane) },
           ...safeContracts,
         },
         { time: (at) => 1_800_000_000 + Number(at - heads.base) * 2, balance: balances("base") },
@@ -200,6 +257,10 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
               lastClaimAt: () => x.lastClaimAt,
               minStakeRao: () => x.minStakeRao,
               rewardCutBps: () => x.rewardCutBps,
+              claimGasRequired: v("vault", "claimGasRequired", () => x.claimGasRequired),
+              maxFeeAbs: () => x.maxFeeAbs,
+              maxFeeBps: () => x.maxFeeBps,
+              primaryBridge: () => x.primaryBridge,
               getPayoutBatch: ([key]) => {
                 const p = x.payoutBatches[lc(key)];
                 return {
@@ -220,12 +281,62 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
             abi: STAKING,
             fns: { getStake: ([hk]) => x.stakes[lc(hk)] ?? 0n, getUnclaimedRootTaoByHotkey: () => x.unclaimed },
           },
-          [STORAGE_QUERY]: { raw: (key) => (key.startsWith(STAKING_HOTKEYS_PREFIX) ? encodeAccountIds(x.stakingHotkeys) : x.hotkeyOwner === null ? "0x" : x.hotkeyOwner) },
-          [t.bittensor.fmTao]: { abi: ERC20, fns: { balanceOf: ([a]) => (lc(a) === t.bittensor.lockPool ? x.lockPoolFmTao : 0n) } },
-          [t.bittensor.alphaVault]: { abi: ALPHA_VAULT, fns: { isPaused: () => x.alpha.isPaused, migrationReadyAt: () => x.alpha.migrationReadyAt, migrationFinished: () => x.alpha.migrationFinished } },
+          [STORAGE_QUERY]: {
+            raw: (key) =>
+              key.startsWith(STAKING_HOTKEYS_PREFIX)
+                ? encodeAccountIds(x.stakingHotkeys)
+                : key.startsWith(DELEGATES_PREFIX)
+                  ? x.storage.delegates
+                  : key.startsWith(TOTAL_HOTKEY_ALPHA_PREFIX)
+                    ? x.storage.totalHotkeyAlpha
+                    : key.startsWith(UIDS_PREFIX)
+                      ? x.storage.uids
+                      : key === ROOT_STAKE_UNLOCK_INTERVAL_KEY
+                        ? x.storage.unlockInterval
+                        : x.hotkeyOwner === null
+                          ? "0x"
+                          : x.hotkeyOwner,
+          },
+          [t.bittensor.fmTao]: { abi: ERC20, fns: { balanceOf: ([a]) => (lc(a) === t.bittensor.lockPool ? x.lockPoolFmTao : 0n), totalSupply: v("wTao", "totalSupply", () => x.wTaoSupply) } },
+          [t.bittensor.alphaVault]: {
+            abi: ALPHA_VAULT,
+            fns: {
+              isPaused: () => x.alpha.isPaused,
+              migrationReadyAt: () => x.alpha.migrationReadyAt,
+              migrationFinished: () => x.alpha.migrationFinished,
+              pausedUntil: () => x.alpha.pausedUntil,
+              pauseableAfter: () => x.alpha.pauseableAfter,
+              migrationTarget: () => x.alpha.migrationTarget,
+              migrationExecuted: () => x.alpha.migrationExecuted,
+              pendingDefaultAdmin: () => x.alpha.pendingAdmin,
+              backing: v("alphaVault", "backing", ([token]) => {
+                state.asked.backingOf.push(lc(token));
+                return x.alpha.backing;
+              }),
+            },
+          },
+          [t.bittensor.lockPool]: { abi: TOKEN_POOL, fns: lane("bittensor", x.lane) },
+          ...Object.fromEntries(
+            x.quoteBridges.map((bridge) => [
+              bridge,
+              {
+                abi: BRIDGE_VIEWS,
+                fns: {
+                  quoteFee: v("bridge", "quoteFee", ([destChain, recipient, message]) => {
+                    const [, , , entries] = decodeAbiParameters(
+                      [{ type: "uint8" }, { type: "bytes32" }, { type: "uint32" }, { type: "tuple[]", components: [{ type: "address" }, { type: "uint256" }] }],
+                      message as Hex,
+                    );
+                    state.asked.quotes.push({ bridge: lc(bridge), destChain: destChain as bigint, recipient: lc(recipient), entries: entries.length });
+                    return x.payoutFeeQuote;
+                  }),
+                },
+              },
+            ]),
+          ),
           [t.bittensor.offRamp]: { abi: OFFRAMP, fns: { getExecutionState: ([id]) => x.offRamp[lc(id)] ?? 0 } },
         },
-        { time: (at) => 1_800_000_000 + Number(at - heads.bittensor) * 12, balance: balances("bittensor") },
+        { time: (at) => 1_800_000_000 + Number(at - heads.bittensor) * 12, balance: balances("bittensor"), baseFee: () => x.baseFee },
       ),
     },
   };

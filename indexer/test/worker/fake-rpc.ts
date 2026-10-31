@@ -162,7 +162,7 @@ export interface FakeContracts {
 /** An eth_call handler for `fakeChains`' `calls`: views of the given contracts, called directly or
  * through Multicall3's aggregate3 (with getBlockNumber, getCurrentBlockTimestamp and getEthBalance
  * answered from the block the node is at). A view returning REVERT (or throwing) reverts. */
-export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => number; balance?: (address: Hex, at: bigint) => bigint } = {}) {
+export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => number; balance?: (address: Hex, at: bigint) => bigint; baseFee?: (at: bigint) => bigint } = {}) {
   const byAddress = new Map(Object.entries(contracts).map(([a, c]) => [a.toLowerCase(), c]));
   const time = o.time ?? ((at: bigint) => 1_700_000_000 + Number(at) * 12);
 
@@ -173,6 +173,7 @@ export function ethCall(contracts: FakeContracts, o: { time?: (at: bigint) => nu
       if (functionName === "getBlockNumber") return encodeFunctionResult({ abi: MULTICALL3, functionName, result: at });
       if (functionName === "getCurrentBlockTimestamp") return encodeFunctionResult({ abi: MULTICALL3, functionName, result: BigInt(time(at)) });
       if (functionName === "getEthBalance") return encodeFunctionResult({ abi: MULTICALL3, functionName, result: o.balance?.(args[0] as Hex, at) ?? 0n });
+      if (functionName === "getBasefee" && o.baseFee) return encodeFunctionResult({ abi: MULTICALL3, functionName, result: o.baseFee(at) });
       return null;
     }
     const c = byAddress.get(target.toLowerCase());

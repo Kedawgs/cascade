@@ -1,13 +1,68 @@
-import { encodeAbiParameters, type Hex, hexToBigInt, keccak256 } from "viem";
-import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, EXECUTION_STATES, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "./abi.ts";
+import { encodeAbiParameters, type Hex, hexToBigInt, keccak256, toBytes } from "viem";
+import {
+  ADMIN_VIEWS,
+  ALPHA_VAULT,
+  BRIDGE_VIEWS,
+  CCIP_SELECTOR,
+  ERC20,
+  EXECUTION_STATES,
+  FRONT_DOOR_VIEWS,
+  MULTICALL3,
+  OFFRAMP,
+  ORACLE,
+  SAFE,
+  STAKING,
+  TOKEN_POOL,
+  TREASURY,
+  UNISWAP_POOL,
+  VAULT_VIEWS,
+} from "./abi.ts";
 import type { ChainName, Config } from "./config.ts";
+import { encodePayoutsMessage } from "./crosscheck/payouts.ts";
 import { multicall, newerThan, type Read } from "./multicall.ts";
 import type { Rpc } from "./rpc.ts";
-import { decodeAccountId, decodeAccountIds, ownerStorageKey, STAKING_PRECOMPILE, stakingHotkeysKey, STORAGE_QUERY } from "./subtensor.ts";
+import {
+  decodeAccountId,
+  decodeAccountIds,
+  decodeU16,
+  decodeU64,
+  delegatesKey,
+  ownerStorageKey,
+  ROOT_STAKE_UNLOCK_INTERVAL_KEY,
+  STAKING_PRECOMPILE,
+  stakingHotkeysKey,
+  STORAGE_QUERY,
+  totalHotkeyAlphaKey,
+  uidsKey,
+} from "./subtensor.ts";
 
 /** At most this many hotkeys' stakes are read a tick (the vault lists at most 4; the chain's list for the
  * coldkey is bounded by what ever held its stake). */
 const MAX_STAKE_READS = 16;
+
+/** The payout chunk payout.fee_ceiling has the primary bridge quote: the most entries a chunk holds (CascadeMessages
+ * MAX_ENTRIES, the keeper's maxEntries), so the costliest message, worth 1 TAO in all (the amount doesn't move the
+ * fee: 0.01 and 1 TAO quoted the same live). Its content is a stand-in; the fee follows its size and gas. Built once. */
+const QUOTE_ENTRIES = 100;
+const QUOTE_AMOUNT = 10n ** 18n;
+const QUOTE_MESSAGE = encodePayoutsMessage(
+  keccak256(toBytes("cascade monitor fee quote")),
+  0,
+  Array.from({ length: QUOTE_ENTRIES }, (_, i) => ({ user: `0x${(i + 1).toString(16).padStart(40, "0")}` as Hex, amount: QUOTE_AMOUNT / BigInt(QUOTE_ENTRIES) })),
+);
+
+/** A CCIP token pool's rate-limit bucket, refilled to the reading's block. */
+export interface Bucket {
+  tokens: bigint;
+  isEnabled: boolean;
+  capacity: bigint;
+  rate: bigint;
+}
+/** A token pool's buckets for Cascade's lane: inbound (from the other chain) and outbound (to it). */
+export interface Lane {
+  inbound?: Bucket;
+  outbound?: Bucket;
+}
 
 // One block-pinned reading of each chain per tick (spec section 6, "Readings"): one Multicall3 call per
 // chain, every field optional (a failed sub-call leaves it undefined, and the rules that need it skip).
@@ -62,7 +117,40 @@ export interface BitState {
   lockPoolFmTao?: bigint;
   adapterBalance?: bigint;
   keeperBalance?: bigint;
-  alpha: { isPaused?: boolean; migrationReadyAt?: bigint; migrationFinished?: boolean };
+  alpha: {
+    isPaused?: boolean;
+    migrationReadyAt?: bigint;
+    migrationFinished?: boolean;
+    /** a guardian's timed pause runs until this time (0: none) */
+    pausedUntil?: bigint;
+    pauseableAfter?: bigint;
+    /** where an announced migration moves the AlphaVault's holdings (zero: none) */
+    migrationTarget?: Hex;
+    migrationExecuted?: boolean;
+    /** pendingDefaultAdmin(): a scheduled admin transfer (the zero address: none) and when it may be accepted */
+    pendingAdmin?: { admin: Hex; schedule: number };
+    /** backing(wTAO): what the AlphaVault holds against wTAO, in wei of TAO */
+    backing?: bigint;
+  };
+  /** wTAO's total supply (TOKENS.bittensor.fmTao): what the AlphaVault's backing must cover */
+  wTaoSupply?: bigint;
+  /** the lock pool's buckets for the Base lane */
+  lane?: Lane;
+  /** the stake hotkey as a validator: its take (of 65,535; null: no Delegates entry), the stake on it on root (rao,
+   * everyone's) and its root uid (null: not registered on root); a field undefined when its answer didn't decode */
+  validator?: { hotkey: Hex; take?: number | null; rootStake?: bigint; rootUid?: number | null };
+  /** SubtensorModule.RootStakeUnlockInterval, in blocks (0: unset, no hold) */
+  rootUnlockInterval?: bigint;
+  /** the gas the vault requires left before a claim (the keeper sends claimGasRequired + 2M) */
+  claimGasRequired?: bigint;
+  /** the block's base fee: Bittensor takes a transaction's whole gas limit at it up front */
+  baseFee?: bigint;
+  primaryBridge?: Hex;
+  /** the vault's payout fee ceiling: a chunk's fee may be at most max(sum × maxFeeBps / 10,000, maxFeeAbs) */
+  maxFeeAbs?: bigint;
+  maxFeeBps?: bigint;
+  /** the primary bridge's fee for a full payout chunk (QUOTE_ENTRIES entries), rounded up to whole rao as the vault does */
+  payoutFeeQuote?: bigint;
   /** getPayoutBatch(key) for each pending payout key */
   payoutBatches: Record<Hex, { queuedAt: number; cursor: number; count: number; chunk: number; remaining: bigint }>;
 }
@@ -94,8 +182,11 @@ export interface BaseState {
   frontDoorEth?: bigint;
   /** FM-TAO's total supply on Base */
   fmTaoSupply?: bigint;
-  taoWethPool: { sqrtPriceX96?: bigint; liquidity?: bigint; tao?: bigint; token0?: Hex };
-  wethUsdcPool: { sqrtPriceX96?: bigint; liquidity?: bigint; token0?: Hex };
+  /** the pools the TWAP oracle reads: `cardinality` is how many observations each keeps (slot0) */
+  taoWethPool: { sqrtPriceX96?: bigint; liquidity?: bigint; tao?: bigint; token0?: Hex; cardinality?: number; cardinalityNext?: number };
+  wethUsdcPool: { sqrtPriceX96?: bigint; liquidity?: bigint; token0?: Hex; cardinality?: number; cardinalityNext?: number };
+  /** the Base token pool's buckets for the Bittensor lane */
+  lane?: Lane;
   /** the front door's oracle's usdcValue(1e18); `oracleReverted` when that call failed */
   oracleValue?: bigint;
   oracleReverted?: boolean;
@@ -131,6 +222,8 @@ export interface SnapshotInputs {
   stakeHotkey?: Hex;
   keepers?: { base?: Hex; bittensor?: Hex };
   oracle?: Hex;
+  /** the vault's primary bridge, which quotes the payout fee */
+  bitBridge?: Hex;
   pendingMessages: { messageId: Hex; direction: "base>bittensor" | "bittensor>base" }[];
   watched: { chain: ChainName; address: Hex; isSafe?: boolean }[];
   /** addresses whose code to read (the role wallets, for keys.delegated), in the same batch as the counts */
@@ -145,6 +238,8 @@ export interface SnapshotInputs {
 export const peerIdOf = (chain: bigint, addr: Hex): Hex => keccak256(encodeAbiParameters([{ type: "uint64" }, { type: "address" }], [chain, addr]));
 
 const lc = (x: unknown) => String(x).toLowerCase() as Hex;
+const RAO_WEI = 10n ** 9n;
+const bucketOf = (v: { tokens: bigint; isEnabled: boolean; capacity: bigint; rate: bigint }): Bucket => ({ tokens: v.tokens, isEnabled: v.isEnabled, capacity: v.capacity, rate: v.rate });
 const state = (n: unknown) => EXECUTION_STATES[Number(n)] ?? String(n);
 
 /** The reads of one chain's multicall, each with what to do with its answer. */
@@ -260,9 +355,51 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   vp.add({ ethBalance: d.bitAdapter }, (v) => (bit.adapterBalance = v));
   if (i.keepers?.bittensor) vp.add({ ethBalance: i.keepers.bittensor }, (v) => (bit.keeperBalance = v));
   vp.add({ address: t.bittensor.fmTao, abi: ERC20, functionName: "balanceOf", args: [t.bittensor.lockPool] }, (v) => (bit.lockPoolFmTao = v));
-  vp.add({ address: t.bittensor.alphaVault, abi: ALPHA_VAULT, functionName: "isPaused" }, (v) => (bit.alpha.isPaused = v));
-  vp.add({ address: t.bittensor.alphaVault, abi: ALPHA_VAULT, functionName: "migrationReadyAt" }, (v) => (bit.alpha.migrationReadyAt = v));
-  vp.add({ address: t.bittensor.alphaVault, abi: ALPHA_VAULT, functionName: "migrationFinished" }, (v) => (bit.alpha.migrationFinished = v));
+  const alpha = (functionName: string, ok: (v: any) => void, args?: unknown[]) => vp.add({ address: t.bittensor.alphaVault, abi: ALPHA_VAULT, functionName, args }, ok);
+  alpha("isPaused", (v) => (bit.alpha.isPaused = v));
+  alpha("migrationReadyAt", (v) => (bit.alpha.migrationReadyAt = v));
+  alpha("migrationFinished", (v) => (bit.alpha.migrationFinished = v));
+  alpha("pausedUntil", (v) => (bit.alpha.pausedUntil = v));
+  alpha("pauseableAfter", (v) => (bit.alpha.pauseableAfter = v));
+  alpha("migrationTarget", (v) => (bit.alpha.migrationTarget = lc(v)));
+  alpha("migrationExecuted", (v) => (bit.alpha.migrationExecuted = v));
+  alpha("pendingDefaultAdmin", (v) => (bit.alpha.pendingAdmin = { admin: lc(v[0]), schedule: Number(v[1]) }));
+  // the rail's true backing: the AlphaVault's TAO against wTAO, and wTAO against the lock pool's share of it
+  alpha("backing", (v) => (bit.alpha.backing = v), [t.bittensor.fmTao]);
+  vp.add({ address: t.bittensor.fmTao, abi: ERC20, functionName: "totalSupply" }, (v) => (bit.wTaoSupply = v));
+  // the lane's buckets on the lock pool (toward Base)
+  const bitLane: Lane = {};
+  vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "getCurrentInboundRateLimiterState", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.inbound = bucketOf(v)));
+  vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "getCurrentOutboundRateLimiterState", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.outbound = bucketOf(v)));
+  // the stake hotkey as a validator, and the chain's root-stake hold (SubtensorModule storage)
+  const validator: NonNullable<BitState["validator"]> = { hotkey: lc(stakeHotkey) };
+  const storage = (key: Hex, ok: (v: Hex) => void) => vp.add({ address: STORAGE_QUERY, callData: key }, ok);
+  storage(delegatesKey(stakeHotkey), (v) => {
+    const take = decodeU16(v);
+    if (take !== undefined) validator.take = take;
+  });
+  storage(totalHotkeyAlphaKey(stakeHotkey, 0), (v) => {
+    const stake = decodeU64(v);
+    // ValueQuery: no entry is 0
+    if (stake !== undefined) validator.rootStake = stake ?? 0n;
+  });
+  storage(uidsKey(0, stakeHotkey), (v) => {
+    const uid = decodeU16(v);
+    if (uid !== undefined) validator.rootUid = uid;
+  });
+  storage(ROOT_STAKE_UNLOCK_INTERVAL_KEY, (v) => {
+    const blocks = decodeU64(v);
+    if (blocks !== undefined) bit.rootUnlockInterval = blocks ?? 0n;
+  });
+  // what a claim and a payout chunk cost: the keeper's claim gas at the base fee, and the primary bridge's quote
+  vault("claimGasRequired", (v) => (bit.claimGasRequired = v));
+  vp.add({ address: t.multicall3, abi: MULTICALL3, functionName: "getBasefee" }, (v) => (bit.baseFee = v));
+  vault("primaryBridge", (v) => (bit.primaryBridge = lc(v)));
+  vault("maxFeeAbs", (v) => (bit.maxFeeAbs = v));
+  vault("maxFeeBps", (v) => (bit.maxFeeBps = v));
+  vp.add({ address: i.bitBridge ?? d.bitAdapter, abi: BRIDGE_VIEWS, functionName: "quoteFee", args: [BigInt(d.base.chainId), d.frontDoor, QUOTE_MESSAGE, QUOTE_AMOUNT] }, (v: bigint) => {
+    bit.payoutFeeQuote = ((v + RAO_WEI - 1n) / RAO_WEI) * RAO_WEI;
+  });
   for (const p of i.pendingPayoutKeys) {
     vault("getPayoutBatch", (v) => (bit.payoutBatches[p.key] = { queuedAt: Number(v.queuedAt), cursor: Number(v.cursor), count: Number(v.count), chunk: Number(v.chunk), remaining: v.remaining }), [p.key]);
   }
@@ -307,10 +444,17 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
     [t.base.taoWethPool, base.taoWethPool],
     [t.base.wethUsdcPool, base.wethUsdcPool],
   ] as const) {
-    bp.add({ address: pool, abi: UNISWAP_POOL, functionName: "slot0" }, (v) => (into.sqrtPriceX96 = v[0]));
+    bp.add({ address: pool, abi: UNISWAP_POOL, functionName: "slot0" }, (v) => {
+      into.sqrtPriceX96 = v[0];
+      into.cardinality = Number(v[3]);
+      into.cardinalityNext = Number(v[4]);
+    });
     bp.add({ address: pool, abi: UNISWAP_POOL, functionName: "liquidity" }, (v) => (into.liquidity = v));
     bp.add({ address: pool, abi: UNISWAP_POOL, functionName: "token0" }, (v) => (into.token0 = lc(v)));
   }
+  const baseLane: Lane = {};
+  bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "getCurrentInboundRateLimiterState", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.inbound = bucketOf(v)));
+  bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "getCurrentOutboundRateLimiterState", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.outbound = bucketOf(v)));
   bp.add(
     { address: i.oracle ?? d.oracle, abi: ORACLE, functionName: "usdcValue", args: [10n ** 18n] },
     (v) => (base.oracleValue = v),
@@ -357,11 +501,14 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
       set.push(hk);
     }
     if (slots[0] !== undefined) bit.hotkeys = set;
+    if (bitLane.inbound || bitLane.outbound) bit.lane = bitLane;
+    if (Object.keys(validator).length > 1) bit.validator = validator;
     snap.bittensor = bitReading;
     Object.assign(messageStates, bitMessages);
     Object.assign(safeNonces, bitSafes);
   }
   if (baseReading) {
+    if (baseLane.inbound || baseLane.outbound) base.lane = baseLane;
     snap.base = baseReading;
     Object.assign(messageStates, baseMessages);
     Object.assign(safeNonces, baseSafes);
@@ -420,6 +567,8 @@ export interface HourAgg {
   liquidityLast?: bigint;
   unclaimedFirst?: bigint;
   unclaimedLast?: bigint;
+  /** the validator's root stake (everyone's), the hour's highest */
+  validatorStakeHigh?: bigint;
   /** the pool's TAO price in USD, summed over the readings that had one */
   spotSum: number;
   spotCount: number;
@@ -449,6 +598,7 @@ export function hourRollup(prev: HourAgg | undefined, s: Snapshot, spotUsd?: num
     liquidityLast: base?.taoWethPool.liquidity ?? p.liquidityLast,
     unclaimedFirst: p.unclaimedFirst ?? bit?.unclaimed,
     unclaimedLast: bit?.unclaimed ?? p.unclaimedLast,
+    validatorStakeHigh: hi(p.validatorStakeHigh, bit?.validator?.rootStake),
     spotSum: p.spotSum + (spotUsd ?? 0),
     spotCount: p.spotCount + (spotUsd === undefined ? 0 : 1),
   };

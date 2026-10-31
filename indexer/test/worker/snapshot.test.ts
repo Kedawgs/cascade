@@ -1,5 +1,6 @@
 import { encodeAbiParameters, type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
+import { CCIP_SELECTOR } from "../../src/abi.ts";
 import { compact, compactHour, expand, expandHour, hourRollup, payoutsDone, peerIdOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
 import { decodeAccountId, decodeAccountIds, OWNER_PREFIX, ownerStorageKey, STAKING_HOTKEYS_PREFIX, stakingHotkeysKey } from "../../src/subtensor.ts";
 import { deploymentState, encodeAccountIds, fakeDeployment, GUARDIAN, KEEPER, OWNER, VALIDATOR_OWNER } from "./fake-deployment.ts";
@@ -54,7 +55,31 @@ describe("readSnapshot", () => {
       hotkeyOwner: VALIDATOR_OWNER,
       lockPoolFmTao: 100n * 10n ** 18n,
       adapterBalance: 10n ** 13n,
-      alpha: { isPaused: false, migrationReadyAt: 0n, migrationFinished: false },
+      alpha: {
+        isPaused: false,
+        migrationReadyAt: 0n,
+        migrationFinished: false,
+        pausedUntil: 0n,
+        pauseableAfter: 0n,
+        migrationTarget: "0x0000000000000000000000000000000000000000",
+        migrationExecuted: false,
+        pendingAdmin: { admin: "0x0000000000000000000000000000000000000000", schedule: 0 },
+        backing: 101n * 10n ** 18n,
+      },
+      wTaoSupply: 100n * 10n ** 18n,
+      lane: {
+        inbound: { tokens: 5000n * 10n ** 18n, isEnabled: true, capacity: 5000n * 10n ** 18n, rate: 6n * 10n ** 17n },
+        outbound: { tokens: 4000n * 10n ** 18n, isEnabled: true, capacity: 5000n * 10n ** 18n, rate: 6n * 10n ** 17n },
+      },
+      validator: { hotkey: d.stakeHotkey, take: 0, rootStake: 1_021_436_954_236_042n, rootUid: 1 },
+      rootUnlockInterval: 0n,
+      claimGasRequired: 55_000_000n,
+      baseFee: 5_000_000_000n,
+      primaryBridge: d.bitAdapter,
+      maxFeeAbs: 5n * 10n ** 15n,
+      maxFeeBps: 100n,
+      // the quote rounded up to whole rao, as the vault rounds the fee it checks
+      payoutFeeQuote: 1_315_670_000_000_000n,
     });
     expect(s.base?.state).toMatchObject({
       openBatch: { id: 7n, start: 1_700_000_000, totalDeposits: 0n, feePot: 0n, nDeposits: 0, nRedeems: 0 },
@@ -64,11 +89,49 @@ describe("readSnapshot", () => {
       owner: OWNER,
       oracle: d.oracle,
       fmTaoSupply: 100n * 10n ** 18n,
-      taoWethPool: { liquidity: 5n * 10n ** 18n, tao: 30n * 10n ** 18n, token0: cfg.tokens.base.fmTao },
+      taoWethPool: { liquidity: 5n * 10n ** 18n, tao: 30n * 10n ** 18n, token0: cfg.tokens.base.fmTao, cardinality: 2000, cardinalityNext: 2000 },
+      wethUsdcPool: { cardinality: 5000, cardinalityNext: 5000 },
+      lane: {
+        inbound: { tokens: 5000n * 10n ** 18n, isEnabled: true, capacity: 5000n * 10n ** 18n, rate: 6n * 10n ** 17n },
+        outbound: { tokens: 5000n * 10n ** 18n, isEnabled: true, capacity: 5000n * 10n ** 18n, rate: 6n * 10n ** 17n },
+      },
       oracleValue: 400_000_000n,
       claimable: { [USER]: 5n * 10n ** 16n },
       deliveryOf: { [USER]: { minUsdcPerTao: 400_000_000n, deadline: 1_800_000_500, destination: 6 } },
     });
+  });
+
+  it("asks the token pools for the Base-Bittensor lane's buckets, the AlphaVault's backing for wTAO, and a full payout chunk's fee", async () => {
+    const state = deploymentState(cfg);
+    const other = "0x00000000000000000000000000000000000b1d9e" as Hex;
+    state.bit.quoteBridges.push(other);
+    const { rpc } = fakeDeployment(cfg, state);
+    await readSnapshot(rpc, cfg, inputs(), 1);
+    // the lane's selectors: the Base pool is asked about Bittensor, the lock pool about Base
+    expect(state.asked.bucketSelectors).toEqual(expect.arrayContaining([`base:${CCIP_SELECTOR.bittensor}`, `bittensor:${CCIP_SELECTOR.base}`]));
+    expect(state.asked.backingOf).toEqual([cfg.tokens.bittensor.fmTao]);
+    // the quote: a chunk of the most entries a payout chunk holds (100), to the front door on Base, at the primary bridge
+    expect(state.asked.quotes).toEqual([{ bridge: d.bitAdapter, destChain: 8453n, recipient: d.frontDoor, entries: 100 }]);
+    // and from the bridge the last reading named, when it moved
+    await readSnapshot(rpc, cfg, inputs({ bitBridge: other }), 2);
+    expect(state.asked.quotes.at(-1)).toMatchObject({ bridge: other });
+  });
+
+  it("reads the validator's take, root stake and root uid, and an unset RootStakeUnlockInterval as 0; an absent entry as null", async () => {
+    const state = deploymentState(cfg);
+    const { rpc } = fakeDeployment(cfg, state);
+    state.bit.storage.delegates = "0x";
+    state.bit.storage.uids = "0x";
+    state.bit.storage.unlockInterval = "0x6801000000000000";
+    const s = await readSnapshot(rpc, cfg, inputs(), 1);
+    expect(s.bittensor?.state.validator).toEqual({ hotkey: d.stakeHotkey, take: null, rootStake: 1_021_436_954_236_042n, rootUid: null });
+    expect(s.bittensor?.state.rootUnlockInterval).toBe(360n);
+    // an answer that doesn't decode is unread, never a value
+    state.bit.storage.delegates = "0x1234567890";
+    state.bit.storage.unlockInterval = "0x01";
+    const t = await readSnapshot(rpc, cfg, inputs(), 2);
+    expect(t.bittensor?.state.validator?.take).toBeUndefined();
+    expect(t.bittensor?.state.rootUnlockInterval).toBeUndefined();
   });
 
   it("leaves only a failed read's field undefined", async () => {
@@ -273,6 +336,8 @@ describe("readings in D1", () => {
     agg = hourRollup(agg, await readSnapshot(rpc, cfg, inputs(), at(120)));
     expect(agg).toMatchObject({ hour: 3600 * 1000, ticks: 3, priceHigh: 10n ** 18n + 5n, priceLow: 10n ** 18n - 3n, priceLast: 10n ** 18n - 3n, spotSum: 802, spotCount: 2 });
     expect(agg.supplyFirst).toBe(100n * 10n ** 18n);
+    // the validator's root stake: the hour's highest (validator.root_stake_drop compares with a day of them)
+    expect(agg.validatorStakeHigh).toBe(1_021_436_954_236_042n);
     const next = hourRollup(agg, await readSnapshot(rpc, cfg, inputs(), at(3600)));
     expect(next).toMatchObject({ hour: 3600 * 1001, ticks: 1, priceHigh: 10n ** 18n - 3n });
   });

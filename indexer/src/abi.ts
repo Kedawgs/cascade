@@ -218,7 +218,14 @@ export const VAULT_VIEWS = parseAbi([
   "function minStakeRao() view returns (uint256)",
   "function rewardCutBps() view returns (uint16)",
   "function getPayoutBatch(bytes32 key) view returns (PayoutBatch)",
+  "function claimGasRequired() view returns (uint256)",
+  "function maxFeeBps() view returns (uint256)",
+  "function maxFeeAbs() view returns (uint256)",
+  "function primaryBridge() view returns (address)",
 ]);
+
+/** CcipAdapterBase's fee quote (the vault asks its primary bridge before each payout chunk). */
+export const BRIDGE_VIEWS = parseAbi(["function quoteFee(uint64 destChain, address recipient, bytes message, uint256 amount) view returns (uint256)"]);
 
 export const FRONT_DOOR_VIEWS = parseAbi([
   "function openBatch() view returns (uint64 id, uint64 start, uint256 totalDeposits, uint256 feePot, uint256 nDeposits, uint256 nRedeems)",
@@ -259,11 +266,24 @@ export const ORACLE = parseAbi(["function usdcValue(uint256 taoWei) view returns
 export const OFFRAMP = parseAbi(["function getExecutionState(bytes32 messageId) view returns (uint8)"]);
 export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE"] as const;
 
-/** ForeverMoney's AlphaVault, the rail TAO crosses on. */
+/** ForeverMoney's AlphaVault, the rail TAO crosses on (each view answered live on 2026-10-31). */
 export const ALPHA_VAULT = parseAbi([
   "function isPaused() view returns (bool)",
   "function migrationReadyAt() view returns (uint256)",
   "function migrationFinished() view returns (bool)",
+  "function pausedUntil() view returns (uint256)",
+  "function pauseableAfter() view returns (uint256)",
+  "function migrationTarget() view returns (address)",
+  "function migrationExecuted() view returns (bool)",
+  "function pendingDefaultAdmin() view returns (address newAdmin, uint48 schedule)",
+  "function backing(address token) view returns (uint256)",
+]);
+
+/** A Chainlink TokenPool 1.5.1's rate-limit buckets for a remote chain, refilled to now. */
+export const TOKEN_POOL = parseAbi([
+  "struct TokenBucket { uint128 tokens; uint32 lastUpdated; bool isEnabled; uint128 capacity; uint128 rate; }",
+  "function getCurrentInboundRateLimiterState(uint64 remoteChainSelector) view returns (TokenBucket)",
+  "function getCurrentOutboundRateLimiterState(uint64 remoteChainSelector) view returns (TokenBucket)",
 ]);
 
 /** Bittensor's staking precompile (0x…0805), as contracts/src/interfaces/IStaking.sol declares it. */
@@ -280,6 +300,7 @@ export const MULTICALL3 = parseAbi([
   "function getEthBalance(address addr) view returns (uint256 balance)",
   "function getBlockNumber() view returns (uint256 blockNumber)",
   "function getCurrentBlockTimestamp() view returns (uint256 timestamp)",
+  "function getBasefee() view returns (uint256 basefee)",
 ]);
 
 /** A Safe's nonce counts its executed transactions (an owner that is a Safe sends none of its own). */

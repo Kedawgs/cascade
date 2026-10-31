@@ -413,6 +413,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       stakeHotkey: previous.bittensor?.state.stakeHotkey,
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
       oracle: previous.base?.state.oracle,
+      bitBridge: previous.bittensor?.state.primaryBridge,
       pendingMessages: [...state.pendingMessages, ...pendingFresh].map((m) => ({ messageId: m.messageId, direction: m.direction })),
       // every watched address both ways: its transaction count, and nonce() in case it is a Safe (the keys rule
       // takes a Safe's nonce() over its count). The reading keeps a nonce() only from an address with contract

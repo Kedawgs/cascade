@@ -48,6 +48,18 @@ export interface State {
   };
   /** v3: deliveries ready to send (the run loop fills it; reward claims are never an action) */
   deliveries?: DueDelivery[];
+  /** Actions `run` skips this round, by actionKey: each refused by its simulation or its own re-read
+   * MAX_REFUSALS rounds in a row (the circuit breaker), tried again on a back-off. The next due action
+   * goes ahead instead, so one refused payout or stake never starves the deliveries and closes behind it. */
+  skipped?: ReadonlySet<string>;
+}
+
+/** The key `run`'s circuit breaker tracks an action by: a payout per batch, a delivery per user, else
+ * its kind. */
+export function actionKey(a: Action): string {
+  if (a.kind === "payouts") return `payouts:${a.key.toLowerCase()}`;
+  if (a.kind === "deliver") return `deliver:${a.user.toLowerCase()}`;
+  return a.kind;
 }
 
 export type Action =
@@ -137,15 +149,19 @@ export const closeHold = (s: State): string | undefined => (isHeld(s) ? `the kee
 /** The next thing the keeper should do: a due payout, then a USDC delivery, then staking, then closing
  * (or rolling) the batch. A batch with entries closes once the front door allows it and it is full, at
  * least `closeMaxWaitS` old, or its fees cover the bridge fee; fees that could not be read never close it
- * early. An empty one is rolled under a max wait while AlphaVault is healthy (see rollable). */
+ * early. An empty one is rolled under a max wait while AlphaVault is healthy (see rollable). An action in
+ * `s.skipped` (run's circuit breaker) is passed over for the next due one, and named in the reason when
+ * nothing else is due. */
 export function decideNext(s: State): { action: Action | null; reason: string } {
+  const skip = s.skipped ?? new Set<string>();
   const open = s.vault.batches.filter((b) => b.cursor < b.count);
   const due = open.filter((b) => s.now >= b.queuedAt + s.vault.payoutDelay);
+  const dueNow = due.filter((b) => !skip.has(`payouts:${b.key.toLowerCase()}`));
   const held = isHeld(s);
   const closable = s.frontDoor.canClose && s.frontDoor.nDeposits + s.frontDoor.nRedeems > 0 && !held;
 
-  if (due.length && !s.vault.paused && s.alphaVault.healthy) {
-    return { action: { kind: "payouts", key: due[0].key }, reason: "a payout batch is past its delay" };
+  if (dueNow.length && !s.vault.paused && s.alphaVault.healthy) {
+    return { action: { kind: "payouts", key: dueNow[0].key }, reason: "a payout batch is past its delay" };
   }
   const ready = s.deliveries ?? [];
   if (ready.length && !s.frontDoor.paused) {
@@ -154,13 +170,16 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   }
   const stakeable = s.vault.available >= s.vault.minStakeWei;
   const bigEnough = s.vault.rootStake + s.vault.available >= s.vault.nominatorMinWei;
-  if (stakeable && bigEnough && !s.vault.paused) {
+  const stakeDue = stakeable && bigEnough && !s.vault.paused;
+  if (stakeDue && !skip.has("stake")) {
     return { action: { kind: "stake" }, reason: "the vault holds idle TAO above the staking floor" };
   }
-  if (closable && !s.frontDoor.paused && s.alphaVault.healthy) {
+  const closeDue = closable && !s.frontDoor.paused && s.alphaVault.healthy;
+  if (closeDue && !skip.has("close")) {
     return { action: { kind: "close" }, reason: "the open batch is ready to close" };
   }
-  if (rollable(s) && !s.frontDoor.paused) {
+  const rollDueNow = rollable(s) && !s.frontDoor.paused;
+  if (rollDueNow && !skip.has("roll")) {
     return { action: { kind: "roll" }, reason: `rolling the empty batch so its ${hours(s.closeMaxWaitS)} wait starts from the next deposit` };
   }
 
@@ -172,8 +191,16 @@ export function decideNext(s: State): { action: Action | null; reason: string } 
   if (s.frontDoor.paused && rollDue(s)) return { action: null, reason: "the front door is paused — not rolling the empty batch" };
   if (!s.alphaVault.healthy && rollDue(s)) return { action: null, reason: "AlphaVault is paused or migrating — not rolling the empty batch" };
   const waits: string[] = [];
-  if (open.length) waits.push(`next payout at ${hhmm(Math.min(...open.map((b) => b.queuedAt + s.vault.payoutDelay)))}`);
+  const notDue = open.filter((b) => !due.includes(b));
+  if (notDue.length) waits.push(`next payout at ${hhmm(Math.min(...notDue.map((b) => b.queuedAt + s.vault.payoutDelay)))}`);
   if (held) waits.push(`the open batch ${holdWait(s)}`);
+  const skippedNow = [
+    ...due.filter((b) => skip.has(`payouts:${b.key.toLowerCase()}`)).map((b) => `paying out batch ${b.key.slice(0, 10)}…`),
+    ...(stakeDue && skip.has("stake") ? ["staking"] : []),
+    ...(closeDue && skip.has("close") ? ["closing the batch"] : []),
+    ...(rollDueNow && skip.has("roll") ? ["rolling the empty batch"] : []),
+  ];
+  if (skippedNow.length) waits.push(`${skippedNow.join(", ")} skipped after repeated refusals (tried again on a back-off; see SKIPPING above)`);
   if (waits.length) return { action: null, reason: `nothing due: ${waits.join("; ")}` };
   if (stakeable && !bigEnough) {
     return {

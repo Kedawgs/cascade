@@ -5,7 +5,7 @@ import { type DeploymentRecord, requireHandoff } from "../record.ts";
 import { ReceiptTimeout, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom, explainDeliveryRevert } from "./delivery.ts";
-import { type Action, type DueDelivery, decideNext, type State } from "./due.ts";
+import { type Action, actionKey, type DueDelivery, decideNext, type State } from "./due.ts";
 import {
   classifyFailure,
   DeliveryReverted,
@@ -437,6 +437,13 @@ export const REVERT_BUDGET = 2;
 export const REVERT_WINDOW_MS = 24 * 3600_000;
 export const REVERT_HOLD_MS = 6 * 3600_000;
 export const REVERT_HOLD_MAX_MS = 48 * 3600_000;
+/** The circuit breaker: a close, stake or payout refused this many rounds in a row (by its simulation,
+ * or by its own re-read of the chain) is skipped, so the actions behind it (other payouts, deliveries,
+ * the stake, the close) go ahead, and it is tried again SKIP_MS later, doubling each time it is refused
+ * again, up to SKIP_MAX_MS. A refused simulation sends nothing, so skipping it can never send twice. */
+export const MAX_REFUSALS = 3;
+export const SKIP_MS = 5 * 60_000;
+export const SKIP_MAX_MS = 60 * 60_000;
 
 const hours = (ms: number) => `${Number((ms / 3600_000).toFixed(1))} hour${ms === 3600_000 ? "" : "s"}`;
 /** A clock time for the log: "2027-01-18 14:05 UTC". */
@@ -493,7 +500,11 @@ export interface RunOptions {
  * race lost to another caller or a user, a pending transaction, an RPC fault) is logged on one line and
  * the next round decides again, after a wait that doubles with each failed round in a row (nextWaitMs);
  * from `stillFailingAfter` failed rounds in a row the line starts STILL FAILING, as does a skip of one
- * action (a lost race, a delivery the wallet's guard refuses) that many rounds in a row. Nothing is ever
+ * action (a lost race, a delivery the wallet's guard refuses) that many rounds in a row. A close, stake
+ * or payout refused MAX_REFUSALS rounds in a row (its simulation, or its own re-read, saying no) trips
+ * the circuit breaker: it is skipped, said loudly (SKIPPING), the round moves on to the next due action,
+ * and it is tried again on a back-off (SKIP_MS, doubling to SKIP_MAX_MS), so one refused action never
+ * starves the ones behind it. Nothing is ever
  * retried within the round that failed: a transaction with no receipt may still be pending, and the next
  * round's send guard refuses every send until it is mined or dropped; its receipt is looked up each
  * round, and a bridge message it sent is recorded once it lands. A close, roll, payout or stake that
@@ -514,6 +525,10 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
   /** How many rounds in a row each kind of skip has happened, and the ones this round. */
   const skipRuns = new Map<string, number>();
   let skippedNow = new Set<string>();
+  /** The circuit breaker: each close, stake or payout's refusals in a row (by actionKey), the back-off
+   * its last skip cost, and when it is tried again; and the ones refused this round. */
+  const refusals = new Map<string, { n: number; backoffMs: number; until: number }>();
+  let refusedNow = new Set<string>();
   /** A revert whose re-read failed: the next round's read decides. */
   let unread: { action: Racing; before: KeeperState; revert: RevertedOnChain } | undefined;
   let unreceipted: Unreceipted[] = [];
@@ -555,6 +570,27 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     r.holdEnd = now + holdMs;
     return { within: r.at.length, holdMs };
   }
+
+  /** A refusal of `a` (its simulation, or its own re-read, said no): counted; from MAX_REFUSALS in a row,
+   * the breaker trips and returns true: `a` is skipped for a back-off (said loudly) and the round moves on
+   * to the next due action. Before that, false: the round fails on it as before. */
+  function tripped(a: Racing, e: SendRefused | NotNow): boolean {
+    const key = actionKey(a);
+    refusedNow.add(key);
+    const r = refusals.get(key) ?? { n: 0, backoffMs: 0, until: 0 };
+    r.n++;
+    refusals.set(key, r);
+    if (r.n < MAX_REFUSALS) return false;
+    r.backoffMs = Math.min(Math.max(r.backoffMs * 2, SKIP_MS), SKIP_MAX_MS);
+    r.until = clock() + r.backoffMs;
+    log(
+      `SKIPPING ${doing(a)}: refused ${r.n} rounds in a row (${classifyFailure(e).label}: ${oneLine(e.message)}); the keeper's other actions go ahead; tried again in ${inWords(r.backoffMs)}, at ${at(r.until)}`,
+    );
+    return true;
+  }
+  /** The actions the breaker holds back now (their back-off still running). */
+  const skippedKeys = () => new Set([...refusals].filter(([, r]) => r.n >= MAX_REFUSALS && clock() < r.until).map(([k]) => k));
+  const refused = (e: unknown): e is SendRefused | NotNow => (e instanceof SendRefused && e.reason === "estimate") || e instanceof NotNow;
 
   /** A close, roll, payout or stake that reverted on chain: true when the chains, read again, show it lost
    * a race (a skip). Nothing explaining it throws the revert (which stops the run); a read that fails
@@ -674,9 +710,11 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     let soft: { error: unknown; doing: string } | undefined;
     let step = "deciding what is due";
     let current: Action | undefined;
+    /** What the breaker holds back this round, and whatever trips it during the round. */
+    const skip = skippedKeys();
     try {
       for (;;) {
-        const next = decideNext({ ...s, deliveries });
+        const next = decideNext({ ...s, deliveries, skipped: skip });
         const action = next.action;
         if (!action) {
           log(next.reason);
@@ -707,8 +745,15 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
             done = await act(deps, rec, action);
           } catch (e) {
             if (await raced(e, action, s)) break;
+            // refused MAX_REFUSALS rounds in a row: skipped, and the round moves on to the next due action
+            // (nothing was sent, so nothing can be sent twice); before that, the round fails on it
+            if (refused(e) && tripped(action, e)) {
+              skip.add(actionKey(action));
+              continue;
+            }
             throw e;
           }
+          refusals.delete(actionKey(action));
           log(`Done: ${next.reason} (transaction ${done.hash}${done.messageId ? `, bridge message ${done.messageId}` : ""})`);
           break;
         }
@@ -795,6 +840,10 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     // a skip that didn't happen this round starts its count again
     for (const key of [...skipRuns.keys()]) if (!skippedNow.has(key)) skipRuns.delete(key);
     skippedNow = new Set();
+    // an action neither refused this round nor still held back by the breaker (it went through, or is no
+    // longer due) starts its refusals again
+    for (const [key, r] of [...refusals]) if (!refusedNow.has(key) && !(r.n >= MAX_REFUSALS && clock() < r.until)) refusals.delete(key);
+    refusedNow = new Set();
     const f = failure && classifyFailure(failure.error);
     unexpected = f?.kind === "unexpected" ? unexpected + 1 : 0;
     if (f && (f.stop || unexpected >= maxUnexpected)) {

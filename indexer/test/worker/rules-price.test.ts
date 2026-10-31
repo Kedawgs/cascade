@@ -2,7 +2,8 @@ import { type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import { logQuery } from "../../src/rules/context.ts";
-import { priceDrop, stakeHotkeyChanged, stakeUnexplainedDrop } from "../../src/rules/price.ts";
+import { priceDrop, stakeDivergence, stakeHotkeyChanged, stakeUnexplainedDrop } from "../../src/rules/price.ts";
+import { RUNBOOK } from "../../src/runbook.ts";
 import type { BitState, ChainReading, HourAgg } from "../../src/snapshot.ts";
 import type { HoldRow } from "../../src/store.ts";
 import { bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
@@ -222,5 +223,75 @@ describe("stake.hotkey_changed", () => {
     const [f] = stakeHotkeyChanged.run(ctx(c, [b, a]));
     expect(f.key).toBe(`stake.hotkey_changed:owner:${HOTKEY}:${h("someone else")}`);
     expect(f.hold).toBeUndefined();
+  });
+});
+
+describe("stake.divergence", () => {
+  const NEW = h("the validator's new hotkey");
+  const X = 49n * 10n ** 9n;
+  /** a reading with the vault listing HOTKEY and the chain's stake where `stakes` says */
+  const at = (block: bigint, stakes: Record<Hex, bigint>, over: Partial<BitState> = {}) =>
+    bit(block, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], stakedHotkeys: Object.keys(stakes) as Hex[], rootStakeRao: stakes[HOTKEY] ?? 0n, stakes, ...over });
+  const healthy = (block: bigint) => at(block, { [HOTKEY]: X });
+
+  it("a simulated hotkey swap: the stake sits on a hotkey the vault doesn't list, confirmed by two readings, and holds once", () => {
+    // reading 100: all is well; the validator swaps HOTKEY → NEW; reading 105 learns the chain's list and reads
+    // the old hotkey empty; 110 reads the stake on NEW; 115 confirms it
+    const learned = at(105n, { [HOTKEY]: 0n }, { stakedHotkeys: [NEW] });
+    const seen = at(110n, { [HOTKEY]: 0n, [NEW]: X });
+    const confirmed = at(115n, { [HOTKEY]: 0n, [NEW]: X });
+    expect(stakeDivergence.run(ctx(learned, [healthy(100n)]))).toEqual([]);
+    expect(stakeDivergence.run(ctx(seen, [learned, healthy(100n)]))).toEqual([]);
+    const [f] = stakeDivergence.run(ctx(confirmed, [seen, learned, healthy(100n)]));
+    expect(f).toMatchObject({ rule: "stake.divergence", key: `stake.divergence:${NEW}` });
+    expect(f.subject).toBe("49 TAO of the vault's stake sits on a hotkey the vault doesn't list");
+    expect(f.facts).toMatchObject({ hotkey: NEW, stake: `${X} rao (49 TAO)`, "listed by the vault": HOTKEY, "the vault counts": "0 rao (0 TAO)", block: "115", taostats: `https://taostats.io/hotkey/${NEW}` });
+    expect(f.facts["the chain holds for its coldkey"]).toBe(`${X} rao (49 TAO) on the 2 hotkeys read`);
+    expect(f.hold).toEqual({ id: `stake.divergence:${NEW}:110`, summary: `49 TAO of the vault's stake sits on hotkey ${NEW}, which the vault doesn't list` });
+    expect(RUNBOOK["stake.divergence"](f.facts)).toContain(`addHotkey(${NEW})`);
+    expect(RUNBOOK["stake.divergence"](f.facts)).toContain("pause()");
+    // still there on the next tick: the same alert, and the hold isn't raised again
+    const [g] = stakeDivergence.run(ctx(at(120n, { [HOTKEY]: 0n, [NEW]: X }), [confirmed, seen, learned]));
+    expect(g.key).toBe(f.key);
+    expect(g.hold).toBeUndefined();
+    // the owner re-adds the hotkey: nothing more is found
+    const fixed = at(125n, { [HOTKEY]: 0n, [NEW]: X }, { hotkeys: [HOTKEY, NEW], rootStakeRao: X });
+    expect(stakeDivergence.run(ctx(fixed, [at(120n, { [HOTKEY]: 0n, [NEW]: X }), confirmed]))).toEqual([]);
+  });
+
+  it("finds the configured stake hotkey removed from the set while it still holds stake", () => {
+    const other = h("the set's other hotkey");
+    const removed = (block: bigint) => at(block, { [other]: 7n * 10n ** 9n, [HOTKEY]: X }, { stakeHotkey: other, hotkeys: [other], rootStakeRao: 7n * 10n ** 9n });
+    const [f] = stakeDivergence.run(ctx(removed(110n), [removed(105n), healthy(100n)]));
+    expect(f.key).toBe(`stake.divergence:${HOTKEY}`);
+    expect(f.hold?.id).toBe(`stake.divergence:${HOTKEY}:105`);
+  });
+
+  it("never fires on honest operations: a stake, an unstake, a payout, a reward claim, vesting, and a hotkey added", () => {
+    const readings = [
+      healthy(100n),
+      // stakeIdle: more stake on the listed hotkey
+      at(105n, { [HOTKEY]: X + 10n ** 9n }),
+      // an unstake for a payout: less stake, more balance
+      at(110n, { [HOTKEY]: X - 5n * 10n ** 9n }, { balance: 6n * 10n ** 18n }),
+      // a reward claim credited as stake, and the price vesting up
+      at(115n, { [HOTKEY]: X }, { price: E18 + 10n ** 15n }),
+      // the owner adds a second hotkey, empty so far
+      at(120n, { [HOTKEY]: X, [h("second")]: 0n }, { hotkeys: [HOTKEY, h("second")] }),
+      // the chain's list still names a hotkey the vault once used, with dust left on it
+      at(125n, { [HOTKEY]: X, [h("old")]: 1000n }, { hotkeys: [HOTKEY], stakedHotkeys: [HOTKEY, h("old")] }),
+      at(130n, { [HOTKEY]: X, [h("old")]: 1000n }, { hotkeys: [HOTKEY], stakedHotkeys: [HOTKEY, h("old")] }),
+    ];
+    for (let i = 1; i < readings.length; i++) {
+      expect(stakeDivergence.run(ctx(readings[i], readings.slice(0, i).reverse())), String(readings[i].block)).toEqual([]);
+    }
+  });
+
+  it("judges nothing while the vault's set is unknown, from one reading, or from readings out of order", () => {
+    const blind = at(110n, { [HOTKEY]: 0n, [NEW]: X }, { hotkeys: undefined });
+    expect(stakeDivergence.run(ctx(blind, [at(105n, { [HOTKEY]: 0n, [NEW]: X })]))).toEqual([]);
+    expect(stakeDivergence.run(ctx(at(110n, { [HOTKEY]: 0n, [NEW]: X }), [blind]))).toEqual([]);
+    expect(stakeDivergence.run(ctx(at(110n, { [HOTKEY]: 0n, [NEW]: X }), []))).toEqual([]);
+    expect(stakeDivergence.run(ctx(at(105n, { [HOTKEY]: 0n, [NEW]: X }), [at(110n, { [HOTKEY]: 0n, [NEW]: X })]))).toEqual([]);
   });
 });

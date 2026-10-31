@@ -1,8 +1,8 @@
 import { encodeAbiParameters, type Hex, keccak256, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
 import { compact, compactHour, expand, expandHour, hourRollup, payoutsDone, peerIdOf, readSnapshot, type SnapshotInputs } from "../../src/snapshot.ts";
-import { decodeAccountId, OWNER_PREFIX, ownerStorageKey } from "../../src/subtensor.ts";
-import { deploymentState, fakeDeployment, GUARDIAN, KEEPER, OWNER, VALIDATOR_OWNER } from "./fake-deployment.ts";
+import { decodeAccountId, decodeAccountIds, OWNER_PREFIX, ownerStorageKey, STAKING_HOTKEYS_PREFIX, stakingHotkeysKey } from "../../src/subtensor.ts";
+import { deploymentState, encodeAccountIds, fakeDeployment, GUARDIAN, KEEPER, OWNER, VALIDATOR_OWNER } from "./fake-deployment.ts";
 import { testConfig } from "./fixtures.ts";
 import { reads } from "./v3-test-fixtures.ts";
 
@@ -228,6 +228,29 @@ describe("readSnapshot", () => {
     const { rpc } = fakeDeployment(cfg, state);
     expect((await readSnapshot(rpc, cfg, inputs(), 1)).bittensor?.state.hotkeyOwner).toBeNull();
   });
+
+  it("reads the chain's list of the coldkey's staking hotkeys, and the stake on each it was told of last time, listed by the vault or not", async () => {
+    const state = deploymentState(cfg);
+    const swapped = h("the validator's new hotkey");
+    // after a hotkey swap: the vault still lists the old hotkey, the chain holds the stake on the new one
+    state.bit.stakingHotkeys = [swapped];
+    state.bit.stakes = { [swapped]: 49n * 10n ** 9n };
+    const { rpc } = fakeDeployment(cfg, state);
+    // the first reading after the swap learns the chain's list; the stake on the new hotkey is read from the next
+    const first = await readSnapshot(rpc, cfg, inputs({ hotkeys: [d.stakeHotkey] }), 1);
+    expect(first.bittensor?.state.stakedHotkeys).toEqual([swapped]);
+    expect(first.bittensor?.state.stakes).toEqual({ [d.stakeHotkey]: 0n });
+    const next = await readSnapshot(rpc, cfg, inputs({ hotkeys: [d.stakeHotkey], stakedHotkeys: first.bittensor?.state.stakedHotkeys }), 2);
+    expect(next.bittensor?.state.stakes).toEqual({ [d.stakeHotkey]: 0n, [swapped]: 49n * 10n ** 9n });
+    // the configured stake hotkey is read even when the vault's set no longer lists it
+    const other = h("another listed hotkey");
+    state.bit.stakes[other] = 5n;
+    const unlisted = await readSnapshot(rpc, cfg, inputs({ hotkeys: [other], stakeHotkey: other }), 3);
+    expect(unlisted.bittensor?.state.stakes).toEqual({ [other]: 5n, [d.stakeHotkey]: 0n });
+    // no entry for the coldkey: an empty list, not unknown
+    state.bit.stakingHotkeys = [];
+    expect((await readSnapshot(rpc, cfg, inputs(), 4)).bittensor?.state.stakedHotkeys).toEqual([]);
+  });
 });
 
 describe("readings in D1", () => {
@@ -297,5 +320,36 @@ describe("keys", () => {
     expect(decodeAccountId(undefined)).toBeNull();
     expect(decodeAccountId(VALIDATOR_OWNER)).toBe(VALIDATOR_OWNER);
     expect(decodeAccountId("0x1234")).toBeNull();
+  });
+
+  it("stakingHotkeysKey is twox128(SubtensorModule) ++ twox128(StakingHotkeys) ++ blake2_128_concat(coldkey)", () => {
+    // twox128("StakingHotkeys") from the same xxhash64 that reproduces twox128("SubtensorModule"), ("Owner") and
+    // ("BasketTwr") (src/apy.ts); the coldkey's blake2b-128 as ownerStorageKey's test computes a hotkey's
+    const coldkey = "0x56a9aee6291bd03ab6d36d4d13e2bebae7cd403518066c72fba1b417d6ddd748" as Hex;
+    expect(stakingHotkeysKey(coldkey)).toBe(
+      "0x658faa385070e074c85bf6b568cf0555" + "b7d32a0408ab25b30dac6ec2cb66fe1f" + "6c1664b37fae67165907bd92805ee938" + coldkey.slice(2),
+    );
+    expect(STAKING_HOTKEYS_PREFIX.slice(0, 34)).toBe(OWNER_PREFIX.slice(0, 34));
+    expect(stakingHotkeysKey(d.vaultColdkey).length).toBe(2 + 2 * (32 + 16 + 32));
+  });
+
+  it("decodes a SCALE Vec<AccountId32>: a compact length then the ids; empty storage as no hotkeys; anything else as null", () => {
+    const a = h("a");
+    const b = h("b");
+    expect(decodeAccountIds("0x")).toEqual([]);
+    expect(decodeAccountIds(undefined)).toBeNull();
+    expect(decodeAccountIds(encodeAccountIds([]))).toEqual([]);
+    expect(encodeAccountIds([])).toBe("0x00");
+    expect(decodeAccountIds(encodeAccountIds([a]))).toEqual([a]);
+    expect(decodeAccountIds(encodeAccountIds([a, b]))).toEqual([a, b]);
+    // 70 ids: a two-byte compact length
+    const many = Array.from({ length: 70 }, (_, i) => h(`id ${i}`));
+    expect(encodeAccountIds(many).slice(0, 6)).toBe("0x1901");
+    expect(decodeAccountIds(encodeAccountIds(many))).toEqual(many);
+    // a length that doesn't fit the bytes, an odd value, a lone owner-style word
+    expect(decodeAccountIds(`0x08${a.slice(2)}`)).toBeNull();
+    expect(decodeAccountIds("0x1234")).toBeNull();
+    expect(decodeAccountIds(a)).toBeNull();
+    expect(decodeAccountIds("0xzz")).toBeNull();
   });
 });

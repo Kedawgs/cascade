@@ -2,10 +2,18 @@ import type { Hex } from "viem";
 import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
 import type { Config } from "../../src/config.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
-import { STAKING_PRECOMPILE, STORAGE_QUERY } from "../../src/subtensor.ts";
+import { STAKING_HOTKEYS_PREFIX, STAKING_PRECOMPILE, STORAGE_QUERY } from "../../src/subtensor.ts";
 import { type ChainSpec, ethCall, type FetchRecord, fakeChains, REVERT, TEST_URLS } from "./fake-rpc.ts";
 
 const ZERO = "0x0000000000000000000000000000000000000000" as Hex;
+
+/** A SCALE `Vec<AccountId32>` as SubtensorModule stores it: a compact length (one byte below 64 items, two
+ * below 16,384), then the ids. */
+export function encodeAccountIds(ids: readonly Hex[]): Hex {
+  const n = ids.length;
+  const len = n < 64 ? [n << 2] : [((n << 2) | 1) & 0xff, (n << 2) >> 8];
+  return `0x${len.map((b) => b.toString(16).padStart(2, "0")).join("")}${ids.map((id) => id.slice(2).toLowerCase()).join("")}`;
+}
 export const OWNER = "0x00000000000000000000000000000000000000a1" as Hex;
 export const GUARDIAN = "0x00000000000000000000000000000000000000a2" as Hex;
 export const KEEPER = "0x00000000000000000000000000000000000000a3" as Hex;
@@ -42,6 +50,8 @@ export function deploymentState(cfg: Config) {
       unclaimed: 3n * 10n ** 16n,
       /** the stake hotkey's owner in SubtensorModule `Owner`; null: no entry */
       hotkeyOwner: VALIDATOR_OWNER as Hex | null,
+      /** the hotkeys SubtensorModule `StakingHotkeys` lists for the vault's coldkey (where its stake sits) */
+      stakingHotkeys: [d.stakeHotkey] as Hex[],
       minStakeRao: 2_000_000n,
       rewardCutBps: 1000,
       treasury: TREASURY_WALLET,
@@ -210,7 +220,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
             abi: STAKING,
             fns: { getStake: ([hk]) => x.stakes[lc(hk)] ?? 0n, getUnclaimedRootTaoByHotkey: () => x.unclaimed },
           },
-          [STORAGE_QUERY]: { raw: () => (x.hotkeyOwner === null ? "0x" : x.hotkeyOwner) },
+          [STORAGE_QUERY]: { raw: (key) => (key.startsWith(STAKING_HOTKEYS_PREFIX) ? encodeAccountIds(x.stakingHotkeys) : x.hotkeyOwner === null ? "0x" : x.hotkeyOwner) },
           [t.bittensor.fmTao]: { abi: ERC20, fns: { balanceOf: ([a]) => (lc(a) === t.bittensor.lockPool ? x.lockPoolFmTao : 0n) } },
           [t.bittensor.alphaVault]: { abi: ALPHA_VAULT, fns: { isPaused: () => x.alpha.isPaused, migrationReadyAt: () => x.alpha.migrationReadyAt, migrationFinished: () => x.alpha.migrationFinished } },
           [t.bittensor.offRamp]: { abi: OFFRAMP, fns: { getExecutionState: ([id]) => x.offRamp[lc(id)] ?? 0 } },

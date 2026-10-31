@@ -78,6 +78,10 @@ describe("senderFromArgs", () => {
     }
     expect(senderFromArgs(log("staker", "Staked", { payer: PAYER, beneficiary: USER }))).toBe(PAYER);
     expect(senderFromArgs(log("bitAdapter", "ReserveFunded", { from: PAYER, amount: "1" }))).toBe(PAYER);
+    // the vault's direct entry points name msg.sender as `user`
+    for (const e of ["DepositedDirect", "RedeemedDirect", "FrontDoorRedeemsAllowed"]) {
+      expect(senderFromArgs(log("vault", e, { user: USER, assets: "1", shares: "1" })), e).toBe(USER);
+    }
   });
 
   it("names nobody for events that don't carry their caller", () => {
@@ -93,8 +97,8 @@ describe("senderFromArgs", () => {
 });
 
 describe("which transactions are fetched", () => {
-  it("covers the events only a few addresses cause, and every admin event", () => {
-    for (const e of ["frontDoor:BatchClosed", "frontDoor:BatchRolled", "frontDoor:Delivered", "vault:PayoutChunkSent", "vault:Staked", "vault:RewardsClaimed", "vault:HotkeyAdded"]) {
+  it("covers the events only a few addresses cause (the owner's StakeMoved among them), and every admin event", () => {
+    for (const e of ["frontDoor:BatchClosed", "frontDoor:BatchRolled", "frontDoor:Delivered", "vault:PayoutChunkSent", "vault:Staked", "vault:RewardsClaimed", "vault:HotkeyAdded", "vault:StakeMoved"]) {
       expect(ATTRIBUTABLE.has(e as never), e).toBe(true);
     }
     for (const e of ADMIN_EVENTS) expect(ATTRIBUTABLE.has(e), e).toBe(true);

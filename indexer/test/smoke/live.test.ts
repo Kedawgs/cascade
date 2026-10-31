@@ -47,6 +47,10 @@ describe.skipIf(!live)("live smoke: one tick against the v3 test deployment", ()
     expect(base?.state.openBatch).toBeDefined();
     // the live Owner read: the stake hotkey has an owner (32 bytes)
     expect(bit?.state.hotkeyOwner).toMatch(/^0x[0-9a-f]{64}$/);
+    // the live StakingHotkeys read (the storage key is worked out offline): the chain lists the stake hotkey
+    // among the hotkeys the vault's coldkey has stake on
+    console.log(`StakingHotkeys(vault coldkey): ${JSON.stringify(bit?.state.stakedHotkeys)}`);
+    expect(bit?.state.stakedHotkeys).toContain(cfg.deployment.stakeHotkey);
     // FM-TAO on Base within its lock on Bittensor
     console.log(`FM-TAO: ${base?.state.fmTaoSupply} on Base, ${bit?.state.lockPoolFmTao} locked on Bittensor`);
     expect(base!.state.fmTaoSupply! <= bit!.state.lockPoolFmTao!).toBe(true);

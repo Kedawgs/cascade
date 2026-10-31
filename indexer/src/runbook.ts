@@ -14,6 +14,8 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
     `Stake left the vault without a vault action: look up the hotkey ${or(f.hotkey, "")} on taostats (swap, slash, chain change). Guardian: pause the vault until it is explained.`,
   "stake.hotkey_changed": () =>
     "A hotkey change the owner didn't make means a validator-side swap: re-add the new hotkey with addHotkey (owner, guardian or keeper) and check the price.",
+  "stake.divergence": (f) =>
+    `The vault's coldkey holds ${or(f.stake, "stake")} on hotkey ${or(f.hotkey, "(see the facts)")}, which the vault doesn't list, so rootStakeRao() and the share price don't count it: a validator's hotkey swap (the stake moved to its new hotkey), or stake moved off a listed hotkey. Until it is listed again, shares mint cheaply at the depressed price (a batch delivery, depositDirect). Guardian: pause() the vault now (deliveries, direct deposits and payouts stop). Then owner, guardian or keeper: addHotkey(${or(f.hotkey, "<the hotkey>")}) to bring the stake back into the price (the set holds at most 4: owner removeHotkey an empty one first if it is full). Check on taostats${f.taostats ? ` (${f.taostats})` : ""} that the stake is there and who owns the hotkey now, check the price recovered, then clear the hold and unpause.`,
   "admin.event": (f) =>
     `An admin action on a Cascade contract${f.sender ? `, sent by ${f.sender}` : ""}. If it was a planned change, acknowledge it. If not: guardian pause() both contracts now, then rotate keys.`,
   "keys.unexplained_tx": (f) =>
@@ -79,6 +81,14 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
   "rewards.uncollected": () => "Run pnpm ops claim --live.",
   "validator.not_earning": () => "The validator may have stopped earning (deregistered, offline): check it on taostats; consider moving stake.",
   "vault.events": () => "Read the event in the email; usually a user-level edge case.",
+  "vault.stake_moved": (f) =>
+    `The vault moved root stake onto its stake hotkey (moveStake or removeHotkey: owner only${f.sender && f.sender !== "not known yet" ? `, sent by ${f.sender}` : ""}). If it was your own change, acknowledge it. If not, treat the owner key as compromised: guardian pause() the vault, then rotate.`,
+  "vault.stake_moved_unexpected": (f) =>
+    `Stake was moved ${f.to && f["configured stake hotkey"] && f.to !== f["configured stake hotkey"] ? `to hotkey ${f.to}, which isn't the configured stake hotkey ${f["configured stake hotkey"]} (the vault's stake hotkey was changed first: see the StakeHotkeySet alert)` : `in a large amount (${or(f.asked, "see the facts")}) at once`}. Only the owner can move stake${f.sender && f.sender !== "not known yet" ? ` (sent by ${f.sender})` : ""}. If you didn't, assume the owner key is compromised: guardian pause() the vault now, then rotate; check where the stake sits on taostats${f.to ? ` (https://taostats.io/hotkey/${f.to})` : ""}.`,
+  "vault.direct_use": (f) =>
+    `Someone used the vault directly on Bittensor (depositDirect, redeemDirect or allowFrontDoorRedeems), which the launch doesn't offer: none is expected. Check the user${f.user ? ` (https://evm.taostats.io/address/${f.user})` : ""}. A direct deposit while the share price is depressed (a hotkey swap: see stake.divergence and price.drop) mints shares cheaply: if the price isn't right, guardian pause() the vault (depositDirect and redeemDirect stop while paused).`,
+  "vault.direct_use_large": (f) =>
+    `A direct ${f.event?.includes("Redeemed") ? "redeem" : "deposit"} above the size threshold${f.hold === "on" ? ", or while a hold is on (the share price is in doubt)" : ""}. Guardian: pause() the vault until the price is checked (depositDirect and redeemDirect stop while paused). If the price was depressed when a deposit minted, the shares it got are the loss: find the cause (stake.divergence, price.drop) before unpausing, and check the user${f.user ? ` (https://evm.taostats.io/address/${f.user})` : ""}.`,
   "indexer.lag": () => "The monitor is behind on a chain and the keeper is holding: check the logs RPC first (state reads may still work).",
   "bridge.check_stuck": (f) =>
     `The keeper won't pay this batch until its check is ok. Find out why (usually Base lag); if you have verified the batch by hand: pnpm checks:approve -- --env <env> --key ${or(f.key, "<delivered key>")} --note "…".`,

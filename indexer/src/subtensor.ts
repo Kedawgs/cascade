@@ -23,3 +23,44 @@ export function decodeAccountId(data: Hex | undefined): Hex | null {
   if (!data || data === "0x" || !/^0x[0-9a-fA-F]{64}$/.test(data)) return null;
   return data.toLowerCase() as Hex;
 }
+
+/** twox128("SubtensorModule") ++ twox128("StakingHotkeys"): the map of the hotkeys each coldkey has stake on
+ * (Blake2_128Concat(coldkey) → Vec<AccountId32>), kept by add_stake, remove_stake, move_stake and the hotkey
+ * swap. twox128("StakingHotkeys") was worked out with an xxhash64 that reproduces OWNER_PREFIX's two halves
+ * and the BasketTwr prefix (src/apy.ts). The smoke test checks the live chain answers it with a list that
+ * holds the stake hotkey. */
+export const STAKING_HOTKEYS_PREFIX = "0x658faa385070e074c85bf6b568cf0555b7d32a0408ab25b30dac6ec2cb66fe1f" as Hex;
+
+/** The `StakingHotkeys` storage key for a coldkey: the prefix, then Blake2_128Concat (blake2b-128 of the
+ * key, then the key). */
+export function stakingHotkeysKey(coldkey: Hex): Hex {
+  return `${STAKING_HOTKEYS_PREFIX}${bytesToHex(blake2b(hexToBytes(coldkey), { dkLen: 16 })).slice(2)}${coldkey.slice(2).toLowerCase()}` as Hex;
+}
+
+/** A SCALE `Vec<AccountId32>` as stored: a compact length, then 32 bytes an id; lowercase. `[]` for no entry
+ * (empty: a coldkey with no stake anywhere), null for anything that doesn't decode as such a list. */
+export function decodeAccountIds(data: Hex | undefined): Hex[] | null {
+  if (!data || !/^0x([0-9a-fA-F]{2})*$/.test(data)) return null;
+  if (data === "0x") return [];
+  const bytes = hexToBytes(data);
+  // the compact length: its low two bits say how many bytes it takes
+  const mode = bytes[0] & 3;
+  let n: number;
+  let at: number;
+  if (mode === 0) {
+    n = bytes[0] >> 2;
+    at = 1;
+  } else if (mode === 1 && bytes.length >= 2) {
+    n = (bytes[0] | (bytes[1] << 8)) >> 2;
+    at = 2;
+  } else if (mode === 2 && bytes.length >= 4) {
+    n = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 2;
+    at = 4;
+  } else {
+    return null;
+  }
+  if (bytes.length !== at + 32 * n) return null;
+  const out: Hex[] = [];
+  for (let i = 0; i < n; i++) out.push(bytesToHex(bytes.subarray(at + 32 * i, at + 32 * (i + 1))).toLowerCase() as Hex);
+  return out;
+}

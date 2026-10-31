@@ -236,6 +236,28 @@ print what it would run:
 On v3-test the owner, guardian and keeper are one address, so a reverted keeper call pages as a critical
 `keys.unexplained_tx`: expect that noise there.
 
+### The vault's stake and its direct entry points
+
+The share price is `totalAssets / totalSupply`, and `totalAssets` counts the vault coldkey's root stake **on the
+hotkeys the vault lists** (`rootStakeRao()`, at most 4). A validator's hotkey swap moves every nominator's stake,
+the vault's included, to the validator's new hotkey, which the vault doesn't list: the price falls to what the
+vault's liquid balance alone is worth, and until the new hotkey is re-added with `addHotkey` (owner, guardian or
+keeper) a batch delivery or a `depositDirect` mints shares at that price. Every tick reads where the stake really
+sits (`SubtensorModule.StakingHotkeys` for the vault's coldkey, and `getStake` on each of those hotkeys, the
+listed ones and the configured stake hotkey), so the monitor names the hotkey to re-add:
+
+| Alert | Tier | What it means | What to do |
+|---|---|---|---|
+| `stake.divergence` | critical, **holds** | the vault's coldkey holds stake (above `stakeDustRao`) on a hotkey the vault doesn't list, on two readings in a row: a hotkey swap, stake moved off a listed hotkey, or the configured stake hotkey removed with stake still on it; the email names the hotkey, the stake on it, what the vault counts and what the chain holds | guardian `pause()` the vault (deliveries, direct deposits and payouts stop); owner, guardian or keeper `addHotkey(<the hotkey>)` (if the set is full, owner `removeHotkey` an empty one first); check the price recovered, clear the hold, unpause. `price.drop`, `stake.unexplained_drop` and `stake.hotkey_changed` fire on the same swap from their own angles; this one says where the stake went |
+| `vault.stake_moved` | warning | a `StakeMoved` onto the configured stake hotkey below `stakeMoveCriticalRao` (100 TAO): `moveStake` or `removeHotkey`, owner only; the sender is named | your own change: acknowledge. Not yours: the owner key is compromised, guardian `pause()`, rotate |
+| `vault.stake_moved_unexpected` | critical | a `StakeMoved` to a hotkey that isn't the configured stake hotkey (the vault's stake hotkey was changed first: see the `StakeHotkeySet` admin alert), or of `stakeMoveCriticalRao` or more at once | if you didn't, assume the owner key is compromised: guardian `pause()` the vault now, rotate; check where the stake sits on taostats |
+| `vault.direct_use` | warning | a `DepositedDirect`, `RedeemedDirect` or `FrontDoorRedeemsAllowed` (the launch offers none; the user is named) | check the user; if the share price isn't right (a swap in progress), guardian `pause()` the vault: `depositDirect` and `redeemDirect` stop while paused |
+| `vault.direct_use_large` | critical | a direct deposit or redeem of `directCriticalWei` (10 TAO) or more, or **any** direct deposit while a hold is on (the price is in doubt) | guardian `pause()` the vault until the price is checked; if the price was depressed when the deposit minted, those shares are the loss: find the cause (`stake.divergence`, `price.drop`) before unpausing |
+
+The three thresholds (`stakeDustRao`, `stakeMoveCriticalRao`, `directCriticalWei`) are in `src/thresholds.ts`
+and can be set in `THRESHOLDS`. The `StakingHotkeys` storage key is worked out offline (`src/subtensor.ts`);
+`pnpm smoke` checks the live chain answers it with a list that holds the stake hotkey.
+
 ## Limits worth knowing
 
 - **The site check is a tripwire over the scripts' text and the pages' policies.** An address or host built at

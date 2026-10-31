@@ -18,7 +18,14 @@ export const RULES = {
   "price.drop": critical("event", true),
   "stake.unexplained_drop": critical("event", true),
   "stake.hotkey_changed": critical("event", true),
+  // the vault's coldkey holds stake on a hotkey the vault doesn't list (a validator's hotkey swap): the price
+  // doesn't count it, so shares mint cheaply until it is re-added
+  "stake.divergence": critical("event", true),
   "admin.event": critical("event"),
+  // the owner moved stake to a hotkey that isn't the configured stake hotkey, or a large amount at once
+  "vault.stake_moved_unexpected": critical("event"),
+  // a direct deposit or redeem above the size threshold, or a direct deposit while a hold is on
+  "vault.direct_use_large": critical("event"),
   "keys.unexplained_tx": critical("event"),
   // a role wallet delegated (EIP-7702) or its code changed: assume the key is compromised
   "keys.delegated": critical("event", true),
@@ -69,6 +76,10 @@ export const RULES = {
   "rewards.uncollected": warning("condition"),
   "validator.not_earning": warning("condition"),
   "vault.events": warning("event"),
+  // the owner moved stake onto the stake hotkey (moveStake, removeHotkey): an owner action, every one reported
+  "vault.stake_moved": warning("event"),
+  // depositDirect, redeemDirect or allowFrontDoorRedeems: the launch offers none of them
+  "vault.direct_use": warning("event"),
   "indexer.lag": warning("condition"),
   "bridge.check_stuck": warning("condition"),
   "indexer.reorg": warning("event"),

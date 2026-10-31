@@ -9,8 +9,8 @@ import type { TxRow } from "./store.ts";
  * wait for the next. */
 export const PER_TICK = 20;
 
-/** Events only a few addresses can cause, and every admin event: their transactions are fetched (spec
- * 3.3), so a watched key's transactions can be counted. */
+/** Events only a few addresses can cause (StakeMoved is the owner's: moveStake and removeHotkey), and every
+ * admin event: their transactions are fetched (spec 3.3), so a watched key's transactions can be counted. */
 export const ATTRIBUTABLE: ReadonlySet<`${Role}:${string}`> = new Set([
   "frontDoor:BatchClosed",
   "frontDoor:BatchRolled",
@@ -19,6 +19,7 @@ export const ATTRIBUTABLE: ReadonlySet<`${Role}:${string}`> = new Set([
   "vault:Staked",
   "vault:RewardsClaimed",
   "vault:HotkeyAdded",
+  "vault:StakeMoved",
   ...ADMIN_EVENTS,
 ]);
 
@@ -34,6 +35,9 @@ const SENDER_ARG: Readonly<Record<string, string>> = {
   "frontDoor:DeliverySet": "user",
   "staker:Staked": "payer",
   "bitAdapter:ReserveFunded": "from",
+  "vault:DepositedDirect": "user",
+  "vault:RedeemedDirect": "user",
+  "vault:FrontDoorRedeemsAllowed": "user",
 };
 
 /** The caller an event names in its arguments, if it names one. */

@@ -1,4 +1,4 @@
-import type { Hex } from "viem";
+import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import type { BitState, ChainReading } from "../snapshot.ts";
 import { onset, type Readings, type RuleCtx, twice } from "./context.ts";
@@ -196,4 +196,64 @@ export const stakeHotkeyChanged: Rule = {
   },
 };
 
-export const PRICE_RULES: Rule[] = [priceDrop, stakeUnexplainedDrop, stakeHotkeyChanged];
+const tao = (rao: bigint) => `${formatUnits(rao * RAO, 18)} TAO`;
+
+/** The vault coldkey's stake on hotkeys the vault doesn't list, above dust, by hotkey (lowercase); undefined
+ * while the reading doesn't know the vault's set (hotkeys(0) failed). */
+function unlistedStake(r: ChainReading<BitState>, dust: bigint): Map<Hex, bigint> | undefined {
+  if (!r.state.hotkeys) return undefined;
+  const listed = new Set(r.state.hotkeys.map((h) => h.toLowerCase()));
+  const out = new Map<Hex, bigint>();
+  for (const [hk, rao] of Object.entries(r.state.stakes) as [Hex, bigint][]) {
+    if (!listed.has(hk.toLowerCase()) && rao > dust) out.set(hk.toLowerCase() as Hex, rao);
+  }
+  return out;
+}
+
+/** stake.divergence (critical, holds): the vault's coldkey holds stake (more than stakeDustRao) on a hotkey the
+ * vault doesn't list, on this reading and the previous one (one bad answer can't trip it). The readings ask
+ * the staking precompile for the stake on every hotkey the vault lists, the configured stake hotkey and every
+ * hotkey SubtensorModule.StakingHotkeys names for the coldkey (snapshot.ts), so this is the vault's own view
+ * (rootStakeRao(), which sums its listed hotkeys only, and prices the shares) against the chain's: what a
+ * validator's hotkey swap leaves behind (every nominator's stake moved to its new hotkey, the vault's price no
+ * longer counting it, so shares mint cheaply until it is re-added with addHotkey), stake moved off a listed
+ * hotkey, or the configured stake hotkey removed from the set with stake still on it. Honest operations (stake,
+ * unstake, payouts, reward claims and vesting) keep every rao on a listed hotkey, so none of them can raise it.
+ * One alert per hotkey while it lasts; the hold is raised once, on the first tick it is confirmed. */
+export const stakeDivergence: Rule = {
+  name: "stake.divergence",
+  run(ctx) {
+    const s = ctx.snap.bittensor;
+    const p = ctx.previous.bittensor;
+    if (!s || !p || p.block >= s.block) return [];
+    const now = unlistedStake(s, ctx.t.stakeDustRao);
+    const before = unlistedStake(p, ctx.t.stakeDustRao);
+    if (!now || !before) return [];
+    const e = ctx.history.bittensor[1];
+    const earlier = e && e.block < p.block ? unlistedStake(e, ctx.t.stakeDustRao) : undefined;
+    const out: Finding[] = [];
+    for (const [hk, rao] of now) {
+      if (!before.has(hk)) continue;
+      const total = Object.values(s.state.stakes).reduce((a, b) => a + b, 0n);
+      const f: Finding = {
+        rule: "stake.divergence",
+        key: `stake.divergence:${hk}`,
+        subject: `${tao(rao)} of the vault's stake sits on a hotkey the vault doesn't list`,
+        facts: {
+          hotkey: hk,
+          stake: `${rao} rao (${tao(rao)})`,
+          "listed by the vault": s.state.hotkeys?.join(", ") || "none",
+          "the vault counts": s.state.rootStakeRao === undefined ? "unknown" : `${s.state.rootStakeRao} rao (${tao(s.state.rootStakeRao)})`,
+          "the chain holds for its coldkey": `${total} rao (${tao(total)}) on the ${Object.keys(s.state.stakes).length} hotkeys read`,
+          block: String(s.block),
+          taostats: `https://taostats.io/hotkey/${hk}`,
+        },
+      };
+      if (!earlier?.has(hk)) f.hold = { id: `stake.divergence:${hk}:${p.block}`, summary: `${tao(rao)} of the vault's stake sits on hotkey ${hk}, which the vault doesn't list` };
+      out.push(f);
+    }
+    return out;
+  },
+};
+
+export const PRICE_RULES: Rule[] = [priceDrop, stakeUnexplainedDrop, stakeHotkeyChanged, stakeDivergence];

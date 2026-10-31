@@ -20,6 +20,7 @@ import { lagLimitOf, OPS_RULES } from "./rules/ops.ts";
 import { PRICE_RULES } from "./rules/price.ts";
 import { SITE_RULES } from "./rules/site.ts";
 import { SOLVENCY_RULES } from "./rules/solvency.ts";
+import { VAULT_RULES } from "./rules/vault.ts";
 import { Budget, createRpc } from "./rpc.ts";
 import { headTimeOf, rereadRange, type ScanResult, type ScanStop, scanChain } from "./scan.ts";
 import { pageEvents, seedEventsOf } from "./seed.ts";
@@ -69,6 +70,7 @@ export const TICK_RULES: readonly Rule[] = [
   ...SITE_RULES,
   ...APPROVAL_RULES,
   ...ADMIN_RULES,
+  ...VAULT_RULES,
   ...PRICE_RULES,
   ...SOLVENCY_RULES,
   ...BRIDGE_RULES,
@@ -400,6 +402,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     {
       last: { base: previous.base?.block, bittensor: previous.bittensor?.block },
       hotkeys: previous.bittensor?.state.hotkeys,
+      stakedHotkeys: previous.bittensor?.state.stakedHotkeys,
       stakeHotkey: previous.bittensor?.state.stakeHotkey,
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
       oracle: previous.base?.state.oracle,

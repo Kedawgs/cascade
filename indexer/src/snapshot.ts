@@ -3,7 +3,11 @@ import { ADMIN_VIEWS, ALPHA_VAULT, ERC20, EXECUTION_STATES, FRONT_DOOR_VIEWS, OF
 import type { ChainName, Config } from "./config.ts";
 import { multicall, newerThan, type Read } from "./multicall.ts";
 import type { Rpc } from "./rpc.ts";
-import { decodeAccountId, ownerStorageKey, STAKING_PRECOMPILE, STORAGE_QUERY } from "./subtensor.ts";
+import { decodeAccountId, decodeAccountIds, ownerStorageKey, STAKING_PRECOMPILE, stakingHotkeysKey, STORAGE_QUERY } from "./subtensor.ts";
+
+/** At most this many hotkeys' stakes are read a tick (the vault lists at most 4; the chain's list for the
+ * coldkey is bounded by what ever held its stake). */
+const MAX_STAKE_READS = 16;
 
 // One block-pinned reading of each chain per tick (spec section 6, "Readings"): one Multicall3 call per
 // chain, every field optional (a failed sub-call leaves it undefined, and the rules that need it skip).
@@ -33,8 +37,13 @@ export interface BitState {
   stakeHotkey?: Hex;
   /** the vault's hotkey set now (hotkeys(0..3)) */
   hotkeys?: Hex[];
-  /** getStake(hotkey, coldkey, root) for each hotkey asked (the set known before this reading) */
+  /** getStake(hotkey, coldkey, root) for each hotkey asked: the set known before this reading, the stake
+   * hotkey (the configured one too) and the hotkeys the chain listed for the coldkey before this reading */
   stakes: Record<Hex, bigint>;
+  /** the hotkeys SubtensorModule.StakingHotkeys names for the vault's coldkey: where its stake sits, listed by
+   * the vault or not (a validator's hotkey swap moves it to a hotkey the vault doesn't list); undefined when the
+   * answer couldn't be decoded, [] when the coldkey has no entry */
+  stakedHotkeys?: Hex[];
   /** the vault's own TAO */
   balance?: bigint;
   payoutDelay?: number;
@@ -115,8 +124,10 @@ export interface SnapshotInputs {
   /** the blocks of the last readings kept: a reading must be newer */
   last: { base?: bigint; bittensor?: bigint };
   /** from the previous reading (one multicall can't use its own answers): the hotkeys whose stakes to read,
-   * the stake hotkey, the keepers, the front door's oracle. Config's values before the first reading. */
+   * the hotkeys the chain listed for the coldkey, the stake hotkey, the keepers, the front door's oracle.
+   * Config's values before the first reading. */
   hotkeys?: Hex[];
+  stakedHotkeys?: Hex[];
   stakeHotkey?: Hex;
   keepers?: { base?: Hex; bittensor?: Hex };
   oracle?: Hex;
@@ -232,11 +243,19 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   // the hotkey set now: at most 4 (MAX_HOTKEYS); an index past its end reverts
   const slots: (Hex | undefined)[] = [];
   for (let n = 0; n < 4; n++) vault("hotkeys", (v) => (slots[n] = lc(v)), [BigInt(n)]);
-  for (const hk of i.hotkeys ?? [stakeHotkey]) {
+  // the coldkey's stake on each hotkey that may hold it: the set known before this reading, the stake hotkey
+  // (the configured one too: listed or not), and every hotkey the chain listed for the coldkey last time, so
+  // stake a validator's swap moved to a hotkey the vault doesn't list is read (stake.divergence)
+  const stakeReads = [...new Set([...(i.hotkeys ?? []), stakeHotkey, d.stakeHotkey, ...(i.stakedHotkeys ?? [])].map(lc))].slice(0, MAX_STAKE_READS);
+  for (const hk of stakeReads) {
     vp.add({ address: STAKING_PRECOMPILE, abi: STAKING, functionName: "getStake", args: [hk, d.vaultColdkey, 0n] }, (v) => (bit.stakes[hk] = v));
   }
   vp.add({ address: STAKING_PRECOMPILE, abi: STAKING, functionName: "getUnclaimedRootTaoByHotkey", args: [d.vaultColdkey, stakeHotkey] }, (v) => (bit.unclaimed = v));
   vp.add({ address: STORAGE_QUERY, callData: ownerStorageKey(stakeHotkey) }, (v) => (bit.hotkeyOwner = decodeAccountId(v)));
+  vp.add({ address: STORAGE_QUERY, callData: stakingHotkeysKey(d.vaultColdkey) }, (v) => {
+    const ids = decodeAccountIds(v);
+    if (ids) bit.stakedHotkeys = ids;
+  });
   vp.add({ ethBalance: d.vault }, (v) => (bit.balance = v));
   vp.add({ ethBalance: d.bitAdapter }, (v) => (bit.adapterBalance = v));
   if (i.keepers?.bittensor) vp.add({ ethBalance: i.keepers.bittensor }, (v) => (bit.keeperBalance = v));

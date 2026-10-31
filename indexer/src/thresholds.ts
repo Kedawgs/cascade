@@ -8,8 +8,13 @@ export const DEFAULTS = {
   priceDropEpsilon: 1e-12,
   /** price.drop holds when the price is this far below the 24-hour high */
   holdPriceDropBps: 10,
-  /** stake.unexplained_drop: a hotkey's stake may fall this much without a vault event */
+  /** stake.unexplained_drop: a hotkey's stake may fall this much without a vault event; stake.divergence: stake
+   * on an unlisted hotkey up to this much is dust, not a divergence */
   stakeDustRao: 1000n,
+  /** vault.stake_moved: a StakeMoved of this much or more (100 TAO) is critical, whatever its destination */
+  stakeMoveCriticalRao: 100n * 10n ** 9n,
+  /** vault.direct_use: a direct deposit or redeem of this much or more (10 TAO) is critical */
+  directCriticalWei: 10n * 10n ** 18n,
   /** keys.unexplained_tx: how long an unexplained transaction may stay unexplained */
   unexplainedTxGraceS: 900,
   /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */

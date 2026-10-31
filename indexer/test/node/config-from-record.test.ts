@@ -186,9 +186,11 @@ describe("the test environment in wrangler.jsonc", () => {
 
 describe("the production environment in wrangler.jsonc", () => {
   const productionVars = () => (readJsonc(pkg("wrangler.jsonc")) as { env: { production: { vars: Record<string, unknown> } } }).env.production.vars;
+  // the recipient is the ALERT_TO secret (wrangler secret put), never in the repo; a stand-in lets send mode parse
+  const productionWithSecret = () => ({ ...productionVars(), ALERT_TO: "owner@example.com" });
 
   it("holds the v3-launch deployment, as pnpm config:from-record printed it from the launch record, and the Worker parses it", () => {
-    const cfg = parseConfig(productionVars());
+    const cfg = parseConfig(productionWithSecret());
     // the launch's addresses (web/src/lib/cascade/deployments.json "v3-launch") and the 24-hour close wait
     expect(cfg.deployment.frontDoor).toBe("0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA".toLowerCase());
     expect(cfg.deployment.vault).toBe("0x450cD94401B45c72C09734071fe683F6b74Aea72".toLowerCase());
@@ -199,14 +201,17 @@ describe("the production environment in wrangler.jsonc", () => {
   });
 
   it("counts the Ledger's acceptOwnership as setup: each chain's baseline is its acceptance block, so the first run raises no ownership alert", () => {
-    const cfg = parseConfig(productionVars());
+    const cfg = parseConfig(productionWithSecret());
     // the staker's acceptance (Base 53297722, after the front door's at 53297713) and the vault's (Bittensor
     // 9398435); admin.event skips a log at or before the baseline
     expect(cfg.deployment.base.baselineBlock).toBe(53297722n);
     expect(cfg.deployment.bittensor.baselineBlock).toBe(9398435n);
   });
 
-  it("keeps writing alerts to the log until the owner chooses a recipient and deploys", () => {
-    expect(productionVars().ALERT_MODE).toBe("log");
+  it("sends alerts, to a recipient that lives only in the ALERT_TO secret", () => {
+    expect(productionVars().ALERT_MODE).toBe("send");
+    expect(productionVars()).not.toHaveProperty("ALERT_TO");
+    // without the secret the Worker refuses to start rather than send to no one
+    expect(() => parseConfig(productionVars())).toThrow(/ALERT_TO is empty/);
   });
 });

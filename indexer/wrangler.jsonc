@@ -165,7 +165,7 @@
         // every page of the site (test/node/site-pages.test.ts checks them against web/src/app)
         "SITE_PAGES": ["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/stake/", "/unstake/", "/withdraw/"],
         "ALERT_FROM": "monitor@cascadefi.xyz",
-        "ALERT_MODE": "log",
+        "ALERT_MODE": "send",
         "THRESHOLDS": "{}",
         "PRICE_SOURCES": ["coingecko", "coinbase"],
         "TOKENS": {

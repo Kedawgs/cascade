@@ -176,6 +176,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   const c = deps.clients;
   /** The clients the history scan and its receipt checks use: Bittensor on its own connection. */
   const history: Clients = { ...c, bittensor: c.bittensorScan ?? c.bittensor };
+  /** The clients the background check of a seeded account reads with: the connection for slow archive
+   * reads, so its log windows never share a request batch with the reads a screen is waiting on. */
+  const background: Clients = { ...c, bittensor: c.bittensorHistory ?? c.bittensorScan ?? c.bittensor };
   /** Whether the contracts are wired as the build says, its answer kept 15 minutes (wiring.ts). */
   const wiring = createWiringCheck(c, d, deps.checkWiring);
   const scans = new Map<string, VaultScan>();
@@ -445,7 +448,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     checking.add(key);
     checkedAt.set(key, deps.now());
     const p = progress.load(account);
-    const step = checkSeededAccount(history, d, scan, account, p).then(
+    const step = checkSeededAccount(background, d, scan, account, p).then(
       (r) => {
         if (r === "done") {
           delete scan.accountSeededTo;

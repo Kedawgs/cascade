@@ -112,11 +112,21 @@ describe("fmtao.backing_true", () => {
     expect(deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, near), bitBefore: [at(11n, near)] }))).toEqual([]);
   });
 
-  it("finds wTAO leaving the lock pool: less than 99.9% of wTAO's supply locked (a drain the Base-only check can't see)", () => {
+  it("finds wTAO leaving the lock pool: less than 99.9% of wTAO's supply locked (a drain the Base-only check can't see), and never holds on it", () => {
     const drained = { lockPoolFmTao: live.wTaoSupply - 5_000n * E18 };
     const [f] = deps.fmtaoBackingTrue.run(ctx({ bit: at(12n, drained), bitBefore: [at(11n, drained), at(10n, {})] }));
-    expect(f).toMatchObject({ key: "fmtao.backing_true:lock", hold: { id: "fmtao.backing_true:lock:11" } });
+    expect(f).toMatchObject({ rule: "fmtao.backing_true", key: "fmtao.backing_true:lock" });
     expect(f.facts["wTAO outside the lock pool"]).toBe("5000 TAO");
+    // anyone can mint wTAO with the AlphaVault's depositLiquid (simulated live on 2026-10-31) and keep it out of the
+    // pool: a stranger could hold the keeper at will, so this side pages but never holds
+    expect(f.hold).toBeUndefined();
+    // its own tolerance: 50 TAO parked outside the pool (0.36%) pages at 0.1%, and can be allowed for
+    const parked = { lockPoolFmTao: live.wTaoSupply - 50n * E18 };
+    const at01 = ctx({ bit: at(12n, parked), bitBefore: [at(11n, parked), at(10n, {})] });
+    expect(keys(deps.fmtaoBackingTrue, at01)).toEqual(["fmtao.backing_true:lock"]);
+    const at1 = ctx({ bit: at(12n, parked), bitBefore: [at(11n, parked), at(10n, {})] });
+    at1.t = { ...DEFAULTS, lockToleranceBps: 100 };
+    expect(deps.fmtaoBackingTrue.run(at1)).toEqual([]);
   });
 
   it("judges nothing it couldn't read", () => {

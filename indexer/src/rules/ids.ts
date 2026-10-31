@@ -54,8 +54,8 @@ export const RULES = {
   // 6.4, proposed (switchable in THRESHOLDS rules.off)
   "rail.alpha_vault": critical("condition"),
   "fmtao.mint_surge": warning("event"),
-  // what Cascade depends on and doesn't control (src/rules/deps.ts). Only an under-backed rail holds: a payout sends
-  // TAO into it
+  // what Cascade depends on and doesn't control (src/rules/deps.ts). Only the AlphaVault's backing short of wTAO holds:
+  // a payout sends TAO into that rail, and no stranger can cause it
   "fmtao.backing_true": critical("condition", true),
   // a new way to mint or release (a MINTER grant, a remote pool, lane or router added), an admin moving, a lane's
   // bucket at capacity 0 or Cascade's lane removed, the lock pool's liquidity withdrawn

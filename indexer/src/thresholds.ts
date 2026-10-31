@@ -49,9 +49,12 @@ export const DEFAULTS = {
   keeperMinTaoWei: 10n ** 16n,
   /** the gas the keeper sends a claim with above the vault's claimGasRequired (ops CLAIM_GAS_MARGIN) */
   claimGasMargin: 2_000_000,
-  /** fmtao.backing_true: wTAO may be short of the AlphaVault's backing, or of being locked in the lock pool, by this
-   * share of its supply (0.1%; at least fmtaoBackingSlackWei) */
+  /** fmtao.backing_true: the AlphaVault's backing may fall short of wTAO's supply by this share of it (0.1%; at least
+   * fmtaoBackingSlackWei) */
   backingToleranceBps: 10,
+  /** fmtao.backing_true: wTAO's supply may sit outside the lock pool by this share of it (0.1%; 0.047 TAO did on
+   * 2026-10-31). Anyone can mint wTAO with depositLiquid and keep it: raise this if wTAO comes to be held unbridged */
+  lockToleranceBps: 10,
   /** ccip.rate_limited: a token pool's bucket under this much (10 TAO) for longer than ccipRateLimitedS */
   ccipBucketMinWei: 10n * 10n ** 18n,
   ccipRateLimitedS: 600,

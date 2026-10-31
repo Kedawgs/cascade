@@ -19,15 +19,19 @@ const ZERO = "0x0000000000000000000000000000000000000000";
 const pct = (bps: bigint) => `${(Number(bps) / 100).toFixed(2)}%`;
 const num = (s: string | undefined) => (s === undefined || s === "" || !Number.isFinite(Number(s)) ? undefined : Number(s));
 
-/** fmtao.backing_true (critical, holds): the rail under FM-TAO short of what it owes, on two readings of Bittensor.
- * FM-TAO on every lane (Base, Robinhood) is wTAO locked in the lock pool, and wTAO is the AlphaVault's TAO, so:
- * - `alpha`: the AlphaVault's backing(wTAO) below wTAO's supply: every FM-TAO is under-backed;
- * - `lock`: less of wTAO's supply locked in the lock pool than it should be: wTAO has left the pool without FM-TAO
- *   being burned for it (a drain, or a release a forged message asked for). Nearly all wTAO is locked (13,985.61 of
- *   13,985.65 on 2026-10-31): wTAO is bridged as soon as it is minted. This sees the Robinhood lane too, which
- *   fmtao.unbacked (Base's supply against the whole lock) can't.
- * Each is short when it falls below wTAO's supply by more than backingToleranceBps of it (at least
- * fmtaoBackingSlackWei). It holds, on its first tick: a payout sends TAO into this rail. */
+/** fmtao.backing_true (critical): the rail under FM-TAO short of what it owes, on two readings of Bittensor. FM-TAO on
+ * every lane (Base, Robinhood) is wTAO locked in the lock pool, and wTAO is the AlphaVault's TAO, so:
+ * - `alpha`: the AlphaVault's backing(wTAO) below wTAO's supply by more than backingToleranceBps of it: every FM-TAO
+ *   is under-backed. It holds, on its first tick: a payout sends users' TAO into this rail. No stranger can cause it
+ *   (a deposit raises the backing and the supply together).
+ * - `lock`: wTAO's supply outside the lock pool by more than lockToleranceBps of it: wTAO has left the pool without
+ *   FM-TAO being burned for it (a drain, or a release a forged message asked for), seen while the wTAO is held. Nearly
+ *   all wTAO is locked (13,985.61 of 13,985.65 on 2026-10-31): it is bridged as soon as it is minted. This sees the
+ *   Robinhood lane too, which fmtao.unbacked (Base's supply against the whole lock) can't. Never a hold: anyone can
+ *   mint wTAO with the AlphaVault's depositLiquid (simulated live) and keep it out of the pool, so a stranger could
+ *   otherwise hold the keeper at will (as stake.unlisted is never a hold). A drain unwrapped at once through the
+ *   AlphaVault burns the wTAO, keeping supply and lock level: only fmtao.unbacked (Base) can see that one's result.
+ * Each is short by at least fmtaoBackingSlackWei. */
 export const fmtaoBackingTrue: Rule = {
   name: "fmtao.backing_true",
   run(ctx) {
@@ -37,11 +41,12 @@ export const fmtaoBackingTrue: Rule = {
     ];
     const out: Finding[] = [];
     for (const x of sides) {
+      const tolerance = x.side === "alpha" ? ctx.t.backingToleranceBps : ctx.t.lockToleranceBps;
       const short = (s: BitState | undefined) => {
         const supply = s?.wTaoSupply;
         const have = s ? x.have(s) : undefined;
         if (supply === undefined || have === undefined || supply === 0n) return undefined;
-        const slack = (supply * BigInt(ctx.t.backingToleranceBps)) / 10_000n;
+        const slack = (supply * BigInt(tolerance)) / 10_000n;
         return supply - have > (slack > ctx.t.fmtaoBackingSlackWei ? slack : ctx.t.fmtaoBackingSlackWei) ? supply - have : undefined;
       };
       const cond = (r: Readings) => short(r.bittensor) !== undefined;
@@ -60,13 +65,13 @@ export const fmtaoBackingTrue: Rule = {
           "backing / supply": s.alpha.backing === undefined ? "unknown" : pct((s.alpha.backing * 10_000n) / supply),
           "wTAO in the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(s.lockPoolFmTao),
           "wTAO outside the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(supply - s.lockPoolFmTao),
-          tolerance: pct(BigInt(ctx.t.backingToleranceBps)),
+          tolerance: pct(BigInt(tolerance)),
           block: String(now.block),
           alphaVault: addressLink("bittensor", ctx.cfg.tokens.bittensor.alphaVault),
           lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool),
         },
       };
-      if (onset(ctx, "bittensor", cond)) f.hold = { id: `fmtao.backing_true:${x.side}:${ctx.previous.bittensor!.block}`, summary: `${x.what}: FM-TAO isn't fully backed` };
+      if (x.side === "alpha" && onset(ctx, "bittensor", cond)) f.hold = { id: `fmtao.backing_true:${x.side}:${ctx.previous.bittensor!.block}`, summary: `${x.what}: FM-TAO isn't fully backed` };
       out.push(f);
     }
     return out;

@@ -48,6 +48,11 @@ export interface PositionHistory {
   rewardsEarnedTao?: number;
   /** Average price paid across this browser's deposits, or null. */
   avgEntryPriceUsd: number | null;
+  /** The account's history came from the history indexer's seed, every event confirmed by its receipt
+   * and the total checked against the account's balance, but not yet read from the chain by this
+   * browser itself: an event left out of a seed could still move the figures (the UI says "checking"),
+   * until the background read matches (live.ts) and this clears. */
+  provisional?: true;
 }
 
 export interface StakeProof {

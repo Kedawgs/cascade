@@ -89,6 +89,12 @@ export interface VaultState {
   maxEntryValue?: bigint;
 }
 
+/** The account's csTAO as of `block` (the vault's balanceOf then, from the archive node): what the
+ * account's Deposited and Redeemed up to that block must add up to (live.ts, the seed's tripwire). */
+export async function readSharesAt(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, block: bigint): Promise<bigint> {
+  return (await c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "balanceOf", args: [account], blockNumber: block })) as bigint;
+}
+
 export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, account: Address = ZERO): Promise<VaultState> {
   const v = { address: d.vault, abi: VAULT } as const;
   // read at a block known to be recent: a server that is behind then errors instead of answering from the past

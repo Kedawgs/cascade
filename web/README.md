@@ -131,6 +131,23 @@ for display only (`units.ts`).
   more than the figures they were sent with; each gives way to its record, by id, once the list read from
   the chain holds it. A receipt (`?deposit=` / `?withdrawal=`) picks its record from the same list query
   as the list, so one opened from the list shows at once and the two never read the chain twice.
+- **A first visit's history from the indexer (optional):** with `NEXT_PUBLIC_CASCADE_INDEXER_URL` set
+  to the history indexer's origin (`indexer/`, an https origin and nothing more; unset, nothing below
+  happens), a scan more than a day behind the chain asks the indexer for its two seed pages
+  (`indexer.ts`: the deployment's deliveries, stakes and payout chunks, and the account's own deposits
+  and redeems, in exactly the form the scan store saves) instead of reading every 1,000-block window
+  since the deploy block from the rate-limited archive node. Nothing from the seed is shown on its own
+  word (`seed.ts`, `live.ts`): both pages are decoded as strictly as saved history; the seed's last 400
+  blocks must hold exactly what the chain's logs hold there, and a sample of its older events must each
+  be in their receipt, before any of it is merged (through the same merge saved history goes through,
+  every event unconfirmed); every delivery, stake, chunk and amount is then confirmed by its receipt
+  before a trail or figure uses it, as saved history is; the account's deposits and redeems must add up
+  to its balance at the scan's last block; and "Earned so far" is marked "checking…" until the browser
+  has read the account's own events from the deploy block itself in the background (a few windows per
+  poll, resumable across visits) and they match. Any failure, refusal (a 429 included), timeout, stale
+  seed or disagreement falls back to today's full scan with a line in the console; a seed shown to
+  contradict the chain also leaves the indexer alone for a day in that browser. Balances, prices,
+  limits, quotes and anything a wallet signs never come from the indexer.
 - **Prices and fees:** TAO from Uniswap's quoter (what selling 0.01 TAO pays), swap fees from the
   route's pool fees, the bridge fee from the Bittensor adapter's own `quoteFee`.
 - **Nothing is sent on one source's word.** Every figure above comes from `https://mainnet.base.org`,

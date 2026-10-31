@@ -58,7 +58,10 @@ function RewardsForAccount({ account }: { account: string }) {
               <Dash loading={!history.isError} />
             ) : earned !== undefined ? (
               <>
-                {formatUsd(earned * position.data.taoPriceUsd)} <small>{formatTao(earned, 6)} TAO</small>
+                {formatUsd(earned * position.data.taoPriceUsd)}{" "}
+                <small>
+                  {formatTao(earned, 6)} TAO{history.data.provisional ? " · checking…" : ""}
+                </small>
               </>
             ) : (
               "–"

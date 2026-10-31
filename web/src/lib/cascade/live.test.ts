@@ -5,8 +5,11 @@ import type { Deployment } from "./config";
 import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredError } from "./live";
 import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState, WalletState } from "./reads";
-import { createScanStore } from "./scan-store";
-import { scanVault } from "./facts";
+import { createScanStore, scanState } from "./scan-store";
+import { newScan, REREAD, scanVault } from "./facts";
+import { DISTRUST_MS, indexerDistrusted } from "./indexer";
+import { SEED_MIN_BLOCKS, vaultEvents, verifySeed } from "./seed";
+import { CHECK_EVERY_MS, SEED_RETRY_MS } from "./live";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -80,6 +83,10 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     checkWiring: async () => "ok",
     scan: async () => undefined,
     scanStore: createScanStore(memory(), D),
+    storage: memory(),
+    fetchSeed: async () => Promise.reject(new Error("the indexer wasn't expected to be asked")),
+    verifySeed,
+    readSharesAt: async () => Promise.reject(new Error("the balance at a block wasn't expected to be read")),
     now,
     ...over,
   };
@@ -1153,5 +1160,304 @@ describe("live data", () => {
     await Promise.all([data.getPositionHistory(ME), data.listDeposits(ME), data.getPositionHistory(ME)]);
     expect(overlapped).toBe(false);
     expect(calls).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("the indexer's seed", () => {
+  const DI: Deployment = { ...D, indexerUrl: "https://api.cascadefi.xyz" };
+  const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
+  type Log = { address: string; topics: `0x${string}`[]; data: `0x${string}`; blockNumber: bigint; transactionHash: `0x${string}`; logIndex: number };
+  const log = (topics: readonly unknown[], data: `0x${string}`, block: bigint, tx: `0x${string}`, index = 0): Log => ({ address: D.vault, topics: topics as `0x${string}`[], data, blockNumber: block, transactionHash: tx, logIndex: index });
+  const delivered = (batchId: bigint, key: `0x${string}`, block: bigint, tx: `0x${string}`) =>
+    log(encodeEventTopics({ abi: VAULT, eventName: "BatchDelivered", args: { key, sourceChain: 8453n, frontDoor: D.frontDoor } }), encodeAbiParameters(parseAbiParameters("uint64, uint256"), [batchId, 10n ** 16n]), block, tx);
+  const staked = (block: bigint, tx: `0x${string}`) =>
+    log(encodeEventTopics({ abi: VAULT, eventName: "Staked", args: { hotkey: H(1) } }), encodeAbiParameters(parseAbiParameters("uint256, uint256"), [1n, 1n]), block, tx);
+  const chunk = (key: `0x${string}`, block: bigint, tx: `0x${string}`) =>
+    log(
+      encodeEventTopics({ abi: VAULT, eventName: "PayoutChunkSent", args: { key } }),
+      encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256"), [0, 1, 10n ** 16n, 9n * 10n ** 15n, 10n ** 15n]),
+      block,
+      tx,
+    );
+  const deposited = (key: `0x${string}`, assets: bigint, shares: bigint, block: bigint, tx: `0x${string}`) =>
+    log(encodeEventTopics({ abi: VAULT, eventName: "Deposited", args: { key, user: ME } }), encodeAbiParameters(parseAbiParameters("uint256, uint256"), [assets, shares]), block, tx, 1);
+  const redeemed = (key: `0x${string}`, assets: bigint, shares: bigint, block: bigint, tx: `0x${string}`) =>
+    log(encodeEventTopics({ abi: VAULT, eventName: "Redeemed", args: { key, user: ME } }), encodeAbiParameters(parseAbiParameters("uint256, uint256"), [shares, assets]), block, tx, 1);
+
+  const HEAD = 30_000n;
+  const NEXT = HEAD - 100n;
+  /** 0.07 TAO in (batch 1, block 500), staked; 0.01 TAO out (batch 2, block 20,000), paid; a stake near the seed's end. */
+  const CHAIN: Log[] = [
+    delivered(1n, H(1), 500n, H(101)),
+    deposited(H(1), 7n * 10n ** 16n, 7n * 10n ** 22n, 500n, H(101)),
+    staked(510n, H(102)),
+    delivered(2n, H(2), 20_000n, H(103)),
+    redeemed(H(2), 10n ** 16n, 10n ** 22n, 20_000n, H(103)),
+    chunk(H(2), 20_100n, H(104)),
+    staked(NEXT - 50n, H(105)),
+  ];
+  /** The account's csTAO after all that: 7e22 − 1e22. */
+  const SHARES = 6n * 10n ** 22n;
+
+  /** Bittensor from a node at `head` holding `logs` and their receipts. */
+  function node(logs: Log[] = CHAIN, head = HEAD) {
+    const receipts = new Map<string, { status: string; blockNumber: bigint; logs: Log[] }>();
+    for (const l of logs) {
+      const r = receipts.get(l.transactionHash) ?? { status: "success", blockNumber: l.blockNumber, logs: [] };
+      r.logs.push(l);
+      receipts.set(l.transactionHash, r);
+    }
+    const windows: [bigint, bigint][] = [];
+    const checks: [bigint, bigint][] = [];
+    const asked: `0x${string}`[] = [];
+    const nowS = BigInt(Math.floor(Date.now() / 1000));
+    const bittensor = {
+      getBlock: async () => ({ number: head, timestamp: nowS }),
+      request: async ({ method, params }: { method: string; params?: unknown[] }) => {
+        if (method === "eth_blockNumber") return `0x${head.toString(16)}`;
+        if (method === "eth_getLogs") {
+          const q = (params as [{ fromBlock: `0x${string}`; toBlock: `0x${string}`; topics: (unknown | null)[] }])[0];
+          const [from, to] = [BigInt(q.fromBlock), BigInt(q.toBlock)];
+          checks.push([from, to]);
+          const user = q.topics[2] as string | null;
+          return logs.filter((l) => l.blockNumber >= from && l.blockNumber <= to && (!user || l.topics[2] === user));
+        }
+        throw new Error(`unexpected ${method}`);
+      },
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+        windows.push([fromBlock, toBlock]);
+        return logs.filter((l) => l.blockNumber >= fromBlock && l.blockNumber <= toBlock);
+      },
+      getTransactionReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+        asked.push(hash);
+        const r = receipts.get(hash);
+        if (!r) throw new TransactionReceiptNotFoundError({ hash });
+        return r;
+      },
+    };
+    return { bittensor, windows, checks, asked };
+  }
+
+  /** The indexer's two halves of `logs` up to `next`, as its API would serve them. */
+  function halvesOf(logs: Log[], next = NEXT) {
+    const s = newScan(DI);
+    s.next = next + 10n;
+    const ev = vaultEvents(logs as never, DI, ME);
+    for (const e of ev.delivered) s.delivered.set(e.batchId, { key: e.key, txHash: e.txHash, block: e.block });
+    s.staked.push(...ev.staked);
+    for (const p of ev.payouts) s.payouts.set(p.key, [...(s.payouts.get(p.key) ?? []), { txHash: p.txHash, block: p.block, chunk: p.chunk, taken: p.taken }]);
+    s.deposited.push(...ev.deposited);
+    s.redeemed.push(...ev.redeemed);
+    const state = scanState(s);
+    return { shared: { ...state, deposited: [], redeemed: [] }, own: { ...state, delivered: [], staked: [], payouts: [] } };
+  }
+
+  /** A visit of the site: the real scan and seed checks against `n`, the indexer answering `seed`. */
+  function visit(n: ReturnType<typeof node>, seed: ReturnType<typeof halvesOf> | null, over: Partial<LiveDeps> = {}, storage = memory()) {
+    const asked: string[] = [];
+    const balances: bigint[] = [];
+    const d = deps({
+      clients: { bittensor: n.bittensor } as never,
+      scan: scanVault,
+      storage,
+      scanStore: createScanStore(storage, DI),
+      fetchSeed: async (_d, a) => {
+        asked.push(a);
+        return seed;
+      },
+      readSharesAt: async (_c, _d, _a, block) => {
+        balances.push(block);
+        return SHARES;
+      },
+      ...over,
+    });
+    return { data: createLiveCascadeData(DI, d), asked, balances, storage, opLog: d.opLog };
+  }
+
+  it("starts a first visit far behind the chain from the indexer's seed: one window read instead of thirty, the amounts confirmed by their receipts, the figure provisional, the balance checked at the scan's last block", async () => {
+    const n = node();
+    const v = visit(n, halvesOf(CHAIN));
+    const h = await v.data.getPositionHistory(ME);
+    // 0.08 now + 0.01 out − 0.07 in
+    expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(h.provisional).toBe(true);
+    expect(v.asked).toEqual([ME]);
+    // the seed's last 400 blocks checked against the chain, then the scan's own read from there: two windows, not thirty
+    expect(n.windows).toHaveLength(2);
+    for (const [from] of n.windows) expect(from).toBeGreaterThanOrEqual(NEXT - REREAD);
+    // the account's deposit and redeem were confirmed by their receipts before the figure showed
+    expect(n.asked).toEqual(expect.arrayContaining([H(101), H(103)]));
+    // and their shares checked against the balance at the scan's last block
+    expect(v.balances).toEqual([HEAD - 2n]);
+    // saved as the indexer's, up to its block (less the blocks a save leaves unsettled: the mark never outruns the save)
+    const saved = createScanStore(v.storage, DI).load(ME);
+    expect(saved.sharedSeededTo).toBe(NEXT - 10n);
+    expect(saved.accountSeededTo).toBe(NEXT - 10n);
+    // a later poll asks the indexer nothing: the scan is caught up
+    n.windows.length = 0;
+    await v.data.getPositionHistory(ME);
+    expect(v.asked).toHaveLength(1);
+    expect(n.windows).toHaveLength(1);
+    // the same visit without a seed reads the whole history, and shows the same figure, final
+    const plain = node();
+    const bare = visit(plain, null);
+    const h2 = await bare.data.getPositionHistory(ME);
+    expect(h2.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(h2.provisional).toBeUndefined();
+    expect(plain.windows).toHaveLength(30);
+    expect(bare.balances).toEqual([]);
+  });
+
+  it("asks the indexer nothing without an indexer URL, while it is distrusted, or when the scan is within a day of the chain's head", async () => {
+    let askedWithoutUrl = 0;
+    const plain = createLiveCascadeData(D, deps({ clients: { bittensor: node().bittensor } as never, scan: scanVault, fetchSeed: async () => (askedWithoutUrl++, null) }));
+    expect(await plain.getPositionHistory(ME)).not.toHaveProperty("provisional");
+    expect(askedWithoutUrl).toBe(0);
+    const storage = memory();
+    const { distrustIndexer } = await import("./indexer");
+    distrustIndexer(storage, DI, 1_800_000_100_000);
+    const shunned = visit(node(), halvesOf(CHAIN), {}, storage);
+    expect((await shunned.data.getPositionHistory(ME)).provisional).toBeUndefined();
+    expect(shunned.asked).toEqual([]);
+    const near = node(CHAIN.slice(0, 3), SEED_MIN_BLOCKS);
+    const close = visit(near, halvesOf(CHAIN.slice(0, 3), SEED_MIN_BLOCKS - 100n));
+    await close.data.getPositionHistory(ME);
+    expect(close.asked).toEqual([]);
+  });
+
+  it("reads the whole history itself, with no error shown, when the indexer doesn't answer, and asks again only after a while", async () => {
+    let clock = 1_800_000_100_000;
+    // a scan that never moves on, so the account stays far behind: what a visit cut short looks like
+    const n = node();
+    const v = visit(n, null, { now: () => clock, scan: async () => undefined });
+    await v.data.getPositionHistory(ME);
+    await v.data.getPositionHistory(ME);
+    clock += SEED_RETRY_MS - 1;
+    await v.data.getPositionHistory(ME);
+    expect(v.asked).toEqual([ME]);
+    clock += 1;
+    await v.data.getPositionHistory(ME);
+    expect(v.asked).toEqual([ME, ME]);
+    // and when it answers nothing, the real scan reads everything and the figures are right
+    const full = node();
+    const w = visit(full, null);
+    expect((await w.data.getPositionHistory(ME)).rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(full.windows).toHaveLength(30);
+  });
+
+  it("distrusts the indexer for a day, in this browser, when its seed contradicts the chain, and reads the history itself", async () => {
+    // the seed leaves out the stake in its last blocks
+    const lying = halvesOf(CHAIN.filter((l) => l.transactionHash !== H(105)));
+    const n = node();
+    const v = visit(n, lying);
+    const h = await v.data.getPositionHistory(ME);
+    expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(h.provisional).toBeUndefined();
+    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
+    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000 + DISTRUST_MS)).toBe(false);
+    // one window to catch it, then the whole history
+    expect(n.windows).toHaveLength(31);
+    // the next visit in this browser doesn't ask
+    const again = visit(node(), lying, {}, v.storage);
+    await again.data.getPositionHistory(ME);
+    expect(again.asked).toEqual([]);
+  });
+
+  it("shows no figure from a seed whose account half left a deposit out: the balance doesn't add up, the scan starts over, the indexer is distrusted", async () => {
+    const h = halvesOf(CHAIN);
+    const omitted = { shared: h.shared, own: { ...h.own, deposited: [] } };
+    const n = node();
+    const v = visit(n, omitted);
+    await expect(v.data.getPositionHistory(ME)).rejects.toThrow(/didn't match Bittensor/);
+    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
+    expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
+    // the next read is the browser's own, and right
+    const h2 = await v.data.getPositionHistory(ME);
+    expect(h2.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(h2.provisional).toBeUndefined();
+  });
+
+  it("catches, in the background, a matched set the seed left out that the balance couldn't show: the figure was provisional, and is then read again from the chain", async () => {
+    // a 0.02 TAO deposit and its full redeem, both left out of the account half: the shares add up all the same
+    const pair = [delivered(5n, H(5), 1_000n, H(106)), deposited(H(5), 2n * 10n ** 16n, 2n * 10n ** 22n, 1_000n, H(106)), delivered(6n, H(6), 1_500n, H(107)), redeemed(H(6), 2n * 10n ** 16n, 2n * 10n ** 22n, 1_500n, H(107))];
+    const chain = [...CHAIN, ...pair];
+    const honest = halvesOf(chain);
+    const h = halvesOf(CHAIN);
+    const omitted = { shared: honest.shared, own: h.own };
+    const n = node(chain);
+    const v = visit(n, omitted);
+    const first = await v.data.getPositionHistory(ME);
+    expect(first.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(first.provisional).toBe(true);
+    // the background check's first step read the first windows of the account's own events and found the deposit
+    const second = await v.data.getPositionHistory(ME);
+    expect(n.checks[0]).toEqual([1n, 1_000n]);
+    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
+    // read again from the deploy block by the browser: 0.08 now + 0.03 out − 0.09 in, final
+    expect(second.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(second.provisional).toBeUndefined();
+    expect(n.windows.length).toBeGreaterThanOrEqual(32);
+  });
+
+  it("finishes the background check of an honest seed over later reads, a few windows at a time, resuming across visits, and the figure turns final", async () => {
+    let clock = 1_800_000_100_000;
+    const n = node();
+    const storage = memory();
+    const v = visit(n, halvesOf(CHAIN), { now: () => clock }, storage);
+    expect((await v.data.getPositionHistory(ME)).provisional).toBe(true);
+    // one step per poll, three windows a step: the first poll's step has run by the second read
+    await v.data.getPositionHistory(ME);
+    expect(n.checks).toHaveLength(3);
+    expect(n.checks[0]).toEqual([1n, 1_000n]);
+    clock += CHECK_EVERY_MS;
+    await v.data.getPositionHistory(ME);
+    await v.data.getPositionHistory(ME);
+    expect(n.checks).toHaveLength(6);
+    // a new visit picks the check up where it stopped
+    const m = node();
+    const w = visit(m, halvesOf(CHAIN), { now: () => clock }, storage);
+    let h = await w.data.getPositionHistory(ME);
+    expect(h.provisional).toBe(true);
+    expect(w.asked).toEqual([]);
+    for (let i = 0; i < 20 && h.provisional; i++) {
+      clock += CHECK_EVERY_MS;
+      h = await w.data.getPositionHistory(ME);
+    }
+    expect(h.provisional).toBeUndefined();
+    expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+    expect(m.checks[0]).toEqual([6_001n, 7_000n]);
+    // up to the saved mark (the seed's block less the save's unsettled blocks) and no further
+    expect(m.checks[m.checks.length - 1]).toEqual([29_001n, NEXT - 11n]);
+    expect(indexerDistrusted(storage, DI, clock)).toBe(false);
+    // the account half is the browser's own from here on; the deployment's half stays marked as the indexer's
+    const saved = createScanStore(storage, DI).load(ME);
+    expect(saved.accountSeededTo).toBeUndefined();
+    expect(saved.sharedSeededTo).toBe(NEXT - 10n);
+  });
+
+  it("fails a trail whose seeded stake isn't on the chain, starts the scan over under the account's lock and distrusts the indexer; the next read is the browser's own", async () => {
+    const h = halvesOf(CHAIN);
+    // a stake the seed invented, right after the delivery, which the trail would show first
+    const forged = { shared: { ...h.shared, staked: [{ block: "505", txHash: H(999) }, ...h.shared.staked] }, own: h.own };
+    const n = node();
+    // the first checks pass it (its sample happened not to pick the stake): the trail is the last line
+    const v = visit(n, forged, { verifySeed: async () => ({ ok: true, next: NEXT }) });
+    v.opLog.put({ id: "d", kind: "deposit", account: ME, createdAt: T0 + 1, usdcIn: 0n, targetTao: 7n * 10n ** 16n, hashes: {}, batchId: 1n, state: "sent" });
+    await expect(v.data.listDeposits(ME)).rejects.toThrow(/didn't match Bittensor/);
+    expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(true);
+    expect(createScanStore(v.storage, DI).load(ME).next).toBe(DI.bitBlock);
+    const list = await v.data.listDeposits(ME);
+    const stake = list.find((r) => r.id === "d")?.steps.find((s) => s.key === "stake");
+    expect(stake?.status).toBe("done");
+    expect(stake?.txUrl).toContain(H(102));
+  });
+
+  it("counts a seeded delivery for what can be unstaked only once its receipt confirms it", async () => {
+    const n = node();
+    const v = visit(n, halvesOf(CHAIN));
+    v.opLog.put({ id: "w2", kind: "withdrawal", account: ME, createdAt: T0 + 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 2n, state: "sent" });
+    // batch 2 arrived (block 20,000): its receipt says so, so the unstake isn't on the bridge
+    expect((await v.data.getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
+    expect(n.asked).toContain(H(103));
   });
 });

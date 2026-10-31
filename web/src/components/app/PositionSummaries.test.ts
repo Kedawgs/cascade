@@ -63,6 +63,14 @@ describe("Rewards card", () => {
       text(createElement(RewardsCard, { account: ME }), [...ready, { key: cascadeKeys.history(ME), data: { pendingTao: 0, avgEntryPriceUsd: null } }]),
     ).toContain("Earned so far–TAO price");
   });
+
+  it("says the figure is still being checked while the history came from the indexer and this browser hasn't read it all itself", () => {
+    const provisional: PositionHistory = { ...history, provisional: true };
+    expect(text(createElement(RewardsCard, { account: ME }), [...ready, { key: cascadeKeys.history(ME), data: provisional }])).toContain(
+      "Earned so far$5.00 0.020000 TAO · checking…",
+    );
+    expect(text(createElement(RewardsCard, { account: ME }), [...ready, { key: cascadeKeys.history(ME), data: history }])).not.toContain("checking");
+  });
 });
 
 describe("Unstake form", () => {

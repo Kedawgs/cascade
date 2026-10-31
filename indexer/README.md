@@ -122,13 +122,14 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   so the primary's log index lagging its head is never read as an omission; `logsCheckBaseBlocks` 600 and
   `logsCheckBittensorBlocks` 300 at most per run, in the chain's windows, within 20 requests) and compares the
   logs with what the primary had the tick store, so a primary that omits a watched log is noticed. An endpoint
-  that fails (after one retry) hands the whole range to the next in its list; the alert names the one that
-  answered. A second opinion has to come from another provider: the config refuses a second URL on the same
-  registrable domain as its primary (the lite node next to the archive node; a keyed dRPC primary next to the
-  dRPC fallback: drop it from the list). An archive endpoint is best (a pruning second node reads as
-  `indexer.logs_extra` warnings); a chain whose every second endpoint stops answering is `indexer.unverified` after
-  3 hours, and `pnpm smoke` tries them from your machine (not Cloudflare's egress, which public nodes rate-limit
-  harder). **Why this Base list** (tested 2026-10-31 with the check's own batch, two `eth_getLogs` over 100 blocks
+  that fails (after one retry), or answers from a head short of the range's first window, verifies nothing and
+  hands the whole range to the next in its list; the alert names the one that answered. A second opinion has to
+  come from another provider: the config refuses a second URL on the same registrable domain as its primary (the
+  lite node next to the archive node; a keyed dRPC primary next to the dRPC fallback: drop it from the list). An
+  archive endpoint is best (a pruning second node reads as `indexer.logs_extra` warnings); a chain none of whose
+  second endpoints has verified a window for 3 hours (failing, or behind) is `indexer.unverified`, and `pnpm smoke`
+  tries each endpoint of each list on its own from your machine (not Cloudflare's egress, which public nodes
+  rate-limit harder), printing each one's result. **Why this Base list** (tested 2026-10-31 with the check's own batch, two `eth_getLogs` over 100 blocks
   and `eth_blockNumber`, a few times each): Tenderly answered every time in 150–520 ms with the same logs as dRPC;
   dRPC answers from a home IP but has answered the production Worker with HTTP 429 since 14:17 UTC that day, so it
   is the fallback. Keyless Base endpoints that don't fit a 100-block window: `mainnet.base.org` (`eth_getLogs`

@@ -158,21 +158,27 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
 
     // the second endpoint's logs, window by window, each accepted only from a node settled past its end; the
     // lowest head that answered says how far past the range the second node is. The chain's endpoints are tried in
-    // order, each reading the whole range afresh, until one answers every window it asks (a public node may answer
-    // HTTP 429 to Cloudflare's shared egress); the chain fails only when every one does
-    let read: { second: RawLog[]; checkedTo?: bigint; lowestHead?: bigint } | undefined;
+    // order, each reading the whole range afresh, until one checks at least a window (a public node may answer HTTP
+    // 429 to Cloudflare's shared egress, or lag): one that fails, or is behind the range's first window, verifies
+    // nothing and hands the range to the next. Only a window checked clears the failure mark
+    let read: { second: RawLog[]; checkedTo: bigint; lowestHead: bigint } | undefined;
     let secondUrl = "";
+    let behind = false;
     const errors: string[] = [];
     for (const url of chain === "base" ? cfg.rpc.baseLogs2 : cfg.rpc.bittensor2) {
       const rpc = rpcAt(url);
       const second: RawLog[] = [];
       let checkedTo: bigint | undefined;
       let lowestHead: bigint | undefined;
+      let short: { head: bigint; block: bigint } | undefined;
       try {
         for (let a = from; a <= to; a = checkedTo + 1n) {
           const b = min(a + window - 1n, to);
           const r = await rpc.logsWithHead(chain, { address: addresses[chain], fromBlock: a, toBlock: b, watch: watch[chain] });
-          if (r.head < b + SETTLE[chain]) break;
+          if (r.head < b + SETTLE[chain]) {
+            short = { head: r.head, block: b };
+            break;
+          }
           second.push(...r.logs);
           lowestHead = lowestHead === undefined ? r.head : min(lowestHead, r.head);
           checkedTo = b;
@@ -183,22 +189,24 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
         errors.push(why.slice(0, 200));
         continue;
       }
+      if (checkedTo === undefined || lowestHead === undefined) {
+        behind = true;
+        errors.push(`${chain} eth_getLogs via ${hostDomain(url)}: behind the range (its head ${short?.head ?? "?"}, short of block ${short?.block ?? to} + ${SETTLE[chain]})`);
+        continue;
+      }
       read = { second, checkedTo, lowestHead };
       secondUrl = url;
       break;
     }
     if (!read) {
+      // nothing verified: every endpoint failed or was behind (a node behind for hours leaves the logs unverified too)
       if (!num(meta[`logs_check_fail_since:${chain}`])) writes.push(setMeta(db, `logs_check_fail_since:${chain}`, String(nowS)));
       writes.push(setMeta(db, `logs_check_error:${chain}`, errors.join("; ").slice(0, 500)));
-      result[chain] = "failed";
+      result[chain] = behind ? "behind" : "failed";
       continue;
     }
     const { second, checkedTo, lowestHead } = read;
     if (num(meta[`logs_check_fail_since:${chain}`])) writes.push(setMeta(db, `logs_check_fail_since:${chain}`, ""));
-    if (checkedTo === undefined || lowestHead === undefined) {
-      result[chain] = "behind";
-      continue;
-    }
 
     // ForeverMoney's watched events are judged only from the first block the tick read with their filter (meta
     // watch_from:{chain}): below it, a version of the tick that didn't ask for them stored none, and their absence

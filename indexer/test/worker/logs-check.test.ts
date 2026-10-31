@@ -378,6 +378,40 @@ describe("runLogsCheck", () => {
     expect(alert.body).not.toContain("public-node.test");
   });
 
+  it("hands the range to the next endpoint when one answers but is behind it (review M3), and judges with that one", async () => {
+    const { deps, to, net2 } = await world();
+    const LAGGING = "https://lagging.public-node.test/v1/lag-key-0123456789";
+    // a node of Base that answers, from a head short of the range
+    const lagging = fakeChains({ base: { head: 37_000_000n, logs: [] } });
+    const fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(url).host === new URL(LAGGING).host) return lagging.fetch(TEST_URLS.baseLogs2, init);
+      return deps().fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const base = deps();
+    await setMeta(db, "logs_check_fail_since:base", String(base.nowS - 7200)).run();
+    const r = await runLogsCheck({ ...base, cfg: { ...base.cfg, rpc: { ...base.cfg.rpc, baseLogs2: [LAGGING, TEST_URLS.baseLogs2] } }, fetch });
+    expect(lagging.count()).toBe(1);
+    expect(r.base).toMatchObject({ to: to.base, omitted: 0, extra: 0 });
+    expect(net2.fetches.filter((f) => f.chain === "base").length).toBeGreaterThan(0);
+    // a window was checked: the failure mark clears
+    expect((await meta())["logs_check_fail_since:base"]).toBe("");
+  });
+
+  it("an endpoint behind the whole range verifies nothing: the failure mark is set (or kept), never cleared, and the range waits", async () => {
+    const { deps } = await world({ secondHeads: { base: 37_000_000n } });
+    const base = deps();
+    const r = await runLogsCheck(base);
+    expect(r.base).toBe("behind");
+    const m = await meta();
+    expect(m["logs_check_fail_since:base"]).toBe(String(base.nowS));
+    expect(m["logs_check_error:base"]).toMatch(/second\.test.*behind/);
+    expect(m["logs_check_to:base"]).toBeUndefined();
+    // still behind an hour later: the first mark is kept
+    await runLogsCheck(deps(base.nowS + 3600));
+    expect((await meta())["logs_check_fail_since:base"]).toBe(String(base.nowS));
+  });
+
   it("fails a chain only when every second endpoint in its list fails, naming each one's error and none of their keys", async () => {
     const { w, deps } = await world();
     const BUSY = "https://busy.public-node.test/v1/busy-key-0123456789";

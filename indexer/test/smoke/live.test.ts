@@ -1,12 +1,12 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { handleScan } from "../../src/api.ts";
-import { parseConfig, VAR_NAMES } from "../../src/config.ts";
+import { hostDomain, parseConfig, VAR_NAMES } from "../../src/config.ts";
 import { buildDigest } from "../../src/digest.ts";
 import { renderDigest } from "../../src/email.ts";
 import { runLogsCheck } from "../../src/logs-check.ts";
 import { expandHour } from "../../src/snapshot.ts";
-import { loadTickState } from "../../src/store.ts";
+import { loadTickState, setMeta } from "../../src/store.ts";
 import { historyOf, runTick } from "../../src/tick.ts";
 import { assertValidScanState } from "../worker/scan-state-rules.ts";
 
@@ -97,10 +97,21 @@ describe.skipIf(!live)("live smoke: one tick against the v3 test deployment", ()
     });
     console.log(renderDigest(digest).text);
 
-    // the hourly logs cross-check against the live second endpoints (BASE_LOGS_RPC_URL_2, BITTENSOR_RPC_URL_2):
-    // whether they answer from here, and whether they agree with the primaries over the newest settled range
-    const check = await runLogsCheck({ env: { DB: db }, cfg, nowS: Math.floor(Date.now() / 1000), fetch: (i, init) => globalThis.fetch(i, init) });
-    console.log(`logs cross-check: ${JSON.stringify(check, (_k, v) => (typeof v === "bigint" ? String(v) : v))}`);
-    for (const c of ["base", "bittensor"] as const) expect(check[c], `${c}'s second endpoint`).not.toBe("failed");
+    // the hourly logs cross-check against each live second endpoint (BASE_LOGS_RPC_URL_2, BITTENSOR_RPC_URL_2), one at
+    // a time: the job stops at the first that answers, so a fallback would otherwise go untried. Whether each answers
+    // from here (not Cloudflare's egress, which public nodes rate-limit harder), and agrees with the primary over the
+    // newest settled range. The other chain is marked catching up meanwhile, so each run asks one chain
+    const nowS = Math.floor(Date.now() / 1000);
+    for (const c of ["base", "bittensor"] as const) {
+      const field = c === "base" ? "baseLogs2" : "bittensor2";
+      for (const url of cfg.rpc[field]) {
+        await db.batch([db.prepare("DELETE FROM meta WHERE k LIKE 'logs_check_%'"), setMeta(db, "catching_up", c === "base" ? "bittensor" : "base")]);
+        const check = await runLogsCheck({ env: { DB: db }, cfg: { ...cfg, rpc: { ...cfg.rpc, [field]: [url] } }, nowS, fetch: (i, init) => globalThis.fetch(i, init) });
+        const error = (await loadTickState(db, nowS)).meta[`logs_check_error:${c}`];
+        console.log(`logs cross-check, ${c} via ${hostDomain(url)}: ${JSON.stringify(check[c], (_k, v) => (typeof v === "bigint" ? String(v) : v))}${error ? ` (${error})` : ""}`);
+        expect(check[c], `${c}'s second endpoint ${hostDomain(url)}`).not.toBe("failed");
+      }
+    }
+    await setMeta(db, "catching_up", "").run();
   });
 });

@@ -95,6 +95,8 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   OffRamps) and the rail's contracts it watches for admin events: `base.fmTao` and `base.tokenPool` (FM-TAO's CCIP
   burn-mint pool, `0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794`), `bittensor.fmTao` (wTAO), `bittensor.lockPool` and
   `bittensor.alphaVault`. A watched contract can't share an address with the deployment's on its chain.
+- **`BACKING_HOLD`**: `"false"` as shipped in both; `"true"` lets `fmtao.backing_true`'s AlphaVault side raise the
+  keeper's hold (switch it on as "What Cascade depends on" says, after a week of readings).
 - **`DEPLOYMENT`**: the deployment's addresses and blocks. `pnpm config:from-record <ops record>` prints it from
   a verified ops record (addresses checksummed, Bittensor starting at the Bittensor adapter's block, which is the
   site's `NEXT_PUBLIC_CASCADE_BIT_BLOCK`). `env.test` already holds the v3 test deployment's; `env.production`
@@ -209,7 +211,9 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
    digest says "catching up" meanwhile (its lag alerts are quiet then, and a cross-check waiting on it isn't
    reported stuck). Expect the first digest at 13:00 UTC. Trigger one warning on purpose to see an email
    arrive, e.g. `THRESHOLDS` `{"keeperMinEthWei":"1000000000000000000000"}` (a keeper floor above the real
-   balance), then remove it.
+   balance), then remove it. Two warnings stand from the first ticks on production, both real (read live
+   2026-10-31): `keeper.low_tao` (the keeper holds 0.06 TAO and a claim needs 0.295 up front: top it up) and
+   `oracle.cardinality` (TAO/WETH keeps 600 observations, growing to 2,000 as swaps come: it clears by itself).
 10. **An outside uptime check on `/v1/health`** (required): a free checker that emails you when it stops
     answering 200. The Worker can't watch itself for everything: if it refuses its config (a bad value after an
     edit, a missing secret in `send` mode), no job runs at all, the watchdog and the digest included, and it
@@ -292,16 +296,24 @@ Bittensor's rules for root stake apply to it. None of that is Cascade's to chang
   `pendingDefaultAdmin` and `backing(wTAO)`; wTAO's supply and the lock pool's wTAO; both pools' buckets for the
   Base-Bittensor lane (`getCurrentInbound/OutboundRateLimiterState`); the stake hotkey's take, root stake and root uid
   and `RootStakeUnlockInterval` (SubtensorModule storage through the 0x807 precompile); the vault's
-  `claimGasRequired`, `maxFeeAbs`, `maxFeeBps` and `primaryBridge`, the block's base fee, and the primary bridge's
-  `quoteFee` for a full payout chunk (100 entries); each oracle pool's observation cardinality (from the `slot0`
-  already read).
+  `claimGasRequired`, `maxFeeAbs`, `maxFeeBps`, `maxMessageValue` and `primaryBridge`, the block's base fee, and the
+  primary bridge's `maxMessageValue` and `quoteFee` for a full payout chunk (100 entries, worth the lower of the two
+  `maxMessageValue`s the last reading named: 15 TAO live, so a fee in basis points is priced); each oracle pool's
+  observation cardinality (from the `slot0` already read).
 - **Events**: FM-TAO and its pool on Base, wTAO, the lock pool and the AlphaVault on Bittensor (`TOKENS`), for their
   admin events only (`DEPENDENCY_EVENTS` in `src/abi.ts`: role grants and revokes, CCIP admin and ownership transfers,
   the rate-limit admin, lanes, remote pools, the router, the lock pool's liquidity, the AlphaVault's scheduled admin
   transfers). Each log window's request carries a second, topic-filtered `eth_getLogs` for them, so none of FM-TAO's
   transfers is ever read. They are stored under their own roles (`fmTao`, `tokenPool`, `alphaVault`), recognised on
-  re-reads, and re-read by the hourly logs cross-check like the deployment's own.
-- **Cost per tick**: no request of its own. 21 more calls inside the two multicalls (19 on Bittensor, 2 on Base;
+  re-reads, and re-read by the hourly logs cross-check like the deployment's own (from the first block a tick read
+  with their filter, meta `watch_from:<chain>`, so the first run after this version is deployed can't call older ones
+  omitted). What each really covers (none of these events was observed in a log; the signatures are the libraries'):
+  the pools are Chainlink TokenPool 1.5.1 (read live); the AlphaVault answers AccessControlDefaultAdminRules' views;
+  FM-TAO on Base is not Chainlink's BurnMintERC20 but answers OpenZeppelin AccessControl's views, so its role events
+  are OpenZeppelin's, and its `CCIPAdminTransferred` is Chainlink's signature, assumed. wTAO on Bittensor isn't
+  AccessControl at all (only `getCCIPAdmin` answers), so its role watch is inert: wTAO is really covered by the
+  AlphaVault's events and the backing readings.
+- **Cost per tick**: no request of its own. 23 more calls inside the two multicalls (21 on Bittensor, 2 on Base;
   the fee quote's message makes Bittensor's about 13 KB larger), one more `eth_getLogs` inside each log window's
   existing batch (a steady tick makes the same requests as before; the hourly cross-check too), a few more fields in
   the stored reading and the hour row, and meta written only when a mark changes. Decoding the extra answers takes
@@ -311,26 +323,40 @@ Bittensor's rules for root stake apply to it. None of that is Cascade's to chang
 
 | Alert | Tier | What it means | What to do |
 |---|---|---|---|
-| `fmtao.backing_true` | critical; the `alpha` side **holds** | on two readings, either (`alpha`) the AlphaVault's `backing(wTAO)` is below wTAO's supply by more than `backingToleranceBps` (0.1%): FM-TAO on every lane is under-backed; or (`lock`) more than `lockToleranceBps` (0.1%) of wTAO's supply sits outside the lock pool: wTAO left the pool without FM-TAO being burned (a drain or a forged release), seen while it is held. Read live 2026-10-31: backing 13,992.86 TAO against 13,985.65 wTAO, 13,985.61 of it locked. The `lock` side never holds: anyone can mint wTAO with `depositLiquid` (simulated live) and keep it, so a stranger could otherwise stop payouts at will; and a drain unwrapped at once burns the wTAO, keeping supply and lock level, which only `fmtao.unbacked` (Base) sees | `alpha`: guardian `pause()` the front door and the vault (a payout sends TAO into this rail; the keeper is held already); tell ForeverMoney and Chainlink; clear the hold and unpause only once the backing is back. `lock`: look at wTAO's largest holders and the pool's last transfers; a holder that deposited for it is no drain (acknowledge; raise `lockToleranceBps` if it stays), a release to someone who burned no FM-TAO is (pause both, tell ForeverMoney). Users' TAO in the vault is staked on Bittensor, not held as wTAO |
-| `fmtao.role_change_critical` | critical | a watched admin event that can mint, release or move the rail's tokens: `MINTER_ROLE` (or FM-TAO's admin role) granted, a role's admin changed, a remote pool or lane added, a pool's router changed, the lock pool's liquidity withdrawn, the AlphaVault's admin transfer scheduled, a pool's ownership transfer requested, a lane bucket set to capacity 0, or Cascade's lane removed | ask ForeverMoney whether it was planned (a pool upgrade grants `MINTER_ROLE` to the new pool). If not, or until you know, guardian `pause()` the front door and the vault, and watch `fmtao.backing_true`, `fmtao.mint_surge`, `fmtao.depeg`. A bucket at capacity 0 either freezes the lane or turns its limit off: read the pool's buckets to see which |
-| `fmtao.role_change` | warning | any other watched admin event: a role revoked or another role granted, the CCIP admin moved, an ownership accepted, the rate-limit admin set, a rate limit tuned, a remote pool or another lane removed | check it matches something ForeverMoney announced, and acknowledge; ask them if not |
+| `fmtao.backing_true` | critical; the `alpha` side holds only once `BACKING_HOLD` is on (off as shipped) | `alpha`: on two readings, the AlphaVault's `backing(wTAO)` below wTAO's supply by more than `backingToleranceBps` (0.1%): FM-TAO on every lane is under-backed (read live 2026-10-31: 13,992.86 TAO against 13,985.65 wTAO, 100.05%). `lock`: more than `lockOutsideCriticalBps` (5%) of wTAO's supply outside the lock pool for over `lockOutsideS` (an hour; meta `lock_outside_critical_since`): wTAO left the pool without FM-TAO being burned (a drain or a forged release), seen while it is held. Never a hold: anyone can mint wTAO with `depositLiquid` (simulated live) and keep it; and a drain unwrapped at once burns the wTAO, keeping supply and lock level, which only `fmtao.unbacked` (Base) sees | `alpha`: guardian `pause()` the front door and the vault (a payout sends TAO into this rail); tell ForeverMoney and Chainlink; unpause (and clear the hold, if one was raised) only once the backing is back. `lock`: look at wTAO's largest holders and the pool's last transfers; a release to someone who burned no FM-TAO is a drain (pause both, tell ForeverMoney), a holder that deposited for it is not (acknowledge). Users' TAO in the vault is staked on Bittensor, not held as wTAO |
+| `fmtao.lock_outside` | warning | `lockOutsideMinWei` (100 TAO) or more of wTAO outside the lock pool for over an hour (meta `lock_outside_since`; 0.047 TAO was on 2026-10-31). Usually someone holding wTAO unwrapped (anyone can mint it; unwrapping and re-wrapping toggles it); possibly a drain starting | look at wTAO's largest holders and the pool's last transfers; acknowledge a holder; act as `fmtao.backing_true` says on a drain |
+| `fmtao.role_change_critical` | critical | a transaction with a watched admin event that can mint, release or move the rail's tokens: `MINTER_ROLE` (or FM-TAO's admin role) granted, a role's admin changed, a remote pool or lane added, a pool's router changed, the lock pool's liquidity withdrawn, the AlphaVault's admin transfer scheduled, a pool's ownership transfer requested, a lane bucket switched off, or Cascade's lane removed. One alert per transaction (keyed `<chain>:<tx>`), every watched event in it listed, so a pool upgrade is one email. A bucket at capacity 0 is a bucket switched off: on TokenPool 1.5.1 capacity 0 is only allowed with the limit disabled, so that direction has **no limit**; only `ChainRemoved` freezes a lane | ask ForeverMoney whether it was planned (a pool upgrade grants `MINTER_ROLE` to the new pool and adds remote pools). If not, or until you know, guardian `pause()` the front door and the vault, and watch `fmtao.backing_true`, `fmtao.mint_surge`, `fmtao.depeg`. **After a planned pool upgrade**, set `TOKENS.base.tokenPool` and `TOKENS.bittensor.lockPool` in `wrangler.jsonc` to the new pools and redeploy: otherwise the lane buckets, `fmtao.unbacked`, the lock readings and these events keep watching the old pools |
+| `fmtao.role_change` | warning | a transaction with only other watched admin events: a role revoked or another role granted, the CCIP admin moved, an ownership accepted, the rate-limit admin set, a rate limit tuned, a remote pool or another lane removed | check it matches something ForeverMoney announced, and acknowledge; ask them if not |
 | `rail.alpha_vault` | critical | the AlphaVault paused (`isPaused`, or a guardian's `pausedUntil` still to come), a migration announced (`migrationReadyAt` or `migrationTarget` set), executed or finished | guardian `pause()` the front door (deliveries and payouts through a paused AlphaVault revert, so nothing is lost meanwhile); ask ForeverMoney why and until when; before a migration executes, decide with them whether the adapter can use the new vault |
 | `rail.alpha_vault_admin` | warning | the AlphaVault has a default-admin transfer pending (`pendingDefaultAdmin`; it can be accepted once its schedule, 2 days after it was scheduled, passes) | ask ForeverMoney if it is theirs; if not, tell them now (the current admin can cancel it) and be ready to pause as `rail.alpha_vault` says |
-| `validator.take_changed` | warning | the validator's take (SubtensorModule `Delegates`) moved and held on the next reading, or its entry is gone (not open for delegation) | small: acknowledge. High or gone: move validators (below) |
-| `validator.take_high` | critical | the take above `validatorTakeMaxBps` (9%) on two readings: it keeps that share of the vault's root dividends | move validators: owner `setStakeHotkey(<new hotkey>)`, claim the old hotkey's rewards (`pnpm ops claim`), owner `removeHotkey(<old hotkey>, false)` (moves its stake onto the new one); check the price after |
+| `validator.take_changed` | warning | the validator's take (SubtensorModule `Delegates`) moved and held on the next reading, or its entry is gone: `Delegates` is a ValueQuery, so no entry reads as the chain's default take, 11,796 of 65,535 (18%: the entry's default in the runtime metadata), and `validator.take_high` fires too | small: acknowledge. High or gone: move validators (below) |
+| `validator.take_high` | critical | the take (no entry: the default 18%) above `validatorTakeMaxBps` (9%) on two readings: it keeps that share of the vault's root dividends | move validators: owner `setStakeHotkey(<new hotkey>)`, claim the old hotkey's rewards (`pnpm ops claim`), owner `removeHotkey(<old hotkey>, false)` (moves its stake onto the new one); check the price after |
 | `validator.root_stake_drop` | warning | the root stake on the validator's hotkey (everyone's, `TotalHotkeyAlpha(hotkey, 0)`) more than 25% below its high of the last 24 hours, on two readings: nominators leaving. 1,021,436.95 TAO on 2026-10-31 | look the hotkey up on taostats; if the validator is winding down, move validators |
 | `validator.root_uid_lost` | critical | the hotkey has no root uid (`Uids(0, hotkey)`) on two readings, after one was read: it was deregistered from root and the vault's stake on it earns no root dividends. uid 1 on 2026-10-31 | move validators (the stake stays the vault's) |
 | `ccip.rate_limited` | warning | a bucket of Cascade's lane (either pool, either direction) under `ccipBucketMinWei` (10 TAO) for more than `ccipRateLimitedS` (10 minutes): a batch or payout bigger than what is left waits for it to refill (0.6 TAO a second, 5,000 TAO at most, both read live) | usually someone bridged a lot at once and it clears; if it stays empty, check the pool on ccip.chain.link and ask ForeverMoney; keep batches under the bucket's capacity |
-| `root.unlock_interval` | critical | SubtensorModule's `RootStakeUnlockInterval` is set (above 0, unset on 2026-10-31) on two readings: root stake must then sit that many blocks after its last add, remove or claim before it can leave root, and anyone can restart that clock on the vault's coldkey with a `transfer_stake` gift, holding off the vault's unstakes and the payouts that need them | payouts revert and wait, nothing is lost; watch `payout.overdue`, keep enough unstaked TAO in the vault for the payouts due, raise it with the Bittensor team if payouts stall |
+| `root.unlock_interval` | critical | SubtensorModule's `RootStakeUnlockInterval` is set (above 0, unset on 2026-10-31) on two readings: root stake must then sit that many blocks after its last add, remove or claim before it can leave root, and anyone can restart that clock on the vault's coldkey with a `transfer_stake` gift, holding off the vault's unstakes and the payouts that need them | payouts revert and wait, nothing is lost; watch `payout.overdue`, keep enough unstaked TAO in the vault for the payouts due, raise it with the Bittensor team if payouts stall. There is no redeem-only pause: if they stall for long, guardian `pause()` the front door stops deposits, redeem requests and closes alike |
 | `oracle.cardinality` | warning | a pool the TWAP oracle reads keeps fewer than `oracleMinCardinality` (901) observations on two readings: its 30-minute window of 2-second blocks doesn't fit, so a busy half hour makes `usdcValue` revert. TAO/WETH kept 600 on 2026-10-31, growing to 2,000 (its `cardinalityNext`) as swaps come: this warns until then | if it is growing to 901 or more by itself, wait; else anyone can call `increaseObservationCardinalityNext(2000)` on the pool |
-| `oracle.reverted` | critical | the front door's oracle's `usdcValue` reverts on two readings: the keeper can't price a sale, so USDC deliveries stop (claims of TAO on Base still work). It replaces `twap.divergence`'s revert warning | see `oracle.cardinality`; it clears when the window is covered again; if it lasts, tell users deliveries are paused |
-| `payout.fee_ceiling` | warning | the primary bridge's fee for a full payout chunk (100 entries, the costliest) above `payoutFeeCeilingPct` (70%) of the vault's `maxFeeAbs` on two readings; once the fee passes it, chunks worth less than fee / `maxFeeBps` are refused (`FeeTooHigh`). 0.0013 TAO against 0.005 (26%) on 2026-10-31 | owner `setFeeLimits(bps, abs)` (at most 0.1 TAO) before the fee reaches it |
+| `oracle.reverted` | critical | the front door's oracle's `usdcValue` reverts (or answers something that doesn't decode: the reading counts both) on two readings: the keeper can't price a sale, so USDC deliveries stop (claims of TAO on Base still work). It replaces `twap.divergence`'s revert warning | see `oracle.cardinality`; it clears when the window is covered again; if it lasts, tell users deliveries are paused |
+| `payout.fee_ceiling` | warning | the primary bridge's fee for a full payout chunk (100 entries, worth the most a chunk carries: the costliest) above `payoutFeeCeilingPct` (70%) of the vault's `maxFeeAbs` on two readings; once the fee passes it, chunks worth less than fee / `maxFeeBps` are refused (`FeeTooHigh`). 0.0013 TAO against 0.005 (26%) on 2026-10-31 | owner `setFeeLimits(bps, abs)` (at most 0.1 TAO) before the fee reaches it |
 | `keeper.low_tao` | warning | (changed) the keeper's TAO below a round of actions (`keeperMinTaoWei`, 0.01) **plus a claim's gas up front**: (`claimGasRequired` + `claimGasMargin`, the keeper's 2M) × the base fee, 0.285 TAO at launch, so 0.295 in all. Bittensor takes a transaction's whole gas limit up front, so below this the keeper can't claim at all. The launch keeper held 0.06 TAO on 2026-10-31: this warns from the first tick | top the keeper up on Bittensor above the amount the email names |
 
 `fmtao.unbacked` stays (Base's FM-TAO supply against the whole lock), with its blind spot: the lock also backs FM-TAO
 on Robinhood, which it can't read, so the lock can fall well short of every lane before Base's supply crosses it.
 `fmtao.backing_true` watches the lock against wTAO's supply instead. Every number above is in `src/thresholds.ts`;
 each rule can be switched off in `THRESHOLDS` (`rules.off`).
+
+**Switching on `fmtao.backing_true`'s hold.** `backing(wTAO)` is ForeverMoney's own view and its normal range isn't
+known yet (100.05% on 2026-10-31, a 0.05% cushion over the 0.1% tolerance), so the alert ships without its hold
+(`"BACKING_HOLD": "false"` in both environments). Each hour row keeps the ratio's lowest and highest, in parts per
+million (`backingPpmLow`, `backingPpmHigh`). After at least 7 days of them:
+
+```sh
+pnpm --dir indexer wrangler d1 execute cascade-indexer-<env> --remote --env <env> --command \
+  "SELECT MIN(json_extract(json, '$.backingPpmLow')) AS low, MAX(json_extract(json, '$.backingPpmHigh')) AS high, COUNT(*) AS hours FROM hours WHERE hour >= unixepoch() - 7 * 86400"
+```
+
+The observed deviation is `(high - low) / 100` basis points. Set `backingToleranceBps` in `THRESHOLDS` to
+`max(10, 3 × that deviation)` (rounded up), set `"BACKING_HOLD": "true"` in that environment's vars, and redeploy.
 
 ### The logs cross-check
 

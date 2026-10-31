@@ -138,7 +138,9 @@ for display only (`units.ts`).
   and redeems, in exactly the form the scan store saves) instead of reading every 1,000-block window
   since the deploy block from the rate-limited archive node. **Nothing from the seed is ever shown as a
   number or a definite step until the chain has confirmed it** (`seed.ts`, `live.ts`, `facts.ts`): both
-  pages are decoded as strictly as saved history and refused when padded (sizes, counts); the seed's
+  pages are decoded as strictly as saved history and refused when padded or impossible (a shape no chain
+  can have distrusts the indexer; an honest history merely too big to check here is read from the chain
+  with no blame); the seed's
   last 400 blocks must hold exactly what the chain's logs hold there, and a random sample of its events
   must each be in their receipt at their block, before any of it is merged (through the same merge
   saved history goes through, every event unconfirmed and marked as the indexer's). A trail then uses a
@@ -147,12 +149,17 @@ for display only (`units.ts`).
   earlier stake (read then, a few windows at most), payout chunks only once each receipt shows them and
   they account for every entry the delivery made, and an amount only once its receipt gives it; until
   then the step says "checking…", and "Available to unstake" says "checking…" while whether an unstake
-  arrived rests on seeded blocks the browser hasn't read. "Earned so far" shows no figure until the
-  browser has read every seeded block itself in the background (`checkSeededHistory`: every vault log,
-  one window every 1.2 s, resumable across visits) and found exactly the seed's events; a year of a
-  deployment's blocks takes under an hour of an open tab, the launch's first days seconds. A definite
-  contradiction (a receipt that shows otherwise, an event the chain shows that the seed lacks) starts
-  the scan over from the deploy block and leaves the indexer alone for a day in that browser; a history
+  arrived rests on seeded blocks the browser hasn't read (not for the batch before the open one when it
+  closed after the seed's last block: its delivery can't be in them). "Earned so far" shows no figure
+  until the browser has read every seeded block itself in the background (`checkSeededHistory`: every
+  vault log, one window every 1.2 s, started by any page that reads the history or what can be unstaked)
+  and found exactly the seed's events; a year of a deployment's blocks takes under an hour of an open
+  tab, the launch's first days seconds. Its progress is saved inside each half it checked, in the same
+  write as that half's events, so it resumes across visits and never vouches for a half another account
+  or tab wrote; meanwhile Activity says older history is being checked, and the Stake page suggests no
+  claim by hand for an unstake whose delivery may be under way (claiming as TAO stays available). A
+  definite contradiction (a receipt that shows otherwise, an event the chain shows that the seed lacks)
+  starts the scan over from the deploy block and leaves the indexer alone for a day in that browser; a history
   the seed's form can't describe (a direct deposit on Bittensor, a reversed redeem, the reward cut), a
   balance that doesn't add up, or a node that won't confirm the seed's events after a few reads starts
   the scan over without blame. Any failure, refusal (a 429 included), timeout or stale seed falls back

@@ -126,6 +126,9 @@ const SAVE_MOVED_BLOCKS = 1_000n;
  * (its API allows 60 requests a minute per address; the scan reads on meanwhile, and once caught up has no
  * reason to ask). */
 export const SEED_RETRY_MS = 5 * 60_000;
+/** How long the checks of a seed against the chain may take before the scan reads the chain itself:
+ * the archive node can hang on a request for a minute or more, and a seed is only a shortcut. */
+export const SEED_VERIFY_TIMEOUT_MS = 10_000;
 /** How often one step of the background check of a seeded account's history runs (a few windows a step,
  * seed.ts CHECK_WINDOWS_PER_STEP): about once per poll of the history, well under the archive node's
  * requests per minute alongside the screens' own reads. */
@@ -311,10 +314,17 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       return;
     }
     let verdict: SeedVerdict;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      verdict = await deps.verifySeed(history, d, scan, account, halves, await head());
+      // a check that takes too long is no check: the scan reads on (what was asked keeps its answers for later)
+      const tooLong = new Promise<SeedVerdict>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, reason: `it couldn't be checked within ${SEED_VERIFY_TIMEOUT_MS / 1000} seconds`, distrust: false }), SEED_VERIFY_TIMEOUT_MS);
+      });
+      verdict = await Promise.race([deps.verifySeed(history, d, scan, account, halves, await head()), tooLong]);
     } catch {
       verdict = { ok: false, reason: "it couldn't be checked", distrust: false };
+    } finally {
+      clearTimeout(timer);
     }
     if (!verdict.ok) {
       if (verdict.distrust) distrust();

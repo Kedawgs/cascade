@@ -1,5 +1,5 @@
 import { encodeAbiParameters, encodeEventTopics, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FRONT_DOOR, VAULT } from "./abi";
 import type { Deployment } from "./config";
 import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredError } from "./live";
@@ -9,7 +9,7 @@ import { createScanStore, scanState } from "./scan-store";
 import { newScan, REREAD, scanVault } from "./facts";
 import { DISTRUST_MS, indexerDistrusted } from "./indexer";
 import { SEED_MIN_BLOCKS, vaultEvents, verifySeed } from "./seed";
-import { CHECK_EVERY_MS, SEED_RETRY_MS } from "./live";
+import { CHECK_EVERY_MS, SEED_RETRY_MS, SEED_VERIFY_TIMEOUT_MS } from "./live";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -1469,6 +1469,25 @@ describe("the indexer's seed", () => {
     const stake = list.find((r) => r.id === "d")?.steps.find((s) => s.key === "stake");
     expect(stake?.status).toBe("done");
     expect(stake?.txUrl).toContain(H(102));
+  });
+
+  it("reads the chain itself when the seed's checks don't answer in time: a hanging archive node costs ten seconds, not a minute", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const n = node();
+      // the checks never answer (the node hangs on the receipts)
+      const v = visit(n, halvesOf(CHAIN), { verifySeed: () => new Promise(() => {}) });
+      const read = v.data.getPositionHistory(ME);
+      await vi.advanceTimersByTimeAsync(SEED_VERIFY_TIMEOUT_MS);
+      const h = await read;
+      expect(h.rewardsEarnedTao).toBeCloseTo(0.02, 12);
+      expect(h.provisional).toBeUndefined();
+      expect(n.windows).toHaveLength(30);
+      expect(v.asked).toEqual([ME]);
+      expect(indexerDistrusted(v.storage, DI, 1_800_000_100_000)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("counts a seeded delivery for what can be unstaked only once its receipt confirms it", async () => {

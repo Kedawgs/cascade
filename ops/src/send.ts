@@ -200,8 +200,8 @@ const isLocal = (url: string) => ["127.0.0.1", "localhost"].includes(new URL(url
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const bin = (ctx: Ctx, name: string) => join(ctx.paths.foundryBin, process.platform === "win32" ? `${name}.exe` : name);
 
-/** Live gate, chain id and nonce: all before anything is estimated. */
-async function guard(ctx: Ctx, chain: ChainName, nonce: number): Promise<void> {
+/** The live gate and the chain id: before anything is estimated or signed. */
+async function gate(ctx: Ctx, chain: ChainName): Promise<void> {
   const local = Object.values(ctx.targets).every((t) => isLocal(t.rpcUrl));
   const remote = Object.values(ctx.targets).every((t) => !isLocal(t.rpcUrl));
   if (!ctx.live && !local) throw new SendRefused("not-live", "this command would reach the live networks: add --live to mean it");
@@ -210,6 +210,11 @@ async function guard(ctx: Ctx, chain: ChainName, nonce: number): Promise<void> {
   if (id !== ctx.targets[chain].chainId) {
     throw new SendRefused("chain-id", `${chainLabel(chain)}: the RPC reports chain id ${id}, expected ${ctx.targets[chain].chainId}`);
   }
+}
+
+/** Live gate, chain id and nonce: all before anything is estimated. */
+async function guard(ctx: Ctx, chain: ChainName, nonce: number): Promise<void> {
+  await gate(ctx, chain);
   const from = signerOf(ctx);
   const current = await nonceOf(ctx.rpc, chain, from.address);
   const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [from.address, "latest"])) as Hex);
@@ -439,6 +444,81 @@ export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   if (!hash) throw await noHash(ctx, req.chain, req.nonce, req.label, out);
   const r = await waitReceipt(ctx, req.chain, req.nonce, hash, req);
   return settle(req.chain, req.label, hash, r, r.status === "0x1" ? undefined : await revertReason(ctx, req.chain, tx, r.blockNumber));
+}
+
+/** What replaceCall did: the pending transaction replaced (the same call again, or a cancel in its place)
+ * with the replacement's receipt, or nothing (why). */
+export type Replacement = { replaced: false; reason: string } | ({ replaced: true; cancelled: boolean } & Sent);
+
+/** A replacement's fee over the pending transaction's: 12.5% (nodes take a replacement from 10% more). */
+const bumped = (fee: bigint) => (fee * 1125n + 999n) / 1000n;
+/** Gas for a plain transfer of nothing to oneself: the cancel. */
+const CANCEL_GAS = 21_000n;
+
+/** Replaces the signer's own transaction `pending` (the hash sendCall got for `req`, with no receipt
+ * since) at the same nonce with a higher fee: the same call, when it still passes its estimate, else a
+ * cancel (a transfer of nothing to the signer, which only frees the nonce), so a transaction stuck pending
+ * (its fee under the market's since) no longer holds the chain's sends for good. Safe by construction:
+ * two transactions at one nonce can't both be mined, so this never doubles a send. Nothing is sent
+ * unless `pending` is still in the pool, from the signer, at req.nonce, and nothing has been mined at
+ * that nonce (`replaced: false` otherwise: the transaction landed or dropped meanwhile, and the wallet's
+ * nonce says which); the live gate, the chain id and the keystore's account are checked as for any send.
+ * Fees: 12.5% over the pending transaction's (both the fee cap and the tip under EIP-1559; the gas price
+ * on a legacy chain), and never under the node's gas price now. Then the receipt is waited for as in
+ * sendCall: a timeout throws ReceiptTimeout with the replacement's hash and `req`, so it can be replaced
+ * in turn; a revert throws RevertedOnChain with its reason. */
+export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Promise<Replacement> {
+  const chain = req.chain;
+  await gate(ctx, chain);
+  const from = signerOf(ctx);
+  const tx = (await ctx.rpc.request(chain, "eth_getTransactionByHash", [pending])) as
+    | { from: Address; nonce: Hex; blockNumber: Hex | null; gasPrice?: Hex; maxFeePerGas?: Hex; maxPriorityFeePerGas?: Hex }
+    | null;
+  if (!tx) return { replaced: false, reason: `transaction ${pending} is not in the node's pool any more (dropped, or on another node): the wallet's nonce decides` };
+  if (tx.blockNumber !== null) return { replaced: false, reason: `transaction ${pending} was mined meanwhile (block ${hexToNumber(tx.blockNumber)})` };
+  if (tx.from.toLowerCase() !== from.address.toLowerCase() || hexToNumber(tx.nonce) !== req.nonce) {
+    return { replaced: false, reason: `transaction ${pending} is not ${from.name}'s at nonce ${req.nonce}: nothing to replace` };
+  }
+  const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [from.address, "latest"])) as Hex);
+  if (mined !== req.nonce) return { replaced: false, reason: `${chainLabel(chain)}: the wallet's mined nonce is ${mined}, so nonce ${req.nonce} is no longer pending` };
+  const market = await gasPriceOf(ctx.rpc, chain);
+  const t = ctx.targets[chain];
+  const max = (a: bigint, b: bigint) => (a > b ? a : b);
+  const fee = t.legacy
+    ? ["--legacy", "--gas-price", max(bumped(hexToBigInt(tx.gasPrice ?? "0x0")), market).toString()]
+    : [
+        "--gas-price",
+        max(bumped(hexToBigInt(tx.maxFeePerGas ?? tx.gasPrice ?? "0x0")), market).toString(),
+        "--priority-gas-price",
+        bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0")).toString(),
+      ];
+  // the same call, if it still passes; else a cancel, which costs 21,000 gas and frees the nonce
+  const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args } as never);
+  let cancelled = false;
+  let call: string[];
+  let limit: bigint;
+  try {
+    const gas = await estimate(ctx, chain, { from: from.address, to: req.to, data, value: numberToHex(req.value ?? 0n) }, req.label);
+    const fn = req.abi.find((i) => i.type === "function" && i.name === req.functionName) as AbiFunction;
+    call = [req.to, toFunctionSignature(fn), ...fn.inputs.map((p, i) => castArg(req.args[i], p)), ...(req.value ? ["--value", req.value.toString()] : [])];
+    limit = req.gasLimit ?? (gas * 125n + 99n) / 100n;
+  } catch (e) {
+    if (!(e instanceof SendRefused && e.reason === "estimate")) throw e;
+    ctx.log(`${e.message}: nonce ${req.nonce} is cancelled instead`);
+    cancelled = true;
+    call = [from.address, "--value", "0"];
+    limit = CANCEL_GAS;
+  }
+  const label = cancelled ? `cancel nonce ${req.nonce} (${req.label})` : `${req.label} (replacing ${pending})`;
+  ctx.log(`${chainLabel(chain)}: ${label} — nonce ${req.nonce}, fee ${fee.join(" ")}`);
+  const args = ["send", ...call, "--rpc-url", t.rpcUrl, "--keystore", from.keystore, "--password-file", from.passwordFile, "--gas-limit", limit.toString(), ...fee, "--nonce", String(req.nonce), "--async"];
+  await checkSigner(ctx);
+  const out = await ctx.runner.run(bin(ctx, "cast"), args, { cwd: ctx.paths.contractsDir });
+  const hash = out.code === 0 ? hashIn(out.stdout) : undefined;
+  if (!hash) throw await noHash(ctx, chain, req.nonce, label, out);
+  const r = await waitReceipt(ctx, chain, req.nonce, hash, req);
+  const reason = r.status === "0x1" || cancelled ? undefined : await revertReason(ctx, chain, { from: from.address, to: req.to, data, value: numberToHex(req.value ?? 0n) }, r.blockNumber);
+  return { replaced: true, cancelled, ...settle(chain, label, hash, r, reason) };
 }
 
 /** A plain value transfer with `cast send <to> --value`, through the same checks. */

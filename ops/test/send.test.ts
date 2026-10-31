@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { paths, targets, WALLET } from "../src/config.ts";
 import { buildPlan } from "../src/plan.ts";
 import { RpcError, type Rpc } from "../src/rpc.ts";
-import { castArg, type Ctx, ReceiptTimeout, redact, RevertedOnChain, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
+import { castArg, type Ctx, ReceiptTimeout, redact, replaceCall, RevertedOnChain, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
 import type { CallRequest, CreateRequest } from "../src/types.ts";
 import { revert } from "./fake-keeper.ts";
 
@@ -22,6 +22,9 @@ function fixture(
     receipt?: "none" | "reverted" | "throws";
     /** What an eth_call of the sent call at `block` answers (a reverted receipt's replay); unset: the node has no eth_call */
     replay?: (block: string) => unknown;
+    /** What eth_getTransactionByHash answers for a pending transaction of the wallet's (replaceCall): fields over the
+     * default (the wallet's, at `nonce`, unmined, 5 gwei fees), or null for none */
+    pendingTx?: null | Partial<{ from: Address; nonce: Hex; blockNumber: Hex | null; gasPrice: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }>;
     created?: Address;
     signer?: Address;
     castFails?: boolean;
@@ -72,6 +75,18 @@ function fixture(
           return codeReads++ < (over.codeAfter ?? 0) ? "0x" : "0x6080";
         case "eth_call":
           if (over.replay) return over.replay(params[1] as string);
+          break;
+        case "eth_getTransactionByHash":
+          if (over.pendingTx === null) return null;
+          return {
+            from: WALLET,
+            nonce: numberToHex(over.nonce ?? 0),
+            blockNumber: null,
+            gasPrice: numberToHex(5_000_000_000n),
+            maxFeePerGas: numberToHex(5_000_000_000n),
+            maxPriorityFeePerGas: numberToHex(1_000_000n),
+            ...over.pendingTx,
+          };
       }
       throw new Error(`unexpected ${method}`);
     },
@@ -354,6 +369,102 @@ describe("send", () => {
       ],
     } as const;
     expect(castArg([{ user: WALLET, shares: 5n, assets: 7n }], payouts)).toBe(`[(${WALLET},5,7)]`);
+  });
+});
+
+describe("replaceCall: the keeper's own pending transaction, sent again at the same nonce with a higher fee", () => {
+  const baseCall: CallRequest = {
+    chain: "base",
+    nonce: 0,
+    label: "close the open batch and send it to Bittensor",
+    to: plan.addresses.frontDoor,
+    abi: parseAbi(["function closeBatch() payable"]),
+    functionName: "closeBatch",
+    args: [],
+    value: 10n,
+  };
+  const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
+
+  it("sends the same call at the same nonce, legacy on Bittensor, with the gas price 12.5% over the pending transaction's (never under the market's)", async () => {
+    const f = fixture();
+    const r = await replaceCall(f.ctx, call, HASH);
+    expect(r).toMatchObject({ replaced: true, cancelled: false, hash: HASH, block: 16 });
+    expect(f.sends()).toHaveLength(1);
+    const args = f.sends()[0].args;
+    expect(args.slice(0, 3)).toEqual(["send", call.to, "stakeIdle()"]);
+    expect(args).toContain("--legacy");
+    expect(flag(args, "--nonce")).toBe("0");
+    // 5 gwei pending, 5 gwei market: 5.625 gwei
+    expect(flag(args, "--gas-price")).toBe("5625000000");
+    expect(args).not.toContain("--priority-gas-price");
+    // the estimate's 1.25×, as any send
+    expect(flag(args, "--gas-limit")).toBe(String((1_000_001n * 125n + 99n) / 100n));
+    expect(args.at(-1)).toBe("--async");
+    // it asked for the pending transaction, and the wallet's mined nonce, before anything
+    expect(f.calls.map((c) => c.method).slice(0, 3)).toEqual(["eth_chainId", "eth_getTransactionByHash", "eth_getTransactionCount"]);
+    expect(f.calls.find((c) => c.method === "eth_getTransactionByHash")?.params).toEqual([HASH]);
+    expect(f.logs.some((l) => l.includes("replacing") && l.includes("nonce 0"))).toBe(true);
+  });
+
+  it("on Base (EIP-1559) bumps both the fee cap and the tip by 12.5%, and keeps the call's value", async () => {
+    const f = fixture({ pendingTx: { maxFeePerGas: numberToHex(8_000_000_000n), maxPriorityFeePerGas: numberToHex(2_000_000n) } });
+    expect(await replaceCall(f.ctx, baseCall, HASH)).toMatchObject({ replaced: true, cancelled: false });
+    const args = f.sends()[0].args;
+    expect(args).not.toContain("--legacy");
+    expect(flag(args, "--gas-price")).toBe("9000000000");
+    expect(flag(args, "--priority-gas-price")).toBe("2250000");
+    expect(flag(args, "--value")).toBe("10");
+    expect(args.slice(0, 3)).toEqual(["send", baseCall.to, "closeBatch()"]);
+  });
+
+  it("takes the market's gas price when that is higher than the bump", async () => {
+    const f = fixture({ pendingTx: { gasPrice: numberToHex(1_000_000_000n) } });
+    await replaceCall(f.ctx, call, HASH);
+    expect(flag(f.sends()[0].args, "--gas-price")).toBe("5000000000");
+  });
+
+  it("when the call would fail now, cancels the nonce instead: a transfer of nothing to the wallet, 21,000 gas, and says so", async () => {
+    const f = fixture({ estimate: "custom" });
+    const r = await replaceCall(f.ctx, call, HASH);
+    expect(r).toMatchObject({ replaced: true, cancelled: true, hash: HASH });
+    const args = f.sends()[0].args;
+    expect(args.slice(0, 4)).toEqual(["send", WALLET, "--value", "0"]);
+    expect(flag(args, "--gas-limit")).toBe("21000");
+    expect(flag(args, "--nonce")).toBe("0");
+    expect(f.logs).toContainEqual("Bittensor: stake idle TAO would fail, nothing sent (NothingToStake()): nonce 0 is cancelled instead");
+  });
+
+  it("sends nothing when there is nothing of the wallet's to replace at that nonce, and says why", async () => {
+    const cases: [ReturnType<typeof fixture>, RegExp][] = [
+      [fixture({ pendingTx: null }), /not in the node's pool any more/],
+      [fixture({ pendingTx: { blockNumber: "0x10" } }), /was mined meanwhile \(block 16\)/],
+      [fixture({ pendingTx: { from: "0x1111111111111111111111111111111111111111" } }), /is not the test wallet's at nonce 0: nothing to replace/],
+      [fixture({ pendingTx: { nonce: "0x7" } }), /is not the test wallet's at nonce 0/],
+      [fixture({ latestNonce: 1 }), /the wallet's mined nonce is 1, so nonce 0 is no longer pending/],
+    ];
+    for (const [f, why] of cases) {
+      const r = await replaceCall(f.ctx, call, HASH);
+      expect(r).toMatchObject({ replaced: false, reason: expect.stringMatching(why) });
+      expect(f.sends()).toEqual([]);
+    }
+  });
+
+  it("goes through the live gate and the chain-id check, and the keystore's account", async () => {
+    expect(await refusal(replaceCall({ ...fixture().ctx, live: true }, call, HASH))).toBe("not-live");
+    expect(await refusal(replaceCall(fixture({ chainId: 1 }).ctx, call, HASH))).toBe("chain-id");
+    const wrong = fixture({ signer: "0x1111111111111111111111111111111111111111" });
+    expect(await refusal(replaceCall(wrong.ctx, call, HASH))).toBe("signer");
+    expect(wrong.sends()).toEqual([]);
+  });
+
+  it("a replacement with no receipt in its turn is a ReceiptTimeout with its hash and the call, so it can be replaced again", async () => {
+    const f = fixture({ receipt: "none" });
+    const e = (await replaceCall(f.ctx, call, HASH).catch((e: unknown) => e)) as ReceiptTimeout;
+    expect(e).toBeInstanceOf(ReceiptTimeout);
+    expect(e.hash).toBe(HASH);
+    expect(e.request).toBe(call);
+    // and one that reverts is a RevertedOnChain
+    await expect(replaceCall(fixture({ receipt: "reverted" }).ctx, call, HASH)).rejects.toBeInstanceOf(RevertedOnChain);
   });
 });
 

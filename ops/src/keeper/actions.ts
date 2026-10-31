@@ -2,7 +2,7 @@ import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, pa
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy, WALLET } from "../config.ts";
 import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
-import { ReceiptTimeout, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
+import { ReceiptTimeout, type Replacement, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom, explainDeliveryRevert } from "./delivery.ts";
 import { type Action, actionKey, type DueDelivery, decideNext, type State } from "./due.ts";
@@ -67,6 +67,10 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   /** A transaction's receipt (null while there is none): `run` looks up those that timed out. Optional:
    * without it, a transaction with no receipt is only logged. */
   receipt?(chain: ChainName, hash: Hex): Promise<{ reverted: boolean; logs: Sent["logs"] } | null>;
+  /** Replaces the keeper's own transaction `pending` (sent for `req`, with no receipt since) at the same
+   * nonce with a higher fee (send.ts replaceCall): `run` does this to one stuck pending for
+   * REPLACE_AFTER_MS. Optional: without it, a stuck transaction is only reported. */
+  replace?(req: CallRequest, pending: Hex): Promise<Replacement>;
   log(line: string): void;
 }
 
@@ -473,8 +477,16 @@ const hours = (ms: number) => `${Number((ms / 3600_000).toFixed(1))} hour${ms ==
 const at = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 /** Rounds a transaction with no receipt is looked up for before it is reported as probably dropped. */
 const LATE_RECEIPT_ROUNDS = 60;
+/** How long the keeper's own transaction stays pending with no receipt before it is replaced at the
+ * same nonce with a higher fee (deps.replace): the receipt wait itself is 5 minutes, and a slow block is
+ * not a stuck transaction. A replacement that is stuck in turn is replaced after twice as long, and so
+ * on, MAX_REPLACEMENTS times; each is said loudly (REPLACING). Until then the wallet's guard holds the
+ * chain's sends, as before. */
+export const REPLACE_AFTER_MS = 15 * 60_000;
+export const MAX_REPLACEMENTS = 3;
 
-/** A transaction sent with no receipt yet: looked up each round until one comes. */
+/** A transaction sent with no receipt yet: looked up each round until one comes, and replaced at its
+ * nonce once it has been pending REPLACE_AFTER_MS (when the deps can, and the call it carries is known). */
 interface Unreceipted {
   hash: Hex;
   chain: ChainName;
@@ -482,6 +494,12 @@ interface Unreceipted {
   /** Where its bridge message, if it sent one, is read from */
   message?: { adapter: Hex; direction: Message["direction"] };
   rounds: number;
+  /** The call it carries, for a replacement; unset for one the keeper can't rebuild */
+  request?: CallRequest;
+  /** When it was sent (by the clock), how many replacements preceded it, and when it is next replaced */
+  since: number;
+  replacements: number;
+  replaceAt: number;
 }
 
 export interface RunOptions {
@@ -530,7 +548,10 @@ export interface RunOptions {
  * starves the ones behind it. Nothing is ever
  * retried within the round that failed: a transaction with no receipt may still be pending, and the next
  * round's send guard refuses every send until it is mined or dropped; its receipt is looked up each
- * round, and a bridge message it sent is recorded once it lands. A close, roll, payout or stake that
+ * round, and a bridge message it sent is recorded once it lands. One still pending REPLACE_AFTER_MS after
+ * it was sent is replaced at the same nonce with a higher fee (the same call if it still passes, else a
+ * cancel), said loudly (REPLACING), at most MAX_REPLACEMENTS times with doubling waits: two transactions
+ * at one nonce can't both be mined, so that never doubles a send. A close, roll, payout or stake that
  * reverts on chain is re-read first: a lost race is a skip; when that read fails, the next round's read
  * decides. Every line is logged with any URL's secrets stripped (scrubSecrets). */
 export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: RunOptions): Promise<LoopEnd> {
@@ -634,7 +655,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
   }
 
   /** A transaction sent with no receipt: its receipt is looked up in later rounds. */
-  function watch(a: Action, e: ReceiptTimeout) {
+  function watch(a: Action, e: ReceiptTimeout, replacements = 0) {
     if (!e.hash) return;
     const message =
       a.kind === "close" || a.kind === "roll"
@@ -642,11 +663,59 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
         : a.kind === "payouts"
           ? { adapter: rec.plan.addresses.bitAdapter, direction: "Bittensor → Base" as const }
           : undefined;
-    unreceipted.push({ hash: e.hash, chain: e.chain, what: doing(a), message, rounds: 0 });
+    const now = clock();
+    unreceipted.push({ hash: e.hash, chain: e.chain, what: doing(a), message, rounds: 0, request: e.request, since: now, replacements, replaceAt: now + REPLACE_AFTER_MS * 2 ** replacements });
+  }
+
+  /** Reports a transaction of the keeper's that went through late (a late receipt, a replacement), and
+   * records its bridge message. */
+  function landed(u: Unreceipted, hash: Hex, logs: Sent["logs"], how: string) {
+    const id = u.message ? messageIdFrom(logs, u.message.adapter) : undefined;
+    if (id && u.message) recordSafely(deps, { id, direction: u.message.direction, hash });
+    log(`${how}: ${u.what} went through (transaction ${hash}${id ? `, bridge message ${id}` : ""})`);
+  }
+
+  /** Replaces `u`, pending for REPLACE_AFTER_MS with no receipt, at its nonce with a higher fee (the same
+   * call if it still passes, else a cancel): said loudly. A replacement that lands ends the watch on `u`
+   * (nothing else can be mined at that nonce); one with no receipt in its turn is watched, and replaced
+   * again after twice as long; one the node refuses (the original landed meanwhile) leaves `u` watched. */
+  async function replacePending(u: Unreceipted, still: Unreceipted[]) {
+    const req = u.request as CallRequest;
+    log(
+      `REPLACING transaction ${u.hash} (${u.what}, nonce ${req.nonce}): no receipt ${inWords(clock() - u.since)} after it was sent, so it is sent again at the same nonce with a higher fee (the same call if it still passes, else a cancel that only frees the nonce)${u.replacements ? `; replacement ${u.replacements + 1} of ${MAX_REPLACEMENTS}` : ""}`,
+    );
+    let r: Replacement;
+    try {
+      r = await (deps.replace as NonNullable<KeeperDeps["replace"]>)(req, u.hash);
+    } catch (e) {
+      if (e instanceof ReceiptTimeout && e.hash) {
+        log(`Replacement sent, no receipt yet: transaction ${e.hash} (${u.what}, nonce ${req.nonce}) is watched in its turn`);
+        const next: Unreceipted = { ...u, hash: e.hash, rounds: 0, replacements: u.replacements + 1, replaceAt: clock() + REPLACE_AFTER_MS * 2 ** (u.replacements + 1) };
+        still.push(next);
+        return;
+      }
+      if (e instanceof RevertedOnChain) {
+        log(`Replacement reverted on chain: ${u.what} (transaction ${e.hash}${e.reason ? `, ${e.reason}` : ""}); nonce ${req.nonce} is free, and the next round decides again`);
+        return;
+      }
+      log(`Replacement not sent (${oneLine((e as Error).message)}); transaction ${u.hash} stays watched, tried again in ${inWords(REPLACE_AFTER_MS)}`);
+      u.replaceAt = clock() + REPLACE_AFTER_MS;
+      still.push(u);
+      return;
+    }
+    if (!r.replaced) {
+      log(`Not replaced: ${r.reason}; transaction ${u.hash} stays watched`);
+      u.replaceAt = clock() + REPLACE_AFTER_MS;
+      still.push(u);
+      return;
+    }
+    if (r.cancelled) log(`Replaced: ${u.what} was cancelled at nonce ${req.nonce} (transaction ${r.hash}); the next round decides again`);
+    else landed(u, r.hash, r.logs, "Replaced");
   }
 
   /** Looks up each transaction still with no receipt: one that landed is reported (its bridge message
-   * recorded); one with none after LATE_RECEIPT_ROUNDS is reported as probably dropped. */
+   * recorded); one pending REPLACE_AFTER_MS whose call is known is replaced (replacePending); one with
+   * none after LATE_RECEIPT_ROUNDS is reported as probably dropped. */
   async function lookUpReceipts() {
     if (!deps.receipt) {
       unreceipted = [];
@@ -662,7 +731,8 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
         continue;
       }
       if (!r) {
-        if (++u.rounds < LATE_RECEIPT_ROUNDS) still.push(u);
+        if (deps.replace && u.request && u.replacements < MAX_REPLACEMENTS && clock() >= u.replaceAt) await replacePending(u, still);
+        else if (++u.rounds < LATE_RECEIPT_ROUNDS) still.push(u);
         else {
           log(
             `NO RECEIPT after ${u.rounds} rounds for transaction ${u.hash} (${u.what}): it was probably dropped or replaced. Check it on the chain's explorer${u.message ? "; if it went through, find its bridge message with pnpm ops status" : ""}`,
@@ -674,9 +744,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
         log(`Late receipt: ${u.what} reverted on chain (transaction ${u.hash})`);
         continue;
       }
-      const id = u.message ? messageIdFrom(r.logs, u.message.adapter) : undefined;
-      if (id && u.message) recordSafely(deps, { id, direction: u.message.direction, hash: u.hash });
-      log(`Late receipt: ${u.what} went through (transaction ${u.hash}${id ? `, bridge message ${id}` : ""})`);
+      landed(u, u.hash, r.logs, "Late receipt");
     }
     unreceipted = still;
   }

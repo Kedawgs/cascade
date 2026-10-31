@@ -269,9 +269,10 @@ describe("verifySeed", () => {
     expect(sampled.length).toBeGreaterThanOrEqual(SEED_SAMPLE / 2);
     expect(sampled.length).toBeLessThanOrEqual(SEED_SAMPLE);
     expect(new Set(sampled).size).toBe(sampled.length);
-    // across runs the picks vary (a seed can't arrange to be sampled where it is honest)
+    // across runs the picks vary (a seed can't arrange to be sampled where it is honest); 8 picks of these 9
+    // events leave all 6 receipts asked 2 times in 3, so it takes 30 runs to all but rule out every one alike
     const runs = new Set<string>();
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 30; i++) {
       const m = node();
       await verify(m, h);
       runs.add(m.asked.map((a) => a.hash).sort().join());

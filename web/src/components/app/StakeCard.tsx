@@ -6,7 +6,7 @@ import { offersClaim } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatTao, formatUsd } from "@/lib/format";
-import { CLAIM_ENDS_DELIVERY, claimEndsDelivery, offerClaim, walletTaoNote } from "@/lib/stake-form";
+import { CLAIM_CHECKING, CLAIM_ENDS_DELIVERY, claimChecking, claimEndsDelivery, offerClaim, walletTaoNote } from "@/lib/stake-form";
 import { type SentNotice, walletTaoNotice } from "@/lib/sent";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
@@ -79,22 +79,38 @@ function WalletTao({ account, onSent }: { account: string; onSent: (n: SentNotic
 
 /** Money waiting on Base to be claimed (an unstake's payout, or a deposit the vault sent back), with
  * one button that claims it all as USDC. Hidden when there is none, and on v3 while an unstake's USDC
- * is being delivered automatically and none offers the claim by hand (see offerClaim). */
-function ClaimReady({ account }: { account: string }) {
+ * is being delivered automatically and none offers the claim by hand (see offerClaim). While an unstake
+ * that may be delivering it is still being checked against the chain, no claim is suggested: the amount
+ * shows, with why, and only "Claim as TAO" (claimChecking). */
+export function ClaimReady({ account }: { account: string }) {
   const v3 = useIsV3();
   const balances = useBalances(account);
   const price = useTaoPrice();
   const withdrawals = useWithdrawals(account);
   const flows = useFlows(account);
   const claimable = balances.data?.claimable ?? 0n;
-  if (!offerClaim(claimable, v3, withdrawals.data, withdrawals.isError)) return null;
+  const checking = claimChecking(claimable, v3, withdrawals.data);
+  if (!checking && !offerClaim(claimable, v3, withdrawals.data, withdrawals.isError)) return null;
   const ready = (withdrawals.data ?? []).filter(offersClaim).map((w) => w.id);
+  const amount = <b>{price !== undefined ? `About ${formatUsd(toDisplay(claimable, 18) * price)}` : `${formatTao(toDisplay(claimable, 18), 6)} TAO`}</b>;
+  if (checking) {
+    return (
+      <div className={styles.walletTao}>
+        <p>{amount} is back on Base.</p>
+        <p className={styles.walletTaoNote}>{CLAIM_CHECKING}</p>
+        {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.walletTaoNote}>{CLAIM_ENDS_DELIVERY}</p>}
+        <div className={styles.walletTaoActions}>
+          <button type="button" className="pill pill-ghost" disabled={flows.busy !== null} onClick={() => void flows.claim(ready, true).catch(() => undefined)}>
+            {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as TAO"}
+          </button>
+        </div>
+        {flows.error && <p className={styles.walletTaoError}>{flows.error}</p>}
+      </div>
+    );
+  }
   return (
     <div className={styles.walletTao}>
-      <p>
-        <b>{price !== undefined ? `About ${formatUsd(toDisplay(claimable, 18) * price)}` : `${formatTao(toDisplay(claimable, 18), 6)} TAO`}</b> is
-        back on Base and ready to claim.
-      </p>
+      <p>{amount} is back on Base and ready to claim.</p>
       {claimEndsDelivery(v3, withdrawals.data) && <p className={styles.walletTaoNote}>{CLAIM_ENDS_DELIVERY}</p>}
       <div className={styles.walletTaoActions}>
         {/* the claim names the unstakes it pays, so it waits until they have loaded; if they can't be read

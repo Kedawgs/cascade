@@ -243,10 +243,16 @@ export function deliveryNote(floorUsd: number | null): string {
   return `USDC arrives in your wallet automatically, at least ${formatUsd(floorUsd)} (today's price less ${DELIVERY_TOLERANCE_BPS / 100}%). If the price falls further, you can claim by hand.`;
 }
 
+/** v3: an unstake whose USDC is to be delivered automatically, with a step still being checked against
+ * the chain ("checking": its arrival or its return rests on the history indexer's word): it may be
+ * delivering what waits on Base right now, so the claim by hand isn't suggested meanwhile. */
+const mayBeDelivering = (r: WithdrawalRecord): boolean => r.awaitingDelivery === true && r.steps.some((s) => s.status === "checking");
+
 /** Whether the Stake page offers "Claim as USDC" for what is waiting on Base: whenever something is,
  * except on v3 while an unstake's USDC is being delivered automatically (delivery sells everything
- * waiting at once) and no unstake offers the claim by hand. While the unstakes load that isn't known,
- * so v3 waits; if they can't be read it offers the claim, which needs only Base. */
+ * waiting at once), or may be while its steps are still being checked (claimChecking), and no unstake
+ * offers the claim by hand. While the unstakes load that isn't known, so v3 waits; if they can't be read
+ * it offers the claim, which needs only Base. */
 export function offerClaim(
   claimable: bigint,
   v3: boolean,
@@ -257,8 +263,20 @@ export function offerClaim(
   if (!v3) return true;
   if (!withdrawals) return unreadable;
   if (withdrawals.some(offersClaim)) return true;
-  return !withdrawals.some(isDelivering);
+  return !withdrawals.some((w) => isDelivering(w) || mayBeDelivering(w));
 }
+
+/** v3: something waits on Base while an unstake that may be delivering it is still being checked (and
+ * none is known to be delivering, nor offers the claim): the Stake page suggests no claim, but claiming
+ * it as TAO stays within reach, as claiming always is. */
+export function claimChecking(claimable: bigint, v3: boolean, withdrawals: readonly WithdrawalRecord[] | undefined): boolean {
+  if (claimable === 0n || !v3 || !withdrawals) return false;
+  if (withdrawals.some(offersClaim) || withdrawals.some(isDelivering)) return false;
+  return withdrawals.some(mayBeDelivering);
+}
+
+export const CLAIM_CHECKING =
+  "One of your unstakes is still being checked against the chain, and this may already be on its way to your wallet as USDC. You can still claim it as TAO now.";
 
 /** v3: a claim by hand clears the account's delivery preference (CascadeFrontDoor.claim), so the claim
  * banner says so while any unstake is still on its way with automatic delivery ahead of it. */

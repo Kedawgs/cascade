@@ -13,6 +13,7 @@ import {
   maxStakeInput,
   stakeMaxInput,
   offerClaim,
+  claimChecking,
   stakeAgainHref,
   stakeAmountParam,
   stakeAmountText,
@@ -637,5 +638,48 @@ describe("the unstake form after an unstake goes through", () => {
     expect(UNSTAKE_FORM_CLEARED).toEqual({ raw: "", all: false, pinned: null });
     expect(unstakeFormRequest(UNSTAKE_FORM_CLEARED, "USDC", refreshed, price)).toBeNull();
     expect(unstakeFormRequest(UNSTAKE_FORM_CLEARED, "TAO", 0n, price)).toBeNull();
+  });
+});
+
+describe("the claim banner while an unstake that may be delivering is still being checked (review 2)", () => {
+  const waiting = 10n ** 16n;
+  const checkingUnstake = (over: Partial<WithdrawalRecord> = {}): WithdrawalRecord => ({
+    id: "w9",
+    createdAt: new Date(0),
+    status: "in_progress",
+    steps: [
+      { key: "request", title: "Request your unstake", status: "done" },
+      { key: "unstake", title: "Unstake on Bittensor", status: "done" },
+      { key: "return", title: "Return to Base", status: "checking" },
+      { key: "claim", title: "USDC to your wallet", status: "pending" },
+    ],
+    shares: 1n,
+    taoAmount: 0.08,
+    claimable: waiting,
+    awaitingDelivery: true,
+    ...over,
+  });
+
+  it("suggests no claim by hand, and keeps claiming as TAO within reach", () => {
+    expect(offerClaim(waiting, true, [checkingUnstake()])).toBe(false);
+    expect(claimChecking(waiting, true, [checkingUnstake()])).toBe(true);
+  });
+
+  it("offers the claim as before once the step is known, or when no automatic delivery is ahead of it", () => {
+    const known = checkingUnstake({ steps: checkingUnstake().steps.map((s) => (s.key === "return" ? { ...s, status: "active" as const } : s)) });
+    expect(offerClaim(waiting, true, [known])).toBe(true);
+    expect(claimChecking(waiting, true, [known])).toBe(false);
+    expect(offerClaim(waiting, true, [checkingUnstake({ awaitingDelivery: undefined })])).toBe(true);
+    expect(claimChecking(waiting, true, [checkingUnstake({ awaitingDelivery: undefined })])).toBe(false);
+  });
+
+  it("leaves v2, an empty balance, unloaded unstakes, and an unstake that offers the claim as they were", () => {
+    expect(offerClaim(waiting, false, [checkingUnstake()])).toBe(true);
+    expect(claimChecking(waiting, false, [checkingUnstake()])).toBe(false);
+    expect(claimChecking(0n, true, [checkingUnstake()])).toBe(false);
+    expect(claimChecking(waiting, true, undefined)).toBe(false);
+    const ready: WithdrawalRecord = { ...checkingUnstake({ id: "w1", status: "ready", awaitingDelivery: undefined }) };
+    expect(offerClaim(waiting, true, [ready, checkingUnstake()])).toBe(true);
+    expect(claimChecking(waiting, true, [ready, checkingUnstake()])).toBe(false);
   });
 });

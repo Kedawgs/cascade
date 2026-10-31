@@ -48,6 +48,15 @@ describe("how often Activity's lists are read again", () => {
     expect(listPollMs(undefined, depositMoving)).toBe(30_000);
   });
 
+  it("every 30 s while each moving record waits only on the background check of the indexer's history ('checking'): reading sooner moves it no sooner (review 2)", () => {
+    const checkingStep = { key: "bridge" as const, title: "Cross to Bittensor", status: "checking" as const };
+    expect(listPollMs([dep({ steps: [checkingStep] })], depositMoving)).toBe(30_000);
+    expect(listPollMs([dep({ steps: [checkingStep] }), crossing], depositMoving)).toBe(10_000);
+    const returning = { key: "return" as const, title: "Return to Base", status: "checking" as const };
+    expect(listPollMs([uns({ steps: [returning] })], withdrawalMoving)).toBe(30_000);
+    expect(listPollMs([uns({ status: "ready", steps: [returning] })], withdrawalMoving)).toBe(10_000);
+  });
+
   it("an unstake: 30 s while its request waits in the open batch, 10 s once it has left, or is back on Base to be paid", () => {
     expect(listPollMs([uns({ cancellableShares: 1n })], withdrawalMoving)).toBe(30_000);
     expect(listPollMs([uns({ cancellableShares: 1n }), uns({})], withdrawalMoving)).toBe(10_000);

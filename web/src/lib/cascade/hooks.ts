@@ -192,8 +192,11 @@ export function useProof(live = false) {
 }
 
 const moving = (s: string) => s === "in_progress" || s === "needs_you";
-export const depositMoving = (d: DepositRecord): boolean => moving(d.status);
-export const withdrawalMoving = (w: WithdrawalRecord): boolean => moving(w.status) || w.status === "ready";
+/** A record whose next step waits on the background check of the history indexer's seed ("checking"):
+ * reading the list every 10 s moves it no sooner, and costs Bittensor reads each time. */
+const checking = (r: { steps: { status: string }[] }) => r.steps.some((s) => s.status === "checking");
+export const depositMoving = (d: DepositRecord): boolean => moving(d.status) && !checking(d);
+export const withdrawalMoving = (w: WithdrawalRecord): boolean => (moving(w.status) && !checking(w)) || w.status === "ready";
 
 /** Mined into its batch, which is still open on Base: it can still be taken back out (trail.ts). */
 const inOpenBatch = (r: { cancellableWei?: bigint; cancellableShares?: bigint }) => r.cancellableWei !== undefined || r.cancellableShares !== undefined;

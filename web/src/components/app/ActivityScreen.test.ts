@@ -8,7 +8,7 @@ import { createOpLog, type DepositOp, type Operation, type WithdrawalOp } from "
 import { pendingEntry } from "@/lib/cascade/pending";
 import type { DepositRecord, WithdrawalRecord } from "@/lib/cascade/records";
 import { launchData, plainText, renderWithCache } from "../test-render";
-import { DepositDetail, Lists, PendingReceipt } from "./ActivityScreen";
+import { DepositDetail, Lists, OLDER_CHECKING, PendingReceipt } from "./ActivityScreen";
 
 const ME = "0x1234567890abcdef1234567890abcdef12345678";
 const at = new Date("2026-10-28T12:00:00Z");
@@ -68,6 +68,20 @@ describe("Activity lists", () => {
 
   it("says so when there are no unstakes yet", () => {
     expect(plainText(html("unstakes", []))).toContain("No unstakes yet.");
+  });
+
+  it("says under the deposits that older history is still being checked, while the indexer's seed isn't the browser's own reading yet (review 2)", () => {
+    const withHistory = (provisional: boolean) =>
+      plainText(
+        renderWithCache(createElement(Lists, { account: ME, tab: "deposits" }), [
+          { key: cascadeKeys.deposits(ME), data: [deposit] },
+          { key: cascadeKeys.withdrawals(ME), data: [] },
+          { key: cascadeKeys.history(ME), data: { pendingTao: 0, avgEntryPriceUsd: null, ...(provisional ? { provisional: true } : {}) } },
+        ]),
+      );
+    expect(withHistory(true)).toContain(OLDER_CHECKING);
+    expect(withHistory(false)).not.toContain(OLDER_CHECKING);
+    expect(plainText(html("deposits", []))).not.toContain(OLDER_CHECKING);
   });
 
   it("shows the open tab as soon as its own list is read, without waiting for the other", () => {

@@ -12,6 +12,7 @@ import {
   usePendingEntries,
   usePendingEntry,
   usePosition,
+  usePositionHistory,
   useWithdrawal,
   useWithdrawals,
 } from "@/lib/cascade/hooks";
@@ -339,6 +340,9 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
   );
 }
 
+/** Under the deposits while the history indexer's older history is still being checked against the chain. */
+export const OLDER_CHECKING = "Checking older history against the chain…";
+
 const TABS: { key: ActivityTab; label: string; href: string }[] = [
   { key: "deposits", label: "Deposits", href: "/activity" },
   { key: "unstakes", label: "Unstakes", href: "/activity?tab=unstakes" },
@@ -352,6 +356,10 @@ const TABS: { key: ActivityTab; label: string; href: string }[] = [
 export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   const deposits = useDeposits(account);
   const withdrawals = useWithdrawals(account);
+  // older history from the indexer the browser hasn't read itself yet: a deposit made from another
+  // browser may still be missing from the list, so the list says so
+  const history = usePositionHistory(account);
+  const olderChecking = tab === "deposits" && history.data?.provisional === true;
   const pending = {
     deposits: usePendingEntries(account, "deposit", deposits.data),
     unstakes: usePendingEntries(account, "withdrawal", withdrawals.data),
@@ -414,6 +422,7 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
         <section className={styles.section} aria-label={tab === "deposits" ? "Your deposits" : "Your unstakes"}>
           {rows}
           {!list && <Loading inline label="Reading the rest from Base and Bittensor…" />}
+          {list && olderChecking && <p className="small">{OLDER_CHECKING}</p>}
         </section>
       )}
     </>

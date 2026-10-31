@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Address, type Hex, numberToHex, parseAbi } from "viem";
 import { describe, expect, it } from "vitest";
-import { paths, targets, WALLET } from "../src/config.ts";
+import { maxGasPrices, paths, targets, WALLET } from "../src/config.ts";
 import { buildPlan } from "../src/plan.ts";
 import { RpcError, type Rpc } from "../src/rpc.ts";
 import { castArg, type Ctx, ReceiptTimeout, redact, replaceCall, RevertedOnChain, type Runner, SendRefused, sendCall, sendCreate } from "../src/send.ts";
@@ -18,7 +18,12 @@ function fixture(
     chainId?: number;
     nonce?: number;
     latestNonce?: number;
-    estimate?: "fail" | "custom" | bigint;
+    /** eth_estimateGas: "fail" a plain error, "custom" a revert with NothingToStake()'s data, "rpc" the node's own error (-32005), else the gas */
+    estimate?: "fail" | "custom" | "rpc" | bigint;
+    /** eth_gasPrice, in wei (5 gwei) */
+    gasPrice?: bigint;
+    /** eth_maxPriorityFeePerGas, in wei (1 mwei) */
+    priorityFee?: bigint;
     receipt?: "none" | "reverted" | "throws";
     /** What an eth_call of the sent call at `block` answers (a reverted receipt's replay); unset: the node has no eth_call */
     replay?: (block: string) => unknown;
@@ -56,9 +61,12 @@ function fixture(
           if (over.estimate === "fail") throw new Error("execution reverted");
           // NothingToStake()
           if (over.estimate === "custom") throw new RpcError("bittensor eth_estimateGas: execution reverted", 3, "0xd23fa2a3");
+          if (over.estimate === "rpc") throw new RpcError("bittensor eth_estimateGas: limit exceeded", -32005);
           return numberToHex(over.estimate ?? 1_000_001n);
         case "eth_gasPrice":
-          return numberToHex(5_000_000_000n);
+          return numberToHex(over.gasPrice ?? 5_000_000_000n);
+        case "eth_maxPriorityFeePerGas":
+          return numberToHex(over.priorityFee ?? 1_000_000n);
         case "eth_getTransactionReceipt":
           if (over.receipt === "none") return null;
           if (over.receipt === "throws") throw new Error("fetch failed");
@@ -165,6 +173,23 @@ describe("send", () => {
     expect(await refusal(sendCall(f.ctx, call))).toBe("nonce");
     expect(f.calls.some((c) => c.method === "eth_estimateGas")).toBe(false);
     expect(f.runs).toHaveLength(0);
+  });
+
+  it("M1: refuses a send whose gas price is over the chain's cap (OPS_MAX_GAS_PRICE_*), and sends under it", async () => {
+    const f = fixture({ gasPrice: 7_500_000_000n });
+    const e = (await sendCall({ ...f.ctx, maxGasPrice: { bittensor: 5_000_000_000n } }, call).catch((e: unknown) => e)) as SendRefused;
+    expect(e).toBeInstanceOf(SendRefused);
+    expect(e.reason).toBe("fee");
+    expect(e.message).toBe("Bittensor: the gas price is 7.5 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BITTENSOR); stake idle TAO waits for it to fall; nothing sent");
+    expect(f.sends()).toEqual([]);
+    // the other chain's cap doesn't apply, and no cap means no check
+    await sendCall({ ...f.ctx, maxGasPrice: { base: 1n } }, call);
+    await sendCall(f.ctx, call);
+    expect(f.sends()).toHaveLength(2);
+    // the caps from the environment: gwei, decimals allowed, sensible defaults
+    expect(maxGasPrices({})).toEqual({ base: 5_000_000_000n, bittensor: 100_000_000_000n });
+    expect(maxGasPrices({ OPS_MAX_GAS_PRICE_BASE: " 0.5 ", OPS_MAX_GAS_PRICE_BITTENSOR: "12.25" })).toEqual({ base: 500_000_000n, bittensor: 12_250_000_000n });
+    for (const bad of ["0", "-1", "1e3", "5 gwei", "0.0000000001"]) expect(() => maxGasPrices({ OPS_MAX_GAS_PRICE_BASE: bad }), bad).toThrow(/OPS_MAX_GAS_PRICE_BASE/);
   });
 
   it("refuses when the estimate fails", async () => {
@@ -431,7 +456,39 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
     expect(args.slice(0, 4)).toEqual(["send", WALLET, "--value", "0"]);
     expect(flag(args, "--gas-limit")).toBe("21000");
     expect(flag(args, "--nonce")).toBe("0");
-    expect(f.logs).toContainEqual("Bittensor: stake idle TAO would fail, nothing sent (NothingToStake()): nonce 0 is cancelled instead");
+    expect(f.logs).toContainEqual("Bittensor: stake idle TAO would fail now (NothingToStake()): nonce 0 is cancelled instead");
+  });
+
+  it("I3: cancels only on a genuine revert: when the node didn't answer the estimate (a rate limit, a timeout), nothing is sent and it is tried again later", async () => {
+    for (const estimate of ["rpc", "fail"] as const) {
+      const f = fixture({ estimate });
+      const r = await replaceCall(f.ctx, call, HASH);
+      expect(r).toMatchObject({ replaced: false, reason: expect.stringMatching(/^Bittensor: the node didn't answer the estimate of stake idle TAO \(.*\); nothing cancelled$/) });
+      expect(f.sends()).toEqual([]);
+      expect(f.logs.some((l) => l.includes("cancel"))).toBe(false);
+    }
+  });
+
+  it("M1: refuses, never cancels, a replacement whose fee would be over the chain's cap; the tip is never under the node's suggested one", async () => {
+    // 5 gwei pending, bumped to 5.625: over a 5 gwei cap
+    const capped = fixture();
+    const r = await replaceCall({ ...capped.ctx, maxGasPrice: { bittensor: 5_000_000_000n } }, call, HASH);
+    expect(r).toMatchObject({ replaced: false, reason: "Bittensor: the replacement would go out at 5.625 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BITTENSOR); it waits for the price to fall" });
+    expect(capped.sends()).toEqual([]);
+    expect(capped.calls.some((c) => c.method === "eth_estimateGas")).toBe(false);
+    // under the cap it goes; on Base the tip is the node's suggestion when that is above the bumped one
+    const roomy = fixture({ priorityFee: 3_000_000n });
+    await replaceCall({ ...roomy.ctx, maxGasPrice: { base: 20_000_000_000n } }, baseCall, HASH);
+    expect(flag(roomy.sends()[0].args, "--priority-gas-price")).toBe("3000000");
+    expect(flag(roomy.sends()[0].args, "--gas-price")).toBe("5625000000");
+  });
+
+  it("M6: cast refusing the replacement (underpriced, nonce too low) is a plain failure that says so, never 'no receipt yet': nonce 0 was pending already", async () => {
+    const f = fixture({ castFails: true });
+    const e = await replaceCall(f.ctx, call, HASH).catch((e: unknown) => e);
+    expect(e).toBeInstanceOf(Error);
+    expect(e).not.toBeInstanceOf(ReceiptTimeout);
+    expect((e as Error).message).toBe("Bittensor: stake idle TAO (replacing 0xabababababababababababababababababababababababababababababababab) was not sent: Error: server returned an error response");
   });
 
   it("sends nothing when there is nothing of the wallet's to replace at that nonce, and says why", async () => {

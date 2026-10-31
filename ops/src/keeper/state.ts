@@ -368,6 +368,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     // after the round's first send (one eth_getCode a chain a send is cheap)
     signerCode: (chain) => codeAt(ctx.rpc, chain, signer),
     nonce: (chain) => nonceOf(ctx.rpc, chain, signer),
+    minedNonce: async (chain) => hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [signer, "latest"])) as Hex),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
       const { logs: bounced } = await bouncedLogs();

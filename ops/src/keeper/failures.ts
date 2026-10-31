@@ -31,10 +31,22 @@ export class KeeperNotReady extends Error {}
 export class NotNow extends Error {}
 
 /** The payout list rebuilt from the vault's events doesn't match the one the vault stored, on two full
- * scans of those events (payouts rescans once, so a short eth_getLogs answer never gets here). The
- * keeper's view of the vault's events is wrong, which no other action can be trusted on either, so `run`
- * stops on it. */
+ * scans of those events in two rounds (PayoutListRescan came first, so a short eth_getLogs answer never
+ * gets here). The keeper's view of the vault's events is wrong, which no other action can be trusted on
+ * either, so `run` stops on it. */
 export class PayoutListMismatch extends Error {}
+
+/** The payout list rebuilt from the vault's events didn't match the one the vault stored, so the events
+ * are being scanned again in full: a passing failure, and the next round rebuilds `key`'s list from that
+ * second scan (payouts, told the rescan happened, then refuses a second mismatch for good). */
+export class PayoutListRescan extends Error {
+  readonly key: Hex;
+
+  constructor(key: Hex, message: string) {
+    super(message);
+    this.key = key;
+  }
+}
 
 /** A delivery reverted on chain while its simulation still passed on the same facts, and its revert
  * decoded to nothing that explains it. A passing failure: `run` fails the round for it (so the log and
@@ -71,9 +83,11 @@ export type FailureKind =
   | "not-live"
   | "reverted"
   | "payout-list"
+  | "payout-rescan"
   | "waiting"
   | "nonce"
   | "estimate"
+  | "fee"
   | "receipt"
   | "not-now"
   | "revert-unread"
@@ -121,11 +135,12 @@ function networkCode(e: unknown): string | undefined {
  * one user's delivery never stops the keeper: its reverts only hold that user (the revert budget).
  *
  * Wait (log, back off, next round): an earlier transaction still pending, a nonce race, a simulation
- * that refused the send (the chain changed under it), no receipt yet (the send guard then holds every
- * send until it is mined or dropped), the chain changed since the round's read, a revert whose re-read
- * failed (the next round's read decides), a delivery revert nothing explains, an RPC error or a network
- * failure, and anything else: none of these can send twice, since every send goes through the guards
- * again. The message has any URL's secrets stripped (scrubSecrets). */
+ * that refused the send (the chain changed under it), a gas price over the cap, no receipt yet (the send
+ * guard then holds every send until it is mined or dropped), the chain changed since the round's read, a
+ * revert whose re-read failed (the next round's read decides), a delivery revert nothing explains, a
+ * payout list being rebuilt from a second scan, an RPC error or a network failure, and anything else:
+ * none of these can send twice, since every send goes through the guards again. The message has any
+ * URL's secrets stripped (scrubSecrets). */
 export function classifyFailure(e: unknown): Failure {
   // a message can quote an RPC's URL, where a provider's key can sit
   const message = scrubSecrets(e instanceof Error ? e.message : String(e));
@@ -135,6 +150,7 @@ export function classifyFailure(e: unknown): Failure {
   if (e instanceof RecordMismatch) return as(true, "record", "the record changed");
   if (e instanceof RevertedOnChain) return as(true, "reverted", "an unexplained revert");
   if (e instanceof PayoutListMismatch) return as(true, "payout-list", "the payout list doesn't match the vault");
+  if (e instanceof PayoutListRescan) return as(false, "payout-rescan", "the payout list is being rebuilt");
   if (e instanceof DeliveryReverted) return as(false, "delivery-reverted", "an unexplained delivery revert");
   if (e instanceof RevertUnread) return as(false, "revert-unread", "a revert not yet explained");
   if (e instanceof SendRefused) {
@@ -151,6 +167,8 @@ export function classifyFailure(e: unknown): Failure {
         return as(false, "nonce", "a nonce race");
       case "estimate":
         return as(false, "estimate", "refused by simulation");
+      case "fee":
+        return as(false, "fee", "the gas price is over the cap");
     }
   }
   if (e instanceof ReceiptTimeout) return as(false, "receipt", "no receipt yet");

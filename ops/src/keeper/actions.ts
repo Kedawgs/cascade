@@ -2,7 +2,7 @@ import { type Address, encodeEventTopics, formatEther, formatUnits, type Hex, pa
 import { CLAIM_POLICY, type ChainName, type ClaimPolicy, WALLET } from "../config.ts";
 import { isPlanV3, type PlanV3, rolesOf } from "../plan.ts";
 import { type DeploymentRecord, requireHandoff } from "../record.ts";
-import { ReceiptTimeout, type Replacement, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
+import { chainLabel, ReceiptTimeout, type Replacement, RevertedOnChain, type Sent, SendRefused } from "../send.ts";
 import type { CallRequest } from "../types.ts";
 import { checkDelivery, type DeliveryDeps, deliverRequest, deliveredFrom, explainDeliveryRevert } from "./delivery.ts";
 import { type Action, actionKey, type DueDelivery, decideNext, type State } from "./due.ts";
@@ -17,6 +17,7 @@ import {
   NotNow,
   oneLine,
   PayoutListMismatch,
+  PayoutListRescan,
   RevertUnread,
   scrubSecrets,
 } from "./failures.ts";
@@ -45,6 +46,10 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
    * call, never kept: keeperSend reads it on both chains before every send. */
   signerCode(chain: ChainName): Promise<Hex>;
   nonce(chain: ChainName): Promise<number>;
+  /** The keeper wallet's mined nonce on `chain` (its transaction count at the latest block): `run` tells
+   * a watched nonce something else was mined at from one still pending. Optional: without it, a
+   * transaction with no receipt is watched until LATE_RECEIPT_MS. */
+  minedNonce?(chain: ChainName): Promise<number>;
   quoteClose(s: KeeperState): Promise<bigint>;
   /** The vault's payout events (DepositBounced, Redeemed) since the deploy block, kept across calls:
    * each call scans only the new blocks */
@@ -120,11 +125,17 @@ export function requireReady(rec: DeploymentRecord, signer: Address = WALLET): v
  * chain at once (chain id 0), and Bittensor may not run EIP-7702 at all, so code on either chain stops a
  * send on either. The refusal names the chain the code is on. */
 async function keeperSend(deps: KeeperDeps, req: CallRequest): Promise<Sent> {
-  for (const chain of [req.chain, req.chain === "base" ? "bittensor" : "base"] as const) {
-    const code = await deps.signerCode(chain);
-    if (code !== "0x") throw new KeeperHasCode(chain, deps.signer, code);
-  }
+  await assertNoCode(deps, req.chain);
   return deps.sendCall(req);
+}
+
+/** The keeper wallet's code, read fresh on both chains (`chain`, the send's, first): any code throws
+ * KeeperHasCode, which stops `run`. Every send, and every replacement of one, passes here first. */
+export async function assertNoCode(deps: Pick<KeeperDeps, "signerCode" | "signer">, chain: ChainName): Promise<void> {
+  for (const c of [chain, chain === "base" ? "bittensor" : "base"] as const) {
+    const code = await deps.signerCode(c);
+    if (code !== "0x") throw new KeeperHasCode(c, deps.signer, code);
+  }
 }
 
 /** Records a bridge message the keeper sent. The transaction has gone through: a record that can't be
@@ -275,7 +286,13 @@ export async function stake(deps: KeeperDeps, rec: DeploymentRecord): Promise<Do
   return keeperSend(deps, stakeRequest(rec, await deps.nonce("bittensor")));
 }
 
-export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex): Promise<Done> {
+/** Pays `key`'s batch out with the list rebuilt from the vault's events. A list that doesn't match the
+ * vault's stored hash is not refused at once: one short eth_getLogs answer (a lagging replica behind the
+ * head it reported, a truncated response) in a first scan would rebuild a short list for the life of the
+ * process, so the vault's events are set to be scanned again in full and PayoutListRescan is thrown (a
+ * passing failure); `run` then calls again with `rescanned` the next round, with the list rebuilt from
+ * that second scan, and only a mismatch then is refused for good (PayoutListMismatch). */
+export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex, o: { rescanned?: boolean } = {}): Promise<Done> {
   requireReady(rec, deps.signer);
   const s = await deps.readState();
   if (!s.alphaVault.healthy) throw new NotNow("AlphaVault is paused or migrating — not paying out");
@@ -283,20 +300,14 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
   const b = s.vault.batches.find((b) => b.key.toLowerCase() === key.toLowerCase());
   if (!b || b.cursor >= b.count) throw new NotNow(`no payout is pending for batch ${key.slice(0, 10)}…`);
   if (s.now < b.queuedAt + s.vault.payoutDelay) throw new NotNow(`batch ${key.slice(0, 10)}… is not due yet`);
-  let list = rebuildPayouts(await deps.payoutLogs(), key);
-  let stored = await deps.batchInfo(key);
-  if (!payoutsMatch(list, stored)) {
-    // one short eth_getLogs answer (a lagging replica behind the head it reported, a truncated response)
-    // in a first scan would rebuild a short list for the life of the process: the vault's events are
-    // scanned again, in full, and only a second full scan that mismatches too refuses the payout
-    deps.log(
-      scrubSecrets(
-        `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries): scanning the vault's events again in full before deciding`,
-      ),
-    );
+  const list = rebuildPayouts(await deps.payoutLogs(), key);
+  const stored = await deps.batchInfo(key);
+  if (!payoutsMatch(list, stored) && !o.rescanned) {
     deps.rescanPayoutLogs();
-    list = rebuildPayouts(await deps.payoutLogs(), key);
-    stored = await deps.batchInfo(key);
+    throw new PayoutListRescan(
+      key,
+      `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries): the vault's events are scanned again in full, and the next round decides; nothing sent`,
+    );
   }
   const sent = await keeperSend(deps, payoutsRequest(rec, key, list, stored, await deps.nonce("bittensor")));
   return withMessage(deps, sent, rec.plan.addresses.bitAdapter, "Bittensor → Base");
@@ -378,10 +389,10 @@ export async function deliverCommand(deps: KeeperDeps, rec: DeploymentRecord, us
   return deliverAll(deps, rec, list, (d) => log(deliveryLine(d)));
 }
 
-export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, { kind: "deliver" } | { kind: "roll" }>): Promise<Done> {
+export function act(deps: KeeperDeps, rec: DeploymentRecord, a: Exclude<Action, { kind: "deliver" } | { kind: "roll" }>, o: { rescanned?: boolean } = {}): Promise<Done> {
   if (a.kind === "close") return close(deps, rec);
   if (a.kind === "stake") return stake(deps, rec);
-  return payouts(deps, rec, a.key);
+  return payouts(deps, rec, a.key, o);
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -477,31 +488,37 @@ export const SKIP_MAX_MS = 60 * 60_000;
 const hours = (ms: number) => `${Number((ms / 3600_000).toFixed(1))} hour${ms === 3600_000 ? "" : "s"}`;
 /** A clock time for the log: "2027-01-18 14:05 UTC". */
 const at = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
-/** Rounds a transaction with no receipt is looked up for before it is reported as probably dropped. */
-const LATE_RECEIPT_ROUNDS = 60;
-/** How long the keeper's own transaction stays pending with no receipt before it is replaced at the
- * same nonce with a higher fee (deps.replace): the receipt wait itself is 5 minutes, and a slow block is
- * not a stuck transaction. A replacement that is stuck in turn is replaced after twice as long, and so
- * on, MAX_REPLACEMENTS times; each is said loudly (REPLACING). Until then the wallet's guard holds the
- * chain's sends, as before. */
+/** How long a transaction with no receipt is watched for (from when the keeper stopped waiting for its
+ * receipt) before it is reported as probably dropped: long after its last replacement would have gone. */
+export const LATE_RECEIPT_MS = 6 * 3600_000;
+/** How long after the keeper stopped waiting for its receipt (a 5-minute wait at the send) the keeper's
+ * own transaction stays pending before it is replaced at the same nonce with a higher fee (deps.replace):
+ * a slow block is not a stuck transaction. A replacement that is stuck in turn is replaced after twice as
+ * long, and so on, MAX_REPLACEMENTS times; each is said loudly (REPLACING). Until then the wallet's
+ * guard holds the chain's sends, as before. */
 export const REPLACE_AFTER_MS = 15 * 60_000;
 export const MAX_REPLACEMENTS = 3;
 
-/** A transaction sent with no receipt yet: looked up each round until one comes, and replaced at its
- * nonce once it has been pending REPLACE_AFTER_MS (when the deps can, and the call it carries is known). */
+/** A transaction sent with no receipt yet: its hash, and each replacement's, looked up each round until
+ * one of them has a receipt (any of them landing ends the watch), or something else is mined at its
+ * nonce; replaced at that nonce once it has been pending REPLACE_AFTER_MS (when the deps can, and the
+ * call it carries is known). */
 interface Unreceipted {
-  hash: Hex;
+  /** The original's hash, then each replacement's, in order */
+  hashes: Hex[];
   chain: ChainName;
   what: string;
   /** Where its bridge message, if it sent one, is read from */
   message?: { adapter: Hex; direction: Message["direction"] };
-  rounds: number;
   /** The call it carries, for a replacement; unset for one the keeper can't rebuild */
   request?: CallRequest;
-  /** When it was sent (by the clock), how many replacements preceded it, and when it is next replaced */
+  /** When the keeper stopped waiting for its receipt (by the clock), how many replacements have been
+   * sent, and when it is next replaced */
   since: number;
   replacements: number;
   replaceAt: number;
+  /** Rounds in a row the wallet's mined nonce has been past the call's with none of the hashes mined */
+  passed: number;
 }
 
 export interface RunOptions {
@@ -616,6 +633,14 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     r.holdEnd = now + holdMs;
     return { within: r.at.length, holdMs };
   }
+  /** Holds `user`'s delivery for the budget's hold, whatever their facts do, and says so loudly. */
+  function heldLoudly(user: Address, budget: { within: number; holdMs: number }, last: string) {
+    const until = clock() + budget.holdMs;
+    hold(user.toLowerCase(), `held until ${at(until)}: ${budget.within} of this user's deliveries reverted on chain within ${hours(REVERT_WINDOW_MS)}`, undefined, budget.holdMs);
+    log(
+      `DELIVERY HELD: deliver to ${user} reverted on chain ${budget.within} times within ${hours(REVERT_WINDOW_MS)} (the last: ${last}); held ${hours(budget.holdMs)}, until ${at(until)}, whatever the price or the preference does; the user can claim by hand meanwhile, and the keeper's other work goes on`,
+    );
+  }
 
   /** A refusal of `a` (its simulation, or its own re-read, said no): counted; from MAX_REFUSALS in a row,
    * the breaker trips and returns true: `a` is skipped for a back-off (said loudly) and the round moves on
@@ -629,14 +654,17 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     if (r.n < MAX_REFUSALS) return false;
     r.backoffMs = Math.min(Math.max(r.backoffMs * 2, SKIP_MS), SKIP_MAX_MS);
     r.until = clock() + r.backoffMs;
+    // "times", not rounds: from the third on, the tries are a back-off apart
     log(
-      `SKIPPING ${doing(a)}: refused ${r.n} rounds in a row (${classifyFailure(e).label}: ${oneLine(e.message)}); the keeper's other actions go ahead; tried again in ${inWords(r.backoffMs)}, at ${at(r.until)}`,
+      `${r.backoffMs >= SKIP_MAX_MS ? "STILL SKIPPING" : "SKIPPING"} ${doing(a)}: refused ${r.n} times in a row (${classifyFailure(e).label}: ${oneLine(e.message)}); the keeper's other actions go ahead; tried again in ${inWords(r.backoffMs)}, at ${at(r.until)}`,
     );
     return true;
   }
   /** The actions the breaker holds back now (their back-off still running). */
   const skippedKeys = () => new Set([...refusals].filter(([, r]) => r.n >= MAX_REFUSALS && clock() < r.until).map(([k]) => k));
-  const refused = (e: unknown): e is SendRefused | NotNow => (e instanceof SendRefused && e.reason === "estimate") || e instanceof NotNow;
+  /** The chain, or the keeper's own re-read of it, saying no to a send: its simulation, a gas price over
+   * the cap, or NotNow. */
+  const refused = (e: unknown): e is SendRefused | NotNow => (e instanceof SendRefused && (e.reason === "estimate" || e.reason === "fee")) || e instanceof NotNow;
 
   /** A close, roll, payout or stake that reverted on chain: true when the chains, read again, show it lost
    * a race (a skip). Nothing explaining it throws the revert (which stops the run); a read that fails
@@ -666,7 +694,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
           ? { adapter: rec.plan.addresses.bitAdapter, direction: "Bittensor → Base" as const }
           : undefined;
     const now = clock();
-    unreceipted.push({ hash: e.hash, chain: e.chain, what: doing(a), message, rounds: 0, request: e.request, since: now, replacements: 0, replaceAt: now + REPLACE_AFTER_MS });
+    unreceipted.push({ hashes: [e.hash], chain: e.chain, what: doing(a), message, request: e.request, since: now, replacements: 0, replaceAt: now + REPLACE_AFTER_MS, passed: 0 });
   }
 
   /** Reports a transaction of the keeper's that went through late (a late receipt, a replacement), and
@@ -677,36 +705,67 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     log(`${how}: ${u.what} went through (transaction ${hash}${id ? `, bridge message ${id}` : ""})`);
   }
 
+  /** Reports a transaction of the keeper's that reverted on chain late (a late receipt, a replacement).
+   * A delivery's counts against that user's revert budget, as a revert at the send does (the facts it
+   * was sent on are gone, so within budget it is held on time alone). */
+  function revertedLate(u: Unreceipted, hash: Hex, how: string, reason?: string) {
+    const said = `${how}: ${u.what} reverted on chain (transaction ${hash}${reason ? `, ${reason}` : ""})`;
+    const req = u.request;
+    if (req?.functionName !== "deliver") {
+      log(said);
+      return;
+    }
+    const user = req.args[0] as Address;
+    const budget = overBudget(user.toLowerCase());
+    const why = explainDeliveryRevert(reason);
+    if (budget.holdMs) {
+      heldLoudly(user, budget, `transaction ${hash}${reason ? `, ${reason}` : ""}${why ? `: ${why}` : ""}`);
+      return;
+    }
+    hold(user.toLowerCase(), `${said}; held for 30 minutes`);
+    log(`${said}${why ? `: ${why}` : ""}; held for 30 minutes (${budget.within} of ${REVERT_BUDGET} in this user's revert budget)`);
+  }
+
   /** Replaces `u`, pending for REPLACE_AFTER_MS with no receipt, at its nonce with a higher fee (the same
-   * call if it still passes, else a cancel): said loudly. A replacement that lands ends the watch on `u`
-   * (nothing else can be mined at that nonce); one with no receipt in its turn is watched, and replaced
-   * again after twice as long; one the node refuses (the original landed meanwhile) leaves `u` watched. */
+   * call if it still passes, else a cancel): said loudly, and through the guards every send passes
+   * first (the record still ready, the wallet still without code: a failure of those stops the run, as
+   * at any send). A replacement that lands ends the watch on `u` (nothing else can be mined at that
+   * nonce); one with no receipt in its turn is watched with the original, and replaced again after twice
+   * as long; one the node refuses leaves `u` watched. */
   async function replacePending(u: Unreceipted, still: Unreceipted[]) {
     const req = u.request as CallRequest;
+    const latest = u.hashes.at(-1) as Hex;
     log(
-      `REPLACING transaction ${u.hash} (${u.what}, nonce ${req.nonce}): no receipt ${inWords(clock() - u.since)} after it was sent, so it is sent again at the same nonce with a higher fee (the same call if it still passes, else a cancel that only frees the nonce)${u.replacements ? `; replacement ${u.replacements + 1} of ${MAX_REPLACEMENTS}` : ""}`,
+      `REPLACING transaction ${latest} (${u.what}, nonce ${req.nonce}): no receipt ${inWords(clock() - u.since)} after the keeper stopped waiting for one, so it is sent again at the same nonce with a higher fee (the same call if it still passes, else a cancel that only frees the nonce)${u.replacements ? `; replacement ${u.replacements + 1} of ${MAX_REPLACEMENTS}` : ""}`,
     );
     let r: Replacement;
     try {
-      r = await (deps.replace as NonNullable<KeeperDeps["replace"]>)(req, u.hash);
+      requireReady(rec, deps.signer);
+      await assertNoCode(deps, req.chain);
+      r = await (deps.replace as NonNullable<KeeperDeps["replace"]>)(req, latest);
     } catch (e) {
       if (e instanceof ReceiptTimeout && e.hash) {
-        log(`Replacement sent, no receipt yet: transaction ${e.hash} (${u.what}, nonce ${req.nonce}) is watched in its turn`);
-        const next: Unreceipted = { ...u, hash: e.hash, rounds: 0, replacements: u.replacements + 1, replaceAt: clock() + REPLACE_AFTER_MS * 2 ** (u.replacements + 1) };
-        still.push(next);
+        log(`Replacement sent, no receipt yet: transaction ${e.hash} (${u.what}, nonce ${req.nonce}) is watched with the original: whichever lands ends the watch`);
+        u.hashes.push(e.hash);
+        u.replacements++;
+        u.replaceAt = clock() + REPLACE_AFTER_MS * 2 ** u.replacements;
+        still.push(u);
         return;
       }
       if (e instanceof RevertedOnChain) {
-        log(`Replacement reverted on chain: ${u.what} (transaction ${e.hash}${e.reason ? `, ${e.reason}` : ""}); nonce ${req.nonce} is free, and the next round decides again`);
+        // its estimate passed seconds before: a race, and nonce req.nonce is free; the next round decides
+        revertedLate(u, e.hash, "Replacement", e.reason);
         return;
       }
-      log(`Replacement not sent (${oneLine((e as Error).message)}); transaction ${u.hash} stays watched, tried again in ${inWords(REPLACE_AFTER_MS)}`);
+      // a keeper wallet with code, a record no longer ready, a wrong key or chain: the round fails on it, and stops
+      if (classifyFailure(e).stop) throw e;
+      log(`Replacement not sent (${oneLine((e as Error).message)}); the watch goes on, tried again in ${inWords(REPLACE_AFTER_MS)}`);
       u.replaceAt = clock() + REPLACE_AFTER_MS;
       still.push(u);
       return;
     }
     if (!r.replaced) {
-      log(`Not replaced: ${r.reason}; transaction ${u.hash} stays watched`);
+      log(`Not replaced: ${r.reason}; the watch goes on (a receipt, or the wallet's nonce passing it, ends it), tried again in ${inWords(REPLACE_AFTER_MS)}`);
       u.replaceAt = clock() + REPLACE_AFTER_MS;
       still.push(u);
       return;
@@ -715,51 +774,96 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     else landed(u, r.hash, r.logs, "Replaced");
   }
 
-  /** Looks up each transaction still with no receipt: one that landed is reported (its bridge message
-   * recorded); one pending REPLACE_AFTER_MS whose call is known is replaced (replacePending); one with
-   * none after LATE_RECEIPT_ROUNDS is reported as probably dropped. */
-  async function lookUpReceipts() {
+  /** Looks up each transaction still with no receipt, by every hash it has (the original's and each
+   * replacement's): one that landed is reported (its bridge message recorded) and ends the watch; so
+   * does the wallet's mined nonce passing the call's, two rounds in a row, with none of them mined
+   * (something else took the nonce); one pending REPLACE_AFTER_MS whose call is known is replaced
+   * (replacePending); one with none after LATE_RECEIPT_MS is reported as probably dropped. A failure
+   * that must stop the run (a replacement's guards) comes back as the round's. */
+  async function lookUpReceipts(): Promise<{ error: unknown; doing: string } | undefined> {
     if (!deps.receipt) {
       unreceipted = [];
-      return;
+      return undefined;
     }
     const still: Unreceipted[] = [];
+    let failure: { error: unknown; doing: string } | undefined;
     for (const u of unreceipted) {
-      let r: Awaited<ReturnType<NonNullable<KeeperDeps["receipt"]>>>;
-      try {
-        r = await deps.receipt(u.chain, u.hash);
-      } catch {
+      if (failure) {
         still.push(u);
         continue;
       }
-      if (!r) {
-        if (deps.replace && u.request && u.replacements < MAX_REPLACEMENTS && clock() >= u.replaceAt) await replacePending(u, still);
-        else if (++u.rounds < LATE_RECEIPT_ROUNDS) still.push(u);
-        else {
+      let found: { hash: Hex; reverted: boolean; logs: Sent["logs"] } | undefined;
+      let unread = false;
+      for (const hash of u.hashes) {
+        try {
+          const r = await deps.receipt(u.chain, hash);
+          if (r) {
+            found = { hash, ...r };
+            break;
+          }
+        } catch {
+          unread = true;
+        }
+      }
+      if (found) {
+        if (found.reverted) revertedLate(u, found.hash, "Late receipt");
+        else landed(u, found.hash, found.logs, "Late receipt");
+        continue;
+      }
+      if (unread) {
+        still.push(u);
+        continue;
+      }
+      if (u.request && deps.minedNonce) {
+        // twice in a row: a node a block behind the one that answered the receipts can't end a watch early
+        let mined: number | undefined;
+        try {
+          mined = await deps.minedNonce(u.chain);
+        } catch {
+          // the next round asks again
+        }
+        u.passed = mined !== undefined && mined > u.request.nonce ? u.passed + 1 : 0;
+        if (u.passed >= 2) {
           log(
-            `NO RECEIPT after ${u.rounds} rounds for transaction ${u.hash} (${u.what}): it was probably dropped or replaced. Check it on the chain's explorer${u.message ? "; if it went through, find its bridge message with pnpm ops status" : ""}`,
+            `Watch ended: something else was mined at nonce ${u.request.nonce} on ${chainLabel(u.chain)} (the wallet's mined nonce is ${mined}), and none of transaction${u.hashes.length === 1 ? "" : "s"} ${u.hashes.join(", ")} (${u.what}) has a receipt: check them on the chain's explorer${u.message ? "; if one went through, find its bridge message with pnpm ops status" : ""}`,
           );
+          continue;
+        }
+      }
+      if (deps.replace && u.request && u.replacements < MAX_REPLACEMENTS && clock() >= u.replaceAt) {
+        try {
+          await replacePending(u, still);
+        } catch (e) {
+          failure = { error: e, doing: `replacing ${u.what}` };
+          still.push(u);
         }
         continue;
       }
-      if (r.reverted) {
-        log(`Late receipt: ${u.what} reverted on chain (transaction ${u.hash})`);
-        continue;
+      if (clock() - u.since < LATE_RECEIPT_MS) still.push(u);
+      else {
+        log(
+          `NO RECEIPT ${hours(LATE_RECEIPT_MS)} after the keeper stopped waiting for one: transaction${u.hashes.length === 1 ? "" : "s"} ${u.hashes.join(", ")} (${u.what}) probably dropped, or sit on a node this one can't see. Check them on the chain's explorer${u.message ? "; if one went through, find its bridge message with pnpm ops status" : ""}`,
+        );
       }
-      landed(u, u.hash, r.logs, "Late receipt");
     }
     unreceipted = still;
+    return failure;
   }
 
-  /** One round. A failure comes back, with what the round was doing then, instead of being thrown; an
+  /** One round. A failure comes back, with what the round was doing then (and, for a refusal of a close,
+   * stake or payout that didn't trip the breaker, that action's key), instead of being thrown; an
    * unexplained delivery revert comes back once the round's other action is done. */
-  async function round(tick: number): Promise<{ error: unknown; doing: string } | undefined> {
+  async function round(tick: number): Promise<{ error: unknown; doing: string; refusal?: string } | undefined> {
     // the record as it is now: a read-back that failed since the run started stops its sends
     try {
       deps.refresh();
     } catch (e) {
       return { error: e, doing: "re-reading the record" };
     }
+    // the transactions still waited on, before the chains are read for the round: a stuck one is looked
+    // up and replaced whether or not the round's read goes through
+    const looked = await lookUpReceipts();
+    if (looked) return looked;
     let s: KeeperState;
     try {
       s = await deps.readState({ economics: true });
@@ -775,7 +879,6 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
       if (!why) return { error: u.revert, doing: `${doing(u.action)}, read again` };
       notDone(u.action, why, u.revert.hash);
     }
-    await lookUpReceipts();
     let deliveries: DueDelivery[] = [];
     const facts = new Map<string, string | undefined>();
     try {
@@ -803,6 +906,8 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     let soft: { error: unknown; doing: string } | undefined;
     let step = "deciding what is due";
     let current: Action | undefined;
+    /** The action whose refusal, short of tripping the breaker, fails this round */
+    let refusalOf: string | undefined;
     /** What the breaker holds back this round, and whatever trips it during the round. */
     const skip = skippedKeys();
     try {
@@ -835,14 +940,17 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
         if (action.kind !== "deliver") {
           let done: Done;
           try {
-            done = await act(deps, rec, action);
+            done = await act(deps, rec, action, { rescanned: action.kind === "payouts" && rescannedPayout === action.key.toLowerCase() });
           } catch (e) {
             if (await raced(e, action, s)) break;
-            // refused MAX_REFUSALS rounds in a row: skipped, and the round moves on to the next due action
+            // refused MAX_REFUSALS times in a row: skipped, and the round moves on to the next due action
             // (nothing was sent, so nothing can be sent twice); before that, the round fails on it
-            if (refused(e) && tripped(action, e)) {
-              skip.add(actionKey(action));
-              continue;
+            if (refused(e)) {
+              if (tripped(action, e)) {
+                skip.add(actionKey(action));
+                continue;
+              }
+              refusalOf = actionKey(action);
             }
             throw e;
           }
@@ -873,11 +981,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
             if (budget.holdMs) {
               // over budget, explained or not: this user waits, whatever the price or their preference
               // does, and the keeper's other work goes on. Said loudly every time
-              const until = clock() + budget.holdMs;
-              hold(key, `held until ${at(until)}: ${budget.within} of this user's deliveries reverted on chain within ${hours(REVERT_WINDOW_MS)}`, undefined, budget.holdMs);
-              log(
-                `DELIVERY HELD: deliver to ${action.user} reverted on chain ${budget.within} times within ${hours(REVERT_WINDOW_MS)} (the last: transaction ${e.hash}${e.reason ? `, ${e.reason}` : ""}${why ? `: ${why}` : ", and nothing explains it"}); held ${hours(budget.holdMs)}, until ${at(until)}, whatever the price or the preference does; the user can claim by hand meanwhile, and the keeper's other work goes on`,
-              );
+              heldLoudly(action.user, budget, `transaction ${e.hash}${e.reason ? `, ${e.reason}` : ""}${why ? `: ${why}` : ", and nothing explains it"}`);
               continue;
             }
             if (why) {
@@ -918,7 +1022,7 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
       }
     } catch (e) {
       if (e instanceof ReceiptTimeout && current) watch(current, e);
-      return { error: e, doing: step };
+      return { error: e, doing: step, refusal: refusalOf };
     }
     return soft;
   }
@@ -928,8 +1032,14 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
   /** Failed rounds in a row, and those failed on something unexpected */
   let failing = 0;
   let unexpected = 0;
+  /** The failed rounds in a row so far: whether every one was a refusal of a close, stake or payout
+   * short of tripping the breaker, and of which */
+  let streak = { refusalsOnly: true, keys: new Set<string>() };
+  /** The payout whose list the last round set to be rebuilt from a second scan of the vault's events */
+  let rescannedPayout: string | undefined;
   for (let tick = 1; ; tick++) {
     const failure = await round(tick);
+    rescannedPayout = failure?.error instanceof PayoutListRescan ? failure.error.key.toLowerCase() : undefined;
     // a skip that didn't happen this round starts its count again
     for (const key of [...skipRuns.keys()]) if (!skippedNow.has(key)) skipRuns.delete(key);
     skippedNow = new Set();
@@ -944,10 +1054,17 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
       log(`Stopped: ${oneLine(reason)}`);
       return { stopped: true, kind: f.kind, reason };
     }
-    if (f) failing++;
-    else if (failing) {
-      log(`Recovered after ${failing} failed round${failing === 1 ? "" : "s"}`);
+    if (f) {
+      failing++;
+      if (failure?.refusal) streak.keys.add(failure.refusal);
+      else streak.refusalsOnly = false;
+    } else if (failing) {
+      // rounds that failed only on refusals of an action the breaker has since skipped: SKIPPING said
+      // what happened, and nothing recovered
+      const skippedSince = streak.refusalsOnly && [...streak.keys].every((k) => (refusals.get(k)?.n ?? 0) >= MAX_REFUSALS);
+      if (!skippedSince) log(`Recovered after ${failing} failed round${failing === 1 ? "" : "s"}`);
       failing = 0;
+      streak = { refusalsOnly: true, keys: new Set() };
     }
     const wait = nextWaitMs(opts.intervalMs, failing, opts.maxBackoffMs);
     if (failure && f) {

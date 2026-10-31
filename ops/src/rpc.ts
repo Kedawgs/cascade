@@ -184,3 +184,12 @@ export const chainIdOf = async (rpc: Rpc, chain: ChainName): Promise<number> =>
 
 export const gasPriceOf = async (rpc: Rpc, chain: ChainName): Promise<bigint> =>
   hexToBigInt((await rpc.request(chain, "eth_gasPrice", [])) as Hex);
+
+/** The node's suggested priority fee (eth_maxPriorityFeePerGas), or 0 on a node that doesn't serve it. */
+export async function priorityFeeOf(rpc: Rpc, chain: ChainName): Promise<bigint> {
+  try {
+    return hexToBigInt((await rpc.request(chain, "eth_maxPriorityFeePerGas", [])) as Hex);
+  } catch {
+    return 0n;
+  }
+}

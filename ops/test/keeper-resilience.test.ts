@@ -96,6 +96,7 @@ const CONTINUE: [string, Error, FailureKind][] = [
   ["an earlier transaction still pending", new SendRefused("waiting", "Base: an earlier transaction from the keeper (nonce 3) is still waiting to be mined; nothing sent — try again once it is"), "waiting"],
   ["a nonce race", new SendRefused("nonce", "Base: the wallet's next nonce is 5, the plan expected 4"), "nonce"],
   ["a simulation the chain changed under", new SendRefused("estimate", "Base: close the open batch would fail, nothing sent (BatchNotReady())"), "estimate"],
+  ["a gas price over the cap", new SendRefused("fee", "Base: the gas price is 7.5 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BASE); close the open batch waits for it to fall; nothing sent"), "fee"],
   ["no receipt yet (a slow block)", new ReceiptTimeout("bittensor", 7, HASH), "receipt"],
   ["the chain changed since the round's read", new NotNow("the open batch is empty"), "not-now"],
   ["an RPC error", new RpcError("base eth_call: HTTP 503"), "rpc"],

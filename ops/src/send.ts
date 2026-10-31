@@ -16,8 +16,8 @@ import {
   toFunctionSignature,
 } from "viem";
 import { loadArtifact } from "./artifacts.ts";
-import { type ChainName, type ChainTarget, type Paths, WALLET } from "./config.ts";
-import { chainIdOf, codeAt, gasPriceOf, isRevert, nonceOf, type Rpc, RpcError } from "./rpc.ts";
+import { type ChainName, type ChainTarget, gweiOf, type Paths, WALLET } from "./config.ts";
+import { chainIdOf, codeAt, gasPriceOf, isRevert, nonceOf, priorityFeeOf, type Rpc, RpcError } from "./rpc.ts";
 import type { CallRequest, CreateRequest } from "./types.ts";
 
 export interface Runner {
@@ -44,6 +44,9 @@ export interface Ctx {
   /** The block range one eth_getLogs asks `logs` for, per chain: the live Base logs server's own
    * (OPS_BASE_LOGS_WINDOW). Absent = WINDOW (keeper/state.ts), what any public RPC accepts. */
   logsWindow?: Partial<Record<ChainName, bigint>>;
+  /** The highest gas price a send goes out at, per chain, in wei (config.ts maxGasPrices): over it the
+   * send is refused ("fee") and tried again later. Absent = no cap (tests, the local forks). */
+  maxGasPrice?: Partial<Record<ChainName, bigint>>;
   /** Who sends: absent = the test wallet with paths.keystore (every command but pause and unpause). */
   signer?: Signer;
   runner: Runner;
@@ -62,7 +65,8 @@ export interface Sent {
   logs?: { address: Address; topics: Hex[]; data: Hex }[];
 }
 
-export type RefusalReason = "not-live" | "chain-id" | "nonce" | "waiting" | "estimate" | "signer";
+/** Why a send was refused before anything was signed; "fee": the chain's gas price is over the cap. */
+export type RefusalReason = "not-live" | "chain-id" | "nonce" | "waiting" | "estimate" | "signer" | "fee";
 
 export class SendRefused extends Error {
   readonly reason: RefusalReason;
@@ -294,8 +298,21 @@ async function estimate(ctx: Ctx, chain: ChainName, tx: { from: Address; to?: Ad
   }
 }
 
+/** Refuses a send whose gas price is over the chain's cap (Ctx.maxGasPrice): a fee spike costs a wait,
+ * never the wallet's funds. */
+function underCap(ctx: Ctx, chain: ChainName, price: bigint, label: string): void {
+  const cap = ctx.maxGasPrice?.[chain];
+  if (cap !== undefined && price > cap) {
+    throw new SendRefused(
+      "fee",
+      `${chainLabel(chain)}: the gas price is ${gweiOf(price)}, over the ${gweiOf(cap)} cap (OPS_MAX_GAS_PRICE_${chain.toUpperCase()}); ${label} waits for it to fall; nothing sent`,
+    );
+  }
+}
+
 async function prepare(ctx: Ctx, chain: ChainName, label: string, gas: bigint, gasLimit?: bigint) {
   const price = await gasPriceOf(ctx.rpc, chain);
+  underCap(ctx, chain, price, label);
   ctx.log(`${chainLabel(chain)}: ${label} — est. ${gas.toLocaleString("en-US")} gas ≈ ${formatEther(gas * price)} ${unit(chain)}`);
   const limit = gasLimit ?? (gas * 125n + 99n) / 100n;
   const t = ctx.targets[chain];
@@ -456,17 +473,22 @@ const bumped = (fee: bigint) => (fee * 1125n + 999n) / 1000n;
 const CANCEL_GAS = 21_000n;
 
 /** Replaces the signer's own transaction `pending` (the hash sendCall got for `req`, with no receipt
- * since) at the same nonce with a higher fee: the same call, when it still passes its estimate, else a
- * cancel (a transfer of nothing to the signer, which only frees the nonce), so a transaction stuck pending
- * (its fee under the market's since) no longer holds the chain's sends for good. Safe by construction:
- * two transactions at one nonce can't both be mined, so this never doubles a send. Nothing is sent
- * unless `pending` is still in the pool, from the signer, at req.nonce, and nothing has been mined at
- * that nonce (`replaced: false` otherwise: the transaction landed or dropped meanwhile, and the wallet's
- * nonce says which); the live gate, the chain id and the keystore's account are checked as for any send.
- * Fees: 12.5% over the pending transaction's (both the fee cap and the tip under EIP-1559; the gas price
- * on a legacy chain), and never under the node's gas price now. Then the receipt is waited for as in
- * sendCall: a timeout throws ReceiptTimeout with the replacement's hash and `req`, so it can be replaced
- * in turn; a revert throws RevertedOnChain with its reason. */
+ * since) at the same nonce with a higher fee: the same call, when it still passes its estimate, else,
+ * only when that estimate is a genuine revert (the call would fail now), a cancel (a transfer of nothing
+ * to the signer, which only frees the nonce), so a transaction stuck pending (its fee under the market's
+ * since) no longer holds the chain's sends for good. Safe by construction: two transactions at one nonce
+ * can't both be mined, so this never doubles a send. Nothing is sent unless `pending` is still in the
+ * pool, from the signer, at req.nonce, and nothing has been mined at that nonce (`replaced: false`
+ * otherwise: the transaction landed or dropped meanwhile, and the wallet's nonce says which), and nothing
+ * is sent either when the node didn't answer the estimate (an RPC error, a rate limit, a timeout: not a
+ * revert, so no cancel) or the fee would be over the chain's cap (Ctx.maxGasPrice): `replaced: false`,
+ * tried again later. The live gate, the chain id and the keystore's account are checked as for any send
+ * (the record's readiness and the wallet's code are the keeper's checks, before it calls this). Fees:
+ * 12.5% over the pending transaction's (both the fee cap and the tip under EIP-1559, the tip never under
+ * the node's suggested one; the gas price on a legacy chain), and never under the node's gas price now.
+ * Then the receipt is waited for as in sendCall: a timeout throws ReceiptTimeout with the replacement's
+ * hash and `req`, so it can be replaced in turn; a revert throws RevertedOnChain with its reason; cast
+ * refusing it ("replacement transaction underpriced", "nonce too low") throws a plain Error. */
 export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Promise<Replacement> {
   const chain = req.chain;
   await gate(ctx, chain);
@@ -485,36 +507,48 @@ export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Pro
   const t = ctx.targets[chain];
   const max = (a: bigint, b: bigint) => (a > b ? a : b);
   // cast's --gas-price is the gas price of a legacy transaction, the fee cap of an EIP-1559 one
-  const tip = bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0"));
-  const cap = max(max(bumped(hexToBigInt((t.legacy ? tx.gasPrice : (tx.maxFeePerGas ?? tx.gasPrice)) ?? "0x0")), market), t.legacy ? 0n : tip);
+  const tip = t.legacy ? 0n : max(bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0")), await priorityFeeOf(ctx.rpc, chain));
+  const cap = max(max(bumped(hexToBigInt((t.legacy ? tx.gasPrice : (tx.maxFeePerGas ?? tx.gasPrice)) ?? "0x0")), market), tip);
+  const maxPrice = ctx.maxGasPrice?.[chain];
+  if (maxPrice !== undefined && cap > maxPrice) {
+    return {
+      replaced: false,
+      reason: `${chainLabel(chain)}: the replacement would go out at ${gweiOf(cap)}, over the ${gweiOf(maxPrice)} cap (OPS_MAX_GAS_PRICE_${chain.toUpperCase()}); it waits for the price to fall`,
+    };
+  }
   const fee = t.legacy ? ["--legacy", "--gas-price", cap.toString()] : ["--gas-price", cap.toString(), "--priority-gas-price", tip.toString()];
-  const feeInWords = t.legacy ? `gas price ${cap} wei` : `fee cap ${cap} wei, tip ${tip} wei`;
-  // the same call, if it still passes; else a cancel, which costs 21,000 gas and frees the nonce
+  const feeInWords = t.legacy ? `gas price ${gweiOf(cap)}` : `fee cap ${gweiOf(cap)}, tip ${gweiOf(tip)}`;
+  // the same call, if it still passes; a cancel (21,000 gas, which only frees the nonce) when the call
+  // would revert now; nothing when the node didn't answer
   const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args } as never);
+  const callTx = { from: from.address, to: req.to, data, value: numberToHex(req.value ?? 0n) };
   let cancelled = false;
   let call: string[];
   let limit: bigint;
   try {
-    const gas = await estimate(ctx, chain, { from: from.address, to: req.to, data, value: numberToHex(req.value ?? 0n) }, req.label);
+    const gas = hexToBigInt((await ctx.rpc.request(chain, "eth_estimateGas", [callTx])) as Hex);
     const fn = req.abi.find((i) => i.type === "function" && i.name === req.functionName) as AbiFunction;
     call = [req.to, toFunctionSignature(fn), ...fn.inputs.map((p, i) => castArg(req.args[i], p)), ...(req.value ? ["--value", req.value.toString()] : [])];
     limit = req.gasLimit ?? (gas * 125n + 99n) / 100n;
   } catch (e) {
-    if (!(e instanceof SendRefused && e.reason === "estimate")) throw e;
-    ctx.log(`${e.message}: nonce ${req.nonce} is cancelled instead`);
+    if (!isRevert(e)) {
+      return { replaced: false, reason: `${chainLabel(chain)}: the node didn't answer the estimate of ${req.label} (${redact(ctx.targets, (e as Error).message)}); nothing cancelled` };
+    }
+    ctx.log(`${chainLabel(chain)}: ${req.label} would fail now (${describeRevert(ctx, e)}): nonce ${req.nonce} is cancelled instead`);
     cancelled = true;
     call = [from.address, "--value", "0"];
     limit = CANCEL_GAS;
   }
   const label = cancelled ? `cancel nonce ${req.nonce} (${req.label})` : `${req.label} (replacing ${pending})`;
-  ctx.log(`${chainLabel(chain)}: ${label} — nonce ${req.nonce}, ${feeInWords} (12.5% over the pending transaction's, never under the node's gas price)`);
+  ctx.log(`${chainLabel(chain)}: ${label} — nonce ${req.nonce}, ${feeInWords} (12.5% over the pending transaction's, never under the node's)`);
   const args = ["send", ...call, "--rpc-url", t.rpcUrl, "--keystore", from.keystore, "--password-file", from.passwordFile, "--gas-limit", limit.toString(), ...fee, "--nonce", String(req.nonce), "--async"];
   await checkSigner(ctx);
   const out = await ctx.runner.run(bin(ctx, "cast"), args, { cwd: ctx.paths.contractsDir });
   const hash = out.code === 0 ? hashIn(out.stdout) : undefined;
-  if (!hash) throw await noHash(ctx, chain, req.nonce, label, out);
+  // not noHash: nonce `req.nonce` is pending by definition here, so its nonces say nothing about this send
+  if (!hash) throw new Error(`${chainLabel(chain)}: ${label} was not sent: ${redact(ctx.targets, out.stderr.trim() || out.stdout.trim())}`);
   const r = await waitReceipt(ctx, chain, req.nonce, hash, req);
-  const reason = r.status === "0x1" || cancelled ? undefined : await revertReason(ctx, chain, { from: from.address, to: req.to, data, value: numberToHex(req.value ?? 0n) }, r.blockNumber);
+  const reason = r.status === "0x1" || cancelled ? undefined : await revertReason(ctx, chain, callTx, r.blockNumber);
   return { replaced: true, cancelled, ...settle(chain, label, hash, r, reason) };
 }
 

@@ -369,6 +369,25 @@ export function baseLogsWindow(env: Env): bigint {
   return BigInt(v);
 }
 
+/** The highest gas price the keeper sends at, per chain, in wei: OPS_MAX_GAS_PRICE_BASE and
+ * OPS_MAX_GAS_PRICE_BITTENSOR, in gwei (decimals allowed), by default 5 gwei on Base (its price sits
+ * well under 0.1 gwei and spikes to about 1) and 100 gwei on Bittensor (its EVM's sits about 10). Over
+ * the cap a send is refused, not sent and never cancelled, and tried again later: a fee spike should cost
+ * a wait, not the wallet's ETH or TAO. */
+export function maxGasPrices(env: Env): Record<ChainName, bigint> {
+  const gwei = (name: string, fallback: bigint): bigint => {
+    const v = env[name]?.trim();
+    if (!v) return fallback;
+    if (!/^(\d+)(\.\d{1,9})?$/.test(v) || Number(v) <= 0) throw new Error(`${name} "${v}" is not a gas price in gwei (e.g. 5 or 0.5)`);
+    const [whole, frac = ""] = v.split(".");
+    return BigInt(whole) * 10n ** 9n + BigInt(frac.padEnd(9, "0"));
+  };
+  return { base: gwei("OPS_MAX_GAS_PRICE_BASE", 5n * 10n ** 9n), bittensor: gwei("OPS_MAX_GAS_PRICE_BITTENSOR", 100n * 10n ** 9n) };
+}
+
+/** A gas price in gwei for a message: "0.012 gwei", "5 gwei". */
+export const gweiOf = (wei: bigint): string => `${Number(wei) / 1e9} gwei`;
+
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 export function paths(env: Env) {

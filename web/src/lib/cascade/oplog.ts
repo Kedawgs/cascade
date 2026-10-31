@@ -130,8 +130,12 @@ const DECIMAL = /^(0|[1-9]\d{0,77})$/;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** No record is older than this (Cascade's first transaction was in 2026)… */
 const EPOCH_FLOOR = Date.UTC(2025, 0, 1);
-/** …nor dated further ahead than a device's clock plausibly runs fast. */
-const CLOCK_AHEAD_MS = 60 * 60_000;
+/** …nor dated further ahead than a device's clock plausibly runs fast: a day. A date further ahead is
+ * a real record from a clock since corrected, so it is kept and dated now (the earliest this device can
+ * vouch for) rather than lost; every judgement by age then reads it as just made, which is safe. */
+const CLOCK_AHEAD_MS = 24 * 60 * 60_000;
+/** The record's dates (createdAt, sentAt, …) as read, or undefined for one that isn't a date. */
+type Dates = (x: unknown) => number | undefined;
 
 const hash = (x: unknown): Hex | undefined => (typeof x === "string" && HASH.test(x) ? (x as Hex) : undefined);
 const text = (max: number) => (x: unknown): string | undefined => (typeof x === "string" && x.length > 0 && x.length <= max ? x : undefined);
@@ -152,8 +156,12 @@ const uint64 = big(64);
 const uint32 = (x: unknown): number | undefined => (typeof x === "number" && Number.isInteger(x) && x >= 0 && x < 2 ** 32 ? x : undefined);
 /** Dollars for display: a finite non-negative number. */
 const usd = (x: unknown): number | undefined => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined);
-const time = (now: number) => (x: unknown): number | undefined =>
-  typeof x === "number" && Number.isInteger(x) && x >= EPOCH_FLOOR && x <= now + CLOCK_AHEAD_MS ? x : undefined;
+const time = (now: number, issues: { clamped: number }): Dates => (x) => {
+  if (typeof x !== "number" || !Number.isInteger(x) || x < EPOCH_FLOOR) return undefined;
+  if (x <= now + CLOCK_AHEAD_MS) return x;
+  issues.clamped++;
+  return now;
+};
 /** The step hashes a record keeps: only the named steps, each a transaction hash. */
 const hashesOf = <K extends string>(keys: readonly K[]) => (x: unknown): Partial<Record<K, Hex>> | undefined => {
   if (!isRecord(x)) return undefined;
@@ -166,8 +174,10 @@ const hashesOf = <K extends string>(keys: readonly K[]) => (x: unknown): Partial
   }
   return out;
 };
-const cancelledOf = (now: number) => (x: unknown): { hash: Hex; at: number } | undefined =>
-  isRecord(x) ? { hash: need(hash(x.hash)), at: need(time(now)(x.at)) } : undefined;
+const cancelledOf = (at: Dates) => (x: unknown): { hash: Hex; at: number } | undefined =>
+  isRecord(x) ? { hash: need(hash(x.hash)), at: need(at(x.at)) } : undefined;
+/** A wallet batch id (EIP-5792): the spec allows up to 8,194 characters, and wallets use that room. */
+const callsIdOf = text(8_194);
 const deliveryOf = (x: unknown): { minUsdcPerTao: bigint; deadline: number } | undefined =>
   isRecord(x) ? { minUsdcPerTao: need(usdc(x.minUsdcPerTao)), deadline: need(uint32(x.deadline)) } : undefined;
 const idList = (x: unknown): string[] | undefined => (Array.isArray(x) && x.length <= 1_000 ? x.map((id) => need(text(64)(id))) : undefined);
@@ -182,11 +192,12 @@ const CLAIM_CALLS = ["claim", "approveTao", "swap"] as const satisfies ClaimCall
 const defined = <T extends object>(o: { [K in keyof Required<T>]: Required<T>[K] | undefined }): T =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
-/** `x` as a record of `account`'s, every field checked; null for anything else. */
-export function decodeOperation(x: unknown, account: Address, now: number): Operation | null {
+/** `x` as a record of `account`'s, every field checked; null for anything else. A date ahead of the
+ * clock by more than a day is read as now, counted in `issues.clamped`. */
+export function decodeOperation(x: unknown, account: Address, now: number, issues: { clamped: number } = { clamped: 0 }): Operation | null {
   try {
     if (!isRecord(x)) throw new Bad();
-    const at = time(now);
+    const at = time(now, issues);
     const own = typeof x.account === "string" && ADDRESS.test(x.account) && x.account.toLowerCase() === account.toLowerCase() ? (x.account as Address) : undefined;
     const base = {
       id: need(typeof x.id === "string" && ID.test(x.id) ? x.id : undefined),
@@ -207,9 +218,9 @@ export function decodeOperation(x: unknown, account: Address, now: number): Oper
         priceUsd: maybe(x.priceUsd, usd),
         feesUsd: maybe(x.feesUsd, usd),
         hashes: need(hashesOf(DEPOSIT_CALLS)(x.hashes)),
-        callsId: maybe(x.callsId, text(256)),
+        callsId: maybe(x.callsId, callsIdOf),
         batchId: maybe(x.batchId, uint64),
-        cancelled: maybe(x.cancelled, cancelledOf(now)),
+        cancelled: maybe(x.cancelled, cancelledOf(at)),
       });
     }
     if (x.kind === "withdrawal") {
@@ -227,7 +238,7 @@ export function decodeOperation(x: unknown, account: Address, now: number): Oper
         searchedTo: maybe(x.searchedTo, uint64),
         droppedAt: maybe(x.droppedAt, at),
         batchId: maybe(x.batchId, uint64),
-        cancelled: maybe(x.cancelled, cancelledOf(now)),
+        cancelled: maybe(x.cancelled, cancelledOf(at)),
       });
     }
     if (x.kind === "claim") {
@@ -238,7 +249,7 @@ export function decodeOperation(x: unknown, account: Address, now: number): Oper
         keepTao: need(bool(x.keepTao)),
         minUsdc: need(usdc(x.minUsdc)),
         hashes: need(hashesOf(CLAIM_CALLS)(x.hashes)),
-        callsId: maybe(x.callsId, text(256)),
+        callsId: maybe(x.callsId, callsIdOf),
         withdrawalIds: maybe(x.withdrawalIds, idList),
       });
     }
@@ -249,7 +260,7 @@ export function decodeOperation(x: unknown, account: Address, now: number): Oper
         batchId: need(uint64(x.batchId)),
         value: need(wei(x.value)),
         hashes: need(hashesOf(["close"] as const)(x.hashes)),
-        callsId: maybe(x.callsId, text(256)),
+        callsId: maybe(x.callsId, callsIdOf),
       });
     }
     throw new Bad();
@@ -259,9 +270,9 @@ export function decodeOperation(x: unknown, account: Address, now: number): Oper
   }
 }
 
-/** A stored list as its records, `account`'s and sound (decodeOperation), with how many were dropped;
- * null when `raw` isn't a JSON list at all. */
-export function decodeOperations(raw: string, account: Address, now: number): { ops: Operation[]; dropped: number } | null {
+/** A stored list as its records, `account`'s and sound (decodeOperation), with how many were dropped
+ * and how many dates were ahead of the clock and read as now; null when `raw` isn't a JSON list at all. */
+export function decodeOperations(raw: string, account: Address, now: number): { ops: Operation[]; dropped: number; clamped: number } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -270,11 +281,12 @@ export function decodeOperations(raw: string, account: Address, now: number): { 
   }
   if (!Array.isArray(parsed)) return null;
   const ops: Operation[] = [];
+  const issues = { clamped: 0 };
   for (const x of parsed) {
-    const op = decodeOperation(x, account, now);
+    const op = decodeOperation(x, account, now, issues);
     if (op) ops.push(op);
   }
-  return { ops, dropped: parsed.length - ops.length };
+  return { ops, dropped: parsed.length - ops.length, clamped: issues.clamped };
 }
 
 /** The transactions this site sent, per account and deployment, kept in the browser. There is no
@@ -293,8 +305,9 @@ export function createOpLog(storage: StringStorage, frontDoor: Address, makeRoom
   function warnOnce(k: string, raw: string, what: string): void {
     if (warned.get(k) === raw) return;
     warned.set(k, raw);
-    console.warn(`Cascade: ${what} in this browser's storage; it is left out.`);
+    console.warn(`Cascade: ${what} in this browser's storage.`);
   }
+  const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
 
   function read(account: Address): Operation[] {
     const k = key(account);
@@ -312,7 +325,11 @@ export function createOpLog(storage: StringStorage, frontDoor: Address, makeRoom
       warnOnce(k, raw, "the activity records aren't a readable list");
       return memory.get(k) ?? [];
     }
-    if (decoded.dropped > 0) warnOnce(k, raw, `${decoded.dropped} activity record${decoded.dropped === 1 ? "" : "s"} couldn't be read`);
+    const said = [
+      ...(decoded.dropped > 0 ? [`${plural(decoded.dropped, "activity record")} couldn't be read and ${decoded.dropped === 1 ? "is" : "are"} left out`] : []),
+      ...(decoded.clamped > 0 ? [`${plural(decoded.clamped, "activity record date")} dated ahead of this device's clock ${decoded.clamped === 1 ? "is" : "are"} read as now`] : []),
+    ];
+    if (said.length > 0) warnOnce(k, raw, said.join("; "));
     return decoded.ops;
   }
 

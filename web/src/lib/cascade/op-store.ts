@@ -3,11 +3,16 @@ import type { FlowStore } from "./flows";
 import type { OpLog, Operation } from "./oplog";
 
 /** A flow's progress kept in its operation log entry. A withdrawal has one call ("request"), whose
- * hash is dated when recorded (`now`). If the entry disappears while the flow runs (removed from
- * another tab), it is put back before anything is read or written, so a transaction signed after that
- * is still recorded. */
+ * hash is dated when recorded (`now`). The store keeps its own copy of the entry (`last`) and never
+ * loses it: if the entry disappears while the flow runs (removed from another tab), it is put back
+ * before anything is read or written, so a transaction signed after that is still recorded; and if a
+ * write leaves the entry unreadable (a field the log won't read back: oplog.ts), the flow goes on from
+ * the copy, which is put back on the next read, and the loss is said loudly rather than letting a flow
+ * stop between a send and its receipt. */
 export function opStore(log: OpLog, account: Address, id: string, now: () => number = Date.now): FlowStore {
-  let last = log.get(account, id) as Operation;
+  const found = log.get(account, id);
+  if (!found) throw new Error(`There is no record ${id} to keep this flow's progress in`);
+  let last: Operation = found;
   const op = (): Operation => {
     const o = log.get(account, id);
     if (o) return (last = o);
@@ -15,9 +20,17 @@ export function opStore(log: OpLog, account: Address, id: string, now: () => num
     return last;
   };
   const update = (patch: Partial<Operation>) => {
-    op();
+    const before = op();
     log.update(account, id, patch);
-    last = log.get(account, id) as Operation;
+    const after = log.get(account, id);
+    if (after) {
+      last = after;
+      return;
+    }
+    last = { ...before, ...patch } as Operation;
+    console.error(
+      `Cascade: the record of this transaction (${id}) couldn't be read back after it was updated (${Object.keys(patch).join(", ")}); the flow goes on from memory, and the record may be missing from Activity.`,
+    );
   };
   return {
     hashes: () => {

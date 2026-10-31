@@ -238,7 +238,6 @@ describe("what the op log reads back from storage is checked before it is believ
     ["createdAt as text", { ...depositOp, createdAt: "not-a-date" }],
     ["createdAt as NaN", { ...depositOp, createdAt: Number.NaN }],
     ["createdAt before Cascade existed", { ...depositOp, createdAt: 1_000 }],
-    ["createdAt in the future (more than an hour ahead)", { ...depositOp, createdAt: NOW + 2 * 60 * 60_000 }],
     ["createdAt with a fraction", { ...depositOp, createdAt: NOW - 0.5 }],
     ["an id with markup", { ...depositOp, id: "<img src=x>" }],
     ["an empty id", { ...depositOp, id: "" }],
@@ -322,11 +321,53 @@ describe("what the op log reads back from storage is checked before it is believ
     expect(log.list(ME).map((o) => o.id)).toEqual(["cls2", "dep1"]);
   });
 
-  it("decodes a stored list on its own: the valid records, and how many were dropped", () => {
-    expect(decodeOperations(stored([depositOp, "junk", closeOp]), ME, NOW)).toEqual({ ops: [depositOp, closeOp], dropped: 1 });
-    expect(decodeOperations("[]", ME, NOW)).toEqual({ ops: [], dropped: 0 });
+  it("decodes a stored list on its own: the valid records, and how many were dropped or dated back", () => {
+    expect(decodeOperations(stored([depositOp, "junk", closeOp]), ME, NOW)).toEqual({ ops: [depositOp, closeOp], dropped: 1, clamped: 0 });
+    expect(decodeOperations("[]", ME, NOW)).toEqual({ ops: [], dropped: 0, clamped: 0 });
     expect(decodeOperations("{}", ME, NOW)).toBeNull();
     expect(decodeOperations("nope", ME, NOW)).toBeNull();
+  });
+
+  describe("a record from a device whose clock ran ahead when it was written", () => {
+    const HOUR = 60 * 60_000;
+    const DAY = 24 * HOUR;
+
+    it("is read as it is when dated up to a day ahead (an ordinary skew)", () => {
+      const ahead = { ...depositOp, createdAt: NOW + 2 * HOUR };
+      expect(withStored([ahead]).get(ME, "dep1")).toEqual(ahead);
+      const edge = { ...depositOp, createdAt: NOW + DAY };
+      expect(withStored([edge]).get(ME, "dep1")).toEqual(edge);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("is kept, dated now, when dated further ahead than that: a clock correction never loses a real record", () => {
+      const far = { ...depositOp, createdAt: NOW + DAY + 1, cancelled: { hash: H(3), at: NOW + 3 * DAY } };
+      const log = withStored([far]);
+      const op = log.get(ME, "dep1") as DepositOp;
+      expect(op.createdAt).toBe(NOW);
+      expect(op.cancelled).toEqual({ hash: H(3), at: NOW });
+      expect(warn).toHaveBeenCalledOnce();
+      expect(String(warn.mock.calls[0][0])).toMatch(/dated ahead/);
+      // the same for every date a record keeps
+      const w = { ...withdrawalOp, sentAt: NOW + 2 * DAY, droppedAt: NOW + 2 * DAY };
+      expect(withStored([w]).get(ME, "wd1")).toMatchObject({ createdAt: w.createdAt, sentAt: NOW, droppedAt: NOW });
+    });
+
+    it("still drops a date that isn't one, or one from before Cascade existed", () => {
+      expect(withStored([{ ...depositOp, createdAt: "tomorrow" }]).list(ME)).toEqual([]);
+      expect(withStored([{ ...depositOp, createdAt: Number.POSITIVE_INFINITY }]).list(ME)).toEqual([]);
+      expect(withStored([{ ...depositOp, cancelled: { hash: H(3), at: 1_000 } }]).list(ME)).toEqual([]);
+    });
+  });
+
+  it("keeps a wallet batch id as long as EIP-5792 allows (8,194 characters) on a deposit, a claim and a close, and no longer", () => {
+    const longest = `0x${"ab".repeat(4_096)}`;
+    expect(longest.length).toBe(8_194);
+    const log = withStored([{ ...depositOp, callsId: longest }, { ...claimOp, callsId: longest }, { ...closeOp, callsId: longest }]);
+    expect(log.list(ME).map((o) => (o as DepositOp).callsId)).toEqual([longest, longest, longest]);
+    expect(warn).not.toHaveBeenCalled();
+    const over = `${longest}c`;
+    expect(withStored([{ ...depositOp, callsId: over }, { ...claimOp, callsId: over }, { ...closeOp, callsId: over }]).list(ME)).toEqual([]);
   });
 
   it("the resume path never sees a record whose amounts aren't exact bigints in range", () => {

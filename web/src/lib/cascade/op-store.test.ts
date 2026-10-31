@@ -1,6 +1,6 @@
 import type { Hex } from "viem";
-import { describe, expect, it } from "vitest";
-import { cancelCall, FlowError, runFlow, sendNowCall, type WalletPort } from "./flows";
+import { describe, expect, it, vi } from "vitest";
+import { cancelCall, FlowError, runFlow, sendNowCall, stakeV3Calls, type WalletPort } from "./flows";
 import { type CloseOp, createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import { cancelStore, opStore } from "./op-store";
 
@@ -74,6 +74,56 @@ describe("opStore", () => {
     now = T0 + 9_000;
     store.setHash("request", `0x${"33".repeat(32)}`);
     expect(log.get(ME, "w1")).toMatchObject({ hash: `0x${"33".repeat(32)}`, sentAt: T0 + 9_000 });
+  });
+});
+
+describe("opStore through a whole wallet-batch flow", () => {
+  const v3: DepositOp = { ...op, v: 3, minTaoOut: 77_611_000_000_000_000n };
+  const D3 = { ...D, staker: "0x00000000000000000000000000000000005A4E12" as const, oracle: "0x000000000000000000000000000000000000041E" as const };
+  const balances = { usdc: 20_000_000n, tao: 0n, eth: 10n ** 15n, usdcRouterAllowance: 0n, usdcStakerAllowance: 0n, taoRouterAllowance: 0n, taoFrontDoorAllowance: 0n, claimable: 0n };
+  /** A wallet that sends the stake as one batch under `id`. */
+  const batching = (id: string): WalletPort => ({
+    switchToBase: async () => undefined,
+    canBatch: async () => true,
+    sendBatch: async () => ({ id }),
+    waitBatch: async () => ({ status: "success", hashes: [`0x${"11".repeat(32)}`] }),
+    send: async () => {
+      throw new Error("not one at a time");
+    },
+    wait: async () => ({ status: "success" }),
+    hasCode: async () => false,
+    signPermit: async () => ({ v: 27, r: `0x${"11".repeat(32)}`, s: `0x${"11".repeat(32)}` }),
+    simulate: async () => ({ ok: true }),
+  });
+
+  it("keeps a batch id as long as EIP-5792 allows (8,194 characters) from the send to the receipt, and reads it back", async () => {
+    const s = memoryStorage();
+    const log = createOpLog(s, FD);
+    log.put(v3);
+    const longest = `0x${"ab".repeat(4_096)}`;
+    await runFlow(batching(longest), opStore(log, ME, "d1"), stakeV3Calls(v3 as never, balances, D3, ME));
+    const back = createOpLog(s, FD).get(ME, "d1") as DepositOp;
+    expect(back).toMatchObject({ state: "sent", mode: "batch", callsId: longest });
+    expect(back.hashes).toEqual({ approveUsdc: `0x${"11".repeat(32)}`, stake: `0x${"11".repeat(32)}` });
+  });
+
+  it("never loses its place when a write leaves the record unreadable: it says so loudly, keeps what it knows, and the flow finishes", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const log = createOpLog(memoryStorage(), FD);
+      log.put(v3);
+      // a batch id past what the log reads back: the record in storage can't be read after this write
+      const tooLong = `0x${"ab".repeat(5_000)}`;
+      const store = opStore(log, ME, "d1");
+      await expect(runFlow(batching(tooLong), store, stakeV3Calls(v3 as never, balances, D3, ME))).resolves.toBeUndefined();
+      // the store went on from its own copy: the batch's hashes and the final state were recorded on it
+      expect(store.hashes()).toEqual({ approveUsdc: `0x${"11".repeat(32)}`, stake: `0x${"11".repeat(32)}` });
+      expect(store.callsId()).toBe(tooLong);
+      expect(error).toHaveBeenCalled();
+      expect(String(error.mock.calls[0][0])).toMatch(/couldn't be read back/);
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 

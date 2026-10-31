@@ -34,6 +34,8 @@ export const cascadeKeys = {
   history: (account: string) => ["cascade", account, "history"] as const,
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
   withdrawals: (account: string) => ["cascade", account, "withdrawals"] as const,
+  openBatch: (account: string) => ["cascade", account, "open-batch"] as const,
+  nextBatch: () => ["cascade", "next-batch"] as const,
   depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
   withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
   roundTrip: (taoWei: bigint) => ["quote", "round-trip", taoWei.toString()] as const,
@@ -72,6 +74,31 @@ export function useWiring(enabled: boolean) {
     retry: 2,
     refetchInterval: (q) => (q.state.status === "error" ? IDLE_MS : WIRING_TTL_MS),
   });
+}
+
+/** The deployment's max wait (the launch cadence's), or none: when the site has no deployment, or one
+ * whose batches leave as soon as they can close. */
+export function useBatchMaxWait(): number | undefined {
+  const data = useCascadeData();
+  try {
+    return data.deployment.batchMaxWaitS;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The open batch for the public "Next batch" line: one multicall on Base every 30 s, nothing from
+ * Bittensor. Its countdown runs on Base's clock from the read's block time (batch-clock.ts). */
+export function useNextBatch() {
+  const data = useCascadeData();
+  return useQuery({ queryKey: cascadeKeys.nextBatch(), queryFn: () => data.getNextBatch(), refetchInterval: IDLE_MS });
+}
+
+/** The open batch with the account's part in it and, once it can close, what sending it now costs:
+ * read every 30 s, only while one of the account's deposits or unstakes waits in it (`enabled`). */
+export function useOpenBatch(account: string, enabled: boolean) {
+  const data = useCascadeData();
+  return useQuery({ queryKey: cascadeKeys.openBatch(account), queryFn: () => data.getOpenBatch(account), enabled, refetchInterval: IDLE_MS });
 }
 
 export function useProtocolStats() {

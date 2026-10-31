@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { toFunctionSelector } from "viem";
 import { ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
@@ -139,5 +140,19 @@ describe("v3 ABIs match the contracts (selectors from cast sig)", () => {
     expect(sel(ERC20, "nonces")).toBe("0x7ecebe00");
     expect(sel(VAULT, "rewardCutBps")).toBe("0xabbee453");
     expect(FRONT_DOOR.some((x) => x.type === "event" && x.name === "Delivered")).toBe(true);
+  });
+  it("Send it now's call, reads and event, as the front door declares them", () => {
+    const src = readFileSync(new URL("../../../../contracts/src/CascadeFrontDoor.sol", import.meta.url), "utf8");
+    expect(src).toMatch(/function closeBatch\(\) external payable whenNotPaused/);
+    const close = FRONT_DOOR.find((x) => x.type === "function" && x.name === "closeBatch");
+    expect(close && "stateMutability" in close ? close.stateMutability : undefined).toBe("payable");
+    expect(sel(FRONT_DOOR, "closeBatch")).toBe("0x1f96c1a8");
+    expect(sel(FRONT_DOOR, "openDeposits")).toBe("0xc3f81cc5");
+    expect(sel(FRONT_DOOR, "openRedeems")).toBe("0x85c34041");
+    expect(sel(FRONT_DOOR, "paused")).toBe("0x5c975abb");
+    const declared = src.match(/event BatchClosed\(([^)]*)\)/)?.[1].replace(/\s+/g, " ").trim();
+    const event = FRONT_DOOR.find((x) => x.type === "event" && x.name === "BatchClosed");
+    const inputs = event && "inputs" in event ? event.inputs : [];
+    expect(inputs.map((i) => `${i.type}${"indexed" in i && i.indexed ? " indexed" : ""} ${i.name}`).join(", ")).toBe(declared);
   });
 });

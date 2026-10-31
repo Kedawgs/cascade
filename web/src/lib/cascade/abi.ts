@@ -24,6 +24,18 @@ export const FRONT_DOOR = parseAbi([
   "function setDelivery(uint128 minUsdcPerTao, uint64 deadline, uint32 destination)",
   "function requestRedeemWithDelivery(uint256 shares, uint128 minUsdcPerTao, uint64 deadline, uint32 destination) payable",
   "function maxDeliverySlippageBps() view returns (uint16)",
+  // Send it now: anyone may send the open batch once it can close, paying its bridge fee (the pot first,
+  // the rest refunded to the sender)
+  "function closeBatch() payable",
+  "function openDeposits() view returns ((address user, uint256 amount)[])",
+  "function openRedeems() view returns ((address user, uint256 amount)[])",
+  "function paused() view returns (bool)",
+  "event BatchClosed(uint64 indexed id, uint256 totalDeposits, uint256 nDeposits, uint256 nRedeems, uint256 fee, uint256 potUsed)",
+  // what closeBatch can revert with, so the pre-send check can say why (EnforcedPause is OpenZeppelin's Pausable)
+  "error BatchNotReady()",
+  "error InsufficientFee()",
+  "error EnforcedPause()",
+  "error PrimaryBridgeDisabled()",
   // how it is wired, read before anything is sent (wiring.ts); oracle and swapper are v3 only
   "function asset() view returns (address)",
   "function vault() view returns (address)",
@@ -108,7 +120,10 @@ export const ADAPTER = parseAbi([
   "event Delivered(bytes32 indexed messageId, uint64 sourceChain, address indexed sender, address indexed recipient, uint256 amount)",
 ]);
 
-export const OFFRAMP_ABI = parseAbi(["function getExecutionState(bytes32 messageId) view returns (uint8)"]);
+/** Multicall3's own clock: asked in a batch read, it gives the timestamp of the block the read came from. */
+export const MULTICALL3_ABI = parseAbi(["function getCurrentBlockTimestamp() view returns (uint256 timestamp)"]);
+
+export const OFFRAMP_ABI =parseAbi(["function getExecutionState(bytes32 messageId) view returns (uint8)"]);
 
 /** QuoterV2's quote functions are not marked view (they revert internally), but eth_call answers them. */
 export const QUOTER = parseAbi([

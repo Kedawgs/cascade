@@ -60,6 +60,8 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     clients: {} as never,
     opLog: createOpLog(memory(), D.frontDoor),
     readFrontDoor: async () => fd,
+    readOpenBatch: async () => Promise.reject(new Error("the open batch wasn't expected to be read")),
+    readNextBatch: async () => Promise.reject(new Error("the next batch wasn't expected to be read")),
     readVault: async () => vault,
     readWallet: async () => wallet,
     readPendingRewards: async () => undefined,
@@ -78,6 +80,31 @@ function deps(over: Partial<LiveDeps> = {}): LiveDeps {
     ...over,
   };
 }
+
+describe("the open batch", () => {
+  it("reads it for the account (Send it now) and for anyone (Next batch) from Base alone", async () => {
+    const asked: unknown[] = [];
+    const data = createLiveCascadeData(
+      D,
+      deps({
+        readOpenBatch: async (_c, d, account) => (asked.push(["open", d.frontDoor, account]), { id: 7n } as never),
+        readNextBatch: async (_c, d) => (asked.push(["next", d.frontDoor]), { id: 7n } as never),
+        readVault: async () => Promise.reject(new Error("Bittensor wasn't expected to be read")),
+      }),
+    );
+    expect(await data.getOpenBatch(ME)).toEqual({ id: 7n });
+    expect(await data.getNextBatch()).toEqual({ id: 7n });
+    expect(asked).toEqual([
+      ["open", D.frontDoor, ME],
+      ["next", D.frontDoor],
+    ]);
+  });
+
+  it("says there is no deployment when the site has none", async () => {
+    await expect(notConfiguredData().getOpenBatch(ME)).rejects.toBeInstanceOf(NotConfiguredError);
+    await expect(notConfiguredData().getNextBatch()).rejects.toBeInstanceOf(NotConfiguredError);
+  });
+});
 
 describe("rewards waiting (v3)", () => {
   const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };

@@ -1,7 +1,22 @@
+import { decodeAbiParameters, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, size } from "viem";
 import { describe, expect, it } from "vitest";
-import type { Deployment } from "./config";
+import { type Deployment, MULTICALL3 } from "./config";
+import { FRONT_DOOR } from "./abi";
 import { basketTwrKey, STORAGE_QUERY } from "./apy";
-import { readApyPercent, readFrontDoor, readPendingRewards, readRewardCutBps, readVault, readWallet, taoPriceUsd } from "./reads";
+import {
+  CLOSE_GAS,
+  encodeBatch,
+  readApyPercent,
+  readBatchClosed,
+  readFrontDoor,
+  readNextBatch,
+  readOpenBatch,
+  readPendingRewards,
+  readRewardCutBps,
+  readVault,
+  readWallet,
+  taoPriceUsd,
+} from "./reads";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -13,6 +28,7 @@ const D: Deployment = {
   hotkeySs58: "5E4z3h9yVhmQyCFWNbY9BPpwhx4xFiPwq3eeqmBgVF6KULde",
 };
 const ME = "0x000000000000000000000000000000000000a11c" as const;
+const H32 = `0x${"ab".repeat(32)}` as Hex;
 
 /** A client that answers multicalls by function name and records what was asked. */
 function fake(answers: Record<string, unknown>, balance = 0n) {
@@ -216,5 +232,158 @@ describe("readApyPercent", () => {
     expect(young.calls).toEqual([]);
     const none = archive({ "9400000": le(ONE) });
     expect(await readApyPercent({ bittensorHistory: none.client }, D3)).toBeUndefined();
+  });
+});
+
+describe("the open batch, for Send it now", () => {
+  const ALICE = getAddress("0x00000000000000000000000000000000000a11ce");
+  const BOB = getAddress("0x0000000000000000000000000000000000000b0b");
+  const deposits = [
+    { user: ALICE, amount: 2n * 10n ** 17n },
+    { user: getAddress(ME), amount: 10n ** 17n },
+  ];
+  const redeems = [{ user: BOB, amount: 5n * 10n ** 21n }];
+  const FEE = 744_898_037_875_672n;
+
+  /** Base as the front door, its adapter, the wallet and Uniswap's quoter answer it; each eth_call recorded. */
+  function base(over: { canClose?: boolean; paused?: boolean; entries?: boolean; quote?: () => bigint; gas?: () => bigint } = {}) {
+    const calls: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }[] = [];
+    const asked: string[] = [];
+    const empty = over.entries === false;
+    const answers: Record<string, unknown> = {
+      openBatch: [7n, 1_800_000_000n, empty ? 0n : 3n * 10n ** 17n, 10n ** 14n, empty ? 0n : 2n, empty ? 0n : 1n],
+      openDeposits: empty ? [] : deposits,
+      openRedeems: empty ? [] : redeems,
+      canClose: over.canClose ?? true,
+      batchInterval: 3_600n,
+      paused: over.paused ?? false,
+      depositOf: empty ? 0n : 10n ** 17n,
+      redeemOf: 0n,
+      getCurrentBlockTimestamp: 1_800_007_200n,
+    };
+    let multicalls = 0;
+    const client = {
+      async multicall({ contracts }: { contracts: { address: string; functionName: string; args?: readonly unknown[] }[] }) {
+        multicalls++;
+        return contracts.map((c) => {
+          asked.push(c.functionName);
+          if (!(c.functionName in answers)) throw new Error(`unexpected ${c.functionName}`);
+          if (c.functionName === "depositOf" || c.functionName === "redeemOf") expect(c.args).toEqual([ME]);
+          // Base's clock, from the same block as the rest
+          if (c.functionName === "getCurrentBlockTimestamp") expect(c.address).toBe(MULTICALL3);
+          return answers[c.functionName];
+        });
+      },
+      async readContract(c: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }) {
+        calls.push(c);
+        if (c.functionName === "quoteFee") return (over.quote ?? (() => FEE))();
+        if (c.functionName === "quoteExactInput") return [2_330_000n, [], [], 0n];
+        throw new Error(`unexpected ${c.functionName}`);
+      },
+      async getBalance({ address }: { address: string }) {
+        asked.push("getBalance");
+        expect(address).toBe(ME);
+        return 10n ** 16n;
+      },
+      async estimateFeesPerGas() {
+        asked.push("estimateFeesPerGas");
+        return { maxFeePerGas: (over.gas ?? (() => 7_000_000n))(), maxPriorityFeePerGas: 1_000_000n };
+      },
+    };
+    return {
+      client: client as never,
+      calls,
+      asked,
+      get multicalls() {
+        return multicalls;
+      },
+    };
+  }
+
+  it("for anyone: when it started, what waits in it and Base's clock, in one multicall and nothing else", async () => {
+    const b = base();
+    expect(await readNextBatch({ base: b.client }, D)).toEqual({
+      id: 7n,
+      start: 1_800_000_000,
+      interval: 3_600,
+      canClose: true,
+      paused: false,
+      deposits: 2,
+      redeems: 1,
+      chainTime: 1_800_007_200,
+    });
+    expect(b.multicalls).toBe(1);
+    expect(b.asked).toEqual(["openBatch", "canClose", "batchInterval", "paused", "getCurrentBlockTimestamp"]);
+    expect(b.calls).toEqual([]);
+  });
+
+  it("encodes the batch exactly as the front door does: abi.encode(1, id, deposits, redeems)", () => {
+    const message = encodeBatch(7n, deposits, redeems);
+    const [kind, id, d, r] = decodeAbiParameters(
+      parseAbiParameters("uint8, uint64, (address user, uint256 amount)[], (address user, uint256 amount)[]"),
+      message,
+    );
+    expect([kind, id]).toEqual([1, 7n]);
+    expect(d).toEqual(deposits);
+    expect(r).toEqual(redeems);
+    // the adapter prices gas from the message's shape (CcipAdapterBase.gasFor): six header words, then
+    // two words per entry; any other shape would be quoted at its gas cap
+    expect(size(message)).toBe(32 * (6 + 2 * 3));
+  });
+
+  it("asks the bridge for the fee of this batch's exact message, as the front door asks it", async () => {
+    const b = base();
+    const batch = await readOpenBatch({ base: b.client }, D, ME);
+    const quote = b.calls.find((c) => c.functionName === "quoteFee");
+    // the primary bridge (wiring.ts checks it is this adapter), to the vault on Bittensor (chain 964),
+    // for the batch's TAO, from the front door: the call closeBatch makes inside
+    expect(quote).toMatchObject({ address: D.baseAdapter, args: [964n, D.vault, encodeBatch(7n, deposits, redeems), 3n * 10n ** 17n], account: D.frontDoor });
+    expect(batch).toEqual({
+      id: 7n,
+      start: 1_800_000_000,
+      interval: 3_600,
+      canClose: true,
+      paused: false,
+      chainTime: 1_800_007_200,
+      mine: { depositWei: 10n ** 17n, redeemShares: 0n },
+      potWei: 10n ** 14n,
+      feeWei: FEE,
+      ethWei: 10n ** 16n,
+      // a generous allowance for closeBatch's gas at today's price
+      gasWei: CLOSE_GAS * 7_000_000n,
+      ethPriceUsd: 2_330,
+    });
+  });
+
+  it("before the batch can close, reads nothing it can't use yet: no fee, balance, gas or price", async () => {
+    for (const over of [{ canClose: false }, { paused: true }, { entries: false }]) {
+      const b = base(over);
+      const batch = await readOpenBatch({ base: b.client }, D, ME);
+      expect(b.calls, JSON.stringify(over)).toEqual([]);
+      expect(b.asked).not.toContain("getBalance");
+      expect(batch).not.toHaveProperty("feeWei");
+      expect(batch).not.toHaveProperty("ethPriceUsd");
+    }
+  });
+
+  it("leaves out only the figure a failed read was for: never a guess in its place", async () => {
+    const fail = (): never => {
+      throw new Error("rate limited");
+    };
+    const batch = await readOpenBatch({ base: base({ quote: fail, gas: fail }).client }, D, ME);
+    expect(batch).not.toHaveProperty("feeWei");
+    expect(batch).not.toHaveProperty("gasWei");
+    expect(batch).toMatchObject({ ethWei: 10n ** 16n, ethPriceUsd: 2_330, canClose: true });
+  });
+
+  it("reads what a send paid from its receipt: the front door's BatchClosed, its fee and the pot's share", async () => {
+    const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "BatchClosed", args: { id: 7n } });
+    const data = encodeAbiParameters(parseAbiParameters("uint256, uint256, uint256, uint256, uint256"), [3n * 10n ** 17n, 2n, 1n, FEE, 10n ** 14n]);
+    const log = (address: string) => ({ address, topics, data, blockNumber: 1n, logIndex: 0, transactionHash: H32, transactionIndex: 0, blockHash: H32, removed: false });
+    const receipt = (logs: unknown[]) => ({ base: { getTransactionReceipt: async () => ({ logs }) } as never });
+    expect(await readBatchClosed(receipt([log(D.frontDoor)]), D, H32)).toEqual({ feeWei: FEE, potUsedWei: 10n ** 14n });
+    // another contract's event of the same shape isn't the front door's
+    expect(await readBatchClosed(receipt([log(D.baseAdapter)]), D, H32)).toBeUndefined();
+    expect(await readBatchClosed({ base: { getTransactionReceipt: async () => Promise.reject(new Error("not found")) } as never }, D, H32)).toBeUndefined();
   });
 });

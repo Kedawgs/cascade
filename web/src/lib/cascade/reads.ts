@@ -1,9 +1,10 @@
-import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters } from "viem";
+import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters, parseEventLogs } from "viem";
 import { freshTip } from "./fresh";
-import { ADAPTER, ERC20, FRONT_DOOR, QUOTER, STAKER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
+import { ADAPTER, ERC20, FRONT_DOOR, MULTICALL3_ABI, QUOTER, STAKER, STAKING, STAKING_ADDRESS, VAULT } from "./abi";
 import { APY_WINDOW_BLOCKS, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
 import type { Clients } from "./chain";
-import { type Deployment, isV3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
+import { type Deployment, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
+import type { NextBatch, OpenBatch } from "./types";
 import { RAO, toDisplay } from "./units";
 
 const ZERO: Address = "0x0000000000000000000000000000000000000000";
@@ -250,6 +251,139 @@ export async function quotePayoutFee(c: Pick<Clients, "bittensor">, d: Deploymen
     args: [8453n, d.frontDoor, message, taoWei],
     account: d.vault,
   })) as bigint;
+}
+
+/** One entry of a batch's deposit or redeem list (CascadeMessages.Entry). */
+export interface BatchEntry {
+  user: Address;
+  amount: bigint;
+}
+
+/** The chain id the front door's batches go to: the vault's, Bittensor's (wiring.ts checks vaultChain). */
+const VAULT_CHAIN = 964n;
+
+/** CascadeMessages.encodeBatch: abi.encode(uint8 BATCH = 1, uint64 batchId, Entry[] deposits, Entry[] redeems). */
+export const encodeBatch = (id: bigint, deposits: readonly BatchEntry[], redeems: readonly BatchEntry[]): Hex =>
+  encodeAbiParameters(
+    parseAbiParameters("uint8 kind, uint64 batchId, (address user, uint256 amount)[] deposits, (address user, uint256 amount)[] redeems"),
+    [1, id, deposits, redeems],
+  );
+
+/** The gas allowed for closeBatch when checking a wallet can pay for it: about 700,000 measured on Base
+ * with one entry (most of it the bridge's), with room for a full batch. Only the balance check uses it;
+ * the wallet estimates the real figure. */
+export const CLOSE_GAS = 1_500_000n;
+
+/** The bridge fee closeBatch would pay to send the open batch now: the front door's primary bridge
+ * (wiring.ts checks it is the deployment's adapter) quotes the batch's exact message for the vault on
+ * Bittensor, asked from the front door, as closeBatch asks it inside (the adapter's message names its
+ * sender). */
+export async function quoteCloseFee(
+  c: Pick<Clients, "base">,
+  d: Deployment,
+  b: { id: bigint; deposits: readonly BatchEntry[]; redeems: readonly BatchEntry[]; totalDeposits: bigint },
+): Promise<bigint> {
+  return (await c.base.readContract({
+    address: d.baseAdapter,
+    abi: ADAPTER,
+    functionName: "quoteFee",
+    args: [VAULT_CHAIN, d.vault, encodeBatch(b.id, b.deposits, b.redeems), b.totalDeposits],
+    account: d.frontDoor,
+  })) as bigint;
+}
+
+const settled = <T>(r: PromiseSettledResult<T>): T | undefined => (r.status === "fulfilled" ? r.value : undefined);
+
+/** The open batch for anyone, in one multicall on Base: when it started, its interval, whether it can
+ * close, whether Cascade is paused, how many deposits and unstake requests wait in it, and the time of
+ * the block all of that was read at (Multicall3's own clock, so a countdown runs on Base's clock). */
+export async function readNextBatch(c: Pick<Clients, "base">, d: Deployment): Promise<NextBatch> {
+  const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
+  const [open, canClose, interval, paused, time] = await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { ...fd, functionName: "openBatch" },
+      { ...fd, functionName: "canClose" },
+      { ...fd, functionName: "batchInterval" },
+      { ...fd, functionName: "paused" },
+      { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getCurrentBlockTimestamp" },
+    ],
+  });
+  const [id, start, , , nDeposits, nRedeems] = open as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+  return {
+    id,
+    start: Number(start),
+    interval: Number(interval),
+    canClose,
+    paused,
+    deposits: Number(nDeposits),
+    redeems: Number(nRedeems),
+    chainTime: Number(time),
+  };
+}
+
+/** The open batch, the account's entries in it, and, once it can close (with entries, not paused), what
+ * sending it now takes: the bridge fee, the account's ETH, a gas allowance and ETH's price. Those four are
+ * read only then, and each is left out when its read fails, never guessed. The batch itself comes from
+ * one multicall, with the time of the block it read. */
+export async function readOpenBatch(c: Pick<Clients, "base">, d: Deployment, account: Address): Promise<OpenBatch> {
+  const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
+  const [open, deposits, redeems, canClose, interval, paused, depositOf, redeemOf, time] = await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { ...fd, functionName: "openBatch" },
+      { ...fd, functionName: "openDeposits" },
+      { ...fd, functionName: "openRedeems" },
+      { ...fd, functionName: "canClose" },
+      { ...fd, functionName: "batchInterval" },
+      { ...fd, functionName: "paused" },
+      { ...fd, functionName: "depositOf", args: [account] },
+      { ...fd, functionName: "redeemOf", args: [account] },
+      { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getCurrentBlockTimestamp" },
+    ],
+  });
+  const [id, start, totalDeposits, feePot] = open as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+  const batch: OpenBatch = {
+    id,
+    start: Number(start),
+    interval: Number(interval),
+    canClose,
+    paused,
+    chainTime: Number(time),
+    mine: { depositWei: depositOf, redeemShares: redeemOf },
+    potWei: feePot,
+  };
+  if (!canClose || paused || deposits.length + redeems.length === 0) return batch;
+  const [fee, eth, gas, price] = await Promise.allSettled([
+    quoteCloseFee(c, d, { id, deposits, redeems, totalDeposits }),
+    c.base.getBalance({ address: account }),
+    c.base.estimateFeesPerGas().then((f) => CLOSE_GAS * f.maxFeePerGas),
+    ethPriceUsd(c),
+  ]);
+  const feeWei = settled(fee);
+  const ethWei = settled(eth);
+  const gasWei = settled(gas);
+  const ethPrice = settled(price);
+  return {
+    ...batch,
+    ...(feeWei !== undefined ? { feeWei } : {}),
+    ...(ethWei !== undefined ? { ethWei } : {}),
+    ...(gasWei !== undefined ? { gasWei } : {}),
+    ...(ethPrice !== undefined && ethPrice > 0 ? { ethPriceUsd: ethPrice } : {}),
+  };
+}
+
+/** What a send of the batch paid, from its receipt's BatchClosed (the front door's own): the bridge fee
+ * and the part of it the batch's pot paid; the sender paid the rest. Undefined when it can't be read. */
+export async function readBatchClosed(c: Pick<Clients, "base">, d: Deployment, hash: Hex): Promise<{ feeWei: bigint; potUsedWei: bigint } | undefined> {
+  try {
+    const receipt = await c.base.getTransactionReceipt({ hash });
+    const own = receipt.logs.filter((l) => l.address.toLowerCase() === d.frontDoor.toLowerCase());
+    const [closed] = parseEventLogs({ abi: FRONT_DOOR, eventName: "BatchClosed", logs: own });
+    return closed ? { feeWei: closed.args.fee, potUsedWei: closed.args.potUsed } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The share of rewards Cascade keeps, in basis points; v2 has no cut, so nothing is asked. */

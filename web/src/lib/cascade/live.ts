@@ -45,6 +45,8 @@ export interface LiveDeps {
   clients: Clients;
   opLog: OpLog;
   readFrontDoor: typeof reads.readFrontDoor;
+  readOpenBatch: typeof reads.readOpenBatch;
+  readNextBatch: typeof reads.readNextBatch;
   readVault: typeof reads.readVault;
   readWallet: typeof reads.readWallet;
   readPendingRewards: typeof reads.readPendingRewards;
@@ -120,6 +122,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     opLog: given.opLog ?? createOpLog(storage, d.frontDoor, () => dropSavedScans(storage)),
     scanStore: given.scanStore ?? createScanStore(storage, d),
     readFrontDoor: reads.readFrontDoor,
+    readOpenBatch: reads.readOpenBatch,
+    readNextBatch: reads.readNextBatch,
     readVault: reads.readVault,
     readWallet: reads.readWallet,
     readPendingRewards: reads.readPendingRewards,
@@ -646,6 +650,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         rewardCutBps,
       };
     },
+
+    getOpenBatch: (account) => deps.readOpenBatch(c, d, account as Address),
+    getNextBatch: () => deps.readNextBatch(c, d),
   };
 }
 
@@ -681,6 +688,8 @@ export function notConfiguredData(): CascadeData {
     quoteDeposit: fail,
     quoteWithdrawal: fail,
     quoteRoundTrip: fail,
+    getOpenBatch: fail,
+    getNextBatch: fail,
     checkWiring: fail,
     forgetWiring: () => undefined,
   };

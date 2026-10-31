@@ -150,6 +150,47 @@ export interface Balances {
   claimable: bigint;
 }
 
+/** The open batch on Base as the public "Next batch" line needs it, from one multicall (reads.ts,
+ * readNextBatch). */
+export interface NextBatch {
+  id: bigint;
+  /** When it started (unix seconds): it can close `interval` seconds later, or sooner once it's full. */
+  start: number;
+  interval: number;
+  canClose: boolean;
+  paused: boolean;
+  /** How many deposits and unstake requests wait in it. */
+  deposits: number;
+  redeems: number;
+  /** Base's clock when it was read: the timestamp of the block the multicall read (unix seconds). */
+  chainTime: number;
+}
+
+/** The open batch on Base as "Send it now" needs it (reads.ts, readOpenBatch). Anyone may send a batch once
+ * it can close by paying its bridge fee (CascadeFrontDoor.closeBatch): the batch's pot of unstake-request
+ * fees pays first, and whatever the fee doesn't take goes back to the sender. */
+export interface OpenBatch {
+  id: bigint;
+  /** When it started (unix seconds): it can close `interval` seconds later, or sooner once it's full. */
+  start: number;
+  interval: number;
+  canClose: boolean;
+  paused: boolean;
+  /** Base's clock when it was read: the timestamp of the block the multicall read (unix seconds). */
+  chainTime: number;
+  /** The account's own entries in it: the TAO it deposits and the shares it asks back. */
+  mine: { depositWei: bigint; redeemShares: bigint };
+  /** The unstake-request fees it holds, which pay its bridge fee first. */
+  potWei: bigint;
+  /** Read only once it can close (with entries, and not paused); each is undefined when its read failed.
+   * The bridge fee to send it now, as the bridge quotes it for this batch's exact message. */
+  feeWei?: bigint;
+  /** The account's ETH on Base, and an allowance for closeBatch's network fee. */
+  ethWei?: bigint;
+  gasWei?: bigint;
+  ethPriceUsd?: number;
+}
+
 export interface CascadeData {
   readonly deployment: Deployment;
   readonly clients: Clients;
@@ -173,6 +214,10 @@ export interface CascadeData {
   quoteWithdrawal(account: string, shares: bigint): Promise<WithdrawalQuote>;
   /** The costs of a later unstake of `taoWei`, and Cascade's reward cut. */
   quoteRoundTrip(taoWei: bigint): Promise<RoundTripCosts>;
+  /** The open batch, the account's part in it, and once it can close what sending it now costs. */
+  getOpenBatch(account: string): Promise<OpenBatch>;
+  /** The open batch for anyone: when it started, what waits in it, and Base's clock (one multicall). */
+  getNextBatch(): Promise<NextBatch>;
   /** Whether the contracts are wired to each other as the build's config says (wiring.ts); an answer is
    * kept 15 minutes. Rejects when they can't be read right now: nothing may be sent until it resolves "ok". */
   checkWiring(): Promise<"ok" | "mismatch">;

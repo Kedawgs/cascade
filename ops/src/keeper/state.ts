@@ -280,9 +280,10 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     const read = logCursor("bittensor", a.vault, event(VAULT, name));
     return () => read(() => startBlock(rec));
   };
-  const queuedLogs = vaultLogs("PayoutBatchQueued");
-  const bouncedLogs = vaultLogs("DepositBounced");
-  const redeemedLogs = vaultLogs("Redeemed");
+  // `let`: rescanPayoutLogs replaces them, so the next scan of each starts over from the deploy block
+  let queuedLogs = vaultLogs("PayoutBatchQueued");
+  let bouncedLogs = vaultLogs("DepositBounced");
+  let redeemedLogs = vaultLogs("Redeemed");
   /** Payout batches the vault has deleted (paid out or cancelled), not read again for the life of these
    * deps. A batch reads count 0 both once deleted and on a node not yet showing its queue, so it is taken
    * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
@@ -392,6 +393,13 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     async batchInfo(key) {
       const b = (await r("bittensor", a.vault, VAULT, "getPayoutBatch", [key])) as { payoutsHash: Hex; count: number };
       return { payoutsHash: b.payoutsHash, count: b.count };
+    },
+    rescanPayoutLogs() {
+      // new cursors: the next payoutLogs (and readState's batches) scan the vault's events again in full,
+      // from the deploy block, instead of trusting a first scan one short eth_getLogs answer cut short
+      queuedLogs = vaultLogs("PayoutBatchQueued");
+      bouncedLogs = vaultLogs("DepositBounced");
+      redeemedLogs = vaultLogs("Redeemed");
     },
     readClaimable: async (user) => (await r("base", a.frontDoor, FRONT, "claimable", [user])) as bigint,
     readMinDeposit: async () => (await r("base", a.frontDoor, FRONT, "minDeposit")) as bigint,

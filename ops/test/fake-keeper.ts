@@ -92,6 +92,7 @@ export function stubDeps(over: Partial<KeeperDeps>): KeeperDeps {
     quoteClose: missing("quoteClose"),
     payoutLogs: missing("payoutLogs"),
     batchInfo: missing("batchInfo"),
+    rescanPayoutLogs: () => undefined,
     readClaimable: missing("readClaimable"),
     readMinDeposit: missing("readMinDeposit"),
     messageState: missing("messageState"),

@@ -46,8 +46,13 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   signerCode(chain: ChainName): Promise<Hex>;
   nonce(chain: ChainName): Promise<number>;
   quoteClose(s: KeeperState): Promise<bigint>;
+  /** The vault's payout events (DepositBounced, Redeemed) since the deploy block, kept across calls:
+   * each call scans only the new blocks */
   payoutLogs(): Promise<PayoutLog[]>;
   batchInfo(key: Hex): Promise<{ payoutsHash: Hex; count: number }>;
+  /** Forgets the payout events kept so far: the next payoutLogs scans them all again, from the deploy
+   * block (payouts calls it once when the rebuilt list doesn't match the vault's, before refusing) */
+  rescanPayoutLogs(): void;
   /** The TAO the front door holds for `user` to claim (or the keeper to deliver) */
   readClaimable(user: Address): Promise<bigint>;
   /** The front door's minimum deposit as it is now */
@@ -172,6 +177,10 @@ export const stakeRequest = (rec: DeploymentRecord, nonce: number): CallRequest 
   args: [],
 });
 
+/** Whether a payout list rebuilt from the vault's events is the one the vault stored for the batch. */
+export const payoutsMatch = (list: Payout[], stored: { payoutsHash: Hex; count: number }): boolean =>
+  list.length === stored.count && payoutsHash(list).toLowerCase() === stored.payoutsHash.toLowerCase();
+
 /** processPayouts with the batch's full list, refused unless it matches what the vault stored. */
 export function payoutsRequest(
   rec: DeploymentRecord,
@@ -180,7 +189,7 @@ export function payoutsRequest(
   stored: { payoutsHash: Hex; count: number },
   nonce: number,
 ): CallRequest {
-  if (list.length !== stored.count || payoutsHash(list).toLowerCase() !== stored.payoutsHash.toLowerCase()) {
+  if (!payoutsMatch(list, stored)) {
     throw new PayoutListMismatch(
       `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries); nothing sent`,
     );
@@ -268,8 +277,20 @@ export async function payouts(deps: KeeperDeps, rec: DeploymentRecord, key: Hex)
   const b = s.vault.batches.find((b) => b.key.toLowerCase() === key.toLowerCase());
   if (!b || b.cursor >= b.count) throw new NotNow(`no payout is pending for batch ${key.slice(0, 10)}…`);
   if (s.now < b.queuedAt + s.vault.payoutDelay) throw new NotNow(`batch ${key.slice(0, 10)}… is not due yet`);
-  const list = rebuildPayouts(await deps.payoutLogs(), key);
-  const sent = await keeperSend(deps, payoutsRequest(rec, key, list, await deps.batchInfo(key), await deps.nonce("bittensor")));
+  let list = rebuildPayouts(await deps.payoutLogs(), key);
+  let stored = await deps.batchInfo(key);
+  if (!payoutsMatch(list, stored)) {
+    // one short eth_getLogs answer (a lagging replica behind the head it reported, a truncated response)
+    // in a first scan would rebuild a short list for the life of the process: the vault's events are
+    // scanned again, in full, and only a second full scan that mismatches too refuses the payout
+    deps.log(
+      `the payout list rebuilt from the vault's events (${list.length} entries) does not match batch ${key.slice(0, 10)}… (${stored.count} entries): scanning the vault's events again in full before deciding`,
+    );
+    deps.rescanPayoutLogs();
+    list = rebuildPayouts(await deps.payoutLogs(), key);
+    stored = await deps.batchInfo(key);
+  }
+  const sent = await keeperSend(deps, payoutsRequest(rec, key, list, stored, await deps.nonce("bittensor")));
   return withMessage(deps, sent, rec.plan.addresses.bitAdapter, "Bittensor → Base");
 }
 

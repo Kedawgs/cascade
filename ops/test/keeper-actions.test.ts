@@ -81,6 +81,7 @@ function deps(
     quoteClose: async () => 619_000_000_000_000n,
     payoutLogs: async () => [],
     batchInfo: async () => ({ payoutsHash: payoutsHash([]), count: 0 }),
+    rescanPayoutLogs: () => undefined,
     readClaimable: async () => 0n,
     readMinDeposit: async () => 10n ** 16n,
     messageState: async () => "SUCCESS",

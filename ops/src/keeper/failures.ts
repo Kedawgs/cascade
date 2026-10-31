@@ -30,8 +30,10 @@ export class KeeperNotReady extends Error {}
  * read, and decides again the next round. */
 export class NotNow extends Error {}
 
-/** The payout list rebuilt from the vault's events doesn't match the one the vault stored. No payout can
- * go until a person looks, and a due payout comes before every other action, so `run` stops on it. */
+/** The payout list rebuilt from the vault's events doesn't match the one the vault stored, on two full
+ * scans of those events (payouts rescans once, so a short eth_getLogs answer never gets here). The
+ * keeper's view of the vault's events is wrong, which no other action can be trusted on either, so `run`
+ * stops on it. */
 export class PayoutListMismatch extends Error {}
 
 /** A delivery reverted on chain while its simulation still passed on the same facts, and its revert

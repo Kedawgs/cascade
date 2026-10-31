@@ -149,12 +149,14 @@ describe("fmtao.role_change", () => {
   const config = (capacity: bigint, isEnabled = true) => JSON.stringify({ isEnabled, capacity: String(capacity), rate: capacity === 0n ? "0" : "600000000000000000" });
   const judged = (l: StoredLog) => deps.fmtaoRoleChange.run(ctx({ logs: [l] })).map((f) => [f.rule, f.subject]);
 
-  it("a MINTER_ROLE grant on FM-TAO is critical, and names the sender", () => {
-    const l = dep({ contract: "fmTao", chain: "base", event: "RoleGranted", args: { role: MINTER_ROLE, account: STRANGER, sender: STRANGER }, tx: "grant tx" });
+  it("a MINTER_ROLE grant on FM-TAO is critical, and names the grantor and the transaction's sender", () => {
+    const SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
+    const l = dep({ contract: "fmTao", chain: "base", event: "RoleGranted", args: { role: MINTER_ROLE, account: STRANGER, sender: SAFE }, tx: "grant tx" });
     const [f] = deps.fmtaoRoleChange.run(ctx({ logs: [l] }));
     expect(f).toMatchObject({ rule: "fmtao.role_change_critical", key: `fmtao.role_change_critical:${l.uid}` });
     expect(f.subject).toContain("MINTER_ROLE");
-    expect(f.facts).toMatchObject({ contract: "FM-TAO (Base)", role: "MINTER_ROLE", account: STRANGER, sender: STRANGER });
+    // the grantor (the event's sender: ForeverMoney's Safe) and who sent the transaction (its from: a signer)
+    expect(f.facts).toMatchObject({ contract: "FM-TAO (Base)", role: "MINTER_ROLE", account: STRANGER, sender: SAFE, "sent by": STRANGER });
     expect(f.hold).toBeUndefined();
     expect(RUNBOOK["fmtao.role_change_critical"](f.facts)).toContain("ForeverMoney");
   });

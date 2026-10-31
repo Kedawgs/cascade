@@ -55,6 +55,21 @@ describe.skipIf(!live)("live smoke: one tick against the v3 test deployment", ()
     // FM-TAO on Base within its lock on Bittensor
     console.log(`FM-TAO: ${base?.state.fmTaoSupply} on Base, ${bit?.state.lockPoolFmTao} locked on Bittensor`);
     expect(base!.state.fmTaoSupply! <= bit!.state.lockPoolFmTao!).toBe(true);
+    // what Cascade depends on (src/rules/deps.ts): every new reading answered, the storage keys worked out offline among them
+    const big = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
+    console.log(`rail: ${JSON.stringify({ alpha: bit?.state.alpha, wTaoSupply: bit?.state.wTaoSupply, lane: { bittensor: bit?.state.lane, base: base?.state.lane } }, big)}`);
+    console.log(`validator: ${JSON.stringify(bit?.state.validator, big)}; RootStakeUnlockInterval: ${bit?.state.rootUnlockInterval}`);
+    console.log(
+      `claim: ${bit?.state.claimGasRequired} gas at ${bit?.state.baseFee} wei; payout fee: ${bit?.state.payoutFeeQuote} of maxFeeAbs ${bit?.state.maxFeeAbs}; oracle pools: ${base?.state.taoWethPool.cardinality}/${base?.state.taoWethPool.cardinalityNext} and ${base?.state.wethUsdcPool.cardinality} observations`,
+    );
+    expect(bit?.state.alpha.backing).toBeGreaterThan(0n);
+    expect(bit?.state.validator?.take).toBeTypeOf("number");
+    expect(bit?.state.validator?.rootUid).toBeTypeOf("number");
+    expect(bit?.state.validator?.rootStake).toBeGreaterThan(0n);
+    expect(bit?.state.rootUnlockInterval).toBeDefined();
+    expect(bit?.state.lane?.outbound?.capacity).toBeGreaterThan(0n);
+    expect(base?.state.lane?.inbound?.capacity).toBeGreaterThan(0n);
+    expect(bit?.state.payoutFeeQuote).toBeGreaterThan(0n);
 
     const vault = cfg.deployment.vault;
     for (const path of [`/v1/scan/${vault}`, `/v1/scan/${vault}/${WALLET}`]) {

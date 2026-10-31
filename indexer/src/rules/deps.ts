@@ -199,7 +199,7 @@ export const fmtaoRoleChange: Rule = {
           event: l.event,
           ...args,
           "what it means": j.what,
-          sender: ctx.txs.get(`${l.chain}:${l.txHash}`)?.from ?? "not known yet",
+          "sent by": ctx.txs.get(`${l.chain}:${l.txHash}`)?.from ?? "not known yet",
           address: addressLink(l.chain, l.address),
           block: String(l.block),
           transaction: txLink(l.chain, l.txHash),

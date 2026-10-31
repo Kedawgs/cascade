@@ -140,17 +140,14 @@ export const referenceUnavailable: Rule = {
 const WINDOW_S = 1800;
 
 /** twap.divergence: the front door's oracle (usdcValue of 1 TAO) differs by more than twapDivergenceBps from
- * the mean of this monitor's own spot prices over the last 30 minutes, on this tick and the last; or the
- * oracle's call reverts on two readings. */
+ * the mean of this monitor's own spot prices over the last 30 minutes, on this tick and the last. The oracle's call
+ * reverting is the critical oracle.reverted (src/rules/deps.ts). */
 export const twapDivergence: Rule = {
   name: "twap.divergence",
   run(ctx) {
     const b = ctx.snap.base;
     if (!b) return [];
     const out: Finding[] = [];
-    if (twice(ctx, "base", (r) => r.base?.oracleReverted === true)) {
-      out.push({ rule: "twap.divergence", key: "twap.divergence:unavailable", subject: "The TWAP oracle is unavailable: its call reverts", facts: { oracle: ctx.cfg.deployment.oracle, block: String(b.block) } });
-    }
     const spot = poolPriceUsd(b.state, ctx.cfg.tokens);
     const window = (json<[number, number][]>(ctx.meta.spot_30m) ?? []).filter(([t]) => t < ctx.nowS);
     if (spot !== undefined) window.push([ctx.nowS, spot]);

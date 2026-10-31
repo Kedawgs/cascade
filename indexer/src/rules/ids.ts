@@ -54,6 +54,24 @@ export const RULES = {
   // 6.4, proposed (switchable in THRESHOLDS rules.off)
   "rail.alpha_vault": critical("condition"),
   "fmtao.mint_surge": warning("event"),
+  // what Cascade depends on and doesn't control (src/rules/deps.ts). Only an under-backed rail holds: a payout sends
+  // TAO into it
+  "fmtao.backing_true": critical("condition", true),
+  // a new way to mint or release (a MINTER grant, a remote pool, lane or router added), an admin moving, a lane's
+  // bucket at capacity 0 or Cascade's lane removed, the lock pool's liquidity withdrawn
+  "fmtao.role_change_critical": critical("event"),
+  "validator.take_high": critical("condition"),
+  "validator.root_uid_lost": critical("condition"),
+  "root.unlock_interval": critical("condition"),
+  // the TWAP oracle's usdcValue reverts: deliveries to USDC stop (claims still work)
+  "oracle.reverted": critical("condition"),
+  "fmtao.role_change": warning("event"),
+  "rail.alpha_vault_admin": warning("condition"),
+  "validator.take_changed": warning("event"),
+  "validator.root_stake_drop": warning("condition"),
+  "ccip.rate_limited": warning("condition"),
+  "oracle.cardinality": warning("condition"),
+  "payout.fee_ceiling": warning("condition"),
   // 6.3 warning
   "ccip.undelivered": warning("condition"),
   "ccip.foreign_send": warning("event"),

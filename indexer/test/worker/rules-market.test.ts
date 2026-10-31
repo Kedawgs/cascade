@@ -201,11 +201,8 @@ describe("twap.divergence", () => {
     expect(JSON.parse(meta(c).spot_30m).map((x: number[]) => x[0])).toEqual([NOW - 1799, NOW]);
   });
 
-  it("finds the oracle reverting on two readings, worded unavailable", () => {
-    const [f] = twapDivergence.run(ctx({ base: base(11n, { oracleReverted: true }), prev: { base: base(10n, { oracleReverted: true }) } }));
-    expect(f.key).toBe("twap.divergence:unavailable");
-    expect(f.subject).toContain("unavailable");
-    expect(twapDivergence.run(ctx({ base: base(11n, { oracleReverted: true }), prev: { base: base(10n) } }))).toEqual([]);
+  it("leaves the oracle reverting to the critical oracle.reverted (rules-deps.test.ts)", () => {
+    expect(twapDivergence.run(ctx({ base: base(11n, { oracleReverted: true }), prev: { base: base(10n, { oracleReverted: true }) } }))).toEqual([]);
   });
 });
 

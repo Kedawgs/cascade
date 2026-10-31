@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import type { Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import { countingDb, wipe } from "./d1-count.ts";
-import { BIT_ADAPTER } from "../../src/abi.ts";
+import { BIT_ADAPTER, DEPENDENCY_EVENTS, MINTER_ROLE } from "../../src/abi.ts";
 import { catchingUpChains } from "../../src/tick.ts";
 import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
@@ -711,5 +711,61 @@ describe("backfill and budgets", () => {
     expect((await w.tick({ db: c.db })).outcome).toBe("done");
     expect(c.stats.queries).toBeLessThanOrEqual(6);
     expect(c.stats.rowsRead).toBeLessThan(2000);
+  });
+});
+
+describe("what Cascade depends on, through the tick", () => {
+  it("costs no request of its own: the watched events ride in each log window's request, the new readings in the multicalls", async () => {
+    const w = tickWorld();
+    await w.tick();
+    w.advance();
+    await w.tick();
+    const before = w.net.fetches.length;
+    w.advance();
+    await w.tick();
+    const steady = w.net.fetches.slice(before);
+    // every log window carries the watched contracts' second eth_getLogs; one multicall per chain
+    const windows = steady.filter((f) => f.methods.includes("eth_getLogs"));
+    expect(windows.length).toBeGreaterThan(0);
+    expect(windows.every((f) => f.methods.filter((m) => m === "eth_getLogs").length === 2)).toBe(true);
+    expect(steady.filter((f) => f.methods.includes("eth_call"))).toHaveLength(2);
+    // nothing else is new: every request is a log window (the deployment's logs, the head, the watched events), a
+    // multicall, a count-and-code batch or a block-time batch
+    const kind = (m: string[]) =>
+      m[0] === "eth_getLogs" ? "window" : m.join() === "eth_call" ? "multicall" : m[0] === "eth_getTransactionCount" ? "counts" : m.every((x) => x === "eth_getBlockByNumber") ? "times" : m.join("+");
+    expect(new Set(steady.map((f) => kind(f.methods)))).toEqual(new Set(["window", "multicall", "counts", "times"]));
+  });
+
+  it("raises fmtao.backing_true and its hold when the AlphaVault's backing falls below wTAO's supply, and a MINTER_ROLE grant on FM-TAO as a critical", async () => {
+    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+    await w.tick();
+    w.advance();
+    await w.tick();
+    expect(await alertKeys()).toEqual([]);
+    // ForeverMoney's rail loses backing, and someone grants themselves MINTER_ROLE on FM-TAO
+    w.state.bit.alpha.backing = 90n * 10n ** 18n;
+    const grant = rawLog({
+      address: w.cfg.tokens.base.fmTao,
+      abi: DEPENDENCY_EVENTS,
+      eventName: "RoleGranted",
+      args: { role: MINTER_ROLE, account: "0x00000000000000000000000000000000000000bb", sender: "0x00000000000000000000000000000000000000bb" },
+      // a block the next tick's re-read settles (Base's head moves 30 blocks a minute from 37,000,430)
+      block: 37_000_420n,
+      logIndex: 0,
+      txHash: h("the grant"),
+    });
+    w.addLogs("base", [grant]);
+    for (let i = 0; i < 3; i++) {
+      w.advance();
+      await w.tick();
+    }
+    const keys = await alertKeys();
+    expect(keys).toContain("fmtao.backing_true:alpha");
+    expect(keys.filter((k) => k.startsWith("fmtao.role_change_critical:"))).toHaveLength(1);
+    expect((await w.status()).hold.active).toBe(true);
+    expect(await rows("SELECT id FROM holds")).toEqual([{ id: expect.stringMatching(/^fmtao\.backing_true:alpha:\d+$/) }]);
+    expect(w.sent.map((m) => m.subject)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^\[CASCADE CRITICAL\] The AlphaVault's backing is below wTAO's supply/), expect.stringMatching(/^\[CASCADE CRITICAL\] ForeverMoney's FM-TAO \(Base\): MINTER_ROLE granted/)]),
+    );
   });
 });

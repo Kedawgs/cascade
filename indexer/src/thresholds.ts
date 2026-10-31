@@ -43,9 +43,27 @@ export const DEFAULTS = {
   deliveryGraceS: 7200,
   /** keeper.low_eth: 0.002 ETH on Base */
   keeperMinEthWei: 2n * 10n ** 15n,
-  /** keeper.low_tao: 0.01 TAO on Bittensor. The launch keeper spends about 0.0002-0.0008 TAO an action and
-   * holds 0.06 TAO, so 0.1 would warn from the first day. */
+  /** keeper.low_tao: a round of the keeper's actions on Bittensor, 0.01 TAO (about 0.0002-0.0008 TAO an action). The
+   * floor is this plus a claim's up-front gas, (claimGasRequired + claimGasMargin) × the base fee (0.285 TAO at
+   * launch): Bittensor takes a transaction's whole gas limit up front, so a keeper below it can't claim at all. */
   keeperMinTaoWei: 10n ** 16n,
+  /** the gas the keeper sends a claim with above the vault's claimGasRequired (ops CLAIM_GAS_MARGIN) */
+  claimGasMargin: 2_000_000,
+  /** fmtao.backing_true: wTAO may be short of the AlphaVault's backing, or of being locked in the lock pool, by this
+   * share of its supply (0.1%; at least fmtaoBackingSlackWei) */
+  backingToleranceBps: 10,
+  /** ccip.rate_limited: a token pool's bucket under this much (10 TAO) for longer than ccipRateLimitedS */
+  ccipBucketMinWei: 10n * 10n ** 18n,
+  ccipRateLimitedS: 600,
+  /** validator.take_high: the validator's take above this (9%) */
+  validatorTakeMaxBps: 900,
+  /** validator.root_stake_drop: the validator's root stake this far (25%) below its highest of the last 24 hours */
+  validatorStakeDropBps: 2500,
+  /** oracle.cardinality: the observations each pool the TWAP oracle reads must keep: its 1,800-second window of
+   * 2-second Base blocks, plus one */
+  oracleMinCardinality: 901,
+  /** payout.fee_ceiling: a full payout chunk's quoted fee above this share of the vault's maxFeeAbs */
+  payoutFeeCeilingPct: 70,
   /** keeper.idle_unstaked: stakeable TAO idle this long */
   idleUnstakedS: 7200,
   adapterMinReserveWei: 5n * 10n ** 11n,

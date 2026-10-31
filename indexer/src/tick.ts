@@ -13,6 +13,7 @@ import { ADMIN_RULES, roleWallets, watchedRoles } from "./rules/admin.ts";
 import { APPROVAL_RULES } from "./rules/approvals.ts";
 import { BRIDGE_RULES } from "./rules/bridge.ts";
 import { CCIP_RULES } from "./rules/ccip.ts";
+import { DEPENDENCY_RULES } from "./rules/deps.ts";
 import { logQuery, prefetch, type PrefetchNeeds, type RuleCtx } from "./rules/context.ts";
 import { type Rule, runRules } from "./rules/index.ts";
 import { MARKET_RULES } from "./rules/market.ts";
@@ -77,6 +78,7 @@ export const TICK_RULES: readonly Rule[] = [
   ...CCIP_RULES,
   ...MARKET_RULES,
   ...OPS_RULES,
+  ...DEPENDENCY_RULES,
 ];
 
 /** Subrequests kept back from the scan for everything after it (spec 3.6): two multicalls, two nonce batches,

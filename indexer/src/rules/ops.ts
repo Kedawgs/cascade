@@ -85,12 +85,23 @@ export const keeperLowEth: Rule = {
   },
 };
 
+/** keeper.low_tao: the keeper's TAO on Bittensor below what its next claim needs: a round of its actions
+ * (keeperMinTaoWei) plus the claim's gas up front, (claimGasRequired + claimGasMargin) × the base fee (Bittensor takes
+ * the whole gas limit's fee before running a transaction and refunds the rest; ops sends a claim with that limit).
+ * The round alone while the vault's claimGasRequired or the base fee is unread. */
 export const keeperLowTao: Rule = {
   name: "keeper.low_tao",
   run(ctx) {
-    const bal = ctx.snap.bittensor?.state.keeperBalance;
-    if (bal === undefined || bal >= ctx.t.keeperMinTaoWei) return [];
-    return one("keeper.low_tao", "keeper.low_tao", `The keeper has ${tao(bal)} on Bittensor`, { balance: tao(bal) });
+    const s = ctx.snap.bittensor?.state;
+    const bal = s?.keeperBalance;
+    if (bal === undefined) return [];
+    const gas = s?.claimGasRequired === undefined ? undefined : s.claimGasRequired + BigInt(ctx.t.claimGasMargin);
+    const upfront = gas === undefined || s?.baseFee === undefined ? undefined : gas * s.baseFee;
+    const need = ctx.t.keeperMinTaoWei + (upfront ?? 0n);
+    if (bal >= need) return [];
+    const facts: Record<string, string> = { balance: tao(bal), needed: tao(need), "a round of actions": tao(ctx.t.keeperMinTaoWei) };
+    if (upfront !== undefined) facts["a claim's gas up front"] = `${tao(upfront)} (${gas} gas at ${formatUnits(s?.baseFee as bigint, 9)} gwei)`;
+    return one("keeper.low_tao", "keeper.low_tao", `The keeper has ${tao(bal)} on Bittensor; ${upfront === undefined ? "a round" : "a claim"} needs ${tao(need)}`, facts);
   },
 };
 
@@ -259,15 +270,37 @@ export const validatorNotEarning: Rule = {
   },
 };
 
-/** rail.alpha_vault (critical, proposed): ForeverMoney's AlphaVault paused, ready to migrate, or migrated. */
+/** rail.alpha_vault (critical): ForeverMoney's AlphaVault paused (isPaused, or a guardian's pause until a time still to
+ * come), a migration announced (a ready time or a target set), executed or finished. */
 export const railAlphaVault: Rule = {
   name: "rail.alpha_vault",
   run(ctx) {
-    const a = ctx.snap.bittensor?.state.alpha;
-    if (!a) return [];
-    const why = [a.isPaused ? "paused" : "", a.migrationReadyAt !== undefined && a.migrationReadyAt !== 0n ? "a migration is ready" : "", a.migrationFinished ? "migrated" : ""].filter(Boolean);
+    const r = ctx.snap.bittensor;
+    const a = r?.state.alpha;
+    if (!r || !a) return [];
+    const set = (x: bigint | undefined) => x !== undefined && x !== 0n;
+    const target = a.migrationTarget && a.migrationTarget !== "0x0000000000000000000000000000000000000000" ? a.migrationTarget : undefined;
+    const why = [
+      a.isPaused ? "paused" : "",
+      a.pausedUntil !== undefined && a.pausedUntil > BigInt(r.time) ? `paused by its guardian until ${utc(Number(a.pausedUntil))}` : "",
+      target ? `a migration to ${target} is announced` : "",
+      !target && set(a.migrationReadyAt) ? "a migration is announced" : "",
+      a.migrationExecuted ? "a migration was executed" : "",
+      a.migrationFinished ? "migrated" : "",
+    ].filter(Boolean);
     if (why.length === 0) return [];
-    return one("rail.alpha_vault", "rail.alpha_vault", `ForeverMoney's AlphaVault is ${why.join(", ")}`, { alphaVault: ctx.cfg.tokens.bittensor.alphaVault });
+    const at = (x: bigint | undefined) => (x === undefined ? "unknown" : x === 0n ? "none" : utc(Number(x)));
+    return one("rail.alpha_vault", "rail.alpha_vault", `ForeverMoney's AlphaVault is ${why.join(", ")}`, {
+      alphaVault: ctx.cfg.tokens.bittensor.alphaVault,
+      paused: String(a.isPaused ?? "unknown"),
+      "paused until": at(a.pausedUntil),
+      "pauseable after": at(a.pauseableAfter),
+      "migration ready at": at(a.migrationReadyAt),
+      "migration target": a.migrationTarget ?? "unknown",
+      "migration executed": String(a.migrationExecuted ?? "unknown"),
+      "migration finished": String(a.migrationFinished ?? "unknown"),
+      block: String(r.block),
+    });
   },
 };
 

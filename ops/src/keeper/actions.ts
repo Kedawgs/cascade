@@ -41,8 +41,8 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   sendCall(req: CallRequest): Promise<Sent>;
   /** Who the keeper's sends come from (keeperSigner): requireReady checks it is the record's keeper */
   signer: Address;
-  /** The keeper wallet's (`signer`'s) code on `chain`: "0x" for a plain account. Read at most once a
-   * round: `refresh`, at each round's start, forgets it. */
+  /** The keeper wallet's (`signer`'s) code on `chain`: "0x" for a plain account. Read fresh on every
+   * call, never kept: keeperSend reads it on both chains before every send. */
   signerCode(chain: ChainName): Promise<Hex>;
   nonce(chain: ChainName): Promise<number>;
   quoteClose(s: KeeperState): Promise<bigint>;
@@ -110,9 +110,11 @@ export function requireReady(rec: DeploymentRecord, signer: Address = WALLET): v
 /** Every keeper send goes through here. The keeper wallet is a plain account, with no code; code there
  * means its key has signed an EIP-7702 delegation (a thief's sweeper, as in the Binance hot-wallet drain)
  * or the address is a contract. Either way nothing is sent, and `run` stops. Its code is read on both
- * chains, the send's first, each at most once a round (signerCode): one key holds the address on both, a
- * delegation can be signed for every chain at once (chain id 0), and Bittensor may not run EIP-7702 at
- * all, so code on either chain stops a send on either. The refusal names the chain the code is on. */
+ * chains, the send's first, fresh before EVERY send (signerCode keeps nothing): a round with several
+ * sends, each waiting for its receipt, can run for minutes, and a delegation landing after its first send
+ * must stop its next. One key holds the address on both chains, a delegation can be signed for every
+ * chain at once (chain id 0), and Bittensor may not run EIP-7702 at all, so code on either chain stops a
+ * send on either. The refusal names the chain the code is on. */
 async function keeperSend(deps: KeeperDeps, req: CallRequest): Promise<Sent> {
   for (const chain of [req.chain, req.chain === "base" ? "bittensor" : "base"] as const) {
     const code = await deps.signerCode(chain);

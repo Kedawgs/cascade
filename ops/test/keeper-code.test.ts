@@ -169,33 +169,27 @@ describe("the keeper refuses to send when its wallet has code", () => {
   });
 });
 
-describe("the keeper wallet's code is read at most once a round", () => {
-  it("each chain's at the keeper's address, kept until the next round's refresh, and never kept when the read fails", async () => {
+describe("the keeper wallet's code is read fresh before every send", () => {
+  it("each call reads the chain, at the keeper's address, and nothing is kept between calls (the pen test's F6)", async () => {
     const launch = v3Record("live", buildPlanV3(0, 0, COLDKEY, "launch", ROLES));
     const path = join(mkdtempSync(join(tmpdir(), "ops-code-")), "r.json");
     saveRecord(path, launch);
     const asked: string[] = [];
-    let fail = false;
+    let delegated = false;
     const f = fakeChain([], {}, {
       eth_getCode: (chain, p) => {
         asked.push(`${chain} ${p[0]} ${p[1]}`);
-        if (fail) throw new Error("node down");
-        return chain === "base" ? DELEGATED : "0x";
+        return chain === "base" && delegated ? DELEGATED : "0x";
       },
     });
     const keys = { OPS_KEEPER_KEYSTORE: "/keys/keeper.json", OPS_KEEPER_PASSWORD_FILE: "/keys/keeper.pw" };
     const deps = keeperDeps({ ...f.ctx, signer: keeperSigner(keys, paths({}), launch.plan) }, launch, path);
-    expect(await deps.signerCode("base")).toBe(DELEGATED);
-    expect(await deps.signerCode("base")).toBe(DELEGATED);
+    expect(await deps.signerCode("base")).toBe("0x");
     expect(await deps.signerCode("bittensor")).toBe("0x");
-    expect(asked).toEqual([`base ${ROLES.keeper} latest`, `bittensor ${ROLES.keeper} latest`]);
-    // the next round reads again
-    deps.refresh();
-    fail = true;
-    await expect(deps.signerCode("base")).rejects.toThrow(/node down/);
-    fail = false;
+    // a delegation lands between two reads of the same round: the next read sees it
+    delegated = true;
     expect(await deps.signerCode("base")).toBe(DELEGATED);
     expect(await deps.signerCode("base")).toBe(DELEGATED);
-    expect(asked).toHaveLength(4);
+    expect(asked).toEqual([`base ${ROLES.keeper} latest`, `bittensor ${ROLES.keeper} latest`, `base ${ROLES.keeper} latest`, `base ${ROLES.keeper} latest`]);
   });
 });

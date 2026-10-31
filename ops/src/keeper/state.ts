@@ -288,9 +288,6 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
    * deps. A batch reads count 0 both once deleted and on a node not yet showing its queue, so it is taken
    * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
   const deleted = new Set<string>();
-  /** The keeper wallet's code on each chain as read this round (refresh forgets it), so a round's sends
-   * cost one read a chain. A failed read is not kept. */
-  const signerCodes = new Map<ChainName, Hex>();
 
   async function messageState(m: { id: Hex; direction: Message["direction"] }): Promise<string> {
     const dst: ChainName = m.direction === "Base → Bittensor" ? "bittensor" : "base";
@@ -367,13 +364,9 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     },
     sendCall: (req) => sendCall(ctx, req),
     signer,
-    async signerCode(chain) {
-      const kept = signerCodes.get(chain);
-      if (kept !== undefined) return kept;
-      const code = await codeAt(ctx.rpc, chain, signer);
-      signerCodes.set(chain, code);
-      return code;
-    },
+    // read fresh every time, never kept: a send minutes into a round must see a delegation that landed
+    // after the round's first send (one eth_getCode a chain a send is cheap)
+    signerCode: (chain) => codeAt(ctx.rpc, chain, signer),
     nonce: (chain) => nonceOf(ctx.rpc, chain, signer),
     quoteClose: (s) => closeFeeWei(s.detail.openDeposits, s.detail.openRedeems),
     async payoutLogs() {
@@ -419,8 +412,6 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       rec.messages = now.messages;
     },
     refresh() {
-      // a new round: the keeper wallet's code is read again before its first send
-      signerCodes.clear();
       // a file that can't be read or parsed now throws as it is (run waits a round on it); one that is
       // gone or holds another deployment is a RecordMismatch, which stops run
       const now = loadRecord(recordPath);

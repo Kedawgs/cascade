@@ -1,3 +1,4 @@
+import { headerValue } from "./email.ts";
 import { RULES, type RuleId } from "./rules/ids.ts";
 import { RUNBOOK } from "./runbook.ts";
 import { type AlertRow, setMeta } from "./store.ts";
@@ -37,9 +38,11 @@ export interface Due {
 /** An event alert not found any more closes quietly this long after it opened (or once acknowledged). */
 export const EVENT_CLOSES_AFTER_S = 7 * 86400;
 
+/** The facts as the body's `name: value` lines, each fact on one line: a value from a chain, a node or an
+ * error message can't break onto a line of its own and pose as another fact or a "What to do". */
 export const renderFacts = (facts: Record<string, string>): string =>
   Object.entries(facts)
-    .map(([k, v]) => `${k}: ${v}`)
+    .map(([k, v]) => `${headerValue(k)}: ${headerValue(v)}`)
     .join("\n");
 
 interface Live {

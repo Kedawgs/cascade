@@ -1,4 +1,4 @@
-import { type Due, type Finding, markSent, reconcile } from "./alerts.ts";
+import { type Due, type Finding, markSent, reconcile, renderFacts } from "./alerts.ts";
 import type { Config } from "./config.ts";
 import { renderCritical, sendAll } from "./email.ts";
 import { utc } from "./rules/context.ts";
@@ -47,9 +47,7 @@ const fromMemory = (f: Finding, nowS: number): Due => ({
   tier: "critical",
   kind: RULES[f.rule].kind,
   subject: f.subject,
-  body: Object.entries(f.facts)
-    .map(([k, v]) => `${k}: ${v}`)
-    .join("\n"),
+  body: renderFacts(f.facts),
   runbook: RUNBOOK[f.rule](f.facts),
   reason: "alert",
   openedAt: nowS,

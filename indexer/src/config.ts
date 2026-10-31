@@ -142,7 +142,8 @@ function httpsUrl(field: string, x: unknown): string {
   return x;
 }
 
-const EMAIL = /^[^\s@,<>"]+@[^\s@,<>"]+\.[^\s@,<>"]+$/;
+/** An address: no whitespace, no control character (C0, DEL, C1: a header can't be split by one). */
+const EMAIL = /^[^\s@,<>"\u0000-\u001f\u007f-\u009f]+@[^\s@,<>"\u0000-\u001f\u007f-\u009f]+\.[^\s@,<>"\u0000-\u001f\u007f-\u009f]+$/;
 
 const CHAIN_KEYS = ["chainId", "startBlock", "baselineBlock"] as const;
 

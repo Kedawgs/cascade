@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { type Due, type Finding, renderFacts } from "../../src/alerts.ts";
-import { type Email, renderCritical, renderDbFailing, renderDigest, renderResolved, renderWarnings, sendAll } from "../../src/email.ts";
+import { bodyText, type Email, headerValue, renderCritical, renderDbFailing, renderDigest, renderResolved, renderWarnings, sendAll } from "../../src/email.ts";
 import { RULES } from "../../src/rules/ids.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import { testConfig } from "./fixtures.ts";
@@ -95,6 +95,42 @@ describe("rendering", () => {
     expect(e.html).not.toContain("<img");
     expect(e.html).toContain("&lt;img");
   });
+
+  it("strips line breaks and every other control character from the subject, so a node's or a log's text can't add a header", () => {
+    const injected = "The keeper has 0.0019 ETH\r\nBcc: attacker@example.com\nX-Mailer: evil\u0085\u{2028}\u0000\u007f\u009f end";
+    const w = renderWarnings([{ due: due({ ...warning, subject: injected }) }]);
+    expect(w.subject).toBe("[Cascade warning] 1 new: The keeper has 0.0019 ETH Bcc: attacker@example.com X-Mailer: evil end");
+    expect(w.subject).not.toMatch(CONTROLS);
+    const c = renderCritical({ due: due({ ...mismatch, subject: injected }) });
+    expect(c.subject).not.toMatch(CONTROLS);
+    expect(c.subject.startsWith("[CASCADE CRITICAL] The keeper has 0.0019 ETH Bcc:")).toBe(true);
+    expect(renderResolved(due({ ...mismatch, subject: injected }, { reason: "resolved" })).subject).not.toMatch(CONTROLS);
+    expect(renderDigest({ date: "2027-01-15\r\nBcc: x@y.z", status: "OK\u0000", sections: [] }).subject).toBe("[Cascade daily] 2027-01-15 Bcc: x@y.z: OK");
+  });
+
+  it("keeps the body's own line breaks but drops every other control character, and a fact stays on its line", () => {
+    const f: Finding = { ...warning, facts: { error: "D1_ERROR\u0000: too\u0007 many\r\nWhat to do: send funds to 0xbad", block: "7\u{2029}" } };
+    const e = renderWarnings([{ due: due(f), alertId: 3 }]);
+    for (const body of [e.text, e.html]) {
+      expect(body).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u{2028}\u{2029}]/u);
+      expect(body).not.toContain("\r");
+    }
+    // the fact's value is one line: its line break became a space, so it can't pose as a "What to do" line
+    expect(e.text).toContain("error: D1_ERROR: too many What to do: send funds to 0xbad\nblock: 7\n");
+    expect(renderFacts({ a: "x\r\ny", "b\nc": "z" })).toBe("a: x y\nb c: z");
+    // the database-failing email's error comes from D1 as it is
+    expect(renderDbFailing("D1_ERROR\r\n\u0000: too many requests", NOW).text).toContain("error: D1_ERROR\n: too many requests");
+  });
+});
+
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u{2028}\u{2029}]/u;
+
+describe("headerValue and bodyText", () => {
+  it("remove the C0 and C1 controls, DEL and the Unicode line separators; the header value is one line", () => {
+    expect(headerValue("a\r\nb\tc\u000bd\u000ce\u0085f\u{2028}g\u{2029}h\u0000i\u007fj\u009fk  l")).toBe("a b c d e f g hijk l");
+    expect(headerValue("  padded \n ")).toBe("padded");
+    expect(bodyText("a\r\nb\rc\nd\te\u0000f\u001bg\u007fh\u0085i\u{2028}j")).toBe("a\nb\nc\nd\tefghi\nj");
+  });
 });
 
 describe("sendAll", () => {
@@ -123,5 +159,13 @@ describe("sendAll", () => {
     expect(send.mock.calls[1]).toEqual([
       expect.objectContaining({ to: ["owner@example.com", "second@example.com"], from: { email: "monitor@cascadefi.xyz", name: "Cascade monitor" }, subject: msgs[1].subject }),
     ]);
+  });
+
+  it("hands the binding no header field with a control character in it: the recipients, the sender and the subject are cleaned at the send", async () => {
+    const send = vi.fn(async () => ({ messageId: "m" }));
+    // a configuration built by hand (parseConfig refuses such addresses): the send is the last line of defence
+    const odd = { alerts: { mode: "send" as const, from: "monitor@cascadefi.xyz\u0085", to: ["owner@example.com\u0000", "second@example.com\r\nBcc: x@y.z"] } };
+    await sendAll({ EMAIL: { send } as unknown as SendEmail }, odd, [{ id: 1, subject: "s\r\nBcc: x@y.z", text: "t", html: "h" }]);
+    expect(send.mock.calls[0]).toEqual([{ to: ["owner@example.com", "second@example.com Bcc: x@y.z"], from: { email: "monitor@cascadefi.xyz", name: "Cascade monitor" }, subject: "s Bcc: x@y.z", text: "t", html: "h" }]);
   });
 });

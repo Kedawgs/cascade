@@ -118,6 +118,11 @@ describe("parseConfig", () => {
     expect(refused(withVars({ ALERT_MODE: "send" })).message).toContain("ALERT_TO");
     const e = refused(withVars({ ALERT_MODE: "send", ALERT_TO: "owner@example.com, not-an-address" }));
     expect(e.message).toContain("ALERT_TO");
+    // a control character in an address (a header-injection vector) is refused, in the recipients and the sender
+    for (const c of ["\u0000", "\u007f", "\u0085", "\u009f"]) {
+      expect(refused(withVars({ ALERT_MODE: "send", ALERT_TO: `owner@example.com${c}` })).message).toContain("ALERT_TO");
+      expect(refused(withVars({ ALERT_FROM: `monitor@cascadefi.xyz${c}` })).message).toContain("ALERT_FROM");
+    }
     expect(e.message).not.toContain("owner@example.com");
     const cfg = parseConfig(withVars({ ALERT_MODE: "send", ALERT_TO: "a@example.com, b@example.org" }));
     expect(cfg.alerts.to).toEqual(["a@example.com", "b@example.org"]);

@@ -7,6 +7,7 @@ import {
   DELIVERY_TOLERANCE_BPS,
   DELIVERY_VALIDITY_S,
   DESTINATION_BASE,
+  indexerOrigin,
   isV3,
   PATH_TAO_TO_USDC,
   PATH_USDC_TO_TAO,
@@ -75,6 +76,36 @@ describe("readDeployment", () => {
 
   it("reads Bittensor from OpenTensor's archive node: the lite node keeps only minutes of event history", () => {
     expect(RPC.bittensor).toBe("https://archive.chain.opentensor.ai");
+  });
+
+  it("takes the indexer's URL only as an https origin, exactly: anything else leaves the site reading the chains as before", () => {
+    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })?.indexerUrl).toBe("https://api.cascadefi.xyz");
+    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://cascade-indexer-production.dev-truthpoll.workers.dev" })?.indexerUrl).toBe(
+      "https://cascade-indexer-production.dev-truthpoll.workers.dev",
+    );
+    expect(readDeployment(ENV)).not.toHaveProperty("indexerUrl");
+    for (const bad of [
+      "",
+      "http://api.cascadefi.xyz",
+      "https://api.cascadefi.xyz/",
+      "https://api.cascadefi.xyz/v1",
+      "https://api.cascadefi.xyz?x=1",
+      "https://api.cascadefi.xyz#x",
+      "https://user:pw@api.cascadefi.xyz",
+      "https://*.cascadefi.xyz",
+      "https://API.cascadefi.xyz",
+      "api.cascadefi.xyz",
+      " https://api.cascadefi.xyz",
+      "https://api.cascadefi.xyz:443",
+    ]) {
+      expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_INDEXER_URL: bad }), JSON.stringify(bad)).not.toHaveProperty("indexerUrl");
+    }
+    // one with a port is an origin too
+    expect(readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://localhost:8787" })?.indexerUrl).toBe("https://localhost:8787");
+    // the indexer isn't part of a deployment's identity: the committed list doesn't name it
+    expect(indexerOrigin("https://api.cascadefi.xyz")).toBe("https://api.cascadefi.xyz");
+    expect(indexerOrigin("https://api.cascadefi.xyz/")).toBeNull();
+    expect(indexerOrigin(undefined)).toBeNull();
   });
 });
 

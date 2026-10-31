@@ -18,7 +18,29 @@ export interface Deployment {
   batchMaxWaitS?: number;
   /** v3: the vault's payout delay, in seconds (written by `pnpm ops web-config`). Absent = not known here. */
   payoutDelayS?: number;
+  /** The history indexer's origin (`https://…`, no path), from NEXT_PUBLIC_CASCADE_INDEXER_URL: a first
+   * visit starts its scan of the vault's history from the indexer's seed, verified against the chain
+   * (live.ts, seed.ts). Absent = the site reads the whole history from the chains itself, as before. */
+  indexerUrl?: string;
 }
+
+/** `v` as the indexer's origin, only when it is exactly an https origin (scheme and host, a port at most:
+ * no path, slash, query, fragment, credentials or wildcard); null for anything else, so a value that
+ * isn't one leaves the site reading the chains as before. The CSP build step (scripts/csp-headers.mjs)
+ * applies the same rule, so the page may connect exactly where the code asks. */
+export function indexerOrigin(v: string | undefined): string | null {
+  if (!v) return null;
+  let url: URL;
+  try {
+    url = new URL(v);
+  } catch {
+    return null;
+  }
+  return url.protocol === "https:" && url.origin === v && HOSTNAME.test(url.hostname) ? v : null;
+}
+
+/** A DNS name: labels of letters, digits and hyphens (no wildcard, which the URL parser lets through). */
+const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
 /** Minutes from a batch leaving Base to its TAO staked: the crossing (Chainlink, at the slow end of its
  * usual 20–30 minutes) and the stake. The stake form's estimate and the panel after a stake both count
@@ -67,6 +89,7 @@ export function readDeployment(env: Env): Deployment | null {
   // 0 is a real setting (no delay), so it is kept; anything but plain digits is left out
   const delay = env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S;
   const payoutDelayS = delay && /^(0|[1-9]\d*)$/.test(delay) ? Number(delay) : undefined;
+  const indexerUrl = indexerOrigin(env.NEXT_PUBLIC_CASCADE_INDEXER_URL);
   return {
     frontDoor,
     baseAdapter,
@@ -79,6 +102,7 @@ export function readDeployment(env: Env): Deployment | null {
     ...(oracle ? { oracle } : {}),
     ...(batchMaxWaitS ? { batchMaxWaitS } : {}),
     ...(payoutDelayS !== undefined ? { payoutDelayS } : {}),
+    ...(indexerUrl ? { indexerUrl } : {}),
   };
 }
 
@@ -190,6 +214,7 @@ export const DEPLOYMENT = checkedDeployment(readDeployment({
   NEXT_PUBLIC_CASCADE_ORACLE: process.env.NEXT_PUBLIC_CASCADE_ORACLE,
   NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: process.env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S,
   NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: process.env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S,
+  NEXT_PUBLIC_CASCADE_INDEXER_URL: process.env.NEXT_PUBLIC_CASCADE_INDEXER_URL,
 }));
 
 export const TOKENS = {

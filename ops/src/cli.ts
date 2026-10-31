@@ -185,7 +185,7 @@ async function run(a: Args): Promise<number> {
       return 0;
     }
     case "web-config": {
-      const path = writeWebEnv(needRecord(a.live), join(paths(env).contractsDir, ".."));
+      const path = writeWebEnv(needRecord(a.live), join(paths(env).contractsDir, ".."), env);
       log(`Wrote ${path}. Restart \`pnpm dev\` in web/ to pick it up.`);
       return 0;
     }

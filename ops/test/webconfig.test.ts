@@ -73,6 +73,18 @@ describe("web-config", () => {
     expect(webEnv(rec)).not.toContain("PAYOUT_DELAY");
   });
 
+  it("names the history indexer only when OPS_INDEXER_URL is an https origin, exactly; otherwise writes nothing new", () => {
+    const lines = webEnv(rec, { OPS_INDEXER_URL: "https://api.cascadefi.xyz" }).split("\n");
+    expect(lines).toContain("NEXT_PUBLIC_CASCADE_INDEXER_URL=https://api.cascadefi.xyz");
+    // last, after the deployment's own settings, before the file's closing newline
+    expect(lines.slice(-2)).toEqual(["NEXT_PUBLIC_CASCADE_INDEXER_URL=https://api.cascadefi.xyz", ""]);
+    expect(webEnv(rec, {})).not.toContain("INDEXER");
+    expect(webEnv(rec, {})).toBe(webEnv(rec, { OPS_INDEXER_URL: undefined }));
+    for (const bad of ["", "http://api.cascadefi.xyz", "https://api.cascadefi.xyz/", "https://api.cascadefi.xyz/v1", "api.cascadefi.xyz", "https://*.cascadefi.xyz"]) {
+      expect(webEnv(rec, { OPS_INDEXER_URL: bad }), JSON.stringify(bad)).not.toContain("INDEXER");
+    }
+  });
+
   it("takes a recovered Bittensor adapter's block as deploy found it, and refuses one without", () => {
     expect(webEnv({ ...rec, done: { ...rec.done, bitAdapter: { recovered: true, block: 9_357_490 } } })).toContain("\nNEXT_PUBLIC_CASCADE_BIT_BLOCK=9357490\n");
     expect(() => webEnv({ ...rec, done: { ...rec.done, bitAdapter: { recovered: true } } })).toThrow(/deploy block is not in the record/);

@@ -340,36 +340,16 @@ describe("what can be unstaked on the Unstake page alone (review 2, N2)", () => 
   /** csTAO less the open batch's request and the unstake in batch 3, which hasn't arrived. */
   const AWAY = 8n * 10n ** 22n - 10n ** 21n - 2n * 10n ** 21n;
 
-  it("shows the figure at once for an unstake whose batch closed after the seed's last block: its delivery can't be in the seeded blocks", { timeout: 60_000 }, async () => {
-    const clock = { t: NOW };
-    const n = node();
-    const storage = memory();
-    // batch 3 is the one before the open one: it closed at openStart, after the seed's last block
-    const v = visit(n, honestHalves(), storage, () => clock.t);
-    v.opLog.put(w3);
-    let a = await v.data.getAvailable(ME);
-    expect(a.checking).toBeUndefined();
-    expect(a.availableShares).toBe(AWAY);
-    // and the background check runs from this page alone, to the end
-    for (let i = 0; i < 40; i++) {
-      clock.t += CHECK_EVERY_MS;
-      await settled();
-      a = await v.data.getAvailable(ME);
-      await settled();
-    }
-    expect(n.counts.windows).toBeGreaterThan(20);
-    expect(createScanStore(storage, D).load(ME).sharedSeededTo).toBeUndefined();
-    expect(a.availableShares).toBe(AWAY);
-  });
-
-  it("keeps an unstake whose batch closed before the seed's last block at checking (never a low figure) until the check, started from this page alone, has read the seeded blocks", { timeout: 60_000 }, async () => {
+  it("keeps an unstake whose delivery the scan lacks at checking (never a low figure) while seeded blocks are unread, whatever openStart says, until the check started from this page alone has read them", { timeout: 60_000 }, async () => {
     for (const fdNow of [
-      { ...fd, openBatchId: 4n, openStart: 1_700_000_000 }, // batch 3 closed long before the seed's last block
-      { ...fd, openBatchId: 5n }, // batch 3 closed before batch 4 did: when isn't known here
+      fd, // batch 3 is the one before the open one, and openStart is after the seed's last block: no proof of when it closed
+      { ...fd, openBatchId: 4n, openStart: 1_700_000_000 },
+      { ...fd, openBatchId: 5n },
     ]) {
       const clock = { t: NOW };
       const n = node();
-      const v = visit(n, honestHalves(), memory(), () => clock.t, D, { readFrontDoor: async () => fdNow });
+      const storage = memory();
+      const v = visit(n, honestHalves(), storage, () => clock.t, D, { readFrontDoor: async () => fdNow });
       v.opLog.put(w3);
       let a = await v.data.getAvailable(ME);
       expect(a.checking).toBe(true);
@@ -382,8 +362,55 @@ describe("what can be unstaked on the Unstake page alone (review 2, N2)", () => 
       }
       expect(a.checking).toBeUndefined();
       expect(a.availableShares).toBe(AWAY);
+      expect(createScanStore(storage, D).load(ME).sharedSeededTo).toBeUndefined();
       expect(indexerDistrusted(v.storage, D, clock.t)).toBe(false);
     }
+  });
+});
+
+describe("an empty batch rolled after the seed's last block (review 3, R3-1)", () => {
+  // batch 3 arrived at 25,000, burning the account's 2e21 shares; the seed leaves its delivery out. The open
+  // batch, 4, was rolled empty after the seed's last block (closeBatch on an empty batch restarts its timer
+  // without a new id), so fd.openStart is long after batch 3 really closed
+  const CHAIN3 = [...CHAIN, delivered(3n, H(3), 25_000n, H(160)), redeemed(H(3), 10n ** 16n, 2n * 10n ** 21n, 25_000n, H(160))];
+  const omittedSeed = () => {
+    const h = honestHalves(CHAIN3);
+    return { shared: { ...h.shared, delivered: h.shared.delivered.filter((e) => e.batchId !== "3") }, own: h.own };
+  };
+  const w3 = { id: "w3", kind: "withdrawal" as const, account: ME, createdAt: T0 + 1, shares: 2n * 10n ** 21n, taoEstimate: 0n, usdcEstimate: 0n, fee: 0n, batchId: 3n, state: "sent" as const };
+  /** Honest: batch 3 arrived, so only the open batch's request is still asked. */
+  const HONEST = 8n * 10n ** 22n - 10n ** 21n;
+
+  it("never takes an omitted delivery of the batch before the open one for absent: Available is checking, not low, and the unstake's step is checking", { timeout: 30_000 }, async () => {
+    const n = node(CHAIN3);
+    // the request is mined on Base: its trail goes as far as the chain can say
+    const base = { getTransactionReceipt: async () => ({ status: "success", logs: [] }) };
+    const v = visit(n, omittedSeed(), memory(), () => NOW, D, { checkPaceMs: 1e9, clients: { bittensor: n.bittensor, base } as never, readSharesAt: async () => SHARES - 2n * 10n ** 21n });
+    v.opLog.put({ ...w3, hash: H(930) });
+    const a = await v.data.getAvailable(ME);
+    expect(a.checking).toBe(true);
+    expect(a.availableShares).not.toBe(HONEST - 2n * 10n ** 21n);
+    const w = (await v.data.listWithdrawals(ME)).find((r) => r.id === "w3");
+    expect(w?.steps.find((s) => s.key === "unstake")?.status).toBe("checking");
+  });
+
+  it("finds the omission once the check, started from the Unstake page alone, reads those blocks: the indexer is distrusted and the figure is the honest one", { timeout: 60_000 }, async () => {
+    const clock = { t: NOW };
+    const n = node(CHAIN3);
+    const v = visit(n, omittedSeed(), memory(), () => clock.t, D, { readSharesAt: async () => SHARES - 2n * 10n ** 21n });
+    v.opLog.put(w3);
+    let a = await v.data.getAvailable(ME).catch(() => undefined);
+    for (let i = 0; i < 40 && (a === undefined || a.checking); i++) {
+      if (a && !a.checking) break;
+      clock.t += CHECK_EVERY_MS;
+      await settled();
+      a = await v.data.getAvailable(ME).catch(() => undefined);
+      await settled();
+    }
+    expect(indexerDistrusted(v.storage, D, clock.t)).toBe(true);
+    a = await v.data.getAvailable(ME);
+    expect(a.checking).toBeUndefined();
+    expect(a.availableShares).toBe(HONEST);
   });
 });
 

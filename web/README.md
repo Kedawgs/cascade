@@ -149,8 +149,8 @@ for display only (`units.ts`).
   earlier stake (read then, a few windows at most), payout chunks only once each receipt shows them and
   they account for every entry the delivery made, and an amount only once its receipt gives it; until
   then the step says "checking…", and "Available to unstake" says "checking…" while whether an unstake
-  arrived rests on seeded blocks the browser hasn't read (not for the batch before the open one when it
-  closed after the seed's last block: its delivery can't be in them). "Earned so far" shows no figure
+  arrived rests on seeded blocks the browser hasn't read (any batch's: when one closed isn't known for
+  free, and the open batch's start moves when an empty batch is rolled). "Earned so far" shows no figure
   until the browser has read every seeded block itself in the background (`checkSeededHistory`: every
   vault log, one window every 1.2 s, started by any page that reads the history or what can be unstaked)
   and found exactly the seed's events; a year of a deployment's blocks takes under an hour of an open

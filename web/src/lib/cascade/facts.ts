@@ -150,27 +150,12 @@ export function sharedUnverified(scan: VaultScan, lo: bigint, hi: bigint): boole
   return start < scan.sharedSeededTo && hi >= start && lo < scan.sharedSeededTo;
 }
 
-/** Whether batch `batchId`'s delivery, which the scan doesn't hold, could still be in seeded blocks the
- * browser hasn't read (sharedUnverified): then its absence isn't known. Not when the batch is known to
- * have closed on Base after the seed's last block (the batch before the open one closed when the open one
- * started, `fd.openStart`): its delivery comes after that, so it can't be in the seeded blocks, and its
- * absence is as normal as the browser's own read says. An older batch's close isn't known here, nor is
- * the seed's last block's time when it can't be read: both count as possibly there. */
-export async function deliveryMayBeSeeded(
-  c: Pick<Clients, "bittensor">,
-  scan: VaultScan,
-  batchId: bigint,
-  fd: Pick<FrontDoorState, "openBatchId" | "openStart">,
-): Promise<boolean> {
-  if (!sharedUnverified(scan, scan.from, scan.next - 1n)) return false;
-  if (batchId !== fd.openBatchId - 1n || scan.sharedSeededTo === undefined) return true;
-  try {
-    const last = await blockTime(c, scan, scan.sharedSeededTo - 1n);
-    return fd.openStart * 1000 < last.getTime();
-  } catch {
-    return true;
-  }
-}
+/** Whether a delivery the scan doesn't hold could still be in seeded blocks the browser hasn't read: then
+ * its absence isn't known. No batch's close is known here for free: the open batch's start isn't when
+ * the one before it closed, since closing an empty batch restarts its timer under the same id
+ * (CascadeFrontDoor.closeBatch; the keeper rolls one on purpose on a max-wait deployment), so any batch's
+ * delivery counts as possibly there until the background check has read those blocks. */
+export const deliveryMayBeSeeded = (scan: VaultScan): boolean => sharedUnverified(scan, scan.from, scan.next - 1n);
 
 /** How far past the chain's newest block saved progress may claim to be (an hour of 12-second blocks)
  * before it is taken for a corrupt entry rather than a node a little behind. */
@@ -822,15 +807,9 @@ async function cancelInFlight(c: Pick<Clients, "base">, account: Address, hash: 
  * a step: a saved entry whose receipt can't be read yet (a lagging node, or a block since replaced), or
  * no entry while the indexer's blocks the delivery could be in haven't been read by the browser
  * (deliveryMayBeSeeded). */
-async function deliveryOf(
-  c: Pick<Clients, "bittensor">,
-  d: Deployment,
-  scan: VaultScan,
-  batchId: bigint | undefined,
-  fd: Pick<FrontDoorState, "openBatchId" | "openStart">,
-): Promise<{ hit?: { key: Hex; txHash: Hex; block: bigint }; r: Receipt | null; unknown?: true }> {
+async function deliveryOf(c: Pick<Clients, "bittensor">, d: Deployment, scan: VaultScan, batchId: bigint | undefined): Promise<{ hit?: { key: Hex; txHash: Hex; block: bigint }; r: Receipt | null; unknown?: true }> {
   const saved = batchId !== undefined ? scan.delivered.get(String(batchId)) : undefined;
-  if (!saved) return batchId !== undefined && (await deliveryMayBeSeeded(c, scan, batchId, fd)) ? { hit: undefined, r: null, unknown: true } : { hit: undefined, r: null };
+  if (!saved) return batchId !== undefined && deliveryMayBeSeeded(scan) ? { hit: undefined, r: null, unknown: true } : { hit: undefined, r: null };
   if (!saved.unconfirmed) {
     const r = await bitReceipt(c, scan, saved.txHash);
     return { hit: deliveryIn(r, d, String(batchId), saved.key) ? saved : undefined, r };
@@ -898,11 +877,10 @@ export async function depositFacts(
     ...(d.batchMaxWaitS ? { closesBy: true as const } : {}),
     stillOpen: batchId === undefined || batchId === ctx.fd.openBatchId,
     waitingForMinimum: false,
-    // the batch before the open one left Base when the open one started
-    ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
+    // no time the batch left Base (sentAt): the open batch's start isn't it once an empty batch was rolled
   };
   // taken back out of its batch: what the batch did after isn't this deposit's
-  const { hit, r, unknown } = !facts.cancelMined ? await deliveryOf(c, d, ctx.scan, batchId, ctx.fd) : { hit: undefined, r: null };
+  const { hit, r, unknown } = !facts.cancelMined ? await deliveryOf(c, d, ctx.scan, batchId) : { hit: undefined, r: null };
   if (unknown) facts.deliveryUnknown = true;
   if (hit) {
     const mine = accountEvents(r, d, hit.key, op.account);
@@ -944,7 +922,7 @@ export async function withdrawalFacts(
     now: new Date(),
     requestedAt: new Date(op.createdAt),
     watchUrl: explorer.ccipAddress(d.baseAdapter),
-    ...(batchId !== undefined && batchId === ctx.fd.openBatchId - 1n ? { sentAt: new Date(ctx.fd.openStart * 1000) } : {}),
+    // no time the batch left Base (sentAt), as for a deposit
     openBatchId: ctx.fd.openBatchId,
     closesAt: closesAt(ctx.fd, d),
     ...(d.batchMaxWaitS ? { closesBy: true as const } : {}),
@@ -954,7 +932,7 @@ export async function withdrawalFacts(
   };
   // taken back out of its batch: a Redeemed there is another request of the account's, not this one
   if (facts.cancelMined) return { batchId, facts };
-  const { hit, r, unknown } = await deliveryOf(c, d, ctx.scan, batchId, ctx.fd);
+  const { hit, r, unknown } = await deliveryOf(c, d, ctx.scan, batchId);
   if (unknown) facts.deliveryUnknown = true;
   /** This request's part of an amount paid on the account's entry in its batch. */
   let part = (amount: bigint) => amount;

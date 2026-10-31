@@ -664,7 +664,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
    * whether one arrived rests on the indexer's word the chain hasn't confirmed (a seeded delivery whose
    * receipt can't be read yet, or none while seeded blocks the browser hasn't read could hold it:
    * deliveryMayBeSeeded), there is no figure: `checking`, never a low one; the background check of
-   * those blocks is started here, so this page alone gets there. */
+   * those blocks is started here, so this page alone gets there, and the wait is bounded by it. */
   function getAvailable(account: string): Promise<Available> {
     const a = account as Address;
     return trails(a, async () => {
@@ -696,14 +696,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       }
       // one request carries at most the vault's maxEntryValue, this batch's earlier request included
       const most = v.maxEntryValue !== undefined ? unstakeMostWei(v.maxEntryValue, taoFor(fd.redeemOf, v.totalAssets, v.totalSupply)) : undefined;
-      const doubts = await Promise.all(
-        away().map(async (w) => {
-          if (w.batchId === undefined) return false;
-          const hit = scan.delivered.get(String(w.batchId));
-          return hit ? hit.unconfirmed === true && seededShared(scan, hit.block) : deliveryMayBeSeeded(history, scan, w.batchId, fd);
-        }),
-      );
-      const unsure = doubts.some(Boolean);
+      const unsure = away().some((w) => {
+        if (w.batchId === undefined) return false;
+        const hit = scan.delivered.get(String(w.batchId));
+        return hit ? hit.unconfirmed === true && seededShared(scan, hit.block) : deliveryMayBeSeeded(scan);
+      });
       if (unsure) return { availableShares: 0n, availableTaoWei: 0n, ...(most !== undefined ? { mostTaoWei: most } : {}), checking: true };
       const asked = fd.redeemOf + sum(away().map((w) => w.shares));
       const availableShares = v.shares > asked ? v.shares - asked : 0n;

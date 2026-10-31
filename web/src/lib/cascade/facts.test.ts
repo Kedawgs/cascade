@@ -8,7 +8,6 @@ import {
   confirmAccountEvents,
   confirmedChunks,
   confirmedStakeAfter,
-  deliveryMayBeSeeded,
   depositFacts,
   findStakeTx,
   HistoryMismatchError,
@@ -1964,34 +1963,37 @@ describe("the account's events, confirmed by their receipts", () => {
   });
 });
 
-describe("whether a delivery the scan doesn't hold could still be in the indexer's unchecked blocks (review 2, N2)", () => {
-  /** A scan seeded to 2,500, its last seeded block made at 1,800,000,000 (the mock's time for any block). */
+describe("a delivery the scan doesn't hold, while the indexer's blocks aren't all read (review 3, R3-1)", () => {
+  const w3: WithdrawalOp = { id: "w3", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
+  const dep3: DepositOp = { id: "d3", kind: "deposit", account: ME, createdAt: 0, usdcIn: 0n, targetTao: 10n ** 16n, hashes: {}, batchId: 3n, state: "sent" };
+  /** A scan seeded to 2,500 that holds no delivery of batch 3, its seeded blocks not all read by the browser. */
   const seededScan = () => {
     const s = newScan(D);
     s.next = 2_600n;
     s.sharedSeededTo = 2_500n;
     return s;
   };
-  it("not for the batch before the open one when it closed at or after the seed's last block: its delivery comes later", async () => {
+  // the open batch's start is no proof of when the one before it closed: an empty batch rolled later
+  // restarts its timer under the same id (CascadeFrontDoor.closeBatch)
+  const rolled = { ...fd, openBatchId: 4n, openStart: 1_900_000_000 };
+
+  it("says 'checking' for the batch before the open one too, however late the open batch started", async () => {
     const c = chains();
-    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_800_000_000 })).toBe(false);
-    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_800_000_600 })).toBe(false);
+    expect((await withdrawalFacts(c.clients, D, w3, { fd: rolled, vault, scan: seededScan(), claims: [] })).facts.deliveryUnknown).toBe(true);
+    expect((await depositFacts(c.clients, D, dep3, { fd: rolled, vault, scan: seededScan() })).facts.deliveryUnknown).toBe(true);
   });
-  it("yes for one that closed before it, or an older batch whose close isn't known here, or when the seed's time can't be read", async () => {
-    const c = chains();
-    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_799_999_999 })).toBe(true);
-    expect(await deliveryMayBeSeeded(c.clients, seededScan(), 2n, { openBatchId: 4n, openStart: 1_800_000_600 })).toBe(true);
-    const blind = chains();
-    (blind.clients as unknown as { bittensor: { getBlock: () => Promise<never> } }).bittensor.getBlock = async () => {
-      throw new Error("archive busy");
-    };
-    expect(await deliveryMayBeSeeded(blind.clients, seededScan(), 3n, { openBatchId: 4n, openStart: 1_800_000_600 })).toBe(true);
-  });
-  it("never once the browser has read the seeded blocks itself, or with no seed", async () => {
+
+  it("not once the browser has read the seeded blocks itself, or with no seed", async () => {
     const c = chains();
     const read = seededScan();
     read.sharedCheckedTo = 2_500n;
-    expect(await deliveryMayBeSeeded(c.clients, read, 2n, fd)).toBe(false);
-    expect(await deliveryMayBeSeeded(c.clients, newScan(D), 2n, fd)).toBe(false);
+    expect((await withdrawalFacts(c.clients, D, w3, { fd: rolled, vault, scan: read, claims: [] })).facts.deliveryUnknown).toBeUndefined();
+    expect((await withdrawalFacts(c.clients, D, w3, { fd: rolled, vault, scan: newScan(D), claims: [] })).facts.deliveryUnknown).toBeUndefined();
+  });
+
+  it("gives no time the batch left Base: the open batch's start isn't it once an empty batch was rolled", async () => {
+    const c = chains();
+    expect((await withdrawalFacts(c.clients, D, w3, { fd: rolled, vault, scan: newScan(D), claims: [] })).facts.sentAt).toBeUndefined();
+    expect((await depositFacts(c.clients, D, dep3, { fd: rolled, vault, scan: newScan(D) })).facts.sentAt).toBeUndefined();
   });
 });

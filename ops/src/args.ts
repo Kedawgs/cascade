@@ -48,10 +48,15 @@ export interface Args {
   file?: string;
   /** sign: the deployment the file must be for, in place of OPS_DEPLOYMENT */
   deployment?: string;
+  /** pause, unpause, wind-down, sweep: a gas price cap for this run, in gwei (these commands have none
+   * otherwise; config.ts gasPriceCapFor) */
+  maxGasPrice?: string;
 }
 
 const PAUSE_TARGETS = ["front-door", "vault", "both"] as const;
 const FOR_WALLET: readonly string[] = ["handoff", "pause", "unpause", "cardinality"];
+/** The commands --max-gas-price goes with: the ones that send under no cap unless told one (UNCAPPED_COMMANDS). */
+const MAX_GAS_PRICE: readonly string[] = ["pause", "unpause", "wind-down", "sweep"];
 
 export const USAGE = `usage: pnpm ops <command> [--live]
 
@@ -88,6 +93,10 @@ export const USAGE = `usage: pnpm ops <command> [--live]
   --for-wallet               with handoff --live, pause, unpause, or cardinality --from <0x…>: also write
                              a plain account's calls to deployments/wallet/<name>.json for pnpm ops sign.
                              Sends nothing and opens no keystore (pause and unpause: not with --live)
+  --max-gas-price <gwei>     with pause, unpause, wind-down or sweep: refuse to send over this gas price.
+                             These hand-run commands send under no cap otherwise (an emergency pause must
+                             go out in a gas spike); every other command sends under OPS_MAX_GAS_PRICE_BASE
+                             and OPS_MAX_GAS_PRICE_BITTENSOR (gwei; 5 and 100 by default)
 
 Without --live, deploy and the keeper commands use the local forks.
 Live, Base's logs are read from OPS_BASE_LOGS_RPC; without it from OPS_BASE_RPC, unless that is
@@ -120,7 +129,11 @@ export function parseArgs(argv: readonly string[]): Args {
     else if (a === "--from" && cmd === "cardinality") out.from = value();
     else if (a === "--deployment" && cmd === "sign") out.deployment = value();
     else if (cmd === "sign" && !a.startsWith("--") && !out.file) out.file = a;
+    else if (a === "--max-gas-price" && MAX_GAS_PRICE.includes(cmd)) out.maxGasPrice = value();
     else throw new UsageError(`unexpected argument ${a}`);
+  }
+  if (out.maxGasPrice !== undefined && !(/^(\d+)(\.\d{1,9})?$/.test(out.maxGasPrice) && Number(out.maxGasPrice) > 0)) {
+    throw new UsageError(`--max-gas-price ${out.maxGasPrice} is not a gas price in gwei (e.g. 5 or 0.5)`);
   }
   if (cmd === "deploy" && out.newPlan === undefined) out.newPlan = false;
   if (cmd === "track" && !out.messageId) throw new UsageError("track needs a message id");

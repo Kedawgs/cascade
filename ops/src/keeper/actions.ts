@@ -72,10 +72,11 @@ export interface KeeperDeps extends RewardsDeps, DeliveryDeps {
   /** A transaction's receipt (null while there is none): `run` looks up those that timed out. Optional:
    * without it, a transaction with no receipt is only logged. */
   receipt?(chain: ChainName, hash: Hex): Promise<{ reverted: boolean; logs: Sent["logs"] } | null>;
-  /** Replaces the keeper's own transaction `pending` (sent for `req`, with no receipt since) at the same
-   * nonce with a higher fee (send.ts replaceCall): `run` does this to one stuck pending for
-   * REPLACE_AFTER_MS. Optional: without it, a stuck transaction is only reported. */
-  replace?(req: CallRequest, pending: Hex): Promise<Replacement>;
+  /** Replaces the keeper's own transaction sent for `req` (one of `pending`: its hash, then each
+   * replacement's, none with a receipt since) at the same nonce with a higher fee (send.ts replaceCall):
+   * `run` does this to one stuck pending for REPLACE_AFTER_MS. Optional: without it, a stuck transaction
+   * is only reported. */
+  replace?(req: CallRequest, pending: readonly Hex[]): Promise<Replacement>;
   log(line: string): void;
 }
 
@@ -742,7 +743,8 @@ export async function runLoop(deps: KeeperDeps, rec: DeploymentRecord, opts: Run
     try {
       requireReady(rec, deps.signer);
       await assertNoCode(deps, req.chain);
-      r = await (deps.replace as NonNullable<KeeperDeps["replace"]>)(req, latest);
+      // every hash: the pool may have evicted a later replacement and still hold the original
+      r = await (deps.replace as NonNullable<KeeperDeps["replace"]>)(req, [...u.hashes]);
     } catch (e) {
       if (e instanceof ReceiptTimeout && e.hash) {
         log(`Replacement sent, no receipt yet: transaction ${e.hash} (${u.what}, nonce ${req.nonce}) is watched with the original: whichever lands ends the watch`);

@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { type Address, decodeFunctionData, encodeAbiParameters, encodeFunctionData, getAddress, type Hex, keccak256, numberToHex, parseAbi, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
 import { parseArgs, UsageError } from "../src/args.ts";
-import { type ChainName, paths, WALLET } from "../src/config.ts";
+import { type ChainName, gasPriceCapFor, maxGasPrices, paths, WALLET } from "../src/config.ts";
 import { buildPlanV3 } from "../src/plan.ts";
 import { PAUSE_ABI, type PauseOpts, pauseCommand, pauseSigner } from "../src/pause.ts";
+import type { Rpc } from "../src/rpc.ts";
 import { SAFE_PROBE_ABI, TIMELOCK_ABI } from "../src/safe.ts";
 import type { CallRequest } from "../src/types.ts";
 import type { Ctx, Sent } from "../src/send.ts";
@@ -199,6 +200,37 @@ describe("pause, the guardian a plain account", () => {
       expect(r.lines).toEqual([warning, `Base front door ${fd}: paused (transaction ${SENT.hash})`]);
       expect(r.ok).toBe(true);
     });
+  });
+});
+
+describe("an emergency pause is never held up by the keeper's gas price cap", () => {
+  it("pause --live sends through the real send path under a gas price far over the cap: the CLI gives pause no cap; under the keeper's the same send is refused", async () => {
+    const w = world();
+    const HASH = `0x${"ab".repeat(32)}` as Hex;
+    const spike = 500n * 10n ** 9n;
+    const rpc: Rpc = {
+      async request(chain, method, params) {
+        if (method === "eth_chainId") return numberToHex(w.ctx.targets[chain].chainId);
+        if (method === "eth_gasPrice") return numberToHex(spike);
+        if (method === "eth_getTransactionReceipt") return { status: "0x1", blockNumber: "0x10", gasUsed: "0x7530", effectiveGasPrice: numberToHex(spike), contractAddress: null, logs: [] };
+        return w.ctx.rpc.request(chain, method, params);
+      },
+    };
+    const runner: Ctx["runner"] = {
+      run: async (_file, args) => (args[0] === "wallet" ? { code: 0, stdout: `${ROLES.guardian.base}\n`, stderr: "" } : { code: 0, stdout: `transactionHash ${HASH}`, stderr: "" }),
+    };
+    // the context the CLI builds for pause: the cap gasPriceCapFor gives it, none
+    const ctx: Ctx = { ...w.ctx, rpc, runner, pollMs: 1, ...(gasPriceCapFor("pause", {}) ? { maxGasPrice: gasPriceCapFor("pause", {}) } : {}) };
+    expect(ctx.maxGasPrice).toBeUndefined();
+    const r = await pauseCommand(ctx, rec, opts({ send: true, target: "front-door" }));
+    expect(r.ok).toBe(true);
+    expect(r.sent.map((s) => s.hash)).toEqual([HASH]);
+    expect(r.lines).toEqual([`Base front door ${fd}: paused (transaction ${HASH})`]);
+    // the same spike under the keeper's cap (run, close, deliver …): refused, which a pause must never be
+    const capped = await pauseCommand({ ...ctx, maxGasPrice: maxGasPrices({}) }, rec, opts({ send: true, target: "front-door" }));
+    expect(capped.ok).toBe(false);
+    expect(capped.sent).toEqual([]);
+    expect(capped.lines).toEqual([`PROBLEM — Base front door ${fd}: Base: the gas price is 500 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BASE); pause the front door waits for it to fall; nothing sent`]);
   });
 });
 

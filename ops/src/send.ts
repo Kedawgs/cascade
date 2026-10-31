@@ -298,21 +298,21 @@ async function estimate(ctx: Ctx, chain: ChainName, tx: { from: Address; to?: Ad
   }
 }
 
-/** Refuses a send whose gas price is over the chain's cap (Ctx.maxGasPrice): a fee spike costs a wait,
- * never the wallet's funds. */
-function underCap(ctx: Ctx, chain: ChainName, price: bigint, label: string): void {
+/** Why `price`, what a transaction would pay a gas now, is over the chain's cap (Ctx.maxGasPrice); or
+ * undefined, under it or with no cap. prepare and replaceCall both judge the effective price, so a fresh
+ * send and a replacement agree: a fresh send's is the node's gas price (the base fee plus its suggested
+ * tip, which cast's own fee cap sits over); a replacement's is its gas price on a legacy chain, else the
+ * lower of its fee cap and the base fee plus its tip. A fee spike costs a wait, never the wallet's funds. */
+function overCap(ctx: Pick<Ctx, "maxGasPrice">, chain: ChainName, price: bigint): string | undefined {
   const cap = ctx.maxGasPrice?.[chain];
-  if (cap !== undefined && price > cap) {
-    throw new SendRefused(
-      "fee",
-      `${chainLabel(chain)}: the gas price is ${gweiOf(price)}, over the ${gweiOf(cap)} cap (OPS_MAX_GAS_PRICE_${chain.toUpperCase()}); ${label} waits for it to fall; nothing sent`,
-    );
-  }
+  if (cap === undefined || price <= cap) return undefined;
+  return `${chainLabel(chain)}: the gas price is ${gweiOf(price)}, over the ${gweiOf(cap)} cap (OPS_MAX_GAS_PRICE_${chain.toUpperCase()})`;
 }
 
 async function prepare(ctx: Ctx, chain: ChainName, label: string, gas: bigint, gasLimit?: bigint) {
   const price = await gasPriceOf(ctx.rpc, chain);
-  underCap(ctx, chain, price, label);
+  const over = overCap(ctx, chain, price);
+  if (over) throw new SendRefused("fee", `${over}; ${label} waits for it to fall; nothing sent`);
   ctx.log(`${chainLabel(chain)}: ${label} — est. ${gas.toLocaleString("en-US")} gas ≈ ${formatEther(gas * price)} ${unit(chain)}`);
   const limit = gasLimit ?? (gas * 125n + 99n) / 100n;
   const t = ctx.targets[chain];
@@ -472,50 +472,64 @@ const bumped = (fee: bigint) => (fee * 1125n + 999n) / 1000n;
 /** Gas for a plain transfer of nothing to oneself: the cancel. */
 const CANCEL_GAS = 21_000n;
 
-/** Replaces the signer's own transaction `pending` (the hash sendCall got for `req`, with no receipt
- * since) at the same nonce with a higher fee: the same call, when it still passes its estimate, else,
- * only when that estimate is a genuine revert (the call would fail now), a cancel (a transfer of nothing
- * to the signer, which only frees the nonce), so a transaction stuck pending (its fee under the market's
- * since) no longer holds the chain's sends for good. Safe by construction: two transactions at one nonce
- * can't both be mined, so this never doubles a send. Nothing is sent unless `pending` is still in the
- * pool, from the signer, at req.nonce, and nothing has been mined at that nonce (`replaced: false`
- * otherwise: the transaction landed or dropped meanwhile, and the wallet's nonce says which), and nothing
- * is sent either when the node didn't answer the estimate (an RPC error, a rate limit, a timeout: not a
- * revert, so no cancel) or the fee would be over the chain's cap (Ctx.maxGasPrice): `replaced: false`,
- * tried again later. The live gate, the chain id and the keystore's account are checked as for any send
- * (the record's readiness and the wallet's code are the keeper's checks, before it calls this). Fees:
- * 12.5% over the pending transaction's (both the fee cap and the tip under EIP-1559, the tip never under
- * the node's suggested one; the gas price on a legacy chain), and never under the node's gas price now.
- * Then the receipt is waited for as in sendCall: a timeout throws ReceiptTimeout with the replacement's
- * hash and `req`, so it can be replaced in turn; a revert throws RevertedOnChain with its reason; cast
- * refusing it ("replacement transaction underpriced", "nonce too low") throws a plain Error. */
-export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Promise<Replacement> {
+/** A transaction as the node's pool or chain describes it (eth_getTransactionByHash). */
+type PoolTx = { from: Address; nonce: Hex; blockNumber: Hex | null; gasPrice?: Hex; maxFeePerGas?: Hex; maxPriorityFeePerGas?: Hex };
+
+/** Replaces the signer's own pending transaction at req.nonce, one of `pending` (the hash sendCall got
+ * for `req`, then each replacement's, oldest first; none has had a receipt since), at the same nonce
+ * with a higher fee: the same call, when it still passes its estimate, else, only when that estimate is
+ * a genuine revert (the call would fail now), a cancel (a transfer of nothing to the signer, which only
+ * frees the nonce), so a transaction stuck pending (its fee under the market's since) no longer holds the
+ * chain's sends for good. Safe by construction: two transactions at one nonce can't both be mined, so
+ * this never doubles a send. The hashes are looked up newest first, and the first still in the pool is
+ * the one replaced (a later replacement the pool evicted never hides an original still in it). Nothing
+ * is sent unless that one is from the signer, at req.nonce, and nothing has been mined at that nonce
+ * (`replaced: false` otherwise: one of them landed, or all dropped, and the wallet's nonce says which),
+ * and nothing is sent either when the node didn't answer the estimate (an RPC error, a rate limit, a
+ * timeout: not a revert, so no cancel) or the price would be over the chain's cap (overCap, as prepare
+ * judges a fresh send): `replaced: false`, tried again later. The live gate, the chain id and the
+ * keystore's account are checked as for any send (the record's readiness and the wallet's code are the
+ * keeper's checks, before it calls this). Fees: 12.5% over the pending transaction's (both the fee cap
+ * and the tip under EIP-1559, the tip never under the node's suggested one; the gas price on a legacy
+ * chain), and never under the node's gas price now. Then the receipt is waited for as in sendCall: a
+ * timeout throws ReceiptTimeout with the replacement's hash and `req`, so it can be replaced in turn; a
+ * revert throws RevertedOnChain with its reason; cast refusing it ("replacement transaction
+ * underpriced", "nonce too low") throws a plain Error. */
+export async function replaceCall(ctx: Ctx, req: CallRequest, pending: readonly Hex[]): Promise<Replacement> {
   const chain = req.chain;
   await gate(ctx, chain);
   const from = signerOf(ctx);
-  const tx = (await ctx.rpc.request(chain, "eth_getTransactionByHash", [pending])) as
-    | { from: Address; nonce: Hex; blockNumber: Hex | null; gasPrice?: Hex; maxFeePerGas?: Hex; maxPriorityFeePerGas?: Hex }
-    | null;
-  if (!tx) return { replaced: false, reason: `transaction ${pending} is not in the node's pool any more (dropped, or on another node): the wallet's nonce decides` };
-  if (tx.blockNumber !== null) return { replaced: false, reason: `transaction ${pending} was mined meanwhile (block ${hexToNumber(tx.blockNumber)})` };
-  if (tx.from.toLowerCase() !== from.address.toLowerCase() || hexToNumber(tx.nonce) !== req.nonce) {
-    return { replaced: false, reason: `transaction ${pending} is not ${from.name}'s at nonce ${req.nonce}: nothing to replace` };
+  let pooled: { hash: Hex; tx: PoolTx } | undefined;
+  for (const hash of [...pending].reverse()) {
+    const tx = (await ctx.rpc.request(chain, "eth_getTransactionByHash", [hash])) as PoolTx | null;
+    if (!tx) continue;
+    if (tx.blockNumber !== null) return { replaced: false, reason: `transaction ${hash} was mined meanwhile (block ${hexToNumber(tx.blockNumber)})` };
+    if (tx.from.toLowerCase() !== from.address.toLowerCase() || hexToNumber(tx.nonce) !== req.nonce) {
+      return { replaced: false, reason: `transaction ${hash} is not ${from.name}'s at nonce ${req.nonce}: nothing to replace` };
+    }
+    pooled = { hash, tx };
+    break;
   }
+  if (!pooled) {
+    return { replaced: false, reason: `none of transaction${pending.length === 1 ? "" : "s"} ${pending.join(", ")} is in the node's pool any more (dropped, or on another node): the wallet's nonce decides` };
+  }
+  const { hash: replacing, tx } = pooled;
   const mined = hexToNumber((await ctx.rpc.request(chain, "eth_getTransactionCount", [from.address, "latest"])) as Hex);
   if (mined !== req.nonce) return { replaced: false, reason: `${chainLabel(chain)}: the wallet's mined nonce is ${mined}, so nonce ${req.nonce} is no longer pending` };
   const market = await gasPriceOf(ctx.rpc, chain);
   const t = ctx.targets[chain];
   const max = (a: bigint, b: bigint) => (a > b ? a : b);
   // cast's --gas-price is the gas price of a legacy transaction, the fee cap of an EIP-1559 one
-  const tip = t.legacy ? 0n : max(bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0")), await priorityFeeOf(ctx.rpc, chain));
+  const nodeTip = t.legacy ? 0n : await priorityFeeOf(ctx.rpc, chain);
+  const tip = t.legacy ? 0n : max(bumped(hexToBigInt(tx.maxPriorityFeePerGas ?? "0x0")), nodeTip);
   const cap = max(max(bumped(hexToBigInt((t.legacy ? tx.gasPrice : (tx.maxFeePerGas ?? tx.gasPrice)) ?? "0x0")), market), tip);
-  const maxPrice = ctx.maxGasPrice?.[chain];
-  if (maxPrice !== undefined && cap > maxPrice) {
-    return {
-      replaced: false,
-      reason: `${chainLabel(chain)}: the replacement would go out at ${gweiOf(cap)}, over the ${gweiOf(maxPrice)} cap (OPS_MAX_GAS_PRICE_${chain.toUpperCase()}); it waits for the price to fall`,
-    };
-  }
+  // what it would pay a gas now, judged as prepare judges a fresh send: the node's gas price is the base
+  // fee plus its suggested tip, so the base fee is the difference, and a 1559 transaction pays the lower
+  // of its fee cap and the base fee plus its own tip
+  const baseFee = market > nodeTip ? market - nodeTip : market;
+  const effective = t.legacy ? cap : cap < baseFee + tip ? cap : baseFee + tip;
+  const over = overCap(ctx, chain, effective);
+  if (over) return { replaced: false, reason: `${over}; the replacement waits for it to fall` };
   const fee = t.legacy ? ["--legacy", "--gas-price", cap.toString()] : ["--gas-price", cap.toString(), "--priority-gas-price", tip.toString()];
   const feeInWords = t.legacy ? `gas price ${gweiOf(cap)}` : `fee cap ${gweiOf(cap)}, tip ${gweiOf(tip)}`;
   // the same call, if it still passes; a cancel (21,000 gas, which only frees the nonce) when the call
@@ -539,7 +553,7 @@ export async function replaceCall(ctx: Ctx, req: CallRequest, pending: Hex): Pro
     call = [from.address, "--value", "0"];
     limit = CANCEL_GAS;
   }
-  const label = cancelled ? `cancel nonce ${req.nonce} (${req.label})` : `${req.label} (replacing ${pending})`;
+  const label = cancelled ? `cancel nonce ${req.nonce} (${req.label})` : `${req.label} (replacing ${replacing})`;
   ctx.log(`${chainLabel(chain)}: ${label} — nonce ${req.nonce}, ${feeInWords} (12.5% over the pending transaction's, never under the node's)`);
   const args = ["send", ...call, "--rpc-url", t.rpcUrl, "--keystore", from.keystore, "--password-file", from.passwordFile, "--gas-limit", limit.toString(), ...fee, "--nonce", String(req.nonce), "--async"];
   await checkSigner(ctx);

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseArgs, UsageError } from "../src/args.ts";
-import { WALLET } from "../src/config.ts";
+import { gasPriceCapFor, WALLET } from "../src/config.ts";
 import { deployAndVerify } from "../src/deploy.ts";
 import { buildPlan } from "../src/plan.ts";
 import { type DeploymentRecord, loadRecordFor, needRecord, saveRecord } from "../src/record.ts";
@@ -35,6 +35,27 @@ describe("cli arguments", () => {
     expect(parseArgs(["wind-down", "--user", "0x1", "--user", "0x2"]).users).toEqual(["0x1", "0x2"]);
     expect(() => parseArgs(["launch"])).toThrow(UsageError);
     expect(() => parseArgs(["status", "--force"])).toThrow(UsageError);
+  });
+
+  it("--max-gas-price goes with the uncapped commands (pause, unpause, wind-down, sweep) and is a gas price in gwei", () => {
+    expect(parseArgs(["pause", "--live", "--max-gas-price", "50"])).toMatchObject({ cmd: "pause", live: true, maxGasPrice: "50" });
+    expect(parseArgs(["unpause", "vault", "--max-gas-price", "0.5"]).maxGasPrice).toBe("0.5");
+    expect(parseArgs(["wind-down", "--live", "--max-gas-price", "20"]).maxGasPrice).toBe("20");
+    expect(parseArgs(["sweep", "--live", "--tao-to", "5Fx", "--eth-to", "0x77", "--max-gas-price", "20"]).maxGasPrice).toBe("20");
+    for (const capped of ["run", "close", "deploy", "deliver"]) expect(() => parseArgs([capped, "--max-gas-price", "50"]), capped).toThrow(/unexpected argument --max-gas-price/);
+    for (const bad of ["0", "-1", "lots", "5gwei"]) expect(() => parseArgs(["pause", "--max-gas-price", bad]), bad).toThrow(/--max-gas-price .* is not a gas price in gwei/);
+    expect(() => parseArgs(["pause", "--max-gas-price"])).toThrow(/needs a value/);
+  });
+
+  it("the gas price cap a command sends under: none for the emergency and owner commands, the environment's for the keeper's and deploy", () => {
+    for (const cmd of ["pause", "unpause", "wind-down", "sweep"]) expect(gasPriceCapFor(cmd, { OPS_MAX_GAS_PRICE_BASE: "1" }), cmd).toBeUndefined();
+    for (const cmd of ["run", "close", "stake", "payouts", "deliver", "claim", "deploy"]) {
+      expect(gasPriceCapFor(cmd, {}), cmd).toEqual({ base: 5_000_000_000n, bittensor: 100_000_000_000n });
+      expect(gasPriceCapFor(cmd, { OPS_MAX_GAS_PRICE_BASE: "1", OPS_MAX_GAS_PRICE_BITTENSOR: "20" }), cmd).toEqual({ base: 1_000_000_000n, bittensor: 20_000_000_000n });
+    }
+    // --max-gas-price gives an uncapped command a cap for the run, both chains
+    expect(gasPriceCapFor("pause", {}, "50")).toEqual({ base: 50_000_000_000n, bittensor: 50_000_000_000n });
+    expect(() => gasPriceCapFor("pause", {}, "lots")).toThrow(/--max-gas-price/);
   });
 
   it("parses handoff and ownership, which take only --live", () => {

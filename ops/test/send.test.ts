@@ -30,6 +30,8 @@ function fixture(
     /** What eth_getTransactionByHash answers for a pending transaction of the wallet's (replaceCall): fields over the
      * default (the wallet's, at `nonce`, unmined, 5 gwei fees), or null for none */
     pendingTx?: null | Partial<{ from: Address; nonce: Hex; blockNumber: Hex | null; gasPrice: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }>;
+    /** The same, by hash (lower case), over `pendingTx` */
+    pendingTxs?: Record<string, null | Partial<{ from: Address; nonce: Hex; blockNumber: Hex | null; gasPrice: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }>>;
     created?: Address;
     signer?: Address;
     castFails?: boolean;
@@ -84,8 +86,9 @@ function fixture(
         case "eth_call":
           if (over.replay) return over.replay(params[1] as string);
           break;
-        case "eth_getTransactionByHash":
-          if (over.pendingTx === null) return null;
+        case "eth_getTransactionByHash": {
+          const byHash = over.pendingTxs?.[(params[0] as string).toLowerCase()];
+          if (byHash === null || (byHash === undefined && over.pendingTx === null)) return null;
           return {
             from: WALLET,
             nonce: numberToHex(over.nonce ?? 0),
@@ -94,7 +97,9 @@ function fixture(
             maxFeePerGas: numberToHex(5_000_000_000n),
             maxPriorityFeePerGas: numberToHex(1_000_000n),
             ...over.pendingTx,
+            ...byHash,
           };
+        }
       }
       throw new Error(`unexpected ${method}`);
     },
@@ -412,7 +417,7 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
 
   it("sends the same call at the same nonce, legacy on Bittensor, with the gas price 12.5% over the pending transaction's (never under the market's)", async () => {
     const f = fixture();
-    const r = await replaceCall(f.ctx, call, HASH);
+    const r = await replaceCall(f.ctx, call, [HASH]);
     expect(r).toMatchObject({ replaced: true, cancelled: false, hash: HASH, block: 16 });
     expect(f.sends()).toHaveLength(1);
     const args = f.sends()[0].args;
@@ -433,7 +438,7 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
 
   it("on Base (EIP-1559) bumps both the fee cap and the tip by 12.5%, and keeps the call's value", async () => {
     const f = fixture({ pendingTx: { maxFeePerGas: numberToHex(8_000_000_000n), maxPriorityFeePerGas: numberToHex(2_000_000n) } });
-    expect(await replaceCall(f.ctx, baseCall, HASH)).toMatchObject({ replaced: true, cancelled: false });
+    expect(await replaceCall(f.ctx, baseCall, [HASH])).toMatchObject({ replaced: true, cancelled: false });
     const args = f.sends()[0].args;
     expect(args).not.toContain("--legacy");
     expect(flag(args, "--gas-price")).toBe("9000000000");
@@ -444,13 +449,13 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
 
   it("takes the market's gas price when that is higher than the bump", async () => {
     const f = fixture({ pendingTx: { gasPrice: numberToHex(1_000_000_000n) } });
-    await replaceCall(f.ctx, call, HASH);
+    await replaceCall(f.ctx, call, [HASH]);
     expect(flag(f.sends()[0].args, "--gas-price")).toBe("5000000000");
   });
 
   it("when the call would fail now, cancels the nonce instead: a transfer of nothing to the wallet, 21,000 gas, and says so", async () => {
     const f = fixture({ estimate: "custom" });
-    const r = await replaceCall(f.ctx, call, HASH);
+    const r = await replaceCall(f.ctx, call, [HASH]);
     expect(r).toMatchObject({ replaced: true, cancelled: true, hash: HASH });
     const args = f.sends()[0].args;
     expect(args.slice(0, 4)).toEqual(["send", WALLET, "--value", "0"]);
@@ -462,7 +467,7 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
   it("I3: cancels only on a genuine revert: when the node didn't answer the estimate (a rate limit, a timeout), nothing is sent and it is tried again later", async () => {
     for (const estimate of ["rpc", "fail"] as const) {
       const f = fixture({ estimate });
-      const r = await replaceCall(f.ctx, call, HASH);
+      const r = await replaceCall(f.ctx, call, [HASH]);
       expect(r).toMatchObject({ replaced: false, reason: expect.stringMatching(/^Bittensor: the node didn't answer the estimate of stake idle TAO \(.*\); nothing cancelled$/) });
       expect(f.sends()).toEqual([]);
       expect(f.logs.some((l) => l.includes("cancel"))).toBe(false);
@@ -472,20 +477,61 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
   it("M1: refuses, never cancels, a replacement whose fee would be over the chain's cap; the tip is never under the node's suggested one", async () => {
     // 5 gwei pending, bumped to 5.625: over a 5 gwei cap
     const capped = fixture();
-    const r = await replaceCall({ ...capped.ctx, maxGasPrice: { bittensor: 5_000_000_000n } }, call, HASH);
-    expect(r).toMatchObject({ replaced: false, reason: "Bittensor: the replacement would go out at 5.625 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BITTENSOR); it waits for the price to fall" });
+    const r = await replaceCall({ ...capped.ctx, maxGasPrice: { bittensor: 5_000_000_000n } }, call, [HASH]);
+    expect(r).toMatchObject({ replaced: false, reason: "Bittensor: the gas price is 5.625 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BITTENSOR); the replacement waits for it to fall" });
     expect(capped.sends()).toEqual([]);
     expect(capped.calls.some((c) => c.method === "eth_estimateGas")).toBe(false);
     // under the cap it goes; on Base the tip is the node's suggestion when that is above the bumped one
     const roomy = fixture({ priorityFee: 3_000_000n });
-    await replaceCall({ ...roomy.ctx, maxGasPrice: { base: 20_000_000_000n } }, baseCall, HASH);
+    await replaceCall({ ...roomy.ctx, maxGasPrice: { base: 20_000_000_000n } }, baseCall, [HASH]);
     expect(flag(roomy.sends()[0].args, "--priority-gas-price")).toBe("3000000");
     expect(flag(roomy.sends()[0].args, "--gas-price")).toBe("5625000000");
   });
 
+  it("judges the cap by the effective price, as prepare judges a fresh send: a 1559 replacement whose fee cap is over the cap but which would pay under it goes, as the fresh send would", async () => {
+    // 8 gwei pending fee cap, bumped to 9: over a 6 gwei cap; but the market is 5 gwei (a 1 mwei tip in it),
+    // so it would pay about 5.001 gwei, under the cap, as a fresh send at the market would
+    const pending = { maxFeePerGas: numberToHex(8_000_000_000n), maxPriorityFeePerGas: numberToHex(2_000_000n) };
+    const goes = fixture({ pendingTx: pending });
+    expect(await replaceCall({ ...goes.ctx, maxGasPrice: { base: 6_000_000_000n } }, baseCall, [HASH])).toMatchObject({ replaced: true });
+    expect(flag(goes.sends()[0].args, "--gas-price")).toBe("9000000000");
+    const fresh = fixture();
+    await sendCall({ ...fresh.ctx, maxGasPrice: { base: 6_000_000_000n } }, baseCall);
+    expect(fresh.sends()).toHaveLength(1);
+    // a cap under what it would pay refuses both the same way
+    const stays = fixture({ pendingTx: pending });
+    expect(await replaceCall({ ...stays.ctx, maxGasPrice: { base: 5_000_000_000n } }, baseCall, [HASH])).toMatchObject({
+      replaced: false,
+      reason: "Base: the gas price is 5.00125 gwei, over the 5 gwei cap (OPS_MAX_GAS_PRICE_BASE); the replacement waits for it to fall",
+    });
+    expect(stays.sends()).toEqual([]);
+    const refused = fixture({ gasPrice: 5_001_250_000n });
+    expect(await refusal(sendCall({ ...refused.ctx, maxGasPrice: { base: 5_000_000_000n } }, baseCall))).toBe("fee");
+  });
+
+  it("looks every hash up, newest first, and replaces the one still in the pool: a later replacement the pool evicted never hides the original", async () => {
+    const HASH2 = `0x${"cd".repeat(32)}` as Hex;
+    const f = fixture({ pendingTxs: { [HASH2]: null } });
+    expect(await replaceCall(f.ctx, call, [HASH, HASH2])).toMatchObject({ replaced: true, cancelled: false });
+    expect(f.calls.filter((c) => c.method === "eth_getTransactionByHash").map((c) => c.params[0])).toEqual([HASH2, HASH]);
+    expect(f.logs.some((l) => l.includes(`(replacing ${HASH})`))).toBe(true);
+    // the newest still in the pool is the one replaced, and the older ones aren't asked for
+    const newest = fixture();
+    await replaceCall(newest.ctx, call, [HASH, HASH2]);
+    expect(newest.calls.filter((c) => c.method === "eth_getTransactionByHash").map((c) => c.params[0])).toEqual([HASH2]);
+    expect(newest.logs.some((l) => l.includes(`(replacing ${HASH2})`))).toBe(true);
+    // one of them mined: nothing to replace, whichever it is
+    const mined = fixture({ pendingTxs: { [HASH2]: null, [HASH]: { blockNumber: "0x10" } } });
+    expect(await replaceCall(mined.ctx, call, [HASH, HASH2])).toMatchObject({ replaced: false, reason: expect.stringMatching(/^transaction 0xab.* was mined meanwhile/) });
+    // none in the pool: says so, naming them all
+    const gone = fixture({ pendingTx: null });
+    expect(await replaceCall(gone.ctx, call, [HASH, HASH2])).toMatchObject({ replaced: false, reason: `none of transactions ${HASH}, ${HASH2} is in the node's pool any more (dropped, or on another node): the wallet's nonce decides` });
+    expect(gone.sends()).toEqual([]);
+  });
+
   it("M6: cast refusing the replacement (underpriced, nonce too low) is a plain failure that says so, never 'no receipt yet': nonce 0 was pending already", async () => {
     const f = fixture({ castFails: true });
-    const e = await replaceCall(f.ctx, call, HASH).catch((e: unknown) => e);
+    const e = await replaceCall(f.ctx, call, [HASH]).catch((e: unknown) => e);
     expect(e).toBeInstanceOf(Error);
     expect(e).not.toBeInstanceOf(ReceiptTimeout);
     expect((e as Error).message).toBe("Bittensor: stake idle TAO (replacing 0xabababababababababababababababababababababababababababababababab) was not sent: Error: server returned an error response");
@@ -493,35 +539,35 @@ describe("replaceCall: the keeper's own pending transaction, sent again at the s
 
   it("sends nothing when there is nothing of the wallet's to replace at that nonce, and says why", async () => {
     const cases: [ReturnType<typeof fixture>, RegExp][] = [
-      [fixture({ pendingTx: null }), /not in the node's pool any more/],
+      [fixture({ pendingTx: null }), /^none of transaction 0xab.* is in the node's pool any more \(dropped, or on another node\)/],
       [fixture({ pendingTx: { blockNumber: "0x10" } }), /was mined meanwhile \(block 16\)/],
       [fixture({ pendingTx: { from: "0x1111111111111111111111111111111111111111" } }), /is not the test wallet's at nonce 0: nothing to replace/],
       [fixture({ pendingTx: { nonce: "0x7" } }), /is not the test wallet's at nonce 0/],
       [fixture({ latestNonce: 1 }), /the wallet's mined nonce is 1, so nonce 0 is no longer pending/],
     ];
     for (const [f, why] of cases) {
-      const r = await replaceCall(f.ctx, call, HASH);
+      const r = await replaceCall(f.ctx, call, [HASH]);
       expect(r).toMatchObject({ replaced: false, reason: expect.stringMatching(why) });
       expect(f.sends()).toEqual([]);
     }
   });
 
   it("goes through the live gate and the chain-id check, and the keystore's account", async () => {
-    expect(await refusal(replaceCall({ ...fixture().ctx, live: true }, call, HASH))).toBe("not-live");
-    expect(await refusal(replaceCall(fixture({ chainId: 1 }).ctx, call, HASH))).toBe("chain-id");
+    expect(await refusal(replaceCall({ ...fixture().ctx, live: true }, call, [HASH]))).toBe("not-live");
+    expect(await refusal(replaceCall(fixture({ chainId: 1 }).ctx, call, [HASH]))).toBe("chain-id");
     const wrong = fixture({ signer: "0x1111111111111111111111111111111111111111" });
-    expect(await refusal(replaceCall(wrong.ctx, call, HASH))).toBe("signer");
+    expect(await refusal(replaceCall(wrong.ctx, call, [HASH]))).toBe("signer");
     expect(wrong.sends()).toEqual([]);
   });
 
   it("a replacement with no receipt in its turn is a ReceiptTimeout with its hash and the call, so it can be replaced again", async () => {
     const f = fixture({ receipt: "none" });
-    const e = (await replaceCall(f.ctx, call, HASH).catch((e: unknown) => e)) as ReceiptTimeout;
+    const e = (await replaceCall(f.ctx, call, [HASH]).catch((e: unknown) => e)) as ReceiptTimeout;
     expect(e).toBeInstanceOf(ReceiptTimeout);
     expect(e.hash).toBe(HASH);
     expect(e.request).toBe(call);
     // and one that reverts is a RevertedOnChain
-    await expect(replaceCall(fixture({ receipt: "reverted" }).ctx, call, HASH)).rejects.toBeInstanceOf(RevertedOnChain);
+    await expect(replaceCall(fixture({ receipt: "reverted" }).ctx, call, [HASH])).rejects.toBeInstanceOf(RevertedOnChain);
   });
 });
 

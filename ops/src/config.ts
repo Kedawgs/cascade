@@ -377,12 +377,33 @@ export function baseLogsWindow(env: Env): bigint {
 export function maxGasPrices(env: Env): Record<ChainName, bigint> {
   const gwei = (name: string, fallback: bigint): bigint => {
     const v = env[name]?.trim();
-    if (!v) return fallback;
-    if (!/^(\d+)(\.\d{1,9})?$/.test(v) || Number(v) <= 0) throw new Error(`${name} "${v}" is not a gas price in gwei (e.g. 5 or 0.5)`);
-    const [whole, frac = ""] = v.split(".");
-    return BigInt(whole) * 10n ** 9n + BigInt(frac.padEnd(9, "0"));
+    return v ? gweiToWei(name, v) : fallback;
   };
   return { base: gwei("OPS_MAX_GAS_PRICE_BASE", 5n * 10n ** 9n), bittensor: gwei("OPS_MAX_GAS_PRICE_BITTENSOR", 100n * 10n ** 9n) };
+}
+
+/** A gas price given in gwei ("5", "0.5", up to 9 decimals) as wei; refused, naming `name` (the
+ * variable or flag it came from), when it isn't one. */
+export function gweiToWei(name: string, v: string): bigint {
+  if (!/^(\d+)(\.\d{1,9})?$/.test(v) || Number(v) <= 0) throw new Error(`${name} "${v}" is not a gas price in gwei (e.g. 5 or 0.5)`);
+  const [whole, frac = ""] = v.split(".");
+  return BigInt(whole) * 10n ** 9n + BigInt(frac.padEnd(9, "0"));
+}
+
+/** The commands whose sends have no gas price cap: the emergency commands and the owner's, which a
+ * person runs by hand and means, gas spike or not. A guardian's pause during a spike must go out. */
+export const UNCAPPED_COMMANDS: readonly string[] = ["pause", "unpause", "wind-down", "sweep"];
+
+/** The gas price cap a command's sends go under: none for the hand-run emergency and owner commands
+ * (UNCAPPED_COMMANDS), unless `--max-gas-price <gwei>` names one for that run (`overrideGwei`, both
+ * chains); maxGasPrices (the environment's, or the defaults) for every other command: run, deploy,
+ * close, stake, payouts, deliver, claim. */
+export function gasPriceCapFor(cmd: string, env: Env, overrideGwei?: string): Record<ChainName, bigint> | undefined {
+  if (overrideGwei !== undefined) {
+    const wei = gweiToWei("--max-gas-price", overrideGwei);
+    return { base: wei, bittensor: wei };
+  }
+  return UNCAPPED_COMMANDS.includes(cmd) ? undefined : maxGasPrices(env);
 }
 
 /** A gas price in gwei for a message: "0.012 gwei", "5 gwei". */

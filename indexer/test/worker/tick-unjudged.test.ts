@@ -14,6 +14,35 @@ beforeEach(async () => {
   await wipe(db);
 });
 
+describe("monitor.unjudged through the tick", () => {
+  it("a healthy world leaves no critical rule unjudged, so nothing pages however long it runs", async () => {
+    const w = tickWorld();
+    for (let i = 0; i < 3; i++) {
+      await w.tick();
+      w.advance();
+    }
+    expect(await rows("SELECT k, v FROM meta WHERE k LIKE 'unjudged_since:%' AND v != ''")).toEqual([]);
+    expect(await rows("SELECT alert_key FROM alerts WHERE rule = 'monitor.unjudged'")).toEqual([]);
+  });
+
+  it("one read broken for good while the chain reads fine pages after 30 minutes, once, and resolves when it reads again", async () => {
+    const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
+    await w.tick();
+    // the vault's pendingPayouts() starts reverting (an upgrade dropped it): vault.solvency can't be judged
+    w.state.reverts.add("vault.pendingPayouts");
+    for (let i = 0; i < 31; i++) {
+      w.advance();
+      await w.tick();
+    }
+    const pages = () => w.sent.filter((m) => m.subject.includes("hasn't been able to judge"));
+    expect(pages().map((m) => m.subject)).toEqual(["[CASCADE CRITICAL] The monitor hasn't been able to judge vault.solvency for 30 minutes"]);
+    w.state.reverts.delete("vault.pendingPayouts");
+    w.advance();
+    await w.tick();
+    expect(await rows("SELECT alert_key FROM alerts WHERE rule = 'monitor.unjudged' AND resolved_at IS NULL")).toEqual([]);
+  });
+});
+
 describe("a condition the tick couldn't judge", () => {
   it("vault.solvency stays one open alert while pendingPayouts() reverts, and resolves once a reading shows the vault covered", async () => {
     const w = tickWorld({ over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });

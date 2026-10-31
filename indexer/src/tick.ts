@@ -17,7 +17,7 @@ import { DEPENDENCY_RULES } from "./rules/deps.ts";
 import { logQuery, prefetch, type PrefetchNeeds, type RuleCtx } from "./rules/context.ts";
 import { type Rule, runRules } from "./rules/index.ts";
 import { MARKET_RULES } from "./rules/market.ts";
-import { lagLimitOf, OPS_RULES } from "./rules/ops.ts";
+import { lagLimitOf, monitorUnjudged, OPS_RULES } from "./rules/ops.ts";
 import { PRICE_RULES } from "./rules/price.ts";
 import { SITE_RULES } from "./rules/site.ts";
 import { SOLVENCY_RULES } from "./rules/solvency.ts";
@@ -66,7 +66,8 @@ import {
 
 const CHAINS: readonly ChainName[] = ["bittensor", "base"];
 
-/** Every rule the tick runs. The bridge cross-checks wait while either chain is catching up. */
+/** Every rule the tick runs. The bridge cross-checks wait while either chain is catching up. monitor.unjudged runs
+ * last: it counts the marks every other rule left (and runRules' own for a rule that threw). */
 export const TICK_RULES: readonly Rule[] = [
   ...SITE_RULES,
   ...APPROVAL_RULES,
@@ -79,6 +80,7 @@ export const TICK_RULES: readonly Rule[] = [
   ...MARKET_RULES,
   ...OPS_RULES,
   ...DEPENDENCY_RULES,
+  monitorUnjudged,
 ];
 
 /** Subrequests kept back from the scan for everything after it (spec 3.6): two multicalls, two nonce batches,

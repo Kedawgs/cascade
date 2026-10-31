@@ -51,6 +51,9 @@ export const RULES = {
   "monitor.db_failing": critical("condition"),
   // a bridge cross-check rule threw: its deliveries and landings stay waiting, unchecked (review C1)
   "monitor.bridge_rule_failed": critical("condition"),
+  // critical conditions their rules couldn't judge (a reading or a field missing, the rule throwing) for
+  // unjudgedCriticalS: one alert for all of them, so a decode broken for good can't blind a critical in silence
+  "monitor.unjudged": critical("condition"),
   // 6.4, proposed (switchable in THRESHOLDS rules.off)
   "rail.alpha_vault": critical("condition"),
   "fmtao.mint_surge": warning("event"),

@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { type Finding, markSent, reconcile, type Unjudged } from "../../src/alerts.ts";
 import * as deps from "../../src/rules/deps.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
-import type { Rule } from "../../src/rules/index.ts";
+import { RULES } from "../../src/rules/ids.ts";
+import { type Rule, runRules } from "../../src/rules/index.ts";
+import { RUNBOOK } from "../../src/runbook.ts";
+import { TICK_RULES } from "../../src/tick.ts";
 import * as market from "../../src/rules/market.ts";
 import * as ops from "../../src/rules/ops.ts";
 import * as solvency from "../../src/rules/solvency.ts";
@@ -270,6 +273,68 @@ describe("the market and solvency conditions, unread", () => {
     expect(judged(solvency.frontDoorSolvency, ctx({ base: fd }))).toEqual(CLEAR);
     expect(judged(solvency.vaultSolvency, ctx({ bit: { rootStakeRao: 10n ** 9n, balance: E18 } }))).toEqual(blind([{ rule: "vault.solvency", key: "vault.solvency" }]));
     expect(judged(solvency.vaultSolvency, ctx({ bit: { rootStakeRao: 10n ** 9n, balance: E18, pendingPayouts: 0n } }))).toEqual(CLEAR);
+  });
+});
+
+describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pages", () => {
+  const at = (nowS: number, o: Parameters<typeof ctx>[0] & { meta?: Record<string, string> }) => ({ ...ctx(o), nowS });
+  const metaOf = (c: RuleCtx) => Object.fromEntries(c.writes.meta.map((w) => [w.k, w.v]));
+  /** the validator's take undecodable for good while Bittensor reads fine (a runtime change broke the decode) */
+  const blindTake = { validator: { hotkey: HK, rootStake: 100n, rootUid: 1 }, rootUnlockInterval: 0n };
+
+  it("is last in the tick's rules, so it sees every mark, runRules' own for a rule that throws too", () => {
+    expect(TICK_RULES[TICK_RULES.length - 1]).toBe(ops.monitorUnjudged);
+    expect(RULES["monitor.unjudged"]).toEqual({ tier: "critical", kind: "condition", canHold: false, mutedByHold: false });
+    expect(DEFAULTS.unjudgedCriticalS).toBe(1800);
+    expect(RUNBOOK["monitor.unjudged"]({ rules: "validator.take_high" })).toContain("validator.take_high");
+  });
+
+  it("is quiet in a steady state, and writes nothing", () => {
+    const c = at(NOW, { bit: { validator: { hotkey: HK, take: 0, rootStake: 100n, rootUid: 1 } } });
+    expect(runRules([deps.validatorTake, ops.monitorUnjudged], c)).toEqual([]);
+    expect(c.writes.meta).toEqual([]);
+  });
+
+  it("marks since when a critical rule is unjudged, pages once that is 30 minutes old, and resolves when it is judged again", () => {
+    const first = at(NOW, { bit: blindTake });
+    expect(runRules([deps.validatorTake, ops.monitorUnjudged], first)).toEqual([]);
+    expect(metaOf(first)).toEqual({ "unjudged_since:validator.take_high": String(NOW) });
+    const meta = { "unjudged_since:validator.take_high": String(NOW) };
+    // still unread: the mark is kept, not written again; 29 minutes in, quiet
+    const later = at(NOW + 1799, { bit: blindTake, meta });
+    expect(runRules([deps.validatorTake, ops.monitorUnjudged], later)).toEqual([]);
+    expect(later.writes.meta).toEqual([]);
+    const [f] = runRules([deps.validatorTake, ops.monitorUnjudged], at(NOW + 1800, { bit: blindTake, meta }));
+    expect(f).toMatchObject({ rule: "monitor.unjudged", key: "monitor.unjudged", facts: { rules: "validator.take_high", "validator.take_high": expect.stringContaining("30 minutes") } });
+    expect(f.subject).toBe("The monitor hasn't been able to judge validator.take_high for 30 minutes");
+    // the take decodes again: judged, the mark cleared, nothing found (the alert resolves)
+    const back = at(NOW + 1860, { bit: { ...blindTake, validator: { ...blindTake.validator, take: 0 } }, meta });
+    expect(runRules([deps.validatorTake, ops.monitorUnjudged], back)).toEqual([]);
+    expect(metaOf(back)).toEqual({ "unjudged_since:validator.take_high": "" });
+  });
+
+  it("counts a critical rule that throws (runRules' mark), but not warnings, events or rules switched off", () => {
+    const boom = { name: "vault.solvency", run: () => {
+      throw new Error("boom");
+    } };
+    const c = at(NOW, { bit: {} });
+    runRules([boom, ops.keeperLowEth, ops.monitorUnjudged], c);
+    expect(metaOf(c)).toEqual({ "unjudged_since:vault.solvency": String(NOW) });
+    const off = ruleCtx({ ...at(NOW, { bit: blindTake }), t: { ...DEFAULTS, rules: { off: ["validator.take_high"] } } });
+    runRules([deps.validatorTake, ops.monitorUnjudged], off);
+    expect(off.writes.meta).toEqual([]);
+  });
+
+  it("a whole chain unread is one alert listing every critical rule it blinds, not one each", () => {
+    const run = (c: RuleCtx) => runRules(TICK_RULES, c);
+    // Base reads fine, Bittensor answers nothing at all
+    const first = at(NOW, { base: { oracleValue: 400_000_000n } });
+    run(first);
+    const marks = metaOf(first);
+    expect(Object.keys(marks).length).toBeGreaterThan(3);
+    const found = run(at(NOW + 1800, { base: { oracleValue: 400_000_000n }, meta: marks })).filter((f) => f.rule === "monitor.unjudged");
+    expect(found).toHaveLength(1);
+    expect(found[0].facts.rules.split(", ")).toEqual(expect.arrayContaining(["vault.solvency", "validator.take_high", "validator.root_uid_lost", "root.unlock_interval", "fmtao.backing_true"]));
   });
 });
 

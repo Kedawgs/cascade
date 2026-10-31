@@ -3,6 +3,7 @@ import type { Finding } from "../alerts.ts";
 import type { ChainName } from "../config.ts";
 import type { Thresholds } from "../thresholds.ts";
 import { type RuleCtx, unjudged, utc } from "./context.ts";
+import { RULES } from "./ids.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.3 (operational warnings), 6.4 rail.alpha_vault, and the monitor's own health: indexer.lag and
@@ -406,6 +407,45 @@ export const indexerUnverified: Rule = {
         error: ctx.meta[`logs_check_error:${chain}`] || "unknown",
       });
     });
+  },
+};
+
+const UNJUDGED_SINCE = "unjudged_since:";
+/** Critical conditions whose blindness another alert reports already: an incomplete site pass is site.unreachable's
+ * warning (a pass runs hourly, so one bad pass would outlast unjudgedCriticalS on its own). */
+const BLINDNESS_REPORTED: ReadonlySet<string> = new Set(["site.integrity"]);
+
+/** monitor.unjudged (critical): the critical conditions the rules couldn't judge this tick (ctx.unjudged: a reading or
+ * a field missing, or the rule throwing), each unjudged on every tick for unjudgedCriticalS or more (since: meta
+ * unjudged_since:{rule}, set on its first such tick, cleared on the first tick it is judged again). One alert for all
+ * of them, so a whole chain out is one email, and a read broken for good while the chain reads fine (a runtime change
+ * breaking a storage decode, an AlphaVault upgrade dropping backing()) can't blind a critical rule in silence. Runs
+ * last of the tick's rules (tick.ts), so every mark is in, runRules' own for a rule that threw too. Rules switched off
+ * aren't counted. */
+export const monitorUnjudged: Rule = {
+  name: "monitor.unjudged",
+  run(ctx) {
+    const off = new Set(ctx.t.rules.off);
+    const counted = (rule: string) => rule in RULES && RULES[rule as keyof typeof RULES].tier === "critical" && RULES[rule as keyof typeof RULES].kind === "condition" && !off.has(rule) && !BLINDNESS_REPORTED.has(rule);
+    const marked = [...new Set(ctx.unjudged.map((u) => u.rule))].filter(counted);
+    // the marks: set on a rule's first unjudged tick, cleared on the first it is judged again
+    for (const [k, v] of Object.entries(ctx.meta)) {
+      if (k.startsWith(UNJUDGED_SINCE) && v !== "" && !marked.includes(k.slice(UNJUDGED_SINCE.length) as (typeof marked)[number])) ctx.writes.meta.push({ k, v: "" });
+    }
+    const since = new Map<string, number>();
+    for (const rule of marked) {
+      const s = num(ctx.meta[`${UNJUDGED_SINCE}${rule}`]);
+      if (s === undefined || !Number.isFinite(s)) ctx.writes.meta.push({ k: `${UNJUDGED_SINCE}${rule}`, v: String(ctx.nowS) });
+      since.set(rule, s !== undefined && Number.isFinite(s) ? s : ctx.nowS);
+    }
+    const long = marked.filter((rule) => ctx.nowS - (since.get(rule) as number) >= ctx.t.unjudgedCriticalS);
+    if (long.length === 0) return [];
+    const minutes = (rule: string) => Math.floor((ctx.nowS - (since.get(rule) as number)) / 60);
+    const longest = Math.max(...long.map(minutes));
+    const facts: Record<string, string> = { rules: long.join(", ") };
+    for (const rule of long) facts[rule] = `unjudged since ${utc(since.get(rule) as number)} (${minutes(rule)} minutes)`;
+    const what = long.length === 1 ? long[0] : `${long.length} critical conditions (${long[0]} and ${long.length - 1} more)`;
+    return one("monitor.unjudged", "monitor.unjudged", `The monitor hasn't been able to judge ${what} for ${longest} minutes`, facts);
   },
 };
 

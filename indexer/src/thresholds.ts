@@ -118,6 +118,8 @@ export const DEFAULTS = {
   logsCheckBittensorBlocks: 300,
   /** indexer.unverified: the second endpoint failing the cross-check for this long */
   logsCheckUnverifiedS: 3 * 3600,
+  /** monitor.unjudged: a critical condition its rule couldn't judge for this long, tick after tick */
+  unjudgedCriticalS: 1800,
   /** rule ids switched off (the proposed rules, open question 13, can be turned off here) */
   rules: { off: [] as string[] },
 };

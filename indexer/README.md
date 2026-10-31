@@ -256,6 +256,14 @@ that failed is retried, a warning goes out with the next digest, a critical is r
 the next reading that still shows it continues the same alert rather than opening a new one (`unjudged` in
 `src/rules/context.ts`). So a condition alert stays open through an RPC hiccup.
 
+A read that breaks for good while the chain still answers (a Subtensor runtime change breaking the `Delegates`,
+`Uids` or `TotalHotkeyAlpha` decode, an AlphaVault upgrade dropping `backing()`) would leave its rule blind with no
+alert of its own, so **`monitor.unjudged`** (critical) pages once any critical condition has been unjudged on every
+tick for `unjudgedCriticalS` (30 minutes; since when: meta `unjudged_since:<rule>`). It is one alert for all of them
+(a whole chain out is one email, listing each rule and since when), resolves when every one is judged again, and
+doesn't count rules switched off in `rules.off`, or `site.integrity` (an incomplete site pass is
+`site.unreachable`'s warning). The email says what to check.
+
 The owner's scripts run `wrangler d1 execute --remote`, so they need `wrangler login`; each takes `--dry-run` to
 print what it would run:
 

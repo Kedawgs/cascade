@@ -117,9 +117,11 @@ minimum-liquidity floor becomes an amber condition (deliveries wait while the po
 - **Per-chain freshness.** Each chain's numbers come from that chain's newest reading, even when the other chain's
   half of the same tick is missing, and carry that reading's block and time. A chain whose newest reading is
   older than 10 minutes is stale (my call: the monitor reads every minute, and its health check fails at 5): every
-  number from that chain shows "–" and its steps' dots go amber. Base feeds Swap, Bridge (in) and Swap to USDC;
-  Bittensor feeds Backing, Vault, Validator and Bridge back. The endpoint never exposes the monitor's own lag
-  limits, thresholds or alert state.
+  number from that chain shows "–" and its steps go stale. Base feeds Swap and Swap to USDC; Bittensor feeds
+  Vault and Validator; Backing and both Bridge steps read both chains (the backing is the lower of a Bittensor and
+  a cross-chain layer, and a bridge's room is the tighter of its two pools' buckets), so they need both fresh.
+  The endpoint never exposes the monitor's own lag limits, thresholds or alert state. (Amended after the final
+  review, 2026-11-01.)
 - **It returns facts, not judgements:** the numbers with their readings' blocks and times; the in-flight message
   count; the contract notices (kind, the earliest effect time where there is one, the contract); and the explorer
   addresses. The amber conditions above may be computed on the page or in the endpoint, but only from these facts.

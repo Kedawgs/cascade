@@ -35,7 +35,7 @@ view models and notices, and the page renders the map.
   monitor's lag limits, holds or the runbook (spec, Anti-goals).
 - Copy never says "safe", "secure" or "guaranteed"; it says "monitored", "checked", "passing".
 - A chain's newest reading older than **600 seconds** is stale: every number from that chain is "–".
-- Base feeds Swap, Bridge (in), Swap to USDC; Bittensor feeds Backing, Vault, Validator, Bridge back.
+- Base feeds Swap and Swap to USDC; Bittensor feeds Vault and Validator; Backing and both Bridge steps need both chains fresh (amended after the final review).
 - Edge cache: the existing `CACHE_TTL_S` (15 s) and `cached()` helper. Client refresh: every **60 s**, only while
   the tab is visible. The page never calls an RPC.
 - CORS: `Access-Control-Allow-Origin: cfg.site.origin` (from `SITE_ORIGIN`), as `/v1/scan` does.

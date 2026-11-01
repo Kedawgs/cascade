@@ -168,6 +168,9 @@ const sameRoles = (a: readonly string[], b: readonly string[]) => a.length === b
 const keeperOnly = (roles: readonly string[]) => roles.every((r) => r.endsWith(".keeper"));
 /** The meta mark counting a watched address's count readings in a row that were provably stale. */
 const behindKey = (chain: ChainName, address: Hex) => `nonce_behind:${chain}:${address}`;
+/** Safe's execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes): the call that
+ * moves its nonce() */
+const EXEC_TRANSACTION = "0x6a761202";
 
 /** keys.unexplained_tx (critical: an address holding an owner, pending-owner or guardian role) and
  * keys.keeper_unexplained_tx (warning: an address holding only the keeper role): the address's count
@@ -198,7 +201,7 @@ export const keys: Rule = {
         if (ctx.meta[mark]) ctx.writes.meta.push({ k: mark, v: "" });
       }
       const counts = Object.fromEntries(Object.entries(ctx.snap.nonces[chain]).map(([a, n]) => [lower(a as Hex), n]));
-      const safes = Object.fromEntries(Object.entries(ctx.snap.safeNonces).map(([a, n]) => [lower(a as Hex), n]));
+      const safes = Object.fromEntries(Object.entries(ctx.snap.safeNonces[chain] ?? {}).map(([a, n]) => [lower(a as Hex), n]));
       for (const h of now) {
         const row = stored.get(`${chain}:${h.address}`);
         const isSafe = safes[h.address] !== undefined;
@@ -240,9 +243,12 @@ export const keys: Rule = {
         // count was then reported as unexplained). What the count is known to be at least: the highest count already
         // read (counts only rise; a row just turned Safe has no nonce() read yet), one past the nonce of each of the
         // account's own transactions settled now, and for a Safe, whose nonce() is read in the reading's multicall at
-        // its block, one more than it for each execution logged in a later block.
+        // its block, one more than it for each execTransaction logged in a later block. Only execTransaction moves
+        // nonce(): a module's execTransactionFromModule doesn't, and counting it would lift the floor over an
+        // attacker's execution.
         const reading = ctx.snap[chain]?.block;
-        const later = isSafe && reading !== undefined ? own.filter((t) => t.to !== undefined && lower(t.to) === h.address && ctx.logs.inTx(chain, t.hash).some((l) => l.block > reading)).length : 0;
+        const executes = (t: TxRow) => t.to !== undefined && lower(t.to) === h.address && t.selector?.toLowerCase() === EXEC_TRANSACTION;
+        const later = isSafe && reading !== undefined ? own.filter((t) => executes(t) && ctx.logs.inTx(chain, t.hash).some((l) => l.block > reading)).length : 0;
         const floor = Math.max(isSafe && !row.safe ? 0 : row.nonce, count + later, ...own.flatMap((t) => (!isSafe && lower(t.from) === h.address && t.nonce !== undefined ? [t.nonce + 1] : [])));
         // A count below that is provably stale: judged by the floor, for at most nonceBehindTicks readings in a row
         // (more is a reorg past the settle depth: the count is taken). Only this is tolerated: an unbounded floor

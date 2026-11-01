@@ -401,7 +401,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   // 6. the readings: from the last reading, the hotkeys, keepers, oracle and role holders to read
   const history = historyOf(state);
   const previous = { base: history.base[0], bittensor: history.bittensor[0] };
-  const last: Snapshot = { at: 0, base: previous.base, bittensor: previous.bittensor, nonces: { base: {}, bittensor: {} }, safeNonces: {}, messageStates: {}, deliveredReads: [] };
+  const last: Snapshot = { at: 0, base: previous.base, bittensor: previous.bittensor, nonces: { base: {}, bittensor: {} }, safeNonces: { base: {}, bittensor: {} }, messageStates: {}, deliveredReads: [] };
   const holders = watchedRoles(last);
   const watched = new Map<string, { chain: ChainName; address: Hex }>();
   for (const w of [...state.nonces.filter((r) => r.roles.length > 0), ...holders]) watched.set(`${w.chain}:${lower(w.address)}`, { chain: w.chain, address: lower(w.address) });

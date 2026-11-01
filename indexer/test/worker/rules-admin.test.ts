@@ -1,5 +1,6 @@
-import type { Hex } from "viem";
+import { type Hex, toFunctionSelector } from "viem";
 import { describe, expect, it } from "vitest";
+import type { ChainName } from "../../src/config.ts";
 import type { StoredLog } from "../../src/logs.ts";
 import { adminEvent, keys, watchedRoles } from "../../src/rules/admin.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
@@ -30,7 +31,7 @@ function ctx(o: {
   base?: Partial<BaseState>;
   bit?: Partial<BitState>;
   counts?: { base?: Record<Hex, bigint>; bittensor?: Record<Hex, bigint> };
-  safeNonces?: Record<Hex, bigint>;
+  safeNonces?: { base?: Record<Hex, bigint>; bittensor?: Record<Hex, bigint> };
   nonces?: NonceRow[];
   nowS?: number;
   meta?: Record<string, string>;
@@ -42,7 +43,7 @@ function ctx(o: {
       base: o.base ? reading(37_000_300n, NOW, baseState(o.base)) : undefined,
       bittensor: o.bit ? reading(6_900_300n, NOW, bitState(o.bit)) : undefined,
       nonces: { base: o.counts?.base ?? {}, bittensor: o.counts?.bittensor ?? {} },
-      safeNonces: o.safeNonces ?? {},
+      safeNonces: { base: o.safeNonces?.base ?? {}, bittensor: o.safeNonces?.bittensor ?? {} },
       messageStates: {},
       deliveredReads: [],
     },
@@ -181,17 +182,17 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
   it("judges a Safe owner by its nonce() against the admin transactions it executed", () => {
     const safeRow = row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 });
     const executed = sent(2, SIGNER, { to: SAFE });
-    const c = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 5n }, nonces: [safeRow], newTxs: executed });
+    const c = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 5n } }, nonces: [safeRow], newTxs: executed });
     expect(keys.run(c)).toEqual([]);
     expect(c.writes.nonces[0]).toMatchObject({ seen: 2, nonce: 5 });
-    const one = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 5n }, nonces: [{ ...safeRow, changedAt: NOW - 2000 }], newTxs: executed.slice(0, 1) });
+    const one = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 5n } }, nonces: [{ ...safeRow, changedAt: NOW - 2000 }], newTxs: executed.slice(0, 1) });
     expect(keys.run(one)).toEqual([]);
     expect(one.writes.nonces[0]).toMatchObject({ changedAt: NOW });
   });
 
   it("remembers a Safe: a tick without its nonce() (its code misread) is skipped, never judged by its transaction count", () => {
     // first read as a Safe: the row is marked
-    const first = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, counts: { base: { [SAFE]: 1n } } });
+    const first = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 3n } }, counts: { base: { [SAFE]: 1n } } });
     keys.run(first);
     expect(first.writes.nonces).toEqual([expect.objectContaining({ address: SAFE, nonce: 3, safe: true })]);
     const safeRow = first.writes.nonces[0];
@@ -200,7 +201,7 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     expect(keys.run(misread)).toEqual([]);
     expect(misread.writes.nonces).toEqual([]);
     // and its nonce() back, unchanged: still nothing (the baseline wasn't reset to the count)
-    const back = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, counts: { base: { [SAFE]: 1n } }, nonces: [safeRow], nowS: NOW + 3600 });
+    const back = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 3n } }, counts: { base: { [SAFE]: 1n } }, nonces: [safeRow], nowS: NOW + 3600 });
     expect(keys.run(back)).toEqual([]);
   });
 
@@ -217,14 +218,14 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     const thirty = unread("29");
     expect(keys.run(thirty).map((f) => [f.rule, f.key, f.facts.ticks])).toEqual([["keys.safe_unread", `keys.safe_unread:base:${SAFE}`, "30"]]);
     // its nonce() back: the count starts again (and the warning, a condition, clears)
-    const back = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], meta: { [k]: "31" } });
+    const back = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 3n } }, nonces: [safeRow], meta: { [k]: "31" } });
     expect(keys.run(back)).toEqual([]);
     expect(back.writes.meta).toEqual([{ k, v: "" }]);
     expect(RUNBOOK["keys.safe_unread"]({})).toContain("nonce()");
   });
 
   it("marks a watched account a Safe once its nonce() is read (a Safe deployed at it)", () => {
-    const c = ctx({ base: { owner: SAFE }, safeNonces: { [SAFE]: 0n }, nonces: [row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 0, nonce: 0 })] });
+    const c = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 0n } }, nonces: [row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 0, nonce: 0 })] });
     keys.run(c);
     expect(c.writes.nonces).toEqual([expect.objectContaining({ address: SAFE, safe: true })]);
   });
@@ -238,25 +239,35 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
   const ownerKey = { owner: OWNER, guardian: OWNER };
   let owned = 0;
   /** one of the address's own transactions, settled this tick: fetched (its nonce known), or known from an event's args */
-  const own = (from: Hex, nonce?: number): TxRow => ({ chain: "base", hash: tx(7000 + ++owned), from, ...(nonce === undefined ? {} : { nonce }) });
-  const at11 = (address: Hex, roles: readonly string[] = OWNER_ROLES) => row({ address, roles: [...roles], baseline: 11, seen: 0, nonce: 11 });
+  const own = (from: Hex, nonce?: number, chain: ChainName = "base"): TxRow => ({ chain, hash: tx(7000 + ++owned), from, ...(nonce === undefined ? {} : { nonce }) });
+  const at11 = (address: Hex, roles: readonly string[] = OWNER_ROLES, chain: ChainName = "base") => row({ chain, address, roles: [...roles], baseline: 11, seen: 0, nonce: 11 });
   type Step = { count: number; txs?: TxRow[]; logs?: StoredLog[] };
   const steady = (n: number, count: number): Step[] => Array.from({ length: n }, () => ({ count }));
-  /** Ticks a minute apart through keys, the rows and meta it writes kept as the tick commits them: the findings as
-   * "t<tick>:<rule>(<unexplained>)", and the address's row and nonce_behind mark at the end. `safe`: each count is the
-   * address's nonce() (a Safe's), read at the reading's block (37,000,300). */
-  function drive(o: { address: Hex; holder: Partial<BaseState>; start?: NonceRow; safe?: boolean; steps: Step[] }) {
+  /** Ticks a minute apart through keys on `chain` (Base unless given), the rows and meta it writes kept as the tick
+   * commits them: the findings as "t<tick>:<rule>(<unexplained>)", and the address's row and nonce_behind mark at the
+   * end. `holder`: that chain's role readings. `safe`: each count is the address's nonce() (a Safe's), read at the
+   * reading's block (Base 37,000,300; Bittensor 6,900,300). */
+  function drive(o: { address: Hex; holder: Partial<BaseState> & Partial<BitState>; chain?: ChainName; start?: NonceRow; safe?: boolean; steps: Step[] }) {
+    const chain = o.chain ?? "base";
     let rows = o.start ? [o.start] : [];
     const meta: Record<string, string> = {};
     const found: string[] = [];
     o.steps.forEach((s, i) => {
       const read = { [o.address]: BigInt(s.count) };
-      const c = ctx({ base: o.holder, ...(o.safe ? { safeNonces: read } : { counts: { base: read } }), nonces: rows, newTxs: s.txs ?? [], logs: s.logs, meta: { ...meta }, nowS: NOW + 60 * i });
+      const c = ctx({
+        ...(chain === "base" ? { base: o.holder } : { bit: o.holder }),
+        ...(o.safe ? { safeNonces: { [chain]: read } } : { counts: { [chain]: read } }),
+        nonces: rows,
+        newTxs: s.txs ?? [],
+        logs: s.logs,
+        meta: { ...meta },
+        nowS: NOW + 60 * i,
+      });
       for (const f of keys.run(c)) found.push(`t${i}:${f.rule}(${f.facts.unexplained})`);
       for (const w of c.writes.nonces) rows = [...rows.filter((r) => r.chain !== w.chain || r.address !== w.address), w];
       for (const w of c.writes.meta) meta[w.k] = w.v;
     });
-    return { found, end: rows.find((r) => r.address === o.address), mark: meta[`nonce_behind:base:${o.address}`] ?? "" };
+    return { found, end: rows.find((r) => r.chain === chain && r.address === o.address), mark: meta[`nonce_behind:${chain}:${o.address}`] ?? "" };
   }
 
   // P1, 2026-10-31, the keeper on Base: its hourly roll counted at the head, then its log settling on a tick whose count
@@ -369,15 +380,33 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     ]);
   });
 
+  it("works the same on Bittensor: the vault keeper's race is quiet, and a transaction no log explains after it is the keeper's warning", () => {
+    const r = drive({
+      chain: "bittensor",
+      address: KEEPER,
+      holder: { keeper: KEEPER },
+      start: at11(KEEPER, ["vault.keeper"], "bittensor"),
+      steps: [{ count: 12 }, { count: 11, txs: [own(KEEPER, 11, "bittensor")] }, ...steady(5, 12), ...steady(20, 13)],
+    });
+    expect(r.found).toEqual(["t22:keys.keeper_unexplained_tx(1)"]);
+    expect(r.end).toMatchObject({ chain: "bittensor", baseline: 12, seen: 1, nonce: 13 });
+  });
+
+  /** Safe's execTransaction, which moves nonce(); a module's execTransactionFromModule doesn't */
+  const EXEC_TRANSACTION = "0x6a761202" as Hex;
+  const FROM_MODULE = "0x468721a7" as Hex;
+  /** a transaction to the Safe (execTransaction unless another selector is given), its Cascade log at `block` (the
+   * readings are at Base 37,000,300 and Bittensor 6,900,300) */
+  const toSafe = (block: bigint, selector: Hex = EXEC_TRANSACTION, chain: ChainName = "base") => {
+    const t: TxRow = { ...own(SIGNER, 1, chain), to: SAFE, selector };
+    return { txs: [t], logs: [slog({ contract: "frontDoor", event: "LimitSet", chain, address: FD, block, txHash: t.hash })] };
+  };
+
   it("judges a Safe's nonce() the same way: a read below the last is stale, and so is one from a block before an execution just logged", () => {
     const k = `nonce_behind:base:${SAFE}`;
     const safeRow: NonceRow = { ...row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 }), safe: true };
     const owner = { owner: SAFE };
-    /** an execution: a signer's transaction to the Safe, its Cascade log at `block` (the reading is at 37,000,300) */
-    const exec = (block: bigint) => {
-      const t: TxRow = { ...own(SIGNER), to: SAFE };
-      return { txs: [t], logs: [slog({ contract: "frontDoor", event: "LimitSet", chain: "base", address: FD, block, txHash: t.hash })] };
-    };
+    const exec = (block: bigint) => toSafe(block);
     // read at 4, then the execution settling with a read from before it (3): judged by the 4 already read
     expect(drive({ address: SAFE, holder: owner, start: safeRow, safe: true, steps: [{ count: 4 }, { count: 3, ...exec(37_000_100n) }, ...steady(20, 4)] })).toMatchObject({
       found: [],
@@ -386,19 +415,58 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     });
     // never read at 4: the reading's block (37,000,300) is before the execution's log (37,000,301), so its 3 can't hold it
     const later = exec(37_000_301n);
-    const c = ctx({ base: owner, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], newTxs: later.txs, logs: later.logs });
+    const c = ctx({ base: owner, safeNonces: { base: { [SAFE]: 3n } }, nonces: [safeRow], newTxs: later.txs, logs: later.logs });
     expect(keys.run(c)).toEqual([]);
     expect(c.writes.nonces).toEqual([{ ...safeRow, seen: 1, nonce: 4 }]);
     expect(c.writes.meta).toEqual([{ k, v: "1" }]);
     expect(drive({ address: SAFE, holder: owner, start: safeRow, safe: true, steps: [{ count: 3, ...exec(37_000_301n) }, ...steady(20, 4)] }).found).toEqual([]);
     // an execution logged at the reading's block is in its nonce(): a read short of it is a new start at once (counted twice)
     const at = exec(37_000_300n);
-    const current = ctx({ base: owner, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], newTxs: at.txs, logs: at.logs });
+    const current = ctx({ base: owner, safeNonces: { base: { [SAFE]: 3n } }, nonces: [safeRow], newTxs: at.txs, logs: at.logs });
     expect(keys.run(current)).toEqual([]);
     expect(current.writes.nonces[0]).toMatchObject({ baseline: 2, seen: 1, nonce: 3 });
     expect(current.writes.meta).toEqual([]);
     // an execution no log explains still pages critical after the grace
     expect(drive({ address: SAFE, holder: owner, start: safeRow, safe: true, steps: [{ count: 4 }, ...steady(20, 4)] }).found).toEqual(["t15:keys.unexplained_tx(1)"]);
+  });
+
+  it("S4: only execTransaction raises a Safe's floor: a module's call to it after a lagging reading can't hide an execution that follows", () => {
+    expect(toFunctionSelector("execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)")).toBe(EXEC_TRANSACTION);
+    expect(toFunctionSelector("execTransactionFromModule(address,uint256,bytes,uint8)")).toBe(FROM_MODULE);
+    const safeRow: NonceRow = { ...row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 }), safe: true };
+    // a module (an EOA) calls execTransactionFromModule, logged after a reading at 3: nonce() never moves for it, so a
+    // floor of 4 would absorb the attacker's execTransaction three minutes on
+    const module = toSafe(37_000_301n, FROM_MODULE);
+    const first = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 3n } }, nonces: [safeRow], newTxs: module.txs, logs: module.logs });
+    expect(keys.run(first)).toEqual([]);
+    // counted, not held: a new start at once
+    expect(first.writes.nonces).toEqual([{ ...safeRow, baseline: 2, seen: 1 }]);
+    expect(first.writes.meta).toEqual([]);
+    const r = drive({ address: SAFE, holder: { owner: SAFE }, start: safeRow, safe: true, steps: [{ count: 3, ...toSafe(37_000_301n, FROM_MODULE) }, ...steady(3, 3), ...steady(20, 4)] });
+    expect(r.found).toEqual(["t19:keys.unexplained_tx(1)"]);
+  });
+
+  it("judges one Safe address on both chains (Safe's same-address deploys) by each chain's own nonce() and reading block", () => {
+    const rows = (["base", "bittensor"] as const).map((chain): NonceRow => ({ ...row({ chain, address: SAFE, roles: [chain === "base" ? "frontDoor.owner" : "vault.owner"], baseline: 3, nonce: 3 }), safe: true }));
+    // Base's reading (37,000,300) holds its execution (logged at 37,000,200); Bittensor's (6,900,300) is from before its
+    // own (logged at 6,900,301)
+    const onBase = toSafe(37_000_200n);
+    const onBit = toSafe(6_900_301n, EXEC_TRANSACTION, "bittensor");
+    const c = ctx({
+      base: { owner: SAFE },
+      bit: { owner: SAFE },
+      safeNonces: { base: { [SAFE]: 4n }, bittensor: { [SAFE]: 3n } },
+      nonces: rows,
+      newTxs: [...onBase.txs, ...onBit.txs],
+      logs: [...onBase.logs, ...onBit.logs],
+    });
+    expect(keys.run(c)).toEqual([]);
+    // Base: 4, its execution in it; Bittensor: 3, from before its execution, so at least 4 (and marked)
+    expect(c.writes.nonces).toEqual([
+      { ...rows[0], seen: 1, nonce: 4 },
+      { ...rows[1], seen: 1, nonce: 4 },
+    ]);
+    expect(c.writes.meta).toEqual([{ k: `nonce_behind:bittensor:${SAFE}`, v: "1" }]);
   });
 
   it("stops watching an address that holds no role any more (its nonce_behind mark cleared), and waits for a count", () => {

@@ -101,6 +101,8 @@ export function deploymentState(cfg: Config) {
       quoteBridges: [d.bitAdapter] as Hex[],
       payoutBatches: {} as Record<Hex, { queuedAt: bigint; cursor: number; count: number; chunk: number; remaining: bigint }>,
       offRamp: {} as Record<Hex, number>,
+      /** nonce() of each Safe on Bittensor */
+      safes: {} as Record<Hex, bigint>,
     },
     base: {
       openBatch: [7n, 1_700_000_000n, 0n, 0n, 0n, 0n] as [bigint, bigint, bigint, bigint, bigint, bigint],
@@ -180,6 +182,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
   };
   const counts = (chain: "base" | "bittensor") => ([a]: readonly unknown[]) => `0x${(state.nonces[chain][lc(a)] ?? 0n).toString(16)}`;
   const safeContracts = Object.fromEntries(Object.keys(b.safes).map((a) => [a, { abi: SAFE, fns: { nonce: () => b.safes[a as Hex] } }]));
+  const bitSafeContracts = Object.fromEntries(Object.keys(x.safes).map((a) => [a, { abi: SAFE, fns: { nonce: () => x.safes[a as Hex] } }]));
   const baseSpec: ChainSpec = {
     head: heads.base,
     lagBy: o.lagBy?.base,
@@ -343,6 +346,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
             ]),
           ),
           [t.bittensor.offRamp]: { abi: OFFRAMP, fns: { getExecutionState: ([id]) => x.offRamp[lc(id)] ?? 0 } },
+          ...bitSafeContracts,
         },
         { time: (at) => 1_800_000_000 + Number(at - heads.bittensor) * 12, balance: balances("bittensor"), baseFee: () => x.baseFee },
       ),

@@ -214,8 +214,9 @@ export interface Snapshot {
   base?: ChainReading<BaseState>;
   bittensor?: ChainReading<BitState>;
   nonces: Record<ChainName, Record<Hex, bigint>>;
-  /** nonce() of each watched owner that is a Safe */
-  safeNonces: Record<Hex, bigint>;
+  /** nonce() of each watched address that is a Safe, per chain (one Safe address can be deployed on both), read in that
+   * chain's multicall at its reading's block */
+  safeNonces: Record<ChainName, Record<Hex, bigint>>;
   /** the OffRamp execution state of each pending message, on its destination chain */
   messageStates: Record<Hex, string>;
   /** delivered(bridge, keccak256(message)) for each landing awaiting that read, at the Base reading's block */
@@ -321,7 +322,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   /** the code to read: each Safe candidate's (a nonce() counts only from code of its own) and each role wallet's */
   const coded = (chain: ChainName) => [...new Set([...safes(chain), ...(i.codesOf ?? []).filter((w) => w.chain === chain).map((w) => w.address.toLowerCase() as Hex)])];
   const counted = (chain: ChainName) => i.watched.filter((w) => w.chain === chain && !w.isSafe).map((w) => w.address);
-  const safeNonces: Record<Hex, bigint> = {};
+  const safeNonces: Snapshot["safeNonces"] = { base: {}, bittensor: {} };
   const messageStates: Record<Hex, string> = {};
 
   // Bittensor
@@ -524,13 +525,13 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
     if (Object.keys(validator).length > 1) bit.validator = validator;
     snap.bittensor = bitReading;
     Object.assign(messageStates, bitMessages);
-    Object.assign(safeNonces, bitSafes);
+    Object.assign(safeNonces.bittensor, bitSafes);
   }
   if (baseReading) {
     if (baseLane.inbound || baseLane.outbound) base.lane = baseLane;
     snap.base = baseReading;
     Object.assign(messageStates, baseMessages);
-    Object.assign(safeNonces, baseSafes);
+    Object.assign(safeNonces.base, baseSafes);
     snap.deliveredReads = delivered.map(({ c, value }) => ({ landedUid: c.landedUid, key: c.key, chunk: c.chunk, block: baseReading.block, value }));
   }
   return snap;

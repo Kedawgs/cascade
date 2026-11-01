@@ -195,7 +195,7 @@ describe("readSnapshot", () => {
       1,
     );
     expect(s.nonces).toEqual({ base: { [OWNER]: 12n, [KEEPER]: 40n }, bittensor: { [KEEPER]: 9n } });
-    expect(s.safeNonces).toEqual({ [SAFE_OWNER]: 4n });
+    expect(s.safeNonces).toEqual({ base: { [SAFE_OWNER]: 4n }, bittensor: {} });
     const countRequests = net.fetches.filter((f) => f.methods.includes("eth_getTransactionCount"));
     // the Safe's code is asked in the same batch as Base's counts
     expect(countRequests.map((f) => [f.chain, f.methods.length])).toEqual(expect.arrayContaining([["base", 3], ["bittensor", 1]]));
@@ -223,8 +223,23 @@ describe("readSnapshot", () => {
     const both = (address: Hex) => [{ chain: "base" as const, address }, { chain: "base" as const, address, isSafe: true }];
     const s = await readSnapshot(rpc, cfg, inputs({ watched: [...both(DELEGATED), ...both(SAFE_OWNER)] }), 1);
     // the delegated account is judged by its transaction count; only the real Safe by its nonce()
-    expect(s.safeNonces).toEqual({ [SAFE_OWNER]: 4n });
+    expect(s.safeNonces).toEqual({ base: { [SAFE_OWNER]: 4n }, bittensor: {} });
     expect(s.nonces.base[DELEGATED]).toBe(31n);
+  });
+
+  it("keeps each chain's Safe nonce() apart: one Safe address on both chains (Safe's same-address deploys) has two", async () => {
+    const state = deploymentState(cfg);
+    state.base.safes[SAFE_OWNER] = 4n;
+    state.bit.safes[SAFE_OWNER] = 9n;
+    const { rpc, specs } = fakeDeployment(cfg, state);
+    specs.base.code = { [SAFE_OWNER]: "0x6080604052" };
+    specs.bittensor.code = { [SAFE_OWNER]: "0x6080604052" };
+    const watched = (["base", "bittensor"] as const).map((chain) => ({ chain, address: SAFE_OWNER, isSafe: true }));
+    const s = await readSnapshot(rpc, cfg, inputs({ watched }), 1);
+    expect(s.safeNonces).toEqual({ base: { [SAFE_OWNER]: 4n }, bittensor: { [SAFE_OWNER]: 9n } });
+    // each read in its own chain's multicall, at that reading's block
+    expect(s.base?.block).toBeDefined();
+    expect(s.bittensor?.block).toBeDefined();
   });
 
   it("reads each landing's delivered(...) at the block of the Base reading", async () => {

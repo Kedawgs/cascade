@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { toEventSelector } from "viem";
 import { ConfigError, parseConfig, redact, rolesOf, scanAddresses, VAR_NAMES, watchFilters } from "../../src/config.ts";
 import { DEFAULTS, lagLimitS } from "../../src/thresholds.ts";
@@ -91,13 +91,28 @@ describe("parseConfig", () => {
     expect(refused(withVars({ THRESHOLDS_SECRET: "{depegBps:" })).message).toContain("THRESHOLDS_SECRET");
   });
 
-  it("refuses a nonceBehindTicks that a minute apart reaches unexplainedTxGraceS (a count read too high would page before it is taken back)", () => {
+  it("clamps nonceBehindTicks under unexplainedTxGraceS at a reading a minute, with a warning, and never refuses the config for it", () => {
+    // a count read too high is taken back on the nonceBehindTicks-th reading, which must come before the grace ends
     expect(DEFAULTS.nonceBehindTicks * 60).toBeLessThan(DEFAULTS.unexplainedTxGraceS);
-    expect(parseConfig(withVars({ THRESHOLDS: '{"nonceBehindTicks":14}' })).thresholds.nonceBehindTicks).toBe(14);
-    expect(refused(withVars({ THRESHOLDS: '{"nonceBehindTicks":15}' })).message).toContain("nonceBehindTicks");
-    expect(refused(withVars({ THRESHOLDS: '{"nonceBehindTicks":5}', THRESHOLDS_SECRET: '{"unexplainedTxGraceS":300}' })).message).toContain("unexplainedTxGraceS");
-    // 1 or less holds nothing: any grace goes
-    expect(parseConfig(withVars({ THRESHOLDS: '{"nonceBehindTicks":1,"unexplainedTxGraceS":0}' })).thresholds.unexplainedTxGraceS).toBe(0);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const ticks = (vars: Record<string, string>) => parseConfig(withVars(vars)).thresholds.nonceBehindTicks;
+      expect(ticks({})).toBe(10);
+      expect(ticks({ THRESHOLDS: '{"nonceBehindTicks":14}' })).toBe(14);
+      expect(warn).not.toHaveBeenCalled();
+      // 15 a minute apart would reach the 900 s grace: 14
+      expect(ticks({ THRESHOLDS: '{"nonceBehindTicks":15}' })).toBe(14);
+      expect(warn).toHaveBeenLastCalledWith(expect.stringMatching(/nonceBehindTicks 15.*unexplainedTxGraceS 900.*14/));
+      // the secret's grace counts too: 300 s holds 4
+      expect(ticks({ THRESHOLDS: '{"nonceBehindTicks":5}', THRESHOLDS_SECRET: '{"unexplainedTxGraceS":300}' })).toBe(4);
+      expect(warn).toHaveBeenLastCalledWith(expect.stringMatching(/nonceBehindTicks 5.*unexplainedTxGraceS 300.*4/));
+      // a grace of a minute or less leaves 1 (nothing held: more false alerts, never a miss)
+      expect(ticks({ THRESHOLDS_SECRET: '{"unexplainedTxGraceS":0}' })).toBe(1);
+      expect(ticks({ THRESHOLDS_SECRET: '{"unexplainedTxGraceS":61}' })).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(4);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("never echoes a THRESHOLDS secret that isn't JSON", () => {

@@ -28,7 +28,7 @@ function ctx(codes: Record<Hex, Hex>, meta: Record<string, string> = {}): RuleCt
   const snap: Snapshot = {
     at: 1_800_000_000,
     nonces: { base: {}, bittensor: {} },
-    safeNonces: {},
+    safeNonces: { base: {}, bittensor: {} },
     messageStates: {},
     deliveredReads: [],
     base: reading(block, 1_800_000_000, baseState({ owner: SAFE, guardian: GUARDIAN, keeper: OWNER, stakerOwner: OWNER, stakerTreasury: TREASURY })),
@@ -187,7 +187,7 @@ describe("the Bittensor side", () => {
     const snap: Snapshot = {
       at: 1,
       nonces: { base: {}, bittensor: {} },
-      safeNonces: {},
+      safeNonces: { base: {}, bittensor: {} },
       messageStates: {},
       deliveredReads: [],
       bittensor: reading(1n, 1, bitState({ owner: OWNER, keeper: OWNER, treasury: TREASURY })),

@@ -14,7 +14,7 @@ export const reading = <T>(block: bigint, time: number, state: T): ChainReading<
  * stored for the first time by this tick, unless given. */
 export function ruleCtx(over: Partial<RuleCtx> & { logs?: RuleCtx["logs"]; storedLogs?: StoredLog[] } = {}): RuleCtx {
   const cfg: Config = over.cfg ?? testConfig();
-  const snap: Snapshot = over.snap ?? { at: 1_800_000_000, nonces: { base: {}, bittensor: {} }, safeNonces: {}, messageStates: {}, deliveredReads: [] };
+  const snap: Snapshot = over.snap ?? { at: 1_800_000_000, nonces: { base: {}, bittensor: {} }, safeNonces: { base: {}, bittensor: {} }, messageStates: {}, deliveredReads: [] };
   const { storedLogs, ...rest } = over;
   const logs = over.logs ?? logQuery(storedLogs ?? []);
   return {

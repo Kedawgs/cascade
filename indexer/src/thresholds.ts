@@ -23,10 +23,11 @@ export const DEFAULTS = {
   unexplainedTxGraceS: 900,
   /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */
   safeUnreadTicks: 30,
-  /** keys.unexplained_tx: count readings in a row that may be provably stale (below the highest count read, or below
-   * one past an own settled transaction's nonce: a load-balanced node answering from an older head) and still be
-   * judged by what is known; one more is a reorg past the settle depth, and the count is taken. Must stay under
-   * unexplainedTxGraceS at a reading a minute, so a count read too high is taken back before it can page */
+  /** keys.unexplained_tx: a provably stale count (below the highest count read, or below one past an own settled
+   * transaction's nonce: a load-balanced node answering from an older head) is judged by what is known for up to
+   * nonceBehindTicks − 1 readings in a row; the nonceBehindTicks-th takes the count (a reorg past the settle depth).
+   * At a reading a minute it must come before unexplainedTxGraceS ends, so a count read too high is taken back before
+   * it can page: mergeThresholds clamps it (with a warning), never refuses */
   nonceBehindTicks: 10,
   /** fmtao.unbacked: FM-TAO on Base may exceed the lock by this much */
   fmtaoBackingSlackWei: 10n ** 16n,
@@ -186,11 +187,14 @@ export function mergeThresholds(varJson: unknown, secretJson: unknown): Threshol
   const t: Thresholds = { ...DEFAULTS, rules: { off: [...DEFAULTS.rules.off] } };
   apply(t, "THRESHOLDS", varJson);
   apply(t, "THRESHOLDS_SECRET", secretJson);
-  // keys.unexplained_tx judges a provably stale count by a higher one until the nonceBehindTicks-th reading (a tick a
-  // minute) takes the count: a count read too high (a node on a fork) must be taken back before the grace ends, or it
-  // pages. At 1 or less nothing is held, so there is nothing to bound
-  if (t.nonceBehindTicks > 1 && t.nonceBehindTicks * TICK_S >= t.unexplainedTxGraceS) {
-    throw new ConfigError("THRESHOLDS", `nonceBehindTicks (${t.nonceBehindTicks}) at a tick a minute must stay under unexplainedTxGraceS (${t.unexplainedTxGraceS} s)`);
+  // keys.unexplained_tx judges a provably stale count by a higher one for nonceBehindTicks − 1 readings (a tick a
+  // minute) and takes the count on the nonceBehindTicks-th: a count read too high (a node on a fork) must be taken back
+  // before the grace ends, or it pages. Clamped, never refused (a refused config runs no tick at all): a shorter hold
+  // only means more false alerts, never a miss
+  const most = Math.max(1, Math.ceil(t.unexplainedTxGraceS / TICK_S) - 1);
+  if (t.nonceBehindTicks > most) {
+    console.warn(`thresholds: nonceBehindTicks ${t.nonceBehindTicks} reaches unexplainedTxGraceS ${t.unexplainedTxGraceS} s at a tick a minute; using ${most}`);
+    t.nonceBehindTicks = most;
   }
   return t;
 }

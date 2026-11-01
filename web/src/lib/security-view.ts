@@ -22,9 +22,41 @@ export interface StepView {
 export interface NoticeView { tone: "info"; title: string; body: string; href: string | null }
 export interface PageView {
   status: { kind: "passing" | "notOptimal" | "cantCheck" | "waiting"; text: string; detail: string | null };
+  /** How long ago the older of the two chains was read ("1 minute ago"), whether or not it is fresh; null
+   * without both readings. */
+  checkedAgo: string | null;
   notices: NoticeView[];
   stepsIn: StepView[];
   stepsOut: StepView[];
+}
+
+/** A headline number at the top of /security: a live figure from the map, or "–" when the map shows one. */
+export interface HeroStat {
+  value: string;
+  label: string;
+  /** the step's tone, for a figure that is coloured by it (the backing) */
+  tone?: Tone;
+}
+
+/** The figures the top of /security leads with, taken from the map so the two never disagree: the backing and
+ * when the chain was last read, then the swap's depth and cost and the bridge's room. */
+export function heroNumbers(view: PageView): { lead: HeroStat[]; row: HeroStat[] } {
+  const step = (id: StepId) => view.stepsIn.find((s) => s.id === id);
+  const headline = (id: StepId) => step(id)?.headline ?? DASH;
+  const figure = (id: StepId, label: string) => step(id)?.figures.find((f) => f.label === label)?.value ?? DASH;
+  // "about 0.3%" reads as a headline once its "about" moves into the label
+  const cost = figure("swap", "A $1,000 deposit costs").replace(/^about\s+/, "");
+  return {
+    lead: [
+      { value: headline("backing"), label: "Bridged TAO backed", tone: step("backing")?.tone ?? "stale" },
+      { value: view.checkedAgo ?? DASH, label: "Last on-chain check" },
+    ],
+    row: [
+      { value: headline("swap"), label: "Pool depth on Base" },
+      { value: cost, label: "About what a $1,000 deposit costs" },
+      { value: headline("bridge"), label: "Bridge room to Bittensor" },
+    ],
+  };
 }
 
 const DASH = "–";
@@ -322,7 +354,11 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     }
   }
 
-  return { status, notices: flow ? flow.notices.flatMap((n) => noticeView(n, flow, untilMs)) : [], stepsIn, stepsOut };
+  const checkedAgo =
+    flow?.chains.base && flow.chains.bittensor
+      ? formatRelative(new Date(Math.min(takenAt(flow.chains.base.time), takenAt(flow.chains.bittensor.time))), nowMs)
+      : null;
+  return { status, checkedAgo, notices: flow ? flow.notices.flatMap((n) => noticeView(n, flow, untilMs)) : [], stepsIn, stepsOut };
 }
 
 function contractName(addr: string, a: FlowV1["addresses"]): string {

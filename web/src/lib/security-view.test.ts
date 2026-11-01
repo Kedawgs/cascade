@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { FlowV1, Notice } from "./cascade/flow";
 import { GENERATED_AT, goodFlow } from "./cascade/__fixtures__/flow-v1";
-import { AMBER, flowView, type PageView, type StepView } from "./security-view";
+import { AMBER, flowView, heroNumbers, type PageView, type StepView } from "./security-view";
 
 // the visitor's clock at the moment the document arrived
 const RECEIVED = 1_800_000_001_000;
@@ -452,5 +452,36 @@ describe("flowView", () => {
     expect(new Set(details).size).toBe(5);
     for (const d of details) expect(d).not.toMatch(/safe|secure|guarantee/i);
     for (const s of Object.values(AMBER).flatMap((x) => (typeof x === "string" ? [x] : Object.values(x)))) expect(s).not.toMatch(/safe|secure|guarantee/i);
+  });
+});
+
+describe("heroNumbers", () => {
+  it("leads with the backing and when the chain was last read, then the swap and the bridge, as the map shows them", () => {
+    const f = goodFlow();
+    const v = view(f);
+    const { lead, row } = heroNumbers(v);
+    expect(lead).toEqual([
+      { value: step(v, "backing").headline, label: "Bridged TAO backed", tone: step(v, "backing").tone },
+      { value: v.checkedAgo, label: "Last on-chain check" },
+    ]);
+    expect(v.checkedAgo).toMatch(/ago|just now/);
+    expect(row.map((r) => r.label)).toEqual(["Pool depth on Base", "About what a $1,000 deposit costs", "Bridge room to Bittensor"]);
+    expect(row[0]!.value).toBe(step(v, "swap").headline);
+    expect(row[1]!.value).toBe(figure(step(v, "swap"), "A $1,000 deposit costs")!.replace(/^about\s+/, ""));
+    expect(row[1]!.value).not.toMatch(/about/);
+    expect(row[2]!.value).toBe(step(v, "bridge").headline);
+  });
+
+  it("shows dashes, never a stale figure, when the map has none", () => {
+    const { lead, row } = heroNumbers(view(null));
+    for (const s of [...lead, ...row]) expect(s.value).toBe("–");
+  });
+
+  it("still says how old a stale reading is", () => {
+    const f = goodFlow();
+    f.chains.bittensor = { block: "1", time: f.generatedAt - 3600, stale: true };
+    const v = view(f);
+    expect(heroNumbers(v).lead[0]!.value).toBe("–");
+    expect(heroNumbers(v).lead[1]!.value).toMatch(/hour/);
   });
 });

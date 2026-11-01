@@ -1,21 +1,152 @@
-.head {
-  padding-top: 40px;
+/* ---------- the top: what the page is, the two figures it leads with, and a row of live ones ---------- */
+/* the band takes the home hero's glow (landing .hero::before), so the two pages open in the same light */
+.heroBand {
   padding-bottom: 8px;
 }
 
-.h1 {
-  margin: 0 0 14px;
-  font-size: clamp(36px, 5vw, 56px);
-  font-weight: 600;
-  line-height: 1.05;
-  letter-spacing: -0.03em;
+.heroGrid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 40px 72px;
+  padding-top: 72px;
+  padding-bottom: 56px;
 }
 
-.lede {
-  max-width: 52ch;
-  margin: 0 0 24px;
-  font-size: 19px;
+.heroTitle {
+  margin: 0;
+}
+
+.heroLede {
+  max-width: 36ch;
+  margin: 0 0 30px;
+  font-size: 21px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.leadStats {
+  display: flex;
+  margin: 0 0 34px;
+}
+
+/* the label comes first in the markup (a dl's order), the figure first on screen; flex-end on a reversed
+   column keeps every figure on the same top line however many lines its label takes */
+.leadStat {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+  padding-right: 32px;
+}
+
+.leadStat + .leadStat {
+  padding-left: 32px;
+  border-left: 1px solid var(--line);
+}
+
+.leadV {
+  margin: 0;
+  font-size: 44px;
+  font-weight: 500;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.leadK {
+  margin-top: 8px;
+  font-size: 14px;
   color: var(--ink-2);
+}
+
+/* the backing figure takes its step's colour: green while it is passing, amber when short */
+.figOk {
+  color: var(--proof-text);
+}
+
+.figAmber {
+  color: var(--amber);
+}
+
+.figStale {
+  color: var(--ink-3);
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.statRow {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 28px 32px;
+  margin: 24px 0 0;
+  padding-top: 36px;
+  border-top: 1px solid var(--line);
+}
+
+.rowStat {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+}
+
+.rowV {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 300;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+}
+
+.rowK {
+  max-width: 24ch;
+  margin-top: 6px;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}
+
+.flowHead {
+  padding-top: 72px;
+  scroll-margin-top: 96px;
+}
+
+@media (max-width: 900px) {
+  .heroGrid {
+    grid-template-columns: 1fr;
+    padding-top: 40px;
+  }
+
+  .leadV {
+    font-size: 36px;
+  }
+
+  .rowV {
+    font-size: 28px;
+  }
+}
+
+@media (max-width: 480px) {
+  .leadStat {
+    padding-right: 20px;
+  }
+
+  .leadStat + .leadStat {
+    padding-left: 20px;
+  }
+
+  .leadV {
+    font-size: 30px;
+  }
+
+  .statRow {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .pageEnd {

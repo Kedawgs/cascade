@@ -24,7 +24,7 @@ describe("SecurityPage", () => {
   it("rendersTheMapAndHeadlines", () => {
     const t = text(healthy());
     expect(t).toContain("Where your money goes");
-    expect(t).toContain("Every number is read straight from the chain, checked every minute, and links to where you can check it yourself.");
+    expect(t).toContain("Follow a deposit from your wallet to the validator, and back. Pick any step to see its live numbers.");
     expect(t).toContain("All checks passing, last checked 1 minute ago");
     for (const name of ["Your wallet", "Swap", "Backing", "Bridge", "Vault", "Validator"]) expect(t).toContain(name);
     for (const headline of ["You send USDC", "$800K", "100.00%", "80 TAO", "1,234.50 TAO", "tao.bot"]) expect(t, headline).toContain(headline);
@@ -77,6 +77,18 @@ describe("SecurityPage", () => {
     expect(h).toContain('aria-pressed="true"');
     expect(h).toContain('aria-live="polite"');
     expect(h).toContain('aria-hidden="true"');
+  });
+
+  it("opens with the page's name, its two lead figures and a row of live ones", () => {
+    const h = html(healthy());
+    const t = plainText(h);
+    expect(h.match(/<h1[\s>]/g)).toHaveLength(1);
+    expect(t).toContain("Live on-chain");
+    expect(t).toContain("Security");
+    for (const label of ["Bridged TAO backed", "Last on-chain check", "Pool depth on Base", "About what a $1,000 deposit costs", "Bridge room to Bittensor", "Public notice before any contract change"])
+      expect(t, label).toContain(label);
+    expect(t).toContain("100.00%");
+    expect(h).toContain('href="#flow"');
   });
 
   it("shows how the money is protected, with the home page's points", () => {

@@ -3,7 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useNow } from "@/lib/client-state";
 import { useFlow } from "@/lib/cascade/hooks";
-import { flowView, type PageView, type StepId, type StepView } from "@/lib/security-view";
+import { DEPLOYMENT } from "@/lib/cascade/config";
+import { contractsOf } from "@/lib/security-content";
+import { flowView, heroNumbers, type HeroStat, type PageView, type StepId, type StepView } from "@/lib/security-view";
+import { SITE_LINKS } from "@/lib/site";
 import landing from "../landing/Landing.module.css";
 import { SiteFooter } from "../landing/SiteFooter";
 import { SiteNav } from "../landing/SiteNav";
@@ -28,6 +31,55 @@ export function tabAfterKey(from: Dir, key: string): Dir | null {
 }
 
 const TONE_CLASS = { ok: styles.toneOk, amber: styles.toneAmber, stale: styles.toneStale } as const;
+const FIGURE_TONE = { ok: styles.figOk, amber: styles.figAmber, stale: styles.figStale } as const;
+
+/** The top of /security: what the page is, the two figures it leads with, and a row of the live ones. */
+function Hero({ view }: { view: PageView }) {
+  const { lead, row } = heroNumbers(view);
+  const contracts = contractsOf(DEPLOYMENT).length;
+  const facts: HeroStat[] = [
+    ...row,
+    { value: "7 days", label: "Public notice before any contract change" },
+    ...(contracts > 0 ? [{ value: String(contracts), label: "Contracts, all open source" }] : []),
+  ];
+  return (
+    <header className={`${landing.hero} ${styles.heroBand}`}>
+      <div className={`wrap ${styles.heroGrid}`}>
+        <h1 className={`${landing.h1} ${styles.heroTitle}`}>
+          Live on-chain
+          <strong>Security</strong>
+        </h1>
+        <div>
+          <p className={styles.heroLede}>Every number on this page is read from the chain every minute, with a link to check it yourself.</p>
+          <dl className={styles.leadStats}>
+            {lead.map((s) => (
+              <div key={s.label} className={styles.leadStat}>
+                <dt className={styles.leadK}>{s.label}</dt>
+                <dd className={`${styles.leadV} ${s.tone ? FIGURE_TONE[s.tone] : ""}`}>{s.value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div className={styles.heroActions}>
+            <a className="pill" href="#flow">
+              See where your money goes ↓
+            </a>
+            <a className="pill pill-ghost" href={SITE_LINKS.security} target="_blank" rel="noopener noreferrer">
+              Report a vulnerability
+            </a>
+          </div>
+        </div>
+        <dl className={styles.statRow}>
+          {facts.map((s) => (
+            <div key={s.label} className={styles.rowStat}>
+              <dt className={styles.rowK}>{s.label}</dt>
+              <dd className={styles.rowV}>{s.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </header>
+  );
+}
 const STATUS_CLASS = { passing: styles.passing, notOptimal: styles.notOptimal, cantCheck: styles.quiet, waiting: styles.quiet } as const;
 
 function Details({ step, className }: { step: StepView; className: string }) {
@@ -96,10 +148,11 @@ export function SecurityPage() {
   return (
     <div className={landing.page}>
       <SiteNav />
+      <Hero view={view} />
       <main className={`wrap ${styles.pageEnd}`}>
-        <header className={styles.head}>
-          <h1 className={styles.h1}>Where your money goes</h1>
-          <p className={styles.lede}>Every number is read straight from the chain, checked every minute, and links to where you can check it yourself.</p>
+        <header id="flow" className={styles.flowHead}>
+          <h2 className={styles.h2}>Where your money goes</h2>
+          <p className={styles.sectionLede}>Follow a deposit from your wallet to the validator, and back. Pick any step to see its live numbers.</p>
         </header>
 
         <div className={styles.bar}>

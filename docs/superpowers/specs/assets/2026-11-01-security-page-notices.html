@@ -1,0 +1,61 @@
+<style>
+  .sp { --ink:#10212b; --ink2:#4b5b66; --ink3:#5b6a75; --water:#2e8fa3; --deep:#206f80; --tint:#e3f1f4; --mist:#f3f7f9; --line:#e3eaee; --proof:#1e8a5a; --proofT:#176b46; --proofTint:#e6f4ec; --amber:#9a5b00; --amberTint:#fff3de;
+        font-family: Manrope, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .state { background:#fff; border-radius:16px; padding:20px 22px; margin-bottom:14px; }
+  .label { font-size:12px; font-weight:700; color:var(--ink3); margin:0 0 10px; }
+  .ok { display:inline-flex; align-items:center; gap:8px; background:var(--proofTint); color:var(--proofT); font-weight:700; font-size:13px; padding:7px 13px; border-radius:999px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--proof); display:inline-block; flex:none; }
+  .notice { display:flex; gap:12px; align-items:flex-start; border-radius:14px; padding:14px 16px; font-size:14px; }
+  .notice b { display:block; margin-bottom:2px; }
+  .notice a { color:var(--deep); font-weight:700; text-decoration:none; font-size:13px; }
+  .info { background:var(--tint); }
+  .warn { background:var(--amberTint); color:#5b3800; }
+  .warn .dot { background:var(--amber); }
+  .info .dot { background:var(--water); }
+  .phone { width:300px; background:#fff; border-radius:24px; padding:18px; border:1px solid var(--line); }
+  .pstep { display:flex; justify-content:space-between; align-items:center; background:var(--mist); border-radius:12px; padding:12px 14px; margin-top:8px; font-size:14px; }
+  .pstep b { display:flex; gap:7px; align-items:center; }
+  .pstep span { font-weight:800; }
+  .pstep.open { background:#fff; border:2px solid var(--water); flex-wrap:wrap; }
+  .pdet { width:100%; font-size:12px; color:var(--ink2); margin-top:8px; line-height:1.5; }
+  .split2 { display:grid; grid-template-columns: 1fr 320px; gap:18px; align-items:start; }
+</style>
+
+<h2>The top of the page, in its three states, plus the phone view</h2>
+<p class="subtitle">Wording is a first draft. The middle one is for anything happening with our contracts (a scheduled change, a pause, a bridge switched off): facts anyone can see on-chain anyway.</p>
+
+<div class="sp split2">
+  <div>
+    <div class="state">
+      <p class="label">Everything normal</p>
+      <span class="ok"><span class="dot"></span>All checks passing, last checked 1 min ago</span>
+    </div>
+    <div class="state">
+      <p class="label">Something happening with our contracts</p>
+      <div class="notice info"><span class="dot" style="margin-top:6px"></span><div>
+        <b>A change to Cascade's settings is scheduled</b>
+        It can't take effect before Nov 8, 14:00 UTC, and anyone can see exactly what it changes. <a href="#">See the change ↗</a>
+      </div></div>
+    </div>
+    <div class="state">
+      <p class="label">A check isn't passing</p>
+      <div class="notice warn"><span class="dot" style="margin-top:6px"></span><div>
+        <b>Conditions aren't optimal right now</b>
+        The Chainlink bridge has no room left until it refills, so new deposits will wait a little longer to cross. Your existing stake isn't affected.
+      </div></div>
+    </div>
+  </div>
+
+  <div class="phone">
+    <p class="label" style="margin:0 0 4px">On a phone</p>
+    <div style="font-weight:800;font-size:20px;letter-spacing:-0.02em">Where your money goes</div>
+    <div style="margin:10px 0 4px"><span class="ok"><span class="dot"></span>All checks passing</span></div>
+    <div class="pstep"><b><span class="dot"></span>Your wallet</b><span style="font-weight:600;color:#5b6a75">USDC</span></div>
+    <div class="pstep"><b><span class="dot"></span>Swap</b><span>$412k</span></div>
+    <div class="pstep"><b><span class="dot"></span>Backing</b><span>100.02%</span></div>
+    <div class="pstep open"><b><span class="dot"></span>Bridge</b><span>182 TAO room</span>
+      <div class="pdet">Cascade groups deposits and sends them over Chainlink.<br>Room left 182 of 200 TAO · on the way 1 · next send 38 min<br><a href="#" style="color:#206f80;font-weight:700;text-decoration:none">See the lane ↗</a></div></div>
+    <div class="pstep"><b><span class="dot"></span>Vault</b><span>1,204.5 TAO</span></div>
+    <div class="pstep"><b><span class="dot"></span>Validator</b><span>tao.bot</span></div>
+  </div>
+</div>

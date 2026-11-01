@@ -1,0 +1,103 @@
+<style>
+  .sp { --ink:#10212b; --ink2:#4b5b66; --ink3:#5b6a75; --water:#2e8fa3; --deep:#206f80; --tint:#e3f1f4; --mist:#f3f7f9; --line:#e3eaee; --proof:#1e8a5a; --proofT:#176b46; --proofTint:#e6f4ec;
+        font-family: Manrope, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background:#fff; border-radius:16px; padding:32px; font-variant-numeric: tabular-nums; max-width:1100px; margin:0 auto; }
+  .sp h4 { margin:0; font-size:30px; letter-spacing:-0.025em; }
+  .sp .lede { margin:8px 0 18px; color:var(--ink2); font-size:15px; max-width:60ch; }
+  .sp .row { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+  .sp .ok { display:inline-flex; align-items:center; gap:8px; background:var(--proofTint); color:var(--proofT); font-weight:700; font-size:13px; padding:7px 13px; border-radius:999px; }
+  .sp .dot { width:8px; height:8px; border-radius:50%; background:var(--proof); display:inline-block; flex:none; }
+  .sp .seg { display:inline-flex; background:var(--mist); border-radius:999px; padding:4px; }
+  .sp .seg button { border:0; background:transparent; font:inherit; font-weight:700; font-size:13px; padding:7px 16px; border-radius:999px; color:var(--ink2); cursor:pointer; }
+  .sp .seg button.on { background:#fff; color:var(--ink); box-shadow:0 1px 3px rgba(16,33,43,.12); }
+  .sp .k { font-size:12px; font-weight:600; color:var(--ink3); margin:0; }
+  .sp .v { font-size:20px; font-weight:800; letter-spacing:-0.02em; margin:2px 0 0; }
+  .sp .v small { font-size:12px; font-weight:600; color:var(--ink3); }
+  .sp .src { font-size:13px; font-weight:700; color:var(--deep); text-decoration:none; }
+  .sp .when { font-size:13px; color:var(--ink3); margin:4px 0 0; }
+  .mapB { display:flex; align-items:stretch; margin:22px 0 16px; }
+  .nodeB { flex:1; min-width:0; background:var(--mist); border-radius:14px; padding:14px; cursor:pointer; border:2px solid transparent; }
+  .nodeB:hover { background:#e9f1f4; }
+  .nodeB.sel { border-color:var(--water); background:#fff; }
+  .nodeB .name { font-weight:800; font-size:14px; display:flex; gap:7px; align-items:center; }
+  .nodeB .where { font-size:11px; font-weight:700; color:var(--ink3); margin:0 0 6px; }
+  .arrowB { align-self:center; color:var(--water); font-weight:800; padding:0 8px; }
+  .detailB { border:1px solid var(--line); border-radius:16px; padding:18px 20px; }
+  .detailB .top { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+  .detailB .figs { display:flex; flex-wrap:wrap; gap:12px 36px; margin-top:14px; }
+  .chain { font-size:11px; font-weight:700; color:var(--deep); background:var(--tint); border-radius:999px; padding:2px 8px; }
+  .hidden { display:none; }
+</style>
+
+<h2>B, filled out: money in and money out</h2>
+<p class="subtitle">Click the steps (and the In / Out switch) to try it. All numbers are made up. The "money out" side is my guess at what you meant by "the whole money flow".</p>
+
+<div class="sp">
+  <div class="row">
+    <div>
+      <h4>Where your money goes</h4>
+      <p class="lede">Every number is read straight from the chain, checked every minute, and links to where you can check it yourself.</p>
+    </div>
+  </div>
+  <div class="row">
+    <span class="ok"><span class="dot"></span>All checks passing, last checked 1 min ago</span>
+    <div class="seg"><button class="on" onclick="spDir('in',this)">Money in</button><button onclick="spDir('out',this)">Money out</button></div>
+  </div>
+
+  <div id="sp-in">
+    <div class="mapB">
+      <div class="nodeB" onclick="spSel(this,'w')"><p class="where">Base</p><div class="name"><span class="dot"></span>Your wallet</div><p class="k" style="margin-top:6px">You send USDC</p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'s')"><p class="where">Base</p><div class="name"><span class="dot"></span>Swap</div><p class="v">$412k <small>deep</small></p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'b')"><p class="where">Bittensor</p><div class="name"><span class="dot"></span>Backing</div><p class="v">100.02%</p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB sel" onclick="spSel(this,'c')"><p class="where">Base → Bittensor</p><div class="name"><span class="dot"></span>Bridge</div><p class="v">182 <small>TAO room</small></p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'v')"><p class="where">Bittensor</p><div class="name"><span class="dot"></span>Vault</div><p class="v">1,204.5 <small>TAO</small></p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'t')"><p class="where">Bittensor</p><div class="name"><span class="dot"></span>Validator</div><p class="v">tao.bot</p></div>
+    </div>
+  </div>
+
+  <div id="sp-out" class="hidden">
+    <div class="mapB">
+      <div class="nodeB" onclick="spSel(this,'v2')"><p class="where">Bittensor</p><div class="name"><span class="dot"></span>Vault</div><p class="v">0.6 <small>TAO waiting</small></p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'c2')"><p class="where">Bittensor → Base</p><div class="name"><span class="dot"></span>Bridge back</div><p class="v">195 <small>TAO room</small></p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'s2')"><p class="where">Base</p><div class="name"><span class="dot"></span>Swap to USDC</div><p class="v">$412k <small>deep</small></p></div>
+      <div class="arrowB">→</div>
+      <div class="nodeB" onclick="spSel(this,'w2')"><p class="where">Base</p><div class="name"><span class="dot"></span>Your wallet</div><p class="k" style="margin-top:6px">USDC arrives</p></div>
+    </div>
+  </div>
+
+  <div class="detailB" id="sp-detail"></div>
+</div>
+
+<script>
+  var SP = {
+    w:  ['Your wallet on Base', 'Base', 'You start with USDC in your own wallet. Cascade never holds your keys.', [['Network','Base'],['You send','USDC']], 'Base on basescan'],
+    s:  ['The swap on Base', 'Base', 'Your USDC is swapped for TAO in public Uniswap pools, with a price check against the 30-minute average.', [['Pool depth','$412,000'],['A $1,000 deposit moves the price','0.4%'],['Price vs 30-min average','0.1% apart']], 'See the pools'],
+    b:  ['ForeverMoney backing', 'Bittensor', 'The TAO you get on Base is ForeverMoney’s bridged TAO. Each one is backed by real TAO held on Bittensor.', [['Backed','100.02%'],['TAO held','48,215'],['Bridged TAO issued','48,205']], 'See the backing'],
+    c:  ['Chainlink bridge', 'Base → Bittensor', 'Cascade groups deposits into batches and sends them to Bittensor over Chainlink. The bridge has a safety limit on how much can cross, which refills over time.', [['Bridge room left','182 of 200 TAO'],['On the way now','1 transfer'],['Next batch sends in','38 min']], 'See the lane'],
+    v:  ['Cascade vault on Bittensor', 'Bittensor', 'Your TAO is staked by the vault, and you hold vault shares that grow as rewards come in.', [['TAO staked','1,204.5'],['1 share is worth','1.0123 TAO'],['Depositors','37']], 'See the vault'],
+    t:  ['The validator: tao.bot', 'Bittensor', 'The validator the vault stakes with. It earns the staking rewards and keeps a cut.', [['Our stake with it','1,204 TAO'],['Validator’s cut','18%'],['Backup validator','Yuma (ready)']], 'See on taostats'],
+    v2: ['Leaving the vault', 'Bittensor', 'When you unstake, the vault takes your TAO out of staking and queues it to send back to Base.', [['Waiting to send back','0.6 TAO'],['Next payout batch','in 3 h'],['Unstaked today','4.2 TAO']], 'See the vault'],
+    c2: ['Chainlink bridge back', 'Bittensor → Base', 'Payouts cross back to Base over the same Chainlink bridge, with its own safety limit.', [['Bridge room left','195 of 200 TAO'],['On the way now','none']], 'See the lane'],
+    s2: ['Swap back to USDC', 'Base', 'Your TAO is swapped back to USDC in the same public pools, with the same price check.', [['Pool depth','$412,000'],['A $1,000 payout moves the price','0.4%']], 'See the pools'],
+    w2: ['Your wallet on Base', 'Base', 'USDC lands back in your wallet.', [['You receive','USDC']], 'Base on basescan']
+  };
+  function spShow(id){
+    var d = SP[id], f = d[3].map(function(x){ return '<div><p class="k">'+x[0]+'</p><p class="v">'+x[1]+'</p></div>'; }).join('');
+    document.getElementById('sp-detail').innerHTML =
+      '<div class="top"><span style="font-weight:800;font-size:17px">'+d[0]+' <span class="chain">'+d[1]+'</span></span><a class="src" href="#">'+d[4]+' ↗</a></div>'+
+      '<p class="when">'+d[2]+' Checked 1 min ago.</p><div class="figs">'+f+'</div>';
+  }
+  function spSel(el,id){ el.parentNode.querySelectorAll('.nodeB').forEach(function(n){ n.classList.remove('sel'); }); el.classList.add('sel'); spShow(id); }
+  function spDir(dir,btn){
+    btn.parentNode.querySelectorAll('button').forEach(function(b){ b.classList.remove('on'); }); btn.classList.add('on');
+    document.getElementById('sp-in').classList.toggle('hidden', dir!=='in'); document.getElementById('sp-out').classList.toggle('hidden', dir!=='out');
+    var first = document.querySelector('#sp-'+dir+' .nodeB'); spSel(first, dir==='in' ? 'w' : 'v2');
+  }
+  spShow('c');
+</script>

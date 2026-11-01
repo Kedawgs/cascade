@@ -286,6 +286,9 @@ view models and notices, and the page renders the map.
 **Files:**
 - Create: `web/src/app/security/page.tsx` (`metadata.title = "Security"`), `web/src/components/security/SecurityPage.tsx`
   (client), `web/src/components/security/Security.module.css`
+- Modify (a new page breaks the indexer's page-list tests at once, so they move with it): `indexer/wrangler.jsonc`
+  (`SITE_PAGES` in `test` and `production`: add `"/security/"` in sorted order), `indexer/test/node/site-pages.test.ts`
+  (the list and "9 pages"), `indexer/src/site-approved.ts` (regenerated)
 - Test: `web/src/components/security/SecurityPage.test.ts`
 
 **Interfaces:**
@@ -309,25 +312,26 @@ inside it. Tokens from `globals.css` only.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm build` — Expected: PASS, and
   `out/security/index.html` exists.
-- [ ] **Step 5: Commit** `feat(web): the live security page`
+- [ ] **Step 5: Add the page to the monitor's lists:** `SITE_PAGES` and `site-pages.test.ts`; then from `indexer/`,
+  `pnpm site:approved ../web/out` (deploy time regenerates it from the production build). Run the indexer's
+  `pnpm test` and `pnpm typecheck` — Expected: PASS.
+- [ ] **Step 6: Commit** `feat(web): the live security page`
 
 ### Task 6: Links and the site's page lists
 
 **Files:**
 - Modify: `web/src/components/landing/SiteNav.tsx` (`/#secure` → `/security/`, both renders),
   `web/src/components/landing/SiteFooter.tsx` (a "Security" link to `/security/`; the existing GitHub
-  SECURITY.md link becomes "Report a vulnerability"), `indexer/wrangler.jsonc` (`SITE_PAGES` in `test` and
-  `production`: add `"/security/"` in sorted order), `indexer/test/node/site-pages.test.ts` (the list and "9
-  pages"), `indexer/src/site-approved.ts` (regenerated)
-- Test: the existing `site-pages.test.ts`, `site-approved.test.ts`, `csp-headers.test.ts`, and the nav/footer
-  tests if present
+  SECURITY.md link becomes "Report a vulnerability"), `indexer/src/site-approved.ts` (regenerated)
+- Test: the nav and footer tests (create `web/src/components/landing/SiteNav.test.ts` if none exists), and the
+  existing `site-approved.test.ts` and `csp-headers.test.ts`
 
-- [ ] **Step 1: Update** `site-pages.test.ts`'s expected list and count — Run `pnpm test -- site-pages` from
-  `indexer/` — Expected: FAIL (the page exists, `SITE_PAGES` doesn't list it).
-- [ ] **Step 2: Implement** the links and `SITE_PAGES`.
+- [ ] **Step 1: Write the failing test:** the rendered nav links "Security" to `/security/` (both renders) and no
+  longer to `/#secure`; the footer has "Security" → `/security/` and "Report a vulnerability" → the SECURITY.md
+  URL. Run `pnpm test -- SiteNav SiteFooter` from `web/` — Expected: FAIL.
+- [ ] **Step 2: Implement** the links.
 - [ ] **Step 3: Regenerate** `src/site-approved.ts`: from `web/`, `pnpm build`; from `indexer/`,
-  `pnpm site:approved ../web/out`. (Deploy time regenerates it again from the production build; this keeps the
-  branch's tests green.)
+  `pnpm site:approved ../web/out`.
 - [ ] **Step 4: Run** the indexer's `pnpm test` and `pnpm typecheck` and the web's `pnpm test`, `pnpm typecheck`,
   `pnpm lint` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(web): Security in the navigation and footer; the monitor knows the new page`
+- [ ] **Step 5: Commit** `feat(web): Security in the navigation and footer`

@@ -16,9 +16,9 @@ function PageLinks() {
   );
 }
 
-/** The bar stays on screen as the page scrolls, so Stake & Earn is always in reach. On narrow screens
- * only the logo and that button stay: the links take their own row underneath, which scrolls away
- * (the button stands in for the Stake link there). Only one of the two link lists shows at a time. */
+/** The bar stays on screen as the page scrolls, so Stake & Earn, the one way in to staking, is always in
+ * reach. On narrow screens only the logo and that button stay: the links take their own row underneath,
+ * which scrolls away. Only one of the two link lists shows at a time. */
 export function SiteNav() {
   return (
     <>
@@ -29,7 +29,6 @@ export function SiteNav() {
               <Logo size="lg" />
             </Link>
             <div className={`${styles.links} ${styles.barLinks}`}>
-              <Link href="/stake">Stake</Link>
               <PageLinks />
             </div>
             <div className={styles.navRight}>

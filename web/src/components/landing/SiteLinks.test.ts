@@ -7,7 +7,7 @@ import { SiteNav } from "./SiteNav";
 
 /** The anchors of a render as [href, text]. */
 const anchors = (html: string): [string, string][] =>
-  [...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => [m[1]!, m[2]!.replace(/<[^>]*>/g, "")]);
+  [...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => [m[1]!, m[2]!.replace(/<[^>]*>/g, "").replace(/&amp;/g, "&")]);
 
 describe("SiteNav", () => {
   const links = anchors(renderWithCache(createElement(SiteNav)));
@@ -18,6 +18,11 @@ describe("SiteNav", () => {
 
   it("no longer links to the landing's #secure section", () => {
     expect(links.some(([h]) => h === "/#secure")).toBe(false);
+  });
+
+  it("reaches staking through the Stake & Earn button alone, not a second plain Stake link", () => {
+    expect(links.filter(([, t]) => t === "Stake")).toHaveLength(0);
+    expect(links.filter(([h, t]) => h === "/stake" && t === "Stake & Earn")).toHaveLength(1);
   });
 });
 

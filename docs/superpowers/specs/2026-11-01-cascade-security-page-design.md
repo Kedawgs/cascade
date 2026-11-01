@@ -26,9 +26,18 @@ The reader is a depositor or would-be depositor: a crypto user on Base who will 
 4. **A status line at the top**, in one of three states:
    - **Normal:** green, "All checks passing, last checked 1 min ago".
    - **Something is happening with our contracts:** a blue notice per event, in plain words, with the earliest
-     time it can take effect where there is one, and a link to the transaction. Examples: a change to settings is
-     scheduled, an ownership or guardian change is pending, the contracts are paused, a bridge has been switched
-     off. These are facts anyone can already see on-chain.
+     time it can take effect where the chain records one, and a link to the contract on its explorer. These are
+     facts anyone can already see on-chain. On v3-launch today:
+     - the vault or the front door is paused;
+     - an ownership transfer is pending (vault, front door, staker): "can be accepted at any time";
+     - a guardian change, a new bridge or a new front door is proposed (v3-launch's registries): the proposal time
+       plus its delay is the earliest effect;
+     - ForeverMoney's own vault (the backing) has a scheduled admin change, an announced migration or a timed
+       pause, shown against the Backing step (my call: it isn't our contract, but it stands behind the money).
+
+     The monitor's reading has `paused`, `pendingOwner`, `pendingGuardian` and ForeverMoney's `alpha.*` fields
+     today; reading the three proposal times means adding them to the monitor's per-minute call (an indexer change).
+     v3.2 replaces the registries with its scheduler (see "Ready for v3.2").
    - **A check isn't passing:** amber, "Conditions aren't optimal right now", plus one plain sentence on what is
      affected (for example: the bridge has no room until it refills, so new deposits wait longer to cross; your
      existing stake isn't affected). The founder will refine this wording later; ship a sensible first draft.
@@ -91,22 +100,35 @@ Simple, public and fixed, each tied to the step it affects (its dot turns amber 
 - the reading is too old (the page shows "–" and the top line says it is waiting for a fresh reading);
 - backing below 100%;
 - a bridge direction has no room left, or is switched off;
-- the vault or the front door is paused (also a blue notice; amber wins for the dot);
-- the market price and the 30-minute average are far enough apart that deliveries would wait (use the contracts'
-  own public on-chain limit, never a monitor threshold).
+- the vault or the front door is paused (also a blue notice; amber wins for the dot).
+
+The market price vs the 30-minute average is shown as a number ("X% apart") but triggers no amber state on
+v3-launch, which has no public on-chain limit for it (my call). With v3.2, the pool depth below its public
+minimum-liquidity floor becomes an amber condition (deliveries wait while the pool is thin).
 
 ## Where the data comes from
 
-- **A new public, read-only endpoint on the monitor Worker** (`indexer/`), for example `GET /v1/flow`. It is
-  built from the latest complete reading and served through the Workers Cache like `/v1/status` (15-second TTL).
-  It needs no D1 query beyond what the latest reading needs.
-- **It returns facts, not judgements:** the numbers, each with its reading's block and time; the in-flight message
-  count; the contract notices, each with its kind, the earliest time it can take effect where there is one, and
-  its transaction hash; and the explorer addresses. The amber conditions above may be computed on the page or in
-  the endpoint, but never from the monitor's alert state or thresholds.
-- **The site** (`web/`, a static Next.js export) fetches it client-side from the configured indexer origin
-  (`NEXT_PUBLIC_CASCADE_INDEXER_URL`). When the endpoint can't be reached, every number shows "–" and the top line
-  says the page can't check right now.
+- **A new public, read-only endpoint on the monitor Worker** (`indexer/`), for example `GET /v1/flow`, served
+  through the Workers Cache like `/v1/status` (15-second TTL). It may run a few small indexed D1 queries: the
+  newest reading of each chain, and the count of bridge messages sent but not yet delivered (`messages`).
+- **Per-chain freshness.** Each chain's numbers come from that chain's newest reading, even when the other chain's
+  half of the same tick is missing, and carry that reading's block and time. A chain whose newest reading is
+  older than 10 minutes is stale (my call: the monitor reads every minute, and its health check fails at 5): every
+  number from that chain shows "–" and its steps' dots go amber. Base feeds Swap, Bridge (in) and Swap to USDC;
+  Bittensor feeds Backing, Vault, Validator and Bridge back. The endpoint never exposes the monitor's own lag
+  limits, thresholds or alert state.
+- **It returns facts, not judgements:** the numbers with their readings' blocks and times; the in-flight message
+  count; the contract notices (kind, the earliest effect time where there is one, the contract); and the explorer
+  addresses. The amber conditions above may be computed on the page or in the endpoint, but only from these facts.
+- **Dollar figures** (pool depth, the $1,000 example) are priced with the front door's own 30-minute average
+  (`oracleValue`, the TWAP the contracts use), not the spot price, and show "–" when it reverted or is stale
+  (my call).
+- **Names and links.** Validator names come from a small list in the site's config keyed by hotkey (tao.bot, and
+  Yuma as the backup), with a shortened hotkey for anything not on it. Explorers: Basescan for Base, taostats for
+  Bittensor accounts and validators, Chainlink's CCIP explorer for the lane.
+- **Cross-origin and failure.** The endpoint allows the site's origin (`SITE_ORIGIN`) the same way `/v1/scan`
+  does. The site fetches it client-side from `NEXT_PUBLIC_CASCADE_INDEXER_URL`; when that is unset or the endpoint
+  can't be reached, every number shows "–" and the top line says the page can't check right now.
 
 ## Ready for v3.2
 
@@ -129,6 +151,8 @@ returns notices as a list of kinds, and the steps as a list, so these slot in wi
 ## Constraints
 
 - It works against the live v3-launch deployment now.
+- The plan ends at "ready to deploy": code and tests for the site and the endpoint. Deploying is a separate step
+  with the founder's OK.
 - The site is a static export, so all data is fetched client-side.
 - Deploying the site or the Worker to production needs the founder's OK. After any site deploy, run
   `site:approved`, commit, and redeploy the indexer (the monitor checks the live site's contract addresses). Run
@@ -140,8 +164,7 @@ returns notices as a list of kinds, and the steps as a list, so these slot in wi
 
 - The exact formulas for pool depth in $ and "a $1,000 deposit moves the price about X%" (concentrated liquidity,
   so state the approximation used, in the endpoint's code comments).
-- The stale limit (minutes), within: a reading older than the monitor's own health limit is stale.
-- Explorer URLs, the endpoint's exact field names, and the copy polish.
+- The exact explorer URLs, the endpoint's field names, and the copy polish.
 - How the map wraps between desktop and phone widths.
 
 ## Calls made in the brainstorm, for the founder to check
@@ -155,3 +178,7 @@ returns notices as a list of kinds, and the steps as a list, so these slot in wi
 7. No wallet connection on the page.
 8. A refresh once a minute while the tab is visible.
 9. The Backing headline is the lower of its two layers.
+10. ForeverMoney's own scheduled changes to its vault appear as notices on the Backing step.
+11. A chain's numbers go to "–" when its newest reading is over 10 minutes old.
+12. Dollar figures use the contracts' own 30-minute average price, not the spot price.
+13. Market price vs average is shown but raises no amber state on v3-launch.

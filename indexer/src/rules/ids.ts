@@ -86,6 +86,9 @@ export const RULES = {
   "keys.code_changed": warning("event"),
   // a watched Safe's nonce() unread for many ticks: its transactions aren't being counted meanwhile
   "keys.safe_unread": warning("condition"),
+  // a chain's watched transaction counts unread for many ticks (their batch failing): keys.unexplained_tx judges
+  // nothing meanwhile, and keys.delegated (its code reads in the same batch) is blind
+  "keys.count_unread": warning("condition"),
   "batch.past_max_wait": warning("condition", true),
   "payout.overdue": warning("condition", true),
   "delivery.overdue": warning("condition"),

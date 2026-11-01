@@ -23,6 +23,12 @@ export const DEFAULTS = {
   unexplainedTxGraceS: 900,
   /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */
   safeUnreadTicks: 30,
+  /** keys.count_unread: ticks in a row a chain's watched transaction counts may go unread (their batch failing, an RPC
+   * rate limit): keys.unexplained_tx judges nothing meanwhile, and keys.delegated, whose code reads ride in the same
+   * batch, is blind. 15, at a tick a minute, is unexplainedTxGraceS: a transaction sent as the counts stopped would
+   * have paged by now. One failed batch in six (Base's public RPC, 2026-11-01) makes 15 in a row by chance next to
+   * impossible */
+  countUnreadTicks: 15,
   /** keys.unexplained_tx: a provably stale count (below the highest count read, or below one past an own settled
    * transaction's nonce: a load-balanced node answering from an older head) is judged by what is known for up to
    * nonceBehindTicks − 1 readings in a row; the nonceBehindTicks-th takes the count (a reorg past the settle depth).

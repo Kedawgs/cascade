@@ -224,6 +224,60 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     expect(RUNBOOK["keys.safe_unread"]({})).toContain("nonce()");
   });
 
+  it("keys.count_unread: warns once a chain's transaction counts have gone unread countUnreadTicks ticks in a row, not before, and clears on the next read", () => {
+    expect(DEFAULTS.countUnreadTicks).toBe(15);
+    expect(RULES["keys.count_unread"]).toEqual({ tier: "warning", kind: "condition", canHold: false, mutedByHold: false });
+    expect(keys.raises).toContain("keys.count_unread");
+    const k = "count_unread:base";
+    const watched = [row({ address: OWNER, roles: ["frontDoor.owner"], baseline: 1, nonce: 1 })];
+    const tick = (read: boolean, n?: string) => ctx({ base: { owner: OWNER }, counts: { base: read ? { [OWNER]: 1n } : {} }, nonces: watched, meta: n === undefined ? {} : { [k]: n } });
+    // the first unread tick is counted
+    const first = tick(false);
+    expect(keys.run(first)).toEqual([]);
+    expect(first.writes.meta).toEqual([{ k, v: "1" }]);
+    // the 14th: still nothing
+    const almost = tick(false, "13");
+    expect(keys.run(almost)).toEqual([]);
+    expect(almost.writes.meta).toEqual([{ k, v: "14" }]);
+    // the 15th: the warning, naming the chain, the ticks and the keys it can't count
+    const due = tick(false, "14");
+    const [f, ...rest] = keys.run(due);
+    expect(rest).toEqual([]);
+    expect(f).toMatchObject({ rule: "keys.count_unread", key: "keys.count_unread:base", facts: { chain: "base", ticks: "15", addresses: OWNER } });
+    expect(due.writes.meta).toEqual([{ k, v: "15" }]);
+    // and on every unread tick after it, under the same key (a condition: one alert)
+    expect(keys.run(tick(false, "40")).map((x) => x.key)).toEqual(["keys.count_unread:base"]);
+    // a count read again: the mark cleared, nothing found (the warning resolves)
+    const back = tick(true, "40");
+    expect(keys.run(back)).toEqual([]);
+    expect(back.writes.meta).toEqual([{ k, v: "" }]);
+    // a count read with no mark: nothing written
+    const steadyRead = tick(true);
+    keys.run(steadyRead);
+    expect(steadyRead.writes.meta).toEqual([]);
+    expect(RUNBOOK["keys.count_unread"]({ chain: "base" })).toContain("BASE_RPC_URL");
+    expect(RUNBOOK["keys.count_unread"]({ chain: "bittensor" })).toContain("BITTENSOR_RPC_URL");
+  });
+
+  it("keys.count_unread runs per chain: Base's counts unread doesn't count against Bittensor's, nor the other way round", () => {
+    const watched = [row({ address: OWNER, roles: ["frontDoor.owner"], baseline: 1, nonce: 1 }), row({ chain: "bittensor", address: KEEPER, roles: ["vault.keeper"], baseline: 5, nonce: 5 })];
+    const tick = (o: { base: boolean; bit: boolean; meta?: Record<string, string> }) =>
+      ctx({ base: { owner: OWNER }, bit: { keeper: KEEPER }, counts: { base: o.base ? { [OWNER]: 1n } : {}, bittensor: o.bit ? { [KEEPER]: 5n } : {} }, nonces: watched, meta: o.meta ?? {} });
+    const baseOut = tick({ base: false, bit: true, meta: { "count_unread:base": "14", "count_unread:bittensor": "3" } });
+    expect(keys.run(baseOut).map((f) => [f.key, f.facts.chain])).toEqual([["keys.count_unread:base", "base"]]);
+    expect(baseOut.writes.meta).toEqual([
+      { k: "count_unread:base", v: "15" },
+      { k: "count_unread:bittensor", v: "" },
+    ]);
+    const bitOut = tick({ base: true, bit: false, meta: { "count_unread:bittensor": "14" } });
+    expect(keys.run(bitOut).map((f) => [f.key, f.facts.addresses])).toEqual([["keys.count_unread:bittensor", KEEPER]]);
+    expect(bitOut.writes.meta).toEqual([{ k: "count_unread:bittensor", v: "15" }]);
+    // a chain with no watched key yet (a fresh database, its first reading) asked for no count: nothing is counted
+    const fresh = ctx({ base: { owner: OWNER } });
+    expect(keys.run(fresh)).toEqual([]);
+    expect(fresh.writes.meta).toEqual([]);
+  });
+
   it("marks a watched account a Safe once its nonce() is read (a Safe deployed at it)", () => {
     const c = ctx({ base: { owner: SAFE }, safeNonces: { base: { [SAFE]: 0n } }, nonces: [row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 0, nonce: 0 })] });
     keys.run(c);

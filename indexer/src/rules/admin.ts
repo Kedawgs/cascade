@@ -179,11 +179,12 @@ const EXEC_TRANSACTION = "0x6a761202";
  * once. A count read below what is already known of it (provably from an older head) is judged by what is
  * known, for at most nonceBehindTicks readings in a row (meta nonce_behind:{chain}:{address}); a current count
  * behind what the logs explain is a new start at once. A tick with no count (its batch failed) still counts the
- * address's own transactions settled on it, each new on that tick only, and judges nothing. A newly watched address
+ * address's own transactions settled on it, each new on that tick only, and judges nothing; countUnreadTicks such
+ * ticks in a row on a chain is the warning keys.count_unread (meta count_unread:{chain}). A newly watched address
  * starts at its current count. Writes the watched rows that changed. */
 export const keys: Rule = {
   name: "keys",
-  raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"],
+  raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread", "keys.count_unread"],
   run(ctx) {
     const out: Finding[] = [];
     const stored = new Map(ctx.nonces.map((r) => [`${r.chain}:${lower(r.address)}`, r]));
@@ -203,6 +204,32 @@ export const keys: Rule = {
       }
       const counts = Object.fromEntries(Object.entries(ctx.snap.nonces[chain]).map(([a, n]) => [lower(a as Hex), n]));
       const safes = Object.fromEntries(Object.entries(ctx.snap.safeNonces[chain] ?? {}).map(([a, n]) => [lower(a as Hex), n]));
+      // keys.count_unread: the tick asks for the count of every address watched here (a row holding a role) in one
+      // batch with the role wallets' code. When it fails (an RPC rate limit: 2026-11-01) the accounts judged by their
+      // count (not a Safe, judged by its nonce(): keys.safe_unread) are judged by nothing below, and keys.delegated is
+      // blind. Ticks in a row of it are counted in meta, and countUnreadTicks of them is a warning, which resolves on
+      // the next tick that reads the counts
+      const accounts = now.filter((h) => {
+        const r = stored.get(`${chain}:${h.address}`);
+        return r !== undefined && r.roles.length > 0 && !r.safe && safes[h.address] === undefined;
+      });
+      const unreadAccounts = accounts.filter((h) => counts[h.address] === undefined).map((h) => h.address);
+      const countKey = `count_unread:${chain}`;
+      const countsUnread = Number(ctx.meta[countKey] || 0);
+      if (unreadAccounts.length > 0) {
+        const n = countsUnread + 1;
+        ctx.writes.meta.push({ k: countKey, v: String(n) });
+        if (n >= ctx.t.countUnreadTicks) {
+          out.push({
+            rule: "keys.count_unread",
+            key: `keys.count_unread:${chain}`,
+            subject: `The watched keys' transaction counts on ${chain} haven't been read for ${n} ticks`,
+            facts: { chain, ticks: String(n), addresses: unreadAccounts.join(", ") },
+          });
+        }
+      } else if (countsUnread > 0) {
+        ctx.writes.meta.push({ k: countKey, v: "" });
+      }
       for (const h of now) {
         const row = stored.get(`${chain}:${h.address}`);
         const isSafe = safes[h.address] !== undefined;

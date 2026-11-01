@@ -304,7 +304,7 @@ unjudged: `batch.past_max_wait`, `payout.overdue`, `delivery.overdue`, `keeper.l
 `pool.liquidity`, `frontdoor.solvency`, `vault.solvency` and `site.integrity` (an incomplete pass). Left as they
 were, because what they judge outlasts a missing reading already: `ccip.failure` and `ccip.undelivered` (the
 message's stored state), `fmtao.depeg` and `price.reference_unavailable` (their verdicts kept in meta),
-`bridge.check_stuck` and `bridge.payout_unchecked` (the check rows in D1), `keys.safe_unread`,
+`bridge.check_stuck` and `bridge.payout_unchecked` (the check rows in D1), `keys.safe_unread`, `keys.count_unread`,
 `indexer.unverified`, `monitor.chain_unreadable`, `monitor.email_failing` and `monitor.rule_failed` (counters and
 marks in meta), and the other `site.*` warnings (the last pass's result). Events never resolve on a missing reading.
 
@@ -332,12 +332,15 @@ stores it, so a tick whose count batch fails (an RPC answering HTTP 429) still c
 settling on it, and what their nonces prove of the count, and judges nothing until a count is read again. Before
 2026-11-01 it skipped the address first, so a transaction settling on such a tick was never counted: that is what
 reported the keeper's hourly roll as unexplained on 2026-10-31 (count 12) and on 2026-11-01 (count 31), though the
-first was taken at the time for the stale count below. The count is also read in a request of its own, so a
-load-balanced RPC can answer it from an older head than the logs', and the floor below stays as the defence against
-that. A count is taken as stale only when that is provable: it is below the highest
-count already read, or below one past the nonce of one of the address's own settled transactions (a Safe's: below
-its reading plus each `execTransaction` to it logged after the reading's block; only `execTransaction` moves
-`nonce()`, a module's call doesn't). A provably stale count is judged by what is known instead for up to
+first was taken at the time for the stale count below. While a chain's counts go unread nothing there is judged,
+and `keys.delegated` is blind too (the role wallets' code is read in the same batch): `countUnreadTicks` (15) ticks
+in a row of it is the warning `keys.count_unread` (meta `count_unread:<chain>` counts them), which resolves on the
+next tick that reads the counts. A Safe, judged by its `nonce()`, has `keys.safe_unread` instead. The count is also
+read in a request of its own, so a load-balanced RPC can answer it from an older head than the logs', and the floor
+below stays as the defence against that. A count is taken as stale only when that is provable: it is below the
+highest count already read, or below one past the nonce of one of the address's own settled transactions (a
+Safe's: below its reading plus each `execTransaction` to it logged after the reading's block; only
+`execTransaction` moves `nonce()`, a module's call doesn't). A provably stale count is judged by what is known instead for up to
 `nonceBehindTicks` − 1 (9) count readings in a row, and the `nonceBehindTicks`-th (the 10th) takes the count, as a
 reorg past the settle depth (meta `nonce_behind:<chain>:<address>` counts them). That reading must come before the
 grace ends, so a count read too high is taken back before it can page: a `THRESHOLDS` or `THRESHOLDS_SECRET` that

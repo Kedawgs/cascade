@@ -38,6 +38,15 @@ describe("the README's keys.* entry", () => {
     expect(entry).not.toMatch(/on 2026-10-31 the keeper's hourly roll was reported as unexplained this way/);
   });
 
+  it("names keys.count_unread, the warning for counts unread, with its threshold's real value, its meta mark and that keys.delegated is blind too", () => {
+    expect(entry).toContain(`\`countUnreadTicks\` (${DEFAULTS.countUnreadTicks}) ticks in a row of it is the warning \`keys.count_unread\``);
+    expect(entry).toContain("`count_unread:<chain>`");
+    expect(entry).toMatch(/`keys.delegated` is blind/);
+    expect(entry).toMatch(/resolves on the next tick that reads the counts/);
+    // and it is in the list of conditions kept by their own counters
+    expect(section.replace(/\s+/g, " ")).toMatch(/`keys.safe_unread`, `keys.count_unread`, `indexer.unverified`/);
+  });
+
   it("says a THRESHOLDS or THRESHOLDS_SECRET that would hold past the grace is clamped, with a warning", () => {
     expect(entry).toContain("`THRESHOLDS`");
     expect(entry).toContain("`THRESHOLDS_SECRET`");

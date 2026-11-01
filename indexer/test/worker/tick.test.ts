@@ -485,6 +485,32 @@ describe("the keepers' and admin keys' transactions (keys.unexplained_tx), throu
     expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
   });
 
+  it("keys.count_unread: warns once Base's transaction counts have failed countUnreadTicks (15) ticks in a row, and resolves on the next read", async () => {
+    const w = await watching(11n);
+    const keysOpen = async () => (await alertKeys()).filter((a) => a.startsWith("keys."));
+    const calls = w.specs.base.calls!;
+    const counts = calls.eth_getTransactionCount;
+    calls.eth_getTransactionCount = () => {
+      throw Object.assign(new Error("rate limited"), { rpcCode: -32005 });
+    };
+    for (let i = 0; i < 14; i++) {
+      w.advance();
+      await w.tick();
+    }
+    expect(await keysOpen()).toEqual([]);
+    expect((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'count_unread:base'"))[0]?.v).toBe("14");
+    w.advance();
+    await w.tick();
+    expect(await keysOpen()).toEqual(["keys.count_unread:base"]);
+    // the counts back: resolved, the mark cleared
+    calls.eth_getTransactionCount = counts;
+    w.advance();
+    await w.tick();
+    expect(await keysOpen()).toEqual([]);
+    expect((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'count_unread:base'"))[0]?.v).toBe("");
+    expect(await rows("SELECT alert_key FROM alerts WHERE alert_key = 'keys.count_unread:base' AND resolved_at IS NOT NULL")).toHaveLength(1);
+  });
+
   it("W1: a first watch whose count held the roll not yet settled starts again when it settles, so a transaction no log explains pages", async () => {
     const w = tickWorld();
     await w.tick();

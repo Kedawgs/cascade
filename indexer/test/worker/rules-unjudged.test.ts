@@ -368,7 +368,7 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     runRules([{ name: "vault.solvency", run: boom }, ops.keeperLowEth, ops.monitorUnjudged], c);
     expect(metaOf(c)).toEqual({ "unjudged_since:vault.solvency": String(NOW) });
     // a rule raising critical events that keeps throwing (the keys rule: keys.unexplained_tx) pages after its threshold
-    const keys = { name: "keys", raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"] as const, run: boom };
+    const keys = { name: "keys", raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread", "keys.count_unread"] as const, run: boom };
     const k = at(NOW, { bit: {} });
     runRules([keys, ops.monitorUnjudged], k);
     expect(metaOf(k)).toEqual({ "unjudged_since:keys.unexplained_tx": String(NOW) });

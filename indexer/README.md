@@ -31,6 +31,10 @@ after the last one finished, reads every page in `SITE_PAGES` (all 8 of the site
 scripts a run. The real build (32 scripts) is one pass of two runs, so a change to the live site is judged within
 about 64 minutes; at the 400-file cap a pass takes 40 minutes at most. A page it can't read is named
 (`site.unreachable`) and the other pages are still judged.
+A script that answers 404 or 410 is first checked against its page read again (once a pass): when the page no longer
+names it, the site was redeployed mid-pass (a new build has new file names), so it is not reported, the page's
+current scripts are checked instead, and the Worker log says so; when the page still names it, it is a broken site
+and `site.unreachable` names the file as before.
 
 The **watchdog** emails `monitor.stalled` itself when no tick has completed for 15 minutes, even when the
 database can't be written (then straight from memory). It runs with the hourly job, so a stall is noticed 15 to

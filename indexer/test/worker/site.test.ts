@@ -419,6 +419,64 @@ describe("the site job", () => {
     expect(f.find((x) => x.rule === "site.unreachable")?.facts.files).toBe("/stake/ (HTTP 404)");
   });
 
+  describe("a redeploy in the middle of a pass", () => {
+    // a new build: every chunk gets a new name (the hash), so every old one is gone
+    const rename = (files: Record<string, string>) =>
+      Object.fromEntries(Object.entries(files).map(([k, v]) => [k.replace(/chunks\/(\w+)\.js/g, "chunks/$1B.js"), v.replace(/chunks\/(\w+)\.js/g, "chunks/$1B.js")]));
+    const redeploy = (files: Record<string, string>, next: Record<string, string>) => {
+      for (const k of Object.keys(files)) delete files[k];
+      Object.assign(files, next);
+    };
+    const pageCalls = (s: ReturnType<typeof server>, page: string) => s.calls.filter((c) => c === page);
+
+    it("is not a broken site: a file the page no longer lists is dropped, the page's current files are checked, and nothing is raised", async () => {
+      const files = site();
+      const s = server(files);
+      await job(s, NOW); // pages read, main and app fetched; the rest still to come
+      redeploy(files, rename(site()));
+      for (let i = 1; i < 12; i++) await job(s, NOW + i * 120);
+      const result = JSON.parse((await loadTickState(db, NOW)).meta.site_result);
+      expect(result.problems).toEqual([]);
+      expect(result.complete).toBe(true);
+      expect(result.files).toEqual(expect.arrayContaining([chunk("stakeB"), chunk("vendorB")]));
+      expect(await findings(NOW + 3000)).toEqual([]);
+    });
+
+    it("is still a broken site when the page, read again, lists the missing file", async () => {
+      const files = site();
+      delete files[chunk("stake")];
+      const s = server(files);
+      await fullPass(s);
+      const f = await findings(NOW + 300);
+      expect(f.find((x) => x.rule === "site.unreachable")?.facts.files).toBe(`${chunk("stake")} (HTTP 404)`);
+    });
+
+    it("reads each page again at most once a pass, and a run stays within its file budget plus those reads", async () => {
+      const files = site();
+      const s = server(files);
+      await job(s, NOW);
+      redeploy(files, rename(site()));
+      for (let i = 1; i < 12; i++) {
+        const before = s.calls.length;
+        await job(s, NOW + i * 120);
+        expect(s.calls.length - before).toBeLessThanOrEqual(cfg.budgets.siteFilesPerRun + 2);
+      }
+      // the two reads at the start, one more of each at most
+      expect(pageCalls(s, "/")).toHaveLength(2);
+      expect(pageCalls(s, "/stake/")).toHaveLength(2);
+    });
+
+    it("still judges a file whose content changed under the same name", async () => {
+      const extra = "0x00000000000000000000000000000000000000e6";
+      const files = site();
+      const s = server(files);
+      await job(s, NOW);
+      files[chunk("stake")] = `const o="${d.oracle}",e="${extra}"`;
+      for (let i = 1; i < 6; i++) await job(s, NOW + i * 120);
+      expect((await findings(NOW + 3000)).map((f) => f.key)).toEqual([`site.integrity:address:${extra}`]);
+    });
+  });
+
   it("reads every page in a pass's first run, and checks a build the real site's size (9 pages, 32 scripts) in one pass of two runs", async () => {
     // wrangler.jsonc's own settings: every page of the site, 20 files a run
     const real = testConfig();

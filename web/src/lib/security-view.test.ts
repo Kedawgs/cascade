@@ -107,7 +107,7 @@ describe("flowView", () => {
     f.backing = { alphaBacking: null, wTaoSupply: null, lockPoolFmTao: null, fmTaoSupplyBase: null, ratioPpm: null };
     f.bridgeOut = { roomLeft: null, capacity: null, perHour: null, enabled: null, supported: null, inFlight: 1 };
     f.vault = { totalAssets: null, price: null, pendingPayouts: null, nextPayoutAt: null, paused: null };
-    f.validator = { hotkey: null, ourStake: null, takeBps: null, backups: [] };
+    f.validator = { hotkey: null, ourStake: null, takeBps: null, backups: null };
     const v = view(f);
     expect(v.status.kind).toBe("waiting");
     expect(v.status.text).toBe("Waiting for a fresh reading");
@@ -147,12 +147,111 @@ describe("flowView", () => {
     for (const doc of [view(f), view(g)]) expect(JSON.stringify(doc)).not.toMatch(/NaN|Infinity|undefined/);
   });
 
-  it("the first reading after a deploy has no sell quote: a dash", () => {
+  it("the first reading after a deploy has no sell quote: a dash, and that step waits (for one minute)", () => {
     const f = goodFlow();
+    f.backing.ratioPpm = 1_000_000;
     f.swap.sellQuote = null;
     const v = view(f);
     expect(figure(step(v, "swapOut"), "A $1,000 payout costs")).toBe("–");
+    expect(step(v, "swapOut").tone).toBe("stale");
     expect(figure(step(v, "swap"), "A $1,000 deposit costs")).toBe("about 0.7%");
+    expect(step(v, "swap").tone).toBe("ok");
+    expect(v.status.kind).toBe("waiting");
+  });
+
+  it("the quoter reverted: both swap steps wait, never passing beside the blank costs", () => {
+    const f = goodFlow();
+    f.backing.ratioPpm = 1_000_000;
+    f.swap.buyQuote1000Tao = null;
+    f.swap.sellQuote = null;
+    const v = view(f);
+    for (const id of ["swap", "swapOut"]) expect(step(v, id).tone, id).toBe("stale");
+    expect(step(v, "swap").headline).toBe("$800K"); // the headline alone is fine: a blank figure still counts
+    expect(v.status.kind).toBe("waiting");
+  });
+
+  it("any blank figure on a fresh chain makes its step wait, not only a blank headline", () => {
+    const cases: [string, (f: FlowV1) => void, string][] = [
+      ["our stake unread", (f) => { f.validator.ourStake = null; }, "validator"],
+      ["the cut unread", (f) => { f.validator.takeBps = null; }, "validator"],
+      ["spot price unread", (f) => { f.swap.spotUsdcPerTao = null; }, "swap"],
+      ["the USDC pool unread", (f) => { f.swap.wethUsdcPoolUsdc = null; }, "swap"],
+      ["TAO held unread", (f) => { f.backing.alphaBacking = null; }, "backing"],
+      ["the share price unread", (f) => { f.vault.price = null; }, "vault"],
+      ["the refill unread", (f) => { f.bridgeOut.perHour = null; }, "bridgeBack"],
+    ];
+    for (const [name, patch, id] of cases) {
+      const f = goodFlow();
+      f.backing.ratioPpm = 1_000_000;
+      patch(f);
+      const v = view(f);
+      expect(step(v, id).figures.some((x) => x.value === "–"), name).toBe(true);
+      expect(step(v, id).tone, name).toBe("stale");
+      expect(v.status.kind, name).toBe("waiting");
+    }
+  });
+
+  it("an unknown is a dash and its step waits; only a known none reads as none", () => {
+    const cases: [string, (f: FlowV1) => void, string[], [string, string] | null][] = [
+      ["open batch unread", (f) => { f.batch.nextSendAt = null; }, ["bridge"], ["Next batch sends", "–"]],
+      ["payout batches unread", (f) => { f.vault.nextPayoutAt = null; }, ["vaultOut"], ["Next payout batch", "–"]],
+      ["hotkey set unread", (f) => { f.validator.backups = null; }, ["validator"], ["Backup validator", "–"]],
+      ["the vault's pause unread", (f) => { f.vault.paused = null; }, ["vault", "vaultOut"], null],
+      ["the front door's pause unread", (f) => { f.frontDoor.paused = null; }, ["bridge", "bridgeBack"], null],
+    ];
+    for (const [name, patch, ids, fig] of cases) {
+      const f = goodFlow();
+      f.backing.ratioPpm = 1_000_000;
+      patch(f);
+      const v = view(f);
+      for (const id of ids) expect(step(v, id).tone, `${name}: ${id}`).toBe("stale");
+      if (fig) expect(figure(step(v, ids[0]), fig[0]), name).toBe(fig[1]);
+      expect(v.status.kind, name).toBe("waiting");
+    }
+    // known to be empty: words, and passing
+    const f = goodFlow();
+    f.backing.ratioPpm = 1_000_000;
+    f.batch.nextSendAt = "none";
+    f.vault.nextPayoutAt = "none";
+    f.validator.backups = [];
+    const v = view(f);
+    expect(figure(step(v, "bridge"), "Next batch sends")).toBe("No batch waiting");
+    expect(figure(step(v, "vaultOut"), "Next payout batch")).toBe("None queued");
+    expect(figure(step(v, "validator"), "Backup validator")).toBe("None");
+    expect(v.status.kind).toBe("passing");
+  });
+
+  it("a payout batch that has just finished: none queued, never 'any moment now'", () => {
+    // flowOf skips a batch at count 0 (its struct zeroed, queuedAt 0) and sends "none"
+    const f = goodFlow();
+    f.backing.ratioPpm = 1_000_000;
+    f.vault.nextPayoutAt = "none";
+    const v = view(f);
+    expect(figure(step(v, "vaultOut"), "Next payout batch")).toBe("None queued");
+    expect(step(v, "vaultOut").tone).toBe("ok");
+    expect(JSON.stringify(v)).not.toContain("any moment now");
+  });
+
+  it("re-ages the document on the visitor's clock: a reading over 10 minutes old is stale, whatever the document says", () => {
+    const f = goodFlow(); // both read 60 s before the document
+    f.backing.ratioPpm = 1_000_000;
+    // 9 minutes after it arrived: 10 minutes old exactly, still fresh
+    expect(view(f, RECEIVED + 9 * 60_000).status.kind).toBe("passing");
+    // a moment later (a cached or long-open document): stale, every number from it a dash
+    const v = view(f, RECEIVED + 9 * 60_000 + 1);
+    expect(v.status.kind).toBe("waiting");
+    expect(v.status.text).toBe("Waiting for a fresh reading");
+    for (const id of ["swap", "backing", "bridge", "vault", "validator", "vaultOut", "bridgeBack", "swapOut"]) {
+      expect(step(v, id).tone, id).toBe("stale");
+      expect(step(v, id).headline, id).toBe("–");
+    }
+    // only the older chain's reading ages out first
+    const g = goodFlow();
+    g.backing.ratioPpm = 1_000_000;
+    g.chains.base!.time = GENERATED_AT - 300;
+    const w = view(g, RECEIVED + 6 * 60_000);
+    expect(step(w, "swap").tone).toBe("stale");
+    expect(step(w, "vault").tone).toBe("ok");
   });
 
   it("checkedAgoUsesTheServerClock", () => {

@@ -289,7 +289,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
               maxFeeBps: () => x.maxFeeBps,
               primaryBridge: () => x.primaryBridge,
               maxMessageValue: () => x.maxMessageValue,
-              getPayoutBatch: ([key]) => {
+              getPayoutBatch: v("vault", "getPayoutBatch", ([key]) => {
                 const p = x.payoutBatches[lc(key)];
                 return {
                   sourceChain: p ? 8453n : 0n,
@@ -302,7 +302,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
                   remaining: p?.remaining ?? 0n,
                   payoutsHash: `0x${"00".repeat(32)}`,
                 };
-              },
+              }),
             },
           },
           [STAKING_PRECOMPILE]: {

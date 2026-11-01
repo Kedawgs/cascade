@@ -86,7 +86,11 @@ describe("flowOf", () => {
     expect(f.backing.ratioPpm).toBeNull();
     expect(f.frontDoor.paused).toBeNull();
     expect(f.validator.hotkey).toBeNull();
-    expect(f.validator.backups).toEqual([]);
+    // unknown, never "none"
+    expect(f.validator.backups).toBeNull();
+    expect(f.batch.nextSendAt).toBeNull();
+    expect(f.vault.nextPayoutAt).toBeNull();
+    expect(f.vault.paused).toBeNull();
     expect(f.addresses.vault).toBe(d.vault);
     // a stale Base half leaves the lock layer unknown, so the ratio is unknown: never the AlphaVault layer alone
     const g = flowOf(input({ base: rd(baseState(), 9999), bittensor: rd(bitState({ alpha: { backing: 999n * E18 } })) }));
@@ -174,17 +178,41 @@ describe("flowOf", () => {
 
   it("nextSendOnlyWithSomethingInTheBatch", () => {
     const ob = { id: 1n, start: NOW - 100, totalDeposits: 0n, feePot: 0n, nDeposits: 0, nRedeems: 0 };
-    const at = (o: Partial<typeof ob>) => flowOf(input({ base: rd(baseState({ openBatch: { ...ob, ...o }, batchInterval: 3600 })) })).batch.nextSendAt;
-    expect(at({})).toBeNull();
+    // interval null: batchInterval unread
+    const at = (o: Partial<typeof ob>, interval: number | null = 3600) => flowOf(input({ base: rd(baseState({ openBatch: { ...ob, ...o }, batchInterval: interval ?? undefined })) })).batch.nextSendAt;
+    // an empty open batch: known to hold nothing
+    expect(at({})).toBe("none");
+    expect(at({}, null)).toBe("none");
     expect(at({ nDeposits: 1 })).toBe(NOW - 100 + 3600);
     expect(at({ nRedeems: 2 })).toBe(NOW - 100 + 3600);
+    // unread: unknown, never "none"
+    expect(at({ nDeposits: 1 }, null)).toBeNull();
+    expect(flowOf(input({ base: rd(baseState({ openBatch: undefined, batchInterval: 3600 })) })).batch.nextSendAt).toBeNull();
+    expect(flowOf(input({ base: rd(baseState({ openBatch: { ...ob, nDeposits: 1 }, batchInterval: 3600 }), STALE_AFTER_S + 1) })).batch.nextSendAt).toBeNull();
   });
 
   it("nextPayoutIsTheEarliestBatch", () => {
     const b = (queuedAt: number) => ({ queuedAt, cursor: 0, count: 1, chunk: 1, remaining: 1n });
     const f = flowOf(input({ bittensor: rd(bitState({ payoutDelay: 1000, payoutBatches: { [HK1]: b(NOW - 50), [HK2]: b(NOW - 500) } })) }));
     expect(f.vault.nextPayoutAt).toBe(NOW - 500 + 1000);
-    expect(flowOf(input()).vault.nextPayoutAt).toBeNull();
+    expect(flowOf(input({ bittensor: rd(bitState({ payoutDelay: 1000 })) })).vault.nextPayoutAt).toBe("none");
+    // a batch that has just finished reads count 0 and a zeroed struct: skipped, never a 1970 time
+    const done = { queuedAt: 0, cursor: 0, count: 0, chunk: 0, remaining: 0n };
+    expect(flowOf(input({ bittensor: rd(bitState({ payoutDelay: 1000, payoutBatches: { [HK1]: done } })) })).vault.nextPayoutAt).toBe("none");
+    expect(flowOf(input({ bittensor: rd(bitState({ payoutDelay: 1000, payoutBatches: { [HK1]: done, [HK2]: b(NOW - 50) } })) })).vault.nextPayoutAt).toBe(NOW - 50 + 1000);
+    // the delay unread, or a batch's read failed: unknown, never "none"
+    expect(flowOf(input({ bittensor: rd(bitState({ payoutBatches: { [HK1]: b(NOW) } })) })).vault.nextPayoutAt).toBeNull();
+    expect(flowOf(input({ bittensor: rd(bitState({ payoutDelay: 1000, payoutBatchFailed: true })) })).vault.nextPayoutAt).toBeNull();
+    expect(flowOf(input({ bittensor: rd(bitState({ payoutDelay: 1000 }), STALE_AFTER_S + 1) })).vault.nextPayoutAt).toBeNull();
+  });
+
+  it("an unread pause or hotkey set is unknown, never \"not paused\" or \"no backup\"", () => {
+    const f = flowOf(input({ base: rd(baseState({ paused: undefined })), bittensor: rd(bitState({ paused: undefined, stakeHotkey: HK1, hotkeys: undefined })) }));
+    expect(f.frontDoor.paused).toBeNull();
+    expect(f.vault.paused).toBeNull();
+    expect(f.validator.backups).toBeNull();
+    // the vault's set holding only the stake hotkey: known, no backup
+    expect(flowOf(input({ bittensor: rd(bitState({ stakeHotkey: HK1, hotkeys: [HK1] })) })).validator.backups).toEqual([]);
   });
 
   it("takeDefaultsTo1800", () => {

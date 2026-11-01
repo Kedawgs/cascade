@@ -3,9 +3,13 @@ import { bodyWithin } from "./indexer";
 
 // The monitor's public GET /v1/flow document, as indexer/src/flow.ts builds it (FlowV1 and its parts,
 // field for field). Amounts are decimal strings of base units (wei, rao, USDC units), times unix seconds.
+// Throughout, null means unknown: unread, or from a stale chain. A field that can be known to be empty says so with a
+// value of its own ("none" for a time with nothing scheduled, [] for a list), so an unknown never reads as "none".
 
 /** decimal base units; null when unknown or stale */
 export type Amount = string | null;
+/** unix s something is due; "none" when nothing is scheduled; null when unknown or stale */
+export type Scheduled = number | "none" | null;
 export interface FlowChain { block: string; time: number; stale: boolean }
 export type NoticeKind =
   | "paused" | "ownershipPending" | "guardianProposed" | "bridgeProposed" | "frontDoorProposed"
@@ -45,22 +49,24 @@ export interface FlowV1 {
   };
   backing: {
     alphaBacking: Amount; wTaoSupply: Amount; lockPoolFmTao: Amount; fmTaoSupplyBase: Amount;
-    /** the lower of the two layers, in parts per million */
+    /** the lower of the two layers, in parts per million; null unless both layers are known (both chains fresh) */
     ratioPpm: number | null;
   };
   bridgeIn: Bucket;
   bridgeOut: Bucket;
-  /** openBatch.start + batchInterval when the open batch holds anything */
-  batch: { nextSendAt: number | null };
+  /** openBatch.start + batchInterval when the open batch holds anything; "none" when it holds nothing */
+  batch: { nextSendAt: Scheduled };
   vault: {
     totalAssets: Amount;
     /** TAO per share, 1e18 */
     price: Amount;
     pendingPayouts: Amount;
-    nextPayoutAt: number | null;
+    /** the earliest queued payout batch's queuedAt + payoutDelay; "none" when no batch is queued */
+    nextPayoutAt: Scheduled;
     paused: boolean | null;
   };
-  validator: { hotkey: string | null; ourStake: Amount; takeBps: number | null; backups: string[] };
+  /** backups: the vault's other hotkeys ([] when it has none) */
+  validator: { hotkey: string | null; ourStake: Amount; takeBps: number | null; backups: string[] | null };
   frontDoor: { paused: boolean | null };
   notices: Notice[];
   addresses: {

@@ -312,6 +312,12 @@ describe("readSnapshot", () => {
     const s = await readSnapshot(rpc, cfg, inputs({ pendingPayoutKeys: pending }), 1);
     expect(s.bittensor?.state.payoutBatches[h("still")]).toMatchObject({ cursor: 1, count: 3 });
     expect(payoutsDone(s, pending)).toEqual([{ key: h("done"), block: heads.bittensor }]);
+    expect(s.bittensor?.state.payoutBatchFailed).toBeUndefined();
+    // a batch read that fails leaves its key out and says so: the batches are then not all known
+    state.reverts.add("vault.getPayoutBatch");
+    const t = await readSnapshot(rpc, cfg, inputs({ pendingPayoutKeys: pending }), 2);
+    expect(t.bittensor?.state.payoutBatches).toEqual({});
+    expect(t.bittensor?.state.payoutBatchFailed).toBe(true);
   });
 
   it("reads the stakes of the hotkeys it is given, and the set the vault holds now", async () => {

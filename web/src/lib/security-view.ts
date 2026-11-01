@@ -1,5 +1,5 @@
 import { explorer } from "./cascade/config";
-import type { Amount, Bucket, FlowV1, Notice } from "./cascade/flow";
+import type { Amount, Bucket, FlowChain, FlowV1, Notice, Scheduled } from "./cascade/flow";
 import { validatorName, validatorSs58 } from "./cascade/validators";
 import { formatDateTime, formatDuration, formatPercent, formatRelative, formatTao, formatUsdCompact, shortAddress } from "./format";
 
@@ -28,6 +28,15 @@ export interface PageView {
 }
 
 const DASH = "–";
+
+/** A reading older than this on the visitor's clock is stale, whatever the document said when it was built (the
+ * monitor's own limit, indexer/src/flow.ts STALE_AFTER_S): a cached or long-open document never reads as live. */
+export const STALE_AFTER_MS = 600_000;
+
+/** Figures that may show a dash on a fresh chain without their step waiting: only figures that are never a reading.
+ * None today: every figure is a number or a name read from the chain. (The first reading after a deploy has no sell
+ * quote, so "A $1,000 payout costs" is a dash and its step waits for the next reading, a minute later: not exempt.) */
+const NEVER_A_READING: ReadonlySet<string> = new Set<string>();
 
 /** An amount string as a bigint; null for anything that isn't plain decimal digits. */
 function big(x: Amount | undefined): bigint | null {
@@ -100,19 +109,23 @@ function bucketView(b: Bucket | undefined, usable: boolean): { headline: string;
  * a wrong clock on the device can't make an old reading look new. */
 export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowMs: number): PageView {
   const flow = data?.flow ?? null;
-  const baseOk = !!flow?.chains?.base && !flow.chains.base.stale;
-  const bitOk = !!flow?.chains?.bittensor && !flow.chains.bittensor.stale;
+  // when a reading was taken, on the visitor's clock
+  const takenAt = (time: number) => data!.receivedAt - (flow!.generatedAt - time) * 1000;
+  // a chain is fresh when the document says so and, aged on this clock since it arrived, it still is
+  const fresh = (c: FlowChain | null | undefined) => !!c && !c.stale && nowMs - takenAt(c.time) <= STALE_AFTER_MS;
+  const baseOk = fresh(flow?.chains?.base);
+  const bitOk = fresh(flow?.chains?.bittensor);
   const a = flow?.addresses;
   const toneOf = (usable: boolean, amber: boolean): Tone => (!usable ? "stale" : amber ? "amber" : "ok");
 
-  // when a reading was taken, on the visitor's clock
-  const takenAt = (time: number) => data!.receivedAt - (flow!.generatedAt - time) * 1000;
   // seconds from the document's moment to `unix`, less the time that has passed since it arrived
   const untilMs = (unix: number) => (unix - flow!.generatedAt) * 1000 - (nowMs - data!.receivedAt);
-  const inText = (unix: number | null | undefined, usable: boolean, none: string) => {
-    if (!usable || unix === undefined) return DASH;
-    if (unix === null) return none;
-    const ms = untilMs(unix);
+  // a time, "none" (known: nothing scheduled) or unknown (a dash)
+  const inText = (when: Scheduled | undefined, usable: boolean, none: string) => {
+    if (!usable) return DASH;
+    if (when === "none") return none;
+    if (typeof when !== "number" || !Number.isFinite(when)) return DASH;
+    const ms = untilMs(when);
     return ms <= 0 ? "any moment now" : `in ${formatDuration(ms)}`;
   };
 
@@ -123,6 +136,10 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     return t !== null && t > 0 ? t : null;
   })();
   const priced = baseOk && twap !== null;
+  // Pool depth is an approximation: 2 × what one side holds, priced at the 30-minute average (the TAO side at the TWAP,
+  // the USDC side at $1), which is the pool's whole value as if split evenly. With concentrated liquidity only the
+  // liquidity in range near the price absorbs a swap, so this overstates the depth a trade meets; the quoted cost of a
+  // $1,000 swap below (QuoterV2, fees and price movement included) is the figure that reflects it.
   const taoPoolUsd = priced ? (() => { const t = units(sw!.taoWethPoolTao, 18); return t === null ? null : 2 * t * twap!; })() : null;
   const usdcPoolUsd = baseOk ? (() => { const u = units(sw!.wethUsdcPoolUsdc, 6); return u === null ? null : 2 * u; })() : null;
   const usd = (n: number | null) => (n === null ? DASH : formatUsdCompact(n));
@@ -157,6 +174,9 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   const val = flow?.validator;
   const frontDoorPaused = baseOk && flow?.frontDoor?.paused === true;
   const vaultPaused = bitOk && v?.paused === true;
+  // a pause unread on a fresh chain: the steps it would turn amber can't say they are passing
+  const frontDoorPauseUnknown = baseOk && typeof flow?.frontDoor?.paused !== "boolean";
+  const vaultPauseUnknown = bitOk && typeof v?.paused !== "boolean";
   // a bridge direction's two limiters sit one on each chain (the source pool's outbound, the destination's inbound)
   const bothOk = baseOk && bitOk;
   const bin = bucketView(flow?.bridgeIn, bothOk);
@@ -243,11 +263,18 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     { id: "walletOut", name: "Your wallet", chain: "Base", headline: "USDC arrives", say: SAY.walletOut, figures: [], link: null, tone: "ok" },
   ];
 
-  // a fresh chain's step with a blank headline figure is not passing: it waits for a reading. The wallet
-  // steps' headlines are words, not readings, so they never count.
+  // a fresh chain's step with any blank figure (its headline or a detail) is not passing: it waits for a reading.
+  // So does one whose amber condition is unread (a pause). The wallet steps are words, not readings: they never count.
+  const unread: Partial<Record<StepId, boolean>> = {
+    bridge: frontDoorPauseUnknown,
+    bridgeBack: frontDoorPauseUnknown,
+    vault: vaultPauseUnknown,
+    vaultOut: vaultPauseUnknown,
+  };
   for (const s of [...stepsIn, ...stepsOut]) {
     if (s.id === "wallet" || s.id === "walletOut" || s.tone === "stale") continue;
-    if (s.headline === DASH) s.tone = "stale";
+    const blank = s.headline === DASH || s.figures.some((f) => f.value === DASH && !NEVER_A_READING.has(f.label));
+    if (blank || unread[s.id]) s.tone = "stale";
   }
 
   // ---- the top line ----

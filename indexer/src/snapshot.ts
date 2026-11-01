@@ -170,6 +170,8 @@ export interface BitState {
   payoutFeeQuote?: bigint;
   /** getPayoutBatch(key) for each pending payout key */
   payoutBatches: Record<Hex, { queuedAt: number; cursor: number; count: number; chunk: number; remaining: bigint }>;
+  /** a getPayoutBatch read failed: its key is missing from payoutBatches, so they aren't all known */
+  payoutBatchFailed?: boolean;
 }
 
 /** The front door and what surrounds it on Base. */
@@ -435,7 +437,11 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
     bit.payoutFeeQuote = ((v + RAO_WEI - 1n) / RAO_WEI) * RAO_WEI;
   });
   for (const p of i.pendingPayoutKeys) {
-    vault("getPayoutBatch", (v) => (bit.payoutBatches[p.key] = { queuedAt: Number(v.queuedAt), cursor: Number(v.cursor), count: Number(v.count), chunk: Number(v.chunk), remaining: v.remaining }), [p.key]);
+    vp.add(
+      { address: d.vault, abi: VAULT_VIEWS, functionName: "getPayoutBatch", args: [p.key] },
+      (v) => (bit.payoutBatches[p.key] = { queuedAt: Number(v.queuedAt), cursor: Number(v.cursor), count: Number(v.count), chunk: Number(v.chunk), remaining: v.remaining }),
+      () => (bit.payoutBatchFailed = true),
+    );
   }
   for (const m of i.pendingMessages.filter((m) => m.direction === "base>bittensor")) {
     vp.add({ address: t.bittensor.offRamp, abi: OFFRAMP, functionName: "getExecutionState", args: [m.messageId] }, (v) => (bitMessages[m.messageId] = state(v)));

@@ -5,8 +5,13 @@ import type { BaseState, BitState, Bucket as RawBucket, ChainReading, Lane } fro
 // bridge messages in flight and the stored admin events. Pure: no D1, no fetch. The monitor's own thresholds
 // and rules never appear here.
 
+// Throughout, null means unknown: unread, or from a stale chain. A field that can be known to be empty says so with a
+// value of its own ("none" for a time with nothing scheduled, [] for a list), so an unknown never reads as "none".
+
 /** decimal base units; null when unknown or stale */
 export type Amount = string | null;
+/** unix s something is due; "none" when nothing is scheduled; null when unknown or stale */
+export type Scheduled = number | "none" | null;
 export interface FlowChain { block: string; time: number; stale: boolean }
 export type NoticeKind =
   | "paused" | "ownershipPending" | "guardianProposed" | "bridgeProposed" | "frontDoorProposed"
@@ -51,17 +56,19 @@ export interface FlowV1 {
   };
   bridgeIn: Bucket;
   bridgeOut: Bucket;
-  /** openBatch.start + batchInterval when the open batch holds anything */
-  batch: { nextSendAt: number | null };
+  /** openBatch.start + batchInterval when the open batch holds anything; "none" when it holds nothing */
+  batch: { nextSendAt: Scheduled };
   vault: {
     totalAssets: Amount;
     /** TAO per share, 1e18 */
     price: Amount;
     pendingPayouts: Amount;
-    nextPayoutAt: number | null;
+    /** the earliest queued payout batch's queuedAt + payoutDelay; "none" when no batch is queued */
+    nextPayoutAt: Scheduled;
     paused: boolean | null;
   };
-  validator: { hotkey: string | null; ourStake: Amount; takeBps: number | null; backups: string[] };
+  /** backups: the vault's other hotkeys ([] when it has none) */
+  validator: { hotkey: string | null; ourStake: Amount; takeBps: number | null; backups: string[] | null };
   frontDoor: { paused: boolean | null };
   notices: Notice[];
   addresses: {
@@ -187,14 +194,19 @@ export function flowOf(i: FlowInput): FlowV1 {
     if (ratios.length) ratioPpm = Number(ratios.reduce((m, x) => (x < m ? x : m)));
   }
 
+  // the open batch: unknown unread, "none" when it holds nothing (the interval doesn't matter then)
   const ob = bs?.openBatch;
-  const nextSendAt = ob && bs?.batchInterval !== undefined && ob.nDeposits + ob.nRedeems > 0 ? ob.start + bs.batchInterval : null;
+  const nextSendAt: Scheduled = !ob ? null : ob.nDeposits + ob.nRedeems === 0 ? "none" : bs!.batchInterval === undefined ? null : ob.start + bs!.batchInterval;
 
-  let nextPayoutAt: number | null = null;
-  if (ts?.payoutDelay !== undefined) {
+  // the payout batches: unknown when the delay is unread or a batch's read failed; a batch that has finished (count
+  // 0, its struct zeroed) is skipped, so it never reads as due at queuedAt 0
+  let nextPayoutAt: Scheduled = null;
+  if (ts && ts.payoutDelay !== undefined && !ts.payoutBatchFailed) {
+    nextPayoutAt = "none";
     for (const b of Object.values(ts.payoutBatches)) {
+      if (b.count === 0) continue;
       const at = b.queuedAt + ts.payoutDelay;
-      if (nextPayoutAt === null || at < nextPayoutAt) nextPayoutAt = at;
+      if (nextPayoutAt === "none" || at < nextPayoutAt) nextPayoutAt = at;
     }
   }
 
@@ -292,7 +304,7 @@ export function flowOf(i: FlowInput): FlowV1 {
       hotkey: stakeHotkey ?? null,
       ourStake: ts && stakeHotkey ? amt(ts.stakes[stakeHotkey], true) : null,
       takeBps,
-      backups: ts?.hotkeys ? ts.hotkeys.filter((h) => lc(h) !== lc(stakeHotkey ?? "")) : [],
+      backups: ts?.hotkeys ? ts.hotkeys.filter((h) => lc(h) !== lc(stakeHotkey ?? "")) : null,
     },
     frontDoor: { paused: bs?.paused ?? null },
     notices,

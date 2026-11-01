@@ -32,6 +32,29 @@ describe("flowView", () => {
     expect(v.status.detail).toMatch(/backing/i);
   });
 
+  it("the backing sentence names the layer that is short, as the figures show it", () => {
+    // the AlphaVault layer short (999 held against 1,000 issued), the lock layer full
+    const held = view(goodFlow());
+    expect(held.status.detail).toBe(AMBER.backing.held);
+    expect(figure(step(held, "backing"), "TAO held")).toBe("999 TAO");
+    // the lock layer short (the reviewer's case, fresh: Base minted 20,000 against a lock of 13,985.61)
+    const f = goodFlow();
+    f.backing = { alphaBacking: e18(13_992.6), wTaoSupply: e18(13_985.65), lockPoolFmTao: e18(13_985.61), fmTaoSupplyBase: e18(20_000), ratioPpm: 699_280 };
+    const lock = view(f);
+    expect(step(lock, "backing").headline).toBe("69.92%");
+    expect(lock.status.detail).toBe(AMBER.backing.locked);
+    expect(figure(step(lock, "backing"), "TAO locked for bridged TAO")).toBe("13,985.61 TAO");
+    expect(figure(step(lock, "backing"), "Bridged TAO on Base")).toBe("20,000 TAO");
+    // both short
+    const g = goodFlow();
+    g.backing = { ...g.backing, lockPoolFmTao: e18(990), ratioPpm: 990_000 };
+    expect(view(g).status.detail).toBe(AMBER.backing.both);
+    for (const s of [AMBER.backing.held, AMBER.backing.locked, AMBER.backing.both]) expect(s).toMatch(/^Backing is below 100% right now/);
+    expect(AMBER.backing.locked).toContain("TAO locked for bridged TAO");
+    expect(AMBER.backing.locked).toContain("bridged TAO on Base");
+    expect(AMBER.backing.held).toContain("TAO held");
+  });
+
   it("amberStepWhenBridgeHasNoRoom", () => {
     // no room left, or a lane closed (a pool no longer lists the other chain)
     for (const patch of [{ roomLeft: "0" }, { supported: false, enabled: null, roomLeft: null, capacity: null, perHour: null }]) {
@@ -270,7 +293,8 @@ describe("flowView", () => {
     const f = goodFlow();
     const a = f.addresses;
     const T = "0x00000000000000000000000000000000000000aa";
-    const earliest = Date.UTC(2026, 10, 5, 9, 14) / 1000;
+    // after the document's moment (GENERATED_AT is Jan 15, 2027, 8:00 UTC)
+    const earliest = Date.UTC(2027, 0, 20, 9, 14) / 1000;
     const n: Notice[] = [
       { kind: "paused", chain: "bittensor", contract: a.vault },
       { kind: "ownershipPending", chain: "base", contract: a.frontDoor, target: T, tx: "0xabc" },
@@ -295,10 +319,26 @@ describe("flowView", () => {
     ]);
     expect(v.notices.every((x) => x.tone === "info")).toBe(true);
     expect(v.notices[1].body).toContain("can be accepted at any time");
-    expect(v.notices[2].body).toContain("can't take effect before Nov 5, 9:14 AM");
+    expect(v.notices[2].body).toContain("It can't take effect before Jan 20, 9:14 AM.");
     expect(v.notices[4].body).toContain("can be accepted at any time");
     expect(v.notices[1].href).toBe("https://basescan.org/tx/0xabc"); // the transaction when stored
     expect(v.notices[0].href).toContain(a.vault); // else the contract
+  });
+
+  it("an earliest time already past says it can take effect now, never 'can't take effect before' a past date", () => {
+    const f = goodFlow();
+    const a = f.addresses;
+    const past = Date.UTC(2026, 10, 5, 9, 14) / 1000;
+    f.notices = [
+      { kind: "guardianProposed", chain: "base", contract: a.frontDoor, target: "0xaa", earliest: past },
+      // due 2 minutes after the document's moment: not yet when it arrives, past 3 minutes later on the visitor's clock
+      { kind: "bridgeProposed", chain: "base", contract: a.frontDoor, target: "0xaa", earliest: GENERATED_AT + 120 },
+    ];
+    const v = view(f);
+    expect(v.notices[0].body).toContain("It can take effect now.");
+    expect(v.notices[0].body).not.toContain("can't take effect before");
+    expect(v.notices[1].body).toContain("It can't take effect before");
+    expect(view(f, RECEIVED + 3 * 60_000).notices[1].body).toContain("It can take effect now.");
   });
 
   it("a stale Base half leaves the backing blank, never the other layer's better number", () => {
@@ -411,6 +451,6 @@ describe("flowView", () => {
     const details = flows.map((f) => view(f).status.detail);
     expect(new Set(details).size).toBe(5);
     for (const d of details) expect(d).not.toMatch(/safe|secure|guarantee/i);
-    for (const s of Object.values(AMBER)) expect(s).not.toMatch(/safe|secure|guarantee/i);
+    for (const s of Object.values(AMBER).flatMap((x) => (typeof x === "string" ? [x] : Object.values(x)))) expect(s).not.toMatch(/safe|secure|guarantee/i);
   });
 });

@@ -72,7 +72,14 @@ const SAY = {
 } as const;
 
 export const AMBER = {
-  backing: "Backing is below 100% right now: the TAO held is less than the bridged TAO issued.",
+  // by the layer that is short, in the Backing step's own words: TAO held against bridged TAO issued (ForeverMoney's
+  // vault), and TAO locked for bridged TAO against the bridged TAO on Base (the lock pool)
+  backing: {
+    held: "Backing is below 100% right now: the TAO held is less than the bridged TAO issued.",
+    locked: "Backing is below 100% right now: the TAO locked for bridged TAO is less than the bridged TAO on Base.",
+    both: "Backing is below 100% right now: the TAO held is less than the bridged TAO issued, and the TAO locked for bridged TAO is less than the bridged TAO on Base.",
+    short: "Backing is below 100% right now.",
+  },
   bridge: "The bridge has no room left, or its lane is closed, so new deposits wait longer to cross. Your existing stake isn't affected.",
   frontDoor: "The front door is paused, so new deposits and withdrawals can't be requested until it resumes. Your existing stake isn't affected.",
   vault: "The vault is paused, so staking and payouts wait until it resumes.",
@@ -169,6 +176,15 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   // floored, so 99.9999% never reads as 100%
   const ratioText = ratio === null ? DASH : `${(Math.floor(ratio / 100) / 100).toFixed(2)}%`;
   const bit = (x: Amount | undefined, d = 18) => (bitOk ? taoText(units(x, d)) : DASH);
+  // which layer is short, from the same amounts the figures show (the ratio is their floor, so they agree)
+  const short = (held: Amount | undefined, owed: Amount | undefined) => {
+    const h = big(held);
+    const o = big(owed);
+    return h !== null && o !== null && o > 0n && h < o;
+  };
+  const heldShort = bitOk && short(bk?.alphaBacking, bk?.wTaoSupply);
+  const lockShort = bitOk && baseOk && short(bk?.lockPoolFmTao, bk?.fmTaoSupplyBase);
+  const backingAmber = heldShort && lockShort ? AMBER.backing.both : heldShort ? AMBER.backing.held : lockShort ? AMBER.backing.locked : AMBER.backing.short;
 
   const v = flow?.vault;
   const val = flow?.validator;
@@ -203,7 +219,8 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
       figures: [
         { label: "TAO held", value: bit(bk?.alphaBacking) },
         { label: "Bridged TAO issued", value: bit(bk?.wTaoSupply) },
-        { label: "TAO locked for Base", value: bit(bk?.lockPoolFmTao) },
+        // the lock pool holds the TAO behind bridged TAO on every lane, not only Base's
+        { label: "TAO locked for bridged TAO", value: bit(bk?.lockPoolFmTao) },
         { label: "Bridged TAO on Base", value: baseOk ? taoText(units(bk?.fmTaoSupplyBase, 18)) : DASH },
       ],
       link: link("AlphaVault on the Bittensor explorer", a && explorer.bittensorAddress(a.alphaVault)),
@@ -290,7 +307,7 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     const amber = [...stepsIn, ...stepsOut].find((s) => s.tone === "amber");
     if (amber) {
       const detail =
-        amber.id === "backing" ? AMBER.backing
+        amber.id === "backing" ? backingAmber
         : amber.id === "vault" || amber.id === "vaultOut" ? AMBER.vault
         : frontDoorPaused ? AMBER.frontDoor
         : amber.id === "bridgeBack" ? AMBER.bridgeBack
@@ -303,7 +320,7 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     }
   }
 
-  return { status, notices: flow ? flow.notices.flatMap((n) => noticeView(n, flow)) : [], stepsIn, stepsOut };
+  return { status, notices: flow ? flow.notices.flatMap((n) => noticeView(n, flow, untilMs)) : [], stepsIn, stepsOut };
 }
 
 function contractName(addr: string, a: FlowV1["addresses"]): string {
@@ -316,15 +333,18 @@ function contractName(addr: string, a: FlowV1["addresses"]): string {
 }
 
 /** One event as a blue notice, or nothing for a kind this page doesn't know yet. Links to the transaction
- * that started it when the monitor stored one, else to the contract. */
-function noticeView(n: Notice, flow: FlowV1): NoticeView[] {
+ * that started it when the monitor stored one, else to the contract. `untilMs` is how long until a time, on the
+ * visitor's clock: an earliest time already past says it can take effect now. */
+function noticeView(n: Notice, flow: FlowV1, untilMs: (unix: number) => number): NoticeView[] {
   const who = contractName(n.contract, flow.addresses);
   const base = n.chain === "base";
   const href = n.tx ? (base ? explorer.baseTx(n.tx) : explorer.bittensorTx(n.tx)) : base ? explorer.baseAddress(n.contract) : explorer.bittensorAddress(n.contract);
   const timing =
-    typeof n.earliest === "number" && Number.isFinite(n.earliest)
-      ? `It can't take effect before ${formatDateTime(new Date(n.earliest * 1000))}.`
-      : "It can be accepted at any time.";
+    typeof n.earliest !== "number" || !Number.isFinite(n.earliest)
+      ? "It can be accepted at any time."
+      : untilMs(n.earliest) <= 0
+        ? "It can take effect now."
+        : `It can't take effect before ${formatDateTime(new Date(n.earliest * 1000))}.`;
   const to = n.target ? ` to ${shortAddress(n.target)}` : "";
   const make = (title: string, body: string): NoticeView[] => [{ tone: "info", title, body, href }];
   switch (n.kind) {

@@ -330,15 +330,22 @@ export function useRoundTrip(taoWei: bigint | null) {
   });
 }
 
-/** The monitor's public flow document for the security page (null when it can't be had): every minute
- * while the tab is visible, and only when the build names an indexer. */
-export function useFlow() {
-  return useQuery({
+/** useFlow's query: every minute while the tab is visible, and only when the build names an indexer. A document under
+ * a minute old is fresh (staleTime), so focusing the tab again or remounting never reads it sooner: at most once a
+ * minute, as the spec has it. */
+export function flowQuery() {
+  return {
     queryKey: cascadeKeys.flow(),
     queryFn: () => (DEPLOYMENT ? fetchFlow(DEPLOYMENT) : Promise.resolve(null)),
     enabled: Boolean(DEPLOYMENT?.indexerUrl),
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
+    staleTime: 60_000,
     retry: false,
-  });
+  };
+}
+
+/** The monitor's public flow document for the security page (null when it can't be had). */
+export function useFlow() {
+  return useQuery(flowQuery());
 }

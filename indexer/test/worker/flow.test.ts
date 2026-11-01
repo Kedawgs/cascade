@@ -320,6 +320,22 @@ describe("flowOf", () => {
     expect(n(C)).toEqual([{ kind: "ownershipPending", chain: "base", contract: d.frontDoor, target: C }]);
   });
 
+  it("guardianTxIsTheProposalNamingThePendingGuardian", () => {
+    const A = "0x00000000000000000000000000000000000000AA";
+    const B = "0x00000000000000000000000000000000000000bb";
+    const C = "0x00000000000000000000000000000000000000cc";
+    const logs = [
+      log({ event: "GuardianProposed", args: { guardian: A.toLowerCase(), readyAt: "1900000001" }, txHash: tx(20) }),
+      // a later proposal of another guardian (cancelled, or replaced since): never the pending one's
+      log({ event: "GuardianProposed", args: { guardian: B, readyAt: "1900000002" }, txHash: tx(21) }),
+    ];
+    const n = (pending: string) => flowOf(input({ adminLogs: logs, base: rd(baseState({ pendingGuardian: pending as `0x${string}` })) })).notices.filter((x) => x.kind === "guardianProposed");
+    expect(n(A)).toEqual([{ kind: "guardianProposed", chain: "base", contract: d.frontDoor, target: A, earliest: 1900000001, tx: tx(20) }]);
+    expect(n(B)).toEqual([{ kind: "guardianProposed", chain: "base", contract: d.frontDoor, target: B, earliest: 1900000002, tx: tx(21) }]);
+    // no stored proposal names it: no transaction and no time, as the ownership notice does
+    expect(n(C)).toEqual([{ kind: "guardianProposed", chain: "base", contract: d.frontDoor, target: C }]);
+  });
+
   it("fmNotices", () => {
     const admin = "0x00000000000000000000000000000000000000bb";
     const f = flowOf(

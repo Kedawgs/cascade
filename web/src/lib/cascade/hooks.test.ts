@@ -2,7 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { type Cached, plainText, renderWithCache } from "@/components/test-render";
-import { cascadeKeys, depositMoving, listPollMs, movingOffBase, seedSnapshot, useTaoPrice, withdrawalMoving } from "./hooks";
+import { cascadeKeys, depositMoving, flowQuery, listPollMs, movingOffBase, seedSnapshot, useTaoPrice, withdrawalMoving } from "./hooks";
 import type { DepositRecord, WithdrawalRecord } from "./records";
 
 describe("seedSnapshot", () => {
@@ -99,5 +99,22 @@ describe("useTaoPrice", () => {
   it("keeps a live price through a failed read for an hour, then drops it", () => {
     expect(price([stats({ at: Date.now() - 30 * 60_000, failed: true })], SEEDED)).toBe("255.5");
     expect(price([stats({ at: Date.now() - 2 * 60 * 60_000, failed: true })], SEEDED)).toBe("none");
+  });
+});
+
+describe("useFlow's query", () => {
+  // a document read this long ago, held in the cache as a page that lost focus would hold it
+  const isStaleAfter = (ageMs: number) => {
+    const client = new QueryClient();
+    client.setQueryData(cascadeKeys.flow(), null, { updatedAt: Date.now() - ageMs });
+    return client.getQueryCache().find({ queryKey: cascadeKeys.flow() })!.isStaleByTime(flowQuery().staleTime);
+  };
+
+  it("reads the monitor at most once a minute: a tab focused again within the minute asks for nothing", () => {
+    expect(flowQuery().refetchInterval).toBe(60_000);
+    expect(flowQuery().refetchIntervalInBackground).toBe(false);
+    // focus and mount read again only a stale query
+    expect(isStaleAfter(30_000)).toBe(false);
+    expect(isStaleAfter(61_000)).toBe(true);
   });
 });

@@ -229,7 +229,8 @@ export function flowOf(i: FlowInput): FlowV1 {
   const guardianN = (chain: Notice["chain"], contract: string, pending: string | undefined) => {
     if (!nonZero(pending)) return;
     const n: Notice = { kind: "guardianProposed", chain, contract, target: pending };
-    const l = latest(logs, contract, "GuardianProposed");
+    // its time and transaction only from a proposal of this guardian (as the ownership notice's)
+    const l = latest(logs, contract, "GuardianProposed", (x) => lc(x.args.guardian ?? "") === lc(pending));
     if (l) {
       const e = readyOf(l.args.readyAt);
       if (e !== undefined) n.earliest = e;

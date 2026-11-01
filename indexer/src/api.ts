@@ -1,7 +1,9 @@
 import { type Hex, pad } from "viem";
 import type { Config } from "./config.ts";
+import { type AdminLog, flowOf } from "./flow.ts";
 import { lagLimitOf } from "./rules/ops.ts";
 import { type AccountEvent, accountHalf, sharedHalfJson } from "./seed.ts";
+import { expand } from "./snapshot.ts";
 import { seedPageOf } from "./store.ts";
 import { DEFAULTS, type Thresholds } from "./thresholds.ts";
 import { DEFAULT_PAYOUT_DELAY_S } from "./tick.ts";
@@ -30,7 +32,7 @@ const CURSOR =
  * with no client IP (never one through Cloudflare's edge, which sets it) isn't counted, and a limiter that
  * fails lets the request through: the routes are accelerators and signals, and a 429 is itself a refusal
  * their clients handle. Only requests that reach the Worker count: a cached answer never does. */
-async function withinLimit(limiter: RateLimit | undefined, request: Request, route: "scan" | "status" | "health"): Promise<boolean> {
+async function withinLimit(limiter: RateLimit | undefined, request: Request, route: "scan" | "status" | "health" | "flow"): Promise<boolean> {
   const ip = request.headers.get("cf-connecting-ip");
   if (!limiter || !ip) return true;
   try {
@@ -218,6 +220,80 @@ export async function handleStatus(request: Request, env: RouteEnv, cfg: Config,
     generatedAt: iso(nowS),
   };
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": CACHED } });
+}
+
+/** The stored events flowOf reads for the page's notices. */
+const FLOW_EVENTS = [
+  "GuardianProposed",
+  "BridgeProposed",
+  "BridgeActivated",
+  "BridgeProposalCancelled",
+  "FrontDoorProposed",
+  "FrontDoorActivated",
+  "FrontDoorProposalCancelled",
+  "OwnershipTransferStarted",
+];
+
+/** GET /v1/flow, the public facts behind the site's /security page (flowOf): the newest reading of each chain
+ * (a partial tick leaves the other chain's own newest in place), the bridge messages in flight and the stored
+ * admin events. Public chain facts only. Cached for CACHE_TTL_S; no query string; counted against the client's
+ * rate limit (429 past it); CORS for the site's one origin on every answer. 503 when D1 fails or flowOf throws
+ * (never cached), or when the database holds another deployment than DEPLOYMENT (or none yet). */
+export async function handleFlow(request: Request, env: RouteEnv, cfg: Config, nowS: number): Promise<Response> {
+  const cors = { "Access-Control-Allow-Origin": cfg.site.origin };
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { ...cors, "Access-Control-Allow-Methods": "GET", "Access-Control-Max-Age": "86400" } });
+  }
+  if (request.method !== "GET") return plain(405, "method not allowed", { ...cors, Allow: "GET, OPTIONS" });
+  if (!(await withinLimit(env.SCAN_LIMITER, request, "flow"))) return plain(429, "too many requests", { ...cors, "Retry-After": "60" });
+  if (request.url.includes("?")) return plain(400, "no query string", cors);
+  const noStore = { ...cors, "Cache-Control": "no-store" };
+  let rows: Row[][];
+  try {
+    const db = env.DB;
+    const marks = FLOW_EVENTS.map((_, i) => `?${i + 1}`).join(", ");
+    rows = (
+      await db.batch<Row>([
+        db.prepare("SELECT json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 1"),
+        db.prepare("SELECT json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 1"),
+        db.prepare("SELECT direction, COUNT(*) AS n FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' GROUP BY direction"),
+        db
+          .prepare(`SELECT chain, address, event, args, tx_hash, block FROM logs WHERE removed = 0 AND event IN (${marks}) ORDER BY block, log_index`)
+          .bind(...FLOW_EVENTS),
+        db.prepare("SELECT v FROM meta WHERE k = 'deployment'"),
+      ])
+    ).map((r) => r.results);
+  } catch (e) {
+    console.error(`flow read failed: ${e instanceof Error ? e.message : String(e)}`);
+    return plain(503, "not available", noStore);
+  }
+  if (rows[4][0]?.v !== cfg.deployment.id) {
+    console.error("the database holds another deployment than DEPLOYMENT (or none yet): no flow");
+    return plain(503, "not available", { ...cors, "Cache-Control": CACHED });
+  }
+  try {
+    const count = (direction: string) => Number(rows[2].find((r) => r.direction === direction)?.n ?? 0);
+    const adminLogs: AdminLog[] = rows[3].map((r) => ({
+      chain: r.chain as AdminLog["chain"],
+      address: r.address as string,
+      event: r.event as string,
+      args: JSON.parse(r.args as string) as Record<string, string>,
+      txHash: r.tx_hash as string,
+      block: Number(r.block),
+    }));
+    const body = flowOf({
+      base: rows[0][0] ? (expand(rows[0][0].json as string).base ?? null) : null,
+      bittensor: rows[1][0] ? (expand(rows[1][0].json as string).bittensor ?? null) : null,
+      inFlight: { toBittensor: count("base>bittensor"), toBase: count("bittensor>base") },
+      adminLogs,
+      cfg,
+      nowS,
+    });
+    return new Response(JSON.stringify(body), { status: 200, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": CACHED } });
+  } catch (e) {
+    console.error(`flow failed: ${e instanceof Error ? e.message : String(e)}`);
+    return plain(503, "not available", noStore);
+  }
 }
 
 /** A tick must have completed this recently for /v1/health to be ok. */

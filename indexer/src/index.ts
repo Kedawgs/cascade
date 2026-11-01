@@ -1,4 +1,4 @@
-import { cached, handleHealth, handleScan, handleStatus } from "./api.ts";
+import { cached, handleFlow, handleHealth, handleScan, handleStatus } from "./api.ts";
 import { type Config, parseConfig } from "./config.ts";
 import { CRONS } from "./crons.ts";
 import { runDaily } from "./daily.ts";
@@ -44,6 +44,16 @@ async function fetch(request: Request, env: Env, ctx: ExecutionContext): Promise
     // unconfigured: the keeper reads an outage and holds
     if (!cfg) return headless(new Response("not available", { status: 503, headers: { "Cache-Control": "no-store" } }));
     return headless(await cached(asGet, ctx, () => handleStatus(asGet, env, cfg, nowS)));
+  }
+  if (path === "/v1/flow") {
+    const cfg = configOf(env);
+    // unconfigured: the site gets a readable 503 (and its can't-check state) when its origin is set
+    if (!cfg) {
+      const headers: Record<string, string> = { "Cache-Control": "no-store" };
+      if (typeof env.SITE_ORIGIN === "string" && /^https:\/\/[^/]+$/.test(env.SITE_ORIGIN)) headers["Access-Control-Allow-Origin"] = env.SITE_ORIGIN;
+      return headless(new Response("not available", { status: 503, headers }));
+    }
+    return headless(await cached(asGet, ctx, () => handleFlow(asGet, env, cfg, nowS)));
   }
   if (path === "/v1/health") {
     // the configured thresholds' lag limit (the defaults' when the config can't be read: no tick runs then, and

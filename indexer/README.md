@@ -38,19 +38,20 @@ about 75 minutes after the last complete tick. A tick that can't read or write i
 `monitor.db_failing` email, at minute 0 only. Neither can speak when the Worker refuses its config: that is
 what the outside uptime check on `/v1/health` is for (deploy step 10).
 
-### Four routes
+### Five routes
 
 | Route | For |
 |---|---|
 | `GET /v1/scan/{vault}` | the site: the deployment-wide half of its scan (cached 30 s, CORS for `SITE_ORIGIN`) |
 | `GET /v1/scan/{vault}/{account}` | the site: one account's half |
 | `GET /v1/status` | the keeper: the hold (opaque ids only), confirmed payout keys, each chain's lag (cached 15 s; `generatedAt` says when it was computed; `HEAD` answers the same without the body) |
+| `GET /v1/flow` | the site's /security page: public chain facts only (each chain's newest reading, bridge messages in flight, proposals and pending changes from the stored events) as JSON v1 (cached 15 s, CORS for `SITE_ORIGIN`, `HEAD` as above; 503 when a chain read or the document can't be built) |
 | `GET /v1/health` | an uptime checker: 200 while a tick completed in the last 5 minutes and no chain lags past the lag limit; else 503 and why (cached 15 s; `HEAD` answers the same status without the body, for checkers that default to it) |
 
 The vault and account must be lowercase and there must be no query string (one spelling per resource, so the
 cache can't be sidestepped). Every route answers 429 (with `Retry-After: 60`) past 60 requests a minute from one
 IP, each route counted on its own (the keeper's status polls and a checker's health probes are minutes apart,
-far under it); the site falls back to its own scan on it, as on any refusal. The status and the health are served
+far under it); the site falls back to its own scan on it, as on any refusal. The status, the flow and the health are served
 through the Workers Cache for 15 s, so a burst at them reaches D1 once per 15 s per Cloudflare location, and a
 cached answer is never counted; a D1 failure (503) is never cached, so the next request reaches a recovered
 database.
@@ -232,7 +233,7 @@ deploy creates an empty Worker), so deploy first, in log mode, and add the email
     e.g. `base is 61 minutes behind (limit 30 minutes)`: ticks completing while an RPC refuses a chain is a blind
     monitor, and the outside check sees it even when email is broken. A chain catching up in the first backfill
     isn't counted (one stuck then is). A missing daily digest is the weaker sign.
-11. Rate limiting on the API needs nothing set up: the Worker counts `/v1/scan/*`, `/v1/status` and `/v1/health`
+11. Rate limiting on the API needs nothing set up: the Worker counts `/v1/scan/*`, `/v1/status`, `/v1/flow` and `/v1/health`
     requests itself with Workers Rate Limiting (the `SCAN_LIMITER` binding in `wrangler.jsonc`, deployed with
     it: 60 a minute per client IP, per Cloudflare location, approximate, each route under its own key) and
     answers 429 past it; cached answers never reach the Worker, so never count. A WAF rate-limiting rule on

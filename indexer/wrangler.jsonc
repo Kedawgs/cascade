@@ -9,7 +9,7 @@
   // Wrangler sends no usage telemetry for this project: building and testing stay local.
   "send_metrics": false,
   "observability": { "enabled": true },
-  // Workers Cache serves the seed routes (30 s), the status and the health (15 s) by their Cache-Control without
+  // Workers Cache serves the seed routes (30 s), the status, the flow and the health (15 s) by their Cache-Control without
   // running the Worker.
   "cache": { "enabled": true },
   // Four crons, the same in every environment (a test checks them against src/crons.ts):
@@ -43,7 +43,7 @@
         }
       ],
       "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["monitor@cascadefi.xyz"] }],
-      // Workers Rate Limiting on every route (/v1/scan/*, /v1/status and /v1/health, each under its own key): 60
+      // Workers Rate Limiting on every route (/v1/scan/*, /v1/status, /v1/flow and /v1/health, each under its own key): 60
       // requests a minute per client IP, counted per Cloudflare location (approximate). Cached answers never reach
       // the Worker, so never count. The namespace id is any integer unique in the account (nothing to create);
       // each environment has its own.

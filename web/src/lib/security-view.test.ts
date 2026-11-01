@@ -9,6 +9,7 @@ const view = (flow: FlowV1 | null, now = RECEIVED, receivedAt = RECEIVED) => flo
 const all = (v: PageView) => [...v.stepsIn, ...v.stepsOut];
 const step = (v: PageView, id: string): StepView => all(v).find((s) => s.id === id)!;
 const figure = (s: StepView, label: string) => s.figures.find((f) => f.label === label)?.value;
+const e18 = (n: number) => (BigInt(Math.round(n * 1e6)) * 10n ** 12n).toString();
 
 describe("flowView", () => {
   it("passingWhenAllFresh", () => {
@@ -158,6 +159,19 @@ describe("flowView", () => {
     expect(v.notices[4].body).toContain("can be accepted at any time");
     expect(v.notices[1].href).toBe("https://basescan.org/tx/0xabc"); // the transaction when stored
     expect(v.notices[0].href).toContain(a.vault); // else the contract
+  });
+
+  it("a stale Base half leaves the backing blank, never the other layer's better number", () => {
+    // what the monitor sends when Base minted unbacked FM-TAO and its reading is stale: the lock layer unknown, so no ratio
+    const f = goodFlow();
+    f.chains.base = { block: "1", time: GENERATED_AT - 700, stale: true };
+    f.backing = { alphaBacking: e18(13_992.6), wTaoSupply: e18(13_985.65), lockPoolFmTao: e18(13_985.61), fmTaoSupplyBase: null, ratioPpm: null };
+    const v = view(f);
+    const s = step(v, "backing");
+    expect(s.headline).toBe("–");
+    expect(s.tone).toBe("stale");
+    expect(JSON.stringify(v)).not.toContain("100.04%");
+    expect(v.status.kind).toBe("waiting");
   });
 
   it("backingHeadlineIsTheRatio", () => {

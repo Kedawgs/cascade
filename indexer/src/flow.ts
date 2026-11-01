@@ -35,7 +35,7 @@ export interface FlowV1 {
   };
   backing: {
     alphaBacking: Amount; wTaoSupply: Amount; lockPoolFmTao: Amount; fmTaoSupplyBase: Amount;
-    /** the lower of the two layers, in parts per million */
+    /** the lower of the two layers, in parts per million; null unless both layers are known (both chains fresh) */
     ratioPpm: number | null;
   };
   bridgeIn: Bucket;
@@ -149,12 +149,20 @@ export function flowOf(i: FlowInput): FlowV1 {
   const spot = bs ? spotUsdcPerTao(bs, cfg) : undefined;
   const sq = bs?.sellQuote;
 
-  // backing: each layer's coverage in ppm; the lower one counts. A zero divisor skips its layer.
-  const ratios: bigint[] = [];
+  // backing: each layer's coverage in ppm, and the lower one counts, so the page never shows a better number than the
+  // weaker layer. Both layers must be known: the AlphaVault's backing against wTAO's supply (Bittensor), and the lock
+  // pool against FM-TAO's supply on Base (a fresh Base half too). With either unknown the ratio is unknown, never the
+  // other layer alone. A zero supply is known but owes nothing: its layer is skipped, never divided (no Infinity).
   const alphaBacking = ts?.alpha.backing;
-  if (alphaBacking !== undefined && ts?.wTaoSupply) ratios.push((alphaBacking * 1_000_000n) / ts.wTaoSupply);
-  if (ts?.lockPoolFmTao !== undefined && bs?.fmTaoSupply) ratios.push((ts.lockPoolFmTao * 1_000_000n) / bs.fmTaoSupply);
-  const ratioPpm = ratios.length ? Number(ratios.reduce((m, x) => (x < m ? x : m))) : null;
+  const layers = [
+    { held: alphaBacking, owed: ts?.wTaoSupply },
+    { held: ts?.lockPoolFmTao, owed: bs?.fmTaoSupply },
+  ];
+  let ratioPpm: number | null = null;
+  if (layers.every((l) => l.held !== undefined && l.owed !== undefined)) {
+    const ratios = layers.flatMap(({ held, owed }) => (owed! > 0n ? [(held! * 1_000_000n) / owed!] : []));
+    if (ratios.length) ratioPpm = Number(ratios.reduce((m, x) => (x < m ? x : m)));
+  }
 
   const ob = bs?.openBatch;
   const nextSendAt = ob && bs?.batchInterval !== undefined && ob.nDeposits + ob.nRedeems > 0 ? ob.start + bs.batchInterval : null;

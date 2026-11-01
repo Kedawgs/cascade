@@ -84,10 +84,11 @@ describe("flowOf", () => {
     expect(f.validator.hotkey).toBeNull();
     expect(f.validator.backups).toEqual([]);
     expect(f.addresses.vault).toBe(d.vault);
-    // a stale Base half drops only the Base layer
+    // a stale Base half leaves the lock layer unknown, so the ratio is unknown: never the AlphaVault layer alone
     const g = flowOf(input({ base: rd(baseState(), 9999), bittensor: rd(bitState({ alpha: { backing: 999n * E18 } })) }));
-    expect(g.backing.ratioPpm).toBe(999_000);
+    expect(g.backing.ratioPpm).toBeNull();
     expect(g.backing.fmTaoSupplyBase).toBeNull();
+    expect(g.backing.alphaBacking).toBe((999n * E18).toString());
   });
 
   it("backingTakesTheLowerLayer", () => {
@@ -95,6 +96,26 @@ describe("flowOf", () => {
     expect(f.backing.ratioPpm).toBe(999_000);
     const g = flowOf(input({ bittensor: rd(bitState({ alpha: { backing: (1000n * E18 * 9980n) / 10000n } })) }));
     expect(g.backing.ratioPpm).toBe(998_000);
+  });
+
+  it("backing needs both layers known: never a better number than the weaker layer", () => {
+    // the reviewer's case: Base minted unbacked (FM-TAO's supply 20,000 against a lock of 13,985.61), its reading stale.
+    // The AlphaVault layer alone would read 100.04%; the lock layer, unseen, is at 69.9%.
+    const bit = bitState({ alpha: { backing: 13_992_600n * 10n ** 15n }, wTaoSupply: 13_985_650n * 10n ** 15n, lockPoolFmTao: 13_985_610n * 10n ** 15n });
+    const inflated = baseState({ fmTaoSupply: 20_000n * E18 });
+    const stale = flowOf(input({ base: rd(inflated, STALE_AFTER_S + 100), bittensor: rd(bit) }));
+    expect(stale.backing.ratioPpm).toBeNull();
+    // the same reading fresh: the lock layer is the weaker, and it counts
+    expect(flowOf(input({ base: rd(inflated), bittensor: rd(bit) })).backing.ratioPpm).toBe(699_280);
+    // no Base reading at all
+    expect(flowOf(input({ base: null, bittensor: rd(bit) })).backing.ratioPpm).toBeNull();
+    // any one of the four amounts unread leaves the ratio unknown
+    expect(flowOf(input({ bittensor: rd(bitState({ alpha: {} })) })).backing.ratioPpm).toBeNull();
+    expect(flowOf(input({ bittensor: rd(bitState({ wTaoSupply: undefined })) })).backing.ratioPpm).toBeNull();
+    expect(flowOf(input({ bittensor: rd(bitState({ lockPoolFmTao: undefined })) })).backing.ratioPpm).toBeNull();
+    expect(flowOf(input({ base: rd(baseState({ fmTaoSupply: undefined })) })).backing.ratioPpm).toBeNull();
+    // a stale Bittensor half leaves it unknown too
+    expect(flowOf(input({ bittensor: rd(bitState(), STALE_AFTER_S + 1) })).backing.ratioPpm).toBeNull();
   });
 
   it("zeroSupplyIsNotInfinity", () => {

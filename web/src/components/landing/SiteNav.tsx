@@ -8,7 +8,7 @@ function PageLinks() {
     <>
       <Link href="/#how">How it works</Link>
       <Link href="/faq/">FAQ</Link>
-      <Link href="/#secure">Security</Link>
+      <Link href="/security/">Security</Link>
       <a href={SITE_LINKS.docs} target="_blank" rel="noopener noreferrer">
         Docs
       </a>

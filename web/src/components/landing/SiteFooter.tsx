@@ -23,8 +23,9 @@ export function SiteFooter() {
           <a href={SITE_LINKS.github} target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
+          <Link href="/security/">Security</Link>
           <a href={SITE_LINKS.security} target="_blank" rel="noopener noreferrer">
-            Security
+            Report a vulnerability
           </a>
         </div>
       </div>

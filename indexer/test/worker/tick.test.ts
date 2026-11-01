@@ -7,7 +7,7 @@ import { catchingUpChains } from "../../src/tick.ts";
 import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog } from "./fixtures.ts";
-import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, tickWorld } from "./tick-world.ts";
+import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, type TickWorld, tickWorld } from "./tick-world.ts";
 
 const db = env.DB;
 
@@ -381,41 +381,99 @@ describe("role wallets' code (keys.delegated)", () => {
 });
 
 describe("the keepers' and admin keys' transactions (keys.unexplained_tx), through the tick", () => {
-  it("raises nothing for the keeper's roll whose log settles on a tick that reads its count from an older head (2026-10-31)", async () => {
+  const k = `nonce_behind:base:${KEEPER}`;
+  const mark = async () => (await rows<{ v: string }>(`SELECT v FROM meta WHERE k = '${k}'`))[0]?.v;
+  const keeperRow = async () => (await rows<{ baseline: number; seen: number; nonce: number }>(`SELECT baseline, seen, nonce FROM nonces WHERE chain = 'base' AND address = '${KEEPER}'`))[0];
+  /** a world whose keeper is watched from its count, `count` (counts are read from the second tick: the first reading
+   * names the role holders) */
+  const watching = async (count: bigint) => {
     const w = tickWorld();
-    const k = `nonce_behind:base:${KEEPER}`;
-    const meta = async () => (await rows<{ v: string }>(`SELECT v FROM meta WHERE k = '${k}'`))[0]?.v;
-    const keeperRow = async () => (await rows<{ baseline: number; seen: number; nonce: number }>(`SELECT baseline, seen, nonce FROM nonces WHERE chain = 'base' AND address = '${KEEPER}'`))[0];
-    w.state.nonces.base[KEEPER] = 11n;
-    // counts are read from the second tick (the first reading names the role holders)
+    w.state.nonces.base[KEEPER] = count;
     await w.tick();
     w.advance();
     await w.tick();
+    return w;
+  };
+  /** the keeper's hourly empty roll, at the head now (settled 30 blocks on: the next tick), with its real nonce */
+  const roll = (w: TickWorld, nonce: number) => {
+    const l = rawLog({ address: w.cfg.deployment.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 7n }, block: w.specs.base.head, logIndex: 0, txHash: h(`the roll ${nonce}`) });
+    w.txNonces[l.transactionHash] = nonce;
+    w.addLogs("base", [l]);
+    return l;
+  };
+  const nothingRaised = async (w: TickWorld) => {
+    expect((await alertKeys()).filter((a) => a.startsWith("keys."))).toEqual([]);
+    expect(w.sent.filter((m) => `${m.subject}\n${m.text}`.includes("logs don't explain"))).toEqual([]);
+  };
+
+  it("P1: raises nothing for the keeper's roll counted at the head, its log settling on a tick whose count is from before it (2026-10-31)", async () => {
+    const w = await watching(11n);
     expect(await keeperRow()).toEqual({ baseline: 11, seen: 0, nonce: 11 });
-    // the hourly empty roll, at the head: counted (12), its log not settled yet
+    // the roll (nonce 11), at the head: counted (12), its log not settled yet
     w.advance();
-    const roll = rawLog({ address: w.cfg.deployment.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 7n }, block: w.specs.base.head, logIndex: 0, txHash: h("the roll") });
-    w.addLogs("base", [roll]);
+    const l = roll(w, 11);
     w.state.nonces.base[KEEPER] = 12n;
     await w.tick();
-    // its log settles on a tick whose count a lagging node answers from before it
+    // its log settles on a tick whose count a lagging node answers from before it: judged by the 12 already read
     w.advance();
     w.state.nonces.base[KEEPER] = 11n;
     await w.tick();
-    expect(await rows(`SELECT hash FROM txs WHERE hash = '${roll.transactionHash}'`)).toHaveLength(1);
-    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 11 });
-    expect(await meta()).toBe("1");
+    expect(await rows(`SELECT nonce FROM txs WHERE hash = '${l.transactionHash}'`)).toEqual([{ nonce: 11 }]);
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
+    expect(await mark()).toBe("1");
     // the count catches up
     w.advance();
     w.state.nonces.base[KEEPER] = 12n;
     await w.tick();
     expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
-    expect(await meta()).toBe("");
+    expect(await mark()).toBe("");
     // past the grace: nothing raised, nothing sent
     w.advance(16);
     await w.tick();
-    expect((await alertKeys()).filter((a) => a.startsWith("keys."))).toEqual([]);
-    expect(w.sent.filter((m) => `${m.subject}\n${m.text}`.includes("logs don't explain"))).toEqual([]);
+    await nothingRaised(w);
+  });
+
+  it("P2: the roll's own nonce proves a count stale when no tick counted it at the head", async () => {
+    const w = await watching(11n);
+    // the roll lands and settles with every count from before it (11)
+    w.advance();
+    roll(w, 11);
+    await w.tick();
+    w.advance();
+    await w.tick();
+    // nonce 11 settled: the count is at least 12
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
+    expect(await mark()).toBe("1");
+    w.advance();
+    w.state.nonces.base[KEEPER] = 12n;
+    await w.tick();
+    expect(await mark()).toBe("");
+    w.advance(16);
+    await w.tick();
+    await nothingRaised(w);
+  });
+
+  it("W1: a first watch whose count held the roll not yet settled starts again when it settles, so a transaction no log explains pages", async () => {
+    const w = tickWorld();
+    await w.tick();
+    // first watched at 12, which already holds the roll (nonce 11) whose log hasn't settled
+    w.advance();
+    roll(w, 11);
+    w.state.nonces.base[KEEPER] = 12n;
+    await w.tick();
+    expect(await keeperRow()).toEqual({ baseline: 12, seen: 0, nonce: 12 });
+    // it settles: counted twice, so the baseline drops at once
+    w.advance();
+    await w.tick();
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
+    expect(await mark()).toBeUndefined();
+    // a transaction three minutes on that no log explains: the keeper's warning after the grace
+    w.advance(2);
+    w.state.nonces.base[KEEPER] = 13n;
+    await w.tick();
+    w.advance(16);
+    await w.tick();
+    expect((await alertKeys()).filter((a) => a.startsWith("keys."))).toEqual([`keys.keeper_unexplained_tx:base:${KEEPER}:13`]);
   });
 });
 

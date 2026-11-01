@@ -52,10 +52,18 @@ export function tickWorld(o: { over?: Record<string, unknown>; heads?: { base: b
   const { specs, net } = world;
   specs.base.logs = [];
   specs.bittensor.logs = [];
+  /** a transaction's real nonce, by hash (the keys rule's floor reads it); 1 for any other */
+  const txNonces: Record<Hex, number> = {};
   for (const c of ["base", "bittensor"] as const) {
     specs[c].calls = {
       ...specs[c].calls,
-      eth_getTransactionByHash: ([hash]) => ({ hash, from: KEEPER, to: c === "base" ? cfg.deployment.frontDoor : cfg.deployment.vault, input: "0x12345678", nonce: "0x1" }),
+      eth_getTransactionByHash: ([hash]) => ({
+        hash,
+        from: KEEPER,
+        to: c === "base" ? cfg.deployment.frontDoor : cfg.deployment.vault,
+        input: "0x12345678",
+        nonce: `0x${(txNonces[String(hash).toLowerCase() as Hex] ?? 1).toString(16)}`,
+      }),
     };
   }
   const clock = { ms: (T0 + 30) * 1000 };
@@ -81,6 +89,7 @@ export function tickWorld(o: { over?: Record<string, unknown>; heads?: { base: b
     net,
     sent,
     clock,
+    txNonces,
     fail(f: typeof failing) {
       failing = f;
     },

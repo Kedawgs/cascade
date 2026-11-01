@@ -91,6 +91,15 @@ describe("parseConfig", () => {
     expect(refused(withVars({ THRESHOLDS_SECRET: "{depegBps:" })).message).toContain("THRESHOLDS_SECRET");
   });
 
+  it("refuses a nonceBehindTicks that a minute apart reaches unexplainedTxGraceS (a count read too high would page before it is taken back)", () => {
+    expect(DEFAULTS.nonceBehindTicks * 60).toBeLessThan(DEFAULTS.unexplainedTxGraceS);
+    expect(parseConfig(withVars({ THRESHOLDS: '{"nonceBehindTicks":14}' })).thresholds.nonceBehindTicks).toBe(14);
+    expect(refused(withVars({ THRESHOLDS: '{"nonceBehindTicks":15}' })).message).toContain("nonceBehindTicks");
+    expect(refused(withVars({ THRESHOLDS: '{"nonceBehindTicks":5}', THRESHOLDS_SECRET: '{"unexplainedTxGraceS":300}' })).message).toContain("unexplainedTxGraceS");
+    // 1 or less holds nothing: any grace goes
+    expect(parseConfig(withVars({ THRESHOLDS: '{"nonceBehindTicks":1,"unexplainedTxGraceS":0}' })).thresholds.unexplainedTxGraceS).toBe(0);
+  });
+
   it("never echoes a THRESHOLDS secret that isn't JSON", () => {
     const e = refused(withVars({ THRESHOLDS_SECRET: '{"depegBps": 777 oops' }));
     expect(e.message).not.toContain("777");

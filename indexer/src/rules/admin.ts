@@ -166,14 +166,17 @@ export const keysDelegated: Rule = {
 
 const sameRoles = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 const keeperOnly = (roles: readonly string[]) => roles.every((r) => r.endsWith(".keeper"));
+/** The meta mark counting a watched address's count readings in a row that were provably stale. */
+const behindKey = (chain: ChainName, address: Hex) => `nonce_behind:${chain}:${address}`;
 
 /** keys.unexplained_tx (critical: an address holding an owner, pending-owner or guardian role) and
  * keys.keeper_unexplained_tx (warning: an address holding only the keeper role): the address's count
  * (an account's transaction count, or a Safe's nonce()) is ahead of the transactions Cascade's logs
  * explain, and has been for unexplainedTxGraceS. The excess is then absorbed, so each one is reported
- * once. A count behind the logs is a stale read, not a start: the baseline is kept until it has been behind
- * for nonceBehindTicks in a row (meta nonce_behind:{chain}:{address}). A newly watched address starts at its
- * current count. Writes the watched rows that changed. */
+ * once. A count read below what is already known of it (provably from an older head) is judged by what is
+ * known, for at most nonceBehindTicks readings in a row (meta nonce_behind:{chain}:{address}); a current count
+ * behind what the logs explain is a new start at once. A newly watched address starts at its current count.
+ * Writes the watched rows that changed. */
 export const keys: Rule = {
   name: "keys",
   raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"],
@@ -187,9 +190,12 @@ export const keys: Rule = {
         ? holders.filter((h) => h.chain === chain)
         : ctx.nonces.filter((r) => r.chain === chain && r.roles.length > 0).map((r) => ({ chain, address: lower(r.address), roles: r.roles }));
       const counted = new Set(now.map((h) => h.address));
-      // addresses that hold no role any more: stop watching
+      // addresses that hold no role any more: stop watching (and drop a stale-read mark, which would outlive the watch)
       for (const r of ctx.nonces) {
-        if (r.chain === chain && r.roles.length > 0 && !counted.has(lower(r.address))) ctx.writes.nonces.push({ ...r, roles: [] });
+        if (r.chain !== chain || r.roles.length === 0 || counted.has(lower(r.address))) continue;
+        ctx.writes.nonces.push({ ...r, roles: [] });
+        const mark = behindKey(chain, lower(r.address));
+        if (ctx.meta[mark]) ctx.writes.meta.push({ k: mark, v: "" });
       }
       const counts = Object.fromEntries(Object.entries(ctx.snap.nonces[chain]).map(([a, n]) => [lower(a as Hex), n]));
       const safes = Object.fromEntries(Object.entries(ctx.snap.safeNonces).map(([a, n]) => [lower(a as Hex), n]));
@@ -228,28 +234,40 @@ export const keys: Rule = {
         // an account's count moves only for what it sends; a Safe's nonce for what it executes, which
         // arrives as a transaction sent to it (or names it as the caller in an event's args)
         const mine = (t: TxRow) => lower(t.from) === h.address || (isSafe && t.to !== undefined && lower(t.to) === h.address);
-        const seenNow = ctx.newTxs.filter((t) => t.chain === chain && mine(t)).length;
-        const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + seenNow, nonce: count, ...safe };
-        let excess = count - next.baseline - next.seen;
-        // more seen than counted: not comparable yet. The count is read at the head in a request of its own, so a
-        // load-balanced node can answer it from an older head than the logs' settled point, and the next count
-        // catches up. Rebasing at once turned that shortfall into an "unexplained" transaction when the true count
-        // arrived (the keeper's hourly roll, 2026-10-31). So the baseline is kept and the ticks in a row are counted
-        // in meta; only nonceBehindTicks of them (a reorg past the settle depth, or a transaction counted twice: one
-        // not yet settled when the address was first watched) start again from the count, with no alert
-        const behindKey = `nonce_behind:${chain}:${h.address}`;
-        const behind = Number(ctx.meta[behindKey]) || 0;
-        if (excess < 0) {
+        const own = ctx.newTxs.filter((t) => t.chain === chain && mine(t));
+        // The count is read at the head in a request of its own, so a load-balanced node can answer it from an older
+        // head than the logs' (2026-10-31: the keeper's roll settled on such a tick, the rule rebased, and the true
+        // count was then reported as unexplained). What the count is known to be at least: the highest count already
+        // read (counts only rise; a row just turned Safe has no nonce() read yet), one past the nonce of each of the
+        // account's own transactions settled now, and for a Safe, whose nonce() is read in the reading's multicall at
+        // its block, one more than it for each execution logged in a later block.
+        const reading = ctx.snap[chain]?.block;
+        const later = isSafe && reading !== undefined ? own.filter((t) => t.to !== undefined && lower(t.to) === h.address && ctx.logs.inTx(chain, t.hash).some((l) => l.block > reading)).length : 0;
+        const floor = Math.max(isSafe && !row.safe ? 0 : row.nonce, count + later, ...own.flatMap((t) => (!isSafe && lower(t.from) === h.address && t.nonce !== undefined ? [t.nonce + 1] : [])));
+        // A count below that is provably stale: judged by the floor, for at most nonceBehindTicks readings in a row
+        // (more is a reorg past the settle depth: the count is taken). Only this is tolerated: an unbounded floor
+        // would hide for good a transaction reusing a nonce a deep reorg dropped
+        const mark = behindKey(chain, h.address);
+        const behind = Number(ctx.meta[mark]) || 0;
+        let known = count;
+        if (count < floor) {
           const n = behind + 1;
-          if (n >= ctx.t.nonceBehindTicks) {
-            next.baseline = count - next.seen;
-            if (behind > 0) ctx.writes.meta.push({ k: behindKey, v: "" });
-          } else {
-            ctx.writes.meta.push({ k: behindKey, v: String(n) });
+          if (n < ctx.t.nonceBehindTicks) {
+            known = floor;
+            ctx.writes.meta.push({ k: mark, v: String(n) });
+          } else if (behind > 0) {
+            ctx.writes.meta.push({ k: mark, v: "" });
           }
-          excess = 0;
         } else if (behind > 0) {
-          ctx.writes.meta.push({ k: behindKey, v: "" });
+          ctx.writes.meta.push({ k: mark, v: "" });
+        }
+        const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + own.length, nonce: known, ...safe };
+        let excess = known - next.baseline - next.seen;
+        if (excess < 0) {
+          // a current count behind what the logs explain (a transaction counted twice: not settled yet when the address
+          // was first watched; or a reorg): start again from it at once, so nothing unexplained can fill the gap
+          next.baseline = known - next.seen;
+          excess = 0;
         }
         const before = row.nonce - row.baseline - row.seen;
         if (excess > 0 && before <= 0) next.changedAt = ctx.nowS;
@@ -257,9 +275,9 @@ export const keys: Rule = {
           const rule = keeperOnly(h.roles) ? "keys.keeper_unexplained_tx" : "keys.unexplained_tx";
           out.push({
             rule,
-            key: `${rule}:${chain}:${h.address}:${count}`,
+            key: `${rule}:${chain}:${h.address}:${known}`,
             subject: `${excess} transaction${excess === 1 ? "" : "s"} from a Cascade ${keeperOnly(h.roles) ? "keeper" : "admin"} key that Cascade's logs don't explain`,
-            facts: { address: h.address, chain, roles: h.roles.join(", "), count: String(count), unexplained: String(excess), explorer: addressLink(chain, h.address) },
+            facts: { address: h.address, chain, roles: h.roles.join(", "), count: String(known), unexplained: String(excess), explorer: addressLink(chain, h.address) },
           });
           next.baseline += excess;
         }

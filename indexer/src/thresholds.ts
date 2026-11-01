@@ -23,9 +23,10 @@ export const DEFAULTS = {
   unexplainedTxGraceS: 900,
   /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */
   safeUnreadTicks: 30,
-  /** keys.unexplained_tx: ticks in a row an address's count may stay behind what Cascade's logs explain before the
-   * count is taken as the new start (a reorg, a transaction counted twice). Until then it is a count read from an
-   * older head than the logs (a load-balanced node), which catches up, and the baseline is kept */
+  /** keys.unexplained_tx: count readings in a row that may be provably stale (below the highest count read, or below
+   * one past an own settled transaction's nonce: a load-balanced node answering from an older head) and still be
+   * judged by what is known; one more is a reorg past the settle depth, and the count is taken. Must stay under
+   * unexplainedTxGraceS at a reading a minute, so a count read too high is taken back before it can page */
   nonceBehindTicks: 10,
   /** fmtao.unbacked: FM-TAO on Base may exceed the lock by this much */
   fmtaoBackingSlackWei: 10n ** 16n,
@@ -176,12 +177,21 @@ function apply(t: Thresholds, field: string, raw: unknown): void {
   }
 }
 
+/** The tick's cadence (src/crons.ts CRONS.tick, every minute). */
+const TICK_S = 60;
+
 /** The defaults, with the THRESHOLDS var's overrides and then the THRESHOLDS_SECRET secret's (which
  * win). Unknown keys and wrong types are refused, so a typo can't silently leave a default in place. */
 export function mergeThresholds(varJson: unknown, secretJson: unknown): Thresholds {
   const t: Thresholds = { ...DEFAULTS, rules: { off: [...DEFAULTS.rules.off] } };
   apply(t, "THRESHOLDS", varJson);
   apply(t, "THRESHOLDS_SECRET", secretJson);
+  // keys.unexplained_tx judges a provably stale count by a higher one until the nonceBehindTicks-th reading (a tick a
+  // minute) takes the count: a count read too high (a node on a fork) must be taken back before the grace ends, or it
+  // pages. At 1 or less nothing is held, so there is nothing to bound
+  if (t.nonceBehindTicks > 1 && t.nonceBehindTicks * TICK_S >= t.unexplainedTxGraceS) {
+    throw new ConfigError("THRESHOLDS", `nonceBehindTicks (${t.nonceBehindTicks}) at a tick a minute must stay under unexplainedTxGraceS (${t.unexplainedTxGraceS} s)`);
+  }
   return t;
 }
 

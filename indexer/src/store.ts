@@ -70,7 +70,8 @@ export interface NonceRow {
   baseline: number;
   /** transactions seen in Cascade's logs since watching began */
   seen: number;
-  /** the last count read (an account's transaction count, or a Safe's nonce()) */
+  /** the highest count known (an account's transaction count, or a Safe's nonce()): the last read, or, for a read
+   * provably stale (keys.unexplained_tx), what proved it so */
   nonce: number;
   /** since when the count has been ahead of what the logs explain (or when that last began) */
   changedAt: number;

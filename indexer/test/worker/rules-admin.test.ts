@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import { adminEvent, keys, watchedRoles } from "../../src/rules/admin.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
-import { type RuleId, RULES } from "../../src/rules/ids.ts";
+import { RULES } from "../../src/rules/ids.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import type { BaseState, BitState } from "../../src/snapshot.ts";
 import type { NonceRow, TxRow } from "../../src/store.ts";
@@ -229,119 +229,187 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     expect(c.writes.nonces).toEqual([expect.objectContaining({ address: SAFE, safe: true })]);
   });
 
-  // 2026-10-31, the keeper on Base: its hourly empty roll settled in the logs on a tick whose count a load-balanced
-  // node answered from an older head. The count behind what the logs explain was rebased at once, so the next tick's
-  // true count was one "unexplained" transaction, reported after the grace. On an owner or guardian key the same
-  // race pages critical.
+  // The count is read at the head in a request of its own, so a load-balanced node can answer it from an older head
+  // than the logs'. Only a count PROVABLY stale is tolerated: one below what is already known of it (the highest count
+  // read; one past the nonce of each of the account's own settled transactions; for a Safe, one more for each execution
+  // logged after the reading's block), for nonceBehindTicks readings in a row. A current count behind what the logs
+  // explain (a transaction counted twice, a reorg) is a new start at once, so nothing unexplained can fill the gap.
+  const OWNER_ROLES = ["frontDoor.owner", "frontDoor.guardian"] as const;
+  const ownerKey = { owner: OWNER, guardian: OWNER };
+  let owned = 0;
+  /** one of the address's own transactions, settled this tick: fetched (its nonce known), or known from an event's args */
+  const own = (from: Hex, nonce?: number): TxRow => ({ chain: "base", hash: tx(7000 + ++owned), from, ...(nonce === undefined ? {} : { nonce }) });
+  const at11 = (address: Hex, roles: readonly string[] = OWNER_ROLES) => row({ address, roles: [...roles], baseline: 11, seen: 0, nonce: 11 });
+  type Step = { count: number; txs?: TxRow[]; logs?: StoredLog[] };
+  const steady = (n: number, count: number): Step[] => Array.from({ length: n }, () => ({ count }));
+  /** Ticks a minute apart through keys, the rows and meta it writes kept as the tick commits them: the findings as
+   * "t<tick>:<rule>(<unexplained>)", and the address's row and nonce_behind mark at the end. `safe`: each count is the
+   * address's nonce() (a Safe's), read at the reading's block (37,000,300). */
+  function drive(o: { address: Hex; holder: Partial<BaseState>; start?: NonceRow; safe?: boolean; steps: Step[] }) {
+    let rows = o.start ? [o.start] : [];
+    const meta: Record<string, string> = {};
+    const found: string[] = [];
+    o.steps.forEach((s, i) => {
+      const read = { [o.address]: BigInt(s.count) };
+      const c = ctx({ base: o.holder, ...(o.safe ? { safeNonces: read } : { counts: { base: read } }), nonces: rows, newTxs: s.txs ?? [], logs: s.logs, meta: { ...meta }, nowS: NOW + 60 * i });
+      for (const f of keys.run(c)) found.push(`t${i}:${f.rule}(${f.facts.unexplained})`);
+      for (const w of c.writes.nonces) rows = [...rows.filter((r) => r.chain !== w.chain || r.address !== w.address), w];
+      for (const w of c.writes.meta) meta[w.k] = w.v;
+    });
+    return { found, end: rows.find((r) => r.address === o.address), mark: meta[`nonce_behind:base:${o.address}`] ?? "" };
+  }
+
+  // P1, 2026-10-31, the keeper on Base: its hourly roll counted at the head, then its log settling on a tick whose count
+  // a load-balanced node answered from before it. The rule then rebased, and the true count was reported as an
+  // unexplained transaction after the grace; on an owner or guardian key the same race pages critical.
   for (const [who, address, roles, holder] of [
     ["the keeper", KEEPER, ["frontDoor.keeper"], { keeper: KEEPER }],
-    ["an owner and guardian key", OWNER, ["frontDoor.owner", "frontDoor.guardian"], { owner: OWNER, guardian: OWNER }],
+    ["an owner and guardian key", OWNER, OWNER_ROLES, ownerKey],
   ] as const) {
-    it(`tolerates a count read from an older head than the logs (${who}): no rebase, and no alert once it catches up`, () => {
+    it(`P1: a roll counted at the head, then settling on a tick with a count from an older head, is never reported (${who})`, () => {
       const k = `nonce_behind:base:${address}`;
-      const was = row({ address, roles: [...roles], baseline: 0, seen: 11, nonce: 11 });
-      // the roll is seen in the logs; the count is still 11
-      const stale = ctx({ base: holder, counts: { base: { [address]: 11n } }, nonces: [was], newTxs: sent(1, address) });
+      const was = at11(address, roles);
+      // the roll at the head: counted (12), its log not settled yet
+      const fresh = ctx({ base: holder, counts: { base: { [address]: 12n } }, nonces: [was] });
+      expect(keys.run(fresh)).toEqual([]);
+      const ahead = fresh.writes.nonces[0];
+      expect(ahead).toEqual({ ...was, nonce: 12, changedAt: NOW });
+      // its log settles (nonce 11) while the count is from before it (11): judged by the 12 already read, and marked
+      const stale = ctx({ base: holder, counts: { base: { [address]: 11n } }, nonces: [ahead], newTxs: [own(address, 11)], nowS: NOW + 60 });
       expect(keys.run(stale)).toEqual([]);
-      // the baseline is kept (the count isn't comparable yet) and the tick is counted in meta
-      expect(stale.writes.nonces).toEqual([{ ...was, seen: 12 }]);
+      expect(stale.writes.nonces).toEqual([{ ...ahead, seen: 1 }]);
       expect(stale.writes.meta).toEqual([{ k, v: "1" }]);
-      // the next tick's count has caught up: the mark is cleared and nothing is ahead
-      const caughtUp = ctx({ base: holder, counts: { base: { [address]: 12n } }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 60 });
+      // the count catches up: the mark cleared, the row as it was
+      const caughtUp = ctx({ base: holder, counts: { base: { [address]: 12n } }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 120 });
       expect(keys.run(caughtUp)).toEqual([]);
       expect(caughtUp.writes.meta).toEqual([{ k, v: "" }]);
-      expect(caughtUp.writes.nonces).toEqual([{ ...was, seen: 12, nonce: 12 }]);
-      // and past the grace, still nothing
-      const later = ctx({ base: holder, counts: { base: { [address]: 12n } }, nonces: caughtUp.writes.nonces, nowS: NOW + 60 + DEFAULTS.unexplainedTxGraceS });
-      expect(keys.run(later)).toEqual([]);
-      expect(later.writes.nonces).toEqual([]);
-      expect(later.writes.meta).toEqual([]);
+      expect(caughtUp.writes.nonces).toEqual([]);
+      // the whole sequence, run on past the grace: nothing, ever
+      expect(drive({ address, holder, start: was, steps: [{ count: 12 }, { count: 11, txs: [own(address, 11)] }, ...steady(20, 12)] })).toMatchObject({
+        found: [],
+        end: { baseline: 11, seen: 1, nonce: 12 },
+        mark: "",
+      });
     });
   }
 
-  it("still finds a real unexplained transaction after a stale count, as one, and critical for an admin key, after the grace", () => {
-    const k = `nonce_behind:base:${ADMIN}`;
-    // a seen transaction, with the count from an older head
-    const stale = ctx({ base: admin, counts: { base: { [ADMIN]: 50n } }, nonces: [row({ address: ADMIN })], newTxs: sent(1, ADMIN) });
-    expect(keys.run(stale)).toEqual([]);
-    expect(stale.writes.nonces[0]).toMatchObject({ baseline: 50, seen: 1, nonce: 50 });
-    // the count catches up, and one more transaction that no log explains
-    const ahead = ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 60 });
-    expect(keys.run(ahead)).toEqual([]);
-    expect(ahead.writes.meta).toEqual([{ k, v: "" }]);
-    const waiting = ahead.writes.nonces[0];
-    expect(waiting).toMatchObject({ baseline: 50, seen: 1, nonce: 52, changedAt: NOW + 60 });
-    expect(keys.run(ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: [waiting], nowS: NOW + 60 + 899 }))).toEqual([]);
-    const due = ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: [waiting], nowS: NOW + 60 + 900 });
-    const [f, ...rest] = keys.run(due);
-    expect(rest).toEqual([]);
-    expect(f).toMatchObject({ rule: "keys.unexplained_tx", key: `keys.unexplained_tx:base:${ADMIN}:52` });
-    expect(RULES[f.rule as RuleId].tier).toBe("critical");
-    expect(f.facts.unexplained).toBe("1");
-    expect(due.writes.nonces[0].baseline).toBe(51);
+  it("P2 and P4: a settled transaction's own nonce proves a count stale with no fresher count read; a node a few readings behind is waited for", () => {
+    // never counted at the head: its nonce (11) says the count is at least 12
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 11, txs: [own(OWNER, 11)] }, ...steady(20, 12)] })).toMatchObject({
+      found: [],
+      end: { baseline: 11, seen: 1, nonce: 12 },
+      mark: "",
+    });
+    // behind for 4 readings after the settle
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, { count: 11, txs: [own(OWNER, 11)] }, ...steady(3, 11), ...steady(20, 12)] }).found).toEqual([]);
   });
 
-  it("starts again from the count only once it has been behind for nonceBehindTicks ticks in a row (a reorg), with no alert", () => {
-    const k = `nonce_behind:base:${ADMIN}`;
-    const ticks = DEFAULTS.nonceBehindTicks;
-    expect(ticks).toBeGreaterThan(1);
-    // three seen, one counted, and the count never catches up
-    const first = ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [row({ address: ADMIN })], newTxs: sent(3, ADMIN) });
-    expect(keys.run(first)).toEqual([]);
-    expect(first.writes.meta).toEqual([{ k, v: "1" }]);
-    const behind = first.writes.nonces[0];
-    expect(behind).toMatchObject({ baseline: 50, seen: 3, nonce: 51 });
-    const tick = (n: number) => ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [behind], meta: { [k]: String(n - 1) }, nowS: NOW + 60 * (n - 1) });
-    for (let n = 2; n < ticks; n++) {
-      const c = tick(n);
-      expect(keys.run(c)).toEqual([]);
-      // the row is as it was (nothing to write) and the mark counts on
-      expect(c.writes.nonces).toEqual([]);
-      expect(c.writes.meta).toEqual([{ k, v: String(n) }]);
+  it("A2: a stale read after an unexplained transaction neither hides it nor restarts the grace: critical at 15 minutes", () => {
+    const r = drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, ...steady(5, 12), { count: 11 }, ...steady(20, 12)] });
+    expect(r.found).toEqual(["t15:keys.unexplained_tx(1)"]);
+    expect(RULES["keys.unexplained_tx"].tier).toBe("critical");
+    // A1: one sent while the count is stale is reported once the count catches up, as one
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, { count: 11, txs: [own(OWNER, 11)] }, ...steady(20, 13)] }).found).toEqual([
+      "t17:keys.unexplained_tx(1)",
+    ]);
+  });
+
+  it("W1: a first watch whose count held a transaction not yet settled starts again at once when it settles: one sent 3 minutes later is reported", () => {
+    // first watched at 12, which already holds nonce 11 (its log not settled); it settles, counted twice
+    const watched = ctx({ base: ownerKey, counts: { base: { [OWNER]: 12n } } });
+    keys.run(watched);
+    const settles = ctx({ base: ownerKey, counts: { base: { [OWNER]: 12n } }, nonces: watched.writes.nonces, newTxs: [own(OWNER, 11)], nowS: NOW + 60 });
+    expect(keys.run(settles)).toEqual([]);
+    expect(settles.writes.nonces[0]).toMatchObject({ baseline: 11, seen: 1, nonce: 12 });
+    expect(settles.writes.meta).toEqual([]);
+    const r = drive({ address: OWNER, holder: ownerKey, steps: [{ count: 12 }, { count: 12, txs: [own(OWNER, 11)] }, { count: 12 }, { count: 13 }, ...steady(20, 13)] });
+    expect(r.found).toEqual(["t18:keys.unexplained_tx(1)"]);
+  });
+
+  it("W3: a busy key's own transactions keep no gap open: one sent 40 minutes after a first watch's double count is reported", () => {
+    const steps: Step[] = [{ count: 12 }, { count: 12, txs: [own(OWNER, 11)] }];
+    let n = 12;
+    // a transaction every 6 minutes, counted at the head and settled 2 minutes later
+    for (let k = 0; k < 7; k++) {
+      n++;
+      steps.push({ count: n }, { count: n }, { count: n, txs: [own(OWNER, n - 1)] }, ...steady(3, n));
     }
-    // the last of them: started again from the count, the mark cleared
-    const last = tick(ticks);
-    expect(keys.run(last)).toEqual([]);
-    expect(last.writes.meta).toEqual([{ k, v: "" }]);
-    const rebased = last.writes.nonces[0];
-    expect(rebased).toMatchObject({ baseline: 48, seen: 3, nonce: 51 });
-    // quiet from there on, past the grace too
-    const after = ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [rebased], nowS: NOW + 60 * ticks + DEFAULTS.unexplainedTxGraceS });
-    expect(keys.run(after)).toEqual([]);
-    expect(after.writes.nonces).toEqual([]);
-    expect(after.writes.meta).toEqual([]);
+    steps.push(...steady(20, n + 1));
+    expect(drive({ address: OWNER, holder: ownerKey, steps }).found).toEqual(["t59:keys.unexplained_tx(1)"]);
   });
 
-  it("tolerates a Safe's nonce() read from an older block than the logs the same way, and still finds an execution no log explains", () => {
+  it("R2: a reorg past the settle depth that drops a settled transaction is the new start after nonceBehindTicks readings: a later one is reported", () => {
+    expect(DEFAULTS.nonceBehindTicks).toBe(10);
+    const r = drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, { count: 12, txs: [own(OWNER, 11)] }, ...steady(12, 11), ...steady(20, 12)] });
+    expect(r.found).toEqual(["t29:keys.unexplained_tx(1)"]);
+  });
+
+  it("takes back a count read one too high (a node on a fork) before it can page: nonceBehindTicks readings a minute apart end inside the grace", () => {
+    expect(DEFAULTS.nonceBehindTicks * 60).toBeLessThan(DEFAULTS.unexplainedTxGraceS);
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, ...steady(25, 11)] })).toMatchObject({ found: [], end: { baseline: 11, nonce: 11 }, mark: "" });
+  });
+
+  // Known residuals, pinned as documented (README, "When an email arrives")
+
+  it("R1 (a gap): a reorg past the settle depth whose dropped transaction's nonce is reused within nonceBehindTicks readings isn't reported here", () => {
+    // the settled nonce-11 transaction vanishes (indexer.reorg warns of its log); an attacker's reuses nonce 11 five minutes on
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, { count: 12, txs: [own(OWNER, 11)] }, ...steady(5, 11), ...steady(20, 12)] })).toMatchObject({
+      found: [],
+      mark: "",
+    });
+  });
+
+  it("P3 (errs safe): an own transaction known only from an event's args (no nonce), settling on a stale tick before any fresh count, is reported", () => {
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 11, txs: [own(OWNER)] }, ...steady(20, 12)] }).found).toEqual(["t16:keys.unexplained_tx(1)"]);
+  });
+
+  it("P5 (errs safe): a node stuck behind past nonceBehindTicks readings ends the tolerance, and its catching up later is reported", () => {
+    expect(drive({ address: OWNER, holder: ownerKey, start: at11(OWNER), steps: [{ count: 12 }, { count: 11, txs: [own(OWNER, 11)] }, ...steady(11, 11), ...steady(20, 12)] }).found).toEqual([
+      "t28:keys.unexplained_tx(1)",
+    ]);
+  });
+
+  it("judges a Safe's nonce() the same way: a read below the last is stale, and so is one from a block before an execution just logged", () => {
     const k = `nonce_behind:base:${SAFE}`;
     const safeRow: NonceRow = { ...row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 }), safe: true };
     const owner = { owner: SAFE };
-    // an execution seen in the logs, the nonce() still 3
-    const stale = ctx({ base: owner, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], newTxs: sent(1, SIGNER, { to: SAFE }) });
-    expect(keys.run(stale)).toEqual([]);
-    expect(stale.writes.nonces).toEqual([{ ...safeRow, seen: 1 }]);
-    expect(stale.writes.meta).toEqual([{ k, v: "1" }]);
-    // caught up: the mark cleared, nothing ahead, quiet past the grace
-    const caughtUp = ctx({ base: owner, safeNonces: { [SAFE]: 4n }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 60 });
-    expect(keys.run(caughtUp)).toEqual([]);
-    expect(caughtUp.writes.meta).toEqual([{ k, v: "" }]);
-    const settled = caughtUp.writes.nonces[0];
-    expect(settled).toMatchObject({ baseline: 3, seen: 1, nonce: 4, safe: true });
-    expect(keys.run(ctx({ base: owner, safeNonces: { [SAFE]: 4n }, nonces: [settled], nowS: NOW + 60 + DEFAULTS.unexplainedTxGraceS }))).toEqual([]);
-    // an execution with no log: critical after the grace
-    const ahead = ctx({ base: owner, safeNonces: { [SAFE]: 5n }, nonces: [settled], nowS: NOW + 120 });
-    expect(keys.run(ahead)).toEqual([]);
-    const waiting = ahead.writes.nonces[0];
-    expect(waiting).toMatchObject({ changedAt: NOW + 120 });
-    const [f] = keys.run(ctx({ base: owner, safeNonces: { [SAFE]: 5n }, nonces: [waiting], nowS: NOW + 120 + DEFAULTS.unexplainedTxGraceS }));
-    expect(f).toMatchObject({ rule: "keys.unexplained_tx", key: `keys.unexplained_tx:base:${SAFE}:5` });
-    expect(f.facts.unexplained).toBe("1");
+    /** an execution: a signer's transaction to the Safe, its Cascade log at `block` (the reading is at 37,000,300) */
+    const exec = (block: bigint) => {
+      const t: TxRow = { ...own(SIGNER), to: SAFE };
+      return { txs: [t], logs: [slog({ contract: "frontDoor", event: "LimitSet", chain: "base", address: FD, block, txHash: t.hash })] };
+    };
+    // read at 4, then the execution settling with a read from before it (3): judged by the 4 already read
+    expect(drive({ address: SAFE, holder: owner, start: safeRow, safe: true, steps: [{ count: 4 }, { count: 3, ...exec(37_000_100n) }, ...steady(20, 4)] })).toMatchObject({
+      found: [],
+      end: { baseline: 3, seen: 1, nonce: 4, safe: true },
+      mark: "",
+    });
+    // never read at 4: the reading's block (37,000,300) is before the execution's log (37,000,301), so its 3 can't hold it
+    const later = exec(37_000_301n);
+    const c = ctx({ base: owner, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], newTxs: later.txs, logs: later.logs });
+    expect(keys.run(c)).toEqual([]);
+    expect(c.writes.nonces).toEqual([{ ...safeRow, seen: 1, nonce: 4 }]);
+    expect(c.writes.meta).toEqual([{ k, v: "1" }]);
+    expect(drive({ address: SAFE, holder: owner, start: safeRow, safe: true, steps: [{ count: 3, ...exec(37_000_301n) }, ...steady(20, 4)] }).found).toEqual([]);
+    // an execution logged at the reading's block is in its nonce(): a read short of it is a new start at once (counted twice)
+    const at = exec(37_000_300n);
+    const current = ctx({ base: owner, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], newTxs: at.txs, logs: at.logs });
+    expect(keys.run(current)).toEqual([]);
+    expect(current.writes.nonces[0]).toMatchObject({ baseline: 2, seen: 1, nonce: 3 });
+    expect(current.writes.meta).toEqual([]);
+    // an execution no log explains still pages critical after the grace
+    expect(drive({ address: SAFE, holder: owner, start: safeRow, safe: true, steps: [{ count: 4 }, ...steady(20, 4)] }).found).toEqual(["t15:keys.unexplained_tx(1)"]);
   });
 
-  it("stops watching an address that holds no role any more, and waits for a count", () => {
+  it("stops watching an address that holds no role any more (its nonce_behind mark cleared), and waits for a count", () => {
     const gone = ctx({ base: { owner: OWNER }, counts: { base: { [OWNER]: 1n } }, nonces: [row({ address: ADMIN }), row({ address: OWNER, roles: ["frontDoor.owner"], baseline: 1, nonce: 1 })] });
     expect(keys.run(gone)).toEqual([]);
     expect(gone.writes.nonces).toEqual([row({ address: ADMIN, roles: [] })]);
+    expect(gone.writes.meta).toEqual([]);
+    const k = `nonce_behind:base:${ADMIN}`;
+    const marked = ctx({ base: { owner: OWNER }, counts: { base: { [OWNER]: 1n } }, nonces: [row({ address: ADMIN }), row({ address: OWNER, roles: ["frontDoor.owner"], baseline: 1, nonce: 1 })], meta: { [k]: "3" } });
+    expect(keys.run(marked)).toEqual([]);
+    expect(marked.writes.meta).toEqual([{ k, v: "" }]);
     // a new role holder with no count read yet: nothing written until its count is read
     const noCount = ctx({ base: { keeper: KEEPER } });
     expect(keys.run(noCount)).toEqual([]);

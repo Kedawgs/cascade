@@ -309,4 +309,14 @@ export const explorer = {
   /** Every bridge message an address sent, on Chainlink's explorer. */
   ccipAddress: (address: string) => `https://ccip.chain.link/address/${address}`,
   account: (ss58: string) => `https://taostats.io/account/${ss58}`,
+  /** A contract (or any address) on Base. */
+  baseAddress: (addr: string) => `https://basescan.org/address/${addr}`,
+  /** A contract on Bittensor's EVM, on the same explorer as bittensorTx. */
+  bittensorAddress: (addr: string) => `https://evm.taostats.io/address/${addr}`,
+  /** A validator's page on taostats, by its SS58 hotkey (the FAQ links the same pages). */
+  validator: (hotkeySs58: string) => `https://taostats.io/validators/${hotkeySs58}`,
+  /** The bridge lane on Chainlink's CCIP explorer. It has no page per lane, so this is the page of the
+   * Base token pool, which every Base-to-Bittensor transfer of the bridged TAO goes through: its messages
+   * are the lane's traffic. (`ccipAddress` is the same page for any sender.) */
+  ccipLane: (baseTokenPool: string) => `https://ccip.chain.link/address/${baseTokenPool}`,
 };

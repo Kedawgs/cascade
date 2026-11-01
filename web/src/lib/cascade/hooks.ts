@@ -4,7 +4,8 @@ import { keepPreviousData, type Query, type QueryClient, useQuery } from "@tanst
 import type { Address } from "viem";
 import { useNow } from "../client-state";
 import { shownFigure, STATS_KEEP_MS } from "../stats";
-import { isV3 } from "./config";
+import { DEPLOYMENT, isV3 } from "./config";
+import { fetchFlow } from "./flow";
 import { useCascadeData, useSnapshotAt } from "./context";
 import type { Operation } from "./oplog";
 import { type PendingEntry, pendingEntries } from "./pending";
@@ -36,6 +37,7 @@ export const cascadeKeys = {
   withdrawals: (account: string) => ["cascade", account, "withdrawals"] as const,
   openBatch: (account: string) => ["cascade", account, "open-batch"] as const,
   nextBatch: () => ["cascade", "next-batch"] as const,
+  flow: () => ["cascade", "flow"] as const,
   depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
   withdrawalQuote: (account: string, shares: bigint) => ["quote", "withdrawal", account, shares.toString()] as const,
   roundTrip: (taoWei: bigint) => ["quote", "round-trip", taoWei.toString()] as const,
@@ -325,5 +327,18 @@ export function useRoundTrip(taoWei: bigint | null) {
     enabled: amount > 0n,
     placeholderData: keepPreviousData,
     refetchInterval: 60_000,
+  });
+}
+
+/** The monitor's public flow document for the security page (null when it can't be had): every minute
+ * while the tab is visible, and only when the build names an indexer. */
+export function useFlow() {
+  return useQuery({
+    queryKey: cascadeKeys.flow(),
+    queryFn: () => (DEPLOYMENT ? fetchFlow(DEPLOYMENT) : Promise.resolve(null)),
+    enabled: Boolean(DEPLOYMENT?.indexerUrl),
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
 }

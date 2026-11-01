@@ -19,7 +19,7 @@ export interface SeedHalves {
 }
 
 /** The response's body as text, read no further than MAX_SEED_BYTES (whatever Content-Length says). */
-async function bodyWithin(res: Response, limit: number): Promise<string> {
+export async function bodyWithin(res: Response, limit: number): Promise<string> {
   const declared = Number(res.headers.get("content-length") ?? "0");
   if (declared > limit) throw new Error("the seed is too big");
   if (!res.body) {

@@ -10,6 +10,7 @@ import {
   MULTICALL3,
   OFFRAMP,
   ORACLE,
+  QUOTER_V2,
   SAFE,
   STAKING,
   TOKEN_POOL,
@@ -17,7 +18,7 @@ import {
   UNISWAP_POOL,
   VAULT_VIEWS,
 } from "./abi.ts";
-import type { ChainName, Config } from "./config.ts";
+import { type ChainName, type Config, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, UNISWAP_QUOTER as QUOTER } from "./config.ts";
 import { encodePayoutsMessage } from "./crosscheck/payouts.ts";
 import { multicall, newerThan, type Read } from "./multicall.ts";
 import type { Rpc } from "./rpc.ts";
@@ -193,6 +194,12 @@ export interface BaseState {
   /** FM-TAO the front door holds */
   frontDoorTao?: bigint;
   frontDoorEth?: bigint;
+  /** QuoterV2.quoteExactInput(PATH_USDC_TO_TAO, 1_000e6): TAO wei a $1,000 deposit gets (pool fees included) */
+  buyQuote1000?: bigint;
+  /** QuoterV2.quoteExactInput(PATH_TAO_TO_USDC, sellSize): USDC units for `sellSize` TAO wei */
+  sellQuote?: { taoIn: bigint; usdcOut: bigint };
+  /** USDC.balanceOf(wethUsdcPool) */
+  wethUsdcPoolUsdc?: bigint;
   /** FM-TAO's total supply on Base */
   fmTaoSupply?: bigint;
   /** the pools the TWAP oracle reads: `cardinality` is how many observations each keeps (slot0) */
@@ -236,6 +243,8 @@ export interface SnapshotInputs {
   stakeHotkey?: Hex;
   keepers?: { base?: Hex; bittensor?: Hex };
   oracle?: Hex;
+  /** the previous Base reading's oracleValue: a $1,000 sell quote is sized by it (no quote without one) */
+  previousOracleValue?: bigint;
   /** the vault's primary bridge, which quotes the payout fee */
   bitBridge?: Hex;
   /** what the payout fee quote's chunk carries: the lower of the vault's and its bridge's maxMessageValue */
@@ -255,6 +264,7 @@ export const peerIdOf = (chain: bigint, addr: Hex): Hex => keccak256(encodeAbiPa
 
 const lc = (x: unknown) => String(x).toLowerCase() as Hex;
 const RAO_WEI = 10n ** 9n;
+const USDC_UNIT = 10n ** 6n;
 const bucketOf = (v: { tokens: bigint; isEnabled: boolean; capacity: bigint; rate: bigint }): Bucket => ({ tokens: v.tokens, isEnabled: v.isEnabled, capacity: v.capacity, rate: v.rate });
 const state = (n: unknown) => EXECUTION_STATES[Number(n)] ?? String(n);
 
@@ -480,6 +490,13 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
     (v) => (base.oracleValue = v),
     () => (base.oracleReverted = true),
   );
+  // the swap quotes the security page shows: a $1,000 deposit, and $1,000 of TAO (at the last oracle value) sold
+  bp.add({ address: QUOTER, abi: QUOTER_V2, functionName: "quoteExactInput", args: [PATH_USDC_TO_TAO, 1_000n * USDC_UNIT] }, (v: readonly [bigint]) => (base.buyQuote1000 = v[0]));
+  if (i.previousOracleValue !== undefined && i.previousOracleValue > 0n) {
+    const taoIn = (1_000n * USDC_UNIT * 10n ** 18n) / i.previousOracleValue;
+    if (taoIn > 0n) bp.add({ address: QUOTER, abi: QUOTER_V2, functionName: "quoteExactInput", args: [PATH_TAO_TO_USDC, taoIn] }, (v: readonly [bigint]) => (base.sellQuote = { taoIn, usdcOut: v[0] }));
+  }
+  bp.add({ address: t.base.usdc, abi: ERC20, functionName: "balanceOf", args: [t.base.wethUsdcPool] }, (v) => (base.wethUsdcPoolUsdc = v));
   for (const u of i.payoutUsers.slice(0, 50)) {
     fd("claimable", (v) => (base.claimable[u] = v), [u]);
     fd("deliveryOf", (v) => (base.deliveryOf[u] = { minUsdcPerTao: v[0], deadline: Number(v[1]), destination: Number(v[2]) }), [u]);

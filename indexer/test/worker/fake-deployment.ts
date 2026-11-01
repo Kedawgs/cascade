@@ -1,6 +1,6 @@
 import { decodeAbiParameters, type Hex } from "viem";
-import { ADMIN_VIEWS, ALPHA_VAULT, BRIDGE_VIEWS, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, SAFE, STAKING, TOKEN_POOL, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
-import type { Config } from "../../src/config.ts";
+import { ADMIN_VIEWS, ALPHA_VAULT, BRIDGE_VIEWS, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, QUOTER_V2, SAFE, STAKING, TOKEN_POOL, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
+import { type Config, PATH_USDC_TO_TAO, UNISWAP_QUOTER } from "../../src/config.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
 import {
   DELEGATES_PREFIX,
@@ -133,6 +133,11 @@ export function deploymentState(cfg: Config) {
       /** the Base pool's buckets for the Bittensor lane */
       lane: { inbound: bucket(5000n), outbound: bucket(5000n) },
       oracleValue: 400_000_000n,
+      /** QuoterV2: TAO wei a $1,000 deposit gets; USDC units per TAO a sale gets (the sale's amountIn is recorded in `asked.quoterIn`) */
+      buyQuote: 2_450n * 10n ** 15n,
+      sellUsdcPerTao: 395_000_000n,
+      /** USDC.balanceOf(wethUsdcPool) */
+      wethUsdcPoolUsdc: 12_000_000n * 10n ** 6n,
       keeperBalance: 10n ** 17n,
       claimable: {} as Record<Hex, bigint>,
       deliveryOf: {} as Record<Hex, [bigint, bigint, number]>,
@@ -145,7 +150,7 @@ export function deploymentState(cfg: Config) {
     /** eth_getTransactionCount per chain and address */
     nonces: { base: {} as Record<Hex, bigint>, bittensor: {} as Record<Hex, bigint> },
     /** what the readings asked of the views that take arguments */
-    asked: { bucketSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number; amount: bigint; sum: bigint }[] },
+    asked: { quoterIn: [] as bigint[], bucketSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number; amount: bigint; sum: bigint }[] },
   };
 }
 
@@ -219,6 +224,17 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
           [t.base.fmTao]: {
             abi: ERC20,
             fns: { totalSupply: v("fmTao", "totalSupply", () => b.fmTaoSupply), balanceOf: ([a]) => (lc(a) === d.frontDoor ? b.frontDoorTao : lc(a) === t.base.taoWethPool ? b.taoWeth.tao : 0n) },
+          },
+          [t.base.usdc]: { abi: ERC20, fns: { balanceOf: v("base", "usdc.balanceOf", ([a]) => (lc(a) === t.base.wethUsdcPool ? b.wethUsdcPoolUsdc : 0n)) } },
+          [UNISWAP_QUOTER]: {
+            abi: QUOTER_V2,
+            fns: {
+              quoteExactInput: v("base", "quoter", ([path, amountIn]) => {
+                state.asked.quoterIn.push(amountIn as bigint);
+                const out = lc(path) === lc(PATH_USDC_TO_TAO) ? b.buyQuote : ((amountIn as bigint) * b.sellUsdcPerTao) / 10n ** 18n;
+                return [out, [0n], [0], 150_000n];
+              }),
+            },
           },
           [t.base.taoWethPool]: { abi: UNISWAP_POOL, fns: { slot0: () => b.taoWeth.slot0, liquidity: () => b.taoWeth.liquidity, token0: () => b.taoWeth.token0 } },
           [t.base.wethUsdcPool]: { abi: UNISWAP_POOL, fns: { slot0: () => b.wethUsdc.slot0, liquidity: () => b.wethUsdc.liquidity, token0: () => b.wethUsdc.token0 } },

@@ -38,6 +38,12 @@ export interface Deployment {
   batchMaxWaitS: number;
 }
 
+/** Uniswap v3's QuoterV2 on Base, and the two swap paths the site uses (web/src/lib/cascade/config.ts: the
+ * quote-paths test keeps them equal). USDC -0.05%-> WETH -0.3%-> TAO, and back. */
+export const UNISWAP_QUOTER = "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a" as Hex;
+export const PATH_USDC_TO_TAO = "0x833589fcd6edb6e08f4c7c32d4f71b54bda029130001f44200000000000000000000000000000000000006000bb8f3081494b87e8d5fb7960f066e931d1d0e6e3d67" as Hex;
+export const PATH_TAO_TO_USDC = "0xf3081494b87e8d5fb7960f066e931d1d0e6e3d67000bb842000000000000000000000000000000000000060001f4833589fcd6edb6e08f4c7c32d4f71b54bda02913" as Hex;
+
 /** Public contracts the monitor reads but doesn't scan. */
 export interface Tokens {
   /** Multicall3, at the same address on both chains */

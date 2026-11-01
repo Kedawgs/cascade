@@ -36,7 +36,10 @@ The reader is a depositor or would-be depositor: a crypto user on Base who will 
        pause, shown against the Backing step (my call: it isn't our contract, but it stands behind the money).
 
      The monitor's reading has `paused`, `pendingOwner`, `pendingGuardian` and ForeverMoney's `alpha.*` fields
-     today; reading the three proposal times means adding them to the monitor's per-minute call (an indexer change).
+     today. The contract notices come from the monitor's stored contract events (`GuardianProposed`,
+     `BridgeProposed`, `FrontDoorProposed`, `OwnershipTransferStarted`, `Paused` and their cancel/activate/accept/
+     unpause counterparts), which give the earliest time and the transaction; no per-minute call is added for them
+     (amended 2026-11-01, plan Task 1).
      v3.2 replaces the registries with its scheduler (see "Ready for v3.2").
    - **A check isn't passing:** amber, "Conditions aren't optimal right now", plus one plain sentence on what is
      affected (for example: the bridge has no room until it refills, so new deposits wait longer to cross; your
@@ -120,6 +123,11 @@ minimum-liquidity floor becomes an amber condition (deliveries wait while the po
 - **It returns facts, not judgements:** the numbers with their readings' blocks and times; the in-flight message
   count; the contract notices (kind, the earliest effect time where there is one, the contract); and the explorer
   addresses. The amber conditions above may be computed on the page or in the endpoint, but only from these facts.
+- **The swap figure is a quoted cost.** "A $1,000 deposit costs about X%" is a Uniswap QuoterV2 quote (the site's
+  quoter and path), added to the monitor's Base reading (`buyQuote1000`; `sellQuote` for $1,000 of TAO sold, sized
+  at the previous reading's `oracleValue`; `wethUsdcPoolUsdc`, the USDC the WETH/USDC pool holds). It includes pool
+  fees and price movement, which an in-range price-impact estimate would understate in thin pools (amended
+  2026-11-01, plan Task 1).
 - **Dollar figures** (pool depth, the $1,000 example) are priced with the front door's own 30-minute average
   (`oracleValue`, the TWAP the contracts use), not the spot price, and show "–" when it reverted or is stale
   (my call).

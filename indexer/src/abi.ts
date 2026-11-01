@@ -266,6 +266,12 @@ export const ERC20 = parseAbi([
   "function decimals() view returns (uint8)",
 ]);
 
+/** Uniswap v3 QuoterV2. quoteExactInput isn't a view in Solidity (it runs the swap and reverts to read it), but
+ * it answers under eth_call, so it is declared view here to read it through Multicall3. */
+export const QUOTER_V2 = parseAbi([
+  "function quoteExactInput(bytes path, uint256 amountIn) view returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)",
+]);
+
 export const UNISWAP_POOL = parseAbi([
   "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
   "function liquidity() view returns (uint128)",

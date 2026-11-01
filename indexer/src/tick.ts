@@ -417,6 +417,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       stakeHotkey: previous.bittensor?.state.stakeHotkey,
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
       oracle: previous.base?.state.oracle,
+      previousOracleValue: previous.base?.state.oracleValue,
       bitBridge: previous.bittensor?.state.primaryBridge,
       payoutQuoteAmount: quoteAmountOf(previous.bittensor?.state),
       pendingMessages: [...state.pendingMessages, ...pendingFresh].map((m) => ({ messageId: m.messageId, direction: m.direction })),

@@ -233,8 +233,8 @@ export const keys: Rule = {
       for (const h of now) {
         const row = stored.get(`${chain}:${h.address}`);
         const isSafe = safes[h.address] !== undefined;
-        // a row once read as a Safe is judged only by its nonce(): a tick without it (its code misread) is skipped,
-        // counted in meta, and safeUnreadTicks in a row of them is a warning (never skipped silently forever)
+        // a row once read as a Safe is judged only by its nonce(): a tick without it (its code misread) judges nothing
+        // (its own transactions are still counted below), is counted in meta, and safeUnreadTicks in a row of them is a warning (never skipped silently forever)
         const unreadKey = `safe_unread:${chain}:${h.address}`;
         const unread = Number(ctx.meta[unreadKey] || 0);
         if (row?.safe && !isSafe) {

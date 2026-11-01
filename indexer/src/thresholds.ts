@@ -21,7 +21,7 @@ export const DEFAULTS = {
   directCriticalWei: 10n * 10n ** 18n,
   /** keys.unexplained_tx: how long an unexplained transaction may stay unexplained */
   unexplainedTxGraceS: 900,
-  /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */
+  /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (not judged meanwhile; its executions are still counted) */
   safeUnreadTicks: 30,
   /** keys.count_unread: ticks in a row a chain's watched transaction counts may go unread (their batch failing, an RPC
    * rate limit): keys.unexplained_tx judges nothing meanwhile, and keys.delegated, whose code reads ride in the same

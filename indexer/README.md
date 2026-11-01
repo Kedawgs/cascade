@@ -340,8 +340,8 @@ read in a request of its own, so a load-balanced RPC can answer it from an older
 below stays as the defence against that. A count is taken as stale only when that is provable: it is below the
 highest count already read, or below one past the nonce of one of the address's own settled transactions (a
 Safe's: below its reading plus each `execTransaction` to it logged after the reading's block; only
-`execTransaction` moves `nonce()`, a module's call doesn't). A provably stale count is judged by what is known instead for up to
-`nonceBehindTicks` − 1 (9) count readings in a row, and the `nonceBehindTicks`-th (the 10th) takes the count, as a
+`execTransaction` moves `nonce()`, a module's call doesn't). A provably stale count is judged by what is known
+instead for up to `nonceBehindTicks` − 1 (9) count readings in a row, and the `nonceBehindTicks`-th (the 10th) takes the count, as a
 reorg past the settle depth (meta `nonce_behind:<chain>:<address>` counts them). That reading must come before the
 grace ends, so a count read too high is taken back before it can page: a `THRESHOLDS` or `THRESHOLDS_SECRET` that
 would hold longer is clamped to fit, with a warning in the Worker's log (a shorter hold means more false alerts,
@@ -350,7 +350,9 @@ when the address was first watched, after a role change or on a fresh database) 
 transaction no log explains can't hide in the gap. What is left: an own transaction known only from an event's
 arguments (its nonce unknown: a user action such as a deposit sent from an admin key) that settles on a stale tick
 before any fresh count saw it is reported as unexplained, and so is a node's count still behind on the 10th
-reading: both err toward alerting. And a reorg past the settle depth (30 blocks on Base, 10 on Bittensor) that drops
+reading: both err toward alerting. Such a transaction (or any Safe execution) settling while an unexplained one is
+already pending, on a stale or unread tick, can also postpone that alert: it nets the excess to zero until the next
+read restarts the 15-minute grace, so a key that keeps sending them can delay the page, never cancel it. And a reorg past the settle depth (30 blocks on Base, 10 on Bittensor) that drops
 one of the address's settled transactions, followed within those 9 readings by another reusing its nonce, isn't
 reported here. `indexer.reorg` warns of the vanished log, but only within the re-read window (70 blocks on Base,
 400 on Bittensor); a deeper reorg falls to the hourly logs check (`indexer.logs_extra`). When either fires, check

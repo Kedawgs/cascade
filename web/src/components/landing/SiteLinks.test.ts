@@ -21,8 +21,7 @@ describe("SiteNav", () => {
   });
 
   it("reaches staking through the Stake & Earn button alone, not a second plain Stake link", () => {
-    expect(links.filter(([, t]) => t === "Stake")).toHaveLength(0);
-    expect(links.filter(([h, t]) => h === "/stake" && t === "Stake & Earn")).toHaveLength(1);
+    expect(links.filter(([h]) => h === "/stake")).toEqual([["/stake", "Stake & Earn"]]);
   });
 });
 

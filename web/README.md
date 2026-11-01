@@ -103,6 +103,7 @@ errors.
 | `/unstake/` | Unstake tab (TAO back to Base, then claimed as USDC in the same wallet) |
 | `/rewards/` | What the staked TAO has earned |
 | `/activity/` | Deposits or unstakes, one tab at a time (`?tab=unstakes` opens the second); `?deposit=<id>` or `?withdrawal=<id>` opens one receipt trail with its actions (continue, cancel, claim) |
+| `/security/` | Where the money goes, step by step (swap, backing, bridge, vault, validator, and the way back), with the monitor's live readings from `GET /v1/flow` (`security-view.ts`). Needs `NEXT_PUBLIC_CASCADE_INDEXER_URL`: without it every number shows "–" and the page says it can't check |
 | `/deposit/`, `/withdraw/` | The old pages, redirecting to the tabs |
 
 ## How it reads the chains
@@ -131,9 +132,13 @@ for display only (`units.ts`).
   more than the figures they were sent with; each gives way to its record, by id, once the list read from
   the chain holds it. A receipt (`?deposit=` / `?withdrawal=`) picks its record from the same list query
   as the list, so one opened from the list shows at once and the two never read the chain twice.
-- **A first visit's history from the indexer (optional):** with `NEXT_PUBLIC_CASCADE_INDEXER_URL` set
-  to the history indexer's origin (`indexer/`, an https origin and nothing more; unset, nothing below
-  happens), a scan more than a day behind the chain asks the indexer for its two seed pages
+- **The indexer (`NEXT_PUBLIC_CASCADE_INDEXER_URL`, required for a production build):** the history
+  indexer's origin (`indexer/`, an https origin and nothing more). The `/security/` page reads all its
+  numbers from it (`GET /v1/flow`), so a build without it ships a page that can never check; the
+  monitor's approved CSP (`site:approved`) must come from a build that names it (an indexer node test
+  checks every approved page's `connect-src` names it). Activity works without it, as below.
+- **A first visit's history from the indexer:** with `NEXT_PUBLIC_CASCADE_INDEXER_URL` set (unset,
+  nothing below happens), a scan more than a day behind the chain asks the indexer for its two seed pages
   (`indexer.ts`: the deployment's deliveries, stakes and payout chunks, and the account's own deposits
   and redeems, in exactly the form the scan store saves) instead of reading every 1,000-block window
   since the deploy block from the rate-limited archive node. **Nothing from the seed is ever shown as a

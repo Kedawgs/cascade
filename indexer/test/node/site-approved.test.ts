@@ -139,4 +139,31 @@ describe("src/site-approved.ts", () => {
     const env = (readJsonc(pkg("wrangler.jsonc")) as { env: Record<string, { vars: { SITE_PAGES: string[] } }> }).env;
     for (const name of ["production", "test"]) for (const page of env[name].vars.SITE_PAGES) expect(APPROVED_CSP[page]?.length, `${name} ${page}`).toBeGreaterThan(0);
   });
+
+  // The deploy guard: a site built without NEXT_PUBLIC_CASCADE_INDEXER_URL has no indexer in connect-src, so its
+  // /security page can never reach /v1/flow, yet its policies would match the live site exactly. The production
+  // indexer's origin is derived from wrangler.jsonc: the Worker's workers.dev host (<name>-production.<account
+  // subdomain>.workers.dev; the account's subdomain isn't in the repository) or a custom domain routed to it.
+  const wrangler = readJsonc(pkg("wrangler.jsonc")) as { name: string; env: { production: { routes?: (string | { pattern: string; custom_domain?: boolean })[] } } };
+  const customDomains = (wrangler.env.production.routes ?? []).flatMap((r) => (typeof r === "object" && r.custom_domain ? [r.pattern.toLowerCase()] : []));
+  const workersDev = new RegExp(`^${`${wrangler.name}-production`.replace(/[.-]/g, "\\$&")}\\.[a-z0-9-]+\\.workers\\.dev$`);
+  /** The production indexer's https origins a policy's connect-src names. */
+  const indexerOrigins = (policy: string): string[] => {
+    const connect = policy.split(";").map((d) => d.trim().split(/\s+/)).find((d) => d[0].toLowerCase() === "connect-src") ?? [];
+    return connect.slice(1).filter((src) => {
+      const m = /^https:\/\/([a-z0-9.-]+)$/i.exec(src);
+      return !!m && (workersDev.test(m[1].toLowerCase()) || customDomains.includes(m[1].toLowerCase()));
+    });
+  };
+
+  it("was made from a build that names the indexer: every approved policy's connect-src has its https origin", () => {
+    // the check itself: an origin is the production Worker's, over https, and nothing else counts
+    expect(indexerOrigins("default-src 'self'; connect-src 'self' https://mainnet.base.org")).toEqual([]);
+    expect(indexerOrigins("connect-src 'self' https://cascade-indexer-production.acct-1.workers.dev")).toEqual(["https://cascade-indexer-production.acct-1.workers.dev"]);
+    expect(indexerOrigins("connect-src http://cascade-indexer-production.acct-1.workers.dev https://cascade-indexer-test.acct-1.workers.dev https://x.cascade-indexer-production.workers.dev")).toEqual([]);
+    expect(indexerOrigins("default-src https://cascade-indexer-production.acct-1.workers.dev")).toEqual([]);
+    const policies = Object.entries(APPROVED_CSP).flatMap(([page, ps]) => ps.map((p) => [page, p] as const));
+    expect(policies.length).toBeGreaterThan(0);
+    for (const [page, policy] of policies) expect(indexerOrigins(policy), page).toHaveLength(1);
+  });
 });

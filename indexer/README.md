@@ -45,7 +45,7 @@ what the outside uptime check on `/v1/health` is for (deploy step 10).
 | `GET /v1/scan/{vault}` | the site: the deployment-wide half of its scan (cached 30 s, CORS for `SITE_ORIGIN`) |
 | `GET /v1/scan/{vault}/{account}` | the site: one account's half |
 | `GET /v1/status` | the keeper: the hold (opaque ids only), confirmed payout keys, each chain's lag (cached 15 s; `generatedAt` says when it was computed; `HEAD` answers the same without the body) |
-| `GET /v1/flow` | the site's /security page: public chain facts only (each chain's newest reading, bridge messages in flight, proposals and pending changes from the stored events) as JSON v1 (cached 15 s, CORS for `SITE_ORIGIN`, `HEAD` as above; 503 when a chain read or the document can't be built) |
+| `GET /v1/flow` | the site's /security page: public chain facts only (each chain's newest reading, bridge messages in flight, proposals and pending changes from the stored events) as JSON v1 (cached 15 s, CORS for `SITE_ORIGIN`, `HEAD` as above; 503 when D1 can't be read or the document can't be built, both never cached, or when the database holds another deployment than `DEPLOYMENT` or none yet, cached 15 s; a stale or missing chain reading is no 503: its numbers are null and its time says how old it is) |
 | `GET /v1/health` | an uptime checker: 200 while a tick completed in the last 5 minutes and no chain lags past the lag limit; else 503 and why (cached 15 s; `HEAD` answers the same status without the body, for checkers that default to it) |
 
 The vault and account must be lowercase and there must be no query string (one spelling per resource, so the

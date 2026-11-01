@@ -241,7 +241,8 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
   /** one of the address's own transactions, settled this tick: fetched (its nonce known), or known from an event's args */
   const own = (from: Hex, nonce?: number, chain: ChainName = "base"): TxRow => ({ chain, hash: tx(7000 + ++owned), from, ...(nonce === undefined ? {} : { nonce }) });
   const at11 = (address: Hex, roles: readonly string[] = OWNER_ROLES, chain: ChainName = "base") => row({ chain, address, roles: [...roles], baseline: 11, seen: 0, nonce: 11 });
-  type Step = { count: number; txs?: TxRow[]; logs?: StoredLog[] };
+  /** a tick: the count read (none when the tick's count batch failed), and the transactions and logs settled on it */
+  type Step = { count?: number; txs?: TxRow[]; logs?: StoredLog[] };
   const steady = (n: number, count: number): Step[] => Array.from({ length: n }, () => ({ count }));
   /** Ticks a minute apart through keys on `chain` (Base unless given), the rows and meta it writes kept as the tick
    * commits them: the findings as "t<tick>:<rule>(<unexplained>)", and the address's row and nonce_behind mark at the
@@ -253,7 +254,7 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     const meta: Record<string, string> = {};
     const found: string[] = [];
     o.steps.forEach((s, i) => {
-      const read = { [o.address]: BigInt(s.count) };
+      const read = s.count === undefined ? {} : { [o.address]: BigInt(s.count) };
       const c = ctx({
         ...(chain === "base" ? { base: o.holder } : { bit: o.holder }),
         ...(o.safe ? { safeNonces: { [chain]: read } } : { counts: { [chain]: read } }),
@@ -270,9 +271,10 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     return { found, end: rows.find((r) => r.chain === chain && r.address === o.address), mark: meta[`nonce_behind:${chain}:${o.address}`] ?? "" };
   }
 
-  // P1, 2026-10-31, the keeper on Base: its hourly roll counted at the head, then its log settling on a tick whose count
-  // a load-balanced node answered from before it. The rule then rebased, and the true count was reported as an
-  // unexplained transaction after the grace; on an owner or guardian key the same race pages critical.
+  // P1, the keeper on Base: its hourly roll counted at the head, then its log settling on a tick whose count a
+  // load-balanced node answered from before it. Without the floor the rule would rebase, and report the true count as an
+  // unexplained transaction after the grace; on an owner or guardian key the same race would page critical. (Taken at
+  // first for the cause of 2026-10-31's alert; that was a count batch failing on the settle tick, below.)
   for (const [who, address, roles, holder] of [
     ["the keeper", KEEPER, ["frontDoor.keeper"], { keeper: KEEPER }],
     ["an owner and guardian key", OWNER, OWNER_ROLES, ownerKey],
@@ -392,6 +394,37 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     expect(r.end).toMatchObject({ chain: "bittensor", baseline: 12, seen: 1, nonce: 13 });
   });
 
+  // 2026-11-01, the keeper on Base (alerts 13 and 14): the roll's log settled, its transaction fetched, on a tick whose
+  // count batch publicnode answered HTTP 429 (no count, no codes). The rule skipped the address before counting the
+  // tick's own transactions, and a transaction is new on one tick only, so the roll was never counted: the true count
+  // was one unexplained transaction, reported 15 minutes after the head first showed it.
+  for (const [who, address, roles, holder, rule] of [
+    ["the keeper", KEEPER, ["frontDoor.keeper"], { keeper: KEEPER }, "keys.keeper_unexplained_tx"],
+    ["an owner and guardian key", OWNER, OWNER_ROLES, ownerKey, "keys.unexplained_tx"],
+  ] as const) {
+    it(`2026-11-01: counts the transactions settling on a tick whose count wasn't read, so the roll is never reported (${who})`, () => {
+      const was = row({ address, roles: [...roles], baseline: 2, seen: 28, nonce: 30 });
+      // production: 31 at the head (19:31:34), the roll settling with no count (19:32:33), no count (19:33:34), 31 (19:34:34), ...
+      const unread = { txs: [own(address, 30)] };
+      expect(drive({ address, holder, start: was, steps: [{ count: 31 }, unread, {}, { count: 31 }, {}, ...steady(20, 31)] })).toMatchObject({
+        found: [],
+        end: { baseline: 2, seen: 29, nonce: 31 },
+        mark: "",
+      });
+      // never counted at the head: the roll's nonce, kept from the unread tick, still proves a lagging node's 30 stale
+      expect(drive({ address, holder, start: was, steps: [{ count: 30 }, { txs: [own(address, 30)] }, { count: 30 }, ...steady(20, 31)] })).toMatchObject({
+        found: [],
+        end: { baseline: 2, seen: 29, nonce: 31 },
+        mark: "",
+      });
+      // a transaction no log explains after it is still reported, once, after the grace from when it was first known
+      expect(drive({ address, holder, start: was, steps: [{ count: 31 }, { txs: [own(address, 30)] }, ...steady(20, 32)] }).found).toEqual([`t17:${rule}(1)`]);
+      // and one shown only by the nonce of a transaction settling on an unread tick (nonce 31 settled, 30 never explained)
+      // starts the grace on that tick, not on an older one
+      expect(drive({ address, holder, start: was, steps: [{ count: 30 }, { txs: [own(address, 31)] }, ...steady(20, 32)] }).found).toEqual([`t16:${rule}(1)`]);
+    });
+  }
+
   /** Safe's execTransaction, which moves nonce(); a module's execTransactionFromModule doesn't */
   const EXEC_TRANSACTION = "0x6a761202" as Hex;
   const FROM_MODULE = "0x468721a7" as Hex;
@@ -401,6 +434,14 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     const t: TxRow = { ...own(SIGNER, 1, chain), to: SAFE, selector };
     return { txs: [t], logs: [slog({ contract: "frontDoor", event: "LimitSet", chain, address: FD, block, txHash: t.hash })] };
   };
+
+  it("2026-11-01, for a Safe: counts an execution settling on a tick without its nonce() (the count batch failed), so it is never reported", () => {
+    const safeRow: NonceRow = { ...row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 }), safe: true };
+    expect(drive({ address: SAFE, holder: { owner: SAFE }, start: safeRow, safe: true, steps: [{ count: 4 }, toSafe(37_000_100n), {}, ...steady(20, 4)] })).toMatchObject({
+      found: [],
+      end: { baseline: 3, seen: 1, nonce: 4, safe: true },
+    });
+  });
 
   it("judges a Safe's nonce() the same way: a read below the last is stale, and so is one from a block before an execution just logged", () => {
     const k = `nonce_behind:base:${SAFE}`;

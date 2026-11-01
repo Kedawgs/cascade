@@ -406,7 +406,7 @@ describe("the keepers' and admin keys' transactions (keys.unexplained_tx), throu
     expect(w.sent.filter((m) => `${m.subject}\n${m.text}`.includes("logs don't explain"))).toEqual([]);
   };
 
-  it("P1: raises nothing for the keeper's roll counted at the head, its log settling on a tick whose count is from before it (2026-10-31)", async () => {
+  it("P1: raises nothing for the keeper's roll counted at the head, its log settling on a tick whose count is from before it", async () => {
     const w = await watching(11n);
     expect(await keeperRow()).toEqual({ baseline: 11, seen: 0, nonce: 11 });
     // the roll (nonce 11), at the head: counted (12), its log not settled yet
@@ -451,6 +451,38 @@ describe("the keepers' and admin keys' transactions (keys.unexplained_tx), throu
     w.advance(16);
     await w.tick();
     await nothingRaised(w);
+  });
+
+  it("2026-11-01: counts the roll whose log settles on a tick whose transaction counts fail, so nothing is raised (alerts 13 and 14)", async () => {
+    const w = await watching(11n);
+    // the roll (nonce 11), at the head: counted (12), its log not settled yet
+    w.advance();
+    const l = roll(w, 11);
+    w.state.nonces.base[KEEPER] = 12n;
+    await w.tick();
+    // its log settles, and its transaction is fetched, on a tick whose count batch fails (production: publicnode's HTTP
+    // 429 after 3 retries; here a member error, which fails the batch the same way)
+    w.advance();
+    const calls = w.specs.base.calls!;
+    const counts = calls.eth_getTransactionCount;
+    calls.eth_getTransactionCount = () => {
+      throw Object.assign(new Error("rate limited"), { rpcCode: -32005 });
+    };
+    await w.tick();
+    calls.eth_getTransactionCount = counts;
+    expect(await rows(`SELECT nonce FROM txs WHERE hash = '${l.transactionHash}'`)).toEqual([{ nonce: 11 }]);
+    const [last] = await rows<{ json: string; base_block: number | null }>("SELECT json, base_block FROM readings ORDER BY at DESC LIMIT 1");
+    expect(last.base_block).not.toBeNull();
+    expect(JSON.parse(last.json).nonces.base).toEqual({});
+    // counted all the same
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
+    // the counts back, and past the grace: nothing raised, nothing sent
+    w.advance();
+    await w.tick();
+    w.advance(16);
+    await w.tick();
+    await nothingRaised(w);
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
   });
 
   it("W1: a first watch whose count held the roll not yet settled starts again when it settles, so a transaction no log explains pages", async () => {

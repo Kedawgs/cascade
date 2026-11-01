@@ -327,9 +327,14 @@ print what it would run:
 `keys.unexplained_tx` (an owner, pending-owner or guardian key) and `keys.keeper_unexplained_tx` (the keeper)
 compare an address's transaction count (or a Safe's `nonce()`), read at the head, with the transactions Cascade's
 settled logs explain. A count ahead of the logs waits `unexplainedTxGraceS` (15 minutes) before it is reported,
-since the logs settle a minute or two behind the head. The count is read in a request of its own, so a
-load-balanced RPC can answer it from an older head than the logs' (on 2026-10-31 the keeper's hourly roll was
-reported as unexplained this way). A count is taken as stale only when that is provable: it is below the highest
+since the logs settle a minute or two behind the head. A transaction is new on one tick only, the tick that first
+stores it, so a tick whose count batch fails (an RPC answering HTTP 429) still counts the address's own transactions
+settling on it, and what their nonces prove of the count, and judges nothing until a count is read again. Before
+2026-11-01 it skipped the address first, so a transaction settling on such a tick was never counted: that is what
+reported the keeper's hourly roll as unexplained on 2026-10-31 (count 12) and on 2026-11-01 (count 31), though the
+first was taken at the time for the stale count below. The count is also read in a request of its own, so a
+load-balanced RPC can answer it from an older head than the logs', and the floor below stays as the defence against
+that. A count is taken as stale only when that is provable: it is below the highest
 count already read, or below one past the nonce of one of the address's own settled transactions (a Safe's: below
 its reading plus each `execTransaction` to it logged after the reading's block; only `execTransaction` moves
 `nonce()`, a module's call doesn't). A provably stale count is judged by what is known instead for up to

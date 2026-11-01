@@ -178,8 +178,9 @@ const EXEC_TRANSACTION = "0x6a761202";
  * explain, and has been for unexplainedTxGraceS. The excess is then absorbed, so each one is reported
  * once. A count read below what is already known of it (provably from an older head) is judged by what is
  * known, for at most nonceBehindTicks readings in a row (meta nonce_behind:{chain}:{address}); a current count
- * behind what the logs explain is a new start at once. A newly watched address starts at its current count.
- * Writes the watched rows that changed. */
+ * behind what the logs explain is a new start at once. A tick with no count (its batch failed) still counts the
+ * address's own transactions settled on it, each new on that tick only, and judges nothing. A newly watched address
+ * starts at its current count. Writes the watched rows that changed. */
 export const keys: Rule = {
   name: "keys",
   raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"],
@@ -223,9 +224,26 @@ export const keys: Rule = {
         } else if (isSafe && unread > 0) {
           ctx.writes.meta.push({ k: unreadKey, v: "" });
         }
+        // an account's count moves only for what it sends; a Safe's nonce for what it executes, which
+        // arrives as a transaction sent to it (or names it as the caller in an event's args). A row once read as a
+        // Safe is one on a tick without its nonce() too
+        const asSafe = isSafe || row?.safe === true;
+        const mine = (t: TxRow) => lower(t.from) === h.address || (asSafe && t.to !== undefined && lower(t.to) === h.address);
+        const own = ctx.newTxs.filter((t) => t.chain === chain && mine(t));
+        /** one past the nonce of each of an account's own transactions settled now: its count is at least each */
+        const ownNext = asSafe ? [] : own.flatMap((t) => (lower(t.from) === h.address && t.nonce !== undefined ? [t.nonce + 1] : []));
         const read = isSafe ? safes[h.address] : row?.safe ? undefined : counts[h.address];
         if (read === undefined) {
-          if (row && !sameRoles(row.roles, h.roles)) ctx.writes.nonces.push({ ...row, roles: h.roles });
+          // No count this tick: its batch failed (2026-11-01: publicnode answered it HTTP 429 on the tick the keeper's
+          // roll settled, and the roll, never counted, was reported 15 minutes on), or a Safe's nonce() is unread. A
+          // transaction is new on one tick only, so the address's own ones settled now are counted now all the same,
+          // with what their nonces prove of the count; nothing is judged until a tick reads a count
+          if (row) {
+            const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + own.length, nonce: Math.max(row.nonce, ...ownNext) };
+            // an excess those nonces show first starts the grace now, as a count showing it would
+            if (next.nonce - next.baseline - next.seen > 0 && row.nonce - row.baseline - row.seen <= 0) next.changedAt = ctx.nowS;
+            if (next.seen !== row.seen || next.nonce !== row.nonce || next.changedAt !== row.changedAt || !sameRoles(next.roles, row.roles)) ctx.writes.nonces.push(next);
+          }
           continue;
         }
         const count = Number(read);
@@ -234,22 +252,20 @@ export const keys: Rule = {
           ctx.writes.nonces.push({ chain, address: h.address, roles: h.roles, baseline: count, seen: 0, nonce: count, changedAt: ctx.nowS, ...safe });
           continue;
         }
-        // an account's count moves only for what it sends; a Safe's nonce for what it executes, which
-        // arrives as a transaction sent to it (or names it as the caller in an event's args)
-        const mine = (t: TxRow) => lower(t.from) === h.address || (isSafe && t.to !== undefined && lower(t.to) === h.address);
-        const own = ctx.newTxs.filter((t) => t.chain === chain && mine(t));
         // The count is read at the head in a request of its own, so a load-balanced node can answer it from an older
-        // head than the logs' (2026-10-31: the keeper's roll settled on such a tick, the rule rebased, and the true
-        // count was then reported as unexplained). What the count is known to be at least: the highest count already
-        // read (counts only rise; a row just turned Safe has no nonce() read yet), one past the nonce of each of the
-        // account's own transactions settled now, and for a Safe, whose nonce() is read in the reading's multicall at
-        // its block, one more than it for each execTransaction logged in a later block. Only execTransaction moves
-        // nonce(): a module's execTransactionFromModule doesn't, and counting it would lift the floor over an
-        // attacker's execution.
+        // head than the logs'. (The keeper's roll reported as unexplained on 2026-10-31, at count 12, was taken for
+        // this when the floor was added; its real cause, and 2026-11-01's at count 31, was the roll settling on a tick
+        // whose count batch failed, so the roll was never counted: handled above. The floor stays as the defence
+        // against a stale count.) What the count is known to be at least: the highest count already read (counts only
+        // rise; a row just turned Safe has no nonce() read yet), one past the nonce of each of the account's own
+        // transactions settled now, and for a Safe, whose nonce() is read in the reading's multicall at its block, one
+        // more than it for each execTransaction logged in a later block. Only execTransaction moves nonce(): a
+        // module's execTransactionFromModule doesn't, and counting it would lift the floor over an attacker's
+        // execution.
         const reading = ctx.snap[chain]?.block;
         const executes = (t: TxRow) => t.to !== undefined && lower(t.to) === h.address && t.selector?.toLowerCase() === EXEC_TRANSACTION;
         const later = isSafe && reading !== undefined ? own.filter((t) => executes(t) && ctx.logs.inTx(chain, t.hash).some((l) => l.block > reading)).length : 0;
-        const floor = Math.max(isSafe && !row.safe ? 0 : row.nonce, count + later, ...own.flatMap((t) => (!isSafe && lower(t.from) === h.address && t.nonce !== undefined ? [t.nonce + 1] : [])));
+        const floor = Math.max(isSafe && !row.safe ? 0 : row.nonce, count + later, ...ownNext);
         // A count below that is provably stale: judged by the floor, for at most nonceBehindTicks readings in a row
         // (more is a reorg past the settle depth: the count is taken). Only this is tolerated: an unbounded floor
         // would hide for good a transaction reusing a nonce a deep reorg dropped

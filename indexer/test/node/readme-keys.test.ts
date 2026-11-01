@@ -30,6 +30,14 @@ describe("the README's keys.* entry", () => {
     expect(entry).not.toMatch(/short blind spot|minutes in a row|is refused/);
   });
 
+  it("says a tick whose count batch fails still counts what settles on it, and names that, not a stale count, as the cause of the keeper's false alerts", () => {
+    expect(entry).toMatch(/new on one tick only/);
+    expect(entry).toMatch(/count batch fails/);
+    expect(entry).toMatch(/2026-10-31 \(count 12\) and on 2026-11-01 \(count 31\)/);
+    // the old misdiagnosis, gone
+    expect(entry).not.toMatch(/on 2026-10-31 the keeper's hourly roll was reported as unexplained this way/);
+  });
+
   it("says a THRESHOLDS or THRESHOLDS_SECRET that would hold past the grace is clamped, with a warning", () => {
     expect(entry).toContain("`THRESHOLDS`");
     expect(entry).toContain("`THRESHOLDS_SECRET`");

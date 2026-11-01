@@ -326,17 +326,24 @@ print what it would run:
 `keys.unexplained_tx` (an owner, pending-owner or guardian key) and `keys.keeper_unexplained_tx` (the keeper)
 compare an address's transaction count (or a Safe's `nonce()`), read at the head, with the transactions Cascade's
 settled logs explain. A count ahead of the logs waits `unexplainedTxGraceS` (15 minutes) before it is reported,
-since the logs settle a minute or two behind the head. A count behind the logs is a race, not a finding: the count
-is read in a request of its own, and a load-balanced RPC can answer it from an older head than the logs' (on
-2026-10-31 the keeper's hourly roll was reported as unexplained this way). It is taken as not comparable yet: the
-baseline is kept, meta `nonce_behind:<chain>:<address>` counts the ticks, and the next count, caught up, matches.
-Only a count behind for `nonceBehindTicks` (10) ticks in a row (a reorg past the settle depth, or a transaction
-counted twice because it hadn't settled when the address was first watched) is taken as the new start, with no
-alert. The cost: when the shortfall is real, a transaction the logs don't explain sent during those ticks fills it
-and is never reported, a blind spot of at most 10 minutes after a rare event (the logs are 30 blocks deep on Base,
-10 on Bittensor). A stale count has no such gap: once it catches up, a transaction sent meanwhile shows. On v3-test
-the owner, guardian and keeper are one address, so a reverted keeper call pages as a critical
-`keys.unexplained_tx`: expect that noise there.
+since the logs settle a minute or two behind the head. The count is read in a request of its own, so a
+load-balanced RPC can answer it from an older head than the logs' (on 2026-10-31 the keeper's hourly roll was
+reported as unexplained this way). A count is taken as stale only when that is provable: it is below the highest
+count already read, or below one past the nonce of one of the address's own settled transactions (a Safe's, below
+its reading plus each execution logged after the reading's block). A provably stale count is judged by what is
+known instead, for at most `nonceBehindTicks` (10) count readings in a row (meta `nonce_behind:<chain>:<address>`
+counts them; it must stay under the grace, so a count read too high is taken back before it can page, and a
+`THRESHOLDS` that breaks that is refused); one more is a
+reorg past the settle depth, and the count is taken. Any other count behind what the logs explain (a transaction
+counted twice because it hadn't settled when the address was first watched, after a role change or on a fresh
+database) is a new start at once, so a transaction no log explains can't hide in the gap. What is left: an own
+transaction known only from an event's arguments (its nonce unknown: a user action such as a deposit sent from an
+admin key) that settles on a stale tick before any fresh count saw it is reported as unexplained, and so is a
+node's count that stays behind for more than 10 readings: both err toward alerting. And a reorg past the settle
+depth (30 blocks on Base, 10 on Bittensor) that drops one of the address's settled transactions, followed within
+those 10 readings by another reusing its nonce, isn't reported here: `indexer.reorg` warns of the vanished log, so
+when it fires check the watched keys' transactions on the explorer. On v3-test the owner, guardian and keeper are
+one address, so a reverted keeper call pages as a critical `keys.unexplained_tx`: expect that noise there.
 
 ### The vault's stake and its direct entry points
 

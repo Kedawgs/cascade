@@ -25,8 +25,8 @@ describe("SITE_PAGES", () => {
   const env = (readJsonc(pkg("wrangler.jsonc")) as Wrangler).env ?? {};
   const routes = appRoutes(pkg("../web/src/app")).sort();
 
-  it("finds the site's 8 pages in web/src/app", () => {
-    expect(routes).toEqual(["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/stake/", "/unstake/", "/withdraw/"]);
+  it("finds the site's 9 pages in web/src/app", () => {
+    expect(routes).toEqual(["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/security/", "/stake/", "/unstake/", "/withdraw/"]);
   });
 
   it("lists every page of the site, in production and in test, so the site check reads every page a user can open", () => {

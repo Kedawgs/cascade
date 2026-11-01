@@ -10,7 +10,7 @@ import { setMeta } from "./store.ts";
 //
 // Cadence. The cron is how often a run may work, not how often the site is judged: a pass starts at the first
 // run PASS_EVERY_S after the last pass finished, reads every page in SITE_PAGES in that first run, then
-// SITE_FILES_PER_RUN scripts a run. The real build (8 pages, 32 scripts, 20 a run on Paid) is one pass of two
+// SITE_FILES_PER_RUN scripts a run. The real build (9 pages, 32 scripts, 20 a run on Paid) is one pass of two
 // runs, finished 2 minutes after it starts, so a change to the live site is judged within about 64 minutes
 // (the hour, the pass, the next tick); at the 400-file cap a pass takes 20 runs (40 minutes) at most.
 

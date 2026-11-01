@@ -1,0 +1,359 @@
+.head {
+  padding-top: 40px;
+  padding-bottom: 8px;
+}
+
+.h1 {
+  margin: 0 0 14px;
+  font-size: clamp(36px, 5vw, 56px);
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.lede {
+  max-width: 52ch;
+  margin: 0 0 24px;
+  font-size: 19px;
+  color: var(--ink-2);
+}
+
+.pageEnd {
+  padding-bottom: 96px;
+}
+
+/* ---------- status line and the In/Out switch ---------- */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 7px 13px;
+  border-radius: var(--r-pill);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.passing {
+  background: var(--proof-tint);
+  color: var(--proof-text);
+}
+
+.notOptimal {
+  background: var(--amber-tint);
+  color: var(--amber);
+}
+
+.quiet {
+  background: var(--mist);
+  color: var(--ink-2);
+}
+
+.statusDetail {
+  max-width: 64ch;
+  margin: 12px 0 0;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.toneOk {
+  background: var(--proof);
+}
+
+.toneAmber {
+  background: var(--amber);
+}
+
+.toneStale {
+  background: var(--ink-3);
+}
+
+.seg {
+  display: inline-flex;
+  padding: 4px;
+  border-radius: var(--r-pill);
+  background: var(--mist);
+}
+
+.seg button {
+  padding: 7px 16px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.seg button.on {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(16, 33, 43, 0.12);
+}
+
+/* ---------- notices ---------- */
+.notices {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--water-tint);
+  font-size: 14px;
+}
+
+.notice b {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.notice a {
+  color: var(--water-deep);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.noticeDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--water);
+}
+
+/* ---------- the map ---------- */
+.map {
+  display: flex;
+  align-items: stretch;
+  margin: 22px 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.cell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.nodeWrap {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.arrow {
+  align-self: center;
+  padding: 0 8px;
+  color: var(--water);
+  font-weight: 800;
+}
+
+.node {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 14px;
+  border: 2px solid transparent;
+  border-radius: 14px;
+  background: var(--mist);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.node:hover {
+  background: var(--mist-hover);
+}
+
+.node.sel {
+  border-color: var(--water);
+  background: var(--paper);
+}
+
+.where {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+
+.name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.headline {
+  margin-top: 6px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- the detail panel ---------- */
+.detail,
+.inline {
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.inline {
+  display: none;
+}
+
+.detailTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.detailName {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.chain {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--water-tint);
+  color: var(--water-deep);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.src {
+  color: var(--water-deep);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.say {
+  margin: 6px 0 0;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.figs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 36px;
+  margin: 14px 0 0;
+}
+
+.figs > div {
+  min-width: 0;
+}
+
+.k {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.v {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- phone: the map is a list, and the selected step opens in place ---------- */
+@media (max-width: 719px) {
+  .map {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .cell {
+    flex-direction: column;
+  }
+
+  .arrow {
+    display: none;
+  }
+
+  .nodeWrap {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .node {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px 12px;
+  }
+
+  .where {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .headline {
+    margin-top: 0;
+    font-size: 16px;
+  }
+
+  .inline {
+    display: block;
+  }
+
+  .detail {
+    display: none;
+  }
+
+  .v {
+    font-size: 17px;
+  }
+
+  .figs {
+    gap: 10px 24px;
+  }
+}

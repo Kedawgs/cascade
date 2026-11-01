@@ -40,7 +40,6 @@ The reader is a depositor or would-be depositor: a crypto user on Base who will 
      `BridgeProposed`, `FrontDoorProposed`, `OwnershipTransferStarted`, `Paused` and their cancel/activate/accept/
      unpause counterparts), which give the earliest time and the transaction; no per-minute call is added for them
      (amended 2026-11-01, plan Task 1).
-     v3.2 replaces the registries with its scheduler (see "Ready for v3.2").
    - **A check isn't passing:** amber, "Conditions aren't optimal right now", plus one plain sentence on what is
      affected (for example: the bridge has no room until it refills, so new deposits wait longer to cross; your
      existing stake isn't affected). The founder will refine this wording later; ship a sensible first draft.
@@ -106,8 +105,7 @@ Simple, public and fixed, each tied to the step it affects (its dot turns amber 
 - the vault or the front door is paused (also a blue notice; amber wins for the dot).
 
 The market price vs the 30-minute average is shown as a number ("X% apart") but triggers no amber state on
-v3-launch, which has no public on-chain limit for it (my call). With v3.2, the pool depth below its public
-minimum-liquidity floor becomes an amber condition (deliveries wait while the pool is thin).
+v3-launch, which has no public on-chain limit for it (my call).
 
 ## Where the data comes from
 
@@ -140,16 +138,10 @@ minimum-liquidity floor becomes an amber condition (deliveries wait while the po
   does. The site fetches it client-side from `NEXT_PUBLIC_CASCADE_INDEXER_URL`; when that is unset or the endpoint
   can't be reached, every number shows "–" and the top line says the page can't check right now.
 
-## Ready for v3.2
+## Ready for later contract versions
 
-v3.2 (in development) changes the governance and adds states the page should show when it ships. The endpoint
-returns notices as a list of kinds, and the steps as a list, so these slot in without a redesign:
-
-- scheduled changes from v3.2's scheduler (kind, earliest execution time), in place of v3-launch's pending
-  proposals;
-- exits held (`primaryDisabledBy`) and a bridge switched off;
-- the pool depth vs v3.2's minimum-liquidity floor (deliveries wait while the pool is thin);
-- parked and missing-stake states on the vault.
+The endpoint returns notices as a list of kinds and the steps as a list, so a later contract version's new
+notices, states and amber conditions slot in without a redesign.
 
 ## Look and placement
 

@@ -23,6 +23,10 @@ export const DEFAULTS = {
   unexplainedTxGraceS: 900,
   /** keys.safe_unread: ticks in a row a watched Safe's nonce() may go unread (it is skipped meanwhile) */
   safeUnreadTicks: 30,
+  /** keys.unexplained_tx: ticks in a row an address's count may stay behind what Cascade's logs explain before the
+   * count is taken as the new start (a reorg, a transaction counted twice). Until then it is a count read from an
+   * older head than the logs (a load-balanced node), which catches up, and the baseline is kept */
+  nonceBehindTicks: 10,
   /** fmtao.unbacked: FM-TAO on Base may exceed the lock by this much */
   fmtaoBackingSlackWei: 10n ** 16n,
   /** fmtao.depeg: the pool's TAO price this far from the reference */

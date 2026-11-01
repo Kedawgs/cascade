@@ -171,7 +171,9 @@ const keeperOnly = (roles: readonly string[]) => roles.every((r) => r.endsWith("
  * keys.keeper_unexplained_tx (warning: an address holding only the keeper role): the address's count
  * (an account's transaction count, or a Safe's nonce()) is ahead of the transactions Cascade's logs
  * explain, and has been for unexplainedTxGraceS. The excess is then absorbed, so each one is reported
- * once. A newly watched address starts at its current count. Writes the watched rows that changed. */
+ * once. A count behind the logs is a stale read, not a start: the baseline is kept until it has been behind
+ * for nonceBehindTicks in a row (meta nonce_behind:{chain}:{address}). A newly watched address starts at its
+ * current count. Writes the watched rows that changed. */
 export const keys: Rule = {
   name: "keys",
   raises: ["keys.unexplained_tx", "keys.keeper_unexplained_tx", "keys.safe_unread"],
@@ -229,10 +231,25 @@ export const keys: Rule = {
         const seenNow = ctx.newTxs.filter((t) => t.chain === chain && mine(t)).length;
         const next: NonceRow = { ...row, roles: h.roles, seen: row.seen + seenNow, nonce: count, ...safe };
         let excess = count - next.baseline - next.seen;
+        // more seen than counted: not comparable yet. The count is read at the head in a request of its own, so a
+        // load-balanced node can answer it from an older head than the logs' settled point, and the next count
+        // catches up. Rebasing at once turned that shortfall into an "unexplained" transaction when the true count
+        // arrived (the keeper's hourly roll, 2026-10-31). So the baseline is kept and the ticks in a row are counted
+        // in meta; only nonceBehindTicks of them (a reorg past the settle depth, or a transaction counted twice: one
+        // not yet settled when the address was first watched) start again from the count, with no alert
+        const behindKey = `nonce_behind:${chain}:${h.address}`;
+        const behind = Number(ctx.meta[behindKey]) || 0;
         if (excess < 0) {
-          // more seen than counted (a count read before the logs, or a reorg): start again from the count
-          next.baseline = count - next.seen;
+          const n = behind + 1;
+          if (n >= ctx.t.nonceBehindTicks) {
+            next.baseline = count - next.seen;
+            if (behind > 0) ctx.writes.meta.push({ k: behindKey, v: "" });
+          } else {
+            ctx.writes.meta.push({ k: behindKey, v: String(n) });
+          }
           excess = 0;
+        } else if (behind > 0) {
+          ctx.writes.meta.push({ k: behindKey, v: "" });
         }
         const before = row.nonce - row.baseline - row.seen;
         if (excess > 0 && before <= 0) next.changedAt = ctx.nowS;

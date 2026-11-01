@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import { adminEvent, keys, watchedRoles } from "../../src/rules/admin.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
+import { type RuleId, RULES } from "../../src/rules/ids.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import type { BaseState, BitState } from "../../src/snapshot.ts";
 import type { NonceRow, TxRow } from "../../src/store.ts";
+import { DEFAULTS } from "../../src/thresholds.ts";
 import { tx } from "./fixtures.ts";
 import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
@@ -227,10 +229,113 @@ describe("keys.unexplained_tx and keys.keeper_unexplained_tx", () => {
     expect(c.writes.nonces).toEqual([expect.objectContaining({ address: SAFE, safe: true })]);
   });
 
-  it("starts again from the count when more is seen than the count explains", () => {
-    const c = ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [row({ address: ADMIN })], newTxs: sent(3, ADMIN) });
-    expect(keys.run(c)).toEqual([]);
-    expect(c.writes.nonces[0]).toMatchObject({ baseline: 48, seen: 3, nonce: 51 });
+  // 2026-10-31, the keeper on Base: its hourly empty roll settled in the logs on a tick whose count a load-balanced
+  // node answered from an older head. The count behind what the logs explain was rebased at once, so the next tick's
+  // true count was one "unexplained" transaction, reported after the grace. On an owner or guardian key the same
+  // race pages critical.
+  for (const [who, address, roles, holder] of [
+    ["the keeper", KEEPER, ["frontDoor.keeper"], { keeper: KEEPER }],
+    ["an owner and guardian key", OWNER, ["frontDoor.owner", "frontDoor.guardian"], { owner: OWNER, guardian: OWNER }],
+  ] as const) {
+    it(`tolerates a count read from an older head than the logs (${who}): no rebase, and no alert once it catches up`, () => {
+      const k = `nonce_behind:base:${address}`;
+      const was = row({ address, roles: [...roles], baseline: 0, seen: 11, nonce: 11 });
+      // the roll is seen in the logs; the count is still 11
+      const stale = ctx({ base: holder, counts: { base: { [address]: 11n } }, nonces: [was], newTxs: sent(1, address) });
+      expect(keys.run(stale)).toEqual([]);
+      // the baseline is kept (the count isn't comparable yet) and the tick is counted in meta
+      expect(stale.writes.nonces).toEqual([{ ...was, seen: 12 }]);
+      expect(stale.writes.meta).toEqual([{ k, v: "1" }]);
+      // the next tick's count has caught up: the mark is cleared and nothing is ahead
+      const caughtUp = ctx({ base: holder, counts: { base: { [address]: 12n } }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 60 });
+      expect(keys.run(caughtUp)).toEqual([]);
+      expect(caughtUp.writes.meta).toEqual([{ k, v: "" }]);
+      expect(caughtUp.writes.nonces).toEqual([{ ...was, seen: 12, nonce: 12 }]);
+      // and past the grace, still nothing
+      const later = ctx({ base: holder, counts: { base: { [address]: 12n } }, nonces: caughtUp.writes.nonces, nowS: NOW + 60 + DEFAULTS.unexplainedTxGraceS });
+      expect(keys.run(later)).toEqual([]);
+      expect(later.writes.nonces).toEqual([]);
+      expect(later.writes.meta).toEqual([]);
+    });
+  }
+
+  it("still finds a real unexplained transaction after a stale count, as one, and critical for an admin key, after the grace", () => {
+    const k = `nonce_behind:base:${ADMIN}`;
+    // a seen transaction, with the count from an older head
+    const stale = ctx({ base: admin, counts: { base: { [ADMIN]: 50n } }, nonces: [row({ address: ADMIN })], newTxs: sent(1, ADMIN) });
+    expect(keys.run(stale)).toEqual([]);
+    expect(stale.writes.nonces[0]).toMatchObject({ baseline: 50, seen: 1, nonce: 50 });
+    // the count catches up, and one more transaction that no log explains
+    const ahead = ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 60 });
+    expect(keys.run(ahead)).toEqual([]);
+    expect(ahead.writes.meta).toEqual([{ k, v: "" }]);
+    const waiting = ahead.writes.nonces[0];
+    expect(waiting).toMatchObject({ baseline: 50, seen: 1, nonce: 52, changedAt: NOW + 60 });
+    expect(keys.run(ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: [waiting], nowS: NOW + 60 + 899 }))).toEqual([]);
+    const due = ctx({ base: admin, counts: { base: { [ADMIN]: 52n } }, nonces: [waiting], nowS: NOW + 60 + 900 });
+    const [f, ...rest] = keys.run(due);
+    expect(rest).toEqual([]);
+    expect(f).toMatchObject({ rule: "keys.unexplained_tx", key: `keys.unexplained_tx:base:${ADMIN}:52` });
+    expect(RULES[f.rule as RuleId].tier).toBe("critical");
+    expect(f.facts.unexplained).toBe("1");
+    expect(due.writes.nonces[0].baseline).toBe(51);
+  });
+
+  it("starts again from the count only once it has been behind for nonceBehindTicks ticks in a row (a reorg), with no alert", () => {
+    const k = `nonce_behind:base:${ADMIN}`;
+    const ticks = DEFAULTS.nonceBehindTicks;
+    expect(ticks).toBeGreaterThan(1);
+    // three seen, one counted, and the count never catches up
+    const first = ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [row({ address: ADMIN })], newTxs: sent(3, ADMIN) });
+    expect(keys.run(first)).toEqual([]);
+    expect(first.writes.meta).toEqual([{ k, v: "1" }]);
+    const behind = first.writes.nonces[0];
+    expect(behind).toMatchObject({ baseline: 50, seen: 3, nonce: 51 });
+    const tick = (n: number) => ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [behind], meta: { [k]: String(n - 1) }, nowS: NOW + 60 * (n - 1) });
+    for (let n = 2; n < ticks; n++) {
+      const c = tick(n);
+      expect(keys.run(c)).toEqual([]);
+      // the row is as it was (nothing to write) and the mark counts on
+      expect(c.writes.nonces).toEqual([]);
+      expect(c.writes.meta).toEqual([{ k, v: String(n) }]);
+    }
+    // the last of them: started again from the count, the mark cleared
+    const last = tick(ticks);
+    expect(keys.run(last)).toEqual([]);
+    expect(last.writes.meta).toEqual([{ k, v: "" }]);
+    const rebased = last.writes.nonces[0];
+    expect(rebased).toMatchObject({ baseline: 48, seen: 3, nonce: 51 });
+    // quiet from there on, past the grace too
+    const after = ctx({ base: admin, counts: { base: { [ADMIN]: 51n } }, nonces: [rebased], nowS: NOW + 60 * ticks + DEFAULTS.unexplainedTxGraceS });
+    expect(keys.run(after)).toEqual([]);
+    expect(after.writes.nonces).toEqual([]);
+    expect(after.writes.meta).toEqual([]);
+  });
+
+  it("tolerates a Safe's nonce() read from an older block than the logs the same way, and still finds an execution no log explains", () => {
+    const k = `nonce_behind:base:${SAFE}`;
+    const safeRow: NonceRow = { ...row({ address: SAFE, roles: ["frontDoor.owner"], baseline: 3, nonce: 3 }), safe: true };
+    const owner = { owner: SAFE };
+    // an execution seen in the logs, the nonce() still 3
+    const stale = ctx({ base: owner, safeNonces: { [SAFE]: 3n }, nonces: [safeRow], newTxs: sent(1, SIGNER, { to: SAFE }) });
+    expect(keys.run(stale)).toEqual([]);
+    expect(stale.writes.nonces).toEqual([{ ...safeRow, seen: 1 }]);
+    expect(stale.writes.meta).toEqual([{ k, v: "1" }]);
+    // caught up: the mark cleared, nothing ahead, quiet past the grace
+    const caughtUp = ctx({ base: owner, safeNonces: { [SAFE]: 4n }, nonces: stale.writes.nonces, meta: { [k]: "1" }, nowS: NOW + 60 });
+    expect(keys.run(caughtUp)).toEqual([]);
+    expect(caughtUp.writes.meta).toEqual([{ k, v: "" }]);
+    const settled = caughtUp.writes.nonces[0];
+    expect(settled).toMatchObject({ baseline: 3, seen: 1, nonce: 4, safe: true });
+    expect(keys.run(ctx({ base: owner, safeNonces: { [SAFE]: 4n }, nonces: [settled], nowS: NOW + 60 + DEFAULTS.unexplainedTxGraceS }))).toEqual([]);
+    // an execution with no log: critical after the grace
+    const ahead = ctx({ base: owner, safeNonces: { [SAFE]: 5n }, nonces: [settled], nowS: NOW + 120 });
+    expect(keys.run(ahead)).toEqual([]);
+    const waiting = ahead.writes.nonces[0];
+    expect(waiting).toMatchObject({ changedAt: NOW + 120 });
+    const [f] = keys.run(ctx({ base: owner, safeNonces: { [SAFE]: 5n }, nonces: [waiting], nowS: NOW + 120 + DEFAULTS.unexplainedTxGraceS }));
+    expect(f).toMatchObject({ rule: "keys.unexplained_tx", key: `keys.unexplained_tx:base:${SAFE}:5` });
+    expect(f.facts.unexplained).toBe("1");
   });
 
   it("stops watching an address that holds no role any more, and waits for a count", () => {

@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import type { Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import { countingDb, wipe } from "./d1-count.ts";
-import { BIT_ADAPTER, DEPENDENCY_EVENTS, MINTER_ROLE } from "../../src/abi.ts";
+import { BIT_ADAPTER, DEPENDENCY_EVENTS, FRONT_DOOR, MINTER_ROLE } from "../../src/abi.ts";
 import { catchingUpChains } from "../../src/tick.ts";
 import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
@@ -377,6 +377,45 @@ describe("role wallets' code (keys.delegated)", () => {
     expect((await alertKeys()).map((k) => k.split(":").slice(0, 3).join(":"))).toEqual([`keys.code_changed:base:${TREASURY_WALLET}`, `keys.delegated:bittensor:${TREASURY_WALLET}`]);
     // the treasury isn't a watched key: its own transactions raise nothing
     expect(await rows(`SELECT address FROM nonces WHERE address = '${TREASURY_WALLET}'`)).toEqual([]);
+  });
+});
+
+describe("the keepers' and admin keys' transactions (keys.unexplained_tx), through the tick", () => {
+  it("raises nothing for the keeper's roll whose log settles on a tick that reads its count from an older head (2026-10-31)", async () => {
+    const w = tickWorld();
+    const k = `nonce_behind:base:${KEEPER}`;
+    const meta = async () => (await rows<{ v: string }>(`SELECT v FROM meta WHERE k = '${k}'`))[0]?.v;
+    const keeperRow = async () => (await rows<{ baseline: number; seen: number; nonce: number }>(`SELECT baseline, seen, nonce FROM nonces WHERE chain = 'base' AND address = '${KEEPER}'`))[0];
+    w.state.nonces.base[KEEPER] = 11n;
+    // counts are read from the second tick (the first reading names the role holders)
+    await w.tick();
+    w.advance();
+    await w.tick();
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 0, nonce: 11 });
+    // the hourly empty roll, at the head: counted (12), its log not settled yet
+    w.advance();
+    const roll = rawLog({ address: w.cfg.deployment.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 7n }, block: w.specs.base.head, logIndex: 0, txHash: h("the roll") });
+    w.addLogs("base", [roll]);
+    w.state.nonces.base[KEEPER] = 12n;
+    await w.tick();
+    // its log settles on a tick whose count a lagging node answers from before it
+    w.advance();
+    w.state.nonces.base[KEEPER] = 11n;
+    await w.tick();
+    expect(await rows(`SELECT hash FROM txs WHERE hash = '${roll.transactionHash}'`)).toHaveLength(1);
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 11 });
+    expect(await meta()).toBe("1");
+    // the count catches up
+    w.advance();
+    w.state.nonces.base[KEEPER] = 12n;
+    await w.tick();
+    expect(await keeperRow()).toEqual({ baseline: 11, seen: 1, nonce: 12 });
+    expect(await meta()).toBe("");
+    // past the grace: nothing raised, nothing sent
+    w.advance(16);
+    await w.tick();
+    expect((await alertKeys()).filter((a) => a.startsWith("keys."))).toEqual([]);
+    expect(w.sent.filter((m) => `${m.subject}\n${m.text}`.includes("logs don't explain"))).toEqual([]);
   });
 });
 

@@ -1,6 +1,6 @@
 # Cascade live security page: design
 
-Date: 2026-11-01. Status: draft for the founder's approval.
+Date: 2026-11-01. Status: approved by the founder (2026-11-01).
 Mockups (the chosen layout, "the map"): `docs/superpowers/specs/assets/2026-11-01-security-page-map.html` and
 `docs/superpowers/specs/assets/2026-11-01-security-page-notices.html`.
 

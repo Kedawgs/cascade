@@ -114,11 +114,14 @@ function openProposals(
   keyOf: (a: Record<string, string>) => string,
   targetOf: (a: Record<string, string>) => string,
 ) {
-  const open = new Map<string, { target: string; earliest: number; tx: string }>();
+  const open = new Map<string, { target: string; earliest?: number; tx: string }>();
   for (const l of logs) {
     if (lc(l.address) !== lc(address)) continue;
-    if (l.event === proposed) open.set(keyOf(l.args), { target: targetOf(l.args), earliest: Number(l.args.readyAt), tx: l.txHash });
-    else if (closers.includes(l.event)) open.delete(keyOf(l.args));
+    if (!targetOf(l.args)) continue;
+    if (l.event === proposed) {
+      const earliest = Number(l.args.readyAt);
+      open.set(keyOf(l.args), { target: targetOf(l.args), ...(Number.isFinite(earliest) ? { earliest } : {}), tx: l.txHash });
+    } else if (closers.includes(l.event)) open.delete(keyOf(l.args));
   }
   return [...open.values()];
 }
@@ -182,16 +185,17 @@ export function flowOf(i: FlowInput): FlowV1 {
     const n: Notice = { kind: "guardianProposed", chain, contract, target: pending };
     const l = latest(logs, contract, "GuardianProposed");
     if (l) {
-      n.earliest = Number(l.args.readyAt);
+      const e = Number(l.args.readyAt);
+      if (Number.isFinite(e)) n.earliest = e;
       n.tx = l.txHash;
     }
     notices.push(n);
   };
   const proposalsN = (chain: Notice["chain"], contract: string) => {
-    for (const p of openProposals(logs, contract, "BridgeProposed", ["BridgeActivated", "BridgeProposalCancelled"], (a) => lc(a.bridge), (a) => a.bridge))
-      notices.push({ kind: "bridgeProposed", chain, contract, target: p.target, earliest: p.earliest, tx: p.tx });
-    for (const p of openProposals(logs, contract, "FrontDoorProposed", ["FrontDoorActivated", "FrontDoorProposalCancelled"], (a) => `${a.chain}:${lc(a.addr)}`, (a) => a.addr))
-      notices.push({ kind: "frontDoorProposed", chain, contract, target: p.target, earliest: p.earliest, tx: p.tx });
+    for (const p of openProposals(logs, contract, "BridgeProposed", ["BridgeActivated", "BridgeProposalCancelled"], (a) => lc(a.bridge ?? ""), (a) => a.bridge ?? ""))
+      notices.push({ kind: "bridgeProposed", chain, contract, target: p.target, ...(p.earliest !== undefined ? { earliest: p.earliest } : {}), tx: p.tx });
+    for (const p of openProposals(logs, contract, "FrontDoorProposed", ["FrontDoorActivated", "FrontDoorProposalCancelled"], (a) => `${a.chain}:${lc(a.addr ?? "")}`, (a) => a.addr ?? ""))
+      notices.push({ kind: "frontDoorProposed", chain, contract, target: p.target, ...(p.earliest !== undefined ? { earliest: p.earliest } : {}), tx: p.tx });
   };
 
   pausedN("base", d.frontDoor, bs?.paused);

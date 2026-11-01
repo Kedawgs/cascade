@@ -191,6 +191,28 @@ describe("flowOf", () => {
     expect(flowOf(input()).notices).toEqual([]);
   });
 
+  it("aLogWithoutItsTargetIsSkipped", () => {
+    const logs = [
+      log({ event: "BridgeProposed", args: { readyAt: "1900000000" } }),
+      log({ event: "FrontDoorProposed", args: { chain: "8453", readyAt: "1900000000" }, chain: "bittensor", address: d.vault }),
+      log({ event: "BridgeActivated", args: {} }),
+    ];
+    const f = flowOf(input({ adminLogs: logs }));
+    expect(f.notices).toEqual([]);
+  });
+
+  it("aBadReadyAtLeavesNoEarliest", () => {
+    const other = "0x00000000000000000000000000000000000000aa";
+    const logs = [
+      log({ event: "BridgeProposed", args: { bridge: other, readyAt: "soon" }, txHash: tx(2) }),
+      log({ event: "GuardianProposed", args: { guardian: other }, txHash: tx(3) }),
+    ];
+    const f = flowOf(input({ adminLogs: logs, base: rd(baseState({ pendingGuardian: other })) }));
+    expect(f.notices.map((n) => n.kind).sort()).toEqual(["bridgeProposed", "guardianProposed"]);
+    for (const n of f.notices) expect("earliest" in n).toBe(false);
+    expect(JSON.stringify(f)).not.toMatch(/NaN|null,"earliest/);
+  });
+
   it("ownershipTxIsTheTransferNamingThePendingOwner", () => {
     const A = "0x00000000000000000000000000000000000000AA";
     const B = "0x00000000000000000000000000000000000000bb";

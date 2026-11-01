@@ -197,18 +197,21 @@ describe("flowOf", () => {
       log({ event: "FrontDoorProposed", args: { chain: "8453", readyAt: "1900000000" }, chain: "bittensor", address: d.vault }),
       log({ event: "BridgeActivated", args: {} }),
     ];
+    const other = "0x00000000000000000000000000000000000000aa";
+    logs.push(log({ event: "BridgeProposed", args: { bridge: other, readyAt: "1900000000" }, txHash: tx(5) }));
     const f = flowOf(input({ adminLogs: logs }));
-    expect(f.notices).toEqual([]);
+    expect(f.notices).toEqual([{ kind: "bridgeProposed", chain: "base", contract: d.frontDoor, target: other, earliest: 1900000000, tx: tx(5) }]);
   });
 
   it("aBadReadyAtLeavesNoEarliest", () => {
     const other = "0x00000000000000000000000000000000000000aa";
     const logs = [
       log({ event: "BridgeProposed", args: { bridge: other, readyAt: "soon" }, txHash: tx(2) }),
+      log({ event: "BridgeProposed", args: { bridge: "0x00000000000000000000000000000000000000bb", readyAt: "" }, txHash: tx(4) }),
       log({ event: "GuardianProposed", args: { guardian: other }, txHash: tx(3) }),
     ];
     const f = flowOf(input({ adminLogs: logs, base: rd(baseState({ pendingGuardian: other })) }));
-    expect(f.notices.map((n) => n.kind).sort()).toEqual(["bridgeProposed", "guardianProposed"]);
+    expect(f.notices.map((n) => n.kind).sort()).toEqual(["bridgeProposed", "bridgeProposed", "guardianProposed"]);
     for (const n of f.notices) expect("earliest" in n).toBe(false);
     expect(JSON.stringify(f)).not.toMatch(/NaN|null,"earliest/);
   });

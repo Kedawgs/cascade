@@ -234,6 +234,17 @@ const FLOW_EVENTS = [
   "OwnershipTransferStarted",
 ];
 
+/** The admin events, read through logs_by_event (chain, contract, event, block): one branch per contract that can
+ * emit them (the stored roles), then the small result ordered. Exported so a test can ask SQLite for its plan. */
+const FLOW_MARKS = FLOW_EVENTS.map((_, i) => `?${i + 1}`).join(", ");
+export const FLOW_LOGS_SQL = `SELECT chain, address, event, args, tx_hash, block FROM (${[
+  ["base", "frontDoor"],
+  ["base", "staker"],
+  ["bittensor", "vault"],
+]
+  .map(([c, r]) => `SELECT chain, address, event, args, tx_hash, block, log_index FROM logs WHERE chain = '${c}' AND contract = '${r}' AND event IN (${FLOW_MARKS}) AND removed = 0`)
+  .join(" UNION ALL ")}) ORDER BY block, log_index`;
+
 /** GET /v1/flow, the public facts behind the site's /security page (flowOf): the newest reading of each chain
  * (a partial tick leaves the other chain's own newest in place), the bridge messages in flight and the stored
  * admin events. Public chain facts only. Cached for CACHE_TTL_S; no query string; counted against the client's
@@ -251,15 +262,12 @@ export async function handleFlow(request: Request, env: RouteEnv, cfg: Config, n
   let rows: Row[][];
   try {
     const db = env.DB;
-    const marks = FLOW_EVENTS.map((_, i) => `?${i + 1}`).join(", ");
     rows = (
       await db.batch<Row>([
         db.prepare("SELECT json FROM readings WHERE base_block IS NOT NULL ORDER BY at DESC LIMIT 1"),
         db.prepare("SELECT json FROM readings WHERE bit_block IS NOT NULL ORDER BY at DESC LIMIT 1"),
         db.prepare("SELECT direction, COUNT(*) AS n FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' GROUP BY direction"),
-        db
-          .prepare(`SELECT chain, address, event, args, tx_hash, block FROM logs WHERE removed = 0 AND event IN (${marks}) ORDER BY block, log_index`)
-          .bind(...FLOW_EVENTS),
+        db.prepare(FLOW_LOGS_SQL).bind(...FLOW_EVENTS),
         db.prepare("SELECT v FROM meta WHERE k = 'deployment'"),
       ])
     ).map((r) => r.results);

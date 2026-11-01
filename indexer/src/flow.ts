@@ -105,6 +105,9 @@ function bucketOf(b: RawBucket | undefined, live: boolean, inFlight: number): Bu
   return { roomLeft: b.tokens.toString(), capacity: b.capacity.toString(), perHour: (b.rate * 3600n).toString(), enabled: b.isEnabled, inFlight };
 }
 
+/** A stored readyAt as unix seconds, only when it is a plain decimal string. */
+const readyOf = (x: string | undefined) => (x !== undefined && /^\d+$/.test(x) && Number.isSafeInteger(Number(x)) ? Number(x) : undefined);
+
 /** The proposals of one contract that no activate or cancel event has followed since. */
 function openProposals(
   logs: AdminLog[],
@@ -119,8 +122,8 @@ function openProposals(
     if (lc(l.address) !== lc(address)) continue;
     if (!targetOf(l.args)) continue;
     if (l.event === proposed) {
-      const earliest = Number(l.args.readyAt);
-      open.set(keyOf(l.args), { target: targetOf(l.args), ...(Number.isFinite(earliest) ? { earliest } : {}), tx: l.txHash });
+      const earliest = readyOf(l.args.readyAt);
+      open.set(keyOf(l.args), { target: targetOf(l.args), ...(earliest !== undefined ? { earliest } : {}), tx: l.txHash });
     } else if (closers.includes(l.event)) open.delete(keyOf(l.args));
   }
   return [...open.values()];
@@ -185,8 +188,8 @@ export function flowOf(i: FlowInput): FlowV1 {
     const n: Notice = { kind: "guardianProposed", chain, contract, target: pending };
     const l = latest(logs, contract, "GuardianProposed");
     if (l) {
-      const e = Number(l.args.readyAt);
-      if (Number.isFinite(e)) n.earliest = e;
+      const e = readyOf(l.args.readyAt);
+      if (e !== undefined) n.earliest = e;
       n.tx = l.txHash;
     }
     notices.push(n);

@@ -1,7 +1,7 @@
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { CACHE_TTL_S, handleFlow } from "../../src/api.ts";
+import { CACHE_TTL_S, FLOW_LOGS_SQL, handleFlow } from "../../src/api.ts";
 import worker from "../../src/index.ts";
 import { deploymentStatement } from "../../src/store.ts";
 import { countingDb, wipe } from "./d1-count.ts";
@@ -164,6 +164,21 @@ describe("GET /v1/flow", () => {
     const second = await fetchCounted();
     expect([second.r.status, second.queries]).toEqual([200, 0]);
     expect(await second.r.text()).toBe(body);
+  });
+
+  it("aCacheHitStillCarriesTheCorsOrigin", async () => {
+    await (await fetchCounted()).r.text();
+    const hit = await fetchCounted();
+    expect([hit.r.status, hit.queries, hit.r.headers.get("Access-Control-Allow-Origin")]).toEqual([200, 0, ORIGIN]);
+    await hit.r.text();
+  });
+
+  it("theEventsAreReadThroughTheIndexNotAScan", async () => {
+    const names = ["GuardianProposed", "BridgeProposed", "BridgeActivated", "BridgeProposalCancelled", "FrontDoorProposed", "FrontDoorActivated", "FrontDoorProposalCancelled", "OwnershipTransferStarted"];
+    const plan = await db.prepare(`EXPLAIN QUERY PLAN ${FLOW_LOGS_SQL}`).bind(...names).all<{ detail: string }>();
+    const text = plan.results.map((r) => r.detail).join(" | ");
+    expect(text).toContain("logs_by_event");
+    expect(text).not.toMatch(/SCAN logs/);
   });
 
   it("anOptionsOrPostThroughTheWorkerSkipsTheCache", async () => {

@@ -498,6 +498,45 @@ html:has(.navBar) {
   background: var(--water-tint);
 }
 
+/* the icon tiles take the logo's gradients, faintly: the same pairs as the How it works ledges */
+.tileProof {
+  background: linear-gradient(135deg, #e0f4e9, #c9ebd8);
+}
+
+.tileInk {
+  background: linear-gradient(135deg, #e8eef2, #d7e1e7);
+}
+
+.tileAmber {
+  background: linear-gradient(135deg, #fff3de, #fbe3bb);
+}
+
+.tileWater {
+  background: linear-gradient(135deg, #e0f2f6, #c9e6ed);
+}
+
+/* Secure by design closes the page with the hero's light, mirrored: a soft teal and green glow from the right */
+.secureBand {
+  position: relative;
+  overflow: hidden;
+}
+
+.secureBand::before {
+  content: "";
+  position: absolute;
+  inset: -10% -12% -30% auto;
+  width: 58%;
+  background:
+    radial-gradient(44% 48% at 60% 46%, rgba(46, 143, 163, 0.2), transparent 70%),
+    radial-gradient(38% 42% at 34% 74%, rgba(30, 138, 90, 0.16), transparent 70%);
+  filter: blur(12px);
+  pointer-events: none;
+}
+
+.secureInner {
+  position: relative;
+}
+
 .secLink {
   color: var(--water-deep);
   font-weight: 700;
@@ -521,10 +560,15 @@ html:has(.navBar) {
 }
 
 /* ---------- footer ---------- */
-.footer {
-  padding-top: 36px;
-  padding-bottom: 56px;
+/* a full-width mist band, so every page ends grounded rather than on white */
+.footerBand {
+  background: var(--mist);
   border-top: 1px solid var(--line);
+}
+
+.footer {
+  padding-top: 40px;
+  padding-bottom: 56px;
   color: var(--ink-2);
   font-size: 14.5px;
 }
@@ -703,6 +747,16 @@ html:has(.navBar) {
   .frow {
     flex-direction: column;
     gap: 20px;
+  }
+
+  /* on a narrow screen the links wrap as whole links, never mid-label */
+  .flinks {
+    flex-wrap: wrap;
+    gap: 10px 22px;
+  }
+
+  .flinks a {
+    white-space: nowrap;
   }
 }
 

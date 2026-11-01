@@ -6,6 +6,9 @@ import type { FlowV1 } from "@/lib/cascade/flow";
 import { flowView } from "@/lib/security-view";
 import { plainText, renderWithCache } from "../test-render";
 import { SecurityPage, selectStep, tabAfterKey } from "./SecurityPage";
+import { ContractsSection } from "./SecuritySections";
+import deployments from "@/lib/cascade/deployments.json";
+import type { Deployment } from "@/lib/cascade/config";
 
 const seed = (flow: FlowV1 | null) => [{ key: cascadeKeys.flow(), data: flow ? { flow, receivedAt: Date.now() } : null }];
 const html = (flow: FlowV1 | null) => renderWithCache(createElement(SecurityPage), seed(flow));
@@ -74,6 +77,37 @@ describe("SecurityPage", () => {
     expect(h).toContain('aria-pressed="true"');
     expect(h).toContain('aria-live="polite"');
     expect(h).toContain('aria-hidden="true"');
+  });
+
+  it("shows how the money is protected, with the home page's points", () => {
+    const t = text(healthy());
+    expect(t).toContain("How your money is protected");
+    expect(t).toContain("We can't move your TAO without 7 days' public notice.");
+    for (const point of ["Verifiable on-chain", "Open source", "Independent audit", "Built on Chainlink CCIP"]) expect(t).toContain(point);
+  });
+
+  it("lists the deployment's contracts on both chains, each with a copy button and its explorer", () => {
+    const live = Object.values(deployments).find((x) => x.stage === "early")!;
+    const h = renderWithCache(createElement(ContractsSection, { deployment: live as unknown as Deployment }), []);
+    const t = plainText(h);
+    expect(t).toContain("The contracts");
+    for (const name of ["Swap contract", "Price check", "Front door", "Bridge adapter", "Vault"]) expect(t).toContain(name);
+    expect(h).toMatch(/https:\/\/basescan\.org\/address\/0x[0-9a-fA-F]{40}/);
+    expect(h).toMatch(/https:\/\/evm\.taostats\.io\/address\/0x[0-9a-fA-F]{40}/);
+    expect(h).toContain("Copy the Bittensor Vault address");
+  });
+
+  it("names the risks, each pointing at where to watch it", () => {
+    const t = text(healthy());
+    expect(t).toContain("Risks to know");
+    for (const watch of ["Read the code", "Watch the backing", "Watch the bridge", "Watch the validator", "Watch the swap"]) expect(t).toContain(watch);
+    expect(t).toContain("only deposit what you could afford to lose");
+  });
+
+  it("ends with where to report a problem", () => {
+    const h = html(healthy());
+    expect(plainText(h)).toContain("Found a problem?");
+    expect(h).toContain('href="https://github.com/Kedawgs/cascade/blob/main/SECURITY.md"');
   });
 
   it("noForbiddenWords", () => {

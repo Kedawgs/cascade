@@ -5,8 +5,8 @@ import styles from "./Landing.module.css";
 
 export function SiteFooter() {
   return (
-    <footer className={`wrap ${styles.footer}`}>
-      <div className={styles.frow}>
+    <footer className={styles.footerBand}>
+      <div className={`wrap ${styles.footer} ${styles.frow}`}>
         <div>
           <Link href="/" className={styles.brand} aria-label="Cascade home">
             <Logo />

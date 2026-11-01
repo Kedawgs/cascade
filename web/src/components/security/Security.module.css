@@ -47,6 +47,24 @@
   color: var(--proof-text);
 }
 
+/* the one ambient motion on the page: the live dot breathes while every check passes (reduced motion stills it,
+   globals.css) */
+.passing .dot {
+  animation: breathe 2.4s ease-out infinite;
+}
+
+@keyframes breathe {
+  0% {
+    box-shadow: 0 0 0 0 rgba(30, 138, 90, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(30, 138, 90, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(30, 138, 90, 0);
+  }
+}
+
 .notOptimal {
   background: var(--amber-tint);
   color: var(--amber);
@@ -204,6 +222,23 @@
   background: var(--paper);
 }
 
+/* a step a "Watch the …" link brought into view: one glow, so the eye lands on it */
+.node.jumped {
+  animation: landed 1.6s ease-out;
+}
+
+@keyframes landed {
+  0% {
+    box-shadow: 0 0 0 0 rgba(46, 143, 163, 0.5);
+  }
+  35% {
+    box-shadow: 0 0 0 8px rgba(46, 143, 163, 0.18);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(46, 143, 163, 0);
+  }
+}
+
 .where {
   font-size: 11px;
   font-weight: 700;
@@ -301,6 +336,257 @@
   font-weight: 800;
   letter-spacing: -0.02em;
   overflow-wrap: anywhere;
+}
+
+/* ---------- the sections below the map ---------- */
+.section {
+  padding-top: 104px;
+}
+
+.h2 {
+  margin: 0 0 10px;
+  font-size: clamp(28px, 3.2vw, 36px);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+}
+
+.sectionLede {
+  max-width: 58ch;
+  margin: 0 0 40px;
+  font-size: 18px;
+  color: var(--ink-2);
+}
+
+/* the contracts: one column per chain, each marked with the logo's own colour for it (water for Base, where
+   the money starts; green for Bittensor, where it is staked) */
+.chains {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 24px;
+}
+
+.chainCol {
+  padding: 24px 26px 10px;
+  border-radius: var(--r-card);
+  background: var(--mist);
+}
+
+.chainHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.chainMark {
+  width: 22px;
+  height: 7px;
+  border-radius: var(--r-pill);
+}
+
+.onBase {
+  background: linear-gradient(90deg, #79cad8, #206f80);
+}
+
+.onBittensor {
+  background: linear-gradient(90deg, #7dd9a9, #1e8a5a);
+}
+
+.contracts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.contract {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.contract:first-child {
+  border-top: 0;
+}
+
+.contractTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.contractName {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.addr {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.contractDoes {
+  margin: 4px 0 10px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.contractActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.copy {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.copy:hover {
+  background: var(--water-wash);
+}
+
+.copy.copied {
+  border-color: transparent;
+  background: var(--proof-tint);
+  color: var(--proof-text);
+}
+
+/* the risks: a plain two-column list, the title beside what it means and where to watch it */
+.risks {
+  margin: 0;
+}
+
+.risk {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  align-items: start;
+  gap: 6px 32px;
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+}
+
+.risk:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+/* amber is the site's colour for caution: a short bar, the logo's own shape, before each risk */
+.riskTitle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.riskTitle::before {
+  content: "";
+  flex: none;
+  width: 16px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, #f3c77c, var(--amber));
+}
+
+.riskBody {
+  margin: 0;
+}
+
+.riskBody p {
+  max-width: 62ch;
+  margin: 0 0 8px;
+  font-size: 16px;
+  color: var(--ink-2);
+}
+
+.watch {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--water-deep);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.watch:hover,
+.src:hover {
+  text-decoration: underline;
+}
+
+/* the sign-off: the logo's three steps beside where to report a problem */
+.report {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-top: 104px;
+  padding: 30px 34px;
+  border-radius: var(--r-card);
+  background: var(--water-tint);
+}
+
+.reportMark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  background: var(--paper);
+  box-shadow: 0 1px 2px rgba(16, 33, 43, 0.06);
+}
+
+.reportText {
+  flex: 1;
+  min-width: 0;
+}
+
+.reportHead {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.reportText p {
+  margin: 0;
+  max-width: 60ch;
+  font-size: 15.5px;
+  color: var(--ink-2);
+}
+
+@media (max-width: 860px) {
+  .chains {
+    grid-template-columns: 1fr;
+  }
+
+  .risk {
+    grid-template-columns: 1fr;
+  }
+
+  .report {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 /* ---------- phone: the map is a list, and the selected step opens in place ---------- */

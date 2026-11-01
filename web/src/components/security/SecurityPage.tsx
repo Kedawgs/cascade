@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNow } from "@/lib/client-state";
 import { useFlow } from "@/lib/cascade/hooks";
 import { flowView, type PageView, type StepId, type StepView } from "@/lib/security-view";
@@ -8,6 +8,7 @@ import landing from "../landing/Landing.module.css";
 import { SiteFooter } from "../landing/SiteFooter";
 import { SiteNav } from "../landing/SiteNav";
 import styles from "./Security.module.css";
+import { ContractsSection, ProtectedSection, ReportSection, RisksSection } from "./SecuritySections";
 
 type Dir = "in" | "out";
 
@@ -63,11 +64,28 @@ export function SecurityPage() {
   const now = useNow(30_000);
   const [dir, setDir] = useState<Dir>("in");
   const [picked, setPicked] = useState<StepId | null>(null);
+  // the step a "Watch the …" link last jumped to: it is brought into view, focused and briefly highlighted
+  const [jumped, setJumped] = useState<StepId | null>(null);
   const tabs = useRef<Record<Dir, HTMLButtonElement | null>>({ in: null, out: null });
+  const mapRef = useRef<HTMLOListElement | null>(null);
   const chooseDir = (d: Dir) => {
     setDir(d);
     setPicked(null);
   };
+  const watch = (d: Dir, id: StepId) => {
+    setDir(d);
+    setPicked(id);
+    setJumped(id);
+  };
+  useEffect(() => {
+    if (!jumped) return;
+    const node = mapRef.current?.querySelector<HTMLButtonElement>(`[data-step="${jumped}"]`);
+    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    node?.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+    node?.focus({ preventScroll: true });
+    const t = setTimeout(() => setJumped(null), 1600);
+    return () => clearTimeout(t);
+  }, [jumped]);
 
   const checking = flow.isPending && flow.fetchStatus === "fetching";
   const view = flowView(flow.data ?? null, now);
@@ -138,7 +156,7 @@ export function SecurityPage() {
           </ul>
         )}
 
-        <ol id="security-map" className={styles.map} role="tabpanel" aria-labelledby={`security-tab-${dir}`}>
+        <ol id="security-map" ref={mapRef} className={styles.map} role="tabpanel" aria-labelledby={`security-tab-${dir}`}>
           {steps.map((s, i) => {
             const open = s.id === selected.id;
             return (
@@ -149,7 +167,13 @@ export function SecurityPage() {
                   </span>
                 )}
                 <div className={styles.nodeWrap}>
-                  <button type="button" className={`${styles.node} ${open ? styles.sel : ""}`} aria-pressed={open} onClick={() => setPicked(s.id)}>
+                  <button
+                    type="button"
+                    data-step={s.id}
+                    className={`${styles.node} ${open ? styles.sel : ""} ${jumped === s.id ? styles.jumped : ""}`}
+                    aria-pressed={open}
+                    onClick={() => setPicked(s.id)}
+                  >
                     <span className={styles.where}>{s.chain}</span>
                     <span className={styles.name}>
                       <span className={`${styles.dot} ${TONE_CLASS[s.tone]}`} aria-hidden="true" />
@@ -165,6 +189,11 @@ export function SecurityPage() {
         </ol>
 
         <Details step={selected} className={styles.detail} />
+
+        <ProtectedSection />
+        <ContractsSection />
+        <RisksSection onWatch={watch} />
+        <ReportSection />
       </main>
       <SiteFooter />
     </div>

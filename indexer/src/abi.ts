@@ -299,11 +299,13 @@ export const ALPHA_VAULT = parseAbi([
   "function backing(address token) view returns (uint256)",
 ]);
 
-/** A Chainlink TokenPool 1.5.1's rate-limit buckets for a remote chain, refilled to now. */
+/** A Chainlink TokenPool 1.5.1's rate-limit buckets for a remote chain, refilled to now, and whether the pool still lists
+ * that chain (a lane removed with ChainRemoved reads false, and its buckets all zeros and off, like a limiter switched off). */
 export const TOKEN_POOL = parseAbi([
   "struct TokenBucket { uint128 tokens; uint32 lastUpdated; bool isEnabled; uint128 capacity; uint128 rate; }",
   "function getCurrentInboundRateLimiterState(uint64 remoteChainSelector) view returns (TokenBucket)",
   "function getCurrentOutboundRateLimiterState(uint64 remoteChainSelector) view returns (TokenBucket)",
+  "function isSupportedChain(uint64 remoteChainSelector) view returns (bool)",
 ]);
 
 /** Bittensor's staking precompile (0x…0805), as contracts/src/interfaces/IStaking.sol declares it. */

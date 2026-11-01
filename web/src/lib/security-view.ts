@@ -64,24 +64,34 @@ const SAY = {
 
 export const AMBER = {
   backing: "Backing is below 100% right now: the TAO held is less than the bridged TAO issued.",
-  bridge: "The bridge has no room, or is switched off, so new deposits wait longer to cross. Your existing stake isn't affected.",
+  bridge: "The bridge has no room left, or its lane is closed, so new deposits wait longer to cross. Your existing stake isn't affected.",
   frontDoor: "The front door is paused, so new deposits and withdrawals can't be requested until it resumes. Your existing stake isn't affected.",
   vault: "The vault is paused, so staking and payouts wait until it resumes.",
-  bridgeBack: "The bridge back has no room, or is switched off, so payouts wait longer to reach Base.",
+  bridgeBack: "The bridge back has no room left, or its lane is closed, so payouts wait longer to reach Base.",
 } as const;
 
-const noRoom = (b: Bucket) => b.enabled === false || b.roomLeft === "0";
-
-function bucketFigures(b: Bucket, usable: boolean): { room: string; of: string; refill: string; onTheWay: string } {
-  if (!usable) return { room: DASH, of: DASH, refill: DASH, onTheWay: DASH };
+/** A bridge direction as the page shows it: its headline, its figures (the room's), and whether it has no room.
+ * `enabled` false is CCIP's limiter off on both pools: no limit, transfers pass. Only `supported` false (a pool no
+ * longer lists the other chain) closes the lane. Anything unknown, or a chain not fresh, is a dash. */
+function bucketView(b: Bucket | undefined, usable: boolean): { headline: string; figures: { label: string; value: string }[]; noRoom: boolean } {
+  const onTheWay = { label: "Transfers on the way", value: usable && b && Number.isFinite(b.inFlight) ? String(b.inFlight) : DASH };
+  const unknown = { headline: DASH, figures: [{ label: "Room left", value: DASH }, { label: "Refills", value: DASH }, onTheWay], noRoom: false };
+  if (!usable || !b) return unknown;
+  if (b.supported === false) return { headline: "Closed", figures: [{ label: "Room left", value: "None: the lane is closed" }, onTheWay], noRoom: true };
+  if (b.supported !== true) return unknown;
+  if (b.enabled === false) return { headline: "No limit", figures: [{ label: "Room left", value: "No limit" }, onTheWay], noRoom: false };
+  if (b.enabled !== true) return unknown;
   const room = units(b.roomLeft, 18);
   const cap = units(b.capacity, 18);
   const per = units(b.perHour, 18);
   return {
-    room: room === null ? DASH : `${tao2(room)} TAO`,
-    of: room === null || cap === null ? DASH : `${tao2(room)} of ${tao2(cap)} TAO`,
-    refill: per === null ? DASH : `${tao2(per)} TAO per hour`,
-    onTheWay: Number.isFinite(b.inFlight) ? String(b.inFlight) : DASH,
+    headline: room === null ? DASH : `${tao2(room)} TAO`,
+    figures: [
+      { label: "Room left", value: room === null || cap === null ? DASH : `${tao2(room)} of ${tao2(cap)} TAO` },
+      { label: "Refills", value: per === null ? DASH : `${tao2(per)} TAO per hour` },
+      onTheWay,
+    ],
+    noRoom: b.roomLeft === "0",
   };
 }
 
@@ -147,13 +157,13 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   const val = flow?.validator;
   const frontDoorPaused = baseOk && flow?.frontDoor?.paused === true;
   const vaultPaused = bitOk && v?.paused === true;
-  const inRoomOut = flow ? noRoom(flow.bridgeIn) : false;
-  const outRoomOut = flow ? noRoom(flow.bridgeOut) : false;
-  const bin = flow ? bucketFigures(flow.bridgeIn, baseOk) : bucketFigures({ roomLeft: null, capacity: null, perHour: null, enabled: null, inFlight: 0 }, false);
-  const bout = flow ? bucketFigures(flow.bridgeOut, bitOk) : bin;
+  // a bridge direction's two limiters sit one on each chain (the source pool's outbound, the destination's inbound)
+  const bothOk = baseOk && bitOk;
+  const bin = bucketView(flow?.bridgeIn, bothOk);
+  const bout = bucketView(flow?.bridgeOut, bothOk);
 
-  const bridgeAmber = baseOk && (frontDoorPaused || inRoomOut);
-  const bridgeBackAmber = bitOk && outRoomOut;
+  const bridgeAmber = bothOk && (frontDoorPaused || bin.noRoom);
+  const bridgeBackAmber = bothOk && bout.noRoom;
 
   const link = (label: string, href: string | undefined) => (href ? { label, href } : null);
 
@@ -180,17 +190,10 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
       tone: toneOf(bitOk, ratio !== null && ratio < 1_000_000),
     },
     {
-      id: "bridge", name: "Bridge", chain: "Base to Bittensor",
-      headline: !baseOk ? DASH : flow!.bridgeIn.enabled === false ? "Switched off" : bin.room,
-      say: SAY.bridge,
-      figures: [
-        { label: "Room left", value: bin.of },
-        { label: "Refills", value: bin.refill },
-        { label: "Transfers on the way", value: bin.onTheWay },
-        { label: "Next batch sends", value: inText(flow?.batch?.nextSendAt, baseOk, "No batch waiting") },
-      ],
+      id: "bridge", name: "Bridge", chain: "Base to Bittensor", headline: bin.headline, say: SAY.bridge,
+      figures: [...bin.figures, { label: "Next batch sends", value: inText(flow?.batch?.nextSendAt, baseOk, "No batch waiting") }],
       link: link("The lane on Chainlink's explorer", a && explorer.ccipLane(a.baseTokenPool)),
-      tone: toneOf(baseOk, bridgeAmber),
+      tone: toneOf(bothOk, bridgeAmber),
     },
     {
       id: "vault", name: "Vault", chain: "Bittensor", headline: bit(v?.totalAssets), say: SAY.vault,
@@ -226,16 +229,10 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
       tone: toneOf(bitOk, vaultPaused),
     },
     {
-      id: "bridgeBack", name: "Bridge back", chain: "Bittensor to Base",
-      headline: !bitOk ? DASH : flow!.bridgeOut.enabled === false ? "Switched off" : bout.room,
-      say: SAY.bridgeBack,
-      figures: [
-        { label: "Room left", value: bout.of },
-        { label: "Refills", value: bout.refill },
-        { label: "Transfers on the way", value: bout.onTheWay },
-      ],
+      id: "bridgeBack", name: "Bridge back", chain: "Bittensor to Base", headline: bout.headline, say: SAY.bridgeBack,
+      figures: bout.figures,
       link: link("The lane on Chainlink's explorer", a && explorer.ccipLane(a.baseTokenPool)),
-      tone: toneOf(bitOk, bridgeBackAmber || frontDoorPaused),
+      tone: toneOf(bothOk, bridgeBackAmber || frontDoorPaused),
     },
     {
       id: "swapOut", name: "Swap to USDC", chain: "Base", headline: depthHeadline, say: SAY.swapOut,
@@ -248,11 +245,9 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
 
   // a fresh chain's step with a blank headline figure is not passing: it waits for a reading. The wallet
   // steps' headlines are words, not readings, so they never count.
-  const bucketUnknown = (id: StepId) =>
-    flow !== undefined && flow !== null && ((id === "bridge" && baseOk && flow.bridgeIn.enabled === null) || (id === "bridgeBack" && bitOk && flow.bridgeOut.enabled === null));
   for (const s of [...stepsIn, ...stepsOut]) {
     if (s.id === "wallet" || s.id === "walletOut" || s.tone === "stale") continue;
-    if (s.headline === DASH || bucketUnknown(s.id)) s.tone = "stale";
+    if (s.headline === DASH) s.tone = "stale";
   }
 
   // ---- the top line ----

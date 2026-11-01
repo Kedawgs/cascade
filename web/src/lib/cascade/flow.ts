@@ -22,7 +22,18 @@ export interface Notice {
   /** the transaction that started it, when the monitor stored it */
   tx?: string;
 }
-export interface Bucket { roomLeft: Amount; capacity: Amount; perHour: Amount; enabled: boolean | null; inFlight: number }
+/** One bridge direction: the binding one of the source pool's outbound limiter and the destination pool's inbound one. */
+export interface Bucket {
+  /** the binding limiter's room, capacity and refill per hour; null when unknown, and when no limiter binds or the lane is closed */
+  roomLeft: Amount;
+  capacity: Amount;
+  perHour: Amount;
+  /** whether a rate limit applies: false is no limit (CCIP's limiter off on both pools), never "switched off"; null when unknown */
+  enabled: boolean | null;
+  /** whether both pools still list the other chain (isSupportedChain): false is a closed lane; null when unknown */
+  supported: boolean | null;
+  inFlight: number;
+}
 export interface FlowV1 {
   v: 1;
   deployment: string;

@@ -126,6 +126,22 @@ describe("readSnapshot", () => {
     expect(s.bittensor?.state.payoutFeeQuote).toBeUndefined();
   });
 
+  it("asks each token pool whether it still lists the other chain: a lane removed reads false, a failed read is unread", async () => {
+    const state = deploymentState(cfg);
+    const { rpc } = fakeDeployment(cfg, state);
+    const s = await readSnapshot(rpc, cfg, inputs(), 1);
+    expect(s.base?.state.lane?.supported).toBe(true);
+    expect(s.bittensor?.state.lane?.supported).toBe(true);
+    // the same selectors as the buckets: the Base pool is asked about Bittensor, the lock pool about Base
+    expect(state.asked.supportedSelectors.sort()).toEqual([`base:${CCIP_SELECTOR.bittensor}`, `bittensor:${CCIP_SELECTOR.base}`].sort());
+    state.base.lane.supported = false;
+    state.reverts.add("bittensor.pool.isSupportedChain");
+    const t = await readSnapshot(rpc, cfg, inputs(), 2);
+    expect(t.base?.state.lane?.supported).toBe(false);
+    expect(t.bittensor?.state.lane?.supported).toBeUndefined();
+    expect(t.bittensor?.state.lane?.outbound).toBeDefined();
+  });
+
   it("reads the validator's take, root stake and root uid, and an unset RootStakeUnlockInterval as 0; an absent entry as null", async () => {
     const state = deploymentState(cfg);
     const { rpc } = fakeDeployment(cfg, state);

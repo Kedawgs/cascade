@@ -33,7 +33,8 @@ describe("flowView", () => {
   });
 
   it("amberStepWhenBridgeHasNoRoom", () => {
-    for (const patch of [{ roomLeft: "0" }, { enabled: false }]) {
+    // no room left, or a lane closed (a pool no longer lists the other chain)
+    for (const patch of [{ roomLeft: "0" }, { supported: false, enabled: null, roomLeft: null, capacity: null, perHour: null }]) {
       const f = goodFlow();
       f.backing.ratioPpm = 1_000_000;
       f.bridgeIn = { ...f.bridgeIn, ...patch };
@@ -47,6 +48,45 @@ describe("flowView", () => {
     const g = goodFlow();
     g.bridgeOut = { ...g.bridgeOut, roomLeft: "0" };
     expect(step(view(g), "bridgeBack").tone).toBe("amber");
+  });
+
+  it("a limiter that is off is no limit (ok), a closed lane is amber, an unknown one waits", () => {
+    const base = () => { const f = goodFlow(); f.backing.ratioPpm = 1_000_000; return f; };
+    // CCIP's isEnabled false on both pools: transfers pass unlimited
+    const off = base();
+    off.bridgeIn = { roomLeft: null, capacity: null, perHour: null, enabled: false, supported: true, inFlight: 1 };
+    off.bridgeOut = { ...off.bridgeIn, inFlight: 0 };
+    const v = view(off);
+    for (const id of ["bridge", "bridgeBack"]) {
+      expect(step(v, id).headline, id).toBe("No limit");
+      expect(step(v, id).tone, id).toBe("ok");
+      expect(figure(step(v, id), "Room left"), id).toBe("No limit");
+      for (const fig of step(v, id).figures) expect(fig.value, `${id} ${fig.label}`).not.toBe("–");
+    }
+    expect(v.status.kind).toBe("passing");
+    expect(JSON.stringify(v)).not.toMatch(/switched off/i);
+    // a lane closed: amber, its own words
+    const closed = base();
+    closed.bridgeIn = { roomLeft: null, capacity: null, perHour: null, enabled: null, supported: false, inFlight: 0 };
+    const c = view(closed);
+    expect(step(c, "bridge").headline).toBe("Closed");
+    expect(step(c, "bridge").tone).toBe("amber");
+    expect(c.status.kind).toBe("notOptimal");
+    expect(c.status.detail).toMatch(/closed/i);
+    // support unknown: the step waits, whatever the limiter says
+    const unknown = base();
+    unknown.bridgeIn = { ...unknown.bridgeIn, supported: null };
+    expect(step(view(unknown), "bridge").tone).toBe("stale");
+    expect(view(unknown).status.kind).toBe("waiting");
+  });
+
+  it("a bridge direction needs both chains fresh: its two pools sit one on each", () => {
+    const f = goodFlow();
+    f.backing.ratioPpm = 1_000_000;
+    f.chains.base = { block: "1", time: GENERATED_AT - 700, stale: true };
+    const v = view(f);
+    expect(step(v, "bridgeBack").headline).toBe("–");
+    expect(step(v, "bridgeBack").tone).toBe("stale");
   });
 
   it("goes amber when the vault or the front door is paused", () => {
@@ -65,7 +105,7 @@ describe("flowView", () => {
     f.chains.bittensor = { block: "1", time: GENERATED_AT - 700, stale: true };
     // what the server sends for a stale chain: nulls
     f.backing = { alphaBacking: null, wTaoSupply: null, lockPoolFmTao: null, fmTaoSupplyBase: null, ratioPpm: null };
-    f.bridgeOut = { roomLeft: null, capacity: null, perHour: null, enabled: null, inFlight: 1 };
+    f.bridgeOut = { roomLeft: null, capacity: null, perHour: null, enabled: null, supported: null, inFlight: 1 };
     f.vault = { totalAssets: null, price: null, pendingPayouts: null, nextPayoutAt: null, paused: null };
     f.validator = { hotkey: null, ourStake: null, takeBps: null, backups: [] };
     const v = view(f);
@@ -78,10 +118,11 @@ describe("flowView", () => {
       expect(s.figures.length, id).toBeGreaterThan(0);
       for (const fig of s.figures) expect(fig.value, `${id} ${fig.label}`).toBe("–");
     }
-    // Base's own numbers still show
+    // Base's own numbers still show; the bridge in needs the lock pool on Bittensor too
     expect(step(v, "swap").headline).toMatch(/\d/);
     expect(step(v, "swap").tone).toBe("ok");
-    expect(figure(step(v, "bridge"), "Room left")).toMatch(/\d/);
+    expect(figure(step(v, "bridge"), "Room left")).toBe("–");
+    expect(step(v, "bridge").tone).toBe("stale");
   });
 
   it("cantCheckOnNull", () => {
@@ -97,7 +138,7 @@ describe("flowView", () => {
     const f = goodFlow();
     f.chains.base = null;
     f.swap = { taoWethPoolTao: null, wethUsdcPoolUsdc: null, twapUsdcPerTao: null, spotUsdcPerTao: null, buyQuote1000Tao: null, sellQuote: null };
-    f.bridgeIn = { roomLeft: "0", capacity: "0", perHour: "0", enabled: false, inFlight: 0 };
+    f.bridgeIn = { roomLeft: "0", capacity: "0", perHour: "0", enabled: false, supported: true, inFlight: 0 };
     f.backing.wTaoSupply = "0";
     const g = goodFlow();
     g.swap.twapUsdcPerTao = "0";
@@ -221,6 +262,7 @@ describe("flowView", () => {
       ["twap null (oracle reverted)", (f) => { f.swap.twapUsdcPerTao = null; }, "swap"],
       ["ratioPpm null", (f) => { f.backing.ratioPpm = null; }, "backing"],
       ["bucket enabled null", (f) => { f.bridgeIn.enabled = null; }, "bridge"],
+      ["lane support unknown", (f) => { f.bridgeOut.supported = null; }, "bridgeBack"],
     ];
     for (const [name, patch, id] of cases) {
       const f = goodFlow();
@@ -266,7 +308,7 @@ describe("flowView", () => {
     mk((f) => { f.bridgeIn.roomLeft = "0"; }); // bridge
     mk((f) => { f.frontDoor.paused = true; }); // front door
     mk((f) => { f.vault.paused = true; }); // vault
-    mk((f) => { f.bridgeOut.enabled = false; }); // bridge back
+    mk((f) => { f.bridgeOut.supported = false; }); // bridge back (closed)
     const details = flows.map((f) => view(f).status.detail);
     expect(new Set(details).size).toBe(5);
     for (const d of details) expect(d).not.toMatch(/safe|secure|guarantee/i);

@@ -1,5 +1,5 @@
 import { decodeAbiParameters, type Hex } from "viem";
-import { ADMIN_VIEWS, ALPHA_VAULT, BRIDGE_VIEWS, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, QUOTER_V2, SAFE, STAKING, TOKEN_POOL, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
+import { ADMIN_VIEWS, ALPHA_VAULT, BRIDGE_VIEWS, CCIP_SELECTOR, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, QUOTER_V2, SAFE, STAKING, TOKEN_POOL, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
 import { type Config, PATH_USDC_TO_TAO, UNISWAP_QUOTER } from "../../src/config.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
 import {
@@ -83,8 +83,8 @@ export function deploymentState(cfg: Config) {
       },
       /** wTAO's total supply (the lock pool holds lockPoolFmTao of it) */
       wTaoSupply: 100n * 10n ** 18n,
-      /** the lock pool's buckets for the Base lane */
-      lane: { inbound: bucket(5000n), outbound: bucket(4000n) },
+      /** the lock pool's buckets for the Base lane, and whether it lists Base (isSupportedChain) */
+      lane: { inbound: bucket(5000n), outbound: bucket(4000n), supported: true },
       /** the raw storage the 0x807 query answers for the validator (as the live chain did on 2026-10-31) */
       storage: { delegates: "0x0000" as Hex, totalHotkeyAlpha: "0x8a54d1d2fda00300" as Hex, uids: "0x0100" as Hex, unlockInterval: "0x" as Hex },
       claimGasRequired: 55_000_000n,
@@ -130,8 +130,8 @@ export function deploymentState(cfg: Config) {
       // slot0: the observations as the live pools hold them once TAO/WETH's has grown to its cardinalityNext
       taoWeth: { slot0: [79228162514264337593543950336n, 0, 0, 2000, 2000, 0, true] as [bigint, number, number, number, number, number, boolean], liquidity: 5n * 10n ** 18n, tao: 30n * 10n ** 18n, token0: cfg.tokens.base.fmTao },
       wethUsdc: { slot0: [3961408125713216879677197516800n, 0, 0, 5000, 5000, 0, true] as [bigint, number, number, number, number, number, boolean], liquidity: 9n * 10n ** 18n, token0: cfg.tokens.base.weth },
-      /** the Base pool's buckets for the Bittensor lane */
-      lane: { inbound: bucket(5000n), outbound: bucket(5000n) },
+      /** the Base pool's buckets for the Bittensor lane, and whether it lists Bittensor (isSupportedChain) */
+      lane: { inbound: bucket(5000n), outbound: bucket(5000n), supported: true },
       oracleValue: 400_000_000n,
       /** QuoterV2: TAO wei a $1,000 deposit gets; USDC units per TAO a sale gets (the sale's amountIn is recorded in `asked.quoterIn`) */
       buyQuote: 2_450n * 10n ** 15n,
@@ -150,7 +150,7 @@ export function deploymentState(cfg: Config) {
     /** eth_getTransactionCount per chain and address */
     nonces: { base: {} as Record<Hex, bigint>, bittensor: {} as Record<Hex, bigint> },
     /** what the readings asked of the views that take arguments */
-    asked: { quoterIn: [] as bigint[], bucketSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number; amount: bigint; sum: bigint }[] },
+    asked: { quoterIn: [] as bigint[], bucketSelectors: [] as string[], supportedSelectors: [] as string[], backingOf: [] as Hex[], quotes: [] as { bridge: Hex; destChain: bigint; recipient: Hex; entries: number; amount: bigint; sum: bigint }[] },
   };
 }
 
@@ -167,8 +167,9 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
     <T>(chain: string, name: string, value: (args: readonly unknown[]) => T) =>
     (args: readonly unknown[]) =>
       state.reverts.has(`${chain}.${name}`) ? REVERT : value(args);
-  /** a token pool's buckets: either direction, asked by the remote chain's selector (recorded) */
-  const lane = (chain: string, buckets: { inbound: ReturnType<typeof bucket>; outbound: ReturnType<typeof bucket> }) => ({
+  /** a token pool's buckets: either direction, asked by the remote chain's selector (recorded); and whether it lists that
+   * chain, for its own remote selector only (any other reads false, as a live pool answers) */
+  const lane = (chain: string, buckets: { inbound: ReturnType<typeof bucket>; outbound: ReturnType<typeof bucket>; supported: boolean }) => ({
     getCurrentInboundRateLimiterState: v(chain, "pool.inbound", ([sel]) => {
       state.asked.bucketSelectors.push(`${chain}:${sel}`);
       return buckets.inbound;
@@ -176,6 +177,10 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
     getCurrentOutboundRateLimiterState: v(chain, "pool.outbound", ([sel]) => {
       state.asked.bucketSelectors.push(`${chain}:${sel}`);
       return buckets.outbound;
+    }),
+    isSupportedChain: v(chain, "pool.isSupportedChain", ([sel]) => {
+      state.asked.supportedSelectors.push(`${chain}:${sel}`);
+      return buckets.supported && sel === (chain === "base" ? CCIP_SELECTOR.bittensor : CCIP_SELECTOR.base);
     }),
   });
   const b = state.base;

@@ -68,10 +68,13 @@ export interface Bucket {
   capacity: bigint;
   rate: bigint;
 }
-/** A token pool's buckets for Cascade's lane: inbound (from the other chain) and outbound (to it). */
+/** A token pool's buckets for Cascade's lane: inbound (from the other chain) and outbound (to it), and whether the pool
+ * still lists the other chain (isSupportedChain). In CCIP a bucket that is off (isEnabled false: capacity, rate and
+ * tokens 0) is no limit; a lane removed from the pool reads the same, so only `supported` tells the two apart. */
 export interface Lane {
   inbound?: Bucket;
   outbound?: Bucket;
+  supported?: boolean;
 }
 
 // One block-pinned reading of each chain per tick (spec section 6, "Readings"): one Multicall3 call per
@@ -397,6 +400,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   const bitLane: Lane = {};
   vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "getCurrentInboundRateLimiterState", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.inbound = bucketOf(v)));
   vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "getCurrentOutboundRateLimiterState", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.outbound = bucketOf(v)));
+  vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "isSupportedChain", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.supported = v));
   // the stake hotkey as a validator, and the chain's root-stake hold (SubtensorModule storage)
   const validator: NonNullable<BitState["validator"]> = { hotkey: lc(stakeHotkey) };
   const storage = (key: Hex, ok: (v: Hex) => void) => vp.add({ address: STORAGE_QUERY, callData: key }, ok);
@@ -485,6 +489,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   const baseLane: Lane = {};
   bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "getCurrentInboundRateLimiterState", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.inbound = bucketOf(v)));
   bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "getCurrentOutboundRateLimiterState", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.outbound = bucketOf(v)));
+  bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "isSupportedChain", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.supported = v));
   bp.add(
     { address: i.oracle ?? d.oracle, abi: ORACLE, functionName: "usdcValue", args: [10n ** 18n] },
     (v) => (base.oracleValue = v),
@@ -538,14 +543,14 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
       set.push(hk);
     }
     if (slots[0] !== undefined) bit.hotkeys = set;
-    if (bitLane.inbound || bitLane.outbound) bit.lane = bitLane;
+    if (bitLane.inbound || bitLane.outbound || bitLane.supported !== undefined) bit.lane = bitLane;
     if (Object.keys(validator).length > 1) bit.validator = validator;
     snap.bittensor = bitReading;
     Object.assign(messageStates, bitMessages);
     Object.assign(safeNonces.bittensor, bitSafes);
   }
   if (baseReading) {
-    if (baseLane.inbound || baseLane.outbound) base.lane = baseLane;
+    if (baseLane.inbound || baseLane.outbound || baseLane.supported !== undefined) base.lane = baseLane;
     snap.base = baseReading;
     Object.assign(messageStates, baseMessages);
     Object.assign(safeNonces.base, baseSafes);

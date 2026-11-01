@@ -1,5 +1,5 @@
 import type { Config } from "./config.ts";
-import type { BaseState, BitState, Bucket as RawBucket, ChainReading } from "./snapshot.ts";
+import type { BaseState, BitState, Bucket as RawBucket, ChainReading, Lane } from "./snapshot.ts";
 
 // The public document behind the /security page: facts only, from the newest reading of each chain, the
 // bridge messages in flight and the stored admin events. Pure: no D1, no fetch. The monitor's own thresholds
@@ -23,7 +23,18 @@ export interface Notice {
   /** the transaction that started it, when the monitor stored it */
   tx?: string;
 }
-export interface Bucket { roomLeft: Amount; capacity: Amount; perHour: Amount; enabled: boolean | null; inFlight: number }
+/** One bridge direction: the binding one of the source pool's outbound limiter and the destination pool's inbound one. */
+export interface Bucket {
+  /** the binding limiter's room, capacity and refill per hour; null when unknown, and when no limiter binds or the lane is closed */
+  roomLeft: Amount;
+  capacity: Amount;
+  perHour: Amount;
+  /** whether a rate limit applies: false is no limit (CCIP's limiter off on both pools), never "switched off"; null when unknown */
+  enabled: boolean | null;
+  /** whether both pools still list the other chain (isSupportedChain): false is a closed lane; null when unknown */
+  supported: boolean | null;
+  inFlight: number;
+}
 export interface FlowV1 {
   v: 1;
   deployment: string;
@@ -100,9 +111,21 @@ function spotUsdcPerTao(s: BaseState, cfg: Config): bigint | undefined {
   return v > 0n ? v : undefined;
 }
 
-function bucketOf(b: RawBucket | undefined, live: boolean, inFlight: number): Bucket {
-  if (!live || !b) return { roomLeft: null, capacity: null, perHour: null, enabled: null, inFlight };
-  return { roomLeft: b.tokens.toString(), capacity: b.capacity.toString(), perHour: (b.rate * 3600n).toString(), enabled: b.isEnabled, inFlight };
+/** One bridge direction from the two pools' lanes (each undefined when its chain's half is stale or missing).
+ * A transfer passes two limiters: the source pool's outbound one when it is sent, the destination pool's inbound one
+ * when it is released, so the room is the tighter of the two. A limiter that is off (isEnabled false: CCIP stores it as
+ * capacity, rate and tokens 0, and lets transfers through unlimited) never binds; with both off there is no limit. A
+ * lane either pool no longer lists (isSupportedChain false: a removed lane reads the same zeros) is closed. Anything
+ * unknown on either side (a stale half, a bucket or the support unread) leaves the room unknown, never one side's. */
+function laneOf(src: Lane | undefined, dst: Lane | undefined, inFlight: number): Bucket {
+  const unknown: Bucket = { roomLeft: null, capacity: null, perHour: null, enabled: null, supported: null, inFlight };
+  if (!src || !dst) return unknown;
+  const supported = src.supported === false || dst.supported === false ? false : src.supported === true && dst.supported === true ? true : null;
+  if (supported !== true || !src.outbound || !dst.inbound) return { ...unknown, supported };
+  const limits = [src.outbound, dst.inbound].filter((b) => b.isEnabled);
+  if (!limits.length) return { ...unknown, enabled: false, supported };
+  const b: RawBucket = limits.reduce((m, x) => (x.tokens < m.tokens ? x : m));
+  return { roomLeft: b.tokens.toString(), capacity: b.capacity.toString(), perHour: (b.rate * 3600n).toString(), enabled: true, supported, inFlight };
 }
 
 /** A stored readyAt as unix seconds, only when it is a plain decimal string. */
@@ -254,8 +277,9 @@ export function flowOf(i: FlowInput): FlowV1 {
       fmTaoSupplyBase: amt(bs?.fmTaoSupply, !!bs),
       ratioPpm,
     },
-    bridgeIn: bucketOf(bs?.lane?.outbound, !!bs, i.inFlight.toBittensor),
-    bridgeOut: bucketOf(ts?.lane?.outbound, !!ts, i.inFlight.toBase),
+    // a direction needs both halves fresh: the source pool's outbound limiter and the destination pool's inbound one
+    bridgeIn: laneOf(bs && (bs.lane ?? {}), ts && (ts.lane ?? {}), i.inFlight.toBittensor),
+    bridgeOut: laneOf(ts && (ts.lane ?? {}), bs && (bs.lane ?? {}), i.inFlight.toBase),
     batch: { nextSendAt },
     vault: {
       totalAssets: amt(ts?.totalAssets, !!ts),

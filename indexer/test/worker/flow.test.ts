@@ -21,7 +21,8 @@ const baseState = (o: Partial<BaseState> = {}): BaseState => ({
   wethUsdcPoolUsdc: 7_000_000_000n,
   oracleValue: 300_000_000n,
   paused: false,
-  lane: { outbound: bucket() },
+  // the Base pool's buckets: outbound to Bittensor (5 TAO left), inbound from it (6)
+  lane: { outbound: bucket(), inbound: bucket({ tokens: 6n * E18 }), supported: true },
   ...o,
 });
 const bitState = (o: Partial<BitState> = {}): BitState => ({
@@ -34,7 +35,8 @@ const bitState = (o: Partial<BitState> = {}): BitState => ({
   price: E18,
   pendingPayouts: 0n,
   paused: false,
-  lane: { outbound: bucket({ tokens: 2n * E18 }) },
+  // the lock pool's buckets: outbound to Base (2 TAO left), inbound from it (7)
+  lane: { outbound: bucket({ tokens: 2n * E18 }), inbound: bucket({ tokens: 7n * E18 }), supported: true },
   ...o,
 });
 const rd = <T>(state: T, age = 10): ChainReading<T> => ({ block: 123n, time: NOW - age, state });
@@ -68,7 +70,9 @@ describe("flowOf", () => {
     expect(f.bridgeOut.inFlight).toBe(2);
     expect(f.backing.alphaBacking).toBeNull();
     expect(f.swap.buyQuote1000Tao).toBe((3n * E18).toString());
-    expect(f.bridgeIn.roomLeft).toBe((5n * E18).toString());
+    // the bridge in needs both pools: the stale Bittensor half's inbound bucket is unknown, so its room is
+    expect(f.bridgeIn.roomLeft).toBeNull();
+    expect(f.bridgeIn.supported).toBeNull();
     expect(f.frontDoor.paused).toBe(false);
     // 600 s exactly is still fresh
     expect(flowOf(input({ bittensor: rd(bitState(), STALE_AFTER_S) })).chains.bittensor?.stale).toBe(false);
@@ -126,10 +130,46 @@ describe("flowOf", () => {
     expect(flowOf(input({ base: rd(baseState({ fmTaoSupply: 0n })), bittensor: rd(bitState({ wTaoSupply: 0n })) })).backing.ratioPpm).toBeNull();
   });
 
-  it("bucketPerHourAndDisabled", () => {
-    const f = flowOf(input({ base: rd(baseState({ lane: { outbound: bucket({ rate: 1000n, isEnabled: false }) } })) }));
-    expect(f.bridgeIn).toEqual({ roomLeft: (5n * E18).toString(), capacity: (20n * E18).toString(), perHour: "3600000", enabled: false, inFlight: 1 });
-    expect(flowOf(input({ base: rd(baseState({ lane: undefined })) })).bridgeIn.roomLeft).toBeNull();
+  it("a bridge direction's room is the tighter of the source pool's outbound and the destination pool's inbound", () => {
+    const f = flowOf(input());
+    // in: Base's outbound (5 TAO) binds before the lock pool's inbound (7)
+    expect(f.bridgeIn).toEqual({ roomLeft: (5n * E18).toString(), capacity: (20n * E18).toString(), perHour: (36n * E18).toString(), enabled: true, supported: true, inFlight: 1 });
+    // out: the lock pool's outbound (2) binds before Base's inbound (6)
+    expect(f.bridgeOut).toEqual({ roomLeft: (2n * E18).toString(), capacity: (20n * E18).toString(), perHour: (36n * E18).toString(), enabled: true, supported: true, inFlight: 2 });
+    // a tighter destination binds, with its own capacity and refill
+    const tight = bucket({ tokens: 3n * E18, capacity: 10n * E18, rate: 1000n });
+    const g = flowOf(input({ bittensor: rd(bitState({ lane: { outbound: bucket(), inbound: tight, supported: true } })) }));
+    expect(g.bridgeIn).toEqual({ roomLeft: (3n * E18).toString(), capacity: (10n * E18).toString(), perHour: "3600000", enabled: true, supported: true, inFlight: 1 });
+    const h = flowOf(input({ base: rd(baseState({ lane: { outbound: bucket(), inbound: tight, supported: true } })), bittensor: rd(bitState({ lane: { outbound: bucket({ tokens: 9n * E18 }), inbound: bucket(), supported: true } })) }));
+    expect(h.bridgeOut.roomLeft).toBe((3n * E18).toString());
+    // either bucket unread, or either chain without a fresh reading: unknown
+    const unknown = { roomLeft: null, capacity: null, perHour: null, enabled: null, supported: null, inFlight: 1 };
+    expect(flowOf(input({ base: rd(baseState({ lane: undefined })) })).bridgeIn).toEqual(unknown);
+    expect(flowOf(input({ bittensor: rd(bitState({ lane: { outbound: bucket(), supported: true } })) })).bridgeIn).toEqual({ ...unknown, supported: true });
+    expect(flowOf(input({ base: rd(baseState(), STALE_AFTER_S + 1) })).bridgeIn).toEqual(unknown);
+    expect(flowOf(input({ bittensor: null })).bridgeIn).toEqual(unknown);
+  });
+
+  it("a limiter that is off is no limit, never switched off; only a lane no longer listed is closed", () => {
+    // CCIP stores a limiter switched off as capacity, rate and tokens 0, and lets transfers through unlimited
+    const off: Bucket = { tokens: 0n, isEnabled: false, capacity: 0n, rate: 0n };
+    const none = { roomLeft: null, capacity: null, perHour: null };
+    // one side off: the other side binds
+    const a = flowOf(input({ base: rd(baseState({ lane: { outbound: off, inbound: bucket(), supported: true } })) }));
+    expect(a.bridgeIn).toEqual({ roomLeft: (7n * E18).toString(), capacity: (20n * E18).toString(), perHour: (36n * E18).toString(), enabled: true, supported: true, inFlight: 1 });
+    // both sides off: no limit at all
+    const b = flowOf(input({ base: rd(baseState({ lane: { outbound: off, inbound: bucket(), supported: true } })), bittensor: rd(bitState({ lane: { outbound: bucket(), inbound: off, supported: true } })) }));
+    expect(b.bridgeIn).toEqual({ ...none, enabled: false, supported: true, inFlight: 1 });
+    expect(b.bridgeOut.enabled).toBe(true);
+    // a lane removed from either pool reads all zeros and off as well, and isSupportedChain false: closed, both ways
+    const c = flowOf(input({ base: rd(baseState({ lane: { outbound: off, inbound: off, supported: false } })) }));
+    expect(c.bridgeIn).toEqual({ ...none, enabled: null, supported: false, inFlight: 1 });
+    expect(c.bridgeOut).toEqual({ ...none, enabled: null, supported: false, inFlight: 2 });
+    expect(flowOf(input({ bittensor: rd(bitState({ lane: { outbound: off, inbound: off, supported: false } })) })).bridgeIn.supported).toBe(false);
+    // support unread (or a reading from before it was read): unknown, never assumed
+    const u = flowOf(input({ base: rd(baseState({ lane: { outbound: bucket(), inbound: bucket() } })) }));
+    expect(u.bridgeIn).toEqual({ ...none, enabled: null, supported: null, inFlight: 1 });
+    expect(u.bridgeOut.supported).toBeNull();
   });
 
   it("nextSendOnlyWithSomethingInTheBatch", () => {
@@ -283,7 +323,7 @@ describe("flowOf", () => {
     const keys = (v: unknown, path = ""): string[] =>
       v && typeof v === "object" && !Array.isArray(v) ? Object.entries(v).flatMap(([k, x]) => [`${path}${k}`, ...keys(x, `${path}${k}.`)]) : [];
     const f: FlowV1 = flowOf(input({ base: rd(baseState({ sellQuote: { taoIn: 1n, usdcOut: 2n } })), bittensor: rd(bitState({ stakeHotkey: HK1, hotkeys: [HK1] })) }));
-    const bucketKeys = ["roomLeft", "capacity", "perHour", "enabled", "inFlight"];
+    const bucketKeys = ["roomLeft", "capacity", "perHour", "enabled", "supported", "inFlight"];
     const expected = [
       "v", "deployment", "generatedAt",
       "chains", "chains.base", "chains.base.block", "chains.base.time", "chains.base.stale",

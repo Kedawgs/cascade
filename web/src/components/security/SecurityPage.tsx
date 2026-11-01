@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNow } from "@/lib/client-state";
 import { useFlow } from "@/lib/cascade/hooks";
 import { flowView, type PageView, type StepId, type StepView } from "@/lib/security-view";
@@ -15,6 +15,15 @@ type Dir = "in" | "out";
 export function selectStep(view: PageView, dir: Dir, id: StepId | null): StepView {
   const steps = dir === "in" ? view.stepsIn : view.stepsOut;
   return steps.find((s) => s.id === id) ?? steps[0]!;
+}
+
+/** The tab an arrow key (or Home/End) on the tab `from` moves to; null for any other key. With two tabs,
+ * either arrow goes to the other one. */
+export function tabAfterKey(from: Dir, key: string): Dir | null {
+  if (key === "ArrowRight" || key === "ArrowLeft") return from === "in" ? "out" : "in";
+  if (key === "Home") return "in";
+  if (key === "End") return "out";
+  return null;
 }
 
 const TONE_CLASS = { ok: styles.toneOk, amber: styles.toneAmber, stale: styles.toneStale } as const;
@@ -54,6 +63,11 @@ export function SecurityPage() {
   const now = useNow(30_000);
   const [dir, setDir] = useState<Dir>("in");
   const [picked, setPicked] = useState<StepId | null>(null);
+  const tabs = useRef<Record<Dir, HTMLButtonElement | null>>({ in: null, out: null });
+  const chooseDir = (d: Dir) => {
+    setDir(d);
+    setPicked(null);
+  };
 
   const checking = flow.isPending && flow.fetchStatus === "fetching";
   const view = flowView(flow.data ?? null, now);
@@ -84,10 +98,18 @@ export function SecurityPage() {
                 id={`security-tab-${d}`}
                 aria-selected={dir === d}
                 aria-controls="security-map"
+                tabIndex={dir === d ? 0 : -1}
+                ref={(el) => {
+                  tabs.current[d] = el;
+                }}
                 className={dir === d ? styles.on : undefined}
-                onClick={() => {
-                  setDir(d);
-                  setPicked(null);
+                onClick={() => chooseDir(d)}
+                onKeyDown={(e) => {
+                  const to = tabAfterKey(d, e.key);
+                  if (!to) return;
+                  e.preventDefault();
+                  chooseDir(to);
+                  tabs.current[to]?.focus();
                 }}
               >
                 {d === "in" ? "Money in" : "Money out"}

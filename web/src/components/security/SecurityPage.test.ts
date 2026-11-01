@@ -5,7 +5,7 @@ import { goodFlow } from "@/lib/cascade/__fixtures__/flow-v1";
 import type { FlowV1 } from "@/lib/cascade/flow";
 import { flowView } from "@/lib/security-view";
 import { plainText, renderWithCache } from "../test-render";
-import { SecurityPage, selectStep } from "./SecurityPage";
+import { SecurityPage, selectStep, tabAfterKey } from "./SecurityPage";
 
 const seed = (flow: FlowV1 | null) => [{ key: cascadeKeys.flow(), data: flow ? { flow, receivedAt: Date.now() } : null }];
 const html = (flow: FlowV1 | null) => renderWithCache(createElement(SecurityPage), seed(flow));
@@ -98,5 +98,21 @@ describe("selectStep", () => {
     // an id from the other direction falls back to the first of this one
     expect(selectStep(v, "out", "swap").id).toBe("vaultOut");
     expect(selectStep(v, "out", "bridgeBack").id).toBe("bridgeBack");
+  });
+});
+
+describe("tabAfterKey", () => {
+  it("moves between the two tabs with the arrow keys, wrapping, and Home/End", () => {
+    expect(tabAfterKey("in", "ArrowRight")).toBe("out");
+    expect(tabAfterKey("out", "ArrowRight")).toBe("in");
+    expect(tabAfterKey("in", "ArrowLeft")).toBe("out");
+    expect(tabAfterKey("out", "ArrowLeft")).toBe("in");
+    expect(tabAfterKey("out", "Home")).toBe("in");
+    expect(tabAfterKey("in", "End")).toBe("out");
+    expect(tabAfterKey("in", "Enter")).toBeNull();
+  });
+  it("makes only the selected tab a tab stop", () => {
+    const h = renderWithCache(createElement(SecurityPage), []);
+    expect(h).toContain('tabindex="-1"');
   });
 });

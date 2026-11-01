@@ -62,7 +62,7 @@ const SAY = {
   walletOut: "USDC lands back in your wallet.",
 } as const;
 
-const AMBER = {
+export const AMBER = {
   backing: "Backing is below 100% right now: the TAO held is less than the bridged TAO issued.",
   bridge: "The bridge has no room, or is switched off, so new deposits wait longer to cross. Your existing stake isn't affected.",
   frontDoor: "The front door is paused, so new deposits and withdrawals can't be requested until it resumes. Your existing stake isn't affected.",
@@ -246,6 +246,15 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     { id: "walletOut", name: "Your wallet", chain: "Base", headline: "USDC arrives", say: SAY.walletOut, figures: [], link: null, tone: "ok" },
   ];
 
+  // a fresh chain's step with a blank headline figure is not passing: it waits for a reading. The wallet
+  // steps' headlines are words, not readings, so they never count.
+  const bucketUnknown = (id: StepId) =>
+    flow !== undefined && flow !== null && ((id === "bridge" && baseOk && flow.bridgeIn.enabled === null) || (id === "bridgeBack" && bitOk && flow.bridgeOut.enabled === null));
+  for (const s of [...stepsIn, ...stepsOut]) {
+    if (s.id === "wallet" || s.id === "walletOut" || s.tone === "stale") continue;
+    if (s.headline === DASH || bucketUnknown(s.id)) s.tone = "stale";
+  }
+
   // ---- the top line ----
   let status: PageView["status"];
   if (!data || !flow) {
@@ -253,6 +262,8 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   } else if (!baseOk || !bitOk) {
     const which = !baseOk && !bitOk ? "Base and Bittensor" : !baseOk ? "Base" : "Bittensor";
     status = { kind: "waiting", text: "Waiting for a fresh reading", detail: `The latest reading from ${which} is too old to show, so those numbers are left blank.` };
+  } else if ([...stepsIn, ...stepsOut].some((s) => s.tone === "stale")) {
+    status = { kind: "waiting", text: "Waiting for a fresh reading", detail: "A reading from the chain isn't available yet, so that number is left blank." };
   } else {
     const amber = [...stepsIn, ...stepsOut].find((s) => s.tone === "amber");
     if (amber) {

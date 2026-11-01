@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { FlowV1, Notice } from "./cascade/flow";
 import { GENERATED_AT, goodFlow } from "./cascade/__fixtures__/flow-v1";
-import { flowView, type PageView, type StepView } from "./security-view";
+import { AMBER, flowView, type PageView, type StepView } from "./security-view";
 
 // the visitor's clock at the moment the document arrived
 const RECEIVED = 1_800_000_001_000;
@@ -202,6 +202,32 @@ describe("flowView", () => {
     expect(figure(va, "1 share is worth")).toBe("1.0500 TAO");
   });
 
+  it("never passes beside a blank figure on a fresh chain", () => {
+    const cases: [string, (f: FlowV1) => void, string][] = [
+      ["twap null (oracle reverted)", (f) => { f.swap.twapUsdcPerTao = null; }, "swap"],
+      ["ratioPpm null", (f) => { f.backing.ratioPpm = null; }, "backing"],
+      ["bucket enabled null", (f) => { f.bridgeIn.enabled = null; }, "bridge"],
+    ];
+    for (const [name, patch, id] of cases) {
+      const f = goodFlow();
+      f.backing.ratioPpm = 1_000_000;
+      patch(f);
+      const v = view(f);
+      expect(step(v, id).tone, name).toBe("stale");
+      expect(v.status.kind, name).toBe("waiting");
+      expect(v.status.text, name).toBe("Waiting for a fresh reading");
+    }
+  });
+
+  it("the wallet steps never count as unknown", () => {
+    const f = goodFlow();
+    f.backing.ratioPpm = 1_000_000;
+    const v = view(f);
+    expect(step(v, "wallet").tone).toBe("ok");
+    expect(step(v, "walletOut").tone).toBe("ok");
+    expect(v.status.kind).toBe("passing");
+  });
+
   it("noForbiddenWords", () => {
     const f = goodFlow();
     f.vault.paused = true;
@@ -217,5 +243,19 @@ describe("flowView", () => {
     for (const doc of [view(f), view(goodFlow()), view(stale), view(null)]) {
       expect(JSON.stringify(doc)).not.toMatch(/safe|secure|guarantee/i);
     }
+  });
+
+  it("noForbiddenWords covers every amber sentence", () => {
+    const flows: FlowV1[] = [];
+    const mk = (patch: (f: FlowV1) => void) => { const f = goodFlow(); f.backing.ratioPpm = 1_000_000; patch(f); flows.push(f); };
+    mk((f) => { f.backing.ratioPpm = 900_000; }); // backing
+    mk((f) => { f.bridgeIn.roomLeft = "0"; }); // bridge
+    mk((f) => { f.frontDoor.paused = true; }); // front door
+    mk((f) => { f.vault.paused = true; }); // vault
+    mk((f) => { f.bridgeOut.enabled = false; }); // bridge back
+    const details = flows.map((f) => view(f).status.detail);
+    expect(new Set(details).size).toBe(5);
+    for (const d of details) expect(d).not.toMatch(/safe|secure|guarantee/i);
+    for (const s of Object.values(AMBER)) expect(s).not.toMatch(/safe|secure|guarantee/i);
   });
 });

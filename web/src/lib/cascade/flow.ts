@@ -75,7 +75,9 @@ function isFlow(x: unknown): x is FlowV1 {
     if (!isObject(x[k])) return false;
   }
   const chains = x.chains;
-  return isObject(chains) && "base" in chains && "bittensor" in chains;
+  if (!isObject(chains) || !("base" in chains) || !("bittensor" in chains)) return false;
+  const reading = (c: unknown) => c === null || (isObject(c) && typeof c.time === "number" && Number.isFinite(c.time));
+  return reading(chains.base) && reading(chains.bittensor);
 }
 
 /** The monitor's flow document and when it arrived (on this device's clock); null when the deployment names

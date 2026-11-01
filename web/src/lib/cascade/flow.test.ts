@@ -49,6 +49,16 @@ describe("fetchFlow", () => {
     expect(await fetchFlow(D, { fetch: json({ ...goodFlow(), v: 2 }) as typeof fetch })).toBeNull();
   });
 
+  it("nullOnMalformedChainTimes", async () => {
+    const bad = (chains: unknown) => json({ ...goodFlow(), chains }) as typeof fetch;
+    const ok = goodFlow().chains;
+    expect(await fetchFlow(D, { fetch: bad({ base: "x", bittensor: null }) })).toBeNull();
+    expect(await fetchFlow(D, { fetch: bad({ base: { ...ok.base, time: "5" }, bittensor: null }) })).toBeNull();
+    expect(await fetchFlow(D, { fetch: bad({ base: null, bittensor: { block: "1", stale: false } }) })).toBeNull();
+    expect(await fetchFlow(D, { fetch: bad({ base: null, bittensor: { ...ok.bittensor, time: null } }) })).toBeNull();
+    expect(await fetchFlow(D, { fetch: bad({ base: null, bittensor: null }) })).not.toBeNull();
+  });
+
   it("nullOnMissingKey", async () => {
     for (const key of Object.keys(goodFlow())) {
       if (key === "v") continue;

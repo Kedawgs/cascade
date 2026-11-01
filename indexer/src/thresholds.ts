@@ -135,6 +135,8 @@ export const DEFAULTS = {
   /** monitor.unjudged for site.integrity: about three incomplete site passes in a row (a pass an hour; one alone is
    * site.unreachable's warning) */
   siteUnjudgedS: 3 * 3600,
+  /** site.redeploy_race: passes in a row that dropped files as gone with a redeployed build */
+  siteRaceStreak: 3,
   /** rule ids switched off (the proposed rules, open question 13, can be turned off here) */
   rules: { off: [] as string[] },
 };

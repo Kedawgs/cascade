@@ -124,6 +124,8 @@ export const RULES = {
   "site.no_approved_lists": warning("condition"),
   // a page's CSP differs from the approved one only in its inline-script hashes: a site deployed without new lists
   "site.stale_lists": warning("condition"),
+  // files dropped as gone with a redeployed build, in each of the last few passes
+  "site.redeploy_race": warning("condition"),
   "monitor.chain_unreadable": warning("condition"),
   "monitor.email_failing": warning("condition"),
   "monitor.rule_failed": warning("condition"),

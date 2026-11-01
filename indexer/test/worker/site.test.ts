@@ -6,6 +6,7 @@ import { SITE_RULES, siteIntegrity } from "../../src/rules/site.ts";
 import { ADDRESS_RE, pageScripts, readCapped, scanScript } from "../../src/site.ts";
 import { MAX_FILES, runSiteJob, type SiteJobOptions, siteRunMaxS } from "../../src/site-job.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
+import { DEFAULTS } from "../../src/thresholds.ts";
 import { loadTickState } from "../../src/store.ts";
 import { rowCounts, wipe } from "./d1-count.ts";
 import { testConfig } from "./fixtures.ts";
@@ -449,6 +450,7 @@ describe("the site job", () => {
       await fullPass(s);
       const f = await findings(NOW + 300);
       expect(f.find((x) => x.rule === "site.unreachable")?.facts.files).toBe(`${chunk("stake")} (HTTP 404)`);
+      expect(pageCalls(s, "/stake/")).toHaveLength(2);
     });
 
     it("reads each page again at most once a pass, and a run stays within its file budget plus those reads", async () => {
@@ -474,6 +476,139 @@ describe("the site job", () => {
       files[chunk("stake")] = `const o="${d.oracle}",e="${extra}"`;
       for (let i = 1; i < 6; i++) await job(s, NOW + i * 120);
       expect((await findings(NOW + 3000)).map((f) => f.key)).toEqual([`site.integrity:address:${extra}`]);
+    });
+
+    // a fetch that serves a page's later readings from another server: the first reading from `first`
+    const cloaked = (first: ReturnType<typeof server>, later: { fetch: typeof fetch }, pages: string[]) => {
+      const seen: Record<string, number> = {};
+      const f = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        if (!pages.includes(path)) return first.fetch(input, init);
+        seen[path] = (seen[path] ?? 0) + 1;
+        return seen[path] === 1 ? first.fetch(input, init) : later.fetch(input, init);
+      }) as typeof fetch;
+      return { fetch: f, calls: first.calls, read: first.read, seen };
+    };
+    const without = (files: Record<string, string>, ...gone: string[]) => Object.fromEntries(Object.entries(files).filter(([k]) => !gone.includes(k)));
+
+    it("is a broken site when the page can't be read again either (500)", async () => {
+      const first = site();
+      delete first[chunk("stake")];
+      const s500 = { fetch: (async () => new Response("down", { status: 500 })) as typeof fetch };
+      const s = cloaked(server(first), s500, ["/stake/"]);
+      for (let i = 0; i < 3; i++) await job(s, NOW + i * 120);
+      const f = await findings(NOW + 300);
+      expect(f.find((x) => x.rule === "site.unreachable")?.facts.files).toBe(`${chunk("stake")} (HTTP 404)`);
+    });
+
+    it("is a broken site when the re-read times out", async () => {
+      const first = site();
+      delete first[chunk("stake")];
+      const hang = {
+        fetch: (async () => {
+          throw new DOMException("timeout", "TimeoutError");
+        }) as typeof fetch,
+      };
+      const s = cloaked(server(first), hang, ["/stake/"]);
+      for (let i = 0; i < 3; i++) await job(s, NOW + i * 120);
+      expect((await findings(NOW + 300)).find((x) => x.rule === "site.unreachable")?.facts.files).toBe(`${chunk("stake")} (HTTP 404)`);
+    });
+
+    it("still raises what the first reading of a page showed (a foreign script, a bad policy) when the re-read is clean", async () => {
+      const first = without(site({ [chunk("vendor")]: `const o="${d.oracle}"` }), chunk("stake"));
+      first["/stake/"] = `<html><script src="https://evil.example.com/x.js"></script><script src="${chunk("main")}"></script><script src="${chunk("stake")}"></script></html>`;
+      const later = site({ "/stake/": `<html><script src="${chunk("main")}"></script><script src="${chunk("vendor")}"></script></html>` });
+      const s = cloaked(server(first, { "/stake/": ["default-src *"] }), server(later), ["/stake/"]);
+      for (let i = 0; i < 6; i++) await job(s, NOW + i * 120);
+      const keys = (await findings(NOW + 3000)).map((f) => f.key).sort();
+      expect(keys).toEqual(["site.integrity:csp:/stake/", "site.integrity:script_host:evil.example.com"]);
+      expect(s.seen["/stake/"]).toBe(2);
+    });
+
+    it("flags the re-read's own bad policy", async () => {
+      const first = without(site({ [chunk("vendor")]: `const o="${d.oracle}"` }), chunk("stake"));
+      const later = site({ "/stake/": `<html><script src="${chunk("main")}"></script><script src="${chunk("vendor")}"></script></html>` });
+      const s = cloaked(server(first), server(later, { "/stake/": ["default-src *"] }), ["/stake/"]);
+      for (let i = 0; i < 6; i++) await job(s, NOW + i * 120);
+      expect((await findings(NOW + 3000)).map((f) => f.key)).toEqual(["site.integrity:csp:/stake/"]);
+    });
+
+    it("behaves as before for a stored pass without refs: no page is read again", async () => {
+      const files = site();
+      const s = server(files);
+      await job(s, NOW);
+      const stored = JSON.parse((await loadTickState(db, NOW)).meta.site_pass);
+      delete stored.refs;
+      delete stored.reread;
+      await db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('site_pass', ?)").bind(JSON.stringify(stored)).run();
+      delete files[chunk("stake")];
+      for (let i = 1; i < 6; i++) await job(s, NOW + i * 120);
+      expect((await findings(NOW + 3000)).find((x) => x.rule === "site.unreachable")?.facts.files).toBe(`${chunk("stake")} (HTTP 404)`);
+      expect(pageCalls(s, "/stake/")).toHaveLength(1);
+    });
+
+    describe("a chunk shared by two pages", () => {
+      const shared = (stakeLists: string[], homeLists: string[]): Record<string, string> => ({
+        "/": `<html><script>self.fd="${d.frontDoor}"</script>${homeLists.map((c) => `<script src="${chunk(c)}"></script>`).join("")}</html>`,
+        "/stake/": `<html>${stakeLists.map((c) => `<script src="${chunk(c)}"></script>`).join("")}</html>`,
+        [chunk("d1")]: `const v="${d.vault}",s="${d.staker}"`,
+        [chunk("d2")]: `const a="${d.baseAdapter}",b="${d.bitAdapter}"`,
+        [chunk("d3")]: `const o="${d.oracle}"`,
+        [chunk("sh")]: "const x=1",
+      });
+      it("is dropped when neither page names it any more", async () => {
+        const files = shared(["sh"], ["d1", "d2", "sh"]);
+        const s = server(files);
+        await job(s, NOW);
+        redeploy(files, without(shared(["d3"], ["d1", "d2", "d3"]), chunk("sh")));
+        for (let i = 1; i < 8; i++) await job(s, NOW + i * 120);
+        const result = JSON.parse((await loadTickState(db, NOW)).meta.site_result);
+        expect(result.problems).toEqual([]);
+        expect(result.dropped).toBe(1);
+      });
+      it("is a broken site while either page still names it", async () => {
+        const files = shared(["sh"], ["d1", "d2", "sh"]);
+        const s = server(files);
+        await job(s, NOW);
+        redeploy(files, without(shared(["sh"], ["d1", "d2", "d3"]), chunk("sh")));
+        for (let i = 1; i < 8; i++) await job(s, NOW + i * 120);
+        expect((await findings(NOW + 3000)).find((x) => x.rule === "site.unreachable")?.facts.files).toBe(`${chunk("sh")} (HTTP 404)`);
+      });
+    });
+
+    it("follows a second redeploy in the same pass, reading each page at most twice more", async () => {
+      const files = site();
+      const s = server(files);
+      await job(s, NOW);
+      redeploy(files, rename(site()));
+      await job(s, NOW + 120);
+      redeploy(files, Object.fromEntries(Object.entries(rename(site())).map(([k, v]) => [k.replace(/B\.js/g, "C.js"), v.replace(/B\.js/g, "C.js")])));
+      for (let i = 2; i < 14; i++) await job(s, NOW + i * 120);
+      const result = JSON.parse((await loadTickState(db, NOW)).meta.site_result);
+      expect(result.problems).toEqual([]);
+      expect(pageCalls(s, "/").length).toBeLessThanOrEqual(3);
+      expect(pageCalls(s, "/stake/").length).toBeLessThanOrEqual(3);
+    });
+
+    it("warns site.redeploy_race after 3 passes in a row that dropped files, not before, and resolves on a pass with none", async () => {
+      expect(DEFAULTS.siteRaceStreak).toBe(3);
+      expect(RULES["site.redeploy_race"]).toMatchObject({ tier: "warning", kind: "condition" });
+      expect(RUNBOOK["site.redeploy_race"]({})).toContain("redeployed");
+      const racy = async (at: number) => {
+        const files = site();
+        const s = server(files);
+        await job(s, at);
+        redeploy(files, rename(site()));
+        for (let i = 1; i < 8; i++) await job(s, at + i * 120);
+      };
+      const race = async (at: number) => (await findings(at)).filter((f) => f.rule === "site.redeploy_race");
+      await racy(NOW);
+      await racy(NOW + 7200);
+      expect(await race(NOW + 14_000)).toEqual([]);
+      await racy(NOW + 14_400);
+      expect((await race(NOW + 22_000)).map((f) => f.key)).toEqual(["site.redeploy_race"]);
+      await fullPass(server(site()), NOW + 21_600);
+      expect(await race(NOW + 30_000)).toEqual([]);
     });
   });
 

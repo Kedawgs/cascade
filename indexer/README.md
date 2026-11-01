@@ -34,7 +34,9 @@ about 64 minutes; at the 400-file cap a pass takes 40 minutes at most. A page it
 A script that answers 404 or 410 is first checked against its page read again (once a pass): when the page no longer
 names it, the site was redeployed mid-pass (a new build has new file names), so it is not reported, the page's
 current scripts are checked instead, and the Worker log says so; when the page still names it, it is a broken site
-and `site.unreachable` names the file as before.
+and `site.unreachable` names the file as before. What the first reading of a page found (its policy, a foreign script)
+is still judged. Files dropped this way are counted per pass; once `site.redeploy_race` (warning) sees 3 passes in a row
+with drops, the site is changing under the check, and it resolves on a pass with none.
 
 The **watchdog** emails `monitor.stalled` itself when no tick has completed for 15 minutes, even when the
 database can't be written (then straight from memory). It runs with the hourly job, so a stall is noticed 15 to

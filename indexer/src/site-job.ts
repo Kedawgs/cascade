@@ -54,6 +54,10 @@ interface Pass {
   /** each page read again after one of its files was gone (once a pass): the files its current HTML names,
    * or null when it couldn't be read again */
   reread?: Record<string, string[] | null>;
+  /** how many times each page was read again (at most 2 a pass) */
+  rereadN?: Record<string, number>;
+  /** files dropped this pass because the site was redeployed under it */
+  dropped?: number;
 }
 
 export interface SiteResult {
@@ -76,6 +80,10 @@ export interface SiteResult {
   capped: boolean;
   /** the approved lists are empty (not generated yet): nothing was judged against them */
   noApprovedLists?: boolean;
+  /** files dropped this pass as gone with a redeployed build (not a finding by itself) */
+  dropped?: number;
+  /** passes in a row, this one included, that dropped files */
+  raceStreak?: number;
 }
 
 /** What the live site is judged against (src/site-approved.ts, generated from the build deployed). */
@@ -181,10 +189,8 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
   /** A page's response judged and read into the pass: its policy, its scripts and what its HTML names. Returns
    * the files its HTML names (undefined when it was over the byte cap). */
   const takePage = async (p: Pass, page: string, res: Response): Promise<string[] | undefined> => {
-    // a page read again replaces what its earlier reading found
-    delete p.csp?.[page];
-    p.cspHashes = p.cspHashes?.filter((x) => x !== page);
-    for (const m of [p.scriptHosts, p.embedded]) for (const [k, v] of Object.entries(m ?? {})) if (v === page) delete m?.[k];
+    // a page read again adds to what its first reading found, never replaces it: a bad policy or a foreign
+    // script seen in either reading is judged
     // the policy the browser enforces on the page (it decides which scripts run), judged before the body is
     // read, so a page over the byte cap is judged on it too
     if (!noApprovedLists) {
@@ -193,7 +199,9 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
         ? cspDifference(want, cspPolicies(res.headers.get("content-security-policy")))
         : { kind: "changed" as const, detail: "no approved policy: the build approved has no such page (pnpm site:approved on the build deployed)" };
       // only the inline scripts' hashes: a site deployed without new lists (a warning); anything else: a critical
-      if (differs?.kind === "hashes") (p.cspHashes ??= []).push(page);
+      if (differs?.kind === "hashes") {
+        if (!p.cspHashes?.includes(page)) (p.cspHashes ??= []).push(page);
+      }
       else if (differs) (p.csp ??= {})[page] = differs.detail;
     }
     const r = await readCapped(res, cfg.budgets.siteMaxBytes);
@@ -251,8 +259,12 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     const refs = p.refs?.[file] ?? [];
     if (refs.length === 0) return false;
     const reread = (p.reread ??= {});
+    const counts = (p.rereadN ??= {});
     for (const page of new Set(refs.map((r) => r[0]))) {
-      if (page in reread) continue;
+      // read again once; a second time only when a file the first re-read named is gone too (a second redeploy)
+      const named = refs.some((r) => r[0] === page && reread[page]?.includes(r[1]));
+      if (page in reread && !(named && (counts[page] ?? 0) < 2)) continue;
+      counts[page] = (counts[page] ?? 0) + 1;
       reread[page] = null;
       let res: Response | undefined;
       try {
@@ -269,7 +281,9 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     const current = (r: [string, string]) => reread[r[0]] === null || reread[r[0]]?.includes(r[1]);
     if (refs.some(current)) return false;
     // everything still queued that came only through files the pages no longer name went with the old build
+    const before = p.queue.length;
     p.queue = p.queue.filter((f) => f !== file && ((p.refs?.[f] ?? []).length === 0 || p.refs![f].some((r) => !(r[0] in reread) || current(r))));
+    p.dropped = (p.dropped ?? 0) + (before - p.queue.length);
     console.log(`site check: ${file} is gone because the site was redeployed during the pass (${[...new Set(refs.map((r) => r[0]))].join(", ")} no longer name it); the pages' current files are checked`);
     return true;
   };
@@ -346,6 +360,8 @@ export async function runSiteJob(o: SiteJobOptions): Promise<{ skipped: string }
     problems: pass.problems,
     capped: pass.capped,
     noApprovedLists,
+    dropped: pass.dropped ?? 0,
+    raceStreak: pass.dropped ? (json<SiteResult>(meta.site_result)?.raceStreak ?? 0) + 1 : 0,
   };
   await db.batch([setMeta(db, "site_result", JSON.stringify(result)), setMeta(db, "site_pass", "")]);
   return { checked, finished: true };

@@ -124,4 +124,22 @@ export const siteStaleLists: Rule = {
   },
 };
 
-export const SITE_RULES: Rule[] = [siteIntegrity, siteUnreachable, siteNoApprovedLists, siteStaleLists];
+/** site.redeploy_race (warning): files were dropped as gone with a redeployed build in each of the last
+ * siteRaceStreak passes. A deploy now and then is normal; one every pass means the site changes under the check. */
+export const siteRedeployRace: Rule = {
+  name: "site.redeploy_race",
+  run(ctx) {
+    const r = json<SiteResult>(ctx.meta.site_result);
+    if (!r?.raceStreak || r.raceStreak < ctx.t.siteRaceStreak) return [];
+    return [
+      {
+        rule: "site.redeploy_race",
+        key: "site.redeploy_race",
+        subject: "The site changed under the site check in several passes in a row",
+        facts: { passes: String(r.raceStreak), dropped: String(r.dropped ?? 0), pass: utc(r.finishedAt) },
+      },
+    ];
+  },
+};
+
+export const SITE_RULES: Rule[] = [siteIntegrity, siteUnreachable, siteNoApprovedLists, siteStaleLists, siteRedeployRace];

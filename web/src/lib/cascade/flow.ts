@@ -58,7 +58,7 @@ export interface FlowV1 {
   batch: { nextSendAt: Scheduled };
   vault: {
     totalAssets: Amount;
-    /** TAO per share, 1e18 */
+    /** the vault's price(): wei of assets per share unit, scaled by 1e18 (shares have 24 decimals, so 1e12 = 1 TAO per share) */
     price: Amount;
     pendingPayouts: Amount;
     /** the earliest queued payout batch's queuedAt + payoutDelay; "none" when no batch is queued */

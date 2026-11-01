@@ -236,7 +236,9 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
       id: "vault", name: "Vault", chain: "Bittensor", headline: bit(v?.totalAssets), say: SAY.vault,
       figures: [
         { label: "TAO staked", value: bit(v?.totalAssets) },
-        { label: "1 share is worth", value: bitOk ? (() => { const p = units(v?.price, 18); return p === null ? DASH : `${formatTao(p)} TAO`; })() : DASH },
+        // price() is wei of assets per share unit, scaled by 1e18; a share has 24 decimals, so one whole share is worth
+        // price × 1e24 ÷ 1e18 wei = price ÷ 1e12 TAO (1e12 at launch: 1 share = 1 TAO)
+        { label: "1 share is worth", value: bitOk ? (() => { const p = units(v?.price, 12); return p === null ? DASH : `${formatTao(p)} TAO`; })() : DASH },
         { label: "Waiting to pay out", value: bit(v?.pendingPayouts) },
       ],
       link: link("The vault on the Bittensor explorer", a && explorer.bittensorAddress(a.vault)),

@@ -33,7 +33,7 @@ export function goodFlow(): FlowV1 {
     bridgeIn: { roomLeft: e18(80), capacity: e18(100), perHour: e18(10), enabled: true, supported: true, inFlight: 2 },
     bridgeOut: { roomLeft: e18(90), capacity: e18(100), perHour: e18(10), enabled: true, supported: true, inFlight: 0 },
     batch: { nextSendAt: GENERATED_AT + 600 },
-    vault: { totalAssets: e18(1234.5), price: e18(1.05), pendingPayouts: e18(3), nextPayoutAt: GENERATED_AT + 3600, paused: false },
+    vault: { totalAssets: e18(1234.5), price: "1050000000000" /* the vault's price(): wei per share unit × 1e18, shares 24 dp, so 1 share = 1.05 TAO */, pendingPayouts: e18(3), nextPayoutAt: GENERATED_AT + 3600, paused: false },
     validator: { hotkey: TAO_BOT, ourStake: "1234500000000", takeBps: 1800, backups: [YUMA] },
     frontDoor: { paused: false },
     notices: [],

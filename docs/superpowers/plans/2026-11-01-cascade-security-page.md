@@ -131,7 +131,7 @@ view models and notices, and the page renders the map.
                ratioPpm: number | null };   // the lower of the two layers, in parts per million
     bridgeIn: Bucket; bridgeOut: Bucket;
     batch: { nextSendAt: number | null };   // openBatch.start + batchInterval when the open batch holds anything
-    vault: { totalAssets: Amount; price: Amount /* TAO per share, 1e18 */; pendingPayouts: Amount;
+    vault: { totalAssets: Amount; price: Amount /* price(): wei per share unit × 1e18; shares 24 dp, so 1e12 = 1 TAO a share */; pendingPayouts: Amount;
              nextPayoutAt: number | null; paused: boolean | null };
     validator: { hotkey: string | null; ourStake: Amount; takeBps: number | null; backups: string[] };
     frontDoor: { paused: boolean | null };

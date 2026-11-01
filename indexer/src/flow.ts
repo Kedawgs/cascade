@@ -123,8 +123,8 @@ function openProposals(
   return [...open.values()];
 }
 
-const latest = (logs: AdminLog[], address: string, event: string) => {
-  for (let i = logs.length - 1; i >= 0; i--) if (lc(logs[i].address) === lc(address) && logs[i].event === event) return logs[i];
+const latest = (logs: AdminLog[], address: string, event: string, where: (l: AdminLog) => boolean = () => true) => {
+  for (let i = logs.length - 1; i >= 0; i--) if (lc(logs[i].address) === lc(address) && logs[i].event === event && where(logs[i])) return logs[i];
   return undefined;
 };
 
@@ -173,7 +173,7 @@ export function flowOf(i: FlowInput): FlowV1 {
   const ownerN = (chain: Notice["chain"], contract: string, pending: string | undefined) => {
     if (!nonZero(pending)) return;
     const n: Notice = { kind: "ownershipPending", chain, contract, target: pending };
-    const l = latest(logs, contract, "OwnershipTransferStarted");
+    const l = latest(logs, contract, "OwnershipTransferStarted", (x) => lc(x.args.newOwner ?? "") === lc(pending));
     if (l) n.tx = l.txHash;
     notices.push(n);
   };

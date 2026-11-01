@@ -191,6 +191,21 @@ describe("flowOf", () => {
     expect(flowOf(input()).notices).toEqual([]);
   });
 
+  it("ownershipTxIsTheTransferNamingThePendingOwner", () => {
+    const A = "0x00000000000000000000000000000000000000AA";
+    const B = "0x00000000000000000000000000000000000000bb";
+    const C = "0x00000000000000000000000000000000000000cc";
+    const logs = [
+      log({ event: "OwnershipTransferStarted", args: { previousOwner: C, newOwner: A.toLowerCase() }, txHash: tx(10) }),
+      log({ event: "OwnershipTransferStarted", args: { previousOwner: C, newOwner: B }, txHash: tx(11) }),
+      log({ event: "OwnershipTransferStarted", args: { previousOwner: C, newOwner: A.toLowerCase() }, txHash: tx(12) }),
+      log({ event: "OwnershipTransferStarted", args: { previousOwner: C, newOwner: B }, txHash: tx(13) }),
+    ];
+    const n = (pending: string) => flowOf(input({ adminLogs: logs, base: rd(baseState({ pendingOwner: pending as `0x${string}` })) })).notices.filter((x) => x.kind === "ownershipPending");
+    expect(n(A)).toEqual([{ kind: "ownershipPending", chain: "base", contract: d.frontDoor, target: A, tx: tx(12) }]);
+    expect(n(C)).toEqual([{ kind: "ownershipPending", chain: "base", contract: d.frontDoor, target: C }]);
+  });
+
   it("fmNotices", () => {
     const admin = "0x00000000000000000000000000000000000000bb";
     const f = flowOf(

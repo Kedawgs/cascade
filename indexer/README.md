@@ -323,7 +323,19 @@ print what it would run:
   The keeper may then pay that batch, and the next tick emails the critical `checks.owner_approved`, so an
   approval you didn't make is noticed.
 
-On v3-test the owner, guardian and keeper are one address, so a reverted keeper call pages as a critical
+`keys.unexplained_tx` (an owner, pending-owner or guardian key) and `keys.keeper_unexplained_tx` (the keeper)
+compare an address's transaction count (or a Safe's `nonce()`), read at the head, with the transactions Cascade's
+settled logs explain. A count ahead of the logs waits `unexplainedTxGraceS` (15 minutes) before it is reported,
+since the logs settle a minute or two behind the head. A count behind the logs is a race, not a finding: the count
+is read in a request of its own, and a load-balanced RPC can answer it from an older head than the logs' (on
+2026-10-31 the keeper's hourly roll was reported as unexplained this way). It is taken as not comparable yet: the
+baseline is kept, meta `nonce_behind:<chain>:<address>` counts the ticks, and the next count, caught up, matches.
+Only a count behind for `nonceBehindTicks` (10) ticks in a row (a reorg past the settle depth, or a transaction
+counted twice because it hadn't settled when the address was first watched) is taken as the new start, with no
+alert. The cost: when the shortfall is real, a transaction the logs don't explain sent during those ticks fills it
+and is never reported, a blind spot of at most 10 minutes after a rare event (the logs are 30 blocks deep on Base,
+10 on Bittensor). A stale count has no such gap: once it catches up, a transaction sent meanwhile shows. On v3-test
+the owner, guardian and keeper are one address, so a reverted keeper call pages as a critical
 `keys.unexplained_tx`: expect that noise there.
 
 ### The vault's stake and its direct entry points

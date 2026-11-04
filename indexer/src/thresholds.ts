@@ -88,6 +88,9 @@ export const DEFAULTS = {
   twapDivergenceBps: 300,
   /** pool.liquidity: below this share of its 7-day median */
   liquidityDropPct: 50,
+  /** pool.liquidity: for this long before it alerts (a price move past a large position's range thins the in-range
+   * liquidity for minutes, then it comes back) */
+  liquidityLowS: 1800,
   /** batch.one_wallet: one payer with this share of a batch at least half full, or this many entries */
   oneWalletPct: 50,
   oneWalletEntries: 10,

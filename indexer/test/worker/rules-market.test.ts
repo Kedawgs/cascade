@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { reconcile } from "../../src/alerts.ts";
 import type { Config } from "../../src/config.ts";
 import { poolPriceUsd, PRICE_URLS, referencePrice } from "../../src/prices.ts";
-import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
+import { logQuery, type RuleCtx, utc } from "../../src/rules/context.ts";
 import { fmtaoDepeg, fmtaoMintSurge, fmtaoUnbacked, poolLiquidity, referenceUnavailable, twapDivergence } from "../../src/rules/market.ts";
 import type { BaseState, BitState, ChainReading, HourAgg } from "../../src/snapshot.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
@@ -209,11 +209,35 @@ describe("twap.divergence", () => {
 describe("pool.liquidity and fmtao.mint_surge", () => {
   const week = (tao: bigint): HourAgg[] => Array.from({ length: 168 }, (_, i) => ({ hour: NOW - (i + 1) * 3600, ticks: 60, spotSum: 0, spotCount: 0, poolTaoLast: tao, liquidityLast: 10n ** 20n }));
 
-  it("finds the pool's TAO below 50% of its 7-day median", () => {
+  it("finds the pool's TAO below 50% of its 7-day median once it has stayed low for 30 minutes", () => {
     const low = base(10n, { taoWethPool: { ...pools(400).taoWethPool, tao: 490n * E18 } });
-    expect(poolLiquidity.run(ctx({ base: low, hours: week(1000n * E18) })).map((f) => f.key)).toEqual(["pool.liquidity"]);
+    const first = ctx({ base: low, hours: week(1000n * E18) });
+    expect(poolLiquidity.run(first)).toEqual([]);
+    expect(meta(first).pool_low_since).toBe(String(NOW));
+    const early = ctx({ base: low, hours: week(1000n * E18), meta: { pool_low_since: String(NOW) }, nowS: NOW + DEFAULTS.liquidityLowS - 1 });
+    expect(poolLiquidity.run(early)).toEqual([]);
+    expect(early.writes.meta).toEqual([]);
+    const held = ctx({ base: low, hours: week(1000n * E18), meta: { pool_low_since: String(NOW) }, nowS: NOW + DEFAULTS.liquidityLowS });
+    const found = poolLiquidity.run(held);
+    expect(found.map((f) => f.key)).toEqual(["pool.liquidity"]);
+    expect(found[0].facts.since).toBe(utc(NOW));
     const fine = base(10n, { taoWethPool: { ...pools(400).taoWethPool, tao: 510n * E18 } });
-    expect(poolLiquidity.run(ctx({ base: fine, hours: week(1000n * E18) }))).toEqual([]);
+    const back = ctx({ base: fine, hours: week(1000n * E18), meta: { pool_low_since: String(NOW) }, nowS: NOW + 60 });
+    expect(poolLiquidity.run(back)).toEqual([]);
+    expect(meta(back).pool_low_since).toBe("");
+    const quiet = ctx({ base: fine, hours: week(1000n * E18) });
+    expect(poolLiquidity.run(quiet)).toEqual([]);
+    expect(quiet.writes.meta).toEqual([]);
+  });
+
+  it("finds the in-range liquidity below 50% of its 7-day median only after 30 minutes, the mark kept while unjudged", () => {
+    const thin = base(10n, { taoWethPool: { ...pools(400).taoWethPool, tao: 1000n * E18, liquidity: 10n ** 19n } });
+    const held = ctx({ base: thin, hours: week(1000n * E18), meta: { pool_low_since: String(NOW) }, nowS: NOW + DEFAULTS.liquidityLowS });
+    expect(poolLiquidity.run(held).map((f) => f.subject)).toEqual(["The TAO/WETH pool's liquidity is below 50% of its 7-day median"]);
+    // a tick without the pool's reading judges nothing and leaves the mark where it was
+    const unread = ctx({ base: base(10n, { taoWethPool: undefined }), hours: week(1000n * E18), meta: { pool_low_since: String(NOW) }, nowS: NOW + 60 });
+    poolLiquidity.run(unread);
+    expect(meta(unread).pool_low_since).toBeUndefined();
   });
 
   it("finds FM-TAO up 600 in an hour with 50 of Cascade payouts landed, unless switched off", () => {

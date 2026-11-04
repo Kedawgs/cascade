@@ -190,12 +190,14 @@ const median = (xs: bigint[]): bigint | undefined => {
 };
 
 /** pool.liquidity: the TAO/WETH pool's TAO, or its in-range liquidity, below liquidityDropPct of its 7-day
- * median (hour rows; at least a day of them). Unjudged without the reading, the day of rows, or (neither low) either
- * amount or its median. */
+ * median (hour rows; at least a day of them), on every judged tick for liquidityLowS: the first low tick marks
+ * pool_low_since, a judged tick with neither low clears it. Unjudged without the reading, the day of rows, or
+ * (neither low) either amount or its median, its mark left as it is. */
 export const poolLiquidity: Rule = {
   name: "pool.liquidity",
   run(ctx) {
     const blind = () => unjudged(ctx, "pool.liquidity", "pool.liquidity");
+    const since = num(ctx.meta.pool_low_since);
     const pool = ctx.snap.base?.state.taoWethPool;
     if (!pool) return blind();
     const week = ctx.hours.filter((r) => r.hour >= ctx.nowS - 7 * 86400);
@@ -206,13 +208,22 @@ export const poolLiquidity: Rule = {
     const liqMedian = median(week.flatMap((r) => (r.liquidityLast === undefined ? [] : [r.liquidityLast])));
     const lowTao = low(pool.tao, taoMedian);
     const lowLiq = low(pool.liquidity, liqMedian);
-    if (!lowTao && !lowLiq) return lowTao === undefined || lowLiq === undefined ? blind() : [];
+    if (!lowTao && !lowLiq) {
+      if (lowTao === undefined || lowLiq === undefined) return blind();
+      if (since !== undefined) ctx.writes.meta.push({ k: "pool_low_since", v: "" });
+      return [];
+    }
+    if (since === undefined) {
+      ctx.writes.meta.push({ k: "pool_low_since", v: String(ctx.nowS) });
+      return [];
+    }
+    if (ctx.nowS - since < ctx.t.liquidityLowS) return [];
     return [
       {
         rule: "pool.liquidity",
         key: "pool.liquidity",
         subject: `The TAO/WETH pool's ${lowTao ? "TAO" : "liquidity"} is below ${ctx.t.liquidityDropPct}% of its 7-day median`,
-        facts: { "pool TAO": pool.tao === undefined ? "unknown" : tao(pool.tao), "7-day median TAO": taoMedian === undefined ? "unknown" : tao(taoMedian), liquidity: String(pool.liquidity), "7-day median liquidity": String(liqMedian) },
+        facts: { "pool TAO": pool.tao === undefined ? "unknown" : tao(pool.tao), "7-day median TAO": taoMedian === undefined ? "unknown" : tao(taoMedian), liquidity: String(pool.liquidity), "7-day median liquidity": String(liqMedian), since: utc(since) },
       },
     ];
   },

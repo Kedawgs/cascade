@@ -389,6 +389,17 @@ describe("ForeverMoney's admin actions the events don't show (R3 FM-L2)", () => 
     expect(RUNBOOK["rail.pool"](f.facts)).toContain("TOKENS.base.tokenPool");
   });
 
+  it("rail.pool's runbook: a pool that isn't ForeverMoney's takes what crosses it, so the guardian pauses the door and the vault", () => {
+    const [f] = deps.railPool.run(both({ registry: entry(OTHER_POOL) }));
+    const says = RUNBOOK["rail.pool"](f.facts);
+    // CCIP's router hands a send's tokens to the pool the registry names: the next batch or payout is the loss
+    expect(says).toContain("A pool that isn't ForeverMoney's takes the next batch or payout sent through it");
+    expect(says).toContain("pause() the front door and the vault");
+    // the old line: no funds lost, exits keep working (on v3-launch the door's pause stops requestRedeem, and payouts
+    // kept crossing while the vault ran)
+    expect(says).not.toMatch(/loses funds|keep working/);
+  });
+
   it("rail.pool: the batch lane's bucket off (no limit), the lane removed, or a capacity below a full batch is critical", () => {
     const off = deps.railPool.run(both({ lane: lane({ outbound: bucketOf(0n, 0n, false) }) }));
     expect(off.map((f) => f.key)).toEqual(["rail.pool:base"]);

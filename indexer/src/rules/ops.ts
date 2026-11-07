@@ -300,6 +300,18 @@ export const validatorNotEarning: Rule = {
 
 /** rail.alpha_vault (critical): ForeverMoney's AlphaVault paused (isPaused, or a guardian's pause until a time still to
  * come), a migration announced (a ready time or a target set), executed or finished. */
+/** The AlphaVault's halt (AlphaVault.sol at e80a443, R3 FM-L2): isPaused() is block.timestamp < pausedUntil, which a
+ * guardian's pause sets for at most MAX_PAUSE (2 days) a shot and the operator's adminHold(until) to any time, a finished
+ * migration to the largest uint256. A time past the last a date can show (9999-12-31) is a halt with no end. */
+const MAX_GUARDIAN_PAUSE_S = 2n * 86_400n;
+const LAST_TIME = 253_402_300_799n;
+const haltOf = (until: bigint, now: number): string =>
+  until > LAST_TIME
+    ? "halted with no end (a finished migration's halt, or its operator's adminHold)"
+    : until - BigInt(now) > MAX_GUARDIAN_PAUSE_S
+      ? `held by its operator until ${utc(Number(until))} (adminHold: longer than a guardian's 2-day pause)`
+      : `paused until ${utc(Number(until))} (its guardian's pause, or its operator's adminHold)`;
+
 export const railAlphaVault: Rule = {
   name: "rail.alpha_vault",
   run(ctx) {
@@ -310,7 +322,7 @@ export const railAlphaVault: Rule = {
     const target = a.migrationTarget && a.migrationTarget !== "0x0000000000000000000000000000000000000000" ? a.migrationTarget : undefined;
     const why = [
       a.isPaused ? "paused" : "",
-      a.pausedUntil !== undefined && a.pausedUntil > BigInt(r.time) ? `paused by its guardian until ${utc(Number(a.pausedUntil))}` : "",
+      a.pausedUntil !== undefined && a.pausedUntil > BigInt(r.time) ? haltOf(a.pausedUntil, r.time) : "",
       target ? `a migration to ${target} is announced` : "",
       !target && set(a.migrationReadyAt) ? "a migration is announced" : "",
       a.migrationExecuted ? "a migration was executed" : "",
@@ -319,7 +331,7 @@ export const railAlphaVault: Rule = {
     // nothing found: clear only when every field it looks at was read
     const unread = [a.isPaused, a.pausedUntil, a.migrationTarget, a.migrationReadyAt, a.migrationExecuted, a.migrationFinished].some((x) => x === undefined);
     if (why.length === 0) return unread ? unjudged(ctx, "rail.alpha_vault", "rail.alpha_vault") : [];
-    const at = (x: bigint | undefined) => (x === undefined ? "unknown" : x === 0n ? "none" : utc(Number(x)));
+    const at = (x: bigint | undefined) => (x === undefined ? "unknown" : x === 0n ? "none" : x > LAST_TIME ? "no end" : utc(Number(x)));
     return one("rail.alpha_vault", "rail.alpha_vault", `ForeverMoney's AlphaVault is ${why.join(", ")}`, {
       alphaVault: ctx.cfg.tokens.bittensor.alphaVault,
       paused: String(a.isPaused ?? "unknown"),

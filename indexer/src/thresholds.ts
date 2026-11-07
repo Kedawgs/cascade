@@ -73,6 +73,8 @@ export const DEFAULTS = {
   /** ccip.rate_limited: a token pool's bucket under this much (10 TAO) for longer than ccipRateLimitedS */
   ccipBucketMinWei: 10n * 10n ** 18n,
   ccipRateLimitedS: 600,
+  /** rail.pool_low: the batch lane's bucket (an enabled one) below the front door's maxBatchValue for longer than this */
+  railPoolLowS: 3600,
   /** validator.take_high: the validator's take above this (9%) */
   validatorTakeMaxBps: 900,
   /** validator.root_stake_drop: the validator's root stake this far (25%) below its highest of the last 24 hours */

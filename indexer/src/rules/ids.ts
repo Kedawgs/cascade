@@ -63,6 +63,12 @@ export const RULES = {
   // a new way to mint or release (a MINTER grant, a remote pool, lane or router added), an admin moving, a lane's
   // bucket at capacity 0 or Cascade's lane removed, the lock pool's liquidity withdrawn
   "fmtao.role_change_critical": critical("event"),
+  // what no event shows (R3 FM-L2): the registry naming another pool for the rail's token, the batch lane's bucket off,
+  // removed or below a full batch; the lock pool's rebalancer set (setRebalancer logs nothing); a registry administrator
+  // transfer pending
+  "rail.pool": critical("condition"),
+  "fmtao.rebalancer_set": critical("condition"),
+  "fmtao.registry_admin": critical("condition"),
   "validator.take_high": critical("condition"),
   "validator.root_uid_lost": critical("condition"),
   "root.unlock_interval": critical("condition"),
@@ -73,6 +79,8 @@ export const RULES = {
   // 5% of its supply for an hour is fmtao.backing_true's critical lock side)
   "fmtao.lock_outside": warning("condition"),
   "rail.alpha_vault_admin": warning("condition"),
+  // the batch lane's bucket below a full batch for an hour (R3 FM-L2): the next one waits for it to refill
+  "rail.pool_low": warning("condition"),
   "validator.take_changed": warning("event"),
   "validator.root_stake_drop": warning("condition"),
   "ccip.rate_limited": warning("condition"),

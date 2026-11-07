@@ -308,6 +308,19 @@ export const TOKEN_POOL = parseAbi([
   "function isSupportedChain(uint64 remoteChainSelector) view returns (bool)",
 ]);
 
+/** LockReleaseTokenPool 1.5.1's rebalancer: the one account whose withdrawLiquidity takes the locked wTAO; its owner (ForeverMoney's
+ * Safe) sets it with setRebalancer, which logs nothing (R3 FM-L2: 0 on 2026-11-05). */
+export const LOCK_POOL = parseAbi(["function getRebalancer() view returns (address)"]);
+
+/** Chainlink's TokenAdminRegistry 1.5.0 (Base 0x6f6C…1e37, Bittensor 0xe72d…8Be6; R3 FM-L2, read 2026-11-05): a token's
+ * administrator, the administrator proposed (0: none) and the pool every CCIP message carrying it is released or minted
+ * through (the OffRamp reads it at execution). The administrator sets the pool (setPool) and moves itself
+ * (transferAdminRole, then acceptAdminRole), each at once. */
+export const TOKEN_ADMIN_REGISTRY = parseAbi([
+  "struct TokenConfig { address administrator; address pendingAdministrator; address tokenPool; }",
+  "function getTokenConfig(address token) view returns (TokenConfig)",
+]);
+
 /** Bittensor's staking precompile (0x…0805), as contracts/src/interfaces/IStaking.sol declares it. */
 export const STAKING = parseAbi([
   "function getStake(bytes32 hotkey, bytes32 coldkey, uint256 netuid) view returns (uint256)",

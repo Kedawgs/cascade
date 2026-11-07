@@ -304,6 +304,21 @@ describe("ForeverMoney's contracts the scan watches (TOKENS)", () => {
     onTheFrontDoor.base.tokenPool = deployment.frontDoor;
     expect(refused(withVars({ TOKENS: JSON.stringify(onTheFrontDoor) })).message).toContain("TOKENS");
   });
+
+  it("name Chainlink's TokenAdminRegistry on each chain (read, never scanned: R3 FM-L2), and refuse TOKENS without either", () => {
+    const c = cfg();
+    // read live by R3 on 2026-11-05: Base's from Blockscout's verified source, Bittensor's from the OnRamp's getStaticConfig
+    expect(c.tokens.base.tokenAdminRegistry).toBe("0x6f6c373d09c07425baae72317863d7f6bb731e37");
+    expect(c.tokens.bittensor.tokenAdminRegistry).toBe("0xe72d25add538e8ef9cef85622ea8912a6cb98be6");
+    const w = watchFilters(c);
+    expect(w.base.address).not.toContain(c.tokens.base.tokenAdminRegistry);
+    expect(w.bittensor.address).not.toContain(c.tokens.bittensor.tokenAdminRegistry);
+    for (const chain of ["base", "bittensor"] as const) {
+      const t = JSON.parse(JSON.stringify(vars().TOKENS)) as Record<string, Record<string, string>>;
+      delete t[chain].tokenAdminRegistry;
+      expect(refused(withVars({ TOKENS: JSON.stringify(t) })).message).toContain(`TOKENS.${chain}.tokenAdminRegistry`);
+    }
+  });
 });
 
 describe("BACKING_HOLD", () => {

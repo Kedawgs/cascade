@@ -49,9 +49,11 @@ export interface Tokens {
   /** Multicall3, at the same address on both chains */
   multicall3: Hex;
   /** `tokenPool`: FM-TAO's CCIP burn-mint pool on Base; `lockPool`: wTAO's lock-release pool on Bittensor (it serves
-   * the Base lane and others, Robinhood's among them); `fmTao` on Bittensor is wTAO, the AlphaVault's token */
-  base: { fmTao: Hex; usdc: Hex; weth: Hex; taoWethPool: Hex; wethUsdcPool: Hex; offRamp: Hex; tokenPool: Hex };
-  bittensor: { fmTao: Hex; lockPool: Hex; offRamp: Hex; alphaVault: Hex };
+   * the Base lane and others, Robinhood's among them); `fmTao` on Bittensor is wTAO, the AlphaVault's token;
+   * `tokenAdminRegistry`: Chainlink's TokenAdminRegistry on each chain, which names the pool CCIP moves the token
+   * through (read each tick, never scanned: rail.pool, fmtao.registry_admin) */
+  base: { fmTao: Hex; usdc: Hex; weth: Hex; taoWethPool: Hex; wethUsdcPool: Hex; offRamp: Hex; tokenPool: Hex; tokenAdminRegistry: Hex };
+  bittensor: { fmTao: Hex; lockPool: Hex; offRamp: Hex; alphaVault: Hex; tokenAdminRegistry: Hex };
 }
 
 export type PriceSource = "coingecko" | "coinbase";
@@ -229,8 +231,8 @@ function parseBridges(raw: unknown, d: Deployment): Config["bridges"] {
 }
 
 const TOKEN_KEYS = {
-  base: ["fmTao", "usdc", "weth", "taoWethPool", "wethUsdcPool", "offRamp", "tokenPool"],
-  bittensor: ["fmTao", "lockPool", "offRamp", "alphaVault"],
+  base: ["fmTao", "usdc", "weth", "taoWethPool", "wethUsdcPool", "offRamp", "tokenPool", "tokenAdminRegistry"],
+  bittensor: ["fmTao", "lockPool", "offRamp", "alphaVault", "tokenAdminRegistry"],
 } as const;
 
 function parseTokens(raw: unknown, d: Deployment, bridges: Config["bridges"]): Tokens {

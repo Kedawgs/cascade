@@ -120,13 +120,17 @@
             "wethUsdcPool": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
             "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808",
             // FM-TAO's CCIP pool on Base (BurnMintTokenPool 1.5.1, read 2026-10-31): watched for its admin events
-            "tokenPool": "0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794"
+            "tokenPool": "0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794",
+            // Chainlink's TokenAdminRegistry 1.5.0 on each chain (R3, read 2026-11-05: Base's verified on Blockscout,
+            // Bittensor's from the OnRamp's getStaticConfig): read each tick for the token's pool and administrator
+            "tokenAdminRegistry": "0x6f6C373d09C07425BaAE72317863d7F6bb731e37"
           },
           "bittensor": {
             "fmTao": "0xC5b6C1632d34901239396F5E1BDe54B342900256",
             "lockPool": "0xB66b9c085ab711ECC373aaF6dc959a4A6B42BE2e",
             "offRamp": "0xF9410A08FD57e629c66E1f37a5Ae8f0a757d9AD9",
-            "alphaVault": "0x11837459896D96F821a8D88eC93a3C8D152033D4"
+            "alphaVault": "0x11837459896D96F821a8D88eC93a3C8D152033D4",
+            "tokenAdminRegistry": "0xe72d25aDd538E8ef9CeF85622eA8912a6CB98Be6"
           }
         }
       }
@@ -205,13 +209,17 @@
             "wethUsdcPool": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
             "offRamp": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808",
             // FM-TAO's CCIP pool on Base (BurnMintTokenPool 1.5.1, read 2026-10-31): watched for its admin events
-            "tokenPool": "0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794"
+            "tokenPool": "0xF5AC6D6Bd12d8b87dE3c136FAc9375961577e794",
+            // Chainlink's TokenAdminRegistry 1.5.0 on each chain (R3, read 2026-11-05: Base's verified on Blockscout,
+            // Bittensor's from the OnRamp's getStaticConfig): read each tick for the token's pool and administrator
+            "tokenAdminRegistry": "0x6f6C373d09C07425BaAE72317863d7F6bb731e37"
           },
           "bittensor": {
             "fmTao": "0xC5b6C1632d34901239396F5E1BDe54B342900256",
             "lockPool": "0xB66b9c085ab711ECC373aaF6dc959a4A6B42BE2e",
             "offRamp": "0xF9410A08FD57e629c66E1f37a5Ae8f0a757d9AD9",
-            "alphaVault": "0x11837459896D96F821a8D88eC93a3C8D152033D4"
+            "alphaVault": "0x11837459896D96F821a8D88eC93a3C8D152033D4",
+            "tokenAdminRegistry": "0xe72d25aDd538E8ef9CeF85622eA8912a6CB98Be6"
           }
         }
       }

@@ -157,9 +157,10 @@ const capacityOf = (x: unknown): bigint | undefined => {
  * MINTER_ROLE grant, a remote pool or lane added, a pool's router changed, the lock pool's liquidity withdrawn), an
  * admin moving (FM-TAO's admin role granted, a role's admin changed, the AlphaVault's admin transfer scheduled, a
  * pool's ownership transfer requested), a lane's bucket switched off (capacity 0: on TokenPool 1.5.1 that is only
- * allowed with the limit disabled, so the lane has no limit), or Cascade's lane removed (the only way a lane
- * freezes). */
-function judge(l: StoredLog): { critical: boolean; what: string } {
+ * allowed with the limit disabled, so the lane has no limit), Cascade's lane removed (the only way a lane
+ * freezes), or FM-TAO's MINTER_ROLE or BURNER_ROLE revoked from its CCIP pool (`pools`: the one TOKENS names, and the
+ * one Base's TokenAdminRegistry names when that differs; R3 FM-L2), which halts the lane both ways. */
+function judge(l: StoredLog, pools: ReadonlySet<string>): { critical: boolean; what: string } {
   const a = l.args;
   switch (l.event) {
     case "RoleGranted": {
@@ -168,8 +169,13 @@ function judge(l: StoredLog): { critical: boolean; what: string } {
       if (lc(a.role) === DEFAULT_ADMIN_ROLE) return { critical: true, what: `the admin role granted to ${a.account}: it can grant itself MINTER_ROLE` };
       return { critical: false, what: `${role} granted to ${a.account}` };
     }
-    case "RoleRevoked":
+    case "RoleRevoked": {
+      const role = lc(a.role);
+      if (l.chain === "base" && l.contract === "fmTao" && pools.has(lc(a.account)) && (role === MINTER_ROLE || role === BURNER_ROLE)) {
+        return { critical: true, what: `${roleName(a.role)} revoked from FM-TAO's CCIP pool ${a.account}: the lane is halted (deliveries of FM-TAO to Base fail in CCIP and batch closes revert until it is granted back)` };
+      }
       return { critical: false, what: `${roleName(a.role)} revoked from ${a.account}` };
+    }
     case "RoleAdminChanged":
       return { critical: true, what: `the role that administers ${roleName(a.role)} changed to ${roleName(a.newAdminRole)}` };
     case "CCIPAdminTransferred":
@@ -237,8 +243,9 @@ export const fmtaoRoleChange: Rule = {
       byTx.get(k)!.push(l);
     }
     const out: Finding[] = [];
+    const pools = new Set([ctx.cfg.tokens.base.tokenPool, ctx.snap.base?.state.registry?.tokenPool].filter((p): p is Hex => p !== undefined).map(lc));
     for (const [k, logs] of byTx) {
-      const judged = logs.map((l) => ({ l, j: judge(l), name: DEP_NAMES[l.chain][l.contract as DependencyRole] }));
+      const judged = logs.map((l) => ({ l, j: judge(l, pools), name: DEP_NAMES[l.chain][l.contract as DependencyRole] }));
       const critical = judged.some((x) => x.j.critical);
       const rule = critical ? "fmtao.role_change_critical" : "fmtao.role_change";
       const first = judged.find((x) => x.j.critical) ?? judged[0];
@@ -286,6 +293,188 @@ export const railAlphaVaultAdmin: Rule = {
         facts: { "new admin": p.admin, "it may accept from": utc(p.schedule), alphaVault: addressLink("bittensor", ctx.cfg.tokens.bittensor.alphaVault) },
       },
     ];
+  },
+};
+
+/** The two ends of the batch lane (Base → Bittensor) whose pools R3 FM-L2 watches beyond their events: the CCIP pool
+ * each one's TokenAdminRegistry names for the rail's token, and the bucket a batch crosses there. */
+const RAIL_SIDES = [
+  { chain: "base", dir: "outbound", other: "Bittensor", token: "FM-TAO", where: "Base", pool: "FM-TAO's CCIP pool on Base", setting: "TOKENS.base.tokenPool" },
+  { chain: "bittensor", dir: "inbound", other: "Base", token: "wTAO", where: "Bittensor", pool: "the CCIP lock pool on Bittensor", setting: "TOKENS.bittensor.lockPool" },
+] as const;
+type RailSide = (typeof RAIL_SIDES)[number];
+const watchedPool = (ctx: RuleCtx, side: RailSide): Hex => lc(side.chain === "base" ? ctx.cfg.tokens.base.tokenPool : ctx.cfg.tokens.bittensor.lockPool);
+
+/** What is wrong with one side of the batch lane in a reading (empty: nothing; undefined: nothing found, but a field it
+ * needs is unread): the registry naming another pool than TOKENS, or none; the pool no longer listing the other chain;
+ * its bucket off (no limit); its capacity below a full batch (`maxBatch`, the front door's maxBatchValue). */
+function railProblems(ctx: RuleCtx, side: RailSide, s: BaseState | BitState | undefined, maxBatch: bigint | undefined): string[] | undefined {
+  if (!s) return undefined;
+  const out: string[] = [];
+  let unread = false;
+  const reg = s.registry;
+  const watched = watchedPool(ctx, side);
+  if (!reg) unread = true;
+  else if (reg.tokenPool === ZERO) out.push(`${side.where}'s TokenAdminRegistry lists no pool for ${side.token}: sends revert, and messages in flight fail in CCIP until one is set`);
+  else if (reg.tokenPool !== watched) {
+    out.push(`${side.where}'s TokenAdminRegistry names ${reg.tokenPool} as ${side.token}'s pool, not the pool the monitor watches: in-flight messages execute through it`);
+  }
+  const lane = s.lane;
+  const b = lane?.[side.dir];
+  if (lane?.supported === false) out.push(`${side.pool} no longer lists ${side.other}: closes revert, and batches in flight fail in CCIP until the lane is back`);
+  else if (!b) unread = true;
+  else if (!b.isEnabled) out.push(`${side.pool}'s ${side.dir} bucket is off: no rate limit on the lane`);
+  else if (maxBatch === undefined) unread = true;
+  else if (b.capacity < maxBatch) out.push(`${side.pool}'s ${side.dir} bucket holds at most ${tao(b.capacity)}, less than a full batch (${tao(maxBatch)}): such a batch can never cross`);
+  return out.length > 0 ? out : unread ? undefined : [];
+}
+
+/** rail.pool (critical) and rail.pool_low (warning): the CCIP pools each Base → Bittensor batch crosses, as no event
+ * shows them (R3 FM-L2, rules R1 and R4; SE-2: the keeper and the site would learn of it only from closes failing). On
+ * each chain, on two readings: the TokenAdminRegistry naming another pool for the rail's token (FM-TAO on Base, wTAO
+ * on Bittensor) than TOKENS, or none (ForeverMoney's setPool, at once and silent to the pools' own events); the pool no
+ * longer listing the other chain; the batch's bucket (the Base pool's outbound, the lock pool's inbound) off, which is
+ * no limit at all; or its capacity below the front door's maxBatchValue: critical, each chain its own alert. An enabled
+ * bucket holding less than maxBatchValue for railPoolLowS (an hour; meta rail_pool_low_since:{chain}) is the warning:
+ * the next full batch waits for it to refill. The payout lane's buckets are ccip.rate_limited's. A side it can't read
+ * (a reading or a field missing) is unjudged, its mark left as it is. On every deployment: ForeverMoney's contracts
+ * are the same under v3-launch and v3.2. */
+export const railPool: Rule = {
+  name: "rail.pool",
+  raises: ["rail.pool_low"],
+  run(ctx) {
+    const out: Finding[] = [];
+    const maxBatch = ctx.snap.base?.state.maxBatchValue ?? ctx.previous.base?.state.maxBatchValue;
+    for (const side of RAIL_SIDES) {
+      const key = `rail.pool:${side.chain}`;
+      const now = ctx.snap[side.chain];
+      const cond = (r: Readings) => {
+        const p = railProblems(ctx, side, r[side.chain], maxBatch);
+        return p === undefined ? undefined : p.length > 0;
+      };
+      const held = twice(ctx, side.chain, cond);
+      if (held === undefined) unjudged(ctx, "rail.pool", key);
+      if (held && now) {
+        const why = railProblems(ctx, side, now.state, maxBatch) as string[];
+        const reg = now.state.registry;
+        out.push({
+          rule: "rail.pool",
+          key,
+          subject: `The ${side.token} pool the batches cross on ${side.where} has changed: ${why[0]}`,
+          facts: {
+            why: why.join("; "),
+            "the registry's pool": reg?.tokenPool ?? "unknown",
+            "the pool watched (TOKENS)": watchedPool(ctx, side),
+            [`${side.dir} bucket`]: (() => {
+              const b = now.state.lane?.[side.dir];
+              return b === undefined ? "unknown" : b.isEnabled ? `${tao(b.tokens)} of ${tao(b.capacity)}` : "off (no limit)";
+            })(),
+            "a full batch": maxBatch === undefined ? "unknown" : tao(maxBatch),
+            setting: side.setting,
+            block: String(now.block),
+          },
+        });
+      }
+      // the warning: an enabled, listed bucket below a full batch, for an hour
+      const k = `rail_pool_low_since:${side.chain}`;
+      const since = num(ctx.meta[k]);
+      const b = now?.state.lane?.[side.dir];
+      if (!now || !b || maxBatch === undefined) {
+        unjudged(ctx, "rail.pool_low", `rail.pool_low:${side.chain}`);
+        continue;
+      }
+      const low = b.isEnabled && now.state.lane?.supported !== false && b.tokens < maxBatch;
+      if (!low) {
+        if (since !== undefined) ctx.writes.meta.push({ k, v: "" });
+        continue;
+      }
+      if (since === undefined) {
+        ctx.writes.meta.push({ k, v: String(ctx.nowS) });
+        continue;
+      }
+      if (ctx.nowS - since <= ctx.t.railPoolLowS) continue;
+      out.push({
+        rule: "rail.pool_low",
+        key: `rail.pool_low:${side.chain}`,
+        subject: `${side.pool}'s ${side.dir} bucket holds less than a full batch: ${tao(b.tokens)} left`,
+        facts: { pool: side.pool, left: tao(b.tokens), "a full batch": tao(maxBatch), capacity: tao(b.capacity), "refills at": `${formatUnits(b.rate, 18)} TAO a second`, since: utc(since), block: String(now.block) },
+      });
+    }
+    return out;
+  },
+};
+
+/** fmtao.rebalancer_set (critical): the lock pool has a rebalancer (getRebalancer), on two readings. That account can
+ * withdraw the wTAO locked behind every FM-TAO on Base and Robinhood with withdrawLiquidity; its owner (ForeverMoney's
+ * Safe) sets it with setRebalancer, which logs nothing, so this reading is the drain's only early warning (R3 FM-L2,
+ * rule R3; the drain itself is fmtao.role_change_critical's LiquidityRemoved). None on 2026-11-05. */
+export const fmtaoRebalancerSet: Rule = {
+  name: "fmtao.rebalancer_set",
+  run(ctx) {
+    const set = (r: Readings) => (r.bittensor?.lockPoolRebalancer === undefined ? undefined : r.bittensor.lockPoolRebalancer !== ZERO);
+    const held = twice(ctx, "bittensor", set);
+    // unread: every alert of the rule left as it is (its key names the rebalancer, unknown here)
+    if (held === undefined) return unjudged(ctx, "fmtao.rebalancer_set");
+    if (!held) return [];
+    const s = ctx.snap.bittensor!;
+    const who = s.state.lockPoolRebalancer as Hex;
+    return [
+      {
+        rule: "fmtao.rebalancer_set",
+        key: `fmtao.rebalancer_set:${who}`,
+        subject: `${who} can now withdraw the wTAO locked behind every FM-TAO (the lock pool's rebalancer)`,
+        facts: { rebalancer: who, lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool), "wTAO in the lock pool": s.state.lockPoolFmTao === undefined ? "unknown" : tao(s.state.lockPoolFmTao), block: String(s.block) },
+      },
+    ];
+  },
+};
+
+/** fmtao.registry_admin (critical) and an fmtao.role_change (warning event): who administers the rail's token in each
+ * chain's TokenAdminRegistry (R3 FM-L2, rule R1: the administrator sets the token's pool). A transfer requested
+ * (pendingAdministrator set) is the critical, on two readings, while it is pending (it can be accepted at once). The
+ * administrator itself moving (a transfer accepted, perhaps within one tick) is the warning, once: against the last one
+ * remembered (meta registry_admin:{chain}), on two readings; the first reading remembers it silently. */
+export const fmtaoRegistryAdmin: Rule = {
+  name: "fmtao.registry_admin",
+  raises: ["fmtao.role_change"],
+  run(ctx) {
+    const out: Finding[] = [];
+    for (const side of RAIL_SIDES) {
+      const now = ctx.snap[side.chain];
+      const reg = now?.state.registry;
+      const pending = (r: Readings) => {
+        const e = r[side.chain]?.registry;
+        return e === undefined ? undefined : e.pendingAdministrator !== ZERO;
+      };
+      const held = twice(ctx, side.chain, pending);
+      if (held === undefined) unjudged(ctx, "fmtao.registry_admin", `fmtao.registry_admin:${side.chain}`);
+      if (held && now && reg) {
+        out.push({
+          rule: "fmtao.registry_admin",
+          key: `fmtao.registry_admin:${side.chain}`,
+          subject: `${side.token}'s administrator in ${side.where}'s CCIP TokenAdminRegistry is being moved to ${reg.pendingAdministrator}`,
+          facts: { token: side.token, administrator: reg.administrator, "proposed administrator": reg.pendingAdministrator, pool: reg.tokenPool, registry: addressLink(side.chain, ctx.cfg.tokens[side.chain].tokenAdminRegistry), block: String(now.block) },
+        });
+      }
+      // the administrator moved: against the one remembered, on two readings
+      if (!now || !reg) continue;
+      const k = `registry_admin:${side.chain}`;
+      const known = ctx.meta[k] ? lc(ctx.meta[k]) : undefined;
+      if (known === undefined) {
+        ctx.writes.meta.push({ k, v: reg.administrator });
+        continue;
+      }
+      const before = ctx.previous[side.chain];
+      if (reg.administrator === known || !before || before.block >= now.block || before.state.registry?.administrator !== reg.administrator) continue;
+      ctx.writes.meta.push({ k, v: reg.administrator });
+      out.push({
+        rule: "fmtao.role_change",
+        key: `fmtao.role_change:registry:${side.chain}:${reg.administrator}`,
+        subject: `ForeverMoney's rail: ${side.token}'s administrator in ${side.where}'s CCIP TokenAdminRegistry moved to ${reg.administrator}`,
+        facts: { token: side.token, before: known, after: reg.administrator, "what it means": `the new administrator can set ${side.token}'s pool`, registry: addressLink(side.chain, ctx.cfg.tokens[side.chain].tokenAdminRegistry), block: String(now.block) },
+      });
+    }
+    return out;
   },
 };
 
@@ -586,6 +775,9 @@ export const DEPENDENCY_RULES: Rule[] = [
   fmtaoBackingTrue,
   fmtaoRoleChange,
   railAlphaVaultAdmin,
+  railPool,
+  fmtaoRebalancerSet,
+  fmtaoRegistryAdmin,
   validatorTake,
   validatorRootStakeDrop,
   validatorRootUidLost,

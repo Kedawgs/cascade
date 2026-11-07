@@ -13,6 +13,9 @@ const d = cfg.deployment;
 const h = (s: string) => keccak256(toBytes(s)) as Hex;
 const USER = "0x00000000000000000000000000000000000a11ce" as Hex;
 const SAFE_OWNER = "0x00000000000000000000000000000000005afe00" as Hex;
+const ZERO = "0x0000000000000000000000000000000000000000" as Hex;
+/** ForeverMoney's 2-of-3 Safe, as the fake registries answer it (fake-deployment.ts FM_SAFE) */
+const FM_SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
 
 const inputs = (over: Partial<SnapshotInputs> = {}): SnapshotInputs => ({
   last: {},
@@ -124,6 +127,25 @@ describe("readSnapshot", () => {
     // more than the bridge takes reverts (MessageTooLarge): the quote is left unread
     const s = await readSnapshot(rpc, cfg, inputs({ payoutQuoteAmount: 51n * 10n ** 18n }), 3);
     expect(s.bittensor?.state.payoutFeeQuote).toBeUndefined();
+  });
+
+  it("reads each chain's TokenAdminRegistry entry for the rail's token and the lock pool's rebalancer (R3 FM-L2)", async () => {
+    const state = deploymentState(cfg);
+    const { rpc } = fakeDeployment(cfg, state);
+    const s = await readSnapshot(rpc, cfg, inputs(), 1);
+    // FM-TAO's entry on Base, wTAO's on Bittensor: ForeverMoney's Safe administers both, none pending, each the watched pool
+    expect(s.base?.state.registry).toEqual({ administrator: FM_SAFE, pendingAdministrator: ZERO, tokenPool: cfg.tokens.base.tokenPool });
+    expect(s.bittensor?.state.registry).toEqual({ administrator: FM_SAFE, pendingAdministrator: ZERO, tokenPool: cfg.tokens.bittensor.lockPool });
+    expect(s.bittensor?.state.lockPoolRebalancer).toBe(ZERO);
+    // (another token's entry reads all zeros: these were asked for FM-TAO and wTAO)
+    // a failed read leaves only its field unread
+    state.reverts.add("bittensor.registry.getTokenConfig");
+    state.reverts.add("bittensor.pool.getRebalancer");
+    const t = await readSnapshot(rpc, cfg, inputs(), 2);
+    expect(t.bittensor?.state.registry).toBeUndefined();
+    expect(t.bittensor?.state.lockPoolRebalancer).toBeUndefined();
+    expect(t.bittensor?.state.lane?.inbound).toBeDefined();
+    expect(t.base?.state.registry).toBeDefined();
   });
 
   it("asks each token pool whether it still lists the other chain: a lane removed reads false, a failed read is unread", async () => {

@@ -2,6 +2,7 @@ import { decodeAbiParameters, type Hex } from "viem";
 import { ADMIN_VIEWS, ALPHA_VAULT, BRIDGE_VIEWS, CCIP_SELECTOR, ERC20, FRONT_DOOR_VIEWS, OFFRAMP, ORACLE, QUOTER_V2, SAFE, STAKING, TOKEN_POOL, TREASURY, UNISWAP_POOL, VAULT_VIEWS } from "../../src/abi.ts";
 import { type Config, PATH_USDC_TO_TAO, UNISWAP_QUOTER } from "../../src/config.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
+import { LOCK_POOL, TOKEN_ADMIN_REGISTRY } from "../../src/abi.ts";
 import {
   DELEGATES_PREFIX,
   ROOT_STAKE_UNLOCK_INTERVAL_KEY,
@@ -26,6 +27,8 @@ export const OWNER = "0x00000000000000000000000000000000000000a1" as Hex;
 export const GUARDIAN = "0x00000000000000000000000000000000000000a2" as Hex;
 export const KEEPER = "0x00000000000000000000000000000000000000a3" as Hex;
 export const TREASURY_WALLET = "0x00000000000000000000000000000000000000a4" as Hex;
+/** ForeverMoney's 2-of-3 Safe: the administrator of both tokens in the TokenAdminRegistries (R3, 2026-11-05) */
+export const FM_SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
 export const VALIDATOR_OWNER = "0x2222222222222222222222222222222222222222222222222222222222222222" as Hex;
 
 /** A CCIP token pool's rate-limit bucket as getCurrent*RateLimiterState answers it (amounts in TAO). */
@@ -85,6 +88,9 @@ export function deploymentState(cfg: Config) {
       wTaoSupply: 100n * 10n ** 18n,
       /** the lock pool's buckets for the Base lane, and whether it lists Base (isSupportedChain) */
       lane: { inbound: bucket(5000n), outbound: bucket(4000n), supported: true },
+      /** the lock pool's rebalancer (getRebalancer), and wTAO's TokenAdminRegistry entry (getTokenConfig) */
+      rebalancer: ZERO as Hex,
+      registry: { administrator: FM_SAFE as Hex, pendingAdministrator: ZERO as Hex, tokenPool: cfg.tokens.bittensor.lockPool as Hex },
       /** the raw storage the 0x807 query answers for the validator (as the live chain did on 2026-10-31) */
       storage: { delegates: "0x0000" as Hex, totalHotkeyAlpha: "0x8a54d1d2fda00300" as Hex, uids: "0x0100" as Hex, unlockInterval: "0x" as Hex },
       claimGasRequired: 55_000_000n,
@@ -132,6 +138,8 @@ export function deploymentState(cfg: Config) {
       wethUsdc: { slot0: [3961408125713216879677197516800n, 0, 0, 5000, 5000, 0, true] as [bigint, number, number, number, number, number, boolean], liquidity: 9n * 10n ** 18n, token0: cfg.tokens.base.weth },
       /** the Base pool's buckets for the Bittensor lane, and whether it lists Bittensor (isSupportedChain) */
       lane: { inbound: bucket(5000n), outbound: bucket(5000n), supported: true },
+      /** FM-TAO's TokenAdminRegistry entry (getTokenConfig) */
+      registry: { administrator: FM_SAFE as Hex, pendingAdministrator: ZERO as Hex, tokenPool: cfg.tokens.base.tokenPool as Hex },
       oracleValue: 400_000_000n,
       /** QuoterV2: TAO wei a $1,000 deposit gets; USDC units per TAO a sale gets (the sale's amountIn is recorded in `asked.quoterIn`) */
       buyQuote: 2_450n * 10n ** 15n,
@@ -182,6 +190,12 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
       state.asked.supportedSelectors.push(`${chain}:${sel}`);
       return buckets.supported && sel === (chain === "base" ? CCIP_SELECTOR.bittensor : CCIP_SELECTOR.base);
     }),
+  });
+  /** a TokenAdminRegistry: the rail token's entry (getTokenConfig; another token's is all zeros, as a live registry answers) */
+  const registry = (chain: "base" | "bittensor", entry: { administrator: Hex; pendingAdministrator: Hex; tokenPool: Hex }) => ({
+    getTokenConfig: v(chain, "registry.getTokenConfig", ([token]) =>
+      lc(token) === (chain === "base" ? t.base.fmTao : t.bittensor.fmTao) ? entry : { administrator: ZERO, pendingAdministrator: ZERO, tokenPool: ZERO },
+    ),
   });
   const b = state.base;
   const x = state.bit;
@@ -246,6 +260,7 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
           [d.oracle]: { abi: ORACLE, fns: { usdcValue: v("base", "oracle.usdcValue", () => b.oracleValue) } },
           [t.base.offRamp]: { abi: OFFRAMP, fns: { getExecutionState: ([id]) => b.offRamp[lc(id)] ?? 0 } },
           [t.base.tokenPool]: { abi: TOKEN_POOL, fns: lane("base", b.lane) },
+          [t.base.tokenAdminRegistry]: { abi: TOKEN_ADMIN_REGISTRY, fns: registry("base", b.registry) },
           ...safeContracts,
         },
         { time: (at) => 1_800_000_000 + Number(at - heads.base) * 2, balance: balances("base") },
@@ -343,7 +358,8 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
               }),
             },
           },
-          [t.bittensor.lockPool]: { abi: TOKEN_POOL, fns: lane("bittensor", x.lane) },
+          [t.bittensor.lockPool]: { abi: [...TOKEN_POOL, ...LOCK_POOL], fns: { ...lane("bittensor", x.lane), getRebalancer: v("bittensor", "pool.getRebalancer", () => x.rebalancer) } },
+          [t.bittensor.tokenAdminRegistry]: { abi: TOKEN_ADMIN_REGISTRY, fns: registry("bittensor", x.registry) },
           ...Object.fromEntries(
             x.quoteBridges.map((bridge) => [
               bridge,

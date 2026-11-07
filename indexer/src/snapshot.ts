@@ -22,6 +22,8 @@ import { type ChainName, type Config, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, UNISWA
 import { encodePayoutsMessage } from "./crosscheck/payouts.ts";
 import { multicall, newerThan, type Read } from "./multicall.ts";
 import type { Rpc } from "./rpc.ts";
+// the reads no ForeverMoney event replaces (R3 FM-L2), on every deployment
+import { LOCK_POOL, TOKEN_ADMIN_REGISTRY } from "./abi.ts";
 import {
   decodeAccountId,
   decodeAccountIds,
@@ -75,6 +77,13 @@ export interface Lane {
   inbound?: Bucket;
   outbound?: Bucket;
   supported?: boolean;
+}
+/** A token's entry in Chainlink's TokenAdminRegistry (getTokenConfig): who administers it, who it is being moved to
+ * (the zero address: nobody), and the pool CCIP releases or mints it through. */
+export interface RegistryEntry {
+  administrator: Hex;
+  pendingAdministrator: Hex;
+  tokenPool: Hex;
 }
 
 // One block-pinned reading of each chain per tick (spec section 6, "Readings"): one Multicall3 call per
@@ -147,6 +156,10 @@ export interface BitState {
   };
   /** wTAO's total supply (TOKENS.bittensor.fmTao): what the AlphaVault's backing must cover */
   wTaoSupply?: bigint;
+  /** the lock pool's rebalancer (getRebalancer; the zero address: none): the one account that can withdraw its wTAO */
+  lockPoolRebalancer?: Hex;
+  /** wTAO's entry in Bittensor's TokenAdminRegistry */
+  registry?: RegistryEntry;
   /** the lock pool's buckets for the Base lane */
   lane?: Lane;
   /** the stake hotkey as a validator: its take (of 65,535; null: no Delegates entry, which is the chain's default take,
@@ -212,6 +225,8 @@ export interface BaseState {
   wethUsdcPool: { sqrtPriceX96?: bigint; liquidity?: bigint; token0?: Hex; cardinality?: number; cardinalityNext?: number };
   /** the Base token pool's buckets for the Bittensor lane */
   lane?: Lane;
+  /** FM-TAO's entry in Base's TokenAdminRegistry */
+  registry?: RegistryEntry;
   /** the front door's oracle's usdcValue(1e18); `oracleReverted` when that call failed */
   oracleValue?: bigint;
   oracleReverted?: boolean;
@@ -271,6 +286,7 @@ const lc = (x: unknown) => String(x).toLowerCase() as Hex;
 const RAO_WEI = 10n ** 9n;
 const USDC_UNIT = 10n ** 6n;
 const bucketOf = (v: { tokens: bigint; isEnabled: boolean; capacity: bigint; rate: bigint }): Bucket => ({ tokens: v.tokens, isEnabled: v.isEnabled, capacity: v.capacity, rate: v.rate });
+const registryOf = (v: { administrator: Hex; pendingAdministrator: Hex; tokenPool: Hex }): RegistryEntry => ({ administrator: lc(v.administrator), pendingAdministrator: lc(v.pendingAdministrator), tokenPool: lc(v.tokenPool) });
 const state = (n: unknown) => EXECUTION_STATES[Number(n)] ?? String(n);
 
 /** The reads of one chain's multicall, each with what to do with its answer. */
@@ -403,6 +419,10 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "getCurrentInboundRateLimiterState", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.inbound = bucketOf(v)));
   vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "getCurrentOutboundRateLimiterState", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.outbound = bucketOf(v)));
   vp.add({ address: t.bittensor.lockPool, abi: TOKEN_POOL, functionName: "isSupportedChain", args: [CCIP_SELECTOR.base] }, (v) => (bitLane.supported = v));
+  // what no event shows (R3 FM-L2): the lock pool's rebalancer (setRebalancer logs nothing), and the pool and administrator
+  // Bittensor's TokenAdminRegistry names for wTAO
+  vp.add({ address: t.bittensor.lockPool, abi: LOCK_POOL, functionName: "getRebalancer" }, (v) => (bit.lockPoolRebalancer = lc(v)));
+  vp.add({ address: t.bittensor.tokenAdminRegistry, abi: TOKEN_ADMIN_REGISTRY, functionName: "getTokenConfig", args: [t.bittensor.fmTao] }, (v) => (bit.registry = registryOf(v)));
   // the stake hotkey as a validator, and the chain's root-stake hold (SubtensorModule storage)
   const validator: NonNullable<BitState["validator"]> = { hotkey: lc(stakeHotkey) };
   const storage = (key: Hex, ok: (v: Hex) => void) => vp.add({ address: STORAGE_QUERY, callData: key }, ok);
@@ -496,6 +516,8 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "getCurrentInboundRateLimiterState", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.inbound = bucketOf(v)));
   bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "getCurrentOutboundRateLimiterState", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.outbound = bucketOf(v)));
   bp.add({ address: t.base.tokenPool, abi: TOKEN_POOL, functionName: "isSupportedChain", args: [CCIP_SELECTOR.bittensor] }, (v) => (baseLane.supported = v));
+  // the pool and administrator Base's TokenAdminRegistry names for FM-TAO (R3 FM-L2)
+  bp.add({ address: t.base.tokenAdminRegistry, abi: TOKEN_ADMIN_REGISTRY, functionName: "getTokenConfig", args: [t.base.fmTao] }, (v) => (base.registry = registryOf(v)));
   bp.add(
     { address: i.oracle ?? d.oracle, abi: ORACLE, functionName: "usdcValue", args: [10n ** 18n] },
     (v) => (base.oracleValue = v),

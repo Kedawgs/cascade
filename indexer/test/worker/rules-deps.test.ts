@@ -312,11 +312,23 @@ describe("rail.alpha_vault and rail.alpha_vault_admin", () => {
     expect([...railAlphaVault.run(on({})), ...deps.railAlphaVaultAdmin.run(on({}))]).toEqual([]);
   });
 
-  it("a guardian's pause until a time to come is critical, and an expired one isn't", () => {
-    const [f] = railAlphaVault.run(on({ pausedUntil: BigInt(NOW + 3600) }));
+  it("a pause until a time to come is critical, and an expired one isn't", () => {
+    const [f] = railAlphaVault.run(on({ isPaused: true, pausedUntil: BigInt(NOW + 3600) }));
     expect(f).toMatchObject({ rule: "rail.alpha_vault" });
-    expect(f.subject).toContain("paused by its guardian until 2027-01-15 09:00 UTC");
+    // isPaused() is block.timestamp < pausedUntil, which a guardian's pause and the operator's adminHold both set
+    expect(f.subject).toContain("paused until 2027-01-15 09:00 UTC (its guardian's pause, or its operator's adminHold)");
     expect(railAlphaVault.run(on({ pausedUntil: BigInt(NOW - 1) }))).toEqual([]);
+  });
+
+  it("an operator's adminHold past the guardian's 2-day cap is named as the operator's; a halt with no end (a finished migration's) never throws", () => {
+    // adminHold(until) sets pausedUntil to any finite time (AlphaVault.sol:466-476 at e80a443); a guardian's shot is at most 2 days
+    const [held] = railAlphaVault.run(on({ isPaused: true, pausedUntil: BigInt(NOW + 3 * 86_400) }));
+    expect(held.subject).toContain("held by its operator until 2027-01-18 08:00 UTC (adminHold: longer than a guardian's 2-day pause)");
+    expect(held.facts["paused until"]).toBe("2027-01-18 08:00 UTC");
+    // finishMigration sets pausedUntil to the largest uint256, and an adminHold can set any time past a Date's range
+    const [forever] = railAlphaVault.run(on({ isPaused: true, migrationFinished: true, pausedUntil: 2n ** 256n - 1n }));
+    expect(forever.subject).toContain("halted with no end");
+    expect(forever.facts["paused until"]).toBe("no end");
   });
 
   it("a migration announced (a target or a ready time) or executed is critical", () => {
@@ -328,6 +340,135 @@ describe("rail.alpha_vault and rail.alpha_vault_admin", () => {
   it("a pending default admin is a warning", () => {
     const [f] = deps.railAlphaVaultAdmin.run(on({ pendingAdmin: { admin: STRANGER, schedule: NOW + 172_800 } }));
     expect(f).toMatchObject({ rule: "rail.alpha_vault_admin", key: `rail.alpha_vault_admin:${STRANGER}`, facts: { "new admin": STRANGER, "it may accept from": "2027-01-17 08:00 UTC" } });
+  });
+});
+
+describe("ForeverMoney's admin actions the events don't show (R3 FM-L2)", () => {
+  // the live rail on 2026-11-05 (R3): each registry's entry is (ForeverMoney's Safe, none pending, the watched pool); the
+  // lock pool has no rebalancer; the batch lane's buckets hold 5,000 TAO, refilling 0.6 a second
+  const SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
+  const OTHER_POOL = "0x00000000000000000000000000000000000000cc" as Hex;
+  const entry = (tokenPool: Hex, pendingAdministrator: Hex = ZERO, administrator: Hex = SAFE) => ({ administrator, pendingAdministrator, tokenPool });
+  const bucketOf = (tao: bigint, capacity = 5000n, isEnabled = true): Bucket => ({ tokens: tao * E18, isEnabled, capacity: capacity * E18, rate: isEnabled ? 6n * 10n ** 17n : 0n });
+  const lane = (o: Partial<{ inbound: Bucket; outbound: Bucket; supported: boolean }> = {}) => ({ inbound: bucketOf(5000n), outbound: bucketOf(5000n), supported: true, ...o });
+  const onBase = (block: bigint, o: Partial<BaseState> = {}) => base(block, { maxBatchValue: 10n * E18, lane: lane(), registry: entry(t.base.tokenPool), ...o });
+  const onBit = (block: bigint, o: Partial<BitState> = {}) => bit(block, { lane: lane(), registry: entry(t.bittensor.lockPool), lockPoolRebalancer: ZERO, ...o });
+  const all = (c: RuleCtx) => [...deps.railPool.run(c), ...deps.fmtaoRebalancerSet.run(c), ...deps.fmtaoRegistryAdmin.run(c)];
+  const both = (b: Partial<BaseState> = {}, x: Partial<BitState> = {}, meta: Record<string, string> = {}) =>
+    ctx({ base: onBase(11n, b), baseBefore: [onBase(10n, b)], bit: onBit(11n, x), bitBefore: [onBit(10n, x)], meta });
+
+  it("are in the tick on every deployment, each with its tier and a runbook line", () => {
+    for (const r of [deps.railPool, deps.fmtaoRebalancerSet, deps.fmtaoRegistryAdmin]) expect(TICK_RULES).toContain(r);
+    expect(RULES["rail.pool"]).toEqual({ tier: "critical", kind: "condition", canHold: false, mutedByHold: false });
+    expect(RULES["rail.pool_low"]).toMatchObject({ tier: "warning", kind: "condition" });
+    expect(RULES["fmtao.rebalancer_set"]).toEqual({ tier: "critical", kind: "condition", canHold: false, mutedByHold: false });
+    expect(RULES["fmtao.registry_admin"]).toEqual({ tier: "critical", kind: "condition", canHold: false, mutedByHold: false });
+    for (const id of ["rail.pool", "rail.pool_low", "fmtao.rebalancer_set", "fmtao.registry_admin"] as const) expect(RUNBOOK[id]({}).length, id).toBeGreaterThan(80);
+    expect(deps.fmtaoRegistryAdmin.raises).toContain("fmtao.role_change");
+    expect(deps.railPool.raises).toContain("rail.pool_low");
+  });
+
+  it("are quiet on the live rail", () => {
+    const c = both();
+    expect(all(c)).toEqual([]);
+    expect(c.unjudged).toEqual([]);
+  });
+
+  it("rail.pool: the registry naming another pool for FM-TAO (Base) or wTAO (Bittensor), or none, is critical on two readings, each chain its own alert", () => {
+    // one reading alone can't trip it
+    expect(deps.railPool.run(ctx({ base: onBase(11n, { registry: entry(OTHER_POOL) }), baseBefore: [onBase(10n)], bit: onBit(11n), bitBefore: [onBit(10n)] }))).toEqual([]);
+    const [f] = deps.railPool.run(both({ registry: entry(OTHER_POOL) }));
+    expect(f).toMatchObject({ rule: "rail.pool", key: "rail.pool:base" });
+    expect(f.subject).toContain("FM-TAO");
+    expect(f.facts).toMatchObject({ "the registry's pool": OTHER_POOL, "the pool watched (TOKENS)": t.base.tokenPool });
+    expect(f.facts.why).toContain("in-flight messages execute through it");
+    expect(f.hold).toBeUndefined();
+    const [g] = deps.railPool.run(both({}, { registry: entry(ZERO) }));
+    expect(g).toMatchObject({ rule: "rail.pool", key: "rail.pool:bittensor" });
+    expect(g.facts.why).toContain("no pool");
+    expect(RUNBOOK["rail.pool"](f.facts)).toContain("TOKENS.base.tokenPool");
+  });
+
+  it("rail.pool: the batch lane's bucket off (no limit), the lane removed, or a capacity below a full batch is critical", () => {
+    const off = deps.railPool.run(both({ lane: lane({ outbound: bucketOf(0n, 0n, false) }) }));
+    expect(off.map((f) => f.key)).toEqual(["rail.pool:base"]);
+    expect(off[0].facts.why).toContain("no rate limit");
+    const gone = deps.railPool.run(both({}, { lane: lane({ inbound: bucketOf(0n, 0n, false), supported: false }) }));
+    expect(gone.map((f) => f.key)).toEqual(["rail.pool:bittensor"]);
+    expect(gone[0].facts.why).toContain("no longer lists Base");
+    // capacity 9 TAO against 10-TAO batches: a full batch can never cross
+    const small = deps.railPool.run(both({ lane: lane({ outbound: bucketOf(9n, 9n) }) }));
+    expect(small[0].facts.why).toContain("at most 9 TAO");
+    // only the batch lane counts here (the payout lane's buckets are ccip.rate_limited's): Base's inbound and the lock
+    // pool's outbound off are quiet
+    expect(deps.railPool.run(both({ lane: lane({ inbound: bucketOf(0n, 0n, false) }) }, { lane: lane({ outbound: bucketOf(0n, 0n, false) }) }))).toEqual([]);
+  });
+
+  it("rail.pool_low: an enabled batch-lane bucket below a full batch for over an hour is a warning, marked in meta", () => {
+    const low = (b: Partial<BaseState>, meta: Record<string, string> = {}) => both(b, {}, meta);
+    const first = low({ lane: lane({ outbound: bucketOf(4n) }) });
+    expect(deps.railPool.run(first)).toEqual([]);
+    expect(written(first)).toEqual({ "rail_pool_low_since:base": String(NOW) });
+    expect(deps.railPool.run(low({ lane: lane({ outbound: bucketOf(4n) }) }, { "rail_pool_low_since:base": String(NOW - 3600) }))).toEqual([]);
+    const [f] = deps.railPool.run(low({ lane: lane({ outbound: bucketOf(4n) }) }, { "rail_pool_low_since:base": String(NOW - 3601) }));
+    expect(f).toMatchObject({ rule: "rail.pool_low", key: "rail.pool_low:base", facts: { left: "4 TAO", "a full batch": "10 TAO" } });
+    // refilled: the mark clears
+    const back = low({}, { "rail_pool_low_since:base": String(NOW - 7200) });
+    expect(deps.railPool.run(back)).toEqual([]);
+    expect(written(back)).toEqual({ "rail_pool_low_since:base": "" });
+  });
+
+  it("rail.pool: unjudged without a reading or a field it needs, its marks left as they are", () => {
+    const c = ctx({ base: base(11n), baseBefore: [base(10n)], meta: { "rail_pool_low_since:base": String(NOW - 7200) } });
+    expect(deps.railPool.run(c)).toEqual([]);
+    expect(c.unjudged).toEqual(expect.arrayContaining([{ rule: "rail.pool", key: "rail.pool:base" }, { rule: "rail.pool", key: "rail.pool:bittensor" }]));
+    expect(c.writes.meta).toEqual([]);
+  });
+
+  it("fmtao.rebalancer_set: a rebalancer on the lock pool (setRebalancer logs nothing) is critical on two readings; unread is unjudged", () => {
+    const REB = "0x00000000000000000000000000000000000000dd" as Hex;
+    expect(deps.fmtaoRebalancerSet.run(ctx({ bit: onBit(11n, { lockPoolRebalancer: REB }), bitBefore: [onBit(10n)] }))).toEqual([]);
+    const [f] = deps.fmtaoRebalancerSet.run(both({}, { lockPoolRebalancer: REB }));
+    expect(f).toMatchObject({ rule: "fmtao.rebalancer_set", key: `fmtao.rebalancer_set:${REB}`, facts: { rebalancer: REB } });
+    expect(f.subject).toContain("can now withdraw the wTAO locked");
+    expect(RUNBOOK["fmtao.rebalancer_set"](f.facts)).toContain("LiquidityRemoved");
+    const c = ctx({ bit: bit(11n), bitBefore: [bit(10n)] });
+    expect(deps.fmtaoRebalancerSet.run(c)).toEqual([]);
+    expect(c.unjudged).toEqual([{ rule: "fmtao.rebalancer_set" }]);
+  });
+
+  it("fmtao.registry_admin: an administrator transfer requested in either registry is critical on two readings; a completed one is a warning, once", () => {
+    const NEW = "0x00000000000000000000000000000000000000ee" as Hex;
+    const [f] = deps.fmtaoRegistryAdmin.run(both({ registry: entry(t.base.tokenPool, NEW) }));
+    expect(f).toMatchObject({ rule: "fmtao.registry_admin", key: "fmtao.registry_admin:base", facts: { "proposed administrator": NEW, administrator: SAFE } });
+    // the first reading remembers the administrator, silently
+    const first = both();
+    expect(deps.fmtaoRegistryAdmin.run(first)).toEqual([]);
+    expect(written(first)).toEqual({ "registry_admin:base": SAFE, "registry_admin:bittensor": SAFE });
+    // moved, on two readings: a warning event, and the new one remembered
+    const moved = both({}, { registry: entry(t.bittensor.lockPool, ZERO, NEW) }, { "registry_admin:base": SAFE, "registry_admin:bittensor": SAFE });
+    const [m] = deps.fmtaoRegistryAdmin.run(moved);
+    expect(m).toMatchObject({ rule: "fmtao.role_change", key: `fmtao.role_change:registry:bittensor:${NEW}`, facts: { before: SAFE, after: NEW } });
+    expect(written(moved)).toEqual({ "registry_admin:bittensor": NEW });
+    // a single reading that answers another administrator moves nothing
+    const once = ctx({ base: onBase(11n), baseBefore: [onBase(10n)], bit: onBit(11n, { registry: entry(t.bittensor.lockPool, ZERO, NEW) }), bitBefore: [onBit(10n)], meta: { "registry_admin:base": SAFE, "registry_admin:bittensor": SAFE } });
+    expect(deps.fmtaoRegistryAdmin.run(once)).toEqual([]);
+    expect(once.writes.meta).toEqual([]);
+  });
+
+  it("fmtao.role_change: FM-TAO's MINTER_ROLE or BURNER_ROLE revoked from its CCIP pool is critical (the lane halts); from anyone else, a warning", () => {
+    const revoke = (role: Hex, account: Hex) =>
+      slog({ contract: "fmTao", chain: "base", event: "RoleRevoked", args: { role, account, sender: SAFE }, block: 37_000_500n, address: t.base.fmTao, txHash: keccak256(toBytes(`revoke ${role} ${account}`)) });
+    for (const role of [MINTER_ROLE, BURNER_ROLE]) {
+      const [f] = deps.fmtaoRoleChange.run(ctx({ logs: [revoke(role, t.base.tokenPool)] }));
+      expect(f.rule, role).toBe("fmtao.role_change_critical");
+      expect(f.facts["what it means"]).toContain("the lane is halted");
+    }
+    // the pool the registry names counts too, when it is another than TOKENS'
+    const [viaRegistry] = deps.fmtaoRoleChange.run(ctx({ logs: [revoke(MINTER_ROLE, OTHER_POOL)], base: onBase(11n, { registry: entry(OTHER_POOL) }) }));
+    expect(viaRegistry.rule).toBe("fmtao.role_change_critical");
+    expect(deps.fmtaoRoleChange.run(ctx({ logs: [revoke(MINTER_ROLE, STRANGER)] }))[0].rule).toBe("fmtao.role_change");
+    expect(deps.fmtaoRoleChange.run(ctx({ logs: [revoke(keccak256(toBytes("OPERATOR_ROLE")), t.base.tokenPool)] }))[0].rule).toBe("fmtao.role_change");
   });
 });
 

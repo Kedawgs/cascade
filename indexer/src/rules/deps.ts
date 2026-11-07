@@ -338,7 +338,7 @@ function railProblems(ctx: RuleCtx, side: RailSide, s: BaseState | BitState | un
  * bucket holding less than maxBatchValue for railPoolLowS (an hour; meta rail_pool_low_since:{chain}) is the warning:
  * the next full batch waits for it to refill. The payout lane's buckets are ccip.rate_limited's. A side it can't read
  * (a reading or a field missing) is unjudged, its mark left as it is. On every deployment: ForeverMoney's contracts
- * are the same under v3-launch and v3.2. */
+ * are the same for every deployment. */
 export const railPool: Rule = {
   name: "rail.pool",
   raises: ["rail.pool_low"],

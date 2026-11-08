@@ -956,7 +956,7 @@ Defaults at deploy:
 ## Static analysis
 
 Slither 0.11.5 over `src/` (`contracts/slither.config.json` filters out `lib/` and `test/`): 69
-results, no new defects. Re-run from `contracts/` with `slither .`.
+results, no new defects. Re-run from `contracts/` with `../.venv/Scripts/slither .`.
 
 | Severity | Finding | Verdict |
 |---|---|---|

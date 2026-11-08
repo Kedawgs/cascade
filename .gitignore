@@ -18,3 +18,8 @@ contracts/broadcast/*/31337/
 # the keeper supervisor's logs, lock and stop request (ops/scripts/keeper-supervised.ps1)
 ops/logs/
 .DS_Store
+
+.venv/
+
+# the agents' working copies (git worktree)
+.claude/worktrees/

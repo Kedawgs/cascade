@@ -39,7 +39,8 @@ Cascade's product. The only site is https://cascadefi.xyz.
   `contracts/lib`; on an existing clone run `git submodule update --init`).
 - Contracts: `cd contracts && forge test` (356 tests, 9 invariants; `FORK=1` adds 12 fork tests,
   see `contracts/README.md`), `forge build --sizes` (the vault must stay under 24,576 bytes),
-  `forge fmt --check`, `slither .`.
+  `forge fmt --check`, `../.venv/Scripts/slither .` (Slither 0.11.5 lives in the repo's gitignored `.venv`;
+  rebuild with `python -m venv .venv` then `.venv/Scripts/python -m pip install slither-analyzer==0.11.5`).
 - Web: `cd web && pnpm install && pnpm dev`; `pnpm build` writes the static site to `web/out/`.
 - Ops: `cd ops && pnpm install && pnpm test`; `pnpm ops` lists the commands.
 - Tags: `v3.1-contracts-reviewed` is the latest contracts milestone (`v3.0-`, `v2.1-` and

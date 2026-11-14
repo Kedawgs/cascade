@@ -357,6 +357,28 @@ describe("loadTickState", () => {
     expect(s.payoutUsers).toEqual([USER]);
     expect(s.lastPayouts).toEqual([{ user: USER, at: 1_000_000 }]);
   });
+
+  it("looks a week back by time on Base's 200 ms blocks: a payout six days old, 2.6M blocks back, still makes its user worth reading", async () => {
+    const fd = (uid: string, block: bigint, user: Hex) => log({ uid: h(uid), chain: "base", contract: "frontDoor", event: "PayoutReceived", block, topic2: pad(user) });
+    const settled = 10_000_000n;
+    const NOW = 1_800_000_000;
+    const at = (block: bigint) => NOW - Math.floor(Number(settled - block) / 5);
+    const sixDays = settled - 6n * 432_000n;
+    const nineDays = settled - 9n * 432_000n;
+    await db.batch([
+      ...upsertLogs(db, [fd("six", sixDays, USER), fd("nine", nineDays, OTHER)]),
+      ...upsertBlocks(db, [
+        { chain: "base", number: sixDays, time: at(sixDays) },
+        { chain: "base", number: nineDays, time: at(nineDays) },
+      ]),
+      setCursor(db, { chain: "base", fromBlock: 1n, scannedTo: settled, settledTo: settled, settledTime: NOW, headTime: NOW, nowS: NOW }),
+      setMeta(db, "block_s:base", "0.2"),
+    ]);
+    expect((await loadTickState(db, NOW)).payoutUsers).toEqual([USER]);
+    // with Base's block time not yet measured, from block 0: the week by time alone
+    await setMeta(db, "block_s:base", "").run();
+    expect((await loadTickState(db, NOW)).payoutUsers).toEqual([USER]);
+  });
 });
 
 describe("payouts done and landings awaiting a read", () => {

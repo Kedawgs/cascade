@@ -305,8 +305,12 @@ export const chunkCheckOf = (r: Row): ChunkCheckRow => ({
   ...(typeof r.bridge === "string" ? { bridge: r.bridge as Hex } : {}),
 });
 
-/** Seven days of Base's 2-second blocks: how far back a PayoutReceived makes its user worth reading. */
-const PAYOUT_USERS_BLOCKS = 302_400;
+/** How far back a PayoutReceived makes its user worth reading: seven days by its block's time; its logs are looked for in
+ * eight days of Base's blocks back from the settled block, at Base's block time as the tick last measured it (meta
+ * block_s:base, src/blocktime.ts: 3,456,000 of its 200 ms blocks since 2026-11-05), so a measure a little long never cuts
+ * the week short; from block 0 while it is unknown. */
+const PAYOUT_USERS_S = 7 * 86_400;
+const PAYOUT_USERS_LOOKBACK_S = 8 * 86_400;
 
 /** The tick's whole D1 load (spec section 1, step 2), as one query. */
 export async function loadTickState(db: D1Database, nowS: number): Promise<TickState> {
@@ -329,7 +333,9 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
          SELECT p.topic2 AS user, MAX(p.block) AS last, MAX(b.time) AS at FROM logs p
          JOIN blocks b ON b.chain = 'base' AND b.number = p.block
          WHERE p.chain = 'base' AND p.contract = 'frontDoor' AND p.event = 'PayoutReceived' AND p.removed = 0
-           AND p.block >= COALESCE((SELECT settled_to FROM cursors WHERE chain = 'base'), 0) - ?1
+           AND p.block >= COALESCE((SELECT settled_to FROM cursors WHERE chain = 'base'), 0) - COALESCE(
+             (SELECT CAST(?1 / CAST(v AS REAL) AS INTEGER) FROM meta WHERE k = 'block_s:base' AND CAST(v AS REAL) > 0),
+             (SELECT settled_to FROM cursors WHERE chain = 'base'), 0)
            AND b.time >= ?2
          GROUP BY p.topic2
        ) r
@@ -340,7 +346,7 @@ export async function loadTickState(db: D1Database, nowS: number): Promise<TickS
            AND c.block > r.last AND c.chain = 'base' AND c.removed = 0
        )
        ORDER BY r.last DESC LIMIT 50`,
-    ).bind(PAYOUT_USERS_BLOCKS, nowS - 7 * 86400),
+    ).bind(PAYOUT_USERS_LOOKBACK_S, nowS - PAYOUT_USERS_S),
     db.prepare("SELECT delivered_key, queued_block FROM batch_checks WHERE queued_block IS NOT NULL AND payout_done_block IS NULL"),
     db.prepare("SELECT k, v FROM meta"),
     db.prepare("SELECT * FROM batch_checks WHERE status = 'waiting'"),

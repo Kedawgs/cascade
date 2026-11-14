@@ -79,8 +79,9 @@ export const DEFAULTS = {
   validatorTakeMaxBps: 900,
   /** validator.root_stake_drop: the validator's root stake this far (25%) below its highest of the last 24 hours */
   validatorStakeDropBps: 2500,
-  /** oracle.cardinality: the observations each pool the TWAP oracle reads must keep: its 1,800-second window of
-   * 2-second Base blocks, plus one */
+  /** oracle.cardinality: the fewest observations each pool the TWAP oracle reads must keep, whatever the block time: its
+   * 1,800-second window on 2-second Base blocks, plus one. The rule asks more when Base's block time, as the readings
+   * measure it, needs more (1,801 on its 200 ms blocks: a pool keeps at most one observation a second) */
   oracleMinCardinality: 901,
   /** payout.fee_ceiling: a full payout chunk's quoted fee above this share of the vault's maxFeeAbs */
   payoutFeeCeilingPct: 70,

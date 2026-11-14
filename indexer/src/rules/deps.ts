@@ -1,4 +1,5 @@
 import { formatUnits, type Hex, keccak256, toBytes } from "viem";
+import { windowObservations } from "../blocktime.ts";
 import { BURNER_ROLE, CCIP_SELECTOR, DEFAULT_ADMIN_ROLE, DEPENDENCY_EVENTS, MINTER_ROLE } from "../abi.ts";
 import type { Finding } from "../alerts.ts";
 import { type ChainName, DEPENDENCY_ROLES, type DependencyRole } from "../config.ts";
@@ -672,14 +673,17 @@ export const rootUnlockInterval: Rule = {
   },
 };
 
-/** oracle.cardinality (warning): a pool the TWAP oracle reads keeps fewer than oracleMinCardinality observations (slot0's
- * observationCardinality) on two readings. The oracle reads 1,800 seconds back: with a swap in every 2-second block,
- * fewer observations than that don't reach back, and usdcValue reverts ("OLD"). It grows to cardinalityNext by itself
- * as swaps write new observations. TAO/WETH kept 600 (growing to 2,000) on 2026-10-31. */
+/** oracle.cardinality (warning): a pool the TWAP oracle reads keeps fewer observations (slot0's observationCardinality) than
+ * it needs, on two readings. The oracle reads 1,800 seconds back, and a pool writes at most one observation a second: with
+ * a swap in every block, fewer than windowObservations at Base's block time as the readings measure it (1,801 on its 200 ms
+ * blocks since 2026-11-05, 901 on its old 2-second ones) don't reach back, and usdcValue reverts ("OLD"). Never fewer than
+ * oracleMinCardinality. It grows to cardinalityNext by itself as swaps write new observations. TAO/WETH kept 600 (growing
+ * to 2,000) on 2026-10-31. */
 export const oracleCardinality: Rule = {
   name: "oracle.cardinality",
   run(ctx) {
     const out: Finding[] = [];
+    const needed = Math.max(ctx.t.oracleMinCardinality, windowObservations(ctx.blockS.base) ?? 0);
     for (const [pool, name] of [
       ["taoWeth", "TAO/WETH"],
       ["wethUsdc", "WETH/USDC"],
@@ -687,7 +691,7 @@ export const oracleCardinality: Rule = {
       const of = (s?: BaseState) => (pool === "taoWeth" ? s?.taoWethPool : s?.wethUsdcPool);
       const few = (r: Readings) => {
         const c = of(r.base)?.cardinality;
-        return c === undefined ? undefined : c < ctx.t.oracleMinCardinality;
+        return c === undefined ? undefined : c < needed;
       };
       const held = twice(ctx, "base", few);
       if (held === undefined) unjudged(ctx, "oracle.cardinality", `oracle.cardinality:${pool}`);
@@ -696,13 +700,13 @@ export const oracleCardinality: Rule = {
       out.push({
         rule: "oracle.cardinality",
         key: `oracle.cardinality:${pool}`,
-        subject: `The ${name} pool keeps ${p.cardinality} observations; the TWAP oracle needs ${ctx.t.oracleMinCardinality}`,
+        subject: `The ${name} pool keeps ${p.cardinality} observations; the TWAP oracle needs ${needed}`,
         facts: {
           pool: name,
           address: addressLink("base", pool === "taoWeth" ? ctx.cfg.tokens.base.taoWethPool : ctx.cfg.tokens.base.wethUsdcPool),
           observations: String(p.cardinality),
           "growing to": String(p.cardinalityNext ?? "unknown"),
-          needed: String(ctx.t.oracleMinCardinality),
+          needed: String(needed),
           block: String(ctx.snap.base!.block),
         },
       });

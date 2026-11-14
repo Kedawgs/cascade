@@ -575,11 +575,20 @@ describe("root.unlock_interval", () => {
 describe("the oracle", () => {
   const pools = (taoWeth: number, next = 2000) => ({ taoWethPool: { cardinality: taoWeth, cardinalityNext: next }, wethUsdcPool: { cardinality: 5000, cardinalityNext: 5000 } });
 
-  it("oracle.cardinality: a pool keeping fewer than 901 observations (the 30-minute window of 2-second blocks) warns, saying when it grows by itself", () => {
+  it("oracle.cardinality: a pool keeping fewer observations than the 30-minute window needs at Base's block time as measured (1,801 on its 200 ms blocks: one a second at most) warns, saying when it grows by itself", () => {
     // the live TAO/WETH pool on 2026-10-31: 600, growing to 2,000
     const [f] = deps.oracleCardinality.run(ctx({ base: base(11n, pools(600)), baseBefore: [base(10n, pools(600))] }));
-    expect(f).toMatchObject({ rule: "oracle.cardinality", key: "oracle.cardinality:taoWeth", facts: { observations: "600", needed: "901", "growing to": "2000" } });
-    expect(deps.oracleCardinality.run(ctx({ base: base(11n, pools(901)), baseBefore: [base(10n, pools(901))] }))).toEqual([]);
+    expect(f).toMatchObject({ rule: "oracle.cardinality", key: "oracle.cardinality:taoWeth", subject: "The TAO/WETH pool keeps 600 observations; the TWAP oracle needs 1801", facts: { observations: "600", needed: "1801", "growing to": "2000" } });
+    expect(deps.oracleCardinality.run(ctx({ base: base(11n, pools(1_801)), baseBefore: [base(10n, pools(1_801))] }))).toEqual([]);
+    expect(deps.oracleCardinality.run(ctx({ base: base(11n, pools(1_800)), baseBefore: [base(10n, pools(1_800))] }))[0].facts.needed).toBe("1801");
+    // on 2-second blocks, 901; with the block time unread, the threshold (901)
+    const at = (blockS: Record<string, number>, n: number) => deps.oracleCardinality.run({ ...ctx({ base: base(11n, pools(n)), baseBefore: [base(10n, pools(n))] }), blockS });
+    expect(at({ base: 2, bittensor: 12 }, 901)).toEqual([]);
+    expect(at({ base: 2, bittensor: 12 }, 900)[0].facts.needed).toBe("901");
+    expect(at({}, 901)).toEqual([]);
+    // the runbook names the number needed
+    expect(RUNBOOK["oracle.cardinality"](f.facts)).toContain("needs 1801");
+    expect(RUNBOOK["oracle.cardinality"](f.facts)).toContain("growing to 2000 by itself");
   });
 
   it("oracle.reverted: usdcValue reverting on two readings is critical (deliveries stop); twap.divergence no longer reports it", () => {

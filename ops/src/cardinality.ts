@@ -1,5 +1,6 @@
 import { type Address, encodeFunctionData, getAddress, type Hex, parseAbi } from "viem";
 import { BASE_V3 } from "./config.ts";
+import { blockTimeOf } from "./keeper/blocktime.ts";
 import { cadenceOf, type PlanV3 } from "./plan.ts";
 import type { Findings } from "./registry.ts";
 import { read } from "./rpc.ts";
@@ -8,10 +9,13 @@ import { type NewWalletCall, walletFile, writeWalletFile, wroteLine } from "./wa
 
 /** CascadeTwapOracle.TWAP_WINDOW (the test checks it against the source). */
 export const ORACLE_TWAP_WINDOW_S = 1800;
-/** Base makes a block every 2 seconds. */
-export const BASE_BLOCK_TIME_S = 2;
-/** What the owner grows the TAO/WETH pool to: more than twice what the window needs, so a busy stretch
- * can't empty it. */
+/** A Uniswap v3 pool writes at most one observation a second: Oracle.write returns early when its newest observation has
+ * the same block.timestamp, and a timestamp is whole seconds, so Base's five blocks a second (200 ms blocks since block
+ * 53,556,128, 2026-11-05) share one. Each slot covers at least a second, however short Base's blocks get. */
+export const MIN_OBSERVATION_GAP_S = 1;
+/** What the owner grows the TAO/WETH pool to (it has 2,000 since 2026-10-28): more than twice what the window needed on
+ * Base's 2-second blocks, and above the 1,801 it needs on its 200 ms ones; never below what the window needs now
+ * (cardinalityReport). */
 export const CARDINALITY_TARGET = 2000;
 /** New observation slots per transaction. Each costs about 22,500 gas (a cold storage write): 600 new slots
  * from 600 measured 13,479,008 gas on Base (2026-10-28), and Base refuses any transaction above 16,777,216
@@ -36,10 +40,14 @@ export const POOL_ABI = parseAbi([
   "function increaseObservationCardinalityNext(uint16 observationCardinalityNext)",
 ]);
 
-/** Slots a pool needs for `windowS` of history when every block writes an observation: one per block
- * over the window and the newest one (observe(window) reverts "OLD" when the oldest kept observation is
- * younger than the window). 1,800 s on 2-second blocks: 901. */
-export const cardinalityNeeded = (windowS = ORACLE_TWAP_WINDOW_S, blockS = BASE_BLOCK_TIME_S) => Math.ceil(windowS / blockS) + 1;
+/** Slots a pool needs for `windowS` of history when it trades in every block, at `blockS` seconds a block (Base's,
+ * measured): one an observation over the window, an observation at most every MIN_OBSERVATION_GAP_S, and the newest
+ * (observe(window) reverts "OLD" when the oldest kept observation is younger than the window). 1,800 s on 2-second
+ * blocks: 901; on 1-second blocks or shorter (Base's 200 ms today): 1,801. */
+export const cardinalityNeeded = (blockS: number, windowS = ORACLE_TWAP_WINDOW_S) => Math.ceil(windowS / Math.max(blockS, MIN_OBSERVATION_GAP_S)) + 1;
+
+/** What the pools need now: cardinalityNeeded at Base's block time, measured from its headers (keeper/blocktime.ts). */
+export const cardinalityNeededNow = async (ctx: Pick<Ctx, "rpc">) => cardinalityNeeded(await blockTimeOf(ctx.rpc, "base"));
 
 export interface PoolSlots {
   /** observationCardinality: slots in use */
@@ -50,13 +58,13 @@ export interface PoolSlots {
 
 /** A pool with enough slots in use passes; one with enough reserved but not yet in use passes with a
  * note (its history covers the window only once it has grown and traded through them); else a problem. */
-export function cardinalityFinding(label: string, s: PoolSlots, need = cardinalityNeeded()): { problem?: string; note?: string } {
+export function cardinalityFinding(label: string, s: PoolSlots, need: number): { problem?: string; note?: string } {
   if (s.cardinality >= need) return {};
   if (s.next >= need) {
     return { note: `${label} is growing to ${s.next} observation slots (${s.cardinality} in use): its history reaches the oracle's 30 minutes once it has grown and traded through them` };
   }
   return {
-    problem: `${label} has ${s.cardinality} observation slots (cardinalityNext ${s.next}): the oracle's 30-minute window needs ${need} on Base's 2-second blocks, or a delivery can revert; grow it with the transactions from pnpm ops cardinality`,
+    problem: `${label} has ${s.cardinality} observation slots (cardinalityNext ${s.next}): the oracle's 30-minute window needs ${need} at Base's block time, or a delivery can revert; grow it with the transactions from pnpm ops cardinality`,
   };
 }
 
@@ -68,8 +76,9 @@ export async function readPool(ctx: Pick<Ctx, "rpc">, pool: Address): Promise<Po
 /** Preflight's check of both pools: [label, problem or null]. */
 export async function poolProblems(ctx: Pick<Ctx, "rpc">): Promise<[string, string | null][]> {
   const out: [string, string | null][] = [];
+  const need = await cardinalityNeededNow(ctx);
   for (const p of ORACLE_POOLS) {
-    const f = cardinalityFinding(`the ${p.name}`, await readPool(ctx, p.address));
+    const f = cardinalityFinding(`the ${p.name}`, await readPool(ctx, p.address), need);
     out.push([`the ${p.name} (${p.address}) holds 30 minutes of history`, f.problem ?? null]);
   }
   return out;
@@ -80,8 +89,9 @@ export async function poolProblems(ctx: Pick<Ctx, "rpc">): Promise<[string, stri
 export async function cardinalityChecks(ctx: Pick<Ctx, "rpc">, plan: PlanV3): Promise<Findings> {
   const out: Findings = { failures: [], warnings: [] };
   const launch = cadenceOf(plan) === "launch";
+  const need = await cardinalityNeededNow(ctx);
   for (const p of ORACLE_POOLS) {
-    const f = cardinalityFinding(`Base ${p.name} ${p.address}`, await readPool(ctx, p.address));
+    const f = cardinalityFinding(`Base ${p.name} ${p.address}`, await readPool(ctx, p.address), need);
     if (f.problem) (launch ? out.failures : out.warnings).push(f.problem);
     if (f.note) out.warnings.push(f.note);
   }
@@ -101,23 +111,28 @@ export function cardinalitySteps(next: number, target = CARDINALITY_TARGET, maxS
 export const cardinalityTxs = (pool: Address, steps: number[]): { to: Address; data: Hex; next: number }[] =>
   steps.map((next) => ({ to: pool, next, data: encodeFunctionData({ abi: POOL_ABI, functionName: "increaseObservationCardinalityNext", args: [next] }) }));
 
-/** `pnpm ops cardinality`: each pool's slots, and for one below the target the exact transactions that
- * grow it, in order. Anyone may send them (the pool's function is permissionless), from any wallet. With
+/** `pnpm ops cardinality`: each pool's slots, and for one below the target (CARDINALITY_TARGET, or what the window needs at
+ * Base's block time, measured, when that is more) the exact transactions that grow it, in order. Anyone may send them (the pool's function is permissionless), from any wallet. With
  * `wallet` (--for-wallet --from), they also go in a call file in its `dir`, in order and each with its gas
  * limit, for pnpm ops sign to send from that account in MetaMask. Reads only; sends nothing. */
 export async function cardinalityReport(ctx: Pick<Ctx, "rpc">, wallet?: { from: Address; dir: string; now: number }): Promise<string[]> {
   const lines: string[] = [];
   const calls: NewWalletCall[] = [];
-  const need = cardinalityNeeded();
+  const blockS = await blockTimeOf(ctx.rpc, "base");
+  const need = cardinalityNeeded(blockS);
+  const target = Math.max(CARDINALITY_TARGET, need);
+  lines.push(
+    `Base makes a block every ${blockS.toFixed(2)} s (measured) and a pool keeps at most one observation a second, so the oracle's 30-minute window needs ${need} slots; the target is ${target}.`,
+  );
   for (const p of ORACLE_POOLS) {
     const s = await readPool(ctx, p.address);
-    const steps = cardinalitySteps(s.next);
+    const steps = cardinalitySteps(s.next, target);
     if (!steps.length) {
       lines.push(`The ${p.name} ${p.address}: ${s.cardinality} observation slots (cardinalityNext ${s.next}): enough (the oracle needs ${need}).`);
       continue;
     }
     lines.push(
-      `The ${p.name} ${p.address}: ${s.cardinality} observation slots in use, cardinalityNext ${s.next}; the oracle needs ${need}, the target is ${CARDINALITY_TARGET}.`,
+      `The ${p.name} ${p.address}: ${s.cardinality} observation slots in use, cardinalityNext ${s.next}; the oracle needs ${need}, the target is ${target}.`,
       `Base refuses a transaction above 16,777,216 gas and each new slot costs about ${GAS_PER_SLOT.toLocaleString("en-US")}, so send ${steps.length === 1 ? "this transaction" : `these ${steps.length} transactions, in this order,`} from any wallet (no value; anyone may call it):`,
     );
     let from = s.next;

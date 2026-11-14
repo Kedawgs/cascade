@@ -77,6 +77,15 @@ export function fakeChain(abis: readonly Abi[], answers: Record<string, Answer>,
   return { ctx, calls };
 }
 
+/** eth_getBlockByNumber (a fakeChain method) for a chain whose block `head` is at 1,800,000,000 and whose blocks are `blockS`
+ * seconds apart, whole seconds as a header gives them: Base's 200 ms (since block 53,556,128) unless said. */
+export const headers =
+  (blockS = 0.2, head = 57_000_000) =>
+  (_c: ChainName, params: unknown[]) => {
+    const n = params[0] === "latest" ? head : Number(BigInt(params[0] as Hex));
+    return { number: numberToHex(n), timestamp: numberToHex(1_800_000_000 - Math.floor((head - n) * blockS)) };
+  };
+
 const missing = (name: string) => () => {
   throw new Error(`${name} is not stubbed`);
 };

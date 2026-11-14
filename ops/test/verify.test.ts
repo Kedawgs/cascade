@@ -41,7 +41,7 @@ import {
   verify,
   verifyAndSave,
 } from "../src/verify.ts";
-import { fakeChain } from "./fake-keeper.ts";
+import { fakeChain, headers } from "./fake-keeper.ts";
 
 const plan = buildPlan(0, 0, `0x${"33".repeat(32)}`);
 const plan3 = buildPlanV3(0, 40, `0x${"33".repeat(32)}`);
@@ -331,7 +331,8 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
   const exp = [...expectations(plan), ...limitExpectations(plan)];
   const fns = [...CONTRACTS.flatMap((n) => loadArtifact(contractsDir, n).abi), ...VAULT_VIEWS, ...POOL_ABI].filter((i): i is AbiFunction => i.type === "function");
   /** A clean deployment's state for the reads beyond the expectations: nothing pending, nothing extra, not
-   * paused, and both of the oracle's pools at the target's 1,800 observation slots. */
+   * paused, and both of the oracle's pools at the target's 2,000 observation slots (the window needs 1,801 on Base's
+   * 200 ms blocks). */
   const clean: Record<string, unknown> = {
     pendingOwner: zeroAddress,
     guardianProposedAt: 0n,
@@ -339,7 +340,7 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
     bridgeProposedAt: 0n,
     paused: false,
     hotkeyCount: 1n,
-    slot0: [2n ** 96n, 0, 0, 1_800, 1_800, 0, true],
+    slot0: [2n ** 96n, 0, 0, 2_000, 2_000, 0, true],
   };
   const a = plan.addresses;
   const name: Record<string, string> = Object.fromEntries(
@@ -369,6 +370,8 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
       // the registry scan: no registry events since the deployment
       if (method === "eth_blockNumber") return numberToHex(100);
       if (method === "eth_getLogs") return [];
+      // headers 200 ms apart up to the fake head, block 100: the pools' history is judged at Base's block time, measured
+      if (method === "eth_getBlockByNumber") return headers(0.2, 100)(chain, params);
       if (method !== "eth_call") throw new Error(`unexpected ${method}`);
       const { to, data } = params[0] as { to: Address; data: Hex };
       const fn = fns.find((f) => toFunctionSelector(f) === data.slice(0, 10));
@@ -631,7 +634,7 @@ describe("verify reads back the registries, the pending proposals and the state"
       request: (c, m, p) => {
         if (m === "eth_getLogs" && c === "base") return Promise.reject(new Error("range too large"));
         // the gap's first block is 8 days old
-        if (m === "eth_getBlockByNumber") return Promise.resolve({ timestamp: numberToHex(p[0] === "latest" ? T : T - 8 * 86_400) });
+        if (m === "eth_getBlockByNumber") return Promise.resolve(p[0] === "latest" ? { number: numberToHex(100), timestamp: numberToHex(T) } : { timestamp: numberToHex(T - 8 * 86_400) });
         return request(c, m, p);
       },
     };

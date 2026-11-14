@@ -178,8 +178,11 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
 ## Before launch
 
 - **Grow the TAO/WETH pool's observation slots.** `pnpm ops cardinality` prints the exact
-  transactions. The oracle's 30-minute TWAP needs 901 slots on Base's 2-second blocks, and the pool has
-  600 (read 2026-10-28). The target is 2,000, for margin.
+  transactions. The oracle's 30-minute TWAP needed 901 slots on Base's 2-second blocks, and the pool had
+  600 (read 2026-10-28). The target is 2,000, for margin. Since Base's 200 ms blocks (block 53,556,128,
+  2026-11-05) a pool still writes at most one observation a second, so the window needs 1,801: the
+  pools' 2,000 and 6,700 (read 2026-11-14) cover it. ops measures Base's block time from its headers,
+  so preflight, verify and `pnpm ops cardinality` judge the need as it is.
   - Base refuses any transaction above 16,777,216 gas, and one call from 600 to 2,000 needs about 31M.
     Two steps of 700 would each need about 15.7M, within 6% of the cap.
   - So it takes three transactions, from any wallet: `increaseObservationCardinalityNext(1200)` (a

@@ -12,7 +12,7 @@ import { buildPlanV3 } from "../src/plan.ts";
 import { SAFE_PROBE_ABI, TIMELOCK_ABI } from "../src/safe.ts";
 import { knownContracts } from "../src/sign.ts";
 import { checkCalls, decodeKnownCall, describeCalls, KNOWN_ABI, parseWalletFile, type WalletFile, walletFile, writeWalletFile } from "../src/wallet.ts";
-import { COLDKEY, fakeChain, revert, v3Record } from "./fake-keeper.ts";
+import { COLDKEY, fakeChain, headers, revert, v3Record } from "./fake-keeper.ts";
 import { ROLES } from "./launch-roles.ts";
 
 const launch = v3Record("live", buildPlanV3(4, 9, COLDKEY, "launch", ROLES));
@@ -431,13 +431,18 @@ describe("pause and unpause --for-wallet", () => {
 });
 
 describe("cardinality --for-wallet", () => {
+  // Base's 200 ms blocks: the window needs 1,801, the target stays 2,000
   const pools = (taoWeth: { cardinality: number; next: number }) =>
-    fakeChain([POOL_ABI], {
-      slot0: (_a, c) => {
-        const s = c.to.toLowerCase() === BASE_V3.TAO_WETH_POOL.toLowerCase() ? taoWeth : { cardinality: 5_000, next: 5_000 };
-        return [2n ** 96n, 0, 0, s.cardinality, s.next, 0, true];
+    fakeChain(
+      [POOL_ABI],
+      {
+        slot0: (_a, c) => {
+          const s = c.to.toLowerCase() === BASE_V3.TAO_WETH_POOL.toLowerCase() ? taoWeth : { cardinality: 5_000, next: 5_000 };
+          return [2n ** 96n, 0, 0, s.cardinality, s.next, 0, true];
+        },
       },
-    });
+      { eth_getBlockByNumber: headers() },
+    );
 
   it("writes the steps in order, each with its gas limit, for the account given", async () => {
     const dir = tmp();

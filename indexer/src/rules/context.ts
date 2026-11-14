@@ -80,7 +80,7 @@ export interface RuleCtx {
   settled: Record<ChainName, { block: bigint; time: number; headTime?: number }>;
   /** the uids this tick upserts that weren't stored before: settled logs stored for the first time,
    * wherever their block (a log a re-read finds late, below what was settled before, is one). Not the
-   * scan's `fresh` (logs within SETTLE of the head, not stored), and not re-mined logs coming back. An
+   * scan's `fresh` (logs within the settle margin of the head, not stored), and not re-mined logs coming back. An
    * event rule reports a log once, on the tick it is first stored. */
   newUids: ReadonlySet<Hex>;
   payoutDelayS: number;

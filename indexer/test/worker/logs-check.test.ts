@@ -8,7 +8,7 @@ import { LOGS_CHECK_BUDGET, LOGS_CHECK_WINDOW, logsCheckBlocks, logsCheckBudget,
 import { decode, identify, type RawLog } from "../../src/logs.ts";
 import { indexerUnverified } from "../../src/rules/ops.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
-import { REREAD, SETTLE } from "../../src/scan.ts";
+import { marginsAt } from "../../src/scan.ts";
 import { setMeta, upsertLogs } from "../../src/store.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { wipe } from "./d1-count.ts";
@@ -41,7 +41,8 @@ async function world(o: { secondLogs?: SecondLogs; secondHeads?: { base?: bigint
   const more = o.primaryLogs?.(w.cfg) ?? {};
   w.addLogs("base", more.base ?? []);
   w.addLogs("bittensor", more.bittensor ?? []);
-  // settle everything, and re-read it: the check judges only blocks REREAD (70 and 400) below the settled point,
+  // settle everything, and re-read it: the check judges only blocks the re-read margin (70 and 400 of this world's 2 s
+  // and 12 s blocks) below the settled point,
   // so Bittensor's head is moved 500 blocks on after the logs settled (Base's 2-second blocks need no help)
   for (let i = 0; i < 4; i++) {
     if (i === 2) w.specs.bittensor.head += 500n;
@@ -66,7 +67,7 @@ async function world(o: { secondLogs?: SecondLogs; secondHeads?: { base?: bigint
   // the fake clock: a retry's backoff moves it instead of waiting
   const deps = (nowS = w.nowS()) => ({ env: { DB: db, EMAIL: email }, cfg: w.cfg, nowS, fetch, now: () => w.clock.ms, sleep: async (ms: number) => void (w.clock.ms += ms) });
   /** the end of what a run judges: the settled point less REREAD, the blocks the tick has re-read from a node well past them */
-  const to = { base: cursors.base - REREAD.base, bittensor: cursors.bittensor - REREAD.bittensor };
+  const to = { base: cursors.base - marginsAt("base", 2).reread, bittensor: cursors.bittensor - marginsAt("bittensor", 12).reread };
   return { w, trip, second, net2, deps, cursors, to, sentBefore: w.sent.length };
 }
 
@@ -199,7 +200,9 @@ describe("runLogsCheck", () => {
       return w.net.fetch(input, init);
     }) as typeof globalThis.fetch;
     const r = await runLogsCheck({ ...deps(), fetch });
-    expect(r.base).toMatchObject({ from: to.base + 9000n - 6000n + 1n, to: to.base + 9000n });
+    // the settled point less the re-read margin at 200 ms: 700 blocks (140 s)
+    const end = to.base + marginsAt("base", 2).reread + 9000n - marginsAt("base", 0.2).reread;
+    expect(r.base).toMatchObject({ from: end - 6000n + 1n, to: end });
     expect(asked.filter((u) => new URL(u).host === new URL(TEST_URLS.baseLogs2).host)).toHaveLength(60);
     // a block time not yet measured: one window
     expect(logsCheckBlocks(DEFAULTS, {}, "base", 100n)).toBe(100n);
@@ -326,7 +329,7 @@ describe("runLogsCheck", () => {
     // the second Bittensor node: just past the range judged, less than REREAD past the delivery's block, without the
     // delivery's seven logs
     const second = fakeChains({
-      bittensor: { head: to.bittensor + SETTLE.bittensor, logs: (w.specs.bittensor.logs ?? []).filter((l) => l.transactionHash !== trip.deliveryTx) },
+      bittensor: { head: to.bittensor + marginsAt("bittensor", 12).settle, logs: (w.specs.bittensor.logs ?? []).filter((l) => l.transactionHash !== trip.deliveryTx) },
       base: { head: w.specs.base.head, logs: w.specs.base.logs },
     });
     const fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -336,7 +339,7 @@ describe("runLogsCheck", () => {
     const r = await runLogsCheck({ ...deps(), fetch });
     expect(r.bittensor).toMatchObject({ omitted: 0, extra: 0, primary: 9, second: 2 });
     expect(await alerts()).toEqual([]);
-    expect(REREAD.bittensor).toBeGreaterThan(SETTLE.bittensor);
+    expect(marginsAt("bittensor", 12).reread).toBeGreaterThan(marginsAt("bittensor", 12).settle);
   });
 
   it("a second endpoint that fails: nothing judged, the failure noted in meta; the tick warns after 3 hours of it, and a working run clears it", async () => {

@@ -24,7 +24,7 @@ import { SITE_RULES } from "./rules/site.ts";
 import { SOLVENCY_RULES } from "./rules/solvency.ts";
 import { VAULT_RULES } from "./rules/vault.ts";
 import { Budget, createRpc } from "./rpc.ts";
-import { headTimeOf, rereadRange, type ScanResult, type ScanStop, scanChain } from "./scan.ts";
+import { headTimeOf, type Margins, marginsAt, rereadRange, type ScanResult, type ScanStop, scanChain } from "./scan.ts";
 import { pageEvents, seedEventsOf } from "./seed.ts";
 import { type BaseState, type BitState, type ChainReading, compact, compactHour, expand, expandHour, type HourAgg, hourRollup, payoutsDone, quoteAmountOf, readSnapshot, type Snapshot } from "./snapshot.ts";
 import {
@@ -338,9 +338,15 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     cursors[c] = cur;
   }
 
+  // each chain's re-read and settle margins this tick (scan.ts marginsAt: 140 s and 60 s of Base's blocks, 4,800 s and
+  // 120 s of Bittensor's), at the block time the last tick stored (what the hourly cross-check reads too), else as the
+  // stored readings measure it; at the block times they were set at while neither is known
+  const history = historyOf(state);
+  const margins = Object.fromEntries(CHAINS.map((c) => [c, marginsAt(c, storedBlockS(state.meta, c) ?? measureBlockS(history[c]))])) as Record<ChainName, Margins>;
+
   // 3. the stored logs of each chain's re-read range (one query; none before the first window)
   const ranges = CHAINS.flatMap((c) => {
-    const r = rereadRange(c, cursors[c], d[c].startBlock);
+    const r = rereadRange(c, cursors[c], d[c].startBlock, margins[c]);
     return r ? [{ chain: c, ...r }] : [];
   });
   const reread = ranges.length
@@ -379,6 +385,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     deadlineMs: startMs + Math.floor(cfg.budgets.scanWallS * 1000 * BIT_WALL_SHARE),
     now: deps.now,
     reserve: { budget, keep: RESERVE + BASE_SCAN_RESERVE },
+    margins: margins.bittensor,
   });
   const bitSpent = bitShare - bitDecode.left;
   const baseDecode = new Budget(cfg.budgets.decode - bitSpent, "decode");
@@ -396,6 +403,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     now: deps.now,
     window: cfg.baseLogWindow,
     reserve: { budget, keep: RESERVE },
+    margins: margins.base,
   });
   for (const c of CHAINS) if (scans[c].error) console.warn(`${c} scan stopped (${scans[c].stopped}): ${scans[c].error}`);
 
@@ -408,7 +416,6 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   const removedUids = new Set(removed.map((r) => r.uid));
 
   // 6. the readings: from the last reading, the hotkeys, keepers, oracle and role holders to read
-  const history = historyOf(state);
   const previous = { base: history.base[0], bittensor: history.bittensor[0] };
   const last: Snapshot = { at: 0, base: previous.base, bittensor: previous.bittensor, nonces: { base: {}, bittensor: {} }, safeNonces: { base: {}, bittensor: {} }, messageStates: {}, deliveredReads: [] };
   const holders = watchedRoles(last);

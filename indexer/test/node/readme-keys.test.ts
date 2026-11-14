@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { REREAD } from "../../src/scan.ts";
+import { REREAD_S, SETTLE_S } from "../../src/scan.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { pkg } from "./files.ts";
 
@@ -57,7 +57,8 @@ describe("the README's keys.* entry", () => {
     expect(entry).toMatch(/event's arguments/);
     expect(entry).toMatch(/reorg past the settle depth/);
     expect(entry).toContain("`indexer.reorg`");
-    expect(entry).toContain(`re-read window (${REREAD.base} blocks on Base, ${REREAD.bittensor} on Bittensor)`);
+    expect(entry).toContain(`re-read window (${REREAD_S.base} s of Base's blocks, ${REREAD_S.bittensor.toLocaleString("en-US")} s of Bittensor's)`);
+    expect(entry).toContain(`settle depth (${SETTLE_S.base} s of Base's blocks, ${SETTLE_S.bittensor} s of Bittensor's)`);
     expect(entry).toMatch(/hourly logs check/);
   });
 });

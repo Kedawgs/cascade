@@ -1,4 +1,5 @@
 import { type Hex, hexToBigInt, hexToNumber } from "viem";
+import { blocksIn } from "./blocktime.ts";
 import type { ChainName, RoleOf } from "./config.ts";
 import { decode, identityOf, type RawLog, type StoredLog, type StoredRef, sortByPosition, storedIdentity, uidFor } from "./logs.ts";
 import { type Budget, BudgetExhausted, type Rpc, RpcError } from "./rpc.ts";
@@ -8,18 +9,37 @@ import { type Budget, BudgetExhausted, type Rpc, RpcError } from "./rpc.ts";
 
 /** eth_getLogs block ranges the public RPCs accept. Base's can be changed (BASE_LOG_WINDOW). */
 export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
-/** Each tick reads this many blocks again before where it last stopped: a log a lagging node or a
- * reorg hid is found then, and one that vanished is noticed. */
-export const REREAD: Record<ChainName, bigint> = { base: 70n, bittensor: 400n };
-/** Logs this close to the head are returned but not stored, until they are this deep. */
-export const SETTLE: Record<ChainName, bigint> = { base: 30n, bittensor: 10n };
+/** Each tick reads this long of a chain's blocks again before where it last stopped: a log a lagging node or a reorg hid
+ * is found then, and one that vanished is noticed. 140 s of Base's blocks (700 of its 200 ms ones since block
+ * 53,556,128) and 4,800 s of Bittensor's (400 of its 12 s): what 70 and 400 blocks meant on Base's 2-second blocks. */
+export const REREAD_S: Record<ChainName, number> = { base: 140, bittensor: 4_800 };
+/** Logs this close to the head, in time, are returned but not stored, until they are this deep: 60 s of Base's blocks
+ * (300), 120 s of Bittensor's (10). */
+export const SETTLE_S: Record<ChainName, number> = { base: 60, bittensor: 120 };
+/** The block time the margins are counted at while a chain's own is unknown (a new store's first ticks, before three
+ * readings span 100 s): the block times they were set at, Base's 2 s and Bittensor's 12 s, so the counts they always
+ * had (70 and 30, 400 and 10); the first tick that knows it re-reads its full depth. */
+export const MARGIN_FALLBACK_S: Record<ChainName, number> = { base: 2, bittensor: 12 };
+
+/** A chain's re-read and settle margins for one tick, in blocks. */
+export interface Margins {
+  reread: bigint;
+  settle: bigint;
+}
+
+/** REREAD_S and SETTLE_S in `chain`'s blocks at `blockS` seconds a block (its block time as measured: src/blocktime.ts),
+ * or at MARGIN_FALLBACK_S while that is unknown. */
+export function marginsAt(chain: ChainName, blockS: number | undefined): Margins {
+  const s = blockS ?? MARGIN_FALLBACK_S[chain];
+  return { reread: blocksIn(REREAD_S[chain], s), settle: blocksIn(SETTLE_S[chain], s) };
+}
 
 export type ScanStop = "budget" | "decode" | "wall" | "lagging" | "error";
 
 export interface ScanResult {
   /** settled logs to store: new ones, and stored ones found at another block (re-mined) */
   upserts: StoredLog[];
-  /** logs within SETTLE of the head: for this tick only, not stored */
+  /** logs within the settle margin of the head: for this tick only, not stored */
   fresh: StoredLog[];
   /** stored logs missing from a re-read of their (settled) block */
   removed: Hex[];
@@ -35,15 +55,15 @@ export interface ScanResult {
   error?: string;
 }
 
-/** The blocks a tick reads again, whose stored logs it loads once (store.rereadStored): from REREAD blocks
- * before the last head read up to it, or up to the settled point when that is further: after a rewind of
+/** The blocks a tick reads again, whose stored logs it loads once (store.rereadStored): from the re-read margin
+ * (`m`, the tick's: marginsAt) before the last head read up to it, or up to the settled point when that is further: after a rewind of
  * scanned_to (a backfill, README "Backfilling missed logs") the blocks up to settled_to were scanned and stored
  * before, and loading them lets the scan recognise every stored log there by place, so none is hashed again,
  * upserted or replayed as new (no event alert fires twice). settled_to never moves back, so in the normal tick
- * the range is the REREAD window alone. Null before the first window. */
-export function rereadRange(chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, startBlock: bigint): { from: bigint; to: bigint } | null {
+ * the range is the re-read margin alone. Null before the first window. */
+export function rereadRange(_chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, startBlock: bigint, m: Margins): { from: bigint; to: bigint } | null {
   if (cursor.scannedTo === null) return null;
-  const back = cursor.scannedTo + 1n - REREAD[chain];
+  const back = cursor.scannedTo + 1n - m.reread;
   return { from: back > startBlock ? back : startBlock, to: cursor.settledTo > cursor.scannedTo ? cursor.settledTo : cursor.scannedTo };
 }
 
@@ -62,7 +82,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** One chain's incremental scan for one tick (spec section 3.2).
  *
- * It starts at the start block before the first window, else REREAD blocks before the last head read.
+ * It starts at the start block before the first window, else the re-read margin (`margins`) before the last head read.
  * It never asks for a window past a head some node has reported: a tick's first request re-reads up to
  * the last head read (or, on a first scan, asks only for the head), and each answer's head lets the next
  * window reach further. A window is accepted only from a node whose head, asked in the same request,
@@ -73,9 +93,9 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * nothing), and once it is spent the scan stops before the next block that needs work, keeping every
  * block taken whole, so a window busier than one tick can afford is read over several. Logs are
  * settled up to min(last block read,
- * head − SETTLE): those are returned to store; nearer ones are returned fresh. A stored log in the
+ * head − the settle margin): those are returned to store; nearer ones are returned fresh. A stored log in the
  * settled part of a re-read that the read no longer has is returned as removed, but only when the node
- * that answered is REREAD blocks past it (the site's rule for trusting an absence): a node whose log
+ * that answered is the re-read margin past it (the site's rule for trusting an absence): a node whose log
  * index lags its head answers "no logs" for blocks it has imported, and must not flip a log to removed
  * and back. */
 export async function scanChain(o: {
@@ -96,10 +116,12 @@ export async function scanChain(o: {
   window?: bigint;
   /** stop before a window once the subrequest budget is down to `keep`, so later work still runs */
   reserve?: { budget: Budget; keep: number };
+  /** this tick's re-read and settle margins, in blocks at the chain's block time (marginsAt) */
+  margins: Margins;
 }): Promise<ScanResult> {
-  const { rpc, chain } = o;
+  const { rpc, chain, margins } = o;
   const window = o.window ?? WINDOW[chain];
-  const start = o.cursor.scannedTo === null ? o.startBlock : max(o.startBlock, o.cursor.scannedTo + 1n - REREAD[chain]);
+  const start = o.cursor.scannedTo === null ? o.startBlock : max(o.startBlock, o.cursor.scannedTo + 1n - margins.reread);
   const read: { log: StoredLog | undefined; uid: Hex; block: bigint }[] = [];
   const result: ScanResult = { upserts: [], fresh: [], removed: [], cursor: { ...o.cursor } };
   /** the highest block a node has said it has */
@@ -248,8 +270,8 @@ export async function scanChain(o: {
   if (answered.length > 0) result.firstBlock = answered[0].a;
   if (scannedTo !== null && head !== undefined) {
     // everything read this tick runs contiguously from `start`, which is at or before the old settled
-    // point (REREAD > SETTLE), so all of it up to here is stored by this tick's commit
-    const settled = min(scannedTo, head - SETTLE[chain]);
+    // point (REREAD_S > SETTLE_S, by more than twice), so all of it up to here is stored by this tick's commit
+    const settled = min(scannedTo, head - margins.settle);
     result.cursor = {
       scannedTo: o.cursor.scannedTo === null ? scannedTo : max(o.cursor.scannedTo, scannedTo),
       settledTo: max(o.cursor.settledTo, settled),
@@ -263,9 +285,9 @@ export async function scanChain(o: {
     const checkedTo = min(scannedTo, settled);
     for (const [uid, s] of o.stored) {
       if (s.block < start || s.block > checkedTo || seen.has(uid)) continue;
-      // an absence counts only from a node REREAD blocks past the log
+      // an absence counts only from a node the re-read margin past the log
       const w = answered.find((x) => s.block >= x.a && s.block <= x.b);
-      if (w && w.head >= s.block + REREAD[chain]) result.removed.push(uid);
+      if (w && w.head >= s.block + margins.reread) result.removed.push(uid);
     }
   }
   return result;

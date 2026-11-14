@@ -6,7 +6,7 @@ import { decode, identify, type RawLog } from "./logs.ts";
 import { CONTRACT_NAMES, txLink } from "./rules/context.ts";
 import { blocksIn, storedBlockS } from "./blocktime.ts";
 import { Budget, createRpc } from "./rpc.ts";
-import { REREAD, SETTLE, WINDOW } from "./scan.ts";
+import { marginsAt, WINDOW } from "./scan.ts";
 import { type AlertRow, alertOf, returnedIds, setMeta } from "./store.ts";
 
 // The hourly cross-validation of the logs (the pen test's MON-1): the tick reads each chain's logs through one
@@ -15,10 +15,10 @@ import { type AlertRow, alertOf, returnedIds, setMeta } from "./store.ts";
 // _SECRET; each may list up to three, tried in order until one answers) re-reads the newest settled range of the
 // watched addresses, and its logs are compared, by the same uid
 // the scan gives them, with what the store holds for that range. A log the second serves and the store lacks is
-// the critical indexer.logs_omitted (the primary omitted a watched event); a stored log the second, REREAD blocks
-// past it, doesn't serve is the warning indexer.logs_extra. One alert per chain, the logs listed in its facts,
+// the critical indexer.logs_omitted (the primary omitted a watched event); a stored log the second, the tick's re-read
+// margin past it, doesn't serve is the warning indexer.logs_extra. One alert per chain, the logs listed in its facts,
 // raised and re-sent by this job and resolved by it once the store holds every omitted log (the tick leaves these
-// two rules' alerts alone). Only blocks the tick has itself re-read from a node REREAD past them are judged, so
+// two rules' alerts alone). Only blocks the tick has itself re-read from a node its re-read margin past them are judged, so
 // the primary's log index lagging its head is never read as an omission. A second endpoint that fails is noted in
 // meta, and the tick's indexer.unverified warns once it has failed for logsCheckUnverifiedS. The cost is bounded:
 // at most logsCheck{Base,Bittensor}S of each chain's newest blocks per run (in blocks at its block time as the tick last
@@ -150,9 +150,11 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   const findings: Finding[] = [];
 
   for (const chain of CHAINS) {
-    // only blocks the tick has re-read from a node REREAD past them: a log still missing there isn't the primary's
-    // log index lagging its head (which the next tick's re-read would have added), it is omitted
-    const to = settled[chain] === undefined ? undefined : (settled[chain] as bigint) - REREAD[chain];
+    // only blocks the tick has re-read from a node its re-read margin past them (scan.ts marginsAt, at the block time the
+    // tick stored, as the tick counts it): a log still missing there isn't the primary's log index lagging its head
+    // (which the next tick's re-read would have added), it is omitted
+    const m = marginsAt(chain, storedBlockS(meta, chain));
+    const to = settled[chain] === undefined ? undefined : (settled[chain] as bigint) - m.reread;
     const start = cfg.deployment[chain].startBlock;
     if (to === undefined || to < start) continue;
     if (catchingUp.includes(chain)) {
@@ -188,7 +190,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
         for (let a = from; a <= to; a = checkedTo + 1n) {
           const b = min(a + window - 1n, to);
           const r = await rpc.logsWithHead(chain, { address: addresses[chain], fromBlock: a, toBlock: b, watch: watch[chain] });
-          if (r.head < b + SETTLE[chain]) {
+          if (r.head < b + m.settle) {
             short = { head: r.head, block: b };
             break;
           }
@@ -204,7 +206,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
       }
       if (checkedTo === undefined || lowestHead === undefined) {
         behind = true;
-        errors.push(`${chain} eth_getLogs via ${hostDomain(url)}: behind the range (its head ${short?.head ?? "?"}, short of block ${short?.block ?? to} + ${SETTLE[chain]})`);
+        errors.push(`${chain} eth_getLogs via ${hostDomain(url)}: behind the range (its head ${short?.head ?? "?"}, short of block ${short?.block ?? to} + ${m.settle})`);
         continue;
       }
       read = { second, checkedTo, lowestHead };
@@ -249,8 +251,8 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     });
     const secondUids = new Set(secondLogs.map((l) => l.uid));
     const omitted = secondLogs.filter((l) => !storedUids.has(l.uid));
-    // an absence counts only from a node REREAD blocks past the log (the scan's rule for trusting one)
-    const extra = stored.filter((r) => !secondUids.has(r.uid as Hex) && lowestHead >= BigInt(r.block as number) + REREAD[chain]);
+    // an absence counts only from a node the re-read margin past the log (the scan's rule for trusting one)
+    const extra = stored.filter((r) => !secondUids.has(r.uid as Hex) && lowestHead >= BigInt(r.block as number) + m.reread);
 
     const common = {
       chain,

@@ -4,7 +4,7 @@ import { DEPENDENCY_EVENTS, FRONT_DOOR, MINTER_ROLE, VAULT } from "../../src/abi
 import { type ChainName, rolesOf, watchFilters } from "../../src/config.ts";
 import { decode, identify, type RawLog, type StoredRef, storedRefOf } from "../../src/logs.ts";
 import { Budget, createRpc } from "../../src/rpc.ts";
-import { headTimeOf, REREAD, rereadRange, SETTLE, scanChain, WINDOW } from "../../src/scan.ts";
+import { headTimeOf, MARGIN_FALLBACK_S, marginsAt, REREAD_S, rereadRange, SETTLE_S, scanChain, WINDOW } from "../../src/scan.ts";
 import { type ChainSpec, type FetchRecord, fakeChains, fakeClock, TEST_URLS, windowsAsked } from "./fake-rpc.ts";
 import { rawLog, testConfig, tx } from "./fixtures.ts";
 
@@ -30,7 +30,12 @@ function setup(
   const budget = new Budget(o.subrequests ?? 45);
   const rpc = createRpc({ urls: TEST_URLS, fetch: net.fetch, budget, sleep: clock.sleep, now: clock.now, spacingMs: { base: 0, bittensor: 0 } });
   const decodeBudget = new Budget(o.decode ?? 300, "decode");
-  const scan = (chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, more: { stored?: Map<Hex, StoredRef>; startBlock?: bigint; window?: bigint; deadlineMs?: number; reserve?: number } = {}) =>
+  // the chains' block times are these tests' 2 s and 12 s unless `blockS` says (Base's 200 ms since block 53,556,128)
+  const scan = (
+    chain: ChainName,
+    cursor: { scannedTo: bigint | null; settledTo: bigint },
+    more: { stored?: Map<Hex, StoredRef>; startBlock?: bigint; window?: bigint; deadlineMs?: number; reserve?: number; blockS?: number } = {},
+  ) =>
     scanChain({
       rpc,
       chain,
@@ -44,6 +49,7 @@ function setup(
       now: clock.now,
       window: more.window,
       reserve: more.reserve === undefined ? undefined : { budget, keep: more.reserve },
+      margins: marginsAt(chain, more.blockS ?? (chain === "base" ? 2 : 12)),
     });
   return { net, budget, decodeBudget, clock, scan, rpc };
 }
@@ -76,11 +82,12 @@ describe("scanChain on Bittensor", () => {
       [3101n, 3500n],
       [3501n, 3600n],
     ]);
-    expect(rereadRange("bittensor", { scannedTo: 3500n, settledTo: 3490n }, 1000n)).toEqual({ from: 3101n, to: 3500n });
-    expect(rereadRange("bittensor", { scannedTo: 1100n, settledTo: 1090n }, 1000n)).toEqual({ from: 1000n, to: 1100n });
-    expect(rereadRange("bittensor", { scannedTo: null, settledTo: 999n }, 1000n)).toBeNull();
+    const m = marginsAt("bittensor", 12);
+    expect(rereadRange("bittensor", { scannedTo: 3500n, settledTo: 3490n }, 1000n, m)).toEqual({ from: 3101n, to: 3500n });
+    expect(rereadRange("bittensor", { scannedTo: 1100n, settledTo: 1090n }, 1000n, m)).toEqual({ from: 1000n, to: 1100n });
+    expect(rereadRange("bittensor", { scannedTo: null, settledTo: 999n }, 1000n, m)).toBeNull();
     // after a rewind of scanned_to (a backfill) the stored logs up to the settled point are loaded too
-    expect(rereadRange("bittensor", { scannedTo: 1500n, settledTo: 3490n }, 1000n)).toEqual({ from: 1101n, to: 3490n });
+    expect(rereadRange("bittensor", { scannedTo: 1500n, settledTo: 3490n }, 1000n, m)).toEqual({ from: 1101n, to: 3490n });
     expect(r.cursor).toEqual({ scannedTo: 3600n, settledTo: 3590n });
     // the head's time came with the first window, in the same request
     expect(net.fetches[0].methods).toEqual(["eth_getLogs", "eth_blockNumber", "eth_getBlockByNumber"]);
@@ -144,6 +151,28 @@ describe("scanChain on Bittensor", () => {
     const baseStored = storedOf("base", [b]);
     expect((await setup({ base: { head: 1169n, logs: [] } }).scan("base", { scannedTo: 1150n, settledTo: 1120n }, { stored: baseStored })).removed).toEqual([]);
     expect((await setup({ base: { head: 1170n, logs: [] } }).scan("base", { scannedTo: 1150n, settledTo: 1120n }, { stored: baseStored })).removed).toEqual([uidOf("base", b)]);
+  });
+
+  it("on Base's 200 ms blocks a later scan re-reads 140 s (700 blocks) before the last head read, and settles 60 s (300 blocks) short of the head", async () => {
+    const deep = rawLog({ address: d.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 1n }, block: 4_950n, logIndex: 0, txHash: tx(81) });
+    const recent = rawLog({ address: d.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 2n }, block: 5_100n, logIndex: 0, txHash: tx(82) });
+    const { net, scan } = setup({ base: { head: 5_300n, logs: [deep, recent] } });
+    const cursor = { scannedTo: 5_000n, settledTo: 4_700n };
+    const r = await scan("base", cursor, { blockS: 0.2 });
+    expect(windowsAsked(net.fetches)[0][0]).toBe(4_301n);
+    expect(rereadRange("base", cursor, 1_000n, marginsAt("base", 0.2))).toEqual({ from: 4_301n, to: 5_000n });
+    // 5,100 is 200 blocks (40 s) below the head: returned, not stored yet
+    expect(r.cursor).toEqual({ scannedTo: 5_300n, settledTo: 5_000n });
+    expect(r.upserts.map((l) => l.block)).toEqual([4_950n]);
+    expect(r.fresh.map((l) => l.block)).toEqual([5_100n]);
+  });
+
+  it("on Base's 200 ms blocks trusts a stored log's absence only from a node 140 s (700 blocks) past it", async () => {
+    const b = rawLog({ address: d.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 1n }, block: 1100n, logIndex: 0, txHash: tx(83) });
+    const stored = storedOf("base", [b]);
+    const at = async (head: bigint) => (await setup({ base: { head, logs: [] } }).scan("base", { scannedTo: 1150n, settledTo: 1120n }, { stored, blockS: 0.2 })).removed;
+    expect(await at(1799n)).toEqual([]);
+    expect(await at(1800n)).toEqual([uidOf("base", b)]);
   });
 
   it("never advances the cursor on a lagging node", async () => {
@@ -432,6 +461,7 @@ describe("scanChain on Base", () => {
       decodeBudget: new Budget(300, "decode"),
       deadlineMs: a.clock.now() + 40_000,
       now: a.clock.now,
+      margins: marginsAt("base", 2),
     });
     expect(r.upserts.map((l) => [l.contract, l.event])).toEqual([
       ["frontDoor", "BatchRolled"],
@@ -444,10 +474,16 @@ describe("scanChain on Base", () => {
 });
 
 describe("the scan's numbers", () => {
-  it("are the keeper's", () => {
+  it("are the keeper's: the windows in blocks, the re-read and settle margins in time (140 s and 60 s of Base's blocks, 4,800 s and 120 s of Bittensor's), in blocks at each chain's block time", () => {
     expect(WINDOW).toEqual({ base: 100n, bittensor: 1000n });
-    expect(REREAD).toEqual({ base: 70n, bittensor: 400n });
-    expect(SETTLE).toEqual({ base: 30n, bittensor: 10n });
+    expect(REREAD_S).toEqual({ base: 140, bittensor: 4_800 });
+    expect(SETTLE_S).toEqual({ base: 60, bittensor: 120 });
+    expect(marginsAt("base", 0.2)).toEqual({ reread: 700n, settle: 300n });
+    expect(marginsAt("base", 2)).toEqual({ reread: 70n, settle: 30n });
+    expect(marginsAt("bittensor", 12)).toEqual({ reread: 400n, settle: 10n });
+    // a block time not yet measured (a new store's first ticks): the block times they were set at
+    expect(MARGIN_FALLBACK_S).toEqual({ base: 2, bittensor: 12 });
+    expect(marginsAt("base", undefined)).toEqual({ reread: 70n, settle: 30n });
   });
 });
 

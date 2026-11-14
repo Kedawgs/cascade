@@ -125,7 +125,8 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   Bittensor: `https://bittensor-finney.api.onfinality.io/public`, OnFinality's public node, which serves batched
   `eth_getLogs` in 1.3–5 s a call; dRPC's Bittensor endpoint needs a paid plan). A keyed URL, or a JSON list, goes
   in `BASE_LOGS_RPC_URL_2_SECRET` / `BITTENSOR_RPC_URL_2_SECRET`. The hourly job re-reads each chain's newest
-  re-read blocks through them (the settled point less the tick's re-read depth, 70 on Base and 400 on Bittensor,
+  re-read blocks through them (the settled point less the tick's re-read depth, 140 s of Base's blocks and 4,800 s of
+  Bittensor's at each chain's block time,
   so the primary's log index lagging its head is never read as an omission; `logsCheckBaseS` 1,200 (20 minutes)
   and `logsCheckBittensorS` 3,600 (an hour) at most per run, in blocks at each chain's block time as the tick
   measures it (meta `block_s:<chain>`: 6,000 of Base's 200 ms blocks, 60 windows of 100), within twice their
@@ -361,10 +362,10 @@ arguments (its nonce unknown: a user action such as a deposit sent from an admin
 before any fresh count saw it is reported as unexplained, and so is a node's count still behind on the 10th
 reading: both err toward alerting. Such a transaction (or any Safe execution) settling while an unexplained one is
 already pending, on a stale or unread tick, can also postpone that alert: it nets the excess to zero until the next
-read restarts the 15-minute grace, so a key that keeps sending them can delay the page, never cancel it. And a reorg past the settle depth (30 blocks on Base, 10 on Bittensor) that drops
+read restarts the 15-minute grace, so a key that keeps sending them can delay the page, never cancel it. And a reorg past the settle depth (60 s of Base's blocks, 120 s of Bittensor's) that drops
 one of the address's settled transactions, followed within those 9 readings by another reusing its nonce, isn't
-reported here. `indexer.reorg` warns of the vanished log, but only within the re-read window (70 blocks on Base,
-400 on Bittensor); a deeper reorg falls to the hourly logs check (`indexer.logs_extra`). When either fires, check
+reported here. `indexer.reorg` warns of the vanished log, but only within the re-read window (140 s of Base's blocks, 4,800 s of
+Bittensor's); a deeper reorg falls to the hourly logs check (`indexer.logs_extra`). When either fires, check
 the watched keys' transactions on the explorer. On v3-test the owner, guardian and keeper are one address, so a
 reverted keeper call pages as a critical `keys.unexplained_tx`: expect that noise there.
 
@@ -500,7 +501,7 @@ each side are in every alert's facts):
 | Alert | Tier | What it means | What to do |
 |---|---|---|---|
 | `indexer.logs_omitted` | critical | the second RPC served watched logs the primary never did, in blocks the tick had already re-read from a node well past them, so the monitor's history and its rules missed them. One alert per chain, the logs (event, block, transaction) listed in it; re-sent hourly by the job until acknowledged, resolved by the job once the store holds every log it named | open the transactions on the explorer; if they are real, read the events and act on them as their own alerts would have had you, and switch the primary (`BASE_LOGS_RPC_URL` / `BITTENSOR_RPC_URL`, or the `_SECRET`) to another provider, then redeploy. The tick re-reads only 70 (Base) or 400 (Bittensor) blocks back, so a missed log isn't added by itself |
-| `indexer.logs_extra` | warning | the store holds logs the second RPC, 70 or 400 blocks past them, doesn't serve (one alert per chain, the logs listed) | usually the second node pruned them (set an archive endpoint in `*_RPC_URL_2`) or lags its log index; if the explorer doesn't have a transaction either, the primary served a log that isn't on the chain: switch it and re-check what the rules decided on it |
+| `indexer.logs_extra` | warning | the store holds logs the second RPC, the re-read depth past them (140 s of Base's blocks, 4,800 s of Bittensor's), doesn't serve (one alert per chain, the logs listed) | usually the second node pruned them (set an archive endpoint in `*_RPC_URL_2`) or lags its log index; if the explorer doesn't have a transaction either, the primary served a log that isn't on the chain: switch it and re-check what the rules decided on it |
 | `indexer.unverified` | warning (condition) | no second RPC of a chain (every one in its list) has answered the cross-check for `logsCheckUnverifiedS` (3 hours): the primary's logs go unverified meanwhile. The email carries each endpoint's last error | check `BASE_LOGS_RPC_URL_2` / `BITTENSOR_RPC_URL_2`: a public node may refuse Cloudflare's egress (HTTP 429). Add another keyless provider to the list (one that answers a 100-block `eth_getLogs`: the README's "The second logs RPCs" names those that don't), or set a keyed URL in its `_SECRET` (another provider than the primary's); redeploy. Clears on the next run that answers |
 
 A chain still catching up in its first backfill isn't cross-checked (an old range a non-archive second node may

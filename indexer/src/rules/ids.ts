@@ -117,7 +117,7 @@ export const RULES = {
   // stake on a hotkey the vault doesn't list without a matching fall in its counted stake: a stranger's
   // transfer_stake gift (anyone can push stake onto the vault's coldkey), to be swept, never a hold
   "stake.unlisted": warning("event"),
-  // the hourly cross-check: the store holds a log the second RPC (REREAD blocks past it) lacks
+  // the hourly cross-check: the store holds a log the second RPC (the re-read margin past it) lacks
   "indexer.logs_extra": warning("event"),
   // the second RPC of a chain hasn't answered the cross-check for logsCheckUnverifiedS: its logs go unverified
   "indexer.unverified": warning("condition"),

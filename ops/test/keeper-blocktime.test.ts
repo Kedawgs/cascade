@@ -1,7 +1,7 @@
 import { encodeAbiParameters, encodeEventTopics, type Hex, numberToHex, padHex, parseAbiParameters } from "viem";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChainName } from "../src/config.ts";
-import { BLOCK_TIME_SPAN, blocksIn, blockTimeOf, MARGIN_FALLBACK_S, secondsPerBlock } from "../src/keeper/blocktime.ts";
+import { BLOCK_TIME_FRESH_MS, BLOCK_TIME_SPAN, blocksIn, blockTimeOf, MARGIN_FALLBACK_S, secondsPerBlock } from "../src/keeper/blocktime.ts";
 import { blockAtOrAfter, KEEPER_READ_ABIS, marginsOf, REREAD_S, SETTLE_S, trackMessage } from "../src/keeper/state.ts";
 import type { Rpc } from "../src/rpc.ts";
 import { fakeChain, v3Record } from "./fake-keeper.ts";
@@ -56,6 +56,58 @@ describe("a chain's block time, from its headers", () => {
     const young = chain(2, 500);
     expect(await blockTimeOf(young.rpc, "base")).toBe(2);
     expect(young.reads).toEqual(["latest", 0n]);
+  });
+
+  it("is read again after an hour, so a keeper left running follows a change of block time", async () => {
+    let s = 0.2;
+    const reads: (bigint | "latest")[] = [];
+    const rpc: Rpc = {
+      async request(_c, _m, params) {
+        const n = params[0] === "latest" ? 100_000n : BigInt(params[0] as Hex);
+        reads.push(params[0] === "latest" ? "latest" : n);
+        return { number: numberToHex(n), timestamp: numberToHex(1_000 + Math.floor(Number(n) * s)) };
+      },
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    try {
+      expect(BLOCK_TIME_FRESH_MS).toBe(3_600_000);
+      expect(await blockTimeOf(rpc, "base")).toBe(0.2);
+      s = 0.4;
+      now.mockReturnValue(1_800_000_000_000 + BLOCK_TIME_FRESH_MS - 1);
+      expect(await blockTimeOf(rpc, "base")).toBe(0.2);
+      expect(reads).toHaveLength(3);
+      now.mockReturnValue(1_800_000_000_000 + BLOCK_TIME_FRESH_MS);
+      expect(await blockTimeOf(rpc, "base")).toBe(0.4);
+      expect(reads).toHaveLength(6);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("keeps the last block time read when a refresh fails, and tries again on the next call", async () => {
+    let down = false;
+    let reads = 0;
+    const rpc: Rpc = {
+      async request(_c, _m, params) {
+        reads++;
+        if (down) throw new Error("node down");
+        const n = params[0] === "latest" ? 100_000n : BigInt(params[0] as Hex);
+        return { number: numberToHex(n), timestamp: numberToHex(1_000 + Math.floor(Number(n) * 0.2)) };
+      },
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    try {
+      expect(await blockTimeOf(rpc, "base")).toBe(0.2);
+      down = true;
+      now.mockReturnValue(1_800_000_000_000 + BLOCK_TIME_FRESH_MS);
+      expect(await blockTimeOf(rpc, "base")).toBe(0.2);
+      const after = reads;
+      // not kept as fresh: the next call reads again
+      expect(await blockTimeOf(rpc, "base")).toBe(0.2);
+      expect(reads).toBeGreaterThan(after);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("refuses blocks with no time between them, keeping nothing, so a later read tries again", async () => {

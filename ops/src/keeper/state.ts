@@ -261,19 +261,24 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
   /** One event's logs found so far, for the life of these deps. Each call scans to the head from REREAD_S of
-   * blocks before the last head it reached (the first time from `first(head)`, and never before it), and
-   * moves on only once the whole range is in, so a failed scan is retried. Logs SETTLE_S of blocks below the
-   * head are kept; nearer ones are returned and read again next round (marginsOf: at the chain's block time). */
+   * blocks before the last head it reached, and never from after the last call's settled point (a block time read
+   * slower since, after a halt, shortens the re-read below the last settle margin), the first time from
+   * `first(head)`, and never before it; it moves on only once the whole range is in, so a failed scan is retried.
+   * Logs SETTLE_S of blocks below the head are kept; nearer ones are returned and read again next round (marginsOf:
+   * at the chain's block time). */
   function logCursor(chain: ChainName, address: Address, ev: AbiEvent, topics: (Hex | null)[] = []) {
     const kept: ScannedLog[] = [];
     const seen = new Set<string>();
     let scannedTo: bigint | undefined;
+    /** the last call's head less its settle margin: every log at or below it is kept */
+    let settledTo: bigint | undefined;
     return async (first: (head: bigint) => bigint | Promise<bigint>): Promise<{ logs: ScannedLog[]; head: bigint }> => {
       // the head from the server the logs come from
       const head = hexToBigInt((await logsOf(ctx).request(chain, "eth_blockNumber", [])) as Hex);
       const earliest = await first(head);
       const { reread, settle } = await marginsOf(logsOf(ctx), chain);
-      const back = scannedTo === undefined ? earliest : scannedTo + 1n - reread;
+      const reach = scannedTo === undefined ? undefined : scannedTo + 1n - reread;
+      const back = reach === undefined || settledTo === undefined ? earliest : reach < settledTo + 1n ? reach : settledTo + 1n;
       const from = back > earliest ? back : earliest;
       const fresh: ScannedLog[] = [];
       if (from <= head) {
@@ -286,6 +291,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
         }
       }
       scannedTo = head;
+      settledTo = head - settle;
       return { logs: [...kept, ...fresh], head };
     };
   }

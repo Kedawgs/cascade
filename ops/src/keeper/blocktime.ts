@@ -17,7 +17,11 @@ export interface BlockAt {
   time: number;
 }
 
-const measured = new WeakMap<Rpc, Map<ChainName, Promise<number>>>();
+/** A block time is read again after this long (an hour), so a keeper left running follows a change of either chain's. */
+export const BLOCK_TIME_FRESH_MS = 3_600_000;
+
+/** Each RPC's block times by chain: the reading, and when it was started (0: read again on the next call). */
+const measured = new WeakMap<Rpc, Map<ChainName, { at: number; reading: Promise<number> }>>();
 
 const timeOf = async (rpc: Rpc, chain: ChainName, block: bigint | "latest"): Promise<BlockAt> => {
   const b = (await rpc.request(chain, "eth_getBlockByNumber", [block === "latest" ? "latest" : numberToHex(block), false])) as { number?: Hex; timestamp: Hex } | null;
@@ -35,15 +39,18 @@ export function secondsPerBlock(older: BlockAt, newer: BlockAt): number | undefi
 
 /** `chain`'s seconds a block now: the faster of two spans of BLOCK_TIME_SPAN blocks back from its head's header (`head`,
  * when the caller has read it), the newest and the one before it (from block 0 on a younger chain), read once for each
- * `rpc` (a run's, or a command's). The faster, because a halt or a sequencer outage in one span makes it read slow, and a
- * time counted back in blocks at a slow reading lands after the block it wants. Throws, keeping nothing, when a header
- * can't be read or neither span is apart in time. */
+ * `rpc` (a run's, or a command's) and again after BLOCK_TIME_FRESH_MS. The faster, because a halt or a sequencer outage in
+ * one span makes it read slow, and a time counted back in blocks at a slow reading lands after the block it wants. A first
+ * read throws, keeping nothing, when a header can't be read or neither span is apart in time; a refresh that fails keeps
+ * the last block time read, and the next call tries again. */
 export function blockTimeOf(rpc: Rpc, chain: ChainName, head?: BlockAt): Promise<number> {
   let byChain = measured.get(rpc);
   if (!byChain) measured.set(rpc, (byChain = new Map()));
-  const known = byChain.get(chain);
-  if (known) return known;
-  const reading = (async () => {
+  const cache = byChain;
+  const known = cache.get(chain);
+  const now = Date.now();
+  if (known && now - known.at < BLOCK_TIME_FRESH_MS) return known.reading;
+  const fresh = (async () => {
     const span = BLOCK_TIME_SPAN[chain];
     const newer = head ?? (await timeOf(rpc, chain, "latest"));
     const mid = await timeOf(rpc, chain, newer.block > span ? newer.block - span : 0n);
@@ -53,10 +60,20 @@ export function blockTimeOf(rpc: Rpc, chain: ChainName, head?: BlockAt): Promise
     if (s === undefined) throw new Error(`${chain === "base" ? "Base" : "Bittensor"}'s block time can't be read: its blocks up to ${newer.block} are not apart in time`);
     return s;
   })();
-  const cache = byChain;
-  cache.set(chain, reading);
-  reading.catch(() => cache.delete(chain));
-  return reading;
+  const entry = { at: now, reading: fresh };
+  if (known) {
+    // a refresh that fails: the last block time read, marked to be read again on the next call
+    entry.reading = fresh.catch(() => {
+      entry.at = 0;
+      return known.reading;
+    });
+  } else {
+    fresh.catch(() => {
+      if (cache.get(chain) === entry) cache.delete(chain);
+    });
+  }
+  cache.set(chain, entry);
+  return entry.reading;
 }
 
 /** The blocks `chain` makes in `seconds` at `blockS` seconds a block, rounded up. */

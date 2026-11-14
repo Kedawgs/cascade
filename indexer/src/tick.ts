@@ -1,6 +1,7 @@
 import type { Hex } from "viem";
 import { type Due, type Finding, markSent, reconcile } from "./alerts.ts";
 import { argSenders, blockTimes, fetchTxs, PER_TICK, txsToFetch } from "./attribute.ts";
+import { blockSKey, blockSToStore, lookbackFrom, measureBlockS, storedBlockS } from "./blocktime.ts";
 import { type ChainName, type Config, rolesOf, scanAddresses, watchFilters } from "./config.ts";
 import { deliveredChecks } from "./crosscheck/payouts.ts";
 import { type AlertItem, type Outgoing, renderCritical, renderDbFailing, renderResolved, renderWarnings, sendAll } from "./email.ts";
@@ -100,8 +101,9 @@ const QUIET_WHILE_CATCHING_UP: ReadonlySet<string> = new Set(["bridge.check_stuc
 /** The alerts the hourly logs cross-check raises, re-sends and resolves itself (src/logs-check.ts): the tick
  * leaves them as they are. */
 const JOB_OWNED: ReadonlySet<string> = new Set(["indexer.logs_omitted", "indexer.logs_extra"]);
-/** Base blocks in 24 hours (2-second blocks): the redeem requests unstakes.tiny_wave counts. */
-const DAY_BASE_BLOCKS = 43_200n;
+/** The redeem requests unstakes.tiny_wave counts: the last 24 hours', loaded from that many seconds of Base's blocks back
+ * (at its block time, measured: blocktime.ts; 432,000 of its 200 ms blocks since 2026-11-05). */
+const TINY_WAVE_S = 86_400;
 /** At most this many transactions wait in the retry list (meta tx_backlog), the newest kept. */
 const TX_BACKLOG_MAX = 500;
 /** A transaction a node has answered without this many times (a minute apart) is given up. */
@@ -109,6 +111,13 @@ const MAX_TX_TRIES = 10;
 /** The payout delay used before any reading has given one: v3-test's, the shortest (the earliest deadline,
  * the tightest lag limit). */
 export const DEFAULT_PAYOUT_DELAY_S = 3600;
+
+/** Where the prefetch's look-back starts, from Base's settled block: the last day of its blocks (the redeem requests
+ * unstakes.tiny_wave counts), in blocks at its block time as measured (src/blocktime.ts); from block 0 while that is
+ * unknown (the rule's own 24-hour filter deciding). */
+export function prefetchLookbacks(settled: Record<ChainName, bigint>, blockS: Partial<Record<ChainName, number>>): { requestsSince: bigint } {
+  return { requestsSince: lookbackFrom(settled.base, TINY_WAVE_S, blockS.base) };
+}
 
 export interface TickDeps {
   env: { DB: D1Database; EMAIL?: SendEmail };
@@ -452,6 +461,16 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   const toFetch = uniq([...txsToFetch(newLogs), ...backlog].map((x) => `${x.chain}:${x.hash}`)).map((k) => ({ chain: k.slice(0, k.indexOf(":")) as ChainName, hash: k.slice(k.indexOf(":") + 1) as Hex }));
   const oldest = (rs: readonly ChainReading<unknown>[], fallback: bigint) => (rs.length ? rs[rs.length - 1].block : fallback);
   const settledBase = scans.base.cursor.settledTo;
+  // each chain's block time this tick: measured from the stored readings and this tick's, else as last stored (src/blocktime.ts)
+  const measuredS: Partial<Record<ChainName, number>> = {
+    base: measureBlockS([...history.base, ...(snap.base ? [snap.base] : [])]),
+    bittensor: measureBlockS([...history.bittensor, ...(snap.bittensor ? [snap.bittensor] : [])]),
+  };
+  const blockS: Partial<Record<ChainName, number>> = {};
+  for (const c of CHAINS) {
+    const v = measuredS[c] ?? storedBlockS(state.meta, c);
+    if (v !== undefined) blockS[c] = v;
+  }
   const needs: PrefetchNeeds = {
     since: { base: oldest(history.base, settledBase + 1n), bittensor: oldest(history.bittensor, scans.bittensor.cursor.settledTo + 1n) },
     batchIds: uniq([...state.openChecks.batches.map((r) => r.batchId), ...newDeliveries.map((l) => big(l.args.batchId))]),
@@ -460,7 +479,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     payoutKeys: uniq([...state.openChecks.chunks.map((r) => r.batchKey), ...newLandings.map((l) => lower(l.args.batchKey))]),
     txHashes: uniq([...toFetch.map((x) => x.hash), ...fromArgs.map((x) => x.hash)]),
     blocks: state.openChecks.chunks.map((r) => ({ chain: "base" as const, number: r.landedBlock })),
-    requestsSince: settledBase > DAY_BASE_BLOCKS ? settledBase - DAY_BASE_BLOCKS : 0n,
+    requestsSince: prefetchLookbacks({ base: settledBase, bittensor: scans.bittensor.cursor.settledTo }, blockS).requestsSince,
     openBatch: snap.base?.state.openBatch?.id,
     messageIds: uniq([...state.pendingMessages, ...pendingFresh].map((m) => m.messageId)),
   };
@@ -608,6 +627,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     logs: logQuery([...pre.logs.map((l) => (removedUids.has(l.uid) ? { ...l, removed: true } : l)), ...upserts]),
     checks,
     blockTime: timeOf,
+    blockS,
     txs,
     newTxs,
     messages,
@@ -646,6 +666,11 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   for (const c of CHAINS) {
     const from = scans[c].firstBlock;
     if (!state.meta[`watch_from:${c}`] && from !== undefined && watch[c].address.length > 0 && scans[c].cursor.scannedTo !== null) meta.set(`watch_from:${c}`, String(from));
+  }
+  // each chain's block time, kept for the jobs and the next tick when it has moved (src/blocktime.ts)
+  for (const c of CHAINS) {
+    const v = blockSToStore(state.meta, c, measuredS[c]);
+    if (v !== undefined) meta.set(blockSKey(c), v);
   }
   if (firstCaughtUp) meta.set("caught_up", String(nowS));
   meta.set("last_complete_tick", String(nowS));

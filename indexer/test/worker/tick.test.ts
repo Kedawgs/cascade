@@ -3,10 +3,12 @@ import type { Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import { countingDb, wipe } from "./d1-count.ts";
 import { BIT_ADAPTER, DEPENDENCY_EVENTS, FRONT_DOOR, MINTER_ROLE } from "../../src/abi.ts";
-import { catchingUpChains } from "../../src/tick.ts";
+import { catchingUpChains, prefetchLookbacks } from "../../src/tick.ts";
 import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog } from "./fixtures.ts";
+import { slog } from "./rule-ctx.ts";
+import { upsertBlocks, upsertLogs } from "../../src/store.ts";
 import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, type TickWorld, tickWorld } from "./tick-world.ts";
 
 const db = env.DB;
@@ -43,6 +45,84 @@ describe("a first tick", () => {
     expect(await rows("SELECT page, count FROM seed_pages")).toEqual([{ page: 0, count: 2 }]);
     // the lease is released
     expect(await rows("SELECT until FROM lease")).toEqual([{ until: 0 }]);
+  });
+});
+
+describe("each chain's block time, measured from the readings (Base went from 2 s to 200 ms blocks on 2026-11-05)", () => {
+  it("is kept in meta once the readings span 100 s, and written again only when it moves 5%", async () => {
+    const w = tickWorld();
+    const blockS = async () => Object.fromEntries((await rows<{ k: string; v: string }>("SELECT k, v FROM meta WHERE k LIKE 'block_s:%'")).map((m) => [m.k, m.v]));
+    await w.tick();
+    // one reading: nothing to measure yet
+    expect(await blockS()).toEqual({});
+    for (let i = 0; i < 2; i++) {
+      w.advance();
+      await w.tick();
+    }
+    // three readings a minute apart: this world's 2 s and 12 s
+    expect(await blockS()).toEqual({ "block_s:base": "2", "block_s:bittensor": "12" });
+    await env.DB.prepare("UPDATE meta SET v = '2.05' WHERE k = 'block_s:base'").run();
+    w.advance();
+    await w.tick();
+    expect((await blockS())["block_s:base"]).toBe("2.05");
+    await env.DB.prepare("UPDATE meta SET v = '0.2' WHERE k = 'block_s:base'").run();
+    w.advance();
+    await w.tick();
+    expect((await blockS())["block_s:base"]).toBe("2");
+  });
+
+  it("keeps up with Base's 200 ms blocks (3,000 blocks in 10 minutes) on the production settings: 4 windows of 100 a tick, and an hour's backlog read in one tick's budget", async () => {
+    const w = tickWorld({ over: { BASE_LOG_WINDOW: "100", SUBREQUEST_BUDGET: "200" } });
+    await w.tick();
+    const scanned = async () => BigInt((await rows<{ scanned_to: number }>("SELECT scanned_to FROM cursors WHERE chain = 'base'"))[0].scanned_to);
+    // each window one request (its logs, the head, ForeverMoney's watched events)
+    const baseWindows = (from: number) => w.net.fetches.slice(from).filter((f) => new URL(f.url).host === new URL(TEST_URLS.baseLogs).host && f.methods.includes("eth_getLogs"));
+    for (let i = 0; i < 10; i++) {
+      // a minute of Base's blocks: 300 (advance() moves it 30)
+      w.advance();
+      w.specs.base.head += 270n;
+      const before = w.net.fetches.length;
+      await w.tick();
+      expect(await scanned()).toBe(w.specs.base.head);
+      // the 300 new blocks and the 70 re-read: 4 windows
+      expect(baseWindows(before)).toHaveLength(4);
+    }
+    // an hour's backlog (18,000 blocks, the logs server down): read whole on the next tick, within its 200 subrequests
+    w.advance();
+    w.specs.base.head += 18_000n;
+    const before = w.net.fetches.length;
+    await w.tick();
+    expect(await scanned()).toBe(w.specs.base.head);
+    expect(baseWindows(before).length).toBeLessThanOrEqual(185);
+  });
+
+  it("loads the redeem requests unstakes.tiny_wave counts from a day of Base's blocks by time: 432,000 at 200 ms, 43,200 at 2 s; from block 0 while unmeasured", () => {
+    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 0.2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 432_000n });
+    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 43_200n });
+    // a block time unknown (a first tick on an empty store): from block 0, the rule's own 24-hour filter deciding
+    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, {})).toEqual({ requestsSince: 0n });
+  });
+
+  it("unstakes.tiny_wave counts the tiny redeem requests of the last 24 hours of Base's 200 ms blocks, not of the last 2.4", async () => {
+    const w = tickWorld();
+    // Base at 300 blocks a minute (200 ms, five to a whole second) since the first reading, so every reading measures 0.2 s
+    w.specs.base.blockTime = (n) => T0 + Math.floor(Number(n - START_HEADS.base) / 5);
+    const minute = async () => {
+      w.advance();
+      w.specs.base.head += 270n;
+      await w.tick();
+    };
+    await w.tick();
+    for (let i = 0; i < 7; i++) await minute();
+    expect((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'block_s:base'"))[0].v).toBe("0.2");
+    // 20 tiny redeem requests stored, an hour apart (18,000 blocks), the oldest 20 hours (360,000 blocks) back
+    const [c] = await rows<{ settled_to: number; settled_time: number }>("SELECT settled_to, settled_time FROM cursors WHERE chain = 'base'");
+    const requests = Array.from({ length: 20 }, (_, i) =>
+      slog({ contract: "frontDoor", event: "RedeemRequested", address: w.cfg.deployment.frontDoor, block: BigInt(c.settled_to) - BigInt(i + 1) * 18_000n, args: { batchId: "1", user: KEEPER, shares: "1000" } }),
+    );
+    await env.DB.batch([...upsertLogs(env.DB, requests), ...upsertBlocks(env.DB, requests.map((l, i) => ({ chain: "base" as const, number: l.block, time: c.settled_time - (i + 1) * 3_600 })))]);
+    await minute();
+    expect(await alertKeys()).toContain("unstakes.tiny_wave");
   });
 });
 

@@ -46,6 +46,8 @@ export function ruleCtx(over: Partial<RuleCtx> & { logs?: RuleCtx["logs"]; store
     writes: { batchChecks: [], chunkChecks: [], nonces: [], meta: [] },
     unjudged: [],
     ...rest,
+    // the chains' block times as the readings measure them: Base's 200 ms since 2026-11-05, Bittensor's 12 s
+    blockS: rest.blockS ?? { base: 0.2, bittensor: 12 },
   };
 }
 

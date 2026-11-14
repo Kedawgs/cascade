@@ -263,7 +263,8 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
           [t.base.tokenAdminRegistry]: { abi: TOKEN_ADMIN_REGISTRY, fns: registry("base", b.registry) },
           ...safeContracts,
         },
-        { time: (at) => 1_800_000_000 + Number(at - heads.base) * 2, balance: balances("base") },
+        // the reading's block time is the spec's, so a test can change Base's block time (its 200 ms blocks since 2026-11-05)
+        { time: (at) => baseSpec.blockTime!(at), balance: balances("base") },
       ),
     },
   };

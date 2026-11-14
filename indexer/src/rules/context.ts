@@ -90,6 +90,8 @@ export interface RuleCtx {
   checks: { batches: BatchCheckRow[]; chunks: ChunkCheckRow[] };
   /** a block's time, when known (blocks holding stored logs) */
   blockTime: (chain: ChainName, block: bigint) => number | undefined;
+  /** each chain's seconds a block, measured from the readings (src/blocktime.ts); absent while unknown (a first tick) */
+  blockS: Partial<Record<ChainName, number>>;
   /** senders of transactions, by `${chain}:${hash}` */
   txs: Map<string, TxRow>;
   /** the transactions first stored this tick (fetched, or known from an event's args), one per hash */

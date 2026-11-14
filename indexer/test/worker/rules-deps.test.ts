@@ -209,7 +209,7 @@ describe("fmtao.role_change", () => {
     expect(RUNBOOK["fmtao.role_change_critical"](f.facts)).toContain("ForeverMoney");
     // pointing TOKENS at a new pool too soon after its setup makes the hourly cross-check call its setup events omitted
     // (Bittensor's blocks are judged once REREAD, 400 blocks of 12 s, behind the settled point, over the hour before)
-    expect(Number(REREAD.bittensor) * 12 + DEFAULTS.logsCheckBittensorBlocks * 12).toBeLessThan(3 * 3600);
+    expect(Number(REREAD.bittensor) * 12 + DEFAULTS.logsCheckBittensorS).toBeLessThan(3 * 3600);
     expect(RUNBOOK["fmtao.role_change_critical"](f.facts)).toMatch(/at least three hours after the new pool's own setup.*indexer\.logs_omitted.*acknowledge/);
   });
 

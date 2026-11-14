@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DEPENDENCY_EVENTS, VAULT } from "../../src/abi.ts";
 import { type Config, rolesOf } from "../../src/config.ts";
 import { runHourly } from "../../src/hourly.ts";
-import { LOGS_CHECK_BUDGET, LOGS_CHECK_WINDOW, runLogsCheck } from "../../src/logs-check.ts";
+import { LOGS_CHECK_BUDGET, LOGS_CHECK_WINDOW, logsCheckBlocks, logsCheckBudget, runLogsCheck } from "../../src/logs-check.ts";
 import { decode, identify, type RawLog } from "../../src/logs.ts";
 import { indexerUnverified } from "../../src/rules/ops.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
@@ -48,6 +48,8 @@ async function world(o: { secondLogs?: SecondLogs; secondHeads?: { base?: bigint
     await w.tick();
     w.advance();
   }
+  // each chain's block time as this world's readings measure it (2 s and 12 s), kept by the tick
+  await db.batch([setMeta(db, "block_s:base", "2"), setMeta(db, "block_s:bittensor", "12")]);
   const cursors = Object.fromEntries((await rows<{ chain: string; settled_to: number }>("SELECT chain, settled_to FROM cursors")).map((r) => [r.chain, BigInt(r.settled_to)])) as Cursors;
   const logsOf = (chain: "base" | "bittensor") => (o.secondLogs ? o.secondLogs(chain, w.specs[chain].logs ?? [], { cfg: w.cfg, trip, cursors }) : [...(w.specs[chain].logs ?? [])]);
   const second = {
@@ -83,7 +85,7 @@ describe("runLogsCheck", () => {
     const r = await runLogsCheck(deps());
     // the newest cap's worth of blocks the tick has re-read, never before the deployment's start (this world is younger than the cap)
     const max = (a: bigint, b: bigint) => (a > b ? a : b);
-    const from = { base: max(to.base - BigInt(DEFAULTS.logsCheckBaseBlocks) + 1n, w.cfg.deployment.base.startBlock), bittensor: max(to.bittensor - BigInt(DEFAULTS.logsCheckBittensorBlocks) + 1n, w.cfg.deployment.bittensor.startBlock) };
+    const from = { base: max(to.base - BigInt(DEFAULTS.logsCheckBaseS / 2) + 1n, w.cfg.deployment.base.startBlock), bittensor: max(to.bittensor - BigInt(DEFAULTS.logsCheckBittensorS / 12) + 1n, w.cfg.deployment.bittensor.startBlock) };
     expect(r).toEqual({
       base: { from: from.base, to: to.base, primary: 7, second: 7, omitted: 0, extra: 0 },
       bittensor: { from: from.bittensor, to: to.bittensor, primary: 9, second: 9, omitted: 0, extra: 0 },
@@ -99,7 +101,7 @@ describe("runLogsCheck", () => {
     expect(asked.filter(([c]) => c === "base").every(([, host, m]) => host === new URL(TEST_URLS.baseLogs2).host && m === "eth_getLogs+eth_blockNumber+eth_getLogs")).toBe(true);
     expect(asked.filter(([c]) => c === "base")).toHaveLength(Math.ceil(Number(to.base - from.base + 1n) / Number(w.cfg.baseLogWindow)));
     expect(asked.filter(([c]) => c === "bittensor")).toHaveLength(1);
-    expect(LOGS_CHECK_WINDOW.bittensor).toBeGreaterThanOrEqual(BigInt(DEFAULTS.logsCheckBittensorBlocks));
+    expect(LOGS_CHECK_WINDOW.bittensor).toBeGreaterThanOrEqual(BigInt(DEFAULTS.logsCheckBittensorS / 12));
   });
 
   it("never judges the blocks the tick hasn't re-read from a node REREAD past them: a log the primary's lagging log index adds a tick later is no omission", async () => {
@@ -181,7 +183,26 @@ describe("runLogsCheck", () => {
     w.specs.bittensor.head += 5000n;
     const r = await runLogsCheck({ ...deps(), fetch: w.net.fetch });
     expect(r.base).toMatchObject({ from: to.base + 1n, to: to.base + 50n });
-    expect(r.bittensor).toMatchObject({ from: to.bittensor + 5000n - BigInt(DEFAULTS.logsCheckBittensorBlocks) + 1n, to: to.bittensor + 5000n });
+    expect(r.bittensor).toMatchObject({ from: to.bittensor + 5000n - BigInt(DEFAULTS.logsCheckBittensorS / 12) + 1n, to: to.bittensor + 5000n });
+  });
+
+  it("checks 20 minutes of Base by time: on its 200 ms blocks, 6,000 of them, 60 windows of 100, within the run's budget", async () => {
+    const { w, deps, to } = await world();
+    await runLogsCheck(deps());
+    await db.batch([setMeta(db, "block_s:base", "0.2"), db.prepare("UPDATE cursors SET settled_to = settled_to + 9000 WHERE chain = 'base'")]);
+    w.specs.base.head += 9000n;
+    expect(logsCheckBlocks(DEFAULTS, { "block_s:base": "0.2" }, "base", 100n)).toBe(6_000n);
+    expect(logsCheckBudget({ base: 60, bittensor: 1 })).toBe(126);
+    const asked: string[] = [];
+    const fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      asked.push(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      return w.net.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const r = await runLogsCheck({ ...deps(), fetch });
+    expect(r.base).toMatchObject({ from: to.base + 9000n - 6000n + 1n, to: to.base + 9000n });
+    expect(asked.filter((u) => new URL(u).host === new URL(TEST_URLS.baseLogs2).host)).toHaveLength(60);
+    // a block time not yet measured: one window
+    expect(logsCheckBlocks(DEFAULTS, {}, "base", 100n)).toBe(100n);
   });
 
   it("the primary omitted watched events: one critical per chain names them all, with the counts and hashes; it resolves once the store has them", async () => {
@@ -454,7 +475,7 @@ describe("runLogsCheck", () => {
     expect(net2.count()).toBeLessThanOrEqual(LOGS_CHECK_BUDGET);
     // room for one Base list's endpoint failing on its last window, retried, and the next reading every window,
     // beside Bittensor's one window and its retry
-    expect(LOGS_CHECK_BUDGET).toBeGreaterThanOrEqual(2 * Math.ceil(DEFAULTS.logsCheckBaseBlocks / Number(w.cfg.baseLogWindow)) + 1 + 2);
+    expect(logsCheckBudget({ base: Math.ceil(DEFAULTS.logsCheckBaseS / 2 / Number(w.cfg.baseLogWindow)), bittensor: 1 })).toBeGreaterThanOrEqual(2 * Math.ceil(DEFAULTS.logsCheckBaseS / 2 / Number(w.cfg.baseLogWindow)) + 1 + 2);
     expect(aboutLogs(w.sent)).toEqual([]);
   });
 });

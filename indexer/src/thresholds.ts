@@ -128,11 +128,11 @@ export const DEFAULTS = {
   /** monitor.chain_unreadable: this many ticks in a row without a usable reading */
   chainUnreadableTicks: 5,
   emailFailingS: 1800,
-  /** the hourly logs cross-check: at most this many of each chain's newest settled blocks are re-read through the
-   * second endpoint per run (Base: 20 minutes of 2-second blocks, 6 windows of 100; Bittensor: an hour of
-   * 12-second blocks, one window) */
-  logsCheckBaseBlocks: 600,
-  logsCheckBittensorBlocks: 300,
+  /** the hourly logs cross-check: at most this long of each chain's newest settled blocks is re-read through the second
+   * endpoint per run, in blocks at its block time as measured (src/blocktime.ts; Base: 20 minutes, 6,000 of its 200 ms
+   * blocks, 60 windows of 100; Bittensor: an hour, 300 of its 12-second blocks, one window) */
+  logsCheckBaseS: 1200,
+  logsCheckBittensorS: 3600,
   /** indexer.unverified: the second endpoint failing the cross-check for this long */
   logsCheckUnverifiedS: 3 * 3600,
   /** monitor.unjudged: a critical condition its rule couldn't judge for this long, tick after tick */
@@ -163,14 +163,23 @@ export function jsonSetting(field: string, raw: unknown): unknown {
   }
 }
 
-/** One source's overrides applied to `t`: every key must be a threshold, numbers must be finite and
- * not negative, amounts decimal strings, and `rules.off` a list of rule ids. */
+/** Thresholds a later version retired, with what replaced them: still accepted and ignored, with a warning, so a
+ * THRESHOLDS_SECRET set before never stops the monitor (a refused config runs no tick at all). The logs cross-check's caps
+ * counted Base's 2-second blocks; since its 200 ms blocks (2026-11-05) they are in seconds. */
+const RETIRED: Readonly<Record<string, string>> = { logsCheckBaseBlocks: "logsCheckBaseS", logsCheckBittensorBlocks: "logsCheckBittensorS" };
+
+/** One source's overrides applied to `t`: every key must be a threshold (or a RETIRED one, ignored), numbers must be
+ * finite and not negative, amounts decimal strings, and `rules.off` a list of rule ids. */
 function apply(t: Thresholds, field: string, raw: unknown): void {
   const over = jsonSetting(field, raw);
   if (over === undefined) return;
   if (!isObject(over)) throw new ConfigError(field, "is not a JSON object");
   const out = t as Record<Key, unknown>;
   for (const [key, value] of Object.entries(over)) {
+    if (Object.hasOwn(RETIRED, key)) {
+      console.warn(`thresholds: ${field} names "${key}", retired: set "${RETIRED[key]}" (seconds) instead; ignored`);
+      continue;
+    }
     if (!Object.hasOwn(DEFAULTS, key)) throw new ConfigError(field, `names an unknown threshold "${key}"`);
     const k = key as Key;
     const kind = typeof DEFAULTS[k];

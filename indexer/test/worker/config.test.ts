@@ -91,6 +91,21 @@ describe("parseConfig", () => {
     expect(refused(withVars({ THRESHOLDS_SECRET: "{depegBps:" })).message).toContain("THRESHOLDS_SECRET");
   });
 
+  it("accepts the retired logsCheckBaseBlocks and logsCheckBittensorBlocks (2-second blocks), ignoring them with a warning, so a THRESHOLDS_SECRET set before never stops the monitor", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const t = parseConfig(withVars({ THRESHOLDS_SECRET: '{"logsCheckBaseBlocks":600,"logsCheckBittensorBlocks":300,"depegBps":250}' })).thresholds;
+      expect(t.depegBps).toBe(250);
+      expect([t.logsCheckBaseS, t.logsCheckBittensorS]).toEqual([1_200, 3_600]);
+      expect(t).not.toHaveProperty("logsCheckBaseBlocks");
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/THRESHOLDS_SECRET names "logsCheckBaseBlocks", retired: set "logsCheckBaseS"/));
+      // the seconds are thresholds like any other
+      expect(parseConfig(withVars({ THRESHOLDS: '{"logsCheckBaseS":600}' })).thresholds.logsCheckBaseS).toBe(600);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("clamps nonceBehindTicks under unexplainedTxGraceS at a reading a minute, with a warning, and never refuses the config for it", () => {
     // a count read too high is taken back on the nonceBehindTicks-th reading, which must come before the grace ends
     expect(DEFAULTS.nonceBehindTicks * 60).toBeLessThan(DEFAULTS.unexplainedTxGraceS);

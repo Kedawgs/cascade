@@ -4,6 +4,7 @@ import { type ChainName, type Config, DEPENDENCY_ROLES, hostDomain, rolesOf, sca
 import { type AlertItem, type Outgoing, renderCritical, renderWarnings, sendAll } from "./email.ts";
 import { decode, identify, type RawLog } from "./logs.ts";
 import { CONTRACT_NAMES, txLink } from "./rules/context.ts";
+import { blocksIn, storedBlockS } from "./blocktime.ts";
 import { Budget, createRpc } from "./rpc.ts";
 import { REREAD, SETTLE, WINDOW } from "./scan.ts";
 import { type AlertRow, alertOf, returnedIds, setMeta } from "./store.ts";
@@ -20,8 +21,9 @@ import { type AlertRow, alertOf, returnedIds, setMeta } from "./store.ts";
 // two rules' alerts alone). Only blocks the tick has itself re-read from a node REREAD past them are judged, so
 // the primary's log index lagging its head is never read as an omission. A second endpoint that fails is noted in
 // meta, and the tick's indexer.unverified warns once it has failed for logsCheckUnverifiedS. The cost is bounded:
-// at most logsCheck{Base,Bittensor}Blocks per chain per run, in the chain's windows, within LOGS_CHECK_BUDGET
-// requests.
+// at most logsCheck{Base,Bittensor}S of each chain's newest blocks per run (in blocks at its block time as the tick last
+// measured it, src/blocktime.ts: Base's 200 ms blocks make 20 minutes 6,000 of them), in the chain's windows, within the
+// requests logsCheckBudget allows for them.
 
 export interface LogsCheckDeps {
   env: { DB: D1Database; EMAIL?: SendEmail };
@@ -33,10 +35,19 @@ export interface LogsCheckDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Requests the whole run may make (both chains, retries included): room for a Base endpoint failing on its last
- * window, retried, and the next one in its list reading all six, beside Bittensor's window and a retry (15). A
- * third endpoint, or a second failing too, may run out of it: the chain then fails this run. */
+/** Requests the whole run may make at least. */
 export const LOGS_CHECK_BUDGET = 20;
+/** Requests the whole run may make (both chains, retries included), for `windows` of each chain to check: room for an
+ * endpoint failing on its last window, retried, and the next one in its list reading them all (twice the windows and
+ * one), and two more; at least LOGS_CHECK_BUDGET. A third endpoint, or a second failing too, may run out of it: the
+ * chain then fails this run. */
+export const logsCheckBudget = (windows: Record<ChainName, number>): number => Math.max(LOGS_CHECK_BUDGET, CHAINS.reduce((n, c) => n + 2 * windows[c] + 1, 0) + 2);
+/** The blocks a run checks at most on `chain`: its seconds (logsCheckBaseS, logsCheckBittensorS) at the chain's block time
+ * as the tick last stored it; one window while that is unknown. */
+export function logsCheckBlocks(t: Pick<Config["thresholds"], "logsCheckBaseS" | "logsCheckBittensorS">, meta: Readonly<Record<string, string>>, chain: ChainName, window: bigint): bigint {
+  const s = storedBlockS(meta, chain);
+  return s === undefined ? window : blocksIn(chain === "base" ? t.logsCheckBaseS : t.logsCheckBittensorS, s);
+}
 /** The windows the second endpoints are asked in (Base's from BASE_LOG_WINDOW at run time). */
 export const LOGS_CHECK_WINDOW: Record<ChainName, bigint> = { base: WINDOW.base, bittensor: WINDOW.bittensor };
 /** At most this many mismatched logs are listed in a chain's alert; the counts say the rest. */
@@ -86,7 +97,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
   try {
     const rs = await db.batch<Row>([
       db.prepare("SELECT chain, settled_to FROM cursors"),
-      db.prepare("SELECT k, v FROM meta WHERE k IN ('catching_up', 'last_warning_at') OR k LIKE 'logs_check_%' OR k LIKE 'logs_omitted_uids:%' OR k LIKE 'watch_from:%'"),
+      db.prepare("SELECT k, v FROM meta WHERE k IN ('catching_up', 'last_warning_at') OR k LIKE 'logs_check_%' OR k LIKE 'logs_omitted_uids:%' OR k LIKE 'watch_from:%' OR k LIKE 'block_s:%'"),
       db.prepare("SELECT * FROM alerts WHERE rule IN ('indexer.logs_omitted', 'indexer.logs_extra') AND resolved_at IS NULL ORDER BY id"),
     ]);
     settled = Object.fromEntries(rs[0].results.map((r) => [r.chain as ChainName, BigInt(r.settled_to as number)]));
@@ -123,7 +134,9 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     }
   }
 
-  const budget = new Budget(LOGS_CHECK_BUDGET);
+  const windowOf = (chain: ChainName) => (chain === "base" ? cfg.baseLogWindow : LOGS_CHECK_WINDOW.bittensor);
+  const caps = Object.fromEntries(CHAINS.map((c) => [c, logsCheckBlocks(t, meta, c, windowOf(c))])) as Record<ChainName, bigint>;
+  const budget = new Budget(logsCheckBudget(Object.fromEntries(CHAINS.map((c) => [c, Math.ceil(Number(caps[c]) / Number(windowOf(c)))])) as Record<ChainName, number>));
   const now = deps.now ?? Date.now;
   const deadlineMs = now() + RUN_MS;
   /** a client for one second endpoint (the run's budget and deadline shared by all) */
@@ -146,14 +159,14 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
       result[chain] = "catching up";
       continue;
     }
-    const cap = BigInt(chain === "base" ? t.logsCheckBaseBlocks : t.logsCheckBittensorBlocks);
+    const cap = caps[chain];
     const last = meta[`logs_check_to:${chain}`];
     const from = max(max(last ? BigInt(last) + 1n : start, to - cap + 1n), start);
     if (from > to) {
       result[chain] = { from, to, primary: 0, second: 0, omitted: 0, extra: 0 };
       continue;
     }
-    const window = chain === "base" ? cfg.baseLogWindow : LOGS_CHECK_WINDOW.bittensor;
+    const window = windowOf(chain);
     const primaryUrl = chain === "base" ? cfg.rpc.baseLogs : cfg.rpc.bittensor;
 
     // the second endpoint's logs, window by window, each accepted only from a node settled past its end; the

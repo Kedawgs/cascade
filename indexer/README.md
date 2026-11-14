@@ -126,8 +126,11 @@ it at the start of every invocation and refuses to run on a bad config, with a l
   `eth_getLogs` in 1.3–5 s a call; dRPC's Bittensor endpoint needs a paid plan). A keyed URL, or a JSON list, goes
   in `BASE_LOGS_RPC_URL_2_SECRET` / `BITTENSOR_RPC_URL_2_SECRET`. The hourly job re-reads each chain's newest
   re-read blocks through them (the settled point less the tick's re-read depth, 70 on Base and 400 on Bittensor,
-  so the primary's log index lagging its head is never read as an omission; `logsCheckBaseBlocks` 600 and
-  `logsCheckBittensorBlocks` 300 at most per run, in the chain's windows, within 20 requests) and compares the
+  so the primary's log index lagging its head is never read as an omission; `logsCheckBaseS` 1,200 (20 minutes)
+  and `logsCheckBittensorS` 3,600 (an hour) at most per run, in blocks at each chain's block time as the tick
+  measures it (meta `block_s:<chain>`: 6,000 of Base's 200 ms blocks, 60 windows of 100), within twice their
+  windows and a few more requests; the retired `logsCheckBaseBlocks` and `logsCheckBittensorBlocks`, which counted
+  Base's old 2-second blocks, are ignored with a warning if a `THRESHOLDS` still names them) and compares the
   logs with what the primary had the tick store, so a primary that omits a watched log is noticed. An endpoint
   that fails (after one retry), or answers from a head short of the range's first window, verifies nothing and
   hands the whole range to the next in its list; the alert names the one that answered. A second opinion has to

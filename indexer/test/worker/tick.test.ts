@@ -3,6 +3,7 @@ import type { Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 import { countingDb, wipe } from "./d1-count.ts";
 import { BIT_ADAPTER, DEPENDENCY_EVENTS, FRONT_DOOR, MINTER_ROLE } from "../../src/abi.ts";
+import { measureBlockS } from "../../src/blocktime.ts";
 import { catchingUpChains, prefetchLookbacks } from "../../src/tick.ts";
 import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
@@ -107,9 +108,20 @@ describe("each chain's block time, measured from the readings (Base went from 2 
     expect(baseWindows(first).length).toBeLessThanOrEqual(2 * 185);
   });
 
-  it("loads the redeem requests unstakes.tiny_wave counts from a day of Base's blocks by time: 432,000 at 200 ms, 43,200 at 2 s; from block 0 while unmeasured", () => {
-    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 0.2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 432_000n });
-    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 43_200n });
+  it("is the faster of the readings' two halves, so a halt in one never reads it slow; their whole span while a half is too short", () => {
+    const at = (pairs: [number, number][]) => pairs.map(([block, time]) => ({ block: BigInt(block), time }));
+    // seven readings a minute apart; Base stopped for three minutes in the newer half: 0.2 s, not the whole span's 0.3 s
+    expect(measureBlockS(at([[0, 0], [300, 60], [600, 120], [900, 180], [900, 180], [900, 180], [1_200, 360]]))).toBe(0.2);
+    // in the older half too
+    expect(measureBlockS(at([[0, 0], [0, 0], [0, 0], [300, 180], [600, 240], [900, 300], [1_200, 360]]))).toBe(0.2);
+    // three readings a minute apart: each half spans 60 s, less than 100; the whole 120 s
+    expect(measureBlockS(at([[0, 0], [30, 60], [60, 120]]))).toBe(2);
+    expect(measureBlockS(at([[0, 0], [30, 60]]))).toBeUndefined();
+  });
+
+  it("loads the redeem requests unstakes.tiny_wave counts from 25 hours of Base's blocks by time (the rule keeps the last 24): 450,000 at 200 ms, 45,000 at 2 s; from block 0 while unmeasured", () => {
+    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 0.2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 450_000n });
+    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 45_000n });
     // a block time unknown (a first tick on an empty store): from block 0, the rule's own 24-hour filter deciding
     expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, {})).toEqual({ requestsSince: 0n });
   });

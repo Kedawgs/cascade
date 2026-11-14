@@ -101,9 +101,10 @@ const QUIET_WHILE_CATCHING_UP: ReadonlySet<string> = new Set(["bridge.check_stuc
 /** The alerts the hourly logs cross-check raises, re-sends and resolves itself (src/logs-check.ts): the tick
  * leaves them as they are. */
 const JOB_OWNED: ReadonlySet<string> = new Set(["indexer.logs_omitted", "indexer.logs_extra"]);
-/** The redeem requests unstakes.tiny_wave counts: the last 24 hours', loaded from that many seconds of Base's blocks back
- * (at its block time, measured: blocktime.ts; 432,000 of its 200 ms blocks since 2026-11-05). */
-const TINY_WAVE_S = 86_400;
+/** The redeem requests unstakes.tiny_wave counts, the last 24 hours' by their blocks' times, are loaded from 25 hours of
+ * Base's blocks back (at its block time, measured: blocktime.ts; 450,000 of its 200 ms blocks since 2026-11-05), so a
+ * block time read a little long never cuts the day short. */
+const TINY_WAVE_LOOKBACK_S = 25 * 3600;
 /** At most this many transactions wait in the retry list (meta tx_backlog), the newest kept. */
 const TX_BACKLOG_MAX = 500;
 /** A transaction a node has answered without this many times (a minute apart) is given up. */
@@ -112,11 +113,11 @@ const MAX_TX_TRIES = 10;
  * the tightest lag limit). */
 export const DEFAULT_PAYOUT_DELAY_S = 3600;
 
-/** Where the prefetch's look-back starts, from Base's settled block: the last day of its blocks (the redeem requests
- * unstakes.tiny_wave counts), in blocks at its block time as measured (src/blocktime.ts); from block 0 while that is
- * unknown (the rule's own 24-hour filter deciding). */
+/** Where the prefetch's look-back starts, from Base's settled block: 25 hours of its blocks (the redeem requests
+ * unstakes.tiny_wave counts, its own 24-hour filter deciding), in blocks at its block time as measured
+ * (src/blocktime.ts); from block 0 while that is unknown. */
 export function prefetchLookbacks(settled: Record<ChainName, bigint>, blockS: Partial<Record<ChainName, number>>): { requestsSince: bigint } {
-  return { requestsSince: lookbackFrom(settled.base, TINY_WAVE_S, blockS.base) };
+  return { requestsSince: lookbackFrom(settled.base, TINY_WAVE_LOOKBACK_S, blockS.base) };
 }
 
 export interface TickDeps {
@@ -346,7 +347,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
 
   // 3. the stored logs of each chain's re-read range (one query; none before the first window)
   const ranges = CHAINS.flatMap((c) => {
-    const r = rereadRange(c, cursors[c], d[c].startBlock, margins[c]);
+    const r = rereadRange(cursors[c], d[c].startBlock, margins[c]);
     return r ? [{ chain: c, ...r }] : [];
   });
   const reread = ranges.length

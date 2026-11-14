@@ -83,11 +83,11 @@ describe("scanChain on Bittensor", () => {
       [3501n, 3600n],
     ]);
     const m = marginsAt("bittensor", 12);
-    expect(rereadRange("bittensor", { scannedTo: 3500n, settledTo: 3490n }, 1000n, m)).toEqual({ from: 3101n, to: 3500n });
-    expect(rereadRange("bittensor", { scannedTo: 1100n, settledTo: 1090n }, 1000n, m)).toEqual({ from: 1000n, to: 1100n });
-    expect(rereadRange("bittensor", { scannedTo: null, settledTo: 999n }, 1000n, m)).toBeNull();
+    expect(rereadRange({ scannedTo: 3500n, settledTo: 3490n }, 1000n, m)).toEqual({ from: 3101n, to: 3500n });
+    expect(rereadRange({ scannedTo: 1100n, settledTo: 1090n }, 1000n, m)).toEqual({ from: 1000n, to: 1100n });
+    expect(rereadRange({ scannedTo: null, settledTo: 999n }, 1000n, m)).toBeNull();
     // after a rewind of scanned_to (a backfill) the stored logs up to the settled point are loaded too
-    expect(rereadRange("bittensor", { scannedTo: 1500n, settledTo: 3490n }, 1000n, m)).toEqual({ from: 1101n, to: 3490n });
+    expect(rereadRange({ scannedTo: 1500n, settledTo: 3490n }, 1000n, m)).toEqual({ from: 1101n, to: 3490n });
     expect(r.cursor).toEqual({ scannedTo: 3600n, settledTo: 3590n });
     // the head's time came with the first window, in the same request
     expect(net.fetches[0].methods).toEqual(["eth_getLogs", "eth_blockNumber", "eth_getBlockByNumber"]);
@@ -160,11 +160,28 @@ describe("scanChain on Bittensor", () => {
     const cursor = { scannedTo: 5_000n, settledTo: 4_700n };
     const r = await scan("base", cursor, { blockS: 0.2 });
     expect(windowsAsked(net.fetches)[0][0]).toBe(4_301n);
-    expect(rereadRange("base", cursor, 1_000n, marginsAt("base", 0.2))).toEqual({ from: 4_301n, to: 5_000n });
+    expect(rereadRange(cursor, 1_000n, marginsAt("base", 0.2))).toEqual({ from: 4_301n, to: 5_000n });
     // 5,100 is 200 blocks (40 s) below the head: returned, not stored yet
     expect(r.cursor).toEqual({ scannedTo: 5_300n, settledTo: 5_000n });
     expect(r.upserts.map((l) => l.block)).toEqual([4_950n]);
     expect(r.fresh.map((l) => l.block)).toEqual([5_100n]);
+  });
+
+  it("never starts after the settled point: margins that shrink between two ticks (a halt read slow) leave no block unread", async () => {
+    // tick A at 200 ms: settles 300 blocks short of the head, so 5,010 (290 deep) is returned, not stored
+    const log = rawLog({ address: d.frontDoor, abi: FRONT_DOOR, eventName: "BatchRolled", args: { id: 3n }, block: 5_010n, logIndex: 0, txHash: tx(84) });
+    const spec: ChainSpec = { head: 5_300n, logs: [log] };
+    const a = await setup({ base: spec }).scan("base", { scannedTo: 5_000n, settledTo: 4_700n }, { blockS: 0.2 });
+    expect(a.cursor).toEqual({ scannedTo: 5_300n, settledTo: 5_000n });
+    expect(a.fresh.map((l) => l.block)).toEqual([5_010n]);
+    // tick B reads Base at 0.5 s a block (2.5 times slower): a re-read of 280 blocks would start at 5,021, past the old
+    // settled point 5,000, and 5,001 to 5,020 would never be stored; it starts at 5,001 instead
+    spec.head = 5_400n;
+    const b = setup({ base: spec });
+    const r = await b.scan("base", a.cursor, { blockS: 0.5 });
+    expect(windowsAsked(b.net.fetches)[0][0]).toBe(5_001n);
+    expect(r.upserts.map((l) => l.block)).toEqual([5_010n]);
+    expect(rereadRange(a.cursor, 1_000n, marginsAt("base", 0.5))).toEqual({ from: 5_001n, to: 5_300n });
   });
 
   it("on Base's 200 ms blocks trusts a stored log's absence only from a node 140 s (700 blocks) past it", async () => {

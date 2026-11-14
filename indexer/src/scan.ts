@@ -55,16 +55,22 @@ export interface ScanResult {
   error?: string;
 }
 
-/** The blocks a tick reads again, whose stored logs it loads once (store.rereadStored): from the re-read margin
- * (`m`, the tick's: marginsAt) before the last head read up to it, or up to the settled point when that is further: after a rewind of
+/** Where a later scan starts: the re-read margin (`m`, the tick's: marginsAt) before the last head read, and never after
+ * the block past the settled point, nor before the start block. The margins follow the block time the tick stored, which
+ * can read slower in one tick after a halt: a re-read shorter than the last settle margin would otherwise start past the
+ * settled point, and the blocks between would never be stored while settled_to moved on past them. */
+export function scanStart(cursor: { scannedTo: bigint; settledTo: bigint }, startBlock: bigint, m: Margins): bigint {
+  return max(startBlock, min(cursor.scannedTo + 1n - m.reread, cursor.settledTo + 1n));
+}
+
+/** The blocks a tick reads again, whose stored logs it loads once (store.rereadStored): from where the scan starts
+ * (scanStart) up to the last head read, or up to the settled point when that is further: after a rewind of
  * scanned_to (a backfill, README "Backfilling missed logs") the blocks up to settled_to were scanned and stored
  * before, and loading them lets the scan recognise every stored log there by place, so none is hashed again,
- * upserted or replayed as new (no event alert fires twice). settled_to never moves back, so in the normal tick
- * the range is the re-read margin alone. Null before the first window. */
-export function rereadRange(_chain: ChainName, cursor: { scannedTo: bigint | null; settledTo: bigint }, startBlock: bigint, m: Margins): { from: bigint; to: bigint } | null {
+ * upserted or replayed as new (no event alert fires twice). Null before the first window. */
+export function rereadRange(cursor: { scannedTo: bigint | null; settledTo: bigint }, startBlock: bigint, m: Margins): { from: bigint; to: bigint } | null {
   if (cursor.scannedTo === null) return null;
-  const back = cursor.scannedTo + 1n - m.reread;
-  return { from: back > startBlock ? back : startBlock, to: cursor.settledTo > cursor.scannedTo ? cursor.settledTo : cursor.scannedTo };
+  return { from: scanStart({ scannedTo: cursor.scannedTo, settledTo: cursor.settledTo }, startBlock, m), to: max(cursor.settledTo, cursor.scannedTo) };
 }
 
 /** A chain's head time for this tick (written every tick, so lag = head_time − settled_time grows when
@@ -82,7 +88,8 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** One chain's incremental scan for one tick (spec section 3.2).
  *
- * It starts at the start block before the first window, else the re-read margin (`margins`) before the last head read.
+ * It starts at the start block before the first window, else the re-read margin (`margins`) before the last head read,
+ * never after the block past the settled point (scanStart).
  * It never asks for a window past a head some node has reported: a tick's first request re-reads up to
  * the last head read (or, on a first scan, asks only for the head), and each answer's head lets the next
  * window reach further. A window is accepted only from a node whose head, asked in the same request,
@@ -121,7 +128,7 @@ export async function scanChain(o: {
 }): Promise<ScanResult> {
   const { rpc, chain, margins } = o;
   const window = o.window ?? WINDOW[chain];
-  const start = o.cursor.scannedTo === null ? o.startBlock : max(o.startBlock, o.cursor.scannedTo + 1n - margins.reread);
+  const start = o.cursor.scannedTo === null ? o.startBlock : scanStart({ scannedTo: o.cursor.scannedTo, settledTo: o.cursor.settledTo }, o.startBlock, margins);
   const read: { log: StoredLog | undefined; uid: Hex; block: bigint }[] = [];
   const result: ScanResult = { upserts: [], fresh: [], removed: [], cursor: { ...o.cursor } };
   /** the highest block a node has said it has */
@@ -269,8 +276,9 @@ export async function scanChain(o: {
   result.head = head;
   if (answered.length > 0) result.firstBlock = answered[0].a;
   if (scannedTo !== null && head !== undefined) {
-    // everything read this tick runs contiguously from `start`, which is at or before the old settled
-    // point (REREAD_S > SETTLE_S, by more than twice), so all of it up to here is stored by this tick's commit
+    // everything read this tick runs contiguously from `start`, which is at or before the block past the old settled
+    // point (scanStart bounds it there, whatever the margins did since), so all of it up to here is stored by this
+    // tick's commit
     const settled = min(scannedTo, head - margins.settle);
     result.cursor = {
       scannedTo: o.cursor.scannedTo === null ? scannedTo : max(o.cursor.scannedTo, scannedTo),

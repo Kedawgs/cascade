@@ -16,15 +16,23 @@ export const MIN_SPAN_S = 100;
  * wander by a second either side of 12), so the tick writes it rarely. */
 export const REWRITE_SHARE = 0.05;
 
-/** The seconds a block between the newest and the oldest of `readings` (each a block and its time, as a reading's own
- * getBlockNumber and getCurrentBlockTimestamp give them), or undefined when they span less than MIN_SPAN_S or no blocks. */
+/** The seconds a block between two readings, when they are at least MIN_SPAN_S and a block apart. */
+const spanS = (older: { block: bigint; time: number }, newer: { block: bigint; time: number }): number | undefined => {
+  const blocks = Number(newer.block - older.block);
+  const seconds = newer.time - older.time;
+  return blocks > 0 && seconds >= MIN_SPAN_S ? seconds / blocks : undefined;
+};
+
+/** The seconds a block over `readings` (each a block and its time, as a reading's own getBlockNumber and
+ * getCurrentBlockTimestamp give them): the faster of their two halves (the oldest to the middle one, the middle one to the
+ * newest), as ops and the site read two spans of headers, so a halt or a sequencer outage in one never reads it slow;
+ * while neither half spans MIN_SPAN_S, the newest to the oldest; undefined when even they span less, or no blocks. */
 export function measureBlockS(readings: readonly { block: bigint; time: number }[]): number | undefined {
   if (readings.length < 2) return undefined;
-  const newest = readings.reduce((a, b) => (b.block > a.block ? b : a));
-  const oldest = readings.reduce((a, b) => (b.block < a.block ? b : a));
-  const blocks = Number(newest.block - oldest.block);
-  const seconds = newest.time - oldest.time;
-  return blocks > 0 && seconds >= MIN_SPAN_S ? seconds / blocks : undefined;
+  const r = [...readings].sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : a.time - b.time));
+  const mid = r[Math.floor((r.length - 1) / 2)];
+  const halves = [spanS(r[0], mid), spanS(mid, r[r.length - 1])].filter((s): s is number => s !== undefined);
+  return halves.length ? Math.min(...halves) : spanS(r[0], r[r.length - 1]);
 }
 
 /** The block time last stored for `chain`, when there is one. */

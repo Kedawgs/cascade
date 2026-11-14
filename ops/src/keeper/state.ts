@@ -19,6 +19,7 @@ import { balanceOf, codeAt, gasPriceOf, isRevert, nonceOf, read, RpcError } from
 import { type Ctx, describeRevert, logsOf, replaceCall, type Sent, sendCall, signerOf } from "../send.ts";
 import type { Rpc } from "../rpc.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
+import { blocksIn, blockTimeOf } from "./blocktime.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
 import { type CloseEconomics, closeEconomicsOf, closesWithoutFees, type State } from "./due.ts";
@@ -119,32 +120,34 @@ export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n
 export const windowOf = (ctx: Pick<Ctx, "logsWindow">, chain: ChainName): bigint => ctx.logsWindow?.[chain] ?? WINDOW[chain];
 /** The most eth_getLogs queries the keeper's first look at a batch's deposits makes on Base: that many of
  * the logs window (REQUESTED_MAX_QUERIES × windowOf) back from the head at most. The live logs server's
- * 10,000-block window covers a day's batch (43,200 blocks) in 5; a public RPC's 100-block window would
- * reach only four hours back, and the keeper then says so (a batch older than that counts its earlier
- * deposits as unpaid). The look-back starts at the batch's first block (blockAtOrAfter), so a keeper
- * restarted at any hour of a batch sees its whole life. */
+ * 10,000-block window covers a day's batch (432,000 of Base's 200 ms blocks since 2026-11-05) in 44, and
+ * 40 hours in all; a public RPC's 100-block window would reach only 24 minutes back, and the keeper then
+ * says so (a batch older than that counts its earlier deposits as unpaid). The look-back starts at the
+ * batch's first block (blockAtOrAfter), so a keeper restarted at any hour of a batch sees its whole life. */
 const REQUESTED_MAX_QUERIES = 72n;
-/** Base's block time, and the first step of blockAtOrAfter's bracket around its guess (a minute). */
-const BASE_SECONDS_PER_BLOCK = 2;
-const BLOCK_SEARCH_STEP = 30n;
+/** The first step of blockAtOrAfter's bracket around its guess: a minute of the chain's blocks. */
+const BLOCK_SEARCH_STEP_S = 60;
 
-/** The first block of `chain` at or after `time` (a Unix second), by its timestamps: a guess from the
- * head's time at `secondsPerBlock` a block, a bracket around it (each side stepped away, doubling, until
- * it is on its side of `time`), then bisected. About two reads when the guess is right (Base's steady
- * 2-second blocks), a handful more when it is off by minutes. `head + 1` when no block is at `time` yet. */
-export async function blockAtOrAfter(rpc: Rpc, chain: ChainName, time: number, head: bigint, headTime: number, secondsPerBlock = BASE_SECONDS_PER_BLOCK): Promise<bigint> {
+/** The first block of `chain` at or after `time` (a Unix second), by its timestamps: a guess from the head's time at
+ * the chain's block time, measured from its headers (blocktime.ts, once for each `rpc`), a bracket around it (each side
+ * stepped away from a minute of blocks, doubling, until it is on its side of `time`), then bisected. About two reads
+ * when the guess is right (and two more to measure), a handful more when blocks ran late; when the block time can't be
+ * read, a bracket up from block 0 (correct, in more reads). `head + 1` when no block is at `time` yet. */
+export async function blockAtOrAfter(rpc: Rpc, chain: ChainName, time: number, head: bigint, headTime: number): Promise<bigint> {
   const timeOf = async (n: bigint) => hexToNumber(((await rpc.request(chain, "eth_getBlockByNumber", [numberToHex(n), false])) as { timestamp: Hex }).timestamp);
   if (headTime < time) return head + 1n;
-  const back = BigInt(Math.floor((headTime - time) / secondsPerBlock));
+  const blockS = await blockTimeOf(rpc, chain, { block: head, time: headTime }).catch(() => undefined);
+  const back = blockS === undefined ? head : BigInt(Math.floor((headTime - time) / blockS));
   const guess = back < head ? head - back : 0n;
+  const first = blockS === undefined ? 1n : blocksIn(BLOCK_SEARCH_STEP_S, blockS);
   // lo is before `time` (or -1, before the chain); hi is at or after it
   let lo = guess - 1n;
   let hi = guess;
-  for (let step = BLOCK_SEARCH_STEP; hi < head && (await timeOf(hi)) < time; step *= 2n) {
+  for (let step = first; hi < head && (await timeOf(hi)) < time; step *= 2n) {
     lo = hi;
     hi = hi + step < head ? hi + step : head;
   }
-  for (let step = BLOCK_SEARCH_STEP; lo >= 0n && (await timeOf(lo)) >= time; step *= 2n) {
+  for (let step = first; lo >= 0n && (await timeOf(lo)) >= time; step *= 2n) {
     hi = lo;
     lo -= step;
   }
@@ -657,9 +660,10 @@ export async function trackMessage(ctx: Ctx, rec: DeploymentRecord, id: Hex, opt
     dst = "base";
   }
   if (!dst) {
-    // not one the keeper sent: look back over Base's last 1,000 blocks (about half an hour)
+    // not one the keeper sent: look back over Base's last half hour, in blocks at its block time (measured)
     const latest = hexToBigInt((await logsOf(ctx).request("base", "eth_blockNumber", [])) as Hex);
-    if ((await scanLogs(ctx, "base", a.baseAdapter, event(ADAPTER, "Sent"), latest - 1_000n, [id])).length) dst = "bittensor";
+    const back = blocksIn(1_800, await blockTimeOf(ctx.rpc, "base"));
+    if ((await scanLogs(ctx, "base", a.baseAdapter, event(ADAPTER, "Sent"), latest > back ? latest - back : 0n, [id])).length) dst = "bittensor";
   }
   if (!dst) throw new Error(`no bridge message ${id} was found from either adapter`);
   const offRamp = LIVE[dst].OFFRAMP;

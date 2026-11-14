@@ -117,6 +117,20 @@ describe("buildDigest", () => {
     expect(text).toContain("ticks: 900 run, 2 failed, 1 skipped");
   });
 
+  it("finds the day's logs a day by time back, at each chain's block time as measured: on Base's 200 ms blocks a close 20 hours ago is 360,000 blocks back", async () => {
+    await wipe(db);
+    const settled = 60_000_000n;
+    const close = (id: number, back: bigint) => slog({ contract: "frontDoor", event: "BatchClosed", block: settled - back, args: { id: String(id), totalDeposits: "0", nDeposits: "0", nRedeems: "0", fee: String(10n ** 15n), potUsed: "0" } });
+    const logs = [close(1, 360_000n), close(2, 1_000n), close(3, 500_000n)];
+    // the third is 27.8 hours old: past the day
+    await db.batch([...upsertLogs(db, logs), ...upsertBlocks(db, logs.map((l) => ({ chain: "base" as const, number: l.block, time: NOW - Math.floor(Number(settled - l.block) / 5) })))]);
+    const o = { db, nowS: NOW, hours: [], activeHolds: [], openAlerts: [], cursors: { base: cursor("base", settled) } };
+    const closed = async (meta: Record<string, string>) => (await buildDigest({ ...o, meta })).sections.flatMap((s) => s.lines).find((l) => l.startsWith("closed:"));
+    expect(await closed({ "block_s:base": "0.2" })).toBe("closed: 2");
+    // unmeasured: from block 0, the day cut by the blocks' times alone
+    expect(await closed({})).toBe("closed: 2");
+  });
+
   it("shows the share price in TAO per csTAO (csTAO has 24 decimals: price() 1e12 is 1 TAO)", async () => {
     await wipe(db);
     const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [], meta: {} };

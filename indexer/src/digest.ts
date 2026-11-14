@@ -1,4 +1,5 @@
 import { formatUnits } from "viem";
+import { lookbackFrom, storedBlockS } from "./blocktime.ts";
 import type { ChainName } from "./config.ts";
 import type { DigestContent } from "./email.ts";
 import type { BaseState, BitState, ChainReading, HourAgg } from "./snapshot.ts";
@@ -13,8 +14,10 @@ const dateOf = (nowS: number) => new Date(nowS * 1000).toISOString().slice(0, 10
 /** True until the digest for today (UTC) is recorded as sent. */
 export const digestDue = (meta: Readonly<Record<string, string>>, nowS: number): boolean => meta.digest_date !== dateOf(nowS);
 
-/** Blocks a day takes on each chain (Base 2 s, Bittensor 12 s), with room for slow blocks. */
-const DAY_BLOCKS: Record<ChainName, bigint> = { base: 64_800n, bittensor: 10_800n };
+/** How far back the day's logs are looked for: a day and a half of each chain's blocks from its settled block, at its block
+ * time as the tick last measured it (meta block_s:<chain>, src/blocktime.ts), room for slow blocks; the day itself is cut
+ * by the blocks' times. From block 0 while a block time is unknown. */
+const LOOKBACK_S = 1.5 * DAY;
 
 /** The day's logs of these kinds, with their block times. */
 const KINDS: { chain: ChainName; contract: string; event: string }[] = [
@@ -57,7 +60,7 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
         `SELECT l.args AS args, b.time AS time FROM logs l JOIN blocks b ON b.chain = l.chain AND b.number = l.block
          WHERE l.chain = ?1 AND l.contract = ?2 AND l.event = ?3 AND l.block >= ?4 AND l.removed = 0`,
       )
-      .bind(k.chain, k.contract, k.event, Number((i.cursors[k.chain]?.settledTo ?? DAY_BLOCKS[k.chain]) - DAY_BLOCKS[k.chain])),
+      .bind(k.chain, k.contract, k.event, Number(lookbackFrom(i.cursors[k.chain]?.settledTo ?? 0n, LOOKBACK_S, storedBlockS(i.meta, k.chain)))),
   );
   const rs = await i.db.batch<{ args: string; time: number }>(stmts);
   const day = (n: number) => rs[n].results.filter((r) => r.time >= since).map((r) => JSON.parse(r.args) as Record<string, string | number>);

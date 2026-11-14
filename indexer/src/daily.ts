@@ -1,5 +1,6 @@
 import { type Hex, hexToBigInt, hexToNumber, numberToHex } from "viem";
-import { APY_WINDOW_BLOCKS, basketTwrKey, decodeTwr, netApyPercent } from "./apy.ts";
+import { APY_WINDOW_S, basketTwrKey, decodeTwr, netApyPercent } from "./apy.ts";
+import { blocksIn, storedBlockS } from "./blocktime.ts";
 import { buildDigest, digestDue } from "./digest.ts";
 import { renderDigest, sendAll } from "./email.ts";
 import { type JobDeps, watchdog, type WatchdogResult } from "./hourly.ts";
@@ -15,15 +16,18 @@ import { dayOf, historyOf } from "./tick.ts";
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** The 30-day APY after the reward cut, the site's way (web/src/lib/cascade/reads.ts readApyPercent): the stake
- * hotkey's BasketTwr now and 216,000 blocks back, through the storage-query precompile, from an archive node.
- * Undefined when it can't be read or stood behind. */
-export async function readApy(rpc: Rpc, hotkey: Hex, rewardCutBps: number): Promise<number | undefined> {
+ * hotkey's BasketTwr now and 30 days back (in Bittensor's blocks at `blockS`, its block time as the tick measured it),
+ * through the storage-query precompile, from an archive node. Undefined when it can't be read or stood behind, or the
+ * block time is unknown. */
+export async function readApy(rpc: Rpc, hotkey: Hex, rewardCutBps: number, blockS: number | undefined): Promise<number | undefined> {
+  if (blockS === undefined) return undefined;
   try {
     const head = (await rpc.call("bittensor", "eth_getBlockByNumber", ["latest", false])) as { number?: Hex; timestamp?: Hex } | null;
     if (!head?.number || !head.timestamp) return undefined;
     const now = hexToBigInt(head.number);
-    if (now <= APY_WINDOW_BLOCKS) return undefined;
-    const then = now - APY_WINDOW_BLOCKS;
+    const back = blocksIn(APY_WINDOW_S, blockS);
+    if (now <= back) return undefined;
+    const then = now - back;
     const key = basketTwrKey(hotkey);
     const [twrNow, twrThen, thenBlock] = await rpc.batch("bittensor", [
       { method: "eth_call", params: [{ to: STORAGE_QUERY, data: key }, numberToHex(now)] },
@@ -64,7 +68,7 @@ export async function runDaily(deps: DailyDeps): Promise<{ watchdog: WatchdogRes
   const bit = history.bittensor[0];
   const rpc = createRpc({ urls: { base: cfg.rpc.base, baseLogs: cfg.rpc.baseLogs, bittensor: cfg.rpc.bittensor }, fetch: deps.fetch, budget: new Budget(6), timeoutMs: 15_000 });
   const hotkey = bit?.state.stakeHotkey ?? cfg.deployment.stakeHotkey;
-  const apyPercent = bit?.state.rewardCutBps === undefined ? undefined : await readApy(rpc, hotkey, bit.state.rewardCutBps);
+  const apyPercent = bit?.state.rewardCutBps === undefined ? undefined : await readApy(rpc, hotkey, bit.state.rewardCutBps, storedBlockS(state.meta, "bittensor"));
   let content: Awaited<ReturnType<typeof buildDigest>>;
   try {
     content = await buildDigest({

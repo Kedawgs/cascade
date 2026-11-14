@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { runDaily } from "../../src/daily.ts";
+import { numberToHex } from "viem";
+import { readApy, runDaily } from "../../src/daily.ts";
+import type { Rpc } from "../../src/rpc.ts";
 import { runHourly, watchdog } from "../../src/hourly.ts";
 import { insertReading, setMeta, upsertHour } from "../../src/store.ts";
 import { wipe } from "./d1-count.ts";
@@ -104,5 +106,38 @@ describe("the daily job", () => {
     expect((await runDaily(deps(lastTick + 120))).digest).toBe("already");
     expect(w.sent).toHaveLength(1);
     expect((await runDaily(deps(lastTick + 86400))).digest).toBe("sent");
+  });
+});
+
+describe("the digest's APY", () => {
+  /** A Bittensor archive at `blockS` seconds a block, head `head` at T0, BasketTwr 1.0 thirty days before T0 and 1.004 at the head. */
+  const archive = (blockS: number, head = 2_000_000n) => {
+    const asked: bigint[] = [];
+    const timeOf = (n: bigint) => T0 - Math.round(Number(head - n) * blockS);
+    const twr = (n: bigint) => {
+      const v = T0 - timeOf(n) <= 30 * 86_400 - 60 ? (1_004n * 2n ** 64n) / 1_000n : 2n ** 64n;
+      return `0x${Array.from({ length: 16 }, (_, i) => ((v >> BigInt(8 * i)) & 0xffn).toString(16).padStart(2, "0")).join("")}`;
+    };
+    const rpc = {
+      call: async () => ({ number: numberToHex(head), timestamp: numberToHex(T0) }),
+      batch: async (_c: string, calls: { method: string; params: unknown[] }[]) =>
+        calls.map((c) => {
+          const n = BigInt(c.params[c.method === "eth_call" ? 1 : 0] as string);
+          asked.push(n);
+          return c.method === "eth_call" ? (n === head ? twr(head) : twr(n - 1n)) : { timestamp: numberToHex(timeOf(n)) };
+        }),
+    } as unknown as Rpc;
+    return { rpc, asked };
+  };
+
+  it("reads BasketTwr 30 days back by time, in blocks at Bittensor's block time as measured; none while that is unknown", async () => {
+    const twelve = archive(12);
+    expect(await readApy(twelve.rpc, `0x${"aa".repeat(32)}`, 0, 12)).toBeGreaterThan(4);
+    expect(twelve.asked).toEqual([2_000_000n, 2_000_000n - 216_000n, 2_000_000n - 216_000n]);
+    // at 6 s a block the 30 days are 432,000 blocks back
+    const six = archive(6);
+    expect(await readApy(six.rpc, `0x${"aa".repeat(32)}`, 0, 6)).toBeGreaterThan(4);
+    expect(six.asked[1]).toBe(2_000_000n - 432_000n);
+    expect(await readApy(six.rpc, `0x${"aa".repeat(32)}`, 0, undefined)).toBeUndefined();
   });
 });

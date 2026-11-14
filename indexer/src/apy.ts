@@ -7,9 +7,9 @@ import { bytesToHex, type Hex, hexToBytes } from "viem";
 
 /** twox128("SubtensorModule") ++ twox128("BasketTwr") (U64F64, starts at 1.0). */
 export const BASKET_TWR_PREFIX = "0x658faa385070e074c85bf6b568cf055520ccbf191cee8f588773f27f973f3186";
-/** 30 days of 12-second blocks. */
-export const APY_WINDOW_BLOCKS = 216_000n;
-/** The figure is labelled "the last 30 days": a window that far off it (a block-time change) isn't shown. */
+/** The window: 30 days, read back in Bittensor's blocks at its block time as measured (src/blocktime.ts). */
+export const APY_WINDOW_S = 30 * 86_400;
+/** The figure is labelled "the last 30 days": a window that far off it (a block-time change since the measure) isn't shown. */
 const MIN_WINDOW_S = 27 * 86_400;
 const MAX_WINDOW_S = 33 * 86_400;
 /** The keeper claims and restakes rewards about once a month. */

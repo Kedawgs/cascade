@@ -370,8 +370,9 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
       // the registry scan: no registry events since the deployment
       if (method === "eth_blockNumber") return numberToHex(100);
       if (method === "eth_getLogs") return [];
-      // headers 200 ms apart up to the fake head, block 100: the pools' history is judged at Base's block time, measured
-      if (method === "eth_getBlockByNumber") return headers(0.2, 100)(chain, params);
+      // headers up to the fake head, block 100, at Base's old 2 s and Bittensor's 12 s: the pools' history (901 slots) and
+      // the registry scan's settle margin (60 s and 120 s: 30 and 10 blocks) at each chain's block time, measured
+      if (method === "eth_getBlockByNumber") return headers(chain === "base" ? 2 : 12, 100)(chain, params);
       if (method !== "eth_call") throw new Error(`unexpected ${method}`);
       const { to, data } = params[0] as { to: Address; data: Hex };
       const fn = fns.find((f) => toFunctionSelector(f) === data.slice(0, 10));

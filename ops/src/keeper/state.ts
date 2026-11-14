@@ -19,7 +19,7 @@ import { balanceOf, codeAt, gasPriceOf, isRevert, nonceOf, read, RpcError } from
 import { type Ctx, describeRevert, logsOf, replaceCall, type Sent, sendCall, signerOf } from "../send.ts";
 import type { Rpc } from "../rpc.ts";
 import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
-import { blocksIn, blockTimeOf } from "./blocktime.ts";
+import { blocksIn, blockTimeOf, marginBlocks } from "./blocktime.ts";
 import { encodeBatch, type Entry } from "./batch.ts";
 import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
 import { type CloseEconomics, closeEconomicsOf, closesWithoutFees, type State } from "./due.ts";
@@ -159,13 +159,22 @@ export async function blockAtOrAfter(rpc: Rpc, chain: ChainName, time: number, h
   }
   return hi;
 }
-/** Each later scan of an event starts this many blocks before the last head it reached, so a log a
- * lagging (load-balanced) node or a reorg hid is found on a later round; still one query a round (about
- * 70 + 30 new blocks of Base's 100-block window, 400 + 5 of Bittensor's 1,000). */
-const REREAD: Record<ChainName, bigint> = { base: 70n, bittensor: 400n };
-/** Logs this close to the head are returned but not kept: they are read again next round, so one from a
- * block that is then dropped never sticks. */
-const SETTLE: Record<ChainName, bigint> = { base: 30n, bittensor: 10n };
+/** Each later scan of an event starts this long of the chain's blocks before the last head it reached, so a log a
+ * lagging (load-balanced) node or a reorg hid is found on a later round: 140 s of Base's blocks (700 of its 200 ms ones
+ * since block 53,556,128) and 4,800 s of Bittensor's (400 of its 12 s), what 70 and 400 blocks meant on Base's
+ * 2-second blocks. Still one query a round on the live logs server's 10,000-block window (Bittensor's 1,000: 400 + 5).
+ * In blocks at each chain's block time, measured (marginsOf). The indexer's are the same (a test holds them equal). */
+export const REREAD_S: Record<ChainName, number> = { base: 140, bittensor: 4_800 };
+/** Logs this close to the head, in time, are returned but not kept: they are read again next round, so one from a
+ * block that is then dropped (a reorg) never sticks: 60 s of Base's blocks (300 of its 200 ms ones), 120 s of
+ * Bittensor's (10). */
+export const SETTLE_S: Record<ChainName, number> = { base: 60, bittensor: 120 };
+
+/** REREAD_S and SETTLE_S in `chain`'s blocks now: at its block time measured from `rpc`'s headers (read once for each
+ * `rpc`), or at the block times they were set at while that can't be read (blocktime.ts marginBlocks). */
+export async function marginsOf(rpc: Rpc, chain: ChainName): Promise<{ reread: bigint; settle: bigint }> {
+  return { reread: await marginBlocks(rpc, chain, REREAD_S[chain]), settle: await marginBlocks(rpc, chain, SETTLE_S[chain]) };
+}
 
 /** Each log with an id from its transaction and content, numbered when one transaction logs the same
  * thing twice: the same in every read of its block, and the same when a reorg mines the transaction
@@ -242,7 +251,7 @@ export function startBlock(rec: DeploymentRecord): bigint {
  * last blocks, when its fees decide its close (its public RPC allows 200 blocks a query): bridge messages
  * come from the record, which the keeper fills as it sends. The vault's payout events (and with them the
  * delivery candidates) and the open batch's deposits are kept for the life of these deps (one `run`
- * loop), so each round scans only the blocks since the last, and some before them (REREAD). */
+ * loop), so each round scans only the blocks since the last, and some before them (REREAD_S). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
   /** Who the keeper's sends come from (the context's signer: keeperSigner), whose nonces, balances and
@@ -251,10 +260,10 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
-  /** One event's logs found so far, for the life of these deps. Each call scans to the head from REREAD
+  /** One event's logs found so far, for the life of these deps. Each call scans to the head from REREAD_S of
    * blocks before the last head it reached (the first time from `first(head)`, and never before it), and
-   * moves on only once the whole range is in, so a failed scan is retried. Logs SETTLE blocks below the
-   * head are kept; nearer ones are returned and read again next round. */
+   * moves on only once the whole range is in, so a failed scan is retried. Logs SETTLE_S of blocks below the
+   * head are kept; nearer ones are returned and read again next round (marginsOf: at the chain's block time). */
   function logCursor(chain: ChainName, address: Address, ev: AbiEvent, topics: (Hex | null)[] = []) {
     const kept: ScannedLog[] = [];
     const seen = new Set<string>();
@@ -263,13 +272,14 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       // the head from the server the logs come from
       const head = hexToBigInt((await logsOf(ctx).request(chain, "eth_blockNumber", [])) as Hex);
       const earliest = await first(head);
-      const back = scannedTo === undefined ? earliest : scannedTo + 1n - REREAD[chain];
+      const { reread, settle } = await marginsOf(logsOf(ctx), chain);
+      const back = scannedTo === undefined ? earliest : scannedTo + 1n - reread;
       const from = back > earliest ? back : earliest;
       const fresh: ScannedLog[] = [];
       if (from <= head) {
         for (const [id, l] of identified(await scanLogs(ctx, chain, address, ev, from, topics, head))) {
           if (seen.has(id)) continue;
-          if (l.blockNumber + SETTLE[chain] <= head) {
+          if (l.blockNumber + settle <= head) {
             seen.add(id);
             kept.push(l);
           } else fresh.push(l);
@@ -289,7 +299,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   let redeemedLogs = vaultLogs("Redeemed");
   /** Payout batches the vault has deleted (paid out or cancelled), not read again for the life of these
    * deps. A batch reads count 0 both once deleted and on a node not yet showing its queue, so it is taken
-   * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
+   * for deleted only when its queue is REREAD_S of blocks deep, further behind than the scans allow a node. */
   const deleted = new Set<string>();
 
   async function messageState(m: { id: Hex; direction: Message["direction"] }): Promise<string> {
@@ -322,13 +332,14 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const balance = await balanceOf(ctx.rpc, "bittensor", a.vault);
       const payoutDelay = Number(await r("bittensor", a.vault, VAULT, "payoutDelay"));
       const { logs: queued, head } = await queuedLogs();
+      const { reread } = await marginsOf(logsOf(ctx), "bittensor");
       const batches = [];
       for (const q of queued) {
         const key = q.args.key as Hex;
         if (deleted.has(key.toLowerCase())) continue;
         const b = (await r("bittensor", a.vault, VAULT, "getPayoutBatch", [key])) as { queuedAt: bigint; cursor: number; count: number };
         if (b.count > 0) batches.push({ key, queuedAt: Number(b.queuedAt), cursor: b.cursor, count: b.count });
-        else if (q.blockNumber + REREAD.bittensor <= head) deleted.add(key.toLowerCase());
+        else if (q.blockNumber + reread <= head) deleted.add(key.toLowerCase());
       }
       const block = (await ctx.rpc.request("bittensor", "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;

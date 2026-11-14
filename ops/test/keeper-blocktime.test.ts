@@ -1,8 +1,8 @@
 import { encodeAbiParameters, encodeEventTopics, type Hex, numberToHex, padHex, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
 import type { ChainName } from "../src/config.ts";
-import { BLOCK_TIME_SPAN, blocksIn, blockTimeOf, secondsPerBlock } from "../src/keeper/blocktime.ts";
-import { blockAtOrAfter, KEEPER_READ_ABIS, trackMessage } from "../src/keeper/state.ts";
+import { BLOCK_TIME_SPAN, blocksIn, blockTimeOf, MARGIN_FALLBACK_S, secondsPerBlock } from "../src/keeper/blocktime.ts";
+import { blockAtOrAfter, KEEPER_READ_ABIS, marginsOf, REREAD_S, SETTLE_S, trackMessage } from "../src/keeper/state.ts";
 import type { Rpc } from "../src/rpc.ts";
 import { fakeChain, v3Record } from "./fake-keeper.ts";
 
@@ -72,6 +72,29 @@ describe("a chain's block time, from its headers", () => {
     expect(secondsPerBlock({ block: 5n, time: 10 }, { block: 5n, time: 20 })).toBeUndefined();
     expect(blocksIn(1_800, 0.2)).toBe(9_000n);
     expect(blocksIn(60, 12)).toBe(5n);
+  });
+});
+
+describe("the keeper's re-read and settle margins, in time", () => {
+  it("re-read 140 s and settle 60 s of Base's blocks at its measured block time (700 and 300 of its 200 ms blocks), 4,800 s and 120 s of Bittensor's (400 and 10 of its 12 s)", async () => {
+    expect(REREAD_S).toEqual({ base: 140, bittensor: 4_800 });
+    expect(SETTLE_S).toEqual({ base: 60, bittensor: 120 });
+    expect(await marginsOf(chain(0.2).rpc, "base")).toEqual({ reread: 700n, settle: 300n });
+    // what they always were on Base's 2-second blocks
+    expect(await marginsOf(chain(2).rpc, "base")).toEqual({ reread: 70n, settle: 30n });
+    expect(await marginsOf(chain(12).rpc, "bittensor")).toEqual({ reread: 400n, settle: 10n });
+  });
+
+  it("are counted at the block times they were set at (Base's 2 s, Bittensor's 12 s) while a chain's own can't be read", async () => {
+    const flat: Rpc = {
+      async request(_c, _m, params) {
+        const n = params[0] === "latest" ? 5_000n : BigInt(params[0] as Hex);
+        return { number: numberToHex(n), timestamp: numberToHex(7) };
+      },
+    };
+    expect(MARGIN_FALLBACK_S).toEqual({ base: 2, bittensor: 12 });
+    expect(await marginsOf(flat, "base")).toEqual({ reread: 70n, settle: 30n });
+    expect(await marginsOf(flat, "bittensor")).toEqual({ reread: 400n, settle: 10n });
   });
 });
 

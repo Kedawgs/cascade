@@ -61,3 +61,15 @@ export function blockTimeOf(rpc: Rpc, chain: ChainName, head?: BlockAt): Promise
 
 /** The blocks `chain` makes in `seconds` at `blockS` seconds a block, rounded up. */
 export const blocksIn = (seconds: number, blockS: number): bigint => BigInt(Math.ceil(seconds / blockS));
+
+/** The block time a margin (keeper/state.ts REREAD_S and SETTLE_S, registry.ts's; the indexer's the same) is counted at
+ * while a chain's own can't be read: the block times the margins were set at, Base's 2 s (until block 53,556,128) and
+ * Bittensor's 12 s, so they count the blocks they always did then; the next read that measures it re-reads the full
+ * depth. */
+export const MARGIN_FALLBACK_S: Record<ChainName, number> = { base: 2, bittensor: 12 };
+
+/** `seconds` of `chain`'s blocks at its block time measured from `rpc`'s headers (blockTimeOf), or at MARGIN_FALLBACK_S
+ * while that can't be read. Never throws. */
+export async function marginBlocks(rpc: Rpc, chain: ChainName, seconds: number): Promise<bigint> {
+  return blocksIn(seconds, await blockTimeOf(rpc, chain).catch(() => MARGIN_FALLBACK_S[chain]));
+}

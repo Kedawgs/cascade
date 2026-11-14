@@ -8,9 +8,9 @@ import { bytesToHex, type Hex, hexToBytes } from "viem";
 export const BASKET_TWR_PREFIX = "0x658faa385070e074c85bf6b568cf055520ccbf191cee8f588773f27f973f3186";
 /** Bittensor's storage-query precompile: any SubtensorModule value, at any block an archive node keeps. */
 export const STORAGE_QUERY = "0x0000000000000000000000000000000000000807";
-/** 30 days of 12-second blocks. */
-export const APY_WINDOW_BLOCKS = 216_000n;
-/** The figure is labelled "the last 30 days": a window that far off it (a block-time change) isn't shown. */
+/** The window: 30 days, read back in Bittensor's blocks at its block time as measured (blocktime.ts). */
+export const APY_WINDOW_S = 30 * 86_400;
+/** The figure is labelled "the last 30 days": a window that far off it (a block-time change since the measure) isn't shown. */
 const MIN_WINDOW_S = 27 * 86_400;
 const MAX_WINDOW_S = 33 * 86_400;
 /** The keeper claims and restakes rewards about once a month. */

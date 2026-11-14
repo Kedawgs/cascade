@@ -3,7 +3,8 @@ import { freshTip } from "./fresh";
 import { isFull, SEND_GRACE_S } from "../batch-clock";
 import { closeEconomicsOf } from "../send-now";
 import { ADAPTER, ALPHA_VAULT_ABI, ERC20, FRONT_DOOR, MULTICALL3_ABI, QUOTER, STAKER, STAKING, STAKING_ADDRESS, TWAP_ORACLE, VAULT } from "./abi";
-import { APY_WINDOW_BLOCKS, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
+import { APY_WINDOW_S, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
+import { BLOCK_SPAN, blockMsOf, blocksIn } from "./blocktime";
 import type { Clients } from "./chain";
 import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
 import type { NextBatch, OpenBatch } from "./types";
@@ -521,9 +522,13 @@ export async function readApyPercent(c: Pick<Clients, "bittensorHistory">, d: De
     readRewardCutBps({ bittensor: chain }, d),
     chain.getBlock(),
   ]);
-  if (head.number <= APY_WINDOW_BLOCKS) return undefined;
+  // 30 days back in Bittensor's blocks at its block time as measured (blocktime.ts); none while it can't be read
+  const ms = await blockMsOf(chain, BLOCK_SPAN.bittensor, head).catch(() => undefined);
+  if (ms === undefined) return undefined;
+  const back = blocksIn(APY_WINDOW_S * 1000, ms);
+  if (head.number <= back) return undefined;
   const key = basketTwrKey(hotkey);
-  const thenNumber = head.number - APY_WINDOW_BLOCKS;
+  const thenNumber = head.number - back;
   const [now, then, thenBlock] = await Promise.all([
     chain.call({ to: STORAGE_QUERY, data: key, blockNumber: head.number }),
     chain.call({ to: STORAGE_QUERY, data: key, blockNumber: thenNumber }),

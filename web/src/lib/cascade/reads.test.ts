@@ -201,8 +201,8 @@ describe("readApyPercent", () => {
   const ONE = 2n ** 64n;
   const le = (bits: bigint) => `0x${Array.from({ length: 16 }, (_, k) => ((bits >> BigInt(8 * k)) & 0xffn).toString(16).padStart(2, "0")).join("")}`;
 
-  /** An archive node: 12-second blocks, a BasketTwr value per block number. */
-  function archive(twr: Record<string, string>, head = 9_400_000n) {
+  /** An archive node: `blockS`-second blocks (12), a BasketTwr value per block number. */
+  function archive(twr: Record<string, string>, head = 9_400_000n, blockS = 12n) {
     const calls: { to: string; data: string; blockNumber: bigint }[] = [];
     const client = {
       async readContract({ functionName }: { functionName: string }) {
@@ -210,7 +210,7 @@ describe("readApyPercent", () => {
       },
       async getBlock(args: { blockNumber?: bigint } = {}) {
         const number = args.blockNumber ?? head;
-        return { number, timestamp: 1_800_000_000n - (head - number) * 12n };
+        return { number, timestamp: 1_800_000_000n - (head - number) * blockS };
       },
       async call(a: { to: string; data: string; blockNumber: bigint }) {
         calls.push(a);
@@ -226,6 +226,12 @@ describe("readApyPercent", () => {
     expect(calls.map((c) => c.blockNumber)).toEqual([9_400_000n, 9_184_000n]);
     expect(calls.every((c) => c.to === STORAGE_QUERY && c.data === basketTwrKey(HOTKEY))).toBe(true);
     expect(apy).toBeCloseTo(4.469, 3);
+  });
+
+  it("reads 30 days back by time, at Bittensor's block time as measured from two spans of its headers: at 6 s a block, 432,000 blocks", async () => {
+    const { client, calls } = archive({ "9400000": le((ONE * 1004n) / 1000n), "8968000": le(ONE) }, 9_400_000n, 6n);
+    expect(await readApyPercent({ bittensorHistory: client }, D3)).toBeCloseTo(4.469, 3);
+    expect(calls.map((c) => c.blockNumber)).toEqual([9_400_000n, 8_968_000n]);
   });
 
   it("has nothing to show before there are 30 days of chain, or without a series", async () => {

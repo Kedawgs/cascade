@@ -1,4 +1,5 @@
 import { encodeAbiParameters, encodeEventTopics, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
+import { baseHeaders } from "./__fixtures__/base-blocks";
 import { describe, expect, it, vi } from "vitest";
 import { FRONT_DOOR, VAULT } from "./abi";
 import type { Deployment } from "./config";
@@ -687,6 +688,7 @@ describe("unstakes sharing a batch", () => {
           },
           getTransactionCount: async () => o.nonce ?? 0,
           getBlockNumber: async () => HEAD,
+          getBlock: baseHeaders(HEAD),
         },
         baseLogs: {
           request: async ({ method, params }: { method: string; params?: { fromBlock: `0x${string}`; toBlock: `0x${string}` }[] }) => {

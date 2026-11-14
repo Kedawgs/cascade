@@ -17,7 +17,7 @@ export class StaleChainError extends Error {
 
 const clockOffsets = new WeakMap<object, { offsetMs: number; at: number }>();
 
-/** Now, by Base's clock (a block every 2 seconds) rather than the device's: a device clock that is
+/** Now, by Base's clock (its newest block's time: a block every 200 ms) rather than the device's: a device clock that is
  * minutes off must not make a healthy node look stale, or a stale one healthy. The device clock is the
  * fallback when Base can't be read. */
 async function chainNowMs(c: Partial<Pick<Clients, "base">>): Promise<number> {

@@ -1,4 +1,5 @@
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpRequestError, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
+import { baseHeaders } from "./__fixtures__/base-blocks";
 import { describe, expect, it } from "vitest";
 import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import { CLOCK_AHEAD_MS, type Deployment } from "./config";
@@ -989,6 +990,8 @@ describe("v3: what happened to a payout once it was back on Base", () => {
       pref?: readonly [bigint, bigint, number];
       sale?: bigint;
       d?: Deployment;
+      /** Base's seconds a block (2, as these tests were written; 0.2 since block 53,556,128) */
+      blockS?: number;
     } = {},
   ) {
     const c = chains({
@@ -1000,7 +1003,9 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     const reads: string[] = [];
     const base = c.clients as unknown as { base: Record<string, unknown> };
     base.base.getBlock = async (q: { blockTag?: string; blockNumber?: bigint }) =>
-      q.blockTag === "latest" ? { number: HEAD, timestamp: BigInt(TIP_S) } : { number: q.blockNumber, timestamp: BigInt(baseTime(q.blockNumber!).getTime() / 1000) };
+      q.blockTag === "latest"
+        ? { number: HEAD, timestamp: BigInt(TIP_S) }
+        : { number: q.blockNumber, timestamp: BigInt(opts.blockS === undefined ? baseTime(q.blockNumber!).getTime() / 1000 : TIP_S - Math.floor(Number(HEAD - q.blockNumber!) * opts.blockS)) };
     base.base.readContract = async ({ functionName }: { functionName: string }) => {
       reads.push(functionName);
       if (functionName === "getExecutionState") return 2;
@@ -1072,6 +1077,16 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     const [, mine] = encodeEventTopics({ abi: FRONT_DOOR, eventName: "Delivered", args: { user: ME } });
     expect(b.asked[0]).toEqual({ address: D.frontDoor, topics: [[sig("PayoutReceived"), sig("Delivered"), sig("Claimed")], [KEY, mine]] });
     expect(b.reads).not.toContain("deliveryOf");
+  });
+
+  it("counts the time since the payout left Bittensor in Base's blocks at its block time as measured: on its 200 ms blocks a landing 2.5 hours ago is 45,000 blocks back, found", async () => {
+    const b = backOnBase({ blockS: 0.2, logs: [landedFor(ME, HEAD - 45_000n), deliveredUsdc(2_431_337n, HEAD - 44_990n, H(62))] });
+    const f = await factsOf(b);
+    expect(f.traceFailed).toBeUndefined();
+    expect(f.credited?.taoWei).toBe(TAO_BACK);
+    expect(f.usdcDelivered?.hash).toBe(H(62));
+    // three hours of 200 ms blocks back from the head, and five minutes more (on the old 2-second count: 5,550)
+    expect(b.windows[0][0]).toBe(HEAD - 54_000n - 1_500n);
   });
 
   it("takes a claim by hand after the payout landed as its end: a later delivery belongs to another payout", async () => {
@@ -1259,6 +1274,8 @@ describe("the batch an unstake request with no receipt joined", () => {
     logs?: ReturnType<typeof redeemRequested>[];
     logsDown?: boolean;
     logsHead?: bigint;
+    /** Base's seconds a block (2, as these tests were written; 0.2 today) */
+    blockS?: number;
   }) {
     const windows: [bigint, bigint][] = [];
     const asked: unknown[] = [];
@@ -1278,6 +1295,7 @@ describe("the batch an unstake request with no receipt joined", () => {
         return o.nonce ?? 0;
       },
       getBlockNumber: async () => HEAD,
+      getBlock: baseHeaders(HEAD, 1_800_000_000, o.blockS),
     };
     const baseLogs = {
       request: async ({ method, params }: { method: string; params?: { address: string; topics: (Hex | null)[]; fromBlock: Hex; toBlock: Hex }[] }) => {
@@ -1364,6 +1382,14 @@ describe("the batch an unstake request with no receipt joined", () => {
     expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 30n - 150n);
     // the window is still open: the newest couple of blocks are read next time
     expect(b.windows.at(-1)![1]).toBe(HEAD - 2n);
+  });
+
+  it("counts the time since it was sent in Base's blocks at its block time as measured: on its 200 ms blocks a speed-up mined 2 hours 50 minutes ago (51,000 blocks back) is found", async () => {
+    const logs = [redeemRequested(ME, SHARES, 7n, HEAD - 51_000n, H(88))];
+    const b = onBase({ logs, blockS: 0.2 });
+    expect(await place(b, { sentAt: NOW - 3 * HOUR })).toEqual({ batchId: 7n, replacedBy: H(88) });
+    // three hours of 200 ms blocks back, and five minutes more (on the old 2-second count: 5,550, which missed it)
+    expect(b.windows[0][0]).toBe(HEAD - 54_000n - 1_500n);
   });
 
   it("is dropped once the whole two days after it was sent are read and hold nothing in its place: another amount, another account's, or one another record owns", async () => {
@@ -1472,7 +1498,7 @@ describe("finding a v3 stake that went through before its hash was recorded", ()
     );
 
   /** Base's logs RPC: eth_blockNumber (successive answers from `heads`, the last repeated) and topic-filtered eth_getLogs. */
-  function logsRpc(opts: { logs?: ReturnType<typeof staked>[]; heads?: bigint[]; fail?: boolean; baseHead?: bigint }) {
+  function logsRpc(opts: { logs?: ReturnType<typeof staked>[]; heads?: bigint[]; fail?: boolean; baseHead?: bigint; blockS?: number }) {
     const windows: [bigint, bigint][] = [];
     const asked: unknown[] = [];
     let headCalls = 0;
@@ -1488,7 +1514,7 @@ describe("finding a v3 stake that went through before its hash was recorded", ()
         return (opts.logs ?? []).filter((l) => l.blockNumber >= from && l.blockNumber <= to);
       },
     };
-    const base = { getBlockNumber: async () => opts.baseHead ?? HEAD };
+    const base = { getBlockNumber: async () => opts.baseHead ?? HEAD, getBlock: baseHeaders(opts.baseHead ?? HEAD, NOW / 1000, opts.blockS) };
     return { clients: { base, baseLogs } as never, windows, asked };
   }
   // made two hours ago: 3,600 Base blocks
@@ -1510,6 +1536,13 @@ describe("finding a v3 stake that went through before its hash was recorded", ()
       address: STAKER_AT,
       topics: encodeEventTopics({ abi: STAKER, eventName: "Staked", args: { payer: ME, beneficiary: ME } }),
     });
+  });
+
+  it("counts the time back in Base's blocks at its block time as measured: on its 200 ms blocks a stake an hour and a half old is 27,000 blocks back, found", async () => {
+    const rpc = logsRpc({ logs: [staked(ME, 20_000_000n, HEAD - 27_000n, H(52))], blockS: 0.2 });
+    expect(await find(rpc)).toBe(H(52));
+    // two hours, a day more, and five minutes, of 200 ms blocks
+    expect(rpc.windows[0][0]).toBe(HEAD - BigInt((7_200_000 + CLOCK_AHEAD_MS + 300_000) / 200));
   });
 
   it("still finds the stake after the device's clock was put back: a record dated after now is searched for a day and more back, never only the margin", async () => {
@@ -1556,7 +1589,7 @@ describe("the open batch's deposits the staker made, as the keeper counts them",
       block,
       H(Number(block % 1_000n)),
     );
-  function logsRpc(logs: ReturnType<typeof requested>[], fail = false) {
+  function logsRpc(logs: ReturnType<typeof requested>[], fail = false, blockS = 2) {
     const windows: [bigint, bigint][] = [];
     const asked: unknown[] = [];
     const baseLogs = {
@@ -1570,7 +1603,7 @@ describe("the open batch's deposits the staker made, as the keeper counts them",
         return logs.filter((l) => l.blockNumber >= from && l.blockNumber <= to);
       },
     };
-    return { clients: { base: { getBlockNumber: async () => HEAD }, baseLogs } as never, windows, asked };
+    return { clients: { base: { getBlockNumber: async () => HEAD, getBlock: baseHeaders(HEAD, 1_800_000_000, blockS) }, baseLogs } as never, windows, asked };
   }
 
   it("counts the batch's deposits the staker paid for, and their TAO, back to the batch's start", async () => {
@@ -1588,6 +1621,13 @@ describe("the open batch's deposits the staker made, as the keeper counts them",
     // up to two blocks short of the head, as Base's other scans read
     expect(rpc.asked[0]).toEqual({ address: D.frontDoor, topics: encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId: 7n } }) });
     expect(rpc.windows).toEqual([[HEAD - 2n - 450n, HEAD - 2n]]);
+  });
+
+  it("counts the batch's age in Base's blocks at its block time as measured: ten minutes and five more of 200 ms blocks, four seconds of them left for the next read", async () => {
+    const rpc = logsRpc([requested(7n, ME, 10n ** 17n, STAKER_AT, HEAD - 3_000n), requested(7n, ME, 10n ** 17n, STAKER_AT, HEAD - 4_400n)], false, 0.2);
+    expect(await stakerDepositsIn(rpc.clients, D3, 7n, 600)).toEqual({ count: 2, tao: 2n * 10n ** 17n });
+    expect(rpc.windows[0][0]).toBe(HEAD - 20n - 4_500n);
+    expect(rpc.windows.at(-1)![1]).toBe(HEAD - 20n);
   });
 
   it("leaves Base's newest two blocks for the next read: one still being made or replaced is read then", async () => {

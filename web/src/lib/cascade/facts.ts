@@ -1,6 +1,7 @@
 import { type Address, encodeEventTopics, type Hex, parseEventLogs, toHex } from "viem";
 import { FRESH_TRIES, freshTip, StaleChainError } from "./fresh";
 import { ADAPTER, ERC20, FRONT_DOOR, OFFRAMP_ABI, STAKER, VAULT } from "./abi";
+import { BLOCK_SPAN, blockMsOf, blocksIn } from "./blocktime";
 import type { Clients } from "./chain";
 import { batchCloseAt, CLOCK_AHEAD_MS, type Deployment, explorer, isV3, OFFRAMP, TOKENS } from "./config";
 import type { ClaimOp, DepositOp, WithdrawalOp } from "./oplog";
@@ -1122,10 +1123,12 @@ export async function claimWentThrough(c: Pick<Clients, "base">, k: Pick<ClaimOp
 
 /** Base log windows on RPC.baseLogs: at most 2,000 blocks. */
 const BASE_LOG_WINDOW = 2_000n;
-/** Base makes a block every 2 seconds. */
-const BASE_BLOCK_MS = 2_000;
-/** How far before a record's creation a search for its stake starts: 5 minutes of blocks. */
-const STAKE_SEARCH_MARGIN = 150n;
+/** Base's milliseconds a block, measured from its headers (blocktime.ts: 200 ms since block 53,556,128, 2 s before), once
+ * a client and again after an hour: every search below turns its times into blocks at it. */
+const baseMs = (c: Pick<Clients, "base">, tip?: { number: bigint; timestamp: bigint }) => blockMsOf(c.base, BLOCK_SPAN.base, tip);
+/** How far before a record's creation (or a payout's leaving Bittensor) a search on Base starts: 5 minutes of its blocks. */
+const SEARCH_MARGIN_MS = 300_000;
+const searchMargin = (blockMs: number) => blocksIn(SEARCH_MARGIN_MS, blockMs);
 
 /** One window of Base logs, taken only from a server that has reached the window's end: the logs and
  * the server's head travel in one request (see windowLogs), so "no logs" from a server that is behind
@@ -1141,10 +1144,13 @@ async function baseWindowLogs(c: Pick<Clients, "baseLogs">, filter: { address: A
   throw new Error("Base's log server is behind right now");
 }
 
-/** How far before a payout left Bittensor its search on Base starts, for the two chains' clocks: 5 minutes of blocks. */
-const PAYOUT_SEARCH_MARGIN = 150n;
-/** Base's newest blocks are left for the next read: one still being made or replaced is read then. */
-const BASE_SETTLE = 2n;
+/** Base's newest blocks are left for the next read: four seconds of them (one still being made or replaced is read then). */
+const BASE_SETTLE_MS = 4_000;
+/** `head` less BASE_SETTLE_MS of Base's blocks, at its block time as measured. */
+async function settledBase(c: Pick<Clients, "base">, head: bigint, tip?: { number: bigint; timestamp: bigint }): Promise<bigint> {
+  const settle = blocksIn(BASE_SETTLE_MS, await baseMs(c, tip));
+  return head > settle ? head - settle : 0n;
+}
 
 type LogPos = { block: bigint; index: number };
 /** Where a log sits on Base. Raw JSON-RPC logs carry hex strings, decoded ones numbers. */
@@ -1193,12 +1199,13 @@ async function readPayout(c: Pick<Clients, "base" | "baseLogs">, d: Deployment, 
     c.base.getBlock({ blockTag: "latest" }),
   ]);
   if (t.next === undefined) {
-    // counted back from Base's newest block by its own clock, not the device's
-    const back = BigInt(Math.ceil(Math.max(0, Number(tip.timestamp) * 1000 - s.sentAt.getTime()) / BASE_BLOCK_MS)) + PAYOUT_SEARCH_MARGIN;
+    // counted back from Base's newest block by its own clock, not the device's, at its block time as measured
+    const ms = await baseMs(c, tip);
+    const back = blocksIn(Math.max(0, Number(tip.timestamp) * 1000 - s.sentAt.getTime()), ms) + searchMargin(ms);
     t.next = tip.number > back ? tip.number - back : 0n;
   }
   const head = logsHead > tip.number ? logsHead : tip.number;
-  const latest = head - BASE_SETTLE;
+  const latest = await settledBase(c, head, tip);
   const [, user] = encodeEventTopics({ abi: FRONT_DOOR, eventName: "Delivered", args: { user: s.account } });
   // this batch's credits (any user: the user is the third topic) and the account's deliveries and claims
   const filter = {
@@ -1282,12 +1289,14 @@ export async function findRequestTx(
   const head = await baseHead(c);
   // the device clock made both times, so their difference is the time since, whatever the clock says
   const age = Math.max(0, s.nowMs - s.sentAtMs);
-  const blocks = (ms: number) => BigInt(Math.ceil(ms / BASE_BLOCK_MS));
+  const blockMs = await baseMs(c);
+  const blocks = (ms: number) => blocksIn(ms, blockMs);
+  const margin = searchMargin(blockMs);
   const sent = head > blocks(age) ? head - blocks(age) : 0n;
-  const start = sent > STAKE_SEARCH_MARGIN ? sent - STAKE_SEARCH_MARGIN : 0n;
+  const start = sent > margin ? sent - margin : 0n;
   const passed = age >= REPLACEMENT_SPAN_MS;
-  const settled = head > BASE_SETTLE ? head - BASE_SETTLE : 0n;
-  const spanEnd = sent + blocks(REPLACEMENT_SPAN_MS) + STAKE_SEARCH_MARGIN;
+  const settled = await settledBase(c, head);
+  const spanEnd = sent + blocks(REPLACEMENT_SPAN_MS) + margin;
   const end = passed && spanEnd < settled ? spanEnd : settled;
   const from = s.progress.next !== undefined && s.progress.next > start ? s.progress.next : start;
   const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "RedeemRequested", args: { user: s.account } });
@@ -1318,7 +1327,7 @@ async function baseHead(c: Pick<Clients, "base" | "baseLogs">): Promise<bigint> 
 /** The open batch's deposits the staker made, as the keeper counts them (ops/src/keeper/state.ts,
  * stakerDeposits): the batch's DepositRequested logs naming the staker as the payer, the only deposits
  * that paid its deposit and swap fees (TAO deposited straight into the front door paid neither). Read
- * from Base's logs back to the batch's start (its age in 2-second blocks, and five minutes more). None
+ * from Base's logs back to the batch's start (its age in Base's blocks at its block time as measured, and five minutes more). None
  * on v2, which has no staker. Throws when the logs can't be read. */
 export async function stakerDepositsIn(
   c: Pick<Clients, "base" | "baseLogs">,
@@ -1329,7 +1338,8 @@ export async function stakerDepositsIn(
   const staker = d.staker;
   if (!staker) return { count: 0, tao: 0n };
   const topics = encodeEventTopics({ abi: FRONT_DOOR, eventName: "DepositRequested", args: { batchId } }) as (Hex | null)[];
-  const blocks = BigInt(Math.ceil(Math.max(ageS, 0) / 2)) + STAKE_SEARCH_MARGIN;
+  const blockMs = await baseMs(c);
+  const blocks = blocksIn(Math.max(ageS, 0) * 1000, blockMs) + searchMargin(blockMs);
   const raw = await recentBaseLogs(c, { address: d.frontDoor, topics }, blocks);
   const staked = parseEventLogs({ abi: FRONT_DOOR, eventName: "DepositRequested", logs: raw as never, strict: false }).filter(
     (l) => same(l.address, d.frontDoor) && l.args.batchId === batchId && !!l.args.payer && same(l.args.payer, staker),
@@ -1338,7 +1348,7 @@ export async function stakerDepositsIn(
 }
 
 /** Every log matching `filter` in Base's last `blocks` blocks, oldest first, read in windows of at most
- * 2,000 blocks up to the newer of the two servers' heads less BASE_SETTLE, as Base's other scans read (a
+ * 2,000 blocks up to the newer of the two servers' heads less BASE_SETTLE_MS of blocks, as Base's other scans read (a
  * block still being made or replaced is read next time). Throws when a window can't be read (or its
  * server is behind), which must never be taken for "none". */
 export async function recentBaseLogs(
@@ -1347,7 +1357,7 @@ export async function recentBaseLogs(
   blocks: bigint,
 ): Promise<RawLog[]> {
   const head = await baseHead(c);
-  const end = head > BASE_SETTLE ? head - BASE_SETTLE : 0n;
+  const end = await settledBase(c, head);
   const out: RawLog[] = [];
   for (let a = end > blocks ? end - blocks : 0n; a <= end; a += BASE_LOG_WINDOW) {
     const b = a + BASE_LOG_WINDOW - 1n < end ? a + BASE_LOG_WINDOW - 1n : end;
@@ -1393,7 +1403,8 @@ async function searchBaseSince<T>(
 ): Promise<T | null> {
   const head = await baseHead(c);
   const ageMs = Math.max(0, s.nowMs - s.sinceMs) + CLOCK_AHEAD_MS;
-  const back = BigInt(Math.ceil(ageMs / BASE_BLOCK_MS)) + STAKE_SEARCH_MARGIN;
+  const blockMs = await baseMs(c);
+  const back = blocksIn(ageMs, blockMs) + searchMargin(blockMs);
   return searchBase(c, head > back ? head - back : 0n, head, filter, {}, pick);
 }
 

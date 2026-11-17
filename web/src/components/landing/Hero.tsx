@@ -2,15 +2,17 @@
 
 import Link from "next/link";
 import { SOURCE_CHAINS, availabilityText } from "@/lib/cascade/chains";
-import { useApy, useProtocolStats } from "@/lib/cascade/hooks";
+import { useApy, useProtocolStats, useRetired } from "@/lib/cascade/hooks";
 import { formatUsdCompact } from "@/lib/format";
 import { APY_KEEP_MS, APY_NOTE_SHORT, formatApy, shownFigure, STATS_KEEP_MS, totalStakedUsd } from "@/lib/stats";
+import { RetiredNotice } from "../app/RetiredNotice";
 import { Dash } from "../Dash";
 import { Mark } from "../Logo";
 import { HeroMark } from "./HeroMark";
 import styles from "./Landing.module.css";
 
 export function Hero() {
+  const retired = useRetired();
   const stats = useProtocolStats();
   const apy = useApy();
   const apyShown = shownFigure(apy, APY_KEEP_MS);
@@ -53,13 +55,17 @@ export function Hero() {
                 <p className={styles.statK}>Total staked</p>
               </div>
             )}
-            <Link href="/stake" className={`pill ${styles.heroCta}`}>
-              <span className={styles.ctaIcon} aria-hidden="true">
-                <Mark size={18} />
-              </span>
-              Stake
-            </Link>
+            {/* a retired deployment has no stake to lead to (Task 60 follow-up): the plan's sentence below instead */}
+            {!retired && (
+              <Link href="/stake" className={`pill ${styles.heroCta}`}>
+                <span className={styles.ctaIcon} aria-hidden="true">
+                  <Mark size={18} />
+                </span>
+                Stake
+              </Link>
+            )}
           </div>
+          <RetiredNotice />
           <p className={styles.chainsRow}>
             <span className={styles.chainStack} aria-hidden="true">
               {SOURCE_CHAINS.map((c) => (

@@ -1,6 +1,6 @@
 import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, hexToBigInt, isAddress, keccak256, numberToHex, parseAbi } from "viem";
 import { type ChainName, type Env, LIVE } from "./config.ts";
-import { marginsOf, startBlock, windowOf } from "./keeper/state.ts";
+import { startBlock, windowOf } from "./keeper/state.ts";
 import type { PlanV3 } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { firstBlockWithCode, read } from "./rpc.ts";
@@ -54,6 +54,9 @@ export interface RegistryScan {
   bittensor: { to: number; bridges: Address[]; frontDoors: string[] };
 }
 
+/** Logs this close to the head are read again by the next scan, so one a lagging node or a reorg hid is
+ * found then (the keeper's margins). */
+const SETTLE: Record<ChainName, number> = { base: 30, bittensor: 10 };
 
 /** The first block of the deployment on Base: its earliest Base step with a recorded block, else (every
  * Base step recovered) the block the Base adapter's code first appears in. */
@@ -88,9 +91,7 @@ async function scan(
   } catch (e) {
     return { logs, to: from - 1, error: `from block ${from} (${firstLine(e)})`, errorFrom: from };
   }
-  // logs this close to the head are read again by the next scan, so one a lagging node or a reorg hid is found then: the
-  // keeper's settle margin (60 s of Base's blocks, 120 s of Bittensor's), at the chain's block time
-  const settled = head - Number((await marginsOf(rpc, chain)).settle);
+  const settled = head - SETTLE[chain];
   const step = Number(windowOf(ctx, chain));
   for (let start = from; start <= head; start += step) {
     const end = Math.min(start + step - 1, head);

@@ -1,0 +1,9 @@
+{
+  // The files that run in Node (the scripts, the tests that bundle, spawn or read files, the vitest config): Node's
+  // types, not the Workers runtime's, which clash with them. The src/ modules they import must not use Workers globals.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["test/node", "scripts", "vitest.config.ts"]
+}

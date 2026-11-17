@@ -224,7 +224,7 @@ vault's `payoutDelay` and its pending payout batches.
  keeper, people ── GET /v1/status, /v1/health ────────────────────────┤
                                                                       ▼
                   ┌──────────── Worker cascade-indexer ────────────┐
-                  │ fetch():      four read-only routes            │
+                  │ fetch():      six read-only routes             │
                   │ scheduled():  * * * * *    tick                │───▶ D1: logs, cursors, readings,
                   │               */2 * * * *  site check          │         hours, checks, alerts, holds
                   │               17 * * * *   hourly              │
@@ -235,7 +235,7 @@ vault's `payoutDelay` and its pending payout batches.
           (logs, Multicall3)         cascadefi.xyz's JS
 ```
 
-- **One Worker, `cascade-indexer`**, two handlers. `fetch` serves four read-only routes and nothing else
+- **One Worker, `cascade-indexer`**, two handlers. `fetch` serves six read-only routes and nothing else
   (section 4). `scheduled` dispatches on `controller.cron`; a test checks that the crons in `wrangler.jsonc` and
   the dispatch table match. *call*: four crons per environment: the **tick** every minute; the **site check**
   every two minutes (section 6.6), apart from the tick so that whatever the site serves can never slow or stop
@@ -555,7 +555,9 @@ Task tests assert both counts.
 
 ### 4. The API
 
-Four routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404 or 405. No route writes.
+Six routes, all `GET` (and `OPTIONS` for CORS preflight); anything else is 404 or 405. No route writes. Four are below;
+`GET /v1/flow` is the security page's (its own design, `2026-11-01-cascade-security-page-design.md`), and
+`GET /v1/price` (v3.2, Task 57b) is described after `/v1/health`.
 
 **`GET /v1/scan/{vault}`** — the deployment-wide half of the seed, in exactly the form the site's store saves it:
 `ScanState` v1 with `deposited` and `redeemed` empty.
@@ -606,6 +608,12 @@ attacker reading it learns no more than "a hold is on"). Query strings are refus
 (`head_time − settled_time`) is past the lag limit (a chain catching up in the first backfill excepted), else
 `503` with the reason, from D1 alone;
 `Cache-Control: no-store` (Workers Cache is on). For an outside uptime checker (open question 9).
+
+**`GET /v1/price`** (v3.2, Task 57b) — the newest outside reference price of TAO (the median of CoinGecko and
+Coinbase, unavailable when none answers or they differ by more than 2%), as `{ v, usd, sources, at }` or
+`{ v, unavailable, at }`, stored by the tick every fifth minute; the same CORS, 15 s cache and rate limit as
+`/v1/flow`. **A veto only:** the site may use it to refuse a trade, never to approve or loosen one; the contracts'
+floors stay binding. The site judges its age from `at`. Details: `indexer/README.md`.
 
 ### 5. How the site verifies, and how it falls back
 

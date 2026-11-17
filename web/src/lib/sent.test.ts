@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BRIDGE_MINUTES, EXPECTED_DEPLOYMENTS, STAKE_MINUTES } from "./cascade/config";
-import { batchNotice, depositNotice, sentCopy, sentTiming, unstakeNotice, walletTaoNotice } from "./sent";
+import { batchNotice, depositNotice, receiveTaoNotice, sentCopy, sentRows, sentTiming, unstakeNotice, walletTaoNotice } from "./sent";
 
 const launch = EXPECTED_DEPLOYMENTS["v3-launch"];
 /** The launch as the site is built for it: 24-hour batches at the latest, a 24-hour payout delay, v3. */
@@ -55,6 +55,25 @@ describe("the panel after a deposit", () => {
   });
 });
 
+describe("R11: the panel after a v3.2 deposit says when a cancel works", () => {
+  const V32 = { ...LAUNCH, cancelCooldownS: 300 };
+
+  it("five minutes after the last deposit, before its batch leaves; v3-launch says nothing of it", () => {
+    expect(sentCopy(deposit, V32).next).toBe(
+      "Next it crosses to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. It's staked about 27 minutes after it leaves. You can cancel it until its batch leaves, from 5 minutes after your last deposit.",
+    );
+    expect(sentCopy(deposit, LAUNCH).next).not.toContain("cancel");
+    // an unstake has no cooldown
+    expect(sentCopy(unstake, V32).next).not.toContain("5 minutes");
+  });
+
+  it("is read from the deployment: v3.2's 5-minute CANCEL_COOLDOWN, none elsewhere", () => {
+    const lenses = { vaultLens: "0x000000000000000000000000000000000000Ae15", doorLens: "0x000000000000000000000000000000000000De15", staker: "0x00000000000000000000000000000000005A4E12", oracle: "0x000000000000000000000000000000000000041E" } as const;
+    expect(sentTiming({ batchMaxWaitS: 86_400, payoutDelayS: 86_400, ...lenses }, true)).toEqual(V32);
+    expect(sentTiming({ batchMaxWaitS: 86_400, payoutDelayS: 86_400 }, true)).toEqual(LAUNCH);
+  });
+});
+
 describe("the panel after an unstake", () => {
   it("says it's requested, with the TAO and the USDC it should pay, and follows it on Activity", () => {
     const copy = sentCopy(unstake, LAUNCH);
@@ -79,6 +98,30 @@ describe("the panel after an unstake", () => {
     expect(sentCopy({ ...unstake, batchIntervalS: undefined }, { v3: false, payoutDelayS: 0 }).next).toBe(
       "Next it goes to Bittensor in a batch. Then it comes back to Base, where you claim it as USDC from its receipt.",
     );
+  });
+});
+
+describe("the panel after a v3.2 unstake that receives TAO (Task 59a)", () => {
+  const tao = receiveTaoNotice("w2", 7n * 10n ** 16n, HOUR);
+
+  it("says it's requested, with the TAO and no USDC, and follows it on Activity", () => {
+    expect(tao).toEqual({ kind: "unstake", id: "w2", tao: 0.07, keepTao: true, batchIntervalS: HOUR });
+    const copy = sentCopy(tao, LAUNCH);
+    expect(copy.title).toBe("Your unstake is requested");
+    expect(copy.rows).toEqual([
+      ["Unstaking", "about 0.0700 TAO"],
+      ["You will receive", "TAO on Base, to claim"],
+    ]);
+    expect(sentRows(tao)).toEqual(copy.rows);
+    expect(copy.href).toBe("/activity?withdrawal=w2");
+  });
+
+  it("says nothing is sold: back on Base it waits to be claimed", () => {
+    expect(sentCopy(tao, LAUNCH).next).toBe(
+      "Next it goes to Bittensor in a batch: batches leave hourly once their fees cover the bridge fee, otherwise within 24 hours. After the 24-hour safety wait it comes back to Base, where it waits for you to claim it.",
+    );
+    // without the interval read
+    expect(receiveTaoNotice("w2", 7n * 10n ** 16n)).toEqual({ kind: "unstake", id: "w2", tao: 0.07, keepTao: true });
   });
 });
 

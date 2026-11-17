@@ -2,14 +2,16 @@ import { env } from "cloudflare:workers";
 import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { reconcile } from "../../src/alerts.ts";
-import type { Config } from "../../src/config.ts";
+import { type Config, PATH_TAO_TO_USDC } from "../../src/config.ts";
 import { poolPriceUsd, PRICE_URLS, referencePrice } from "../../src/prices.ts";
 import { logQuery, type RuleCtx, utc } from "../../src/rules/context.ts";
-import { fmtaoDepeg, fmtaoMintSurge, fmtaoUnbacked, poolLiquidity, referenceUnavailable, twapDivergence } from "../../src/rules/market.ts";
+import { fmtaoDepeg, fmtaoMintSurge, fmtaoUnbacked, MARKET_RULES, oracleThinPool, pathFees, poolLiquidity, referenceUnavailable, swapBelowOracle, twapDivergence } from "../../src/rules/market.ts";
+import { RULES } from "../../src/rules/ids.ts";
+import { RUNBOOK } from "../../src/runbook.ts";
 import type { BaseState, BitState, ChainReading, HourAgg } from "../../src/snapshot.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { D, h } from "./bridge-fixtures.ts";
-import { testConfig } from "./fixtures.ts";
+import { testConfig, testConfigV32 } from "./fixtures.ts";
 import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
 const E18 = 10n ** 18n;
@@ -76,7 +78,8 @@ describe("referencePrice and poolPriceUsd", () => {
   });
 
   it("is unavailable when the sources disagree by more than 2%, none answers, or none is configured", async () => {
-    expect(await referencePrice({ getJson: answers(cg(400), cb(412)), sources: ["coingecko", "coinbase"] })).toEqual({ unavailable: expect.stringContaining("disagree") });
+    // the reason carries no price (it is stored and served); the answers ride beside it for the tick's log
+    expect(await referencePrice({ getJson: answers(cg(412), cb(400)), sources: ["coingecko", "coinbase"] })).toEqual({ unavailable: "the price sources disagree by more than 2%", answers: [400, 412] });
     expect(await referencePrice({ getJson: answers(new Error("x"), { nonsense: true }), sources: ["coingecko", "coinbase"] })).toEqual({ unavailable: expect.stringContaining("answered") });
     expect(await referencePrice({ getJson: answers(cg(400), cb(400)), sources: [] })).toEqual({ unavailable: expect.stringContaining("configured") });
   });
@@ -97,6 +100,26 @@ describe("fmtao.unbacked", () => {
     expect(fmtaoUnbacked.run(ctx({ ...at(11n, over, 100n * E18), prev: at(10n, 100n * E18, 100n * E18) }))).toEqual([]);
     const [f] = fmtaoUnbacked.run(ctx({ ...at(12n, over, 100n * E18), prev: at(11n, over, 100n * E18) }));
     expect(f).toMatchObject({ rule: "fmtao.unbacked", key: "fmtao.unbacked", facts: { excess: "10000000000000001" } });
+  });
+
+  it("on v3.2 its runbook says a front-door pause never stops a close (I-20), and names the guardian's and the owner's real options", () => {
+    const at = (b: bigint, supply: bigint) => ({ base: base(b, { fmTaoSupply: supply }), bit: bit(b, { lockPoolFmTao: 100n * E18 }) });
+    const over = 100n * E18 + 10n ** 16n + 1n;
+    const [f] = fmtaoUnbacked.run(ctx({ cfg: testConfigV32(), ...at(12n, over), prev: at(11n, over) }));
+    expect(f.facts.contracts).toBe("v3.2");
+    const says = RUNBOOK["fmtao.unbacked"](f.facts);
+    expect(says).not.toMatch(/stops new batches|new batches stop|no new batch crosses/);
+    expect(says).toContain("never stops a close");
+    expect(says).toContain("deposit, depositFor and deliver");
+    expect(says).toContain("pause() the vault");
+    expect(says).toContain("disableBridge(<the primary bridge>) on the front door");
+    expect(says).toContain("cancelPayoutBatch(key, payouts)");
+    // its blind spot stays named
+    expect(says).toContain("Robinhood");
+    // v3-launch's line is as it was
+    const [g] = fmtaoUnbacked.run(ctx({ ...at(12n, over), prev: at(11n, over) }));
+    expect(g.facts.contracts).toBeUndefined();
+    expect(RUNBOOK["fmtao.unbacked"](g.facts)).toContain("pause the front door (stops new batches and deliveries)");
   });
 });
 
@@ -251,5 +274,181 @@ describe("pool.liquidity and fmtao.mint_surge", () => {
     expect(fmtaoMintSurge.run(ctx({ base: base(10n, { fmTaoSupply: 1540n * E18 }), hours, logs: [landed] }))).toEqual([]);
     const off = reconcile(env.DB, { open: [], findings: found, nowS: NOW, t: { ...DEFAULTS, rules: { off: ["fmtao.mint_surge"] } }, holdActive: false });
     expect(off.statements).toEqual([]);
+  });
+});
+
+describe("oracle.thin_pool and oracle.thin_pool_repeated (v3.2)", () => {
+  const v32 = testConfigV32();
+  const USER = "0x00000000000000000000000000000000000a11ce" as Hex;
+  // the floors deliver() checks (ThinPool below either), and each pool's 30-minute mean in-range liquidity
+  const floors = { taoWeth: 10n ** 17n, wethUsdc: 10n ** 16n };
+  const deep = { taoWeth: 6n * 10n ** 17n, wethUsdc: 2n * 10n ** 17n };
+  const at = (block: bigint, mean: { taoWeth: bigint; wethUsdc: bigint } | undefined, o: Partial<BaseState> = {}) =>
+    base(block, { minPoolLiquidity: floors, ...(mean ? { meanLiquidity: mean } : {}), ...o });
+  const thin = { ...deep, taoWeth: 10n ** 17n - 1n };
+  const run = (o: Parameters<typeof ctx>[0]) => oracleThinPool.run(ctx({ cfg: v32, ...o }));
+
+  it("is in the tick as a warning, its repeated form too, each with a runbook line", () => {
+    expect(MARKET_RULES).toContain(oracleThinPool);
+    expect(RULES["oracle.thin_pool"]).toMatchObject({ tier: "warning", kind: "condition" });
+    expect(RULES["oracle.thin_pool_repeated"]).toMatchObject({ tier: "warning", kind: "condition" });
+    for (const id of ["oracle.thin_pool", "oracle.thin_pool_repeated"] as const) expect(RUNBOOK[id]({}).length, id).toBeGreaterThan(80);
+  });
+
+  it("warns while a pool's mean liquidity is under the front door's floor, on two readings, one alert per pool, naming the deliveries waiting", () => {
+    const waiting = { claimable: { [USER]: E18 }, deliveryOf: { [USER]: { minUsdcPerTao: 390_000_000n, deadline: NOW + 3600, destination: 6 } } };
+    expect(run({ base: at(11n, deep), prev: { base: at(10n, deep) } })).toEqual([]);
+    expect(run({ base: at(11n, thin), prev: { base: at(10n, deep) } })).toEqual([]);
+    const c = ctx({ cfg: v32, base: at(11n, thin, waiting), prev: { base: at(10n, thin) } });
+    const [f] = oracleThinPool.run(c);
+    expect(f).toMatchObject({ rule: "oracle.thin_pool", key: "oracle.thin_pool:taoWeth", facts: { pool: "TAO/WETH", "mean liquidity (30 minutes)": String(thin.taoWeth), floor: String(floors.taoWeth), "deliveries waiting": "1 (of the users read)" } });
+    expect(f.subject).toBe("The TAO/WETH pool is thinner than the front door's floor: USDC deliveries wait (ThinPool)");
+    // the episode's start is remembered, and counted among the day's episodes
+    expect(meta(c)).toEqual({ "thin_pool_since:taoWeth": String(NOW), "thin_pool_episodes:taoWeth": String(NOW) });
+    // exactly the floor passes, as deliver() does
+    expect(run({ base: at(11n, { ...deep, taoWeth: floors.taoWeth }), prev: { base: at(10n, { ...deep, taoWeth: floors.taoWeth }) } })).toEqual([]);
+    const both = { taoWeth: 1n, wethUsdc: 1n };
+    expect(run({ base: at(11n, both), prev: { base: at(10n, both) } }).map((x) => x.key)).toEqual(["oracle.thin_pool:taoWeth", "oracle.thin_pool:wethUsdc"]);
+  });
+
+  it("held thin for more than two hours is oracle.thin_pool_repeated: deliveries skipped round after round (R3 C-L1)", () => {
+    const m = { "thin_pool_since:taoWeth": String(NOW - 7200) };
+    expect(run({ base: at(11n, thin), prev: { base: at(10n, thin) }, meta: m }).map((x) => x.rule)).toEqual(["oracle.thin_pool"]);
+    const later = { "thin_pool_since:taoWeth": String(NOW - 7201) };
+    const found = run({ base: at(11n, thin), prev: { base: at(10n, thin) }, meta: later });
+    expect(found.map((x) => x.rule)).toEqual(["oracle.thin_pool", "oracle.thin_pool_repeated"]);
+    const r = found[1];
+    expect(r).toMatchObject({ key: "oracle.thin_pool_repeated:taoWeth", facts: { since: utc(NOW - 7201) } });
+    expect(r.subject).toBe("The TAO/WETH pool has been thinner than the floor for 2 hours: USDC deliveries are held round after round");
+    expect(RUNBOOK["oracle.thin_pool_repeated"](r.facts)).toContain("claim");
+    // deep again: the mark clears
+    const c = ctx({ cfg: v32, base: at(11n, deep), prev: { base: at(10n, thin) }, meta: later });
+    expect(oracleThinPool.run(c)).toEqual([]);
+    expect(meta(c)).toEqual({ "thin_pool_since:taoWeth": "" });
+  });
+
+  it("counts thin episodes in a day: a griefer thinning the pool only around the keeper's rounds is oracle.thin_pool_repeated at the third (R3 C-L1)", () => {
+    let m: Record<string, string> = {};
+    const HOUR = 3600;
+    /** One tick at `nowS`, this reading's means and the one before, the meta carried to the next. */
+    const tick = (nowS: number, now: typeof thin, before: typeof thin) => {
+      const c = ctx({ cfg: v32, nowS, base: at(11n, now), prev: { base: at(10n, before) }, meta: m });
+      const found = oracleThinPool.run(c);
+      m = Object.fromEntries(Object.entries({ ...m, ...meta(c) }).filter(([, v]) => v !== ""));
+      return found;
+    };
+    const rules = (f: ReturnType<typeof tick>) => f.map((x) => x.rule);
+    /** A keeper round the griefer thins the pool around: thin on two readings (one episode), deep again 30 minutes on. */
+    const round = (t0: number) => {
+      expect(rules(tick(t0, thin, deep))).toEqual([]);
+      const found = tick(t0 + 60, thin, thin);
+      expect(rules(tick(t0 + 1800, deep, thin)).includes("oracle.thin_pool")).toBe(false);
+      return found;
+    };
+    // never thin for two hours in a row, so the old reading (continuous thinness) never fired
+    expect(rules(round(NOW))).toEqual(["oracle.thin_pool"]);
+    expect(rules(round(NOW + 4 * HOUR))).toEqual(["oracle.thin_pool"]);
+    expect(m["thin_pool_episodes:taoWeth"]).toBe(`${NOW},${NOW + 4 * HOUR}`);
+    const third = round(NOW + 8 * HOUR);
+    expect(rules(third)).toEqual(["oracle.thin_pool", "oracle.thin_pool_repeated"]);
+    const r = third[1];
+    expect(r).toMatchObject({ key: "oracle.thin_pool_repeated:taoWeth", facts: { "thin episodes in 24 hours": `3: ${utc(NOW)}, ${utc(NOW + 4 * HOUR)}, ${utc(NOW + 8 * HOUR)}` } });
+    expect(r.subject).toBe("The TAO/WETH pool has gone thinner than the floor 3 times in 24 hours: USDC deliveries are held round after round");
+    expect(RUNBOOK["oracle.thin_pool_repeated"](r.facts)).toContain("3 times in 24 hours");
+    // it stands between the rounds, the pool deep, while three fall within the day
+    expect(rules(tick(NOW + 12 * HOUR, deep, deep))).toEqual(["oracle.thin_pool_repeated"]);
+    // a day after the first, it has dropped out: two left, quiet, and the mark forgets it
+    expect(rules(tick(NOW + 24 * HOUR + 1, deep, deep))).toEqual([]);
+    expect(m["thin_pool_episodes:taoWeth"]).toBe(`${NOW + 4 * HOUR},${NOW + 8 * HOUR}`);
+  });
+
+  it("is unjudged without the reading, the mean or the floor, its mark left as it is; v3-launch doesn't run it", () => {
+    const m = { "thin_pool_since:taoWeth": String(NOW - 600) };
+    const c = ctx({ cfg: v32, base: at(11n, undefined), prev: { base: at(10n, thin) }, meta: m });
+    expect(oracleThinPool.run(c)).toEqual([]);
+    expect(c.writes.meta).toEqual([]);
+    expect(c.unjudged).toEqual(expect.arrayContaining([{ rule: "oracle.thin_pool", key: "oracle.thin_pool:taoWeth" }, { rule: "oracle.thin_pool_repeated", key: "oracle.thin_pool_repeated:taoWeth" }]));
+    const v31 = ctx({ base: at(11n, thin), prev: { base: at(10n, thin) } });
+    expect(oracleThinPool.run(v31)).toEqual([]);
+    expect(v31.unjudged).toEqual([]);
+  });
+});
+
+describe("fmtao.depeg's reference age (v3.2, the founder's veto ruling)", () => {
+  it("names how old the reference price behind the verdict is; v3-launch's email is today's", () => {
+    const v32 = testConfigV32();
+    const off = pools(400 * 1.051);
+    const first = ctx({ cfg: v32, base: base(10n, off), reference: { usd: 400, sources: 2 } });
+    fmtaoDepeg.run(first);
+    const second = ctx({ cfg: v32, base: base(11n, off), reference: { usd: 400, sources: 2 }, meta: { depeg: meta(first).depeg }, nowS: NOW + 300 });
+    fmtaoDepeg.run(second);
+    // four minutes on, no new price read: the verdict stands, and its reference is four minutes old
+    const between = ctx({ cfg: v32, base: base(12n, off), meta: { depeg: meta(second).depeg }, nowS: NOW + 540 });
+    const [f] = fmtaoDepeg.run(between);
+    expect(f.facts["reference's age"]).toBe(`4 minutes (read ${utc(NOW + 300)})`);
+    const old = ctx({ base: base(12n, off), meta: { depeg: meta(second).depeg }, nowS: NOW + 540 });
+    expect(fmtaoDepeg.run(old)[0].facts["reference's age"]).toBeUndefined();
+  });
+});
+
+describe("swap.below_oracle (v3.2): a stake or delivery settled more than 1% below the oracle", () => {
+  const v32 = testConfigV32();
+  const USER = "0x00000000000000000000000000000000000a11ce" as Hex;
+  const TX = h("a swap");
+  // the oracle values 1 TAO at $400 (usdcValue(1e18) = 400e6)
+  const read = (block: bigint, o: Partial<BaseState> = {}) => base(block, { oracleValue: 400_000_000n, ...o });
+  const staked = (usdcIn: bigint, fees: bigint, taoDeposited: bigint) =>
+    slog({ contract: "staker", event: "Staked", chain: "base", block: 37_000_500n, txHash: TX, args: { payer: USER, beneficiary: USER, usdcIn: String(usdcIn), fees: String(fees), taoDeposited: String(taoDeposited) } });
+  const delivered = (taoIn: bigint, usdcOut: bigint) => slog({ contract: "frontDoor", event: "Delivered", chain: "base", block: 37_000_500n, txHash: TX, args: { user: USER, taoIn: String(taoIn), usdcOut: String(usdcOut) } });
+  const sold = (taoIn: bigint, usdcOut: bigint, fee: bigint) => slog({ contract: "staker", event: "Sold", chain: "base", block: 37_000_500n, txHash: TX, args: { recipient: cfg.deployment.frontDoor, taoIn: String(taoIn), usdcOut: String(usdcOut), fee: String(fee) } });
+  const run = (logs: ReturnType<typeof slog>[], o: Parameters<typeof ctx>[0] = {}) => swapBelowOracle.run(ctx({ cfg: v32, base: read(37_000_600n), prev: { base: read(37_000_490n, pools(400)) }, logs, ...o }));
+
+  it("is a warning event in the tick, with a runbook line", () => {
+    expect(MARKET_RULES).toContain(swapBelowOracle);
+    expect(RULES["swap.below_oracle"]).toMatchObject({ tier: "warning", kind: "event", canHold: false });
+    expect(RUNBOOK["swap.below_oracle"]({}).length).toBeGreaterThan(80);
+  });
+
+  it("a stake: the TAO it got against the oracle's value of the USDC swapped (after the staker's fees); 1% below is quiet, more warns", () => {
+    // $1,000 in, $10 of fees: $990 swapped is 2.475 TAO at the oracle
+    expect(run([staked(1_000_000_000n, 10_000_000n, 2_450_250_000_000_000_000n)])).toEqual([]);
+    const l = staked(1_000_000_000n, 10_000_000n, 2_400_000_000_000_000_000n);
+    const [f] = run([l]);
+    expect(f).toMatchObject({ rule: "swap.below_oracle", key: `swap.below_oracle:${l.uid}`, facts: { trade: "a stake", "TAO received": "2.4 TAO", "the oracle's value": "2.475 TAO", "below the oracle": "3.03%" } });
+    expect(f.subject).toBe("A stake filled 3.03% below the oracle's price");
+  });
+
+  it("a delivery: the USDC paid, the swapper's fee added back, against the oracle and against the pools' price before it (R3 C-I6)", () => {
+    // 1 TAO at the oracle's $400; the swapper kept $2
+    expect(run([delivered(E18, 394_000_000n), sold(E18, 394_000_000n, 2_000_000n)])).toEqual([]);
+    const [f] = run([delivered(E18, 390_000_000n), sold(E18, 390_000_000n, 2_000_000n)]);
+    expect(f).toMatchObject({ facts: { trade: "a USDC delivery", "USDC paid": "390 USDC", "the swapper's fee": "2 USDC", "the oracle's value": "400 USDC", "below the oracle": "2.00%" } });
+    expect(f.subject).toBe("A USDC delivery filled 2.00% below the oracle's price");
+    // the pools' price before it ($420) above the oracle: below the spot too, once the route's pool fees are taken off
+    // it ($420 × 0.997 × 0.9995 = $418.53)
+    const spot = run([delivered(E18, 405_000_000n)], { base: read(37_000_600n), prev: { base: read(37_000_490n, pools(420)) } });
+    expect(spot[0].facts).toMatchObject({ "below the oracle": "none", "the pools' price before it": "420.00 USD a TAO", "the route's pool fees": "0.30% + 0.05%", "below it": "3.23%" });
+    expect(spot[0].subject).toBe("A USDC delivery filled 3.23% below the pools' price before it, after the pools' fees");
+  });
+
+  it("the pools' price is compared after the route's pool fees (PATH_TAO_TO_USDC's tiers), so an honest delivery's fees don't trip it", () => {
+    expect(pathFees(PATH_TAO_TO_USDC)).toEqual([3000, 500]);
+    // the oracle at $395, so only the spot ($400) judges: $400 less 0.3% and 0.05% is $398.6006 a TAO
+    const at395 = { base: read(37_000_600n, { oracleValue: 395_000_000n }), prev: { base: read(37_000_490n, { ...pools(400), oracleValue: 395_000_000n }) } };
+    // an honest fill at the pools' price less their fees: quiet
+    expect(run([delivered(E18, 398_600_600n)], at395)).toEqual([]);
+    // exactly 1% under that (1.35% under the bare mid price, which used to warn): quiet, at the boundary
+    expect(run([delivered(E18, 394_614_594n)], at395)).toEqual([]);
+    // 1.01% under it: warns
+    const [f] = run([delivered(E18, 394_574_000n)], at395);
+    expect(f.facts).toMatchObject({ "below the oracle": "0.10%", "below it": "1.01%" });
+    expect(f.subject).toBe("A USDC delivery filled 1.01% below the pools' price before it, after the pools' fees");
+  });
+
+  it("without the oracle's value it judges nothing (unjudged), and v3-launch doesn't run it", () => {
+    const c = ctx({ cfg: v32, base: base(37_000_600n), logs: [delivered(E18, 300_000_000n)] });
+    expect(swapBelowOracle.run(c)).toEqual([]);
+    expect(c.unjudged).toEqual([{ rule: "swap.below_oracle" }]);
+    expect(swapBelowOracle.run(ctx({ base: read(37_000_600n), logs: [delivered(E18, 300_000_000n)] }))).toEqual([]);
   });
 });

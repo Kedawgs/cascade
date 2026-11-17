@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@noble/hashes": "1.8.0",
     "viem": "2.57.7"
   },
   "devDependencies": {

@@ -1,5 +1,8 @@
-import type { Config } from "./config.ts";
-import type { BaseState, BitState, Bucket as RawBucket, ChainReading, Lane } from "./snapshot.ts";
+import type { Config, Deployment } from "./config.ts";
+import type { StoredLog } from "./logs.ts";
+import { BITTENSOR_BLOCK_S, PARK_TIMEOUT_S, parksOf } from "./parks.ts";
+import { itemStatus, kindName, type TrackedItem } from "./scheduler.ts";
+import { type BaseState, type BitState, type Bucket as RawBucket, type ChainReading, type Lane, type OutflowWindow, outflowOf, payoutsClosedOf } from "./snapshot.ts";
 
 // The public document behind the /security page: facts only, from the newest reading of each chain, the
 // bridge messages in flight and the stored admin events. Pure: no D1, no fetch. The monitor's own thresholds
@@ -15,7 +18,13 @@ export type Scheduled = number | "none" | null;
 export interface FlowChain { block: string; time: number; stale: boolean }
 export type NoticeKind =
   | "paused" | "ownershipPending" | "guardianProposed" | "bridgeProposed" | "frontDoorProposed"
-  | "fmAdminScheduled" | "fmMigration" | "fmPaused";
+  | "fmAdminScheduled" | "fmMigration" | "fmPaused"
+  | "itemScheduled"
+  // v3.2 (the web copy audit, N1 to N4): stake missing (a validator key change), front-door deposits parked on Bittensor
+  // (`earliest`: when the oldest can be sent back to Base), the vault's primary bridge unable to send payouts (its
+  // canSendPayouts(): `contract` is the bridge), and Cascade's route switched off (a primary disabled, or the launch door
+  // removed)
+  | "stakeMissing" | "parked" | "payoutsClosed" | "routeDisabled";
 export interface Notice {
   kind: NoticeKind;
   chain: "base" | "bittensor";
@@ -27,6 +36,9 @@ export interface Notice {
   earliest?: number;
   /** the transaction that started it, when the monitor stored it */
   tx?: string;
+  /** v3.2's itemScheduled: the scheduled item (its kind, Ordinary, GuardianSwap or Reopen; its setter and arguments as
+   * decoded from its calldata, decimal integers and lowercase hex, null when the calldata didn't decode) */
+  item?: { id: string; kind: string; setter: string | null; args: Record<string, string> | null };
 }
 /** One bridge direction: the binding one of the source pool's outbound limiter and the destination pool's inbound one. */
 export interface Bucket {
@@ -75,6 +87,20 @@ export interface FlowV1 {
     vault: string; frontDoor: string; staker: string; taoWethPool: string; wethUsdcPool: string;
     alphaVault: string; lockPool: string; baseTokenPool: string; wTao: string; fmTaoBase: string;
   };
+  /** v3.2 only (absent on v3-launch): the money-out figures (the web copy audit's N5 and S9) and the deposits waiting on
+   * Bittensor (N2). The limit and what it has burned are a guide: the vault works the base out again at each delivery */
+  exits?: {
+    /** the vault's payoutDelay, seconds */
+    payoutDelayS: number | null;
+    /** today's unstake limit through the front door: the allowance of the window whose rest is the smaller (its own, or
+     * every door's together), and what that window has burned since it began (24 hours from its first burn) */
+    dailyLimit: Amount;
+    usedToday: Amount;
+    /** the front door's deposits parked on Bittensor, wei ("0" when none), and when the oldest can be sent back to Base
+     * (its parked time + 14 days; "none" with none parked) */
+    parked: Amount;
+    parkedRefundFrom: Scheduled;
+  };
 }
 export interface AdminLog {
   chain: "base" | "bittensor";
@@ -90,9 +116,35 @@ export interface FlowInput {
   inFlight: { toBittensor: number; toBase: number };
   /** oldest first */
   adminLogs: AdminLog[];
+  /** v3.2: the scheduled items the admin rules keep (meta scheduled_items, src/scheduler.ts), oldest first */
+  items?: readonly TrackedItem[];
+  /** v3.2: the front door's open parks with TAO (doorParksOf), each with when it parked when known; absent: unread */
+  parks?: readonly { amount: bigint; parkedAt?: number }[];
   cfg: Config;
   nowS: number;
 }
+
+/** v3.2: the front door's parks still open with TAO in them (a redeem-only park holds no deposit; a stranger's isn't
+ * Cascade's), from the Bittensor adapters' park events (src/parks.ts), each with when it parked: its BatchParked's block
+ * time, else told by its block back from `reading` at Bittensor's block time as measured (`blockS`, src/blocktime.ts; its
+ * nominal 12 s while that is unread), else unknown. */
+export function doorParksOf(
+  logs: readonly StoredLog[],
+  d: Pick<Deployment, "frontDoor" | "vault">,
+  timeOf: (block: bigint) => number | undefined,
+  reading?: { block: bigint; time: number },
+  blockS: number = BITTENSOR_BLOCK_S,
+): { amount: bigint; parkedAt?: number }[] {
+  return parksOf(logs, d)
+    .filter((p) => !p.ended && p.door && p.amount > 0n)
+    .map((p) => {
+      const at = timeOf(p.parked.block) ?? (reading ? reading.time - Number(reading.block - p.parked.block) * blockS : undefined);
+      return at === undefined ? { amount: p.amount } : { amount: p.amount, parkedAt: at };
+    });
+}
+
+/** What a burn window may still burn today. */
+const restOf = (w: OutflowWindow) => (w.allowance > w.burned ? w.allowance - w.burned : 0n);
 
 export const STALE_AFTER_S = 600;
 
@@ -255,6 +307,26 @@ export function flowOf(i: FlowInput): FlowV1 {
   proposalsN("base", d.frontDoor);
   proposalsN("bittensor", d.vault);
 
+  // v3.2: the pending scheduled items, from the record the admin rules keep and judged as they judge them (one source,
+  // no second decoding): a finished one (the record's `lapsed`), or one the lens reads gone, dead or past its window, is
+  // left out; one it hasn't read (a stale chain's too) is shown, since unread is never "nothing pending"
+  for (const it of i.items ?? []) {
+    if (it.lapsed) continue;
+    const r = it.chain === "base" ? (bs ? i.base : null) : ts ? i.bittensor : null;
+    const status = itemStatus(it, r ?? undefined).status;
+    if (status === "gone" || status === "dead" || status === "lapsed") continue;
+    const target = Object.values(it.args ?? {}).find((v) => /^0x[0-9a-f]{40}$/.test(v));
+    notices.push({
+      kind: "itemScheduled",
+      chain: it.chain,
+      contract: it.role === "vault" ? d.vault : d.frontDoor,
+      ...(target ? { target } : {}),
+      earliest: it.readyAt,
+      tx: it.tx,
+      item: { id: it.id, kind: kindName(it.kind), setter: it.setter ?? null, args: it.args ?? null },
+    });
+  }
+
   if (ts) {
     const a = ts.alpha;
     if (a.pendingAdmin && nonZero(a.pendingAdmin.admin)) {
@@ -268,6 +340,34 @@ export function flowOf(i: FlowInput): FlowV1 {
       notices.push(n);
     }
     if (a.pausedUntil !== undefined && a.pausedUntil > BigInt(nowS)) notices.push({ kind: "fmPaused", chain: "bittensor", contract: tt.alphaVault });
+  }
+
+  // v3.2's states (N1 to N4) and money-out figures (N2, N5, S9), each from a fresh reading only (a stale chain's are
+  // unknown, and an unknown is never said as a state)
+  let exits: FlowV1["exits"];
+  if (d.version === "v3.2") {
+    const parks = ts ? i.parks : undefined;
+    const times = parks?.map((p) => p.parkedAt);
+    const refundFrom: Scheduled = !parks ? null : !parks.length ? "none" : times!.every((t) => t !== undefined) ? Math.min(...(times as number[])) + PARK_TIMEOUT_S : null;
+    if (ts?.stakeMissing === true) notices.push({ kind: "stakeMissing", chain: "bittensor", contract: d.vault });
+    if (parks?.length) notices.push({ kind: "parked", chain: "bittensor", contract: d.bitAdapter, ...(typeof refundFrom === "number" ? { earliest: refundFrom } : {}) });
+    // the view the vault defers its door redeems on, read where the rail now primary is (R4-O round 4)
+    if (ts && payoutsClosedOf(ts) === true) notices.push({ kind: "payoutsClosed", chain: "bittensor", contract: lc(ts.primaryBridge as string) });
+    // a primary disabled on either chain, or the launch door removed: turning either back on is a 7-day Reopen
+    const doorOff = !!bs?.exits?.primaryDisabledBy;
+    const vaultOff = !!ts?.exits?.primaryDisabledBy || !!ts?.exits?.launchDoorRemovedBy;
+    if (doorOff) notices.push({ kind: "routeDisabled", chain: "base", contract: d.frontDoor });
+    else if (vaultOff) notices.push({ kind: "routeDisabled", chain: "bittensor", contract: d.vault });
+    // the day's limit: the window whose rest is the smaller binds a delivery's burns (both must be read)
+    const o = ts && i.bittensor ? outflowOf(i.bittensor) : undefined;
+    const binding = o && o.door.read && o.global.read ? (restOf(o.global) < restOf(o.door) ? o.global : o.door) : undefined;
+    exits = {
+      payoutDelayS: ts?.payoutDelay ?? null,
+      dailyLimit: binding ? binding.allowance.toString() : null,
+      usedToday: binding ? (binding.burned < binding.allowance ? binding.burned : binding.allowance).toString() : null,
+      parked: parks ? parks.reduce((t, p) => t + p.amount, 0n).toString() : null,
+      parkedRefundFrom: refundFrom,
+    };
   }
 
   return {
@@ -321,5 +421,6 @@ export function flowOf(i: FlowInput): FlowV1 {
       wTao: tt.fmTao,
       fmTaoBase: tb.fmTao,
     },
+    ...(exits ? { exits } : {}),
   };
 }

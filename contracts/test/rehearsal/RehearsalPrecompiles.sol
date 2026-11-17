@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 /// @dev Bittensor's balance-transfer precompile: sends msg.value to an SS58 public key.
 address constant BALANCE_TRANSFER_ADDRESS = 0x0000000000000000000000000000000000000800;

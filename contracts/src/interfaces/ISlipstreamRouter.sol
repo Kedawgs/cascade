@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 /// @notice The part of Aerodrome Slipstream's SwapRouter (Base `0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F`,
 /// same selectors on Aero's `0x9Ee35Bf1bd69a03c6F0393582030fCe8Bb93D418`) the staker calls. The struct

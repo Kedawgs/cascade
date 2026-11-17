@@ -1,7 +1,9 @@
-import { formatUnits } from "viem";
+import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
+import { PATH_TAO_TO_USDC } from "../config.ts";
 import { poolPriceUsd } from "../prices.ts";
-import { type Readings, type RuleCtx, twice, unjudged, utc } from "./context.ts";
+import type { BaseState, ChainReading } from "../snapshot.ts";
+import { isNew, type Readings, type RuleCtx, twice, txLink, unjudged, utc } from "./context.ts";
 import type { Rule } from "./index.ts";
 
 // Spec 6.1 fmtao.unbacked and fmtao.depeg, 6.3 twap.divergence, price.reference_unavailable and
@@ -42,7 +44,7 @@ export const fmtaoUnbacked: Rule = {
         rule: "fmtao.unbacked",
         key: "fmtao.unbacked",
         subject: `FM-TAO on Base exceeds its lock on Bittensor by ${tao(e)}`,
-        facts: { supply: String(now.base?.fmTaoSupply), lock: String(now.bittensor?.lockPoolFmTao), excess: String(e), "excess (TAO)": tao(e) },
+        facts: { supply: String(now.base?.fmTaoSupply), lock: String(now.bittensor?.lockPoolFmTao), excess: String(e), "excess (TAO)": tao(e), ...(ctx.cfg.deployment.version === "v3.2" ? { contracts: "v3.2" } : {}) },
       },
     ];
   },
@@ -101,7 +103,13 @@ export const fmtaoDepeg: Rule = {
         rule: "fmtao.depeg",
         key: "fmtao.depeg",
         subject: `TAO on Base trades ${bps ?? "more than " + ctx.t.depegBps} bps away from TAO`,
-        facts: { "pool price (USD)": String(state.spot?.toFixed(2)), "reference (USD)": String(state.ref?.toFixed(2)), "read at": utc(state.at) },
+        facts: {
+          "pool price (USD)": String(state.spot?.toFixed(2)),
+          "reference (USD)": String(state.ref?.toFixed(2)),
+          "read at": utc(state.at),
+          // v3.2: how old the reference behind the verdict is (the founder's veto ruling; the site refuses past 12 minutes)
+          ...(ctx.cfg.deployment.version === "v3.2" ? { "reference's age": `${Math.floor((ctx.nowS - state.at) / 60)} minutes (read ${utc(state.at)})` } : {}),
+        },
       },
     ];
   },
@@ -256,4 +264,174 @@ export const fmtaoMintSurge: Rule = {
   },
 };
 
-export const MARKET_RULES: Rule[] = [fmtaoUnbacked, fmtaoDepeg, referenceUnavailable, twapDivergence, poolLiquidity, fmtaoMintSurge];
+/** The pools the oracle reads, in the front door's floor order (minPoolLiquidity(0) is TAO/WETH's, (1) WETH/USDC's). */
+const THIN_POOLS = [
+  { pool: "taoWeth", name: "TAO/WETH" },
+  { pool: "wethUsdc", name: "WETH/USDC" },
+] as const;
+
+/** oracle.thin_pool (warning) and oracle.thin_pool_repeated (warning), v3.2 (spec §3.7): a pool the oracle reads with its
+ * 30-minute mean in-range liquidity (meanLiquidity) below the front door's floor for it (minPoolLiquidity) on two
+ * readings, one alert per pool. deliver() then refuses every delivery (ThinPool, I-31) and the keeper skips them;
+ * claims of TAO still work. The episode's start is kept in meta thin_pool_since:{pool} (set on the first thin reading,
+ * cleared on the first that isn't), and each episode held on two readings is counted in meta thin_pool_episodes:{pool}
+ * (their starts within thinPoolEpisodesS, comma-separated, written when the list changes). oracle.thin_pool_repeated:
+ * thin for longer than thinPoolRepeatedS (two hours: four windows), or thinPoolEpisodes (3) episodes within
+ * thinPoolEpisodesS (a day), standing between them while they last: the deliveries skipped round after round, which one
+ * cheap block every half hour can do (R3 C-L1, about $88 a hold), or one block before each keeper round, as can a pool
+ * that really lost its depth. Unjudged, its marks left as they are, without the reading, the mean or the floor.
+ * v3-launch has no floor: not run there. */
+export const oracleThinPool: Rule = {
+  name: "oracle.thin_pool",
+  raises: ["oracle.thin_pool_repeated"],
+  run(ctx) {
+    if (ctx.cfg.deployment.version !== "v3.2") return [];
+    const out: Finding[] = [];
+    const b = ctx.snap.base;
+    for (const { pool, name } of THIN_POOLS) {
+      const thin = (s: BaseState | undefined) => {
+        const mean = s?.meanLiquidity?.[pool];
+        const floor = s?.minPoolLiquidity?.[pool];
+        return mean === undefined || floor === undefined ? undefined : mean < floor;
+      };
+      const k = `thin_pool_since:${pool}`;
+      const since = num(ctx.meta[k]);
+      const now = thin(b?.state);
+      if (now === true && since === undefined) ctx.writes.meta.push({ k, v: String(ctx.nowS) });
+      if (now === false && since !== undefined) ctx.writes.meta.push({ k, v: "" });
+      const held = twice(ctx, "base", (r) => thin(r.base));
+      if (held === undefined) {
+        unjudged(ctx, "oracle.thin_pool", `oracle.thin_pool:${pool}`);
+        unjudged(ctx, "oracle.thin_pool_repeated", `oracle.thin_pool_repeated:${pool}`);
+        continue;
+      }
+      // the episodes of the last day: this one counted once it holds, those older than the window forgotten
+      const start = since ?? ctx.nowS;
+      const ek = `thin_pool_episodes:${pool}`;
+      const episodes = (ctx.meta[ek] ?? "").split(",").filter(Boolean).map(Number).filter((x) => Number.isFinite(x) && x > ctx.nowS - ctx.t.thinPoolEpisodesS);
+      if (held && !episodes.includes(start)) episodes.push(start);
+      if (episodes.join(",") !== (ctx.meta[ek] ?? "")) ctx.writes.meta.push({ k: ek, v: episodes.join(",") });
+      const often = episodes.length >= ctx.t.thinPoolEpisodes;
+      const episodic = (facts: Record<string, string>): Finding => ({
+        rule: "oracle.thin_pool_repeated",
+        key: `oracle.thin_pool_repeated:${pool}`,
+        subject: `The ${name} pool has gone thinner than the floor ${episodes.length} times in 24 hours: USDC deliveries are held round after round`,
+        facts: { ...facts, "thin episodes in 24 hours": `${episodes.length}: ${episodes.map((x) => utc(x)).join(", ")}` },
+      });
+      if (!held || !b) {
+        // deep again between the episodes: the repeated alert stands while they last
+        if (often && b) out.push(episodic({ pool: name, block: String(b.block) }));
+        continue;
+      }
+      const s = b.state;
+      const waiting = Object.entries(s.deliveryOf).filter(([u, d]) => d.minUsdcPerTao > 0n && (s.claimable[u as keyof typeof s.claimable] ?? 0n) > 0n).length;
+      const facts: Record<string, string> = {
+        pool: name,
+        "mean liquidity (30 minutes)": String(s.meanLiquidity?.[pool]),
+        floor: String(s.minPoolLiquidity?.[pool]),
+        "deliveries waiting": `${waiting} (of the users read)`,
+        block: String(b.block),
+      };
+      out.push({ rule: "oracle.thin_pool", key: `oracle.thin_pool:${pool}`, subject: `The ${name} pool is thinner than the front door's floor: USDC deliveries wait (ThinPool)`, facts });
+      if (ctx.nowS - start <= ctx.t.thinPoolRepeatedS) {
+        if (often) out.push(episodic(facts));
+        continue;
+      }
+      out.push({
+        rule: "oracle.thin_pool_repeated",
+        key: `oracle.thin_pool_repeated:${pool}`,
+        subject: `The ${name} pool has been thinner than the floor for ${Math.floor((ctx.nowS - start) / 3600)} hours: USDC deliveries are held round after round`,
+        facts: { ...facts, since: utc(start) },
+      });
+    }
+    return out;
+  },
+};
+
+/** The fee tiers of a Uniswap v3 path (a token, then a 3-byte fee and a token per hop), in hundredths of a bip. */
+export const pathFees = (path: Hex): number[] => {
+  const hex = path.slice(2);
+  const out: number[] = [];
+  for (let i = 40; i + 46 <= hex.length; i += 46) out.push(parseInt(hex.slice(i, i + 6), 16));
+  return out;
+};
+/** The delivery route's pool fees (PATH_TAO_TO_USDC: TAO -0.3%-> WETH -0.05%-> USDC), which a fill at the pools' mid
+ * price pays on the way. */
+const DELIVERY_FEES = pathFees(PATH_TAO_TO_USDC);
+/** `x` less the delivery route's pool fees, hop by hop. */
+const lessPoolFees = (x: bigint) => DELIVERY_FEES.reduce((v, fee) => (v * BigInt(1_000_000 - fee)) / 1_000_000n, x);
+
+const usdc = (units: bigint) => `${formatUnits(units, 6)} USDC`;
+const bpsText = (bps: number) => `${(bps / 100).toFixed(2)}%`;
+/** How far (in bps, floored) `got` fell below `fair`; 0 at or above it. */
+const shortBps = (fair: bigint, got: bigint) => (fair > 0n && got < fair ? Number(((fair - got) * 10_000n) / fair) : 0);
+
+/** swap.below_oracle (warning event, v3.2): a stake or a USDC delivery Cascade settled for a user more than
+ * swapBelowOracleBps (1%) below the oracle's 30-minute value (the user's concern of 2026-11-04: swaps must never hurt a
+ * customer; the floors on chain allow 5% for a stake and 1.5% for a delivery). A stake (the staker's Staked): the TAO
+ * deposited against the oracle's value of the USDC swapped (usdcIn less the staker's fees). A delivery (the front
+ * door's Delivered): the USDC paid, the swapper's fee (its Sold in the same transaction) added back, against the
+ * oracle's value of the TAO sold, and against the pools' spot price in the reading before it (R3 C-I6: the keeper's
+ * minimum is a spot quote, which a manipulator can hold down), that mid price less the route's pool fees (Task 57's
+ * review, Minor 3: PATH_TAO_TO_USDC's tiers, 0.3% and 0.05%), so an honest fill's fees don't count as a loss. Judged against the newest reading kept from before the
+ * trade's block (the oracle's value moves little in the minute or two a log takes to settle; this tick's reading when
+ * none is older); with no oracle value at all it judges nothing (unjudged). Once, on the tick the log is first stored. */
+export const swapBelowOracle: Rule = {
+  name: "swap.below_oracle",
+  run(ctx) {
+    if (ctx.cfg.deployment.version !== "v3.2") return [];
+    const trades = ctx.logs.all().filter((l) => l.chain === "base" && isNew(ctx, l) && ((l.contract === "staker" && l.event === "Staked") || (l.contract === "frontDoor" && l.event === "Delivered")));
+    if (trades.length === 0) return [];
+    const readings = [ctx.snap.base, ...ctx.history.base].filter((r): r is ChainReading<BaseState> => r !== undefined);
+    const out: Finding[] = [];
+    for (const l of trades) {
+      const before = readings.find((r) => r.block < l.block);
+      const oracle = before?.state.oracleValue ?? ctx.snap.base?.state.oracleValue ?? ctx.previous.base?.state.oracleValue;
+      if (oracle === undefined || oracle === 0n) {
+        unjudged(ctx, "swap.below_oracle");
+        continue;
+      }
+      const limit = ctx.t.swapBelowOracleBps;
+      const facts: Record<string, string> = {};
+      let subject: string | undefined;
+      if (l.event === "Staked") {
+        const swapped = BigInt(String(l.args.usdcIn)) - BigInt(String(l.args.fees));
+        const got = BigInt(String(l.args.taoDeposited));
+        const fair = (swapped * 10n ** 18n) / oracle;
+        const below = shortBps(fair, got);
+        if (below <= limit) continue;
+        Object.assign(facts, { trade: "a stake", user: String(l.args.beneficiary), "USDC swapped": usdc(swapped), "TAO received": tao(got), "the oracle's value": tao(fair), "below the oracle": bpsText(below) });
+        subject = `A stake filled ${bpsText(below)} below the oracle's price`;
+      } else {
+        const taoIn = BigInt(String(l.args.taoIn));
+        const fee = ctx.logs.inTx("base", l.txHash).filter((x) => x.contract === "staker" && x.event === "Sold").reduce((t, x) => t + BigInt(String(x.args.fee)), 0n);
+        const paid = BigInt(String(l.args.usdcOut));
+        const got = paid + fee;
+        const fair = (taoIn * oracle) / 10n ** 18n;
+        const below = shortBps(fair, got);
+        const spot = before ? poolPriceUsd(before.state, ctx.cfg.tokens) : undefined;
+        const spotFair = spot === undefined ? undefined : lessPoolFees(BigInt(Math.round((Number(taoIn) / 1e18) * spot * 1e6)));
+        const belowSpot = spotFair === undefined ? 0 : shortBps(spotFair, got);
+        if (below <= limit && belowSpot <= limit) continue;
+        Object.assign(facts, {
+          trade: "a USDC delivery",
+          user: String(l.args.user),
+          "TAO sold": tao(taoIn),
+          "USDC paid": usdc(paid),
+          "the swapper's fee": usdc(fee),
+          "the oracle's value": usdc(fair),
+          "below the oracle": below > 0 ? bpsText(below) : "none",
+          "the pools' price before it": spot === undefined ? "not read" : `${spot.toFixed(2)} USD a TAO`,
+          "the route's pool fees": DELIVERY_FEES.map((fee) => `${(fee / 10_000).toFixed(2)}%`).join(" + "),
+          "below it": belowSpot > 0 ? bpsText(belowSpot) : "none",
+        });
+        subject = below > limit ? `A USDC delivery filled ${bpsText(below)} below the oracle's price` : `A USDC delivery filled ${bpsText(belowSpot)} below the pools' price before it, after the pools' fees`;
+      }
+      Object.assign(facts, { block: String(l.block), transaction: txLink("base", l.txHash) });
+      out.push({ rule: "swap.below_oracle", key: `swap.below_oracle:${l.uid}`, subject: subject as string, facts });
+    }
+    return out;
+  },
+};
+
+export const MARKET_RULES: Rule[] = [fmtaoUnbacked, fmtaoDepeg, referenceUnavailable, twapDivergence, poolLiquidity, fmtaoMintSurge, oracleThinPool, swapBelowOracle];

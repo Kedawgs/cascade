@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { chainInfo } from "@/lib/cascade/chains";
+import { NO_DEPOSITS_HERE } from "@/lib/cascade/flows";
 import type { PendingEntry } from "@/lib/cascade/pending";
 import type { DepositRecord, WithdrawalRecord } from "@/lib/cascade/types";
 import { formatDateTime, formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
@@ -49,7 +50,8 @@ function PendingRow({ entry }: { entry: PendingEntry }) {
         <span className={styles.c}>
           {n.kind === "unstake" ? (
             <>
-              about {formatUsdc(n.usdc)} USDC
+              {/* v3.2's Receive TAO asks for no USDC */}
+              {n.usdc !== undefined ? `about ${formatUsdc(n.usdc)} USDC` : `about ${formatTao(n.tao, 4)} TAO`}
               <small>on Base</small>
             </>
           ) : (
@@ -68,10 +70,11 @@ function PendingRow({ entry }: { entry: PendingEntry }) {
   );
 }
 
-/** The deposits read from the chain, below any this browser sent that aren't among them yet (`pending`). */
-export function DepositList({ deposits, pending = [] }: { deposits: DepositRecord[]; pending?: PendingEntry[] }) {
+/** The deposits read from the chain, below any this browser sent that aren't among them yet (`pending`). On a retired
+ * deployment (`retired`) an empty list invites no stake (Task 60 review, Minor 1). */
+export function DepositList({ deposits, pending = [], retired = false }: { deposits: DepositRecord[]; pending?: PendingEntry[]; retired?: boolean }) {
   if (deposits.length === 0 && pending.length === 0) {
-    return <p className={styles.empty}>No deposits yet. Stake some USDC and it will show up here.</p>;
+    return <p className={styles.empty}>{retired ? NO_DEPOSITS_HERE : "No deposits yet. Stake some USDC and it will show up here."}</p>;
   }
   return (
     <ul className={styles.list}>

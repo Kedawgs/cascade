@@ -1,15 +1,17 @@
 import { type Abi, type Address, type Hex, parseSignature, size } from "viem";
 import { base } from "viem/chains";
-import { ERC20, FRONT_DOOR, ROUTER, STAKER } from "./abi";
-import { DESTINATION_BASE, type Deployment, PATH_TAO_TO_USDC, PRICE_CHECK_BPS, RESUME_WINDOW_MS, SLIPPAGE_BPS, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
+import { BASE_CHAIN, CANCEL_COOLDOWN_S, DIRECT_ORIGIN, ERC20, frontDoorAbi, ROUTER, stakerAbi, VAULT_V32 } from "./abi";
+import { DESTINATION_BASE, type Deployment, isV32, PATH_TAO_TO_USDC, PRICE_CHECK_BPS, RESUME_WINDOW_MS, SLIPPAGE_BPS, type Stage, TOKENS, UNISWAP, USDC_PERMIT } from "./config";
+import { impactRefusal, type PriceImpact } from "./impact";
 import type { ClaimOp, DepositOp, OpState } from "./oplog";
 import type { FrontDoorState } from "./reads";
 import { STAKE_LAPSED } from "./trail";
-import type { Balances, DepositQuote, OpenBatch, WithdrawalQuote } from "./types";
-import { floorRao, lessSlippage, toDisplay } from "./units";
+import type { Balances, CancelRead, DepositQuote, Limits, OpenBatch, RedeemListRead, WithdrawalQuote } from "./types";
+import { closeFirstFloor, floorRao, lessSlippage, toDisplay } from "./units";
 import type { Wiring } from "./wiring";
+import { chainNow } from "../batch-clock";
 import { formatTao, formatUsdShort } from "../format";
-import { ethNeeded, needEthText, sendGate, sendNowValue } from "../send-now";
+import { CLOSE_FIRST_SEEN_MS, ethNeeded, needEthText, sendGate, sendNowValue } from "../send-now";
 
 /** One contract call in a flow, named so a resumed flow knows what it already sent. */
 export interface FlowCall {
@@ -90,11 +92,13 @@ export function stakeV3Calls(
   deadline: bigint = permit?.deadline ?? stakeDeadline(Date.now()),
 ): FlowCall[] {
   const staker = stakerOf(d);
+  // v3.2's staker has its buy floor's errors, so the pre-send check can name them
+  const abi = stakerAbi(d);
   const terms = [account, q.usdcIn, q.minTaoOut, STAKE_ROUTE, deadline] as const;
-  if (permit) return [call("stake", staker, STAKER, "stakeWithPermit", [...terms, permit.deadline, permit.v, permit.r, permit.s])];
+  if (permit) return [call("stake", staker, abi, "stakeWithPermit", [...terms, permit.deadline, permit.v, permit.r, permit.s])];
   const out: FlowCall[] = [];
   if (w.usdcStakerAllowance < q.usdcIn) out.push(call("approveUsdc", TOKENS.usdc, ERC20, "approve", [staker, q.usdcIn]));
-  out.push(call("stake", staker, STAKER, "stake", terms));
+  out.push(call("stake", staker, abi, "stake", terms));
   return out;
 }
 
@@ -148,16 +152,30 @@ export function revertReason(e: unknown): string | undefined {
   return err?.cause !== undefined && err.cause !== e ? revertReason(err.cause) : undefined;
 }
 
+/** A custom error's arguments, by position, as Base answered them (R11: CancelTooSoon's one, the second its cancel works
+ * from), when the call's ABI lists the error; undefined otherwise. */
+export function revertArgs(e: unknown): readonly unknown[] | undefined {
+  const err = e as { name?: string; data?: { args?: readonly unknown[] }; cause?: unknown } | undefined;
+  if (err?.name === "ContractFunctionRevertedError") return err.data?.args;
+  return err?.cause !== undefined && err.cause !== e ? revertArgs(err.cause) : undefined;
+}
+
 const DECLINED_SIGNATURE =
   "You declined the signature in your wallet, so nothing was sent. Continue when you're ready: your wallet will then ask you to approve the USDC and to stake.";
 const WONT_GO_THROUGH =
   "This stake wouldn't go through on Base right now (usually because the price moved since your quote), so nothing was sent. Stake again at today's price.";
 const UNREACHABLE = "We couldn't reach Base just now. Nothing was sent. Continue to try again.";
 
+/** v3.2's staker refused the stake: its TAO would be under 95% of the oracle's 30-minute value of the USDC
+ * (BelowOracleFloor, spec §3.7). Nothing left the wallet. */
+export const STAKE_BELOW_FLOOR =
+  "The price moved more than 5% from the market's average, so this stake was not sent. Nothing was spent; try again in a few minutes.";
+
 /** Reasons the staker or the front door gives, in plain words (contracts/src/CascadeStaker.sol and
- * CascadeFrontDoor.sol); anything else keeps the general wording. */
+ * CascadeFrontDoor.sol); anything else keeps the general wording. v3.2's staker refuses NoOracle while the front
+ * door has no oracle to price a stake by: staking is paused then. */
 const BELOW_MIN = new Set(["BelowMinDeposit", "AmountTooSmall"]);
-const PAUSED = new Set(["EnforcedPause", "RouteInactive"]);
+const PAUSED = new Set(["EnforcedPause", "RouteInactive", "NoOracle"]);
 /** The staker's floor check, or the router's own ("Too little received", which some nodes answer
  * with no data, only "execution reverted: Too little received"). */
 const priceMoved = (reason: string) => reason === "InsufficientOutput" || /too little received/i.test(reason);
@@ -174,6 +192,7 @@ export function stakeRefusal(reason: string | undefined, minUsd?: number): strin
   // its list of stakes (50) is full: no amount fits until the next batch
   if (reason === "BatchFull") return "The current batch has as many stakes as it can take, so nothing was sent. A new one opens once it leaves, so try again soon.";
   if (PAUSED.has(reason)) return "Staking is paused right now, so nothing was sent. Try again later.";
+  if (reason === "BelowOracleFloor") return STAKE_BELOW_FLOOR;
   if (priceMoved(reason)) return "The price moved since your quote, so this stake wouldn't go through and nothing was sent. Stake again at today's price.";
   return WONT_GO_THROUGH;
 }
@@ -206,6 +225,14 @@ export const PRICE_DISAGREES = "The price we were quoted doesn't match Cascade's
  * quoter) against the oracle's 30-minute TWAP (`oracle`: reads.ts reads it on the other RPC). The quote
  * is what the stake's floor is cut from, so a lying RPC, or a pool pushed off its price, would otherwise
  * set a floor the market can run down to. Disagreement, or an oracle that can't be read, sends nothing. */
+/** v3.2's cap on a quote's own price impact (impact.ts): a quote that moves the price by more than 3% is refused,
+ * "needs you", in the controller's words, before anything is asked of the wallet. A quote without an impact
+ * (v3-launch's) passes. It reads the quote and changes nothing of it. */
+export function refuseImpact(q: { impact?: PriceImpact }): void {
+  const refusal = impactRefusal(q);
+  if (refusal) throw new FlowError(refusal, "needs-you");
+}
+
 export async function assertPriceAgrees(q: SpotQuote, oracle: () => Promise<bigint>): Promise<void> {
   let o: bigint;
   try {
@@ -229,10 +256,14 @@ export interface StakeV3Input {
   oracle: () => Promise<bigint>;
   /** The smallest stake in dollars, as the form shows it; read only to explain a stake under it. */
   minUsd?: () => Promise<number>;
+  /** v3.2's outside-price veto (price-veto.ts), made after the oracle's check and before the wallet is asked
+   * anything: it throws to refuse and gives nothing back, so the stake's terms are the same with it as without.
+   * None on any other deployment. */
+  veto?: () => Promise<void>;
 }
 
 /** v3: how this stake is paid for, as the calls to send, once its quote checks out against the oracle
- * (assertPriceAgrees). A plain key account signs one USDC permit and sends one `stakeWithPermit`. An
+ * (assertPriceAgrees) and, on v3.2, the pools against the outside price (`veto`). A plain key account signs one USDC permit and sends one `stakeWithPermit`. An
  * account with code (an EIP-7702 smart account, whose permit USDC may refuse), a wallet that can't sign
  * a permit, or a permit USDC refuses in the pre-send check pays by an exact approval and `stake` instead
  * (one batch where the wallet can). An allowance that already covers the stake needs neither. A
@@ -240,6 +271,7 @@ export interface StakeV3Input {
  * stake that would revert for its own reasons stops before anything is sent. */
 export async function planStakeV3(port: WalletPort, x: StakeV3Input): Promise<FlowCall[]> {
   await assertPriceAgrees(x.q, x.oracle);
+  await x.veto?.();
   const deadline = stakeDeadline(x.now);
   const byApproval = () => stakeV3Calls(x.q, x.w, x.d, x.account, undefined, deadline);
   if (x.w.usdcStakerAllowance >= x.q.usdcIn || (await port.hasCode(x.account))) return byApproval();
@@ -377,7 +409,8 @@ const UNCHECKED = "We couldn't check whether your stake already went through. Tr
  * the chain is searched (`findStake`) for this account's stake of this amount: one found is adopted as
  * this stake's (`adopt`) and only waited for, so nothing is sent; a search that can't be completed sends
  * nothing. None found carries on at today's terms (freshStakeTerms: a fresh quote, the user's say-so
- * when it moved, the oracle's check), by approval at today's floor. */
+ * when it moved, on v3.2 its price impact under the cap (refuseImpact), the oracle's check and, on v3.2, the
+ * outside-price veto), by approval at today's floor. */
 export async function planResumeStakeV3(x: {
   op: Pick<DepositOp, "usdcIn" | "targetTao" | "minTaoOut" | "hashes" | "callsId" | "createdAt">;
   w: Balances;
@@ -392,6 +425,9 @@ export async function planResumeStakeV3(x: {
   /** The oracle's price of one TAO in USDC units (reads.ts, readOraclePrice), for the price check. */
   oracle: () => Promise<bigint>;
   record: FreshTermsInput["record"];
+  /** v3.2's outside-price veto (price-veto.ts), made on today's terms after the oracle's check, before they are
+   * recorded: as in planStakeV3, it can only refuse. None on any other deployment. */
+  veto?: () => Promise<void>;
 }): Promise<FlowCall[]> {
   if (x.op.hashes.stake || x.op.callsId) return resumeStakeV3Calls(x.op, x.w, x.d, x.account, x.now);
   let found: Hex | null;
@@ -404,7 +440,12 @@ export async function planResumeStakeV3(x: {
     x.adopt(found);
     return resumeStakeV3Calls({ ...x.op, hashes: { ...x.op.hashes, stake: found } }, x.w, x.d, x.account, x.now);
   }
-  const q = await freshStakeTerms({ op: x.op, now: x.now, quote: x.quote, accepted: x.accepted, check: (fresh) => assertPriceAgrees(fresh, x.oracle), record: x.record });
+  const check = async (fresh: DepositQuote) => {
+    refuseImpact(fresh);
+    await assertPriceAgrees(fresh, x.oracle);
+    await x.veto?.();
+  };
+  const q = await freshStakeTerms({ op: x.op, now: x.now, quote: x.quote, accepted: x.accepted, check, record: x.record });
   return resumeStakeV3Calls(x.op, x.w, x.d, x.account, x.now, q);
 }
 
@@ -437,7 +478,7 @@ export function depositTaoCalls(taoWei: bigint, w: Balances, d: Deployment): Flo
   const amount = floorRao(taoWei);
   const out: FlowCall[] = [];
   if (w.taoFrontDoorAllowance < amount) out.push(call("approveTao", TOKENS.tao, ERC20, "approve", [d.frontDoor, amount]));
-  out.push(call("deposit", d.frontDoor, FRONT_DOOR, "deposit", [amount]));
+  out.push(call("deposit", d.frontDoor, frontDoorAbi(d), "deposit", [amount]));
   return out;
 }
 
@@ -545,7 +586,7 @@ export function sellTaoCalls(taoWei: bigint, minUsdc: bigint, w: Balances, accou
 
 /** The redeem request fee is due once per open batch: a second request in it must send 0. */
 export function unstakeCall(shares: bigint, redeemOf: bigint, redeemRequestFee: bigint, d: Deployment): FlowCall {
-  return call("request", d.frontDoor, FRONT_DOOR, "requestRedeem", [shares], redeemOf === 0n ? redeemRequestFee : 0n);
+  return call("request", d.frontDoor, frontDoorAbi(d), "requestRedeem", [shares], redeemOf === 0n ? redeemRequestFee : 0n);
 }
 
 /** v3: the unstake request and the USDC delivery preference in one call, under the same fee rule. */
@@ -553,11 +594,29 @@ export function unstakeV3Call(shares: bigint, redeemOf: bigint, fee: bigint, q: 
   return call(
     "request",
     d.frontDoor,
-    FRONT_DOOR,
+    frontDoorAbi(d),
     "requestRedeemWithDelivery",
     [shares, q.minUsdcPerTao, BigInt(q.deliveryDeadline), DESTINATION_BASE],
     redeemOf === 0n ? fee : 0n,
   );
+}
+
+/** v3.2's "Receive TAO": the unstake request with no delivery, its payout claimed on Base by hand. It is
+ * `requestRedeemWithDelivery` with a zero floor, which clears the account's USDC delivery preference
+ * (CascadeFrontDoor._setDelivery) before the request, under the same fee rule: the preference is the account's, not
+ * the request's, so a live one left from an earlier USDC unstake would otherwise have this payout sold too. Nothing
+ * is sold, so no price check holds it (use-flows.ts, receiveTao). Only v3.2's site offers it. */
+export function receiveTaoCall(shares: bigint, redeemOf: bigint, fee: bigint, d: Deployment): FlowCall {
+  if (!isV32(d)) throw new Error("Only v3.2's site offers Receive TAO");
+  return call("request", d.frontDoor, frontDoorAbi(d), "requestRedeemWithDelivery", [shares, 0n, 0n, 0], redeemOf === 0n ? fee : 0n);
+}
+
+/** v3.2 with USDC delivery off (Task 60 follow-up): clears the account's USDC delivery preference at once,
+ * `setDelivery(0, 0, 0)` on the front door, which deletes it on a zero floor and works while paused
+ * (CascadeFrontDoor.setDelivery, _setDelivery). It moves nothing: a payout on its way is then claimed by hand, never sold. */
+export function clearDeliveryCall(d: Deployment): FlowCall {
+  if (!isV32(d)) throw new Error("Only v3.2's site turns off USDC delivery for an account");
+  return call("clearDelivery", d.frontDoor, frontDoorAbi(d), "setDelivery", [0n, 0n, 0]);
 }
 
 /** Code at an account that leaves its nonce its own key's: none (a plain key account), or an EIP-7702
@@ -566,7 +625,8 @@ const ownNonce = (code: Hex | undefined) => code === undefined || code === "0x" 
 
 /** An unstake's request, with what its record keeps before it is sent: the fee it pays and the
  * account's pending nonce on Base, read last so it is as close to the send as it can be (the request's
- * own nonce is at least this; facts.ts tells a dropped request from one Base can't see by it). Only for
+ * own nonce is at least this; facts.ts tells a dropped request from one Base can't see by it). `keepTao` (v3.2's
+ * Receive TAO) asks for the payout as TAO (receiveTaoCall), the quote's delivery terms unread. Only for
  * an account whose nonce is its own key's (ownNonce): a contract account, like a Base Account, sends
  * through others whose nonces move instead, so its record keeps none, as does one whose code can't be
  * read. A nonce left out never stops the request: its record just waits longer before a drop is
@@ -575,6 +635,8 @@ export async function planUnstake(x: {
   q: Pick<WithdrawalQuote, "shares" | "minUsdcPerTao" | "deliveryDeadline">;
   d: Deployment;
   v3: boolean;
+  /** v3.2: the payout as TAO, claimed by hand (receiveTaoCall). */
+  keepTao?: boolean;
   frontDoor: () => Promise<Pick<FrontDoorState, "redeemOf" | "redeemRequestFee">>;
   /** The code at the account on Base (undefined or "0x" when there is none). */
   accountCode: () => Promise<Hex | undefined>;
@@ -582,27 +644,116 @@ export async function planUnstake(x: {
   record: (patch: { fee: bigint; nonce?: number }) => void;
 }): Promise<FlowCall[]> {
   const fd = await x.frontDoor();
-  const c = x.v3 ? unstakeV3Call(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.q, x.d) : unstakeCall(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.d);
+  const c = x.keepTao
+    ? receiveTaoCall(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.d)
+    : x.v3
+      ? unstakeV3Call(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.q, x.d)
+      : unstakeCall(x.q.shares, fd.redeemOf, fd.redeemRequestFee, x.d);
   const own = await x.accountCode().then(ownNonce, () => false);
   const nonce = own ? await x.pendingNonce().catch(() => undefined) : undefined;
   x.record({ fee: c.value ?? 0n, ...(nonce !== undefined ? { nonce } : {}) });
   return [c];
 }
 
+/** ChatGPT r3 §2 (R12b): a request from an account with none in the open batch, to a full redeem list, closes the batch
+ * first on its pot alone (the request's own fee is its own, never the close's), and reverts InsufficientFee when the pot
+ * is short of the bridge fee. The keeper closes a full list on its next round, paying the rest. */
+export const REDEEM_LIST_FULL =
+  "The current batch's unstake list is full and its fees don't cover sending it, so a new unstake would fail until it leaves. It normally leaves within a minute or two, at no cost to you: try again then. Nothing was sent.";
+
+/** v3.2: whether a new request would meet that InsufficientFee: the redeem list full (nRedeems at maxRedeems), none of
+ * the account's in it (one of its own adds to it, closing nothing), and the pot under the bridge fee as read for the
+ * batch. Undefined when the fee couldn't be read; false on v3-launch (no limit read) and whenever any of it isn't so. */
+export function redeemCloseShort(b: OpenBatch): boolean | undefined {
+  if (b.nRedeems === undefined || b.maxRedeems === undefined) return false;
+  if (b.mine.redeemShares > 0n || b.nRedeems < b.maxRedeems) return false;
+  if (b.feeWei === undefined) return undefined;
+  return b.potWei < b.feeWei;
+}
+
+/** Before an unstake request is recorded (v3.2): refuses one that would revert InsufficientFee (redeemCloseShort), in
+ * plain words, nothing recorded or sent. R12d (M2): the list's own small read first (`list`, reads.ts readRedeemList: its
+ * length, its limit, the account's request), and the open batch with its bridge fee (`batch`, the slow read: two RPCs'
+ * fee quotes, prices, a log scan) only for a full list with none of the account's in it, the one case that needs it.
+ * Anything it can't tell lets the request go, and the wallet's own estimate decides: either read failing, or the bridge
+ * fee unread. v3-launch reads nothing. (The paid close first, as a stake has, is the next step: the R12b report's
+ * plan.) */
+export async function assertRedeemListOpen(d: Deployment, x: { list: () => Promise<RedeemListRead>; batch: () => Promise<OpenBatch> }): Promise<void> {
+  if (!isV32(d)) return;
+  let l: RedeemListRead;
+  try {
+    l = await x.list();
+  } catch {
+    return;
+  }
+  if (l.redeemShares > 0n || l.nRedeems < l.maxRedeems) return;
+  let b: OpenBatch;
+  try {
+    b = await x.batch();
+  } catch {
+    return;
+  }
+  if (redeemCloseShort(b) === true) throw new FlowError(REDEEM_LIST_FULL, "needs-you");
+}
+
+/** v3.2: a direct redeem of `shares` on Bittensor (the vault's `redeemDirect`), for a way out the site may offer
+ * there. Never the opt-in: `acceptMissing` is always false, so the vault refuses StakeMissing rather than pay the
+ * user out at a loss to stake gone missing (spec §7: the web never offers it). Only v3.2's vault has the call. */
+export function redeemDirectCall(shares: bigint, d: Deployment): FlowCall {
+  if (!isV32(d)) throw new Error("Only a v3.2 vault has redeemDirect(shares, acceptMissing)");
+  return call("redeemDirect", d.vault, VAULT_V32, "redeemDirect", [shares, false]);
+}
+
+/** v3.2: makes the caller's redeem origin Bittensor itself (`setRedeemOrigin(DIRECT_ORIGIN)`, spec §3.4): no front
+ * door burns its shares from then on (a request from Base is skipped), until it names a chain again. The vault takes
+ * it at any time, paused or not, stake missing or not (CascadeVault.setRedeemOrigin). Only v3.2's vault has the call. */
+export function setDirectOriginCall(d: Deployment): FlowCall {
+  if (!isV32(d)) throw new Error("Only a v3.2 vault has setRedeemOrigin(chain)");
+  return call("setRedeemOrigin", d.vault, VAULT_V32, "setRedeemOrigin", [DIRECT_ORIGIN]);
+}
+
+/** v3.2: makes the caller's redeem origin Base again (`setRedeemOrigin(8453)`, spec §3.4): Base's front doors burn its
+ * shares on a request from then on; redeemDirect still works (it reads no origin). The vault refuses it (UnknownOrigin)
+ * while Base has no active door. Only v3.2's vault has the call. */
+export function setBaseOriginCall(d: Deployment): FlowCall {
+  if (!isV32(d)) throw new Error("Only a v3.2 vault has setRedeemOrigin(chain)");
+  return call("setRedeemOrigin", d.vault, VAULT_V32, "setRedeemOrigin", [BASE_CHAIN]);
+}
+
 export function claimCalls(claimable: bigint, minUsdc: bigint, w: Balances, d: Deployment, account: Address, keepTao: boolean): FlowCall[] {
-  const out = [call("claim", d.frontDoor, FRONT_DOOR, "claim", [])];
+  const out = [call("claim", d.frontDoor, frontDoorAbi(d), "claim", [])];
   return keepTao ? out : [...out, ...sellTaoCalls(claimable, minUsdc, w, account)];
 }
 
 // ---- Send it now: the open batch on its way, the user paying its bridge fee ----
 
+/** The open batch as the user saw it when they chose to send it: its id, and their own deposit in it. */
+export interface SeenBatch {
+  batchId: bigint;
+  minValue: bigint;
+}
+
 /** closeBatch with `value`: the front door pays the bridge fee from the batch's pot first, then from the
- * value, and refunds the rest to the sender. */
-export const sendNowCall = (value: bigint, d: Deployment): FlowCall => call("close", d.frontDoor, FRONT_DOOR, "closeBatch", [], value);
+ * value, and refunds the rest to the sender. On v3.2 it names the batch the user saw and asks that its deposits
+ * still total at least `minValue`, the user's own deposit as they saw it (`closeBatch(expectedId, minValue)`):
+ * the front door refuses WrongBatch once that batch has left and BatchTooSmall once a cancel took it under, and
+ * never sends another batch in its place. v3-launch's closeBatch() takes neither. */
+export function sendNowCall(value: bigint, d: Deployment, seen?: SeenBatch): FlowCall {
+  if (!isV32(d)) return call("close", d.frontDoor, frontDoorAbi(d), "closeBatch", [], value);
+  if (!seen) throw new Error("A v3.2 close names the batch the user saw: its id and their deposit in it");
+  return call("close", d.frontDoor, frontDoorAbi(d), "closeBatch", [seen.batchId, seen.minValue], value);
+}
 
 export const SEND_UNREAD = "We couldn't read the batch on Base just now, so nothing was sent. Try again in a moment.";
 export const SEND_PAUSED = "Cascade is paused right now, so the batch can't be sent. Nothing was sent.";
+/** v3.2: the front door's primary bridge is disabled (PrimaryBridgeDisabled), which holds every close; Cascade may
+ * well not be paused (Task 58 review, Minor 4; the controller's wording). */
+export const SEND_ON_HOLD = "Sending batches is on hold right now, so nothing was sent.";
 export const SEND_GONE = "It's already on its way, so nothing was sent.";
+/** v3.2: the batch the user saw has left (WrongBatch, or the read at the click shows the next one open). */
+export const SEND_WRONG_BATCH = "Your batch has already been sent. There is nothing more to do.";
+/** v3.2: a cancel took the batch's deposits under the user's own, as they saw it (BatchTooSmall). */
+export const SEND_BATCH_CHANGED = "The batch changed since you looked. Check it and try again.";
 export const SEND_NOT_YOURS = "Nothing of yours is waiting in this batch any more, so nothing was sent.";
 export const SEND_NOT_YET = "This batch can't be sent yet, so nothing was sent.";
 export const SEND_NO_FEE = "We couldn't read the bridge fee just now, so nothing was sent. Try again in a moment.";
@@ -620,33 +771,44 @@ const SEND_UNREACHABLE = "We couldn't reach Base just now, so nothing was sent. 
 const GATE_REFUSAL = { blocked: SEND_BLOCKED, unchecked: SEND_UNCHECKED, free: SEND_FREE, covered: SEND_COVERED, early: SEND_NOT_YET } as const;
 
 /** Send it now, checked right before the wallet is asked: the open batch is read again, and nothing is
- * sent while Cascade is paused, once the batch the user saw (`batchId`) has left, when nothing of the
+ * sent while Cascade is paused (v3-launch: v3.2's pause stops no close), once the batch the user saw (`batchId`)
+ * has left (on v3.2 in the plan's words, SEND_WRONG_BATCH), when nothing of the
  * account's is in it any more, unless sendGate opens it on the read's own clock (Bittensor's side was
  * checked and can take it, and the keeper is holding it five minutes past its interval, or hasn't sent it
  * five minutes past its max wait), when its fee can't be read or the two Base RPCs disagree about it
  * (reads.ts, readOpenBatch), or when the wallet can't cover the value and the network fee. The call is
- * then run from the account (`simulate`) and goes only if Base says it would go through. Gives the call
- * and the batch it was priced from. */
+ * then run from the account (`simulate`) and goes only if Base says it would go through, a refusal said in plain
+ * words, never as a raw revert. On v3.2 the call names the batch the user saw and their deposit in it as they saw
+ * it (`depositWei`; sendNowCall), so a batch that left or changed since is refused, never another sent. On a retired
+ * deployment (`retired`) a batch that holds the account's deposit, as read at the click, is never sent: Send it now is
+ * a way out only for an unstake alone (Task 60). Gives the call and the batch it was priced from. */
 export async function planSendNow(x: {
   d: Deployment;
   batchId: bigint;
+  /** v3.2: the account's deposit in the batch as the user saw it, the close's `minValue` (0 with an unstake alone). */
+  depositWei?: bigint;
   read: () => Promise<OpenBatch>;
   simulate: (c: FlowCall) => Promise<Simulation>;
+  /** The deployment is retired (deployments.json): no batch with the account's deposit is sent. */
+  retired?: boolean;
 }): Promise<{ call: FlowCall; batch: OpenBatch }> {
+  const v32 = isV32(x.d);
+  if (v32 && x.depositWei === undefined) throw new Error("A v3.2 close needs the account's deposit in the batch, as the user saw it");
   let b: OpenBatch;
   try {
     b = await x.read();
   } catch {
     throw new FlowError(SEND_UNREAD, "needs-you");
   }
-  if (b.paused) throw new FlowError(SEND_PAUSED, "failed");
-  if (b.id !== x.batchId) throw new FlowError(SEND_GONE, "failed");
+  if (b.paused && !v32) throw new FlowError(SEND_PAUSED, "failed");
+  if (b.id !== x.batchId) throw new FlowError(v32 ? SEND_WRONG_BATCH : SEND_GONE, "failed");
   if (b.mine.depositWei === 0n && b.mine.redeemShares === 0n) throw new FlowError(SEND_NOT_YOURS, "failed");
+  if (x.retired && b.mine.depositWei > 0n) throw new FlowError(RETIRED, "failed");
   // just read: Base's clock is the read's block time
   const gate = sendGate(b, x.d.batchMaxWaitS, b.chainTime);
   if (gate !== "open") throw new FlowError(GATE_REFUSAL[gate], gate === "unchecked" ? "needs-you" : "failed");
   if (b.feeWei === undefined) throw new FlowError(b.feeUnconfirmed ? SEND_FEE_UNCONFIRMED : SEND_NO_FEE, "needs-you");
-  const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d);
+  const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d, v32 ? { batchId: x.batchId, minValue: x.depositWei as bigint } : undefined);
   const need = ethNeeded(b);
   if (b.ethWei !== undefined && b.ethWei < need) throw new FlowError(needEthText(need, b.ethPriceUsd), "needs-you");
   let sim: Simulation;
@@ -656,6 +818,13 @@ export async function planSendNow(x: {
     throw new FlowError(noGas(e) ? needEthText(need, b.ethPriceUsd) : SEND_UNREACHABLE, "needs-you");
   }
   if (!sim.ok) {
+    if (v32) {
+      // v3.2's own refusals of a close by id; a disabled bridge is what holds a close now, not a pause
+      if (sim.revert === "WrongBatch") throw new FlowError(SEND_WRONG_BATCH, "failed");
+      if (sim.revert === "BatchTooSmall") throw new FlowError(SEND_BATCH_CHANGED, "needs-you");
+      if (sim.revert === "BatchNotReady") throw new FlowError(SEND_NOT_YET, "failed");
+      if (sim.revert === "PrimaryBridgeDisabled") throw new FlowError(SEND_ON_HOLD, "failed");
+    }
     if (sim.revert === "InsufficientFee") throw new FlowError(SEND_FEE_ROSE, "needs-you");
     if (sim.revert === "EnforcedPause") throw new FlowError(SEND_PAUSED, "failed");
     if (sim.revert === "TransferFailed") throw new FlowError(SEND_NO_REFUND, "failed");
@@ -664,10 +833,338 @@ export async function planSendNow(x: {
   return { call: c, batch: b };
 }
 
+/** v3.2 (R8): the stake that waited for a close the site sent first still has no room: the batch filled again, or the
+ * close didn't go. Nothing of the stake was sent. */
+export const CLOSE_FIRST_STILL_FULL = "The current batch is still full, so your stake wasn't sent. Try again in a minute.";
+export const CLOSE_FIRST_UNREAD = "We couldn't read the batch on Base just now, so your stake wasn't sent. Try again in a moment.";
+/** R9 (L-1): the room read at the click takes the stake neither now nor once the batch has left (the cap filled, the next
+ * batch's room shrank, the batch can no longer close): no close is paid for a stake that couldn't follow it. */
+export const CLOSE_FIRST_NO_ROOM = "The room for your stake changed since you looked, so nothing was sent. Check the amount and try again.";
+/** R10 (M-1): the limits read at the click don't find the batch the note priced closable for CLOSE_FIRST_SEEN_MS (the
+ * form's offer came from an older reading): no close is paid for until a fresh reading offers it again. */
+export const CLOSE_FIRST_RECHECK = "We're checking the batch again, so nothing was sent. Try again in a moment.";
+/** R9 (M-1): the wallet no longer holds the stake's USDC: refused before the close is paid for. */
+export const CLOSE_FIRST_NO_USDC = "Your wallet doesn't hold the USDC for this stake now, so nothing was sent.";
+
+/** R9 (M-1): a stake after a close the site sends first can't be run from the account before the close (the full batch
+ * refuses it, BatchValueFull), so its likeliest other refusal is checked before the close is paid for: the wallet's USDC,
+ * read at the click (`w`), must cover it. Throws to refuse, "needs you". */
+export function assertStakeFunded(q: Pick<DepositQuote, "usdcIn">, w: Pick<Balances, "usdc">): void {
+  if (w.usdc < q.usdcIn) throw new FlowError(CLOSE_FIRST_NO_USDC, "needs-you");
+}
+
+/** R9 (L-1): the room for a stake by the limits read at the click (stake-form.ts stakeRoom): the open batch takes it
+ * now, it fits only once the batch has left, or neither. */
+export type StakeRoom = "now" | "after-close" | "none";
+
+/** What planCloseFirst plans: the close to send first, or none and why the stake goes on without it. */
+export interface CloseFirstPlan {
+  call?: FlowCall;
+  skip?: "not-closable" | "left" | "changed";
+  batch: OpenBatch;
+}
+
+/** v3.2 (R8, the contracts review's L-1): "close this batch, then stake". A holder can fill the open batch just after the
+ * keeper's once-a-minute round and cancel before the next, so a deposit lacks room most of each minute; closeBatch is
+ * anyone's, and a close that lands while the batch is full commits the holder's deposits. So a stake the open batch has
+ * no room for, that fits once it has left (limits' afterClose), can send the close first. The open batch is read again,
+ * and closeBatch(its id, its minValue) is built with Send it now's value (the bridge fee plus 30%, less the pot
+ * of unstake fees, which the front door spends first; whatever the fee doesn't take is refunded), then run from the
+ * account. R12c: `minValue` is a total still full for a batch full by its limits at that read (units.ts closeFirstFloor,
+ * from the keeper's lines: 0 for a full redeem list, 25 minimum deposits for a deposit list at half (R12d), the least
+ * total at which a value limit still holds), so a holder's cancel of a rao from an aged entry before the close (a partial
+ * cancel moves no clock) can't void it for a few cents each time; the deposits as read for a batch due by time alone (and
+ * for a read without the door's limits). R12e: when more than one clause held, the HIGHEST of their lines (the keeper's
+ * own close names the least): the user pays for this close, so it never lands on a batch shrunk below a line it was shown
+ * full by, at the cost of one retry when a cancel takes it under that line but not under the others. THE WORST CASE: the
+ * close lands with the batch shrunk since the click's read, but never under any line that held there (half its
+ * maxBatchValue: 5 TAO of a 10 TAO batch at launch; within a minimum deposit of the limit, for a batch at it; half the
+ * cap's room, or within a minimum deposit of it; 25 minimum deposits for a deposit list at half, or the total if that is
+ * less), and the user pays only the bridge fee they were shown (the wallet sends at most its value, the fee plus 30%; the
+ * door refunds the rest), for a batch that is still full by every line it was full by; if those cancels made room for the
+ * stake in the open batch, that was a close it no longer needed, and the stake still goes, into the next batch. A batch
+ * full by its redeem list alone names 0, as the keeper does. One full by its deposit list alone (at half maxDeposits)
+ * names what the entries the list needs hold at least, ceil(maxDeposits / 2) minimum deposits (R12d, the keeper's list
+ * floor): full cancels of whole aged entries can still take it under 25 entries, and a close that lands past the batch's
+ * interval then sends it as one due by time, but never as a tiny batch (before the interval the door refuses it,
+ * BatchNotReady). Under the line, the close reverts BatchTooSmall (or BatchNotReady), on chain only Base's network fee
+ * spent, and the stake goes straight on once the room, read again, takes it (`skip`:
+ * "changed", or closeFirst's "reverted"), as it does when the batch left already ("left":
+ * WrongBatch, or the read shows a batch other than `batchId`, the one the form's note was priced from: R9, L-1, so a
+ * batch that opened since is never closed in its place) or can't close now ("not-closable": the stake's own checks
+ * decide). Refused, with nothing sent: deposits paused (the stake would be refused too), Bittensor's side not taking
+ * batches or not checked, the bridge fee unread or the two Base RPCs disagreeing on it, the wallet short of the value and
+ * the close's network fee, a disabled bridge, a fee that rose, a refund the wallet can't take. */
+export async function planCloseFirst(x: { d: Deployment; batchId: bigint; read: () => Promise<OpenBatch>; simulate: (c: FlowCall) => Promise<Simulation> }): Promise<CloseFirstPlan> {
+  if (!isV32(x.d)) throw new Error("Closing the batch before a stake is v3.2's (its closeBatch names the batch and its deposits)");
+  let b: OpenBatch;
+  try {
+    b = await x.read();
+  } catch {
+    throw new FlowError(SEND_UNREAD, "needs-you");
+  }
+  // v3.2's pause stops new deposits, never a close: closing the batch then would only send the holder's
+  if (b.paused) throw new FlowError(stakeRefusal("EnforcedPause"), "failed");
+  // R9 (L-1): the batch priced has left (the keeper's close, or anyone's): another is never closed in its place
+  if (b.id !== x.batchId) return { skip: "left", batch: b };
+  if (!b.canClose) return { skip: "not-closable", batch: b };
+  if (b.totalWei === undefined) throw new FlowError(SEND_UNREAD, "needs-you");
+  if (b.bittensor !== "open") throw new FlowError(b.bittensor === "paused" ? SEND_BLOCKED : SEND_UNCHECKED, "needs-you");
+  if (b.feeWei === undefined) throw new FlowError(b.feeUnconfirmed ? SEND_FEE_UNCONFIRMED : SEND_NO_FEE, "needs-you");
+  // R12c: a batch full by its limits names a total still full (R12e: the highest line that held, where the keeper's close
+  // names the least), one due by time alone the exact total
+  const floor =
+    b.limits && b.nRedeems !== undefined && b.maxRedeems !== undefined
+      ? closeFirstFloor({ deposits: b.limits.nDeposits, redeems: b.nRedeems, totalDeposits: b.totalWei }, { ...b.limits, maxRedeems: b.maxRedeems })
+      : undefined;
+  const c = sendNowCall(sendNowValue(b.feeWei, b.potWei), x.d, { batchId: b.id, minValue: floor ?? b.totalWei });
+  const need = ethNeeded(b);
+  if (b.ethWei !== undefined && b.ethWei < need) throw new FlowError(needEthText(need, b.ethPriceUsd), "needs-you");
+  let sim: Simulation;
+  try {
+    sim = await x.simulate(c);
+  } catch (e) {
+    throw new FlowError(noGas(e) ? needEthText(need, b.ethPriceUsd) : SEND_UNREACHABLE, "needs-you");
+  }
+  if (sim.ok) return { call: c, batch: b };
+  if (sim.revert === "WrongBatch") return { skip: "left", batch: b };
+  if (sim.revert === "BatchTooSmall") return { skip: "changed", batch: b };
+  if (sim.revert === "BatchNotReady") return { skip: "not-closable", batch: b };
+  if (sim.revert === "PrimaryBridgeDisabled") throw new FlowError(SEND_ON_HOLD, "failed");
+  if (sim.revert === "InsufficientFee") throw new FlowError(SEND_FEE_ROSE, "needs-you");
+  if (sim.revert === "TransferFailed") throw new FlowError(SEND_NO_REFUND, "failed");
+  throw new FlowError(SEND_NOT_NOW, "failed");
+}
+
+/** v3.2 (R8): the close before a stake, as planCloseFirst plans it, then what lets the stake go on. R9 (L-1): first the
+ * room, read at the click (`room`, stakeRoom): a stake the open batch takes now goes without any close ("fits": the batch
+ * left, or a cancel made room, since the form's read); one that wouldn't fit even once it has left is refused
+ * (CLOSE_FIRST_NO_ROOM), nothing paid for. Then the close: one that landed, the stake goes (its own checks decide, should
+ * the batch have filled again). A close that wasn't needed after all, or reverted on chain (a cancel landing first:
+ * BatchTooSmall; another close first: WrongBatch; `sendClose` says "reverted", which covers one the wallet replaced): the
+ * room is read again, and the stake goes only if it fits now (CLOSE_FIRST_STILL_FULL otherwise). A room that can't be
+ * read sends nothing (CLOSE_FIRST_UNREAD). Any other stop of the close (declined in the wallet, not confirmed) stops here,
+ * nothing of the stake sent. R10 (M-1): the clock is enforced at the click, by the limits that read returns, never by
+ * the form's cached reading (React Query shows the last one through a hidden tab, a failed refresh or one in flight): a
+ * close is planned only while they find `batchId`, the batch the note priced, closable for CLOSE_FIRST_SEEN_MS
+ * (CLOSE_FIRST_RECHECK otherwise, nothing planned or sent), so the keeper's free round still comes first. */
+export async function closeFirst(x: {
+  batchId: bigint;
+  room: () => Promise<{ room: StakeRoom; limits: Pick<Limits, "afterClose"> }>;
+  plan: () => Promise<CloseFirstPlan>;
+  sendClose: (c: FlowCall, batch: OpenBatch) => Promise<"landed" | "reverted">;
+}): Promise<"fits" | "landed" | "reverted" | NonNullable<CloseFirstPlan["skip"]>> {
+  const room = async () => {
+    try {
+      return await x.room();
+    } catch {
+      throw new FlowError(CLOSE_FIRST_UNREAD, "needs-you");
+    }
+  };
+  const before = await room();
+  if (before.room === "now") return "fits";
+  if (before.room === "none") throw new FlowError(CLOSE_FIRST_NO_ROOM, "needs-you");
+  const after = before.limits.afterClose;
+  if (!after || after.batchId !== x.batchId || after.closableForMs < CLOSE_FIRST_SEEN_MS) throw new FlowError(CLOSE_FIRST_RECHECK, "needs-you");
+  const p = await x.plan();
+  const done = p.call ? await x.sendClose(p.call, p.batch) : (p.skip as NonNullable<CloseFirstPlan["skip"]>);
+  if (done === "landed") return done;
+  if ((await room()).room !== "now") throw new FlowError(CLOSE_FIRST_STILL_FULL, "needs-you");
+  return done;
+}
+
 export function cancelCall(kind: "deposit" | "withdrawal", amount: bigint, d: Deployment): FlowCall {
   return kind === "deposit"
-    ? call("cancel", d.frontDoor, FRONT_DOOR, "cancelDeposit", [amount])
-    : call("cancel", d.frontDoor, FRONT_DOOR, "cancelRedeem", [amount]);
+    ? call("cancel", d.frontDoor, frontDoorAbi(d), "cancelDeposit", [amount])
+    : call("cancel", d.frontDoor, frontDoorAbi(d), "cancelRedeem", [amount]);
+}
+
+// ---- v3.2 (R11): the cancel cooldown. cancelDeposit reverts CancelTooSoon(cancelableAt) until five minutes after the
+// last deposit to the caller's entry, whoever made it (a depositFor, the staker's); cancelableAt 0 means no wait ----
+
+/** The deposit's batch has left (the open batch holds none of the account's deposit, or is a later batch). */
+export const CANCEL_LEFT = "Your deposit has already left with its batch, so it can't be cancelled. Its receipt follows it from here.";
+/** R12d: the click's read is of a block before the receipt's batch opened (its open batch an earlier one): a node a block
+ * or two behind, not a batch that left. */
+export const CANCEL_BEHIND = "The reading from Base is a moment behind your deposit, so nothing was sent. Try again in a moment.";
+/** The account's entry is smaller than this deposit now (InsufficientRequest), or a part-cancel would leave less than the
+ * minimum deposit (BelowMinDeposit). */
+export const CANCEL_CHANGED = "Your deposit in the batch changed since you looked, so nothing was sent. Check it and try again.";
+export const CANCEL_WONT_GO = "This cancel wouldn't go through on Base right now, so nothing was sent. Try again in a moment.";
+/** A v3.2 deposit's cancel mined and reverted: its batch left first, or a deposit to the entry restarted its wait. */
+export const CANCEL_REVERTED = `The cancel didn't go through on Base: its batch may have just left, or a deposit to your entry restarted the ${CANCEL_COOLDOWN_S / 60}-minute wait. Only Base's network fee was spent.`;
+/** R12d: any other cancel mined and reverted (an unstake's, or v3-launch's, which have no cooldown): its batch left first. */
+export const CANCEL_REVERTED_LEFT = "The cancel didn't go through on Base: its batch may have just left. Only Base's network fee was spent.";
+
+const COOLDOWN_WHY = `a cancel works ${CANCEL_COOLDOWN_S / 60} minutes after the last deposit to your entry`;
+
+/** Build B: cancelableAt reads 0 while the door is paused or its primary bridge is disabled, and cancelDeposit then never
+ * waits: what the receipt says of it. */
+export const CANCEL_AT_ONCE = `While deposits are paused, or batches can't leave, a cancel works at once: there is no ${CANCEL_COOLDOWN_S / 60}-minute wait.`;
+
+/** R12d (M1): what the receipt tells a screen reader of its cancel, once as it changes (never the countdown's each second):
+ * waiting out the cooldown, then open. */
+export const CANCEL_WAITING_STATUS = `This deposit's cancel opens ${CANCEL_COOLDOWN_S / 60} minutes after the last deposit to your entry.`;
+export const CANCEL_OPEN_STATUS = "You can cancel this deposit now.";
+
+/** R12d (M1): seconds the receipt holds its cancel past cancelableAt on Base's clock: the click's check and the wallet's
+ * estimate read Base's latest block, which can trail the clock counted here by a block or two, so a click as the count
+ * reaches 0 isn't refused for a second's wait. */
+export const CANCEL_MARGIN_S = 3;
+
+/** R12d (M2): the most a cancel's check (its read and its run) holds the click: past it the cancel goes unchecked, as on a
+ * failed read, and the wallet's own estimate decides. A cancel is a way out, so a slow node never holds it. */
+export const CANCEL_CHECK_MS = 5_000;
+
+/** "3 min 5 s", "40 s". */
+const waitWords = (s: number): string => (s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`);
+/** A cancel's wait in words is 1 s to the cooldown, whatever clock it was counted on (a device's can be minutes off). */
+const clampWait = (s: number): number => Math.min(CANCEL_COOLDOWN_S, Math.max(1, Math.ceil(s)));
+
+/** R12d (M1): how long, in whole seconds, the receipt holds a deposit's cancel from `now` (this device's clock, ms):
+ * until `cancelableAt` on Base's clock (the block's time at the read, plus the time since it landed by this device:
+ * batch-clock.ts chainNow), and CANCEL_MARGIN_S more. Never more than CANCEL_COOLDOWN_S and the margin past the read,
+ * whatever it read, so a stale or odd read can't hold the only way out; 0 is no wait (cancelableAt 0, build B; or past). A
+ * device clock minutes off changes nothing: only the time since the read is the device's. */
+export function cancelHoldS(cancelableAt: number, clock: { chainTime: number; readAt: number }, now: number): number {
+  if (cancelableAt === 0) return 0;
+  const sinceReadS = Math.max(0, now - clock.readAt) / 1000;
+  const left = cancelableAt + CANCEL_MARGIN_S - chainNow(clock.chainTime, clock.readAt, now);
+  const most = CANCEL_COOLDOWN_S + CANCEL_MARGIN_S - sinceReadS;
+  return Math.max(0, Math.ceil(Math.min(left, most)));
+}
+
+/** What a deposit's receipt says while it holds the cancel `holdS` seconds (cancelHoldS), worded as 1 s to five minutes;
+ * null once it doesn't. */
+export function cancelWaitText(holdS: number): string | null {
+  if (!(holdS > 0)) return null;
+  return `You can cancel this deposit in ${waitWords(clampWait(holdS))}: ${COOLDOWN_WHY}.`;
+}
+
+/** A cancel refused for its cooldown, said as the wait left to `at` from `nowS`, 1 s to five minutes (R12d: runFlow's
+ * `nowS` is this device's clock, which can be minutes off). */
+const cancelTooSoon = (at: number, nowS: number): string => `You can cancel this deposit in ${waitWords(clampWait(at - nowS))} (${COOLDOWN_WHY}), so nothing was sent.`;
+
+/** Rejects once `ms` have passed since it was made, for whatever `race` is asked to wait on; `done` stops its timer. */
+function deadline(ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out")), ms);
+  });
+  expired.catch(() => undefined);
+  return { race: <T>(p: Promise<T>): Promise<T> => Promise.race([p, expired]), done: () => clearTimeout(timer) };
+}
+
+/** v3.2 (R11): a deposit's cancel, checked right before the wallet is asked, so none is sent that would revert. R12d (M2):
+ * its own small read (`read`, reads.ts readCancelState: the open batch's id, the account's deposit and cooldown, Base's
+ * clock, one multicall), never the open batch's whole read, and the read and the run together for CANCEL_CHECK_MS at
+ * most. depositOf first: none of the account's deposit in it, or a later batch than `batchId` (the receipt's) open, says
+ * the deposit has left (CANCEL_LEFT), whatever its cooldown, since a batch that closed in the last five minutes would
+ * otherwise show a wait and then refuse InsufficientRequest; an earlier batch than the receipt's is a read a block behind
+ * (CANCEL_BEHIND: try again). Then the cooldown, by Base's clock as read (cancelableAt; 0 is no wait); then the call is
+ * run from the account, its refusal in plain words (CancelTooSoon by the second it names, after a deposit to the entry
+ * since the read). A cancel is a way out, so a read or a run that fails or takes longer than CANCEL_CHECK_MS holds
+ * nothing: the call goes, and the wallet's own estimate decides (runFlow names a CancelTooSoon there too). R12e: such a
+ * cancel calls `unchecked`, so once it lands the batch it came out of is read and said (cancelOutcomeNote): unread, the
+ * batch-id check never ran, and a cancel landing after the receipt's batch left takes from the account's entry in the
+ * batch open then. v3-launch has no cooldown: its call, unread. */
+export async function planCancelDeposit(x: {
+  d: Deployment;
+  amount: bigint;
+  batchId?: bigint;
+  read: () => Promise<CancelRead>;
+  simulate: (c: FlowCall) => Promise<Simulation>;
+  unchecked?: () => void;
+}): Promise<FlowCall> {
+  const c = cancelCall("deposit", x.amount, x.d);
+  if (!isV32(x.d)) return c;
+  const t = deadline(CANCEL_CHECK_MS);
+  const blind = () => {
+    x.unchecked?.();
+    return c;
+  };
+  try {
+    let b: CancelRead;
+    try {
+      b = await t.race(x.read());
+    } catch {
+      return blind();
+    }
+    if (x.batchId !== undefined && b.id < x.batchId) throw new FlowError(CANCEL_BEHIND, "needs-you");
+    if (b.mine.depositWei === 0n || (x.batchId !== undefined && b.id !== x.batchId)) throw new FlowError(CANCEL_LEFT, "failed");
+    const at = b.mine.cancelableAt;
+    if (at !== undefined && at !== 0 && b.chainTime < at) throw new FlowError(cancelTooSoon(at, b.chainTime), "needs-you");
+    let sim: Simulation;
+    try {
+      sim = await t.race(x.simulate(c));
+    } catch {
+      return blind();
+    }
+    if (sim.ok) return c;
+    if (sim.revert === "CancelTooSoon") throw new FlowError(cancelTooSoon(Number(sim.args?.[0] ?? 0n), b.chainTime), "needs-you");
+    if (sim.revert === "InsufficientRequest" || sim.revert === "BelowMinDeposit") throw new FlowError(CANCEL_CHANGED, "needs-you");
+    throw new FlowError(CANCEL_WONT_GO, "needs-you");
+  } finally {
+    t.done();
+  }
+}
+
+/** R12d: whether a mined cancel that reverted could have met a cooldown: v3.2's cancelDeposit (its door's ABI has
+ * CancelTooSoon); an unstake's cancel and v3-launch's have none. */
+const cancelHasCooldown = (c: FlowCall): boolean => c.functionName === "cancelDeposit" && c.abi.some((x) => x.type === "error" && x.name === "CancelTooSoon");
+
+/** R12e: a cancel sent without its check (planCancelDeposit's `unchecked`) that came out of the account's deposit in a later
+ * batch: the receipt's batch had left, so cancelDeposit took from the entry in the batch open when it landed. */
+export const CANCEL_SENT_FROM_LATER =
+  "This cancel went without its check (Base didn't answer in time), and this deposit's batch had already left: the cancel came out of your deposit in the batch open now, and that TAO is back in your wallet. This deposit goes on with its batch.";
+/** R12e: the same, its receipt not readable yet: which batch it came out of is not known. */
+export const CANCEL_SENT_UNREAD =
+  "This cancel went without its check (Base didn't answer in time), and Base can't show yet which batch it came out of. If this deposit still shows as on its way once it can, its batch had already left, and the cancel came out of your deposit in the batch open now.";
+
+/** R12e: what to tell the user once a deposit's cancel has landed. A checked cancel: nothing (its batch was the receipt's,
+ * read at the click), and nothing is read. One sent unchecked (`unchecked`: its read or its run didn't answer, so the
+ * batch-id check may never have run): `took` reads whether it came out of the receipt's own batch (facts.ts cancelTook:
+ * its DepositCancelled names the batch); if so nothing more is said (the receipt shows it cancelled), if not
+ * CANCEL_SENT_FROM_LATER, and while that can't be read CANCEL_SENT_UNREAD. */
+export async function cancelOutcomeNote(x: { unchecked: boolean; took: () => Promise<boolean | undefined> }): Promise<string | undefined> {
+  if (!x.unchecked) return undefined;
+  let took: boolean | undefined;
+  try {
+    took = await x.took();
+  } catch {
+    took = undefined;
+  }
+  if (took === true) return undefined;
+  return took === false ? CANCEL_SENT_FROM_LATER : CANCEL_SENT_UNREAD;
+}
+
+/** How long between two reads of a cancel's receipt, while Base can't show it yet (cancelConfirmed). */
+export const CANCEL_CONFIRM_EVERY_MS = 750;
+
+/** What a cancel's own receipt says of it, once its flow has seen it through (`took`: facts.ts cancelTook), for its record
+ * (op-store.ts settleCancel): true, it took this record out of its batch, and the record is marked confirmed, so its
+ * receipt page shows it cancelled at once (cancel-sent.ts); false, the receipt was read and it didn't (no cancel of the
+ * account's from the front door in it, or one out of another batch), and its mark is taken back, so the cancel is
+ * offered again at once; undefined, not known. Never the wallet's word alone (a smart account's transaction can go
+ * through while the call inside it didn't). A receipt Base can't show yet (undefined: the wallet's node saw it first) is
+ * read again every CANCEL_CONFIRM_EVERY_MS, for CANCEL_CHECK_MS at most in all, so a slow node never holds the app's one
+ * flow lock for long. Still unreadable then, or a read that fails or hangs: undefined, and the page shows the cancel as
+ * on its way until a read of the chain says what became of it. */
+export async function cancelConfirmed(took: () => Promise<boolean | undefined>, ms: number = CANCEL_CHECK_MS, everyMs: number = CANCEL_CONFIRM_EVERY_MS): Promise<boolean | undefined> {
+  const t = deadline(ms);
+  let pause: ReturnType<typeof setTimeout> | undefined;
+  try {
+    for (;;) {
+      const r = await t.race(took());
+      if (r !== undefined) return r;
+      await t.race(new Promise<void>((next) => (pause = setTimeout(next, everyMs))));
+    }
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(pause);
+    t.done();
+  }
 }
 
 /** On resuming a stake whose hashes were lost (a reload while the wallet broadcast), drop what the
@@ -792,6 +1289,8 @@ export interface Replacement {
 export interface Simulation {
   ok: boolean;
   revert?: string;
+  /** The refusal's arguments, by position (R11: CancelTooSoon's cancelableAt). */
+  args?: readonly unknown[];
 }
 
 /** Where a flow keeps its progress: the operation log entry it belongs to. */
@@ -805,6 +1304,40 @@ export interface FlowStore {
   setMode(mode: "batch" | "sequential"): void;
 }
 
+// ---- The founder's switches (deployments.json; Task 60): a retired deployment, and v3.2 with USDC delivery off ----
+
+/** A retired deployment's words, the plan's: on every app page, and in place of the stake form. */
+export const RETIRED = "This version of Cascade is retired. Withdraw and claim here.";
+/** The Stake page's title on a retired deployment, in place of "Stake with USDC" (Task 60 follow-up). */
+export const RETIRED_TITLE = "Withdraw and claim";
+/** A retired deployment's words where nothing is there yet, in place of an invitation to stake (Task 60 review,
+ * Minor 1): the unstake form with nothing staked, the empty list of deposits, and the page not found's link, to the
+ * Stake page by its retired title. */
+export const NOTHING_STAKED_HERE = "Nothing staked here.";
+export const NO_DEPOSITS_HERE = "No deposits here.";
+export const RETIRED_NOT_FOUND_LINK = "Go to withdraw and claim";
+/** v3.2 with USDC delivery off: the prompt to an account with a delivery preference, the plan's words (spec §5). Its
+ * claim is the front door's claim() kept as TAO, which clears the preference as it pays (CascadeFrontDoor.claim). */
+export const CLAIM_TAO_NOW = "Claim your TAO now: USDC delivery is off.";
+/** A way to USDC asked for while USDC delivery is off (the screens offer none; the flows refuse it all the same). */
+export const USDC_OFF = "USDC delivery is off, so nothing was sent.";
+
+/** The deployment's switches as the flows read them (CascadeData.stage, .usdcDelivery). */
+export interface SiteSwitches {
+  stage: Stage;
+  usdcDelivery: boolean;
+}
+
+/** Before a flow reads, records or sends anything, what the deployment's switches allow it. A retired deployment shows
+ * only the ways out: a stake (a new one, one carried on, or a deposit of wallet TAO) is refused in the plan's words.
+ * With USDC delivery off every way to USDC is refused (a USDC unstake, a claim sold to USDC, a swap of wallet TAO, the
+ * swap after a claim), never one that sells nothing: Receive TAO, a claim kept as TAO and a cancel stay open, so it
+ * traps no one. */
+export function assertSiteAllows(what: "stake" | "usdc" | "tao", s: SiteSwitches): void {
+  if (what === "stake" && s.stage === "retired") throw new FlowError(RETIRED, "failed");
+  if (what === "usdc" && !s.usdcDelivery) throw new FlowError(USDC_OFF, "needs-you");
+}
+
 /** The contracts aren't wired as this site's build says (wiring.ts): nothing goes in or is asked back
  * from it, but the ways out stay open (needsWiring). */
 export const WIRING_MISMATCH =
@@ -814,13 +1347,24 @@ export const WIRING_UNCHECKED = "We can't check Cascade's contracts right now, s
 
 /** The flows (by their labels in useFlows) that don't wait for the contracts to check out: a claim, a
  * cancel and a swap of wallet TAO only touch the listed front door and the fixed Uniswap router, send no
- * ETH and approve only that router, and a user should always be able to get their own money out. */
-const EXITS: ReadonlySet<string> = new Set(["claim", "cancel", "swap"]);
+ * ETH and approve only that router, and a user should always be able to get their own money out. So
+ * does turning off USDC delivery for the account ("delivery": setDelivery(0, 0, 0) to the listed front
+ * door, clearDeliveryCall), which moves nothing: it must work exactly when a stolen key has disabled a
+ * bridge or removed the door, or an RPC can't be read (spec §5's stalemate; Task 60 review, Important 1). */
+const EXITS: ReadonlySet<string> = new Set(["claim", "cancel", "swap", "delivery"]);
 
 /** Whether a flow (by its label in useFlows) waits for the contracts to check out: every flow but the
  * ways out (EXITS), so a stake (new, carried on, or of wallet TAO), an unstake, and any flow added later
  * is held unless it is named there. */
 export const needsWiring = (label: string): boolean => !EXITS.has(label);
+
+/** What useFlows runs under its guard: `body`, once the contracts check out (assertWired, asking `check`),
+ * or at once for a way out (needsWiring), which never asks the check: a mismatch or a chain that can't be
+ * read holds no way out. */
+export async function whenWired<T>(label: string, check: () => Promise<Wiring>, body: () => Promise<T>): Promise<T> {
+  if (needsWiring(label)) await assertWired(check);
+  return body();
+}
 
 /** Before any flow builds or sends anything: the contracts must check out (`check`, see wiring.ts). A
  * mismatch stops it for good; a check that can't be done stops it too, never failing open. */
@@ -843,7 +1387,7 @@ export function wiringNotice(q: { data?: Wiring; isError: boolean }): string | n
 }
 
 /** The wallet can't pay the network fee (viem's and the node's wordings). */
-const noGas = (e: unknown): boolean => {
+export const noGas = (e: unknown): boolean => {
   const err = e as { message?: string; cause?: unknown } | undefined;
   return /insufficient funds|exceeds the balance/i.test(err?.message ?? "") || (err?.cause !== undefined && noGas(err.cause));
 };
@@ -864,7 +1408,8 @@ const codeOf = (e: unknown): number | undefined => {
   return err?.code ?? (err?.cause !== undefined ? codeOf(err.cause) : undefined);
 };
 
-const rejected = (e: unknown): boolean => {
+/** The user declined in the wallet (EIP-1193's 4001, viem's UserRejectedRequestError, or a wallet's own words). */
+export const rejected = (e: unknown): boolean => {
   const err = e as { name?: string; code?: number; message?: string; cause?: unknown };
   return (
     err?.name === "UserRejectedRequestError" ||
@@ -964,6 +1509,10 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
         hash = await port.send(c);
       } catch (e) {
         if (rejected(e)) fail(store, c.key === "close" ? CLOSE_DECLINED : "You cancelled in your wallet. Continue when you're ready.", "needs-you");
+        // R11: a wallet whose estimate reverted CancelTooSoon (a cancel inside its cooldown) says when it opens, never an
+        // unknown error; its clock is this browser's, the error's second Base's, so the wait is worded as 1 s to five
+        // minutes (R12d), and the next click's check counts it on Base's clock
+        if (isRevert(e) && revertReason(e) === "CancelTooSoon") fail(store, cancelTooSoon(Number(revertArgs(e)?.[0] ?? 0n), Math.floor(Date.now() / 1000)), "needs-you");
         fail(store, noGas(e) ? NO_ETH : "Your wallet couldn't send this step. Try again.", "failed");
       }
       store.setHash(c.key, hash);
@@ -981,7 +1530,10 @@ export async function runFlow(port: WalletPort, store: FlowStore, calls: FlowCal
       fail(store, c.key === "close" ? CLOSE_LOST : LOST, "needs-you");
     }
     if (replaced) fail(store, REPLACED, "failed");
-    if (r.status !== "success") fail(store, revertMessage(c.key), "failed");
+    if (r.status !== "success") {
+      const cancel = c.functionName === "cancelDeposit" || c.functionName === "cancelRedeem";
+      fail(store, cancel ? (cancelHasCooldown(c) ? CANCEL_REVERTED : CANCEL_REVERTED_LEFT) : revertMessage(c.key), "failed");
+    }
   }
   store.setState("sent");
 }

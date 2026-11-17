@@ -612,10 +612,10 @@ describe("the site job", () => {
     });
   });
 
-  it("reads every page in a pass's first run, and checks a build the real site's size (9 pages, 32 scripts) in one pass of two runs", async () => {
+  it("reads every page in a pass's first run, and checks a build the real site's size (10 pages, 32 scripts) in one pass of two runs", async () => {
     // wrangler.jsonc's own settings: every page of the site, 20 files a run
     const real = testConfig();
-    expect([real.site.pages.length, real.budgets.siteFilesPerRun]).toEqual([9, 20]);
+    expect([real.site.pages.length, real.budgets.siteFilesPerRun]).toEqual([10, 20]);
     const scripts = Array.from({ length: 32 }, (_, i) => chunk(`c${i}`));
     const pages = Object.fromEntries(
       real.site.pages.map((p, i) => [p, `<html><script>a="${OURS.join('","')}"</script>${scripts.slice(i * 4, i * 4 + 4).map((x) => `<script src="${x}"></script>`).join("")}</html>`]),
@@ -623,7 +623,7 @@ describe("the site job", () => {
     const s = server({ ...pages, ...Object.fromEntries(scripts.map((x) => [x, "const z=0"])) });
     const run = (nowS: number) => runSiteJob({ db, cfg: real, fetch: s.fetch, nowS, approved: APPROVED });
     expect(await run(NOW)).toEqual({ checked: 20, finished: false });
-    expect(s.calls.slice(0, 9)).toEqual(real.site.pages);
+    expect(s.calls.slice(0, 10)).toEqual(real.site.pages);
     expect(await run(NOW + 120)).toEqual({ checked: 12, finished: true });
     const result = JSON.parse((await loadTickState(db, NOW)).meta.site_result);
     expect([result.complete, result.files.length]).toEqual([true, 32]);

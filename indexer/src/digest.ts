@@ -2,6 +2,7 @@ import { formatUnits } from "viem";
 import { lookbackFrom, storedBlockS } from "./blocktime.ts";
 import type { ChainName } from "./config.ts";
 import type { DigestContent } from "./email.ts";
+import { UNJUDGED_WARNINGS_KEY } from "./rules/ops.ts";
 import type { BaseState, BitState, ChainReading, HourAgg } from "./snapshot.ts";
 import type { AlertRow, CursorRow, HoldRow } from "./store.ts";
 
@@ -26,9 +27,18 @@ const KINDS: { chain: ChainName; contract: string; event: string }[] = [
   { chain: "bittensor", contract: "vault", event: "BatchDelivered" },
   { chain: "bittensor", contract: "vault", event: "PayoutChunkSent" },
   { chain: "bittensor", contract: "vault", event: "RewardCutMinted" },
+  // v3.2: anyone's surplus sweep of an adapter, to its fixed treasury (no alert; listed here)
+  { chain: "base", contract: "baseAdapter", event: "SurplusSwept" },
+  { chain: "bittensor", contract: "bitAdapter", event: "SurplusSwept" },
 ];
 
 const amount = (wei: bigint, unit: string, decimals = 18) => `${formatUnits(wei, decimals)} ${unit}`;
+/** An adapter's sweeps of the day, as one line: what it swept of its native coin and its token. */
+const sweeps = (rows: Record<string, string | number>[], who: string, native: string, token: string): string[] => {
+  if (!rows.length) return [];
+  const total = (arg: string) => rows.reduce((s, r) => s + BigInt(String(r[arg] ?? 0)), 0n);
+  return [`${who} surplus swept: ${amount(total("native"), native)} and ${amount(total("tokens"), token)} (${rows.length} sweep${rows.length === 1 ? "" : "s"})`];
+};
 const age = (s: number) => (s >= 2 * 3600 ? `${Math.floor(s / 3600)} hours` : s >= 3600 ? "1 hour" : `${Math.floor(s / 60)} minutes`);
 const pct = (now: bigint, then: bigint | undefined) => {
   if (then === undefined || then === 0n) return "unknown";
@@ -64,7 +74,7 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
   );
   const rs = await i.db.batch<{ args: string; time: number }>(stmts);
   const day = (n: number) => rs[n].results.filter((r) => r.time >= since).map((r) => JSON.parse(r.args) as Record<string, string | number>);
-  const [closed, staked, delivered, chunks, cuts] = [0, 1, 2, 3, 4].map(day);
+  const [closed, staked, delivered, chunks, cuts, baseSweeps, bitSweeps] = [0, 1, 2, 3, 4, 5, 6].map(day);
   const sum = (rows: Record<string, string | number>[], arg: string) => rows.reduce((s, r) => s + BigInt(String(r[arg] ?? 0)), 0n);
 
   const critical = i.openAlerts.filter((a) => a.tier === "critical");
@@ -92,6 +102,9 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
     `reward cut: ${amount(sum(cuts, "assets"), "TAO")}`,
     `payout bridge fees: ${amount(sum(chunks, "fee"), "TAO")}`,
     `close fees: ${amount(sum(closed, "fee"), "ETH")}`,
+    // only on a day with sweeps (v3.2's adapters; v3-launch's have none)
+    ...sweeps(baseSweeps, "Base adapter", "ETH", "FM-TAO"),
+    ...sweeps(bitSweeps, "Bittensor adapter", "TAO", "wTAO"),
   ];
   const keeper = [
     `Base: ${base?.keeperBalance === undefined ? "unknown" : amount(base.keeperBalance, "ETH")}`,
@@ -118,7 +131,16 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
       { title: "Keeper balances", lines: keeper },
       { title: "Open alerts", lines: alerts },
       { title: "The hold", lines: hold },
-      { title: "The monitor", lines: [...lag, ticks, `emails sent: ${counted ? (i.meta.emails_sent ?? 0) : 0}`] },
+      {
+        title: "The monitor",
+        lines: [
+          ...lag,
+          ticks,
+          `emails sent: ${counted ? (i.meta.emails_sent ?? 0) : 0}`,
+          // a warning rule left blind is paged by nothing (monitor.unjudged counts critical rules): named here daily
+          `warning rules not judged: ${(i.meta[UNJUDGED_WARNINGS_KEY] ?? "").split(",").filter(Boolean).join(", ") || "none"}`,
+        ],
+      },
     ],
   };
 }

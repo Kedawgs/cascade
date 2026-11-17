@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std/Test.sol";
 import {CascadeMessages} from "../src/libraries/CascadeMessages.sol";
@@ -106,21 +106,25 @@ contract CascadeMessagesTest is Test {
         assertEq(h.encodeBatch(7, d, r), abi.encode(uint8(1), uint64(7), d, r));
     }
 
-    function test_decodeBatchRejects101Deposits() public {
-        bytes memory m = h.encodeBatch(1, _list(a, 1, 101), _list(b, 1, 0));
+    /// At most 50 entries a side since Task 18 (MAX_ENTRIES): 51 deposits, or 51 redeems, are refused.
+    function test_decodeBatchRejects51Deposits() public {
+        bytes memory m = h.encodeBatch(1, _list(a, 1, 51), _list(b, 1, 0));
+        vm.expectRevert(CascadeMessages.TooManyEntries.selector);
+        h.decodeBatch(m);
+        m = h.encodeBatch(1, _list(a, 1, 0), _list(b, 1, 51));
         vm.expectRevert(CascadeMessages.TooManyEntries.selector);
         h.decodeBatch(m);
     }
 
-    function test_decodeBatchAccepts100Each() public view {
-        bytes memory m = h.encodeBatch(1, _list(a, 1, 100), _list(b, 2, 100));
+    function test_decodeBatchAccepts50Each() public view {
+        bytes memory m = h.encodeBatch(1, _list(a, 1, 50), _list(b, 2, 50));
         (, CascadeMessages.Entry[] memory d, CascadeMessages.Entry[] memory r) = h.decodeBatch(m);
-        assertEq(d.length, 100);
-        assertEq(r.length, 100);
+        assertEq(d.length, 50);
+        assertEq(r.length, 50);
     }
 
-    function test_decodePayoutsRejects101() public {
-        bytes memory m = h.encodePayouts(keccak256("k"), 0, _list(a, 1, 101));
+    function test_decodePayoutsRejects51() public {
+        bytes memory m = h.encodePayouts(keccak256("k"), 0, _list(a, 1, 51));
         vm.expectRevert(CascadeMessages.TooManyEntries.selector);
         h.decodePayouts(m);
     }

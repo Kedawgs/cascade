@@ -270,6 +270,9 @@ describe("the rate limit (the SCAN_LIMITER binding)", () => {
     await r.text();
   });
 
+  // 131 requests one after another through the Worker: about 0.3 s alone, but past vitest's 5 s default in a full run on a
+  // loaded PC (both R6b full runs and the R6 controller's timed out here; it passes alone), so it has its own limit (R7),
+  // 30 s: under a minute, so the burst still straddles at most one window boundary
   it("is bound in the Worker (60 a minute per IP): a burst from one IP is refused, another IP still served", async () => {
     // a wrong vault: counted, then refused before D1. The window is one wall-clock minute: 130 requests straddle
     // at most one boundary, so 60 to 120 pass
@@ -287,5 +290,5 @@ describe("the rate limit (the SCAN_LIMITER binding)", () => {
     const other = await burst("198.51.100.2");
     expect(other.status).toBe(404);
     await other.text();
-  });
+  }, 30_000);
 });

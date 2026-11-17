@@ -53,6 +53,18 @@ describe("scan store", () => {
     expect(back.redeemed).toEqual([{ key: H(78), txHash: H(13), block: 4_000n, assets: 5n * 10n ** 15n, unconfirmed: true }]);
   });
 
+  it("keeps the account's bounces, and a bounce left with nothing, across visits (TAO on its way back: Task 59a fix round 2)", () => {
+    const storage = memoryStorage();
+    const s = scanned();
+    s.adjustments.push({ key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n, shares: 0n, kind: "bounced" });
+    s.adjustments.push({ key: H(77), txHash: H(14), block: 2_000n, assets: 10n ** 16n, shares: 0n, kind: "dust" });
+    createScanStore(storage, D).save(ME, s);
+    expect(createScanStore(storage, D).load(ME).adjustments).toEqual([
+      { key: H(77), txHash: H(9), block: 1_500n, assets: 10n ** 16n, unconfirmed: true, kind: "bounced" },
+      { key: H(77), txHash: H(14), block: 2_000n, assets: 10n ** 16n, unconfirmed: true, kind: "dust" },
+    ]);
+  });
+
   it("saves only what has settled: progress short of the last blocks read, and no event in them", () => {
     const s = scanned();
     s.staked.push({ block: 4_995n, txHash: H(30) });

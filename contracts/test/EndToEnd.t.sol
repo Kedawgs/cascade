@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
@@ -8,6 +8,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CascadeVault} from "../src/CascadeVault.sol";
 import {CascadeFrontDoor} from "../src/CascadeFrontDoor.sol";
 import {CascadeStaker} from "../src/CascadeStaker.sol";
+import {CascadeVaultLens} from "../src/lens/CascadeVaultLens.sol";
+import {CascadeDoorLens} from "../src/lens/CascadeDoorLens.sol";
 import {ISTAKING_ADDRESS} from "../src/interfaces/IStaking.sol";
 import {ADDRESS_MAPPING_ADDRESS} from "../src/interfaces/IAddressMapping.sol";
 import {CascadeMath} from "../src/libraries/CascadeMath.sol";
@@ -20,11 +22,26 @@ import {MockTAO} from "./mocks/MockTAO.sol";
 import {MockTwap} from "./mocks/MockTwap.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {mirror} from "./mocks/Mirror.sol";
+import {defaultFrontDoorParams, defaultStakerParams, defaultVaultParams} from "./utils/DefaultParams.sol";
+import {Schedule} from "./governance/Schedule.sol";
+import {CancelTooSoon, FrontDoorInactive} from "../src/CascadeErrors.sol";
+import {BounceReason, DoorState} from "../src/CascadeTypes.sol";
+import {
+    DepositBounced,
+    PayoutBatchQueued,
+    RedeemDeferred,
+    RedeemReversed,
+    RedeemSkipped,
+    Redeemed
+} from "../src/CascadeEvents.sol";
 
 /// @notice Both chains in one EVM: the vault on BITTENSOR (native TAO) and a front door on BASE
 /// (bridged TAO), connected by the chain-aware MockBridge, which delivers inside the sender's
 /// transaction. Exact stake reads; bridge fee 1e15 both ways; redeem-request fee 1e14. alice and bob
 /// each hold 1_000 TAO on Base (approved to fd) and 1 ether; the keeper closes batches and pays the fee.
+/// The front door's keeper, oracle (a TWAP at 250 USDC per TAO) and swapper (the staker, on fd) come from
+/// its constructor, as the deployment's do. A read-only lens is built on the vault and on the front door
+/// (spec §8.1).
 contract EndToEndTest is Test {
     uint64 constant BASE = 8453;
     uint64 constant BITTENSOR = 964;
@@ -49,6 +66,13 @@ contract EndToEndTest is Test {
     MockBridge bridge;
     CascadeVault vault;
     CascadeFrontDoor fd;
+    CascadeVaultLens vaultLens;
+    CascadeDoorLens doorLens;
+    MockTwap twap;
+    /// fd's staker and swapper, with its route 0 (also the delivery route) through `router` and its fees from its
+    /// constructor (Task 33); wireV3 sets the router's rates.
+    CascadeStaker staker;
+    MockSwapRouter router;
 
     function setUp() public {
         vm.etch(ISTAKING_ADDRESS, address(new MockStaking()).code);
@@ -60,18 +84,41 @@ contract EndToEndTest is Test {
         usdc = new MockUSDC();
         bridge = new MockBridge(tao);
         bridge.setFee(FEE);
+        twap = new MockTwap(250e6);
+        router = new MockSwapRouter();
 
-        bytes32 expectedColdkey = mirror(vm.computeCreateAddress(address(this), vm.getNonce(address(this))));
-        vault = new CascadeVault(expectedColdkey, HK1, bridge, owner, guardian, 1e15, 0, address(0));
+        // deployment order: the vault, then the front door, its launch door (named at deploy, as the
+        // deployment does, so it is active with no delay), then the staker, the front door's swapper (named
+        // at deploy too), with its route and fees
+        uint256 nonce = vm.getNonce(address(this));
+        address pVault = vm.computeCreateAddress(address(this), nonce);
+        address pFd = vm.computeCreateAddress(address(this), nonce + 1);
+        address pStaker = vm.computeCreateAddress(address(this), nonce + 2);
+        vault = new CascadeVault(defaultVaultParams(mirror(pVault), HK1, bridge, owner, guardian, keeper, BASE, pFd));
         // The operator funds the existential reserve before use.
         vm.deal(address(vault), ED);
-        vm.prank(owner);
-        vault.setKeeper(keeper);
 
-        fd = newFrontDoor();
+        CascadeFrontDoor.Params memory p = frontDoorParams();
+        p.swapper = pStaker;
+        fd = new CascadeFrontDoor(p);
+        address weth = makeAddr("weth");
+        staker = new CascadeStaker(
+            defaultStakerParams(
+                usdc,
+                tao,
+                fd,
+                owner,
+                treasury,
+                address(router),
+                abi.encodePacked(address(usdc), uint24(500), weth, uint24(3000), address(tao)),
+                abi.encodePacked(address(tao), uint24(3000), weth, uint24(500), address(usdc))
+            )
+        );
+        assertEq(address(vault), pVault);
+        assertEq(address(fd), pFd);
+        assertEq(address(staker), pStaker);
         bridge.connect(BITTENSOR, address(vault), true);
         bridge.connect(BASE, address(fd), false);
-        registerFrontDoor(BASE, address(fd));
 
         address[2] memory users = [alice, bob];
         for (uint256 i; i < users.length; ++i) {
@@ -81,22 +128,31 @@ contract EndToEndTest is Test {
             vm.deal(users[i], 1 ether);
         }
         vm.deal(keeper, 1 ether);
+        vaultLens = new CascadeVaultLens(address(vault));
+        doorLens = new CascadeDoorLens(address(fd));
+        assertEq(doorLens.keeper(), keeper);
+        assertEq(fd.swapper(), address(staker));
     }
 
     // ---- helpers ----
 
-    function newFrontDoor() internal returns (CascadeFrontDoor) {
-        return new CascadeFrontDoor(
-            tao, bridge, BITTENSOR, address(vault), owner, guardian, 12 hours, 1e18, 10_000e18, REQUEST_FEE, usdc
-        );
+    /// A front door's constructor arguments: the keeper and the TWAP; no swapper (a staker serves one
+    /// front door: setUp names fd's).
+    function frontDoorParams() internal view returns (CascadeFrontDoor.Params memory p) {
+        p = defaultFrontDoorParams(tao, bridge, BITTENSOR, address(vault), usdc, owner, guardian, keeper);
+        p.redeemRequestFee = REQUEST_FEE;
+        p.oracle = twap;
     }
 
+    /// Another front door on the vault, on frontDoorParams().
+    function newFrontDoor() internal returns (CascadeFrontDoor) {
+        return new CascadeFrontDoor(frontDoorParams());
+    }
+
+    /// Activates front door (chain, addr) on the vault through the scheduler: its activation scheduled, the
+    /// Registry class's 7 days warped, then executed.
     function registerFrontDoor(uint64 chain, address addr) internal {
-        vm.prank(owner);
-        vault.proposeFrontDoor(chain, addr);
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(owner);
-        vault.activateFrontDoor(chain, addr);
+        Schedule.run(vault, owner, abi.encodeCall(CascadeVault.activateFrontDoor, (chain, addr)));
     }
 
     function depositVia(CascadeFrontDoor door, address user, uint256 amount) internal {
@@ -113,12 +169,12 @@ contract EndToEndTest is Test {
     /// Closes `door`'s open batch, warping to its due time first if needed; the keeper tops the fee
     /// pot up with FEE and gets the rest back. The bridge delivers within the call.
     function close(CascadeFrontDoor door) internal {
-        (, uint64 start,,,,) = door.openBatch();
+        (uint64 id, uint64 start,,,,) = door.openBatch();
         // test-controlled time
         // forge-lint: disable-next-line(block-timestamp)
-        if (block.timestamp < uint256(start) + 12 hours) vm.warp(uint256(start) + 12 hours);
+        if (vm.getBlockTimestamp() < uint256(start) + 12 hours) vm.warp(uint256(start) + 12 hours);
         vm.prank(keeper);
-        door.closeBatch{value: FEE}();
+        door.closeBatch{value: FEE}(id, 0);
     }
 
     /// The batch key by its formula, independent of the vault.
@@ -164,7 +220,7 @@ contract EndToEndTest is Test {
         view
         returns (CascadeMessages.Payout[] memory list)
     {
-        Vm.Log[] memory r = vaultLogs(logs, CascadeVault.Redeemed.selector, key);
+        Vm.Log[] memory r = vaultLogs(logs, Redeemed.selector, key);
         list = new CascadeMessages.Payout[](r.length);
         for (uint256 i; i < r.length; ++i) {
             (uint256 shares, uint256 assets) = abi.decode(r[i].data, (uint256, uint256));
@@ -183,20 +239,21 @@ contract EndToEndTest is Test {
     {
         uint256 n;
         for (uint256 i; i < logs.length; ++i) {
-            if (isVaultLog(logs[i], CascadeVault.DepositBounced.selector, key)) ++n;
-            else if (isVaultLog(logs[i], CascadeVault.Redeemed.selector, key)) ++n;
+            if (isVaultLog(logs[i], DepositBounced.selector, key)) ++n;
+            else if (isVaultLog(logs[i], Redeemed.selector, key)) ++n;
         }
         list = new CascadeMessages.Payout[](n);
         n = 0;
         for (uint256 i; i < logs.length; ++i) {
             Vm.Log memory log = logs[i];
-            bool bounced = isVaultLog(log, CascadeVault.DepositBounced.selector, key);
-            if (!bounced && !isVaultLog(log, CascadeVault.Redeemed.selector, key)) continue;
+            bool bounced = isVaultLog(log, DepositBounced.selector, key);
+            if (!bounced && !isVaultLog(log, Redeemed.selector, key)) continue;
             // casting to 'uint160' is safe because the topic is an indexed address
             // forge-lint: disable-next-line(unsafe-typecast)
             address user = address(uint160(uint256(log.topics[2])));
             if (bounced) {
-                list[n++] = CascadeMessages.Payout(user, 0, abi.decode(log.data, (uint256)));
+                (uint256 assets,) = abi.decode(log.data, (uint256, BounceReason));
+                list[n++] = CascadeMessages.Payout(user, 0, assets);
             } else {
                 (uint256 shares, uint256 assets) = abi.decode(log.data, (uint256, uint256));
                 list[n++] = CascadeMessages.Payout(user, shares, assets);
@@ -224,41 +281,207 @@ contract EndToEndTest is Test {
         assertEq(list[0].assets, assets, "assets");
     }
 
-    /// The v3 pieces at their launch settings: a staker on fd with fees 15 bps and 50_000 ($0.05) to the
-    /// treasury, route 0 (also the delivery route) a two-hop Uniswap path through a mock router buying at
-    /// 4e9 TAO wei per USDC unit ($250/TAO) and selling at 250 USDC per TAO; fd's keeper, the staker as
-    /// its swapper and a TWAP at 250 USDC per TAO; a 10% reward cut to the treasury.
-    function wireV3() internal returns (CascadeStaker staker, MockSwapRouter router) {
-        address weth = makeAddr("weth");
-        router = new MockSwapRouter();
+    /// The v3 pieces at their launch settings: fd's staker (its swapper, as its keeper and its TWAP at 250
+    /// USDC per TAO are, from fd's constructor) with fees 15 bps and 50_000 ($0.05) to the treasury and route 0
+    /// (also the delivery route) a two-hop Uniswap path through the mock router, all from the staker's
+    /// constructor; the router buying at 4e9 TAO wei per USDC unit ($250/TAO, the TWAP's value, so above the
+    /// staker's 95% buy floor) and selling at 250 USDC per TAO; a 10% reward cut to the treasury, a loosening
+    /// (a new treasury, the cut up), so scheduled (Task 11): it runs 48 hours on, before any flow.
+    function wireV3() internal {
+        assertEq(staker.swapFeeBps(), 15);
+        assertEq(staker.depositFeeUsdc(), 50_000);
         router.setRate(address(usdc), 4e9 * 1e18);
         router.setRate(address(tao), 250e6);
-        staker = new CascadeStaker(usdc, tao, fd, owner, treasury);
-        MockTwap twap = new MockTwap(250e6);
-
-        vm.startPrank(owner);
-        staker.setRoute(
-            0,
-            CascadeStaker.Route(
-                CascadeStaker.RouterKind.UniswapV3,
-                address(router),
-                abi.encodePacked(address(usdc), uint24(500), weth, uint24(3000), address(tao)),
-                abi.encodePacked(address(tao), uint24(3000), weth, uint24(500), address(usdc)),
-                true
-            )
-        );
-        staker.setDeliveryRoute(0);
-        staker.setFees(15, 50_000);
-        fd.setKeeper(keeper);
-        fd.setSwapper(address(staker));
-        fd.setOracle(twap);
-        vault.setRewardCut(treasury, 1_000);
-        vm.stopPrank();
+        Schedule.run(vault, owner, abi.encodeCall(CascadeVault.setRewardCut, (treasury, 1_000)));
     }
 
     /// What `who`'s shares would redeem for now.
     function valueOf(address who) internal view returns (uint256) {
-        return CascadeMath.assetsForRedeem(vault.balanceOf(who), vault.totalAssets(), vault.totalSupply());
+        return CascadeMath.assetsForRedeem(vault.balanceOf(who), vaultLens.totalAssets(), vault.totalSupply());
+    }
+
+    // ---- R6, the Fable whole-system review's Lows (stated, no contract change) ----
+
+    /// L-1: the front door's depositCap counts netForwarded, which only a payout or a refund arriving on Base lowers; a
+    /// direct exit on Bittensor never does. At a 40 TAO cap, four 10 TAO door deposits each taken back by redeemDirect
+    /// leave the vault holding none of them and the door counting all of them, so the next deposit reverts CapExceeded
+    /// until the owner raises the cap (setCaps, immediate). No funds move and no exit is touched.
+    function test_aDirectExitLeavesTheDoorsCapUsed() public {
+        uint256 part = 10e18;
+        uint256 min = fd.minDeposit();
+        vm.prank(owner);
+        fd.setCaps(min, 40e18);
+        for (uint256 i; i < 4; ++i) {
+            depositVia(fd, alice, part);
+            close(fd);
+            uint256 shares = vault.balanceOf(alice);
+            vm.prank(alice);
+            vault.redeemDirect(shares, false); // paid on Bittensor; nothing goes to Base
+        }
+        assertEq(vault.balanceOf(alice), 0, "the vault holds none of it");
+        assertEq(fd.netForwarded(), 40e18, "the door still counts all of it");
+        vm.prank(alice);
+        vm.expectRevert(CascadeFrontDoor.CapExceeded.selector);
+        fd.deposit(part);
+        // the owner's raise, at once
+        vm.prank(owner);
+        fd.setCaps(min, 50e18);
+        depositVia(fd, alice, part);
+    }
+
+    /// L-2 (R6): the open batch's deposit list can be filled with minimum deposits, which cost no fee and can be
+    /// cancelled (README checklist item 29's fill), so every other depositor reverts BatchFull. Under R11 a holder kept
+    /// the list one short at each keeper round with 49 aged entries and cycled one a round. The list's half rule (R12,
+    /// Revision 36) ends that hold: a list at half its limit or more is closable, so 49 aged entries go at the next
+    /// round. The most a round leaves waiting is 24 entries, so a holder that fills the list after a round pushes at
+    /// least 26 fresh entries, none of which it can cancel for five minutes (R11): with every aged entry cancelled the
+    /// next round still finds 26, half the list or more, and commits them to the vault. Other depositors are refused
+    /// BatchFull for at most a round, at 26 minimum deposits committed a round; the honest deposit lands in the next
+    /// batch. No exit is touched (the redeem list is separate).
+    function test_theDepositListHoldEndsAtTheKeepersNextRound() public {
+        uint256 n = fd.maxDeposits();
+        uint256 min = fd.minDeposit();
+        uint256 cooldown = fd.CANCEL_COOLDOWN();
+        address[] memory holders = new address[](n);
+        for (uint256 i; i < n; ++i) {
+            holders[i] = makeAddr(string.concat("slot", vm.toString(i)));
+            tao.mint(holders[i], min);
+            vm.prank(holders[i]);
+            tao.approve(address(fd), type(uint256).max);
+        }
+        (uint64 id,,,,,) = fd.openBatch();
+
+        // R11's hold, 49 aged entries one short of the full list: now over half the list, the keeper's round closes it
+        uint256 snap = vm.snapshotState();
+        for (uint256 i; i + 1 < n; ++i) {
+            depositVia(fd, holders[i], min);
+        }
+        Schedule.wait(cooldown);
+        assertTrue(fd.canClose(), "49 of 50: closable");
+        vm.prank(keeper);
+        fd.closeBatch{value: FEE}(id, (n - 1) * min);
+        for (uint256 i; i + 1 < n; ++i) {
+            assertGt(vault.balanceOf(holders[i]), 0, "the 49 committed");
+        }
+        vm.revertToState(snap);
+
+        // the most a round leaves waiting: 24 aged entries
+        uint256 aged = (n - 1) / 2;
+        for (uint256 i; i < aged; ++i) {
+            depositVia(fd, holders[i], min);
+        }
+        Schedule.wait(cooldown);
+        assertFalse(fd.canClose(), "24 of 50: the keeper's round finds it waiting");
+        vm.prank(keeper);
+        vm.expectRevert(CascadeFrontDoor.BatchNotReady.selector);
+        fd.closeBatch{value: FEE}(id, 0);
+        // just after the round the holder fills the list with 26 fresh entries: every other depositor is refused
+        for (uint256 i = aged; i < n; ++i) {
+            depositVia(fd, holders[i], min);
+        }
+        vm.prank(bob);
+        vm.expectRevert(CascadeFrontDoor.BatchFull.selector);
+        fd.deposit(1e18);
+        // before the next round it cancels every aged entry; no fresh one
+        for (uint256 i; i < aged; ++i) {
+            vm.prank(holders[i]);
+            fd.cancelDeposit(min);
+        }
+        vm.prank(holders[aged]);
+        vm.expectRevert(abi.encodeWithSelector(CancelTooSoon.selector, vm.getBlockTimestamp() + cooldown));
+        fd.cancelDeposit(min);
+        assertTrue(fd.canClose(), "26 fresh entries: over half the list");
+
+        // the next round commits the 26
+        Schedule.wait(1 minutes);
+        uint256 forwarded = fd.netForwarded();
+        vm.recordLogs();
+        vm.prank(keeper);
+        fd.closeBatch{value: FEE}(id, (n - aged) * min);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 closes;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(fd) || logs[i].topics[0] != CascadeFrontDoor.BatchClosed.selector) continue;
+            ++closes;
+            (uint256 total, uint256 nDeposits,,,,) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            assertEq(nDeposits, n - aged, "26 entries");
+            assertEq(total, (n - aged) * min);
+        }
+        assertEq(closes, 1);
+        assertEq(fd.netForwarded(), forwarded + (n - aged) * min);
+        for (uint256 i; i < n; ++i) {
+            if (i < aged) assertEq(tao.balanceOf(holders[i]), min, "an aged entry, cancelled");
+            else assertGt(vault.balanceOf(holders[i]), 0, "a fresh entry, committed");
+        }
+        depositVia(fd, bob, 1e18);
+        assertEq(fd.depositOf(bob), 1e18, "the honest deposit lands in the next batch");
+    }
+
+    /// Fake redeem requests at the launch's redeemRequestFee (1e14 wei; the question of an outside review, ChatGPT's
+    /// third round, follow-up 3). Fifty fresh addresses with no shares each request with the fee: the full list is
+    /// closable at once, and the 51st first request closes the batch on its pot alone and lands in the next batch. The
+    /// pot paid the bridge fee out of the fifty fees and carries the rest (fifty fees less the bridge fee), none of it
+    /// to the requester. At the vault the fifty are skipped (RedeemSkipped: no shares), nothing burns, no payout batch
+    /// is queued, and pending payouts stay as they were (a real payout queued before them).
+    function test_fiftyFakeRedeemRequestsPayTheirOwnClose() public {
+        // a real payout queued first, so "unchanged" is measured against one
+        depositVia(fd, alice, 10e18);
+        close(fd);
+        vm.prank(keeper);
+        vault.stakeIdle();
+        vm.warp(vm.getBlockTimestamp() + 2 days);
+        requestVia(fd, alice, 5e24);
+        close(fd);
+        uint256 pending = vaultLens.pendingPayouts();
+        assertGt(pending, 0, "a real payout queued");
+
+        assertEq(fd.redeemRequestFee(), 1e14, "the launch fee");
+        uint256 n = fd.maxRedeems();
+        (uint64 id,,, uint256 pot0,,) = fd.openBatch();
+        CascadeMessages.Entry[] memory fakes = new CascadeMessages.Entry[](n);
+        for (uint256 i; i < n; ++i) {
+            address f = makeAddr(string.concat("fake", vm.toString(i)));
+            vm.deal(f, REQUEST_FEE);
+            vm.prank(f);
+            fd.requestRedeem{value: REQUEST_FEE}(1e24);
+            fakes[i] = CascadeMessages.Entry(f, 1e24);
+        }
+        assertTrue(fd.canClose(), "a full redeem list: closable at once");
+        (,,, uint256 pot,, uint256 nR) = fd.openBatch();
+        assertEq(nR, n);
+        assertEq(pot, pot0 + n * REQUEST_FEE);
+
+        // the 51st first request closes the batch on the pot alone and lands in the next one
+        address late = makeAddr("fake50");
+        vm.deal(late, REQUEST_FEE);
+        bytes32 key = keyOf(BASE, address(fd), id, noEntries(), fakes);
+        uint256 carried = pot0 + n * REQUEST_FEE - FEE;
+        vm.expectEmit(address(fd));
+        emit CascadeFrontDoor.BatchClosed(id, 0, 0, n, FEE, FEE, carried);
+        vm.recordLogs();
+        vm.prank(late);
+        fd.requestRedeem{value: REQUEST_FEE}(1e24);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(late.balance, 0, "the 51st paid its own fee, and got nothing back");
+        (uint64 next,,, uint256 pot2,, uint256 nR2) = fd.openBatch();
+        assertEq(next, id + 1, "the batch closed itself");
+        assertEq(nR2, 1);
+        assertEq(fd.redeemOf(late), 1e24, "the 51st is in the next batch");
+        assertEq(fd.potCarried(), carried, "fifty fees less the bridge fee, carried");
+        assertEq(pot2, carried + REQUEST_FEE);
+
+        // relayed to the vault: fifty skipped, nothing burned or queued
+        assertTrue(vaultLens.processed(key), "the batch delivered");
+        Vm.Log[] memory skipped = vaultLogs(logs, RedeemSkipped.selector, key);
+        assertEq(skipped.length, n, "fifty RedeemSkipped");
+        for (uint256 i; i < n; ++i) {
+            assertEq(skipped[i].topics[2], bytes32(uint256(uint160(fakes[i].user))), "in the list's order");
+        }
+        assertEq(vaultLogs(logs, Redeemed.selector, key).length, 0, "nothing burned");
+        assertEq(vaultLogs(logs, PayoutBatchQueued.selector, key).length, 0, "no payout batch queued");
+        assertEq(vaultLens.getPayoutBatch(key).count, 0);
+        assertEq(vaultLens.pendingPayouts(), pending, "pending payouts unchanged");
     }
 
     // ---- flows ----
@@ -274,14 +497,14 @@ contract EndToEndTest is Test {
         // the keeper stakes all but the reserve, then claims 1 TAO of rewards, which vests over 7 days
         vm.prank(keeper);
         vault.stakeIdle();
-        assertEq(vault.rootStakeRao(), 10_000_000_000);
-        staking.setUnclaimed(vault.coldkey(), HK1, 1_000_000_000);
+        assertEq(vaultLens.visibleStakeRao(), 10_000_000_000);
+        staking.setUnclaimed(vaultLens.coldkey(), HK1, 1_000_000_000);
         vm.prank(keeper);
         // claimRewards needs claimGasRequired (55M) left before the claim
         vault.claimRewards{gas: 60_000_000}(HK1);
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         // 11_000_000_000 rao * 1e9 + ED - ED, nothing pending, nothing unvested
-        assertEq(vault.totalAssets(), 11e18);
+        assertEq(vaultLens.totalAssets(), 11e18);
 
         // alice asks to redeem half; the keeper rebuilds the payout list from the delivery's events
         requestVia(fd, alice, 5e24);
@@ -291,10 +514,10 @@ contract EndToEndTest is Test {
         CascadeMessages.Payout[] memory list = redeemedList(vm.getRecordedLogs(), key);
         // A = 11e18, S = 1e25: 5e24 * (11e18 + 1) / (1e25 + 1e6) = 5_499_999_999_999_999_999, floored to rao
         assertPayout(list, alice, 5e24, 5_499_999_999_000_000_000);
-        assertEq(vault.pendingPayouts(), 5_499_999_999_000_000_000);
+        assertEq(vaultLens.pendingPayouts(), 5_499_999_999_000_000_000);
 
         // Bittensor → Base after the payout delay: net = 5_499_999_999_000_000_000 - 1e15 fee
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         vm.prank(keeper);
         vault.processPayouts(key, list, 50);
         assertEq(fd.claimable(alice), 5_498_999_999_000_000_000);
@@ -307,17 +530,55 @@ contract EndToEndTest is Test {
         assertEq(fd.totalClaimable(), 0);
         assertEq(tao.balanceOf(address(fd)), 0);
         assertEq(fd.netForwarded(), 10e18 - 5_498_999_999_000_000_000);
-        // Bittensor: net + fee = 5_499_999_999 rao unstaked from 11_000_000_000 and sent
-        assertEq(vault.pendingPayouts(), 0);
-        assertEq(vault.rootStakeRao(), 5_500_000_001);
-        assertEq(address(vault).balance, ED);
+        // Bittensor: net + fee = 5_499_999_999 rao unstaked from 11_000_000_000, with the 1_000-rao shortfall
+        // tolerance on top (Task 19), and sent; the tolerance stays idle
+        assertEq(vaultLens.pendingPayouts(), 0);
+        assertEq(vaultLens.visibleStakeRao(), 5_499_999_001);
+        assertEq(address(vault).balance, ED + 1_000e9);
         assertEq(vault.balanceOf(alice), 5e24);
         assertEq(vault.totalSupply(), 5e24);
         // the rao floor stayed in the vault: 11e18 - 5_499_999_999_000_000_000
-        assertEq(vault.totalAssets(), 5_500_000_001_000_000_000);
+        assertEq(vaultLens.totalAssets(), 5_500_000_001_000_000_000);
         // the rail
         assertEq(bridge.pendingCount(), 0);
         assertEq(bridge.failedCount(), 0);
+    }
+
+    /// Both lenses read their chain's state through a round trip: a deposit, a stake, a vesting claim
+    /// and a queued redeem on Bittensor, the door's roles and bridge on Base.
+    function test_lensesReadBothChainsThroughARoundTrip() public {
+        depositVia(fd, alice, 10e18);
+        close(fd);
+        vm.prank(keeper);
+        vault.stakeIdle();
+        staking.setUnclaimed(vaultLens.coldkey(), HK1, 1_000_000_000);
+        vm.prank(keeper);
+        vault.claimRewards{gas: 60_000_000}(HK1);
+        vm.warp(vm.getBlockTimestamp() + 2 days);
+        requestVia(fd, alice, 5e24);
+        bytes32 key = keyOf(BASE, address(fd), 2, noEntries(), entries1(alice, 5e24));
+        close(fd);
+
+        assertEq(vaultLens.target(), address(vault));
+        assertEq(vaultLens.coldkey(), vaultLens.coldkey());
+        assertEq(vaultLens.visibleStakeRao(), vaultLens.visibleStakeRao());
+        assertEq(vaultLens.unvestedRewards(), vaultLens.unvestedRewards());
+        assertGt(vaultLens.unvestedRewards(), 0);
+        assertEq(vaultLens.totalAssets(), vaultLens.totalAssets());
+        assertEq(vaultLens.price(), vaultLens.price());
+        assertEq(vaultLens.pendingPayouts(), vaultLens.pendingPayouts());
+        assertGt(vaultLens.pendingPayouts(), 0);
+        assertEq(vaultLens.balanceOf(alice), vault.balanceOf(alice));
+        assertTrue(vaultLens.processed(key));
+        assertEq(uint8(vaultLens.doorState(vaultLens.peerId(BASE, address(fd)))), uint8(DoorState.Active));
+        assertEq(abi.encode(vaultLens.getPayoutBatch(key)), abi.encode(vaultLens.getPayoutBatch(key)));
+        assertEq(vaultLens.getPayoutBatch(key).frontDoor, address(fd));
+
+        assertEq(doorLens.target(), address(fd));
+        assertEq(doorLens.guardian(), guardian);
+        assertEq(doorLens.primaryBridge(), address(bridge));
+        assertTrue(doorLens.bridgeEnabled(address(bridge)));
+        assertEq(doorLens.keeper(), fd.keeper());
     }
 
     /// In an insolvent vault a deposit is not minted: its TAO rides back to Base with the batch's payouts
@@ -327,6 +588,8 @@ contract EndToEndTest is Test {
         // A = 0, S = 0: alice's 10e18 → 1e25 shares, left liquid; then 60% of the assets are lost
         depositVia(fd, alice, 10e18);
         close(fd);
+        // her shares held a day, so her redeem below burns (the door hold, R4 B-H1)
+        vm.warp(vm.getBlockTimestamp() + 1 days);
         vm.deal(address(vault), ED + 4e18);
 
         // bob deposits 1e18 and alice asks to redeem half in the same batch. A = (5e18 - 0) - 1e18 = 4e18,
@@ -346,12 +609,12 @@ contract EndToEndTest is Test {
         assertEq(list[1].assets, 2e18);
         assertEq(vault.balanceOf(bob), 0);
         assertEq(vault.balanceOf(alice), 5e24);
-        assertEq(vault.pendingPayouts(), 3e18);
+        assertEq(vaultLens.pendingPayouts(), 3e18);
         assertEq(bridge.failedCount(), 0);
 
         // after the delay: fee 1e15 pro rata over 3e18 (bob 999_666_666_000_000_000, alice
         // 1_999_333_333_000_000_000, net 2_998_999_999_000_000_000), paid from the liquid balance
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         vm.prank(keeper);
         vault.processPayouts(key, list, 50);
         assertEq(fd.claimable(bob), 999_666_666_000_000_000);
@@ -366,7 +629,7 @@ contract EndToEndTest is Test {
         // 11e18 forwarded - 2_998_999_999_000_000_000 received
         assertEq(fd.netForwarded(), 8_001_000_001_000_000_000);
         // Bittensor: net + fee left; the rounding remainder 1e9 stayed
-        assertEq(vault.pendingPayouts(), 0);
+        assertEq(vaultLens.pendingPayouts(), 0);
         assertEq(address(vault).balance, ED + 5e18 - 2_999_999_999_000_000_000);
         assertEq(vault.totalSupply(), 5e24);
         assertEq(bridge.pendingCount(), 0);
@@ -377,6 +640,10 @@ contract EndToEndTest is Test {
         CascadeFrontDoor fd2 = newFrontDoor();
         bridge.connect(CHAIN2, address(fd2), false);
         registerFrontDoor(CHAIN2, address(fd2));
+        // all doors together may burn 50% a day (Task 17's global window, raised through the scheduler from the
+        // fixture's 20% to its bound), so here each door's own 20% binds and the global window keeps room; the
+        // global window binding is VaultOrigin.t.sol's
+        Schedule.run(vault, owner, abi.encodeCall(CascadeVault.setOutflowLimits, (2_000, 100e18, 5_000)));
         vm.prank(bob);
         tao.approve(address(fd2), type(uint256).max);
 
@@ -391,7 +658,7 @@ contract EndToEndTest is Test {
         // the keeper stakes both deposits, and a day later all of it is in the allowance base
         vm.prank(keeper);
         vault.stakeIdle();
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(vm.getBlockTimestamp() + 1 days);
 
         // Each front door has its own window: 20% of the 2_000e18 staked = 400e18.
         // fd: A = 2_000e18, S = 2e27: sMax = 400e18 * (2e27 + 1e6) / (2_000e18 + 1) = 4e26 → 400e18
@@ -411,29 +678,41 @@ contract EndToEndTest is Test {
         CascadeMessages.Payout[] memory list2 = redeemedList(vm.getRecordedLogs(), k2);
         assertPayout(list2, bob, 4e26, 400e18);
 
+        // The global window (50% of the 2_000e18 staked = 1_000e18) holds both doors' 800e18 and keeps room for
+        // alice's next request (1e26 at A = 1_200e18, S = 1.2e27: 100e18), so only fd's own window can defer it.
+        (, uint256 burnedByAll) = vaultLens.burnWindows(bytes32(0));
+        assertEq(burnedByAll, 800e18, "the global window: both doors' burns");
+        assertGe(
+            2_000e18 * vaultLens.globalOutflowBps() / 10_000 - burnedByAll,
+            100e18,
+            "the global window has room for alice's request"
+        );
+
         // fd's window is spent: its third batch, 12 hours into the window, defers alice's request
         requestVia(fd, alice, 1e26);
         bytes32 k3 = keyOf(BASE, address(fd), 3, noEntries(), entries1(alice, 1e26));
         vm.recordLogs();
         close(fd);
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        Vm.Log[] memory deferred = vaultLogs(logs, CascadeVault.RedeemDeferred.selector, k3);
+        Vm.Log[] memory deferred = vaultLogs(logs, RedeemDeferred.selector, k3);
         assertEq(deferred.length, 1);
         assertEq(deferred[0].topics[2], bytes32(uint256(uint160(alice))));
         assertEq(deferred[0].data, abi.encode(uint256(1e26)));
         assertEq(redeemedList(logs, k3).length, 0);
-        assertTrue(vault.processed(k3));
+        assertTrue(vaultLens.processed(k3));
 
-        (, uint256 burned1) = vault.burnWindows(vault.peerId(BASE, address(fd)));
-        (, uint256 burned2) = vault.burnWindows(vault.peerId(CHAIN2, address(fd2)));
+        (, uint256 burned1) = vaultLens.burnWindows(vaultLens.peerId(BASE, address(fd)));
+        (, uint256 burned2) = vaultLens.burnWindows(vaultLens.peerId(CHAIN2, address(fd2)));
         assertEq(burned1, 400e18);
         assertEq(burned2, 400e18);
-        assertEq(vault.pendingPayouts(), 800e18);
+        (, burnedByAll) = vaultLens.burnWindows(bytes32(0));
+        assertEq(burnedByAll, 800e18, "the deferral burned nothing in the global window");
+        assertEq(vaultLens.pendingPayouts(), 800e18);
         assertEq(vault.balanceOf(alice), 6e26);
         assertEq(vault.balanceOf(bob), 6e26);
 
         // each payout goes back to the chain its batch came from: 400e18 - 1e15 fee
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         vault.processPayouts(k1, list1, 50);
         vault.processPayouts(k2, list2, 50);
 
@@ -447,10 +726,11 @@ contract EndToEndTest is Test {
         // 1_000e18 - 399_999e15
         assertEq(fd.netForwarded(), 600_001e15);
         assertEq(fd2.netForwarded(), 600_001e15);
-        // Bittensor: 2_000e18 + ED in, 2 * 400e18 out, unstaked exactly
-        assertEq(vault.pendingPayouts(), 0);
-        assertEq(address(vault).balance, ED);
-        assertEq(vault.rootStakeRao(), 1_200e9);
+        // Bittensor: 2_000e18 + ED in, 2 * 400e18 out, unstaked with one 1_000-rao shortfall tolerance on top
+        // (Task 19): the first walk's cushion stays idle and covers 1_000 rao of the second's
+        assertEq(vaultLens.pendingPayouts(), 0);
+        assertEq(address(vault).balance, ED + 1_000e9);
+        assertEq(vaultLens.visibleStakeRao(), 1_200e9 - 1_000);
         assertEq(bridge.failedCount(), 0);
     }
 
@@ -461,7 +741,7 @@ contract EndToEndTest is Test {
         vm.prank(keeper);
         vault.stakeIdle();
         assertEq(vault.balanceOf(alice), 1e27);
-        assertEq(vault.rootStakeRao(), 1_000_000_000_000);
+        assertEq(vaultLens.visibleStakeRao(), 1_000_000_000_000);
 
         // the owner registers an EOA as a second BASE front door
         address rogue = makeAddr("rogue");
@@ -472,30 +752,30 @@ contract EndToEndTest is Test {
         bytes memory forged = CascadeMessages.encodeBatch(1, noEntries(), entries1(alice, 1e27));
         bytes32 key = keyOf(BASE, rogue, 1, noEntries(), entries1(alice, 1e27));
         vm.expectEmit(address(vault));
-        emit CascadeVault.Redeemed(key, alice, 2e26, 200e18);
+        emit Redeemed(key, alice, 2e26, 200e18);
         vm.prank(address(bridge));
         vault.onBridgeMessage(BASE, rogue, forged, 0);
         assertEq(vault.balanceOf(alice), 8e26);
-        assertEq(vault.pendingPayouts(), 200e18);
+        assertEq(vaultLens.pendingPayouts(), 200e18);
 
         // the guardian removes the peer without pausing; the queued payout cannot leave
         vm.prank(guardian);
         vault.removeFrontDoor(BASE, rogue);
         assertFalse(vault.paused());
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         CascadeMessages.Payout[] memory list = new CascadeMessages.Payout[](1);
         list[0] = CascadeMessages.Payout(alice, 2e26, 200e18);
-        vm.expectRevert(CascadeVault.FrontDoorInactive.selector);
+        vm.expectRevert(FrontDoorInactive.selector);
         vault.processPayouts(key, list, 50);
-        assertEq(vault.pendingPayouts(), 200e18);
+        assertEq(vaultLens.pendingPayouts(), 200e18);
 
         // the owner cancels: alice's shares come back
         vm.expectEmit(address(vault));
-        emit CascadeVault.RedeemReversed(key, alice, 2e26, 200e18);
+        emit RedeemReversed(key, alice, 2e26, 200e18);
         vm.prank(owner);
         vault.cancelPayoutBatch(key, list);
         assertEq(vault.balanceOf(alice), 1e27);
-        assertEq(vault.pendingPayouts(), 0);
+        assertEq(vaultLens.pendingPayouts(), 0);
 
         // alice's honest redeem through fd: A = 1_000e18, S = 1e27, allowance 200e18:
         // 1e26 * (1_000e18 + 1) / (1e27 + 1e6) = 100e18
@@ -505,7 +785,7 @@ contract EndToEndTest is Test {
         close(fd);
         CascadeMessages.Payout[] memory list2 = redeemedList(vm.getRecordedLogs(), k2);
         assertPayout(list2, alice, 1e26, 100e18);
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         vault.processPayouts(k2, list2, 50);
         // 100e18 - 1e15 fee
         assertEq(fd.claimable(alice), 99_999e15);
@@ -517,11 +797,12 @@ contract EndToEndTest is Test {
         assertEq(tao.balanceOf(address(fd)), 0);
         // 1_000e18 - 99_999e15
         assertEq(fd.netForwarded(), 900_001e15);
-        // Bittensor: 100_000_000_000 rao unstaked for net + fee
+        // Bittensor: 100_000_000_000 rao unstaked for net + fee, and the 1_000-rao shortfall tolerance on top
+        // (Task 19), which stays idle
         assertEq(vault.balanceOf(alice), 9e26);
-        assertEq(vault.rootStakeRao(), 900_000_000_000);
-        assertEq(vault.pendingPayouts(), 0);
-        assertEq(address(vault).balance, ED);
+        assertEq(vaultLens.visibleStakeRao(), 900_000_000_000 - 1_000);
+        assertEq(vaultLens.pendingPayouts(), 0);
+        assertEq(address(vault).balance, ED + 1_000e9);
     }
 
     function test_failedDeliveryIsRetried() public {
@@ -558,9 +839,10 @@ contract EndToEndTest is Test {
     }
 
     function test_failedPayoutDeliveryIsRetried() public {
-        // A = 0, S = 0: 10e18 * 1e6 = 1e25, left liquid
+        // A = 0, S = 0: 10e18 * 1e6 = 1e25, left liquid, held a day (the door hold, R4 B-H1)
         depositVia(fd, alice, 10e18);
         close(fd);
+        vm.warp(vm.getBlockTimestamp() + 1 days);
         // A = 10e18, S = 1e25: 5e24 * (10e18 + 1) / (1e25 + 1e6) = 5e18
         requestVia(fd, alice, 5e24);
         bytes32 key = keyOf(BASE, address(fd), 2, noEntries(), entries1(alice, 5e24));
@@ -570,7 +852,7 @@ contract EndToEndTest is Test {
         assertPayout(list, alice, 5e24, 5e18);
 
         // the vault sends the chunk; the rail fails its delivery to Base (deliveries 0 and 1 were the batches)
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         bridge.failNext();
         vm.recordLogs();
         vault.processPayouts(key, list, 50);
@@ -580,7 +862,7 @@ contract EndToEndTest is Test {
         assertEq(reason.length, 0);
         assertEq(bridge.failedCount(), 1);
         // Bittensor: the payout left (net + fee = 5e18)
-        assertEq(vault.pendingPayouts(), 0);
+        assertEq(vaultLens.pendingPayouts(), 0);
         assertEq(address(vault).balance, ED + 5e18);
         // Base: nothing arrived
         assertEq(tao.balanceOf(address(fd)), 0);
@@ -642,7 +924,7 @@ contract EndToEndTest is Test {
         assertEq(bridge.failedCount(), 1);
         assertEq(address(bridge).balance, FEE);
         bytes32 key1 = keyOf(BASE, address(fd), 1, entries1(alice, 10e18), noEntries());
-        assertFalse(vault.processed(key1));
+        assertFalse(vaultLens.processed(key1));
 
         // batch 2 closes and delivers behind it. A = 0, S = 0: 20e18 * 1e6 = 2e25
         depositVia(fd, bob, 20e18);
@@ -654,7 +936,7 @@ contract EndToEndTest is Test {
         // A = 20e18, S = 2e25: 10e18 * (2e25 + 1e6) / (20e18 + 1) = 1e25
         assertTrue(bridge.retryNext());
         assertEq(vault.balanceOf(alice), 1e25);
-        assertTrue(vault.processed(key1));
+        assertTrue(vaultLens.processed(key1));
         assertEq(bridge.failedCount(), 0);
         assertEq(bridge.pendingCount(), 0);
 
@@ -669,14 +951,14 @@ contract EndToEndTest is Test {
     /// and claims 0.5 TAO of rewards with a 10% cut, and she redeems everything with a USDC delivery
     /// preference (240 USDC per TAO for 7 days), which the keeper delivers once the payout lands.
     function test_v3RoundTrip() public {
-        (CascadeStaker staker, MockSwapRouter router) = wireV3();
+        wireV3();
 
         // Base: 50_000 deposit fee, then 15 bps of 1_000_000_000 = 1_500_000 swap fee to the treasury;
         // 998_500_000 to the router at 4e9 wei per unit = 3_994e15 TAO (whole rao), deposited for carol
         usdc.mint(carol, 1_000_050_000);
         vm.startPrank(carol);
         usdc.approve(address(staker), 1_000_050_000);
-        assertEq(staker.stake(carol, 1_000_050_000, 3.9e18, 0, block.timestamp), 3_994e15);
+        assertEq(staker.stake(carol, 1_000_050_000, 3.9e18, 0, vm.getBlockTimestamp()), 3_994e15);
         vm.stopPrank();
         assertEq(usdc.balanceOf(carol), 0);
         assertEq(usdc.balanceOf(treasury), 1_550_000);
@@ -687,32 +969,32 @@ contract EndToEndTest is Test {
         assertEq(vault.balanceOf(carol), 3_994e21);
         vm.prank(keeper);
         vault.stakeIdle();
-        assertEq(vault.rootStakeRao(), 3_994_000_000);
+        assertEq(vaultLens.visibleStakeRao(), 3_994_000_000);
 
         // 0.5 TAO of rewards with a 10% cut: 5e16 minted at the pre-claim price.
         // A = 3_994e15, S = 3_994e21: 5e16 * (3_994e21 + 1e6) / (3_994e15 + 1) = 5e22 shares
-        staking.setUnclaimed(vault.coldkey(), HK1, 500_000_000);
-        uint256 priceBefore = vault.price();
+        staking.setUnclaimed(vaultLens.coldkey(), HK1, 500_000_000);
+        uint256 priceBefore = vaultLens.price();
         vm.prank(keeper);
         vault.claimRewards{gas: 60_000_000}(HK1);
         assertEq(vault.balanceOf(treasury), 5e22);
-        assertEq(vault.vestingAmount(), 4.5e17);
+        assertEq(vaultLens.vestingAmount(), 4.5e17);
         // the price is unchanged: (3_994e15 + 5e16 + 1) * 1e18 / (3_994e21 + 5e22 + 1e6) = 1e12
-        assertEq(vault.price(), priceBefore);
-        assertEq(vault.price(), 1e12);
+        assertEq(vaultLens.price(), priceBefore);
+        assertEq(vaultLens.price(), 1e12);
         // right after the claim the treasury's shares are worth exactly 10% of the claimed 5e17:
         // 5e22 * (4_044e15 + 1) / (4_044e21 + 1e6) = 5e16
         assertEq(valueOf(treasury), 5e16);
 
         // the rest vests over 7 days; the treasury's fresh shares share in it, so they end up worth
         // a little more than the cut: 5e22 * (4_494e15 + 1) / (4_044e21 + 1e6)
-        vm.warp(block.timestamp + 7 days);
-        assertEq(vault.totalAssets(), 4_494e15);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        assertEq(vaultLens.totalAssets(), 4_494e15);
         assertEq(valueOf(treasury), 55_563_798_219_584_569);
 
         // carol redeems everything and asks for USDC in the same call
         vm.deal(carol, 1 ether);
-        uint64 deadline = uint64(block.timestamp + 7 days);
+        uint64 deadline = uint64(vm.getBlockTimestamp() + 7 days);
         vm.prank(carol);
         fd.requestRedeemWithDelivery{value: REQUEST_FEE}(3_994e21, 240e6, deadline, 6);
         // A = 4_494e15, S = 4_044e21: 3_994e21 * (4_494e15 + 1) / (4_044e21 + 1e6)
@@ -724,7 +1006,7 @@ contract EndToEndTest is Test {
         assertPayout(list, carol, 3_994e21, 4_438_436_201_000_000_000);
 
         // after the payout delay: 4_438_436_201_000_000_000 - 1e15 fee credited to carol on Base
-        vm.warp(block.timestamp + 24 hours);
+        vm.warp(vm.getBlockTimestamp() + 24 hours);
         vm.prank(keeper);
         vault.processPayouts(key, list, 50);
         uint256 owed = 4_437_436_201_000_000_000;
@@ -759,10 +1041,11 @@ contract EndToEndTest is Test {
         assertEq(minUsdcPerTao, 240e6);
         assertEq(until, deadline);
         assertEq(destination, 6);
-        // Bittensor: 4_438_436_201 rao unstaked from 4_494_000_000; the treasury holds every share left
-        assertEq(vault.pendingPayouts(), 0);
-        assertEq(vault.rootStakeRao(), 55_563_799);
-        assertEq(address(vault).balance, ED);
+        // Bittensor: 4_438_436_201 rao unstaked from 4_494_000_000, and the 1_000-rao shortfall tolerance on top
+        // (Task 19), which stays idle; the treasury holds every share left
+        assertEq(vaultLens.pendingPayouts(), 0);
+        assertEq(vaultLens.visibleStakeRao(), 55_562_799);
+        assertEq(address(vault).balance, ED + 1_000e9);
         assertEq(vault.balanceOf(carol), 0);
         assertEq(vault.totalSupply(), 5e22);
         assertEq(bridge.pendingCount(), 0);

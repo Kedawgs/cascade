@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { type Address, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, keccak256, numberToHex, parseAbi, parseUnits, toFunctionSelector, zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
-import { loadArtifact } from "../src/artifacts.ts";
-import { type ChainName, FRONT_DOOR_DEFAULTS, paths, SETTINGS_V3, VAULT_DEFAULTS } from "../src/config.ts";
+import { preauditArtifact } from "../src/builds.ts";
+import { type ChainName, FRONT_DOOR_DEFAULTS, SETTINGS_V3, VAULT_DEFAULTS } from "../src/config.ts";
 import { buildPlan, buildPlanV3, type PlanV3 } from "../src/plan.ts";
 import { type DeploymentRecord, uncheckedLines } from "../src/record.ts";
 import {
@@ -20,8 +20,9 @@ import { limitExpectations, ownershipChecks } from "../src/verify.ts";
 import { COLDKEY, fakeChain, v3Record } from "./fake-keeper.ts";
 
 const E18 = 10n ** 18n;
-const vaultSource = readFileSync(new URL("../../contracts/src/CascadeVault.sol", import.meta.url), "utf8");
-const frontDoorSource = readFileSync(new URL("../../contracts/src/CascadeFrontDoor.sol", import.meta.url), "utf8");
+/** v3-launch's sources, frozen in ops/builds/preaudit (contracts/ now holds v3.2). */
+const vaultSource = readFileSync(new URL("../builds/preaudit/src/CascadeVault.sol", import.meta.url), "utf8");
+const frontDoorSource = readFileSync(new URL("../builds/preaudit/src/CascadeFrontDoor.sol", import.meta.url), "utf8");
 /** A Solidity literal's value: 2_000e18, 0.02e18, 1_000_000. */
 const literal = (s: string) => {
   const t = s.replaceAll("_", "");
@@ -63,7 +64,7 @@ describe("the read-back's limits", () => {
     expect(at("CascadeVault", "minDirectDeposit")).toBe(SETTINGS_V3.minDirectDeposit);
     expect(at("CascadeFrontDoor", "maxDeposits")).toBe(50);
     // every field is a view of the build
-    const views = (n: string) => loadArtifact(paths({}).contractsDir, n).abi.filter((i) => i.type === "function").map((i) => (i as { name: string }).name);
+    const views = (n: string) => preauditArtifact(n).abi.filter((i) => i.type === "function").map((i) => (i as { name: string }).name);
     for (const e of exp) expect(views(e.contract), e.field).toContain(e.field);
     expect(limitExpectations(buildPlan(0, 0, COLDKEY))).toEqual([]);
   });
@@ -101,15 +102,10 @@ const log = (address: Address, block: number, eventName: string, args: Record<st
 });
 
 /** Chains holding `logs`, at `head`; each eth_getLogs query is kept. */
-function logChain(logs: Partial<Record<ChainName, Log[]>>, head: Record<ChainName, number>, blockS?: Record<ChainName, number>) {
+function logChain(logs: Partial<Record<ChainName, Log[]>>, head: Record<ChainName, number>) {
   const queries: { chain: ChainName; from: number; to: number; address: Address[] }[] = [];
   const f = fakeChain([], {}, {
     eth_blockNumber: (chain) => numberToHex(head[chain]),
-    // headers `blockS` apart when given; else all at one time (the block time unreadable: the margins' fallback)
-    eth_getBlockByNumber: (chain, p) => {
-      const n = p[0] === "latest" ? head[chain] : Number(p[0]);
-      return { number: numberToHex(n), timestamp: numberToHex(blockS ? 1_800_000_000 - Math.floor((head[chain] - n) * blockS[chain]) : 1_800_000_000) };
-    },
     eth_getLogs: (chain, p) => {
       const q = p[0] as { address: Address[]; fromBlock: Hex; toBlock: Hex; topics: [Hex[]] };
       const from = Number(q.fromBlock);
@@ -169,14 +165,6 @@ describe("the registry scan finds every bridge, front door and route the contrac
     ]);
   });
 
-  it("settles 60 s of Base's blocks short of the head at its measured block time (300 of its 200 ms blocks), and Bittensor's 120 s (10 of its 12 s), the keeper's margin", async () => {
-    const c = logChain({}, { base: 100_000, bittensor: 20_000 }, { base: 0.2, bittensor: 12 });
-    const prev = { base: { to: 99_000, bridges: [], routes: [0] }, bittensor: { to: 19_000, bridges: [], frontDoors: [] } };
-    const { scan, unchecked } = await scanRegistry({ ...c.ctx, logsWindow: { base: 10_000n, bittensor: 10_000n } }, rec, prev);
-    expect(unchecked).toEqual([]);
-    expect([scan.base.to, scan.bittensor.to]).toEqual([100_000 - 300, 20_000 - 10]);
-  });
-
   it("a later scan starts where the last one settled and keeps what it found", async () => {
     const c = logChain({ base: [log(a.frontDoor, 1_230, "BridgeProposed", { bridge: OTHER2 })] }, { base: 1_300, bittensor: 2_100 });
     const prev: RegistryScan = { base: { to: 1_220, bridges: [OTHER], routes: [0] }, bittensor: { to: 2_090, bridges: [], frontDoors: [] } };
@@ -216,8 +204,7 @@ describe("the registry scan finds every bridge, front door and route the contrac
   });
 
   it("the topics are the build's own events", () => {
-    const dir = paths({}).contractsDir;
-    const built = (n: string) => loadArtifact(dir, n).abi.filter((i) => i.type === "event");
+    const built = (n: string) => preauditArtifact(n).abi.filter((i) => i.type === "event");
     for (const e of EVENTS) {
       const owner = e.name.startsWith("Route") ? "CascadeStaker" : e.name.startsWith("FrontDoor") ? "CascadeVault" : "CascadeFrontDoor";
       const match = built(owner).find((b) => (b as { name: string }).name === e.name);

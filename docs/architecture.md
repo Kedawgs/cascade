@@ -22,18 +22,19 @@ validators.md` (which validator to stake with). v3 design:
   each deposit has a step-by-step trail with a receipt per step under the Activity tab. Shares and stake
   now live in one contract, so the check is one read on one chain.
 - **Security first.** Small immutable contracts, no upgrade proxies, caps, and a guardian that can
-  only stop flows. At launch the owner is a single hardware-wallet account with no timelock, so its
-  setting changes take effect at once; a Safe plus a timelock is planned before Cascade takes other
-  people's money. The team cannot move user funds instantly: a front door or bridge added after
-  deployment is announced on-chain 7 days ahead.
+  only stop flows. At launch the owner is a single hardware-wallet account. Since v3.2 its changes
+  that loosen a protection wait on-chain, 48 hours for a setting (before v3.2 a setting change took
+  effect at once); a Safe as owner is recommended before Cascade takes other people's money. The
+  team cannot move user funds instantly: a front door or bridge added after deployment is announced
+  on-chain 7 days ahead.
 - **Runs on its own.** Closing batches, sending payouts and re-executing bridge messages are
   permissionless. Staking idle TAO and claiming rewards are timed by a keeper; if it has not acted
   for 7 days, anyone may. The team's bot is just the most reliable caller.
 - **Base only, in the contracts.** ForeverMoney's bridged TAO, the only TAO that CCIP carries to
   Bittensor EVM, exists only on Base and Robinhood Chain. The first front door is on Base; Robinhood
   Chain is a possible second. Users on Ethereum, BNB or Polygon bridge USDC to Base inside the app.
-- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base. The first launch
-  (v3-launch) starts far lower, at 40 TAO.
+- **The beta cap follows liquidity:** about $250k, sized to the TAO market on Base. The first
+  launches (v3-launch, then v3.2-launch) start far lower, at 40 TAO.
 - **csTAO cannot be transferred in v2.** That is what makes "the address that deposited controls the
   shares" true on both chains.
 - **A small anti-spam fee on withdrawal requests** (about $0.30 in ETH; the app can pre-pay it).
@@ -191,8 +192,15 @@ the keeper's maximum wait.
 
 ## Launch status
 
-v3-launch has been live on Base and Bittensor mainnet since 2026-10-30, holding only the founder's
-own money, with deposits capped at 40 TAO. It is not professionally audited. The addresses are in
-`SECURITY.md` and under "Launch configuration" in `contracts/README.md`; the pre-mainnet checklist
-there records what was confirmed. An audit, and a Safe plus a timelock as owner, come before other
-people's money.
+v3.2-launch has been live on Base and Bittensor mainnet since 2026-11-16, holding only the founder's
+own money while a mainnet canary with small amounts runs, with deposits capped at 40 TAO. It is not
+professionally audited. It replaced v3-launch (live from 2026-10-30), which is empty and is being
+retired. The addresses are in `SECURITY.md` and under "Launch configuration" in
+`contracts/README.md`; the pre-mainnet checklist there records what was confirmed.
+
+This page describes the design as of v3. What v3.2 changed is in its design,
+`docs/superpowers/specs/2026-10-31-cascade-v3.2-design.md`, and how it is run in
+`docs/runbook-v3.2.md`. One change matters for everything above: in v3.2 the owner's changes that
+loosen a protection wait on-chain (48 hours for a setting, 7 days for a new front door or bridge,
+8 days for a new owner or guardian). An audit comes before other people's money, and a Safe as owner
+is recommended before then.

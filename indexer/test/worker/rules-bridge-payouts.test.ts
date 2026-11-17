@@ -9,8 +9,9 @@ import { bridgePayouts } from "../../src/rules/bridge.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
 import type { Snapshot } from "../../src/snapshot.ts";
 import type { ChunkCheckRow, ChunkCheckWrite } from "../../src/store.ts";
-import { D, h, type PayoutEntry, type PayoutFixture, payoutBatch, withArgs } from "./bridge-fixtures.ts";
-import { testConfig } from "./fixtures.ts";
+import { D, h, type PayoutEntry, type PayoutFixture, parkedBatch, parkLog, payoutBatch, withArgs } from "./bridge-fixtures.ts";
+import { REFUND_CHUNK } from "../../src/parks.ts";
+import { testConfig, testConfigV32 } from "./fixtures.ts";
 import { ruleCtx, slog } from "./rule-ctx.ts";
 
 const E18 = 10n ** 18n;
@@ -142,6 +143,62 @@ describe("bridge.payout_mismatch: honest chunks pass", () => {
     const c = tick(all(p));
     expect(bridgePayouts.run(c)).toEqual([]);
     expect(c.writes.chunkChecks.map((w) => [w.chunk, w.status])).toEqual([[0, "awaiting_read"]]);
+  });
+});
+
+describe("bridge.payout_mismatch: v3.2's chunks", () => {
+  const cfg32 = testConfigV32();
+
+  it("a chunk's entries bear what they were charged plus the walk's unstake cost, not the fee the bridge was paid, and pass", () => {
+    // the fee is the quote: 0.0005 TAO above the ceiling was the caller's top-up, so the entries paid `charged`, and the
+    // walk's cost (what the chain kept, 3 rao) on top
+    const p = payoutBatch({ key: KEY, list, chunks: [{ taken: 3, fee: FEE + 5n * 10n ** 14n, charged: FEE, unstakeCost: 3n * 10n ** 9n }] });
+    const c = tick(all(p), { cfg: cfg32 });
+    expect(bridgePayouts.run(c)).toEqual([]);
+    expect(c.writes.chunkChecks.map((w) => [w.status, w.expectedHash])).toEqual([["awaiting_read", hashOf(KEY, 0, p.chunks[0].entries)]]);
+    // rebuilt with the fee instead, the entries would pay less than the chunk's net
+    const v31Args = ({ charged: _c, unstakeCost: _u, ...rest }: StoredLog["args"]) => rest;
+    const asFee = p.bit.map((l) => (l.event === "PayoutChunkSent" ? { ...l, args: v31Args(l.args) } : l));
+    const wrong = tick([...asFee, ...p.base], { cfg: cfg32 });
+    expect(bridgePayouts.run(wrong).map((f) => f.rule)).toEqual(["bridge.payout_mismatch"]);
+  });
+
+  it("after the owner's cancel carried bounced entries forward, the next chunk (its cursor back at 0 in the carried list) passes: the carried list is the batch's, continued", () => {
+    const X = "0x00000000000000000000000000000000000000d4" as Hex;
+    // two bounces and a redeem; the first chunk pays A, the cancel re-mints C's shares and carries X (the last bounce)
+    const carried: PayoutEntry[] = [list[0], { user: X, shares: 0n, assets: E18 }, list[2]];
+    const p = payoutBatch({
+      key: KEY,
+      list: carried,
+      chunks: [
+        { taken: 1, fee: FEE, charged: FEE },
+        { taken: 1, fee: FEE, charged: FEE },
+      ],
+      cancel: { after: 0, bouncesCarried: 1 },
+    });
+    expect(p.chunks[1].entries.map((e) => e.user)).toEqual([X]);
+    const c = tick(all(p), { cfg: cfg32 });
+    expect(bridgePayouts.run(c)).toEqual([]);
+    expect(c.writes.chunkChecks.map((w) => [w.chunk, w.status])).toEqual([
+      [0, "awaiting_read"],
+      [1, "awaiting_read"],
+    ]);
+    // the unsent bounces are the bounce section's tail from the cursor on, so the carried list holds what the batch's
+    // list holds there: placed by every earlier chunk's taken, as before
+    expect(payoutList(p.bit, KEY)).toEqual(carried);
+    expect(p.bit.filter((l) => l.event === "PayoutBatchCancelled").map((l) => l.args.bouncesCarried)).toEqual([1]);
+  });
+
+  it("chunkEntries splits charged + unstakeCost over a chunk as deductFee does (each share rounded up, each net floored to rao)", () => {
+    const two = [
+      { user: A, shares: 1n, assets: 2n * E18 },
+      { user: B, shares: 1n, assets: E18 },
+    ];
+    // 0.001 TAO charged and 0.0005 TAO of walk cost over 3 TAO: 1/2000 each
+    expect(chunkEntries(two, 0, 2, 3n * E18, 10n ** 15n + 5n * 10n ** 14n)).toEqual([
+      { user: A, amount: 1_999_000_000_000_000_000n },
+      { user: B, amount: 999_500_000_000_000_000n },
+    ]);
   });
 });
 
@@ -393,5 +450,106 @@ describe("the payout list, a chunk's entries and the message", () => {
     // the hash the front door recorded: delivered() reads true for it at the landing block (and not before)
     expect(v.expectedHash).toBe(chunk.delivered.hash);
     expect(chunk.delivered).toMatchObject({ atLanding: true, beforeLanding: false });
+  });
+});
+
+// ---- v3.2 (Task 56): a park's refund lands on Base as chunk 4294967295, with no PayoutChunkSent ----
+
+describe("v3.2: a park's refund (chunk 4294967295) is checked against the parked batch, never as a vault chunk", () => {
+  const CFG32 = testConfigV32();
+  const deposits = [
+    { user: A, amount: 3n * E18 },
+    { user: B, amount: E18 },
+  ];
+  const TOTAL = 4n * E18;
+  /** A front-door batch that parked on Bittensor, was refunded 14 days on (the adapter's Sent from the vault to the front
+   * door, then ParkedRefunded), and landed on Base as PayoutsDelivered(parkKey, REFUND_CHUNK) with a PayoutReceived per
+   * deposit. */
+  function refunded(o: { entries?: { user: Hex; amount: bigint }[]; deliveredMessage?: Hex; noPark?: boolean; noRefund?: boolean; park?: (l: StoredLog) => StoredLog } = {}) {
+    const b = parkedBatch({ id: 46n, deposits });
+    const R = h("refund message 46");
+    const refundTx = h("refund tx 46");
+    const bit = [
+      slog({
+        contract: "bitAdapter",
+        chain: "bittensor",
+        address: D.bitAdapter,
+        event: "Sent",
+        block: 6_901_000n,
+        txHash: refundTx,
+        logIndex: 0,
+        topic1: R,
+        args: { messageId: R, destChain: "8453", sender: D.vault, recipient: D.frontDoor, amount: String(TOTAL), fee: "1", gasLimit: "1" },
+      }),
+      parkLog("ParkedRefunded", { key: b.parkKey, block: 6_901_000n, txHash: refundTx, logIndex: 1, messageId: R }),
+    ];
+    const landTx = h("refund landing 46");
+    const fd = (event: string, args: StoredLog["args"], logIndex: number) => slog({ contract: "frontDoor", chain: "base", address: D.frontDoor, event, args, block: 37_001_000n, txHash: landTx, logIndex, topic1: b.parkKey });
+    const entries = o.entries ?? deposits;
+    const landing = fd("PayoutsDelivered", { batchKey: b.parkKey, chunk: REFUND_CHUNK, amount: String(TOTAL), bridge: D.baseAdapter }, 0);
+    const base = [
+      landing,
+      ...entries.map((e, i) => fd("PayoutReceived", { batchKey: b.parkKey, chunk: REFUND_CHUNK, user: e.user, amount: String(e.amount) }, 1 + i)),
+      slog({
+        contract: "baseAdapter",
+        chain: "base",
+        address: D.baseAdapter,
+        event: "Delivered",
+        block: 37_001_000n,
+        txHash: landTx,
+        logIndex: 1 + entries.length,
+        topic1: o.deliveredMessage ?? R,
+        args: { messageId: o.deliveredMessage ?? R, sourceChain: "964", sender: D.vault, recipient: D.frontDoor, amount: String(TOTAL) },
+      }),
+    ];
+    const parked = (o.park ?? ((l) => l))(b.park[0]);
+    return { b, landing, refundTx, R, logs: [...b.base, ...(o.noPark ? [] : [parked]), ...(o.noRefund ? [] : bit), ...base] };
+  }
+  const mismatchStep = (logs: StoredLog[], cfg: Config = CFG32) => {
+    const c = tick(logs, { cfg });
+    const found = bridgePayouts.run(c);
+    expect(c.writes.chunkChecks.map((w) => w.status)).toEqual(["mismatch"]);
+    expect(found.map((f) => f.rule)).toEqual(["bridge.payout_mismatch"]);
+    return found[0].facts;
+  };
+
+  it("an honest refund awaits the front door's delivered() of the parked batch's deposits as a PAYOUTS message, then passes: no false alarm", () => {
+    const r = refunded();
+    const first = tick(r.logs, { cfg: CFG32 });
+    expect(bridgePayouts.run(first)).toEqual([]);
+    expect(first.writes.chunkChecks).toEqual([
+      {
+        landedUid: r.landing.uid,
+        batchKey: r.b.parkKey,
+        chunk: REFUND_CHUNK,
+        landedTx: r.landing.txHash,
+        landedBlock: r.landing.block,
+        status: "awaiting_read",
+        firstSeen: LANDED_AT,
+        sentTx: r.refundTx,
+        messageId: r.R,
+        expectedHash: hashOf(r.b.parkKey, REFUND_CHUNK, deposits),
+      },
+    ]);
+    const rows = first.writes.chunkChecks.map(rowOf);
+    const ok = tick(r.logs, { cfg: CFG32, rows, fresh: false, reads: [read(r.landing, true)] });
+    expect(bridgePayouts.run(ok)).toEqual([]);
+    expect(ok.writes.chunkChecks.map((w) => w.status)).toEqual(["ok"]);
+  });
+
+  it("fails a refund landing that isn't the park's: no ParkedRefunded of its key (step 2), a stranger's park (step 2), another message (step 3), another depositor or amount (step 4)", () => {
+    expect(mismatchStep(refunded({ noRefund: true }).logs).step).toMatch(/^2: the park the adapter refunded/);
+    expect(mismatchStep(refunded({ park: (l) => withArgs(l, { sender: EVIL }) }).logs).detail).toMatch(/isn't a batch from the front door to the vault/);
+    expect(mismatchStep(refunded({ deliveredMessage: h("another refund") }).logs).step).toMatch(/^3/);
+    expect(mismatchStep(refunded({ entries: [{ user: EVIL, amount: 3n * E18 }, { user: B, amount: E18 }] }).logs).step).toMatch(/^4/);
+    expect(mismatchStep(refunded({ entries: [{ user: A, amount: 3n * E18 + 1n }, { user: B, amount: E18 - 1n }] }).logs).step).toMatch(/^4/);
+    // the parked batch can't be found on Base (its close, by the park's message id): step 4, worded so
+    const r = refunded();
+    expect(mismatchStep(r.logs.filter((l) => !(l.chain === "base" && l.event === "BatchClosed"))).detail).toMatch(/can't rebuild the parked batch/);
+  });
+
+  it("on v3-launch a chunk 4294967295 is no refund: it still fails as a chunk the vault never sent", () => {
+    const r = refunded();
+    expect(mismatchStep(r.logs, testConfig()).step).toMatch(/^2: the chunk the vault sent/);
   });
 });

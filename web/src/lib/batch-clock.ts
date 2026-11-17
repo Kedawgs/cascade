@@ -27,7 +27,8 @@ export const chainNow = (chainTime: number, readAt: number, now: number): number
 export const leavesBy = (b: { start: number; interval: number }, maxWaitS?: number): number => b.start + Math.max(b.interval, maxWaitS ?? 0);
 
 /** The front door let it close before its interval was up, as of the block read: it's full, and the
- * keeper sends a full batch at once. */
+ * keeper sends a full batch on its next round, each minute (or anyone's close does: R8; a holder that cancels in
+ * between makes it not full again). */
 export const isFull = (b: { start: number; interval: number; canClose: boolean; chainTime: number }): boolean =>
   b.canClose && b.chainTime < b.start + b.interval;
 
@@ -52,13 +53,18 @@ function waiting(b: Pick<NextBatch, "deposits" | "redeems">): string {
   return parts.join(" and ");
 }
 
+/** v3.2: a paused front door, in plain words (the controller's wording, Task 59 review Minor 7, in place of the plan's):
+ * its pause stops new stakes and the automatic USDC delivery (`deposit`/`depositFor` and `deliver` are
+ * whenNotPaused, CascadeFrontDoor.sol:318, :530-532); requests, closes and claims by hand all work (I-20). */
+export const PAUSED_DOOR = "New stakes and automatic USDC delivery are paused; withdrawals and claims still work.";
+
 /** The Stake page's public line: "Next batch leaves within 3 h 12 min · 1 depositor waiting". "Within", as
  * the time is the latest it leaves: the keeper sends it sooner once its fees cover the bridge fee. An
- * empty batch waits for its first deposit; a paused one names no time; a read that hasn't come, failed
- * or is stale shows "–". */
+ * empty batch waits for its first deposit; a paused one names no time (v3.2's says only that new stakes are paused:
+ * its batch still leaves, and Send it now still sends it); a read that hasn't come, failed or is stale shows "–". */
 export function nextBatchLine(b: NextBatch | undefined, x: { readAt: number; now: number; maxWaitS?: number }): string {
   if (!b || isStale(x.readAt, x.now)) return "Next batch: –";
-  if (b.paused) return "Next batch: on hold while Cascade is paused";
+  if (b.paused) return b.closesWhilePaused ? PAUSED_DOOR : "Next batch: on hold while Cascade is paused";
   if (b.deposits + b.redeems === 0) return "Next batch: waiting for the first deposit";
   const left = isFull(b) ? 0 : leavesBy(b, x.maxWaitS) - chainNow(b.chainTime, x.readAt, x.now);
   const when = left <= 0 ? "any moment now" : left < 60 ? "within a minute" : `within ${countdown(left)}`;

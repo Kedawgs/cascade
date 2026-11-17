@@ -110,6 +110,10 @@ const aboutEth = (wei: bigint, ethPriceUsd?: number): string => {
 const upToEth = (wei: bigint, ethPriceUsd?: number): string =>
   priced(ethPriceUsd) ? `${usdUp(toDisplay(wei, 18) * ethPriceUsd)} in ETH` : `${eth.format(toDisplay(wei, 18))} ETH`;
 
+/** An amount for the button and its note, which say once that the fee is paid in ETH: the dollar figure alone ("about
+ * $1.74", "under $0.01", "$2.26"), and without a price still in ETH ("about 0.000745 ETH"), never a bare number. */
+const figure = (words: string): string => (words.endsWith(" in ETH") ? words.slice(0, -" in ETH".length) : words);
+
 /** "about $2.29 of ETH" (rounded up to the cent), or "about 0.000979 ETH" without a price: what a wallet needs to hold. */
 const ofEth = (wei: bigint, ethPriceUsd?: number): string =>
   priced(ethPriceUsd) ? `about ${usdUp(toDisplay(wei, 18) * ethPriceUsd)} of ETH` : `about ${eth.format(toDisplay(wei, 18))} ETH`;
@@ -127,7 +131,7 @@ export const needEthText = (wei: bigint, ethPriceUsd?: number): string => `You n
  * browser is on its way, that send). When the keeper sends the batch for free, or Bittensor's side can't
  * take it, only `leaves`, saying so. */
 export interface SendNowView {
-  /** "Leaves in 3 h 12 min (by 3:45 PM), or sooner once its fees cover the bridge fee." */
+  /** "Leaves in 3 h 12 min (by 3:45 PM), or sooner." (sooner: once its fees cover the bridge fee, or it fills) */
   leaves: string;
   /** Until it's offered: "Send it yourself in 18 min (from 9:05 AM)." */
   yourself?: string;
@@ -162,14 +166,26 @@ export const blockedText = (what: "deposit" | "unstake") =>
 export const uncheckedText = (what: "deposit" | "unstake") =>
   `We couldn't check Bittensor's side just now; your ${what} waits on Base and you can still cancel it. Try again in a minute.`;
 
+/** Whether "Send it now" is offered at all for the account's deposit or unstake in the open batch: on a retired
+ * deployment (Task 60) only for an unstake, and only while none of the account's deposit is in the batch, so a retired
+ * site never sends a deposit (flows.ts planSendNow refuses it at the click too). Everywhere else, as sendNowView says. */
+export const sendNowOffered = (x: { retired: boolean; what: "deposit" | "unstake"; depositWei: bigint }): boolean =>
+  !x.retired || (x.what === "unstake" && x.depositWei === 0n);
+
+/** A retired deployment's unstake beside the account's deposit in the open batch: why "Send it now" isn't offered for
+ * it, and the way to it (Task 60 review, Minor 5). Null everywhere else. */
+export const SEND_HELD_BY_DEPOSIT = "Cancel your deposit to send your unstake now.";
+export const sendNowHeldByDeposit = (x: { retired: boolean; what: "deposit" | "unstake"; depositWei: bigint }): string | null =>
+  x.retired && x.what === "unstake" && x.depositWei > 0n ? SEND_HELD_BY_DEPOSIT : null;
+
 /** What "Send it now" shows for the account's deposit or unstake in the open batch, or null when nothing
- * is: while paused, with nothing of the account's in the batch, or without a max wait. What it offers
- * follows sendGate. A figure that can't be read is never guessed: a stale read shows "–" for every time
- * and holds the button, a fee that can't be read shows "–" and holds it too, and without ETH's price
- * amounts show in ETH. */
+ * is: while paused (v3-launch: v3.2's pause stops no close, `closesWhilePaused`), with nothing of the account's
+ * in the batch, or without a max wait. What it offers follows sendGate. A figure that can't be read is never
+ * guessed: a stale read shows "–" for every time and holds the button, a fee that can't be read shows "–" and
+ * holds it too, and without ETH's price amounts show in ETH. */
 export function sendNowView(x: SendNowInput): SendNowView | null {
   const b = x.batch;
-  if (b.paused || !x.maxWaitS || x.maxWaitS <= b.interval) return null;
+  if ((b.paused && !b.closesWhilePaused) || !x.maxWaitS || x.maxWaitS <= b.interval) return null;
   if (b.mine.depositWei === 0n && b.mine.redeemShares === 0n) return null;
 
   const stale = isStale(x.readAt, x.now);
@@ -187,7 +203,7 @@ export function sendNowView(x: SendNowInput): SendNowView | null {
     : by - nowS <= 0
       ? // past its max wait and five minutes more: the keeper hasn't sent it
         `It was due to leave by ${byText} and hasn't left yet; you can send it yourself.`
-      : `Leaves in ${countdown(by - nowS)} (by ${byText}), or sooner once its fees cover the bridge fee.`;
+      : `Leaves in ${countdown(by - nowS)} (by ${byText}), or sooner.`;
   if (x.sending) return { leaves, sending: { text: "Sending your batch to Bittensor…", txUrl: explorer.baseTx(x.sending.hash) } };
 
   if (stale) return b.canClose ? { leaves, button: { label: "Send it now: about –", note: DASH_NOTE, disabled: true } } : { leaves, yourself: "Send it yourself in –" };
@@ -208,17 +224,101 @@ export function sendNowView(x: SendNowInput): SendNowView | null {
   const pay = feeToPay(b.feeWei, b.potWei);
   const value = sendNowValue(b.feeWei, b.potWei);
   const price = b.ethPriceUsd;
-  const margin = `Your wallet sends up to ${upToEth(value, price)}`;
+  // the most the wallet sends, beside words that say it is ETH: "$2.26", or "0.000969 ETH" without a price
+  const most = figure(upToEth(value, price));
   const [label, note] =
     pay === 0n
       ? [
           "Send it now: no bridge fee to pay",
-          `The fees already in this batch cover its bridge fee, so you pay only Base's network fee.${value > 0n ? ` ${margin} in case the fee rises; anything extra is refunded.` : ""}`,
+          // ETH is named here, with the figure: this note says it nowhere else
+          `This batch's fees already cover its bridge fee, so you pay only Base's network fee.${value > 0n ? ` Up to ${upToEth(value, price)} is sent in case the fee rises; any extra is refunded.` : ""}`,
         ]
-      : [`Send it now: ${aboutEth(pay, price)}`, `You pay the bridge fee for the whole batch. ${margin}; anything extra is refunded.`];
+      : [`Send it now: ${figure(aboutEth(pay, price))}`, `You pay the whole batch's bridge fee, in ETH. Up to ${most} is sent; any extra is refunded.`];
   const need = ethNeeded(b);
   const short = b.ethWei !== undefined && b.ethWei < need;
   return { leaves, button: { label, note, ...(short ? { warning: needEthText(need, price) } : {}), disabled: short } };
+}
+
+/** v3.2 (R8): what the stake form says when a stake fits only once the open batch has left, so it offers to close the
+ * batch first and then stake (stake-form.ts closeFirstNeeded; flows.ts planCloseFirst, which reads it all again at the
+ * click): what the close costs, in plain words, and whether it can go now. The batch read (`batch`) not there yet, or
+ * failing (`unread`), holds the button, as does a batch that can't close now, Bittensor's side not taking batches or not
+ * checked, a bridge fee that can't be read, and a wallet short of the close's value and network fee. R9 (M-2): it says
+ * first that the batch normally leaves on its own, at no cost (the keeper's next round sends a full one), and offers the
+ * paid close only once the limits' reads (`after`) have found that same batch closable for CLOSE_FIRST_SEEN_MS, a
+ * refresh apart; a batch closable by time alone (under half its limits) is called due, not full, the keeper perhaps
+ * waiting on its fee rule. R9 (L-1): an open batch read that isn't the batch the limits read holds it too, and the
+ * offer names its batch (`batchId`), the only one the click may close. R10 (M-1): so does a reading of the limits that
+ * isn't fresh (`limits`: its last refresh failed, "unread", or it is older than two refreshes, "old": a hidden tab's),
+ * since React Query goes on showing the last one; the click reads them again in any case (flows.ts closeFirst). */
+export interface CloseFirstView {
+  note: string;
+  warning?: string;
+  disabled: boolean;
+  /** R9 (L-1): the batch the note was priced from, once the close is offered: the one the click may close
+   * (use-flows.ts closeThenStake), never another. */
+  batchId?: bigint;
+}
+
+/** R9 (M-2): how long reads must have found the same open batch closable (the limits' closableForMs) before a paid close
+ * is offered: two reads a refresh apart (the limits are read every 30 seconds; 25 allows for a timer that fires a little
+ * early). The keeper sends a full batch on its next round, at no cost to anyone, so the wait gives that round a chance
+ * to come first. R10 (L-A): it doesn't show the keeper isn't sending it: the keeper's rounds are a minute apart, so 25
+ * seconds may see none of them. It is a trade-off: a wait over 60 seconds would never be met by a batch a holder fills
+ * just after each round and cancels from before the next (each cancel starts the clock again), and a close that lands
+ * while it is full is what commits the holder's deposits (R8). */
+export const CLOSE_FIRST_SEEN_MS = 25_000;
+
+/** R12d: what the stake form says while a click on "Send the batch, then stake" reads the limits again because their
+ * reading aged since the form last showed it (a tab just shown again): the click sends nothing, and says so. */
+export const CLOSE_FIRST_RECHECKING = "Checking the batch again, so nothing was sent yet. Press the button again in a moment.";
+
+/** R9 (M-2): the batch is full by its limits, and the keeper sends it on its next round for free. */
+const FULL_LEAD = "The current batch is full. It normally leaves on its own within a minute or two, at no cost to you, and the next batch then has room for your stake";
+/** R9 (M-2): it can close by time alone (under half its limits): due, not full, and the keeper may be waiting on its fee
+ * rule (the batch's fees covering the bridge fee, or the max wait). */
+const DUE_LEAD = "The current batch has no room for this stake. It is due to leave, but it isn't full, so the keeper may hold it for more fees before sending it at no cost to you";
+
+export function closeFirstView(x: {
+  batch?: OpenBatch;
+  unread?: boolean;
+  after: { batchId: bigint; due: "full" | "time"; closableForMs: number };
+  limits?: "fresh" | "old" | "unread";
+}): CloseFirstView {
+  const b = x.batch;
+  const lead = x.after.due === "time" ? DUE_LEAD : FULL_LEAD;
+  const held = (why: string): CloseFirstView => ({ note: `${lead}. ${why}`, disabled: true });
+  if (!b) return held(x.unread ? "We can't read the batch on Base right now, so it can't be sent from here yet." : "Checking what sending it costs…");
+  if (b.paused) return { note: "Staking is paused right now. Try again later.", disabled: true };
+  if (!b.canClose) return { note: "The current batch is full and can't be sent yet. Try again in a minute.", disabled: true };
+  // R9 (L-1): the open batch isn't the one the limits found closable: it just left, or one read lags the other
+  if (b.id !== x.after.batchId) return { note: "The batch may have just left. Checking the room again…", disabled: true };
+  if (b.bittensor === "paused") return held("Bittensor's side isn't accepting batches right now, so it can't be sent from here; try again later.");
+  if (b.bittensor !== "open") return held("We couldn't check Bittensor's side just now, so it can't be sent from here yet. Try again in a minute.");
+  // R10 (M-1): the limits' clock counts only from a fresh reading of them
+  if (x.limits === "unread") return held("We couldn't check the batch again just now, so it can't be sent from here yet.");
+  if (x.limits === "old") return held("Checking whether it has left yet…");
+  // R9 (M-2): the keeper's free close first: nothing is offered for a fee until reads a refresh apart still find it here
+  if (x.after.closableForMs < CLOSE_FIRST_SEEN_MS) return held("If it hasn't left in a moment, you can send it yourself.");
+  if (b.feeWei === undefined) {
+    return held(
+      b.feeUnconfirmed
+        ? "The bridge fee couldn't be confirmed right now (our two sources for it disagree), so it can't be sent from here yet."
+        : "We can't read the bridge fee right now, so it can't be sent from here yet.",
+    );
+  }
+  const price = b.ethPriceUsd;
+  const pay = feeToPay(b.feeWei, b.potWei);
+  const value = sendNowValue(b.feeWei, b.potWei);
+  const most = `Your wallet sends up to ${upToEth(value, price)} with the close`;
+  const yourself = `${lead}. It hasn't left yet, so you can send it now yourself`;
+  const note =
+    pay === 0n
+      ? `${yourself}: the fees already in it cover its bridge fee, so sending it now costs only Base's network fee for the two steps.${value > 0n ? ` ${most} in case the fee rises; anything extra is refunded.` : ""}`
+      : `${yourself}: sending it now costs ${b.potWei > 0n ? "the part of its bridge fee its own fees don't cover" : "its bridge fee"}, ${aboutEth(pay, price)}, and Base's network fee for the two steps. ${most}; anything extra is refunded.`;
+  const need = ethNeeded(b);
+  const short = b.ethWei !== undefined && b.ethWei < need;
+  return { note, ...(short ? { warning: needEthText(need, price) } : {}), disabled: short, batchId: b.id };
 }
 
 /** How long a send from this browser shows as sending while Base doesn't show the batch gone. */

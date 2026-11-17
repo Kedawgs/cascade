@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { type AbiFunction, encodeFunctionData, type Hex, parseEther, parseUnits, toFunctionSignature } from "viem";
 import { describe, expect, it } from "vitest";
-import { loadArtifact } from "../src/artifacts.ts";
-import { LAUNCH_VAULT_LIMITS, paths, SETTINGS_V3, SETTINGS_V3_LAUNCH, VAULT_DEFAULTS } from "../src/config.ts";
+import { preauditArtifact } from "../src/builds.ts";
+import { LAUNCH_VAULT_LIMITS, SETTINGS_V3, SETTINGS_V3_LAUNCH, VAULT_DEFAULTS } from "../src/config.ts";
 import { effectPresent } from "../src/deploy.ts";
 import { buildPlanV3, vaultLimitsOf } from "../src/plan.ts";
 import { limitExpectations } from "../src/verify.ts";
@@ -12,7 +12,8 @@ import { ROLES } from "./launch-roles.ts";
 const L = LAUNCH_VAULT_LIMITS;
 const TAO = 10n ** 18n;
 
-const source = (path: string) => readFileSync(new URL(`../../contracts/src/${path}`, import.meta.url), "utf8");
+/** v3-launch's sources, frozen in ops/builds/preaudit (contracts/ now holds v3.2). */
+const source = (path: string) => readFileSync(new URL(`../builds/preaudit/src/${path}`, import.meta.url), "utf8");
 const VAULT_SOURCE = source("CascadeVault.sol");
 const FRONT_DOOR_SOURCE = source("CascadeFrontDoor.sol");
 const ADAPTER_SOURCE = source("adapters/CcipAdapterBase.sol");
@@ -139,7 +140,7 @@ describe("a launch sets them during deploy and verify checks them", () => {
   });
 
   it("each limit step encodes against the vault's build", () => {
-    const vault = loadArtifact(paths({}).contractsDir, "CascadeVault").abi.filter((i): i is AbiFunction => i.type === "function").map((i) => toFunctionSignature(i));
+    const vault = preauditArtifact("CascadeVault").abi.filter((i): i is AbiFunction => i.type === "function").map((i) => toFunctionSignature(i));
     for (const id of ["setOutflowLimits", "setMaxTotalAssets", "setMessageLimits", "setFeeLimits", "vaultTransferOwnership"]) {
       const s = step(id);
       if (s.kind !== "call") throw new Error(id);
@@ -163,7 +164,7 @@ describe("a launch sets them during deploy and verify checks them", () => {
     const ctx = (over: Record<string, unknown>) => {
       const values: Record<string, unknown> = { ...VAULT_DEFAULTS, ...over };
       const answers = Object.fromEntries(Object.keys(VAULT_DEFAULTS).map((k) => [k, (() => values[k]) as Answer]));
-      return fakeChain([loadArtifact(paths({}).contractsDir, "CascadeVault").abi], answers, { eth_getCode: () => "0x6080" as Hex }).ctx;
+      return fakeChain([preauditArtifact("CascadeVault").abi], answers, { eth_getCode: () => "0x6080" as Hex }).ctx;
     };
     for (const id of ["setOutflowLimits", "setMaxTotalAssets", "setMessageLimits", "setFeeLimits"]) {
       expect(await effectPresent(ctx({}), launch, step(id)), id).toBe(false);

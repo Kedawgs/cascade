@@ -41,7 +41,8 @@ export const STAKE_POINTS: readonly { lead: string; body: string }[] = [
 ];
 
 /** The landing page's audit card: at the launch ("early") that there is no independent audit yet; otherwise,
- * while one is scheduled, that it comes before launch. An audit that is done is never "Not yet". */
+ * while one is scheduled, that it comes before launch. An audit that is done is never "Not yet". A retired deployment
+ * is worded as the stage it was retired from (config.wordingStage, which the callers pass). */
 export function auditCard(stage: Stage, audit: AuditStatus): { badge: string | null; body: string } {
   if (stage === "early" && audit !== "done") return { badge: "Not yet", body: "No independent audit yet. Only deposit what you could afford to lose." };
   return { badge: audit === "scheduled" ? "Scheduled" : null, body: "A third-party review before launch. The report will be linked here." };

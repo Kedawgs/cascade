@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 /// @dev Bittensor staking precompile address.
 address constant ISTAKING_ADDRESS = 0x0000000000000000000000000000000000000805;
@@ -24,6 +24,10 @@ interface IStaking {
     ) external payable;
 
     function getStake(bytes32 hotkey, bytes32 coldkey, uint256 netuid) external view returns (uint256);
+
+    /// @return the coldkey's stake on `netuid` across every hotkey, in rao (root: rao of TAO); the vault reads
+    /// it for its unlisted stake (spec §3.1)
+    function getTotalColdkeyStakeOnSubnet(bytes32 coldkey, uint256 netuid) external view returns (uint256);
 
     function claimRootWithHotkey(bytes32 hotkey) external;
 

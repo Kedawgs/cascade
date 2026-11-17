@@ -1,16 +1,57 @@
 import { encodeAbiParameters, encodeEventTopics, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
 import { baseHeaders } from "./__fixtures__/base-blocks";
 import { describe, expect, it, vi } from "vitest";
-import { FRONT_DOOR, VAULT } from "./abi";
+import { ADAPTER, BIT_ADAPTER_V32, FRONT_DOOR, FRONT_DOOR_V32, REFUND_CHUNK, VAULT, VAULT_V32 } from "./abi";
 import type { Deployment } from "./config";
 import { createLiveCascadeData, type LiveDeps, notConfiguredData, NotConfiguredError } from "./live";
 import { createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
 import type { FrontDoorState, VaultState, WalletState } from "./reads";
 import { createScanStore, scanState } from "./scan-store";
-import { newScan, REREAD, scanVault } from "./facts";
+import { CROSSING_WINDOWS, GAP_WINDOWS, LANDING_WINDOWS, newScan, REREAD, scanVault, type VaultScan } from "./facts";
 import { DISTRUST_MS, indexerDistrusted } from "./indexer";
 import { SEED_MIN_BLOCKS, vaultEvents, verifySeed } from "./seed";
-import { SEED_RETRY_MS, SEED_VERIFY_TIMEOUT_MS } from "./live";
+import { CLOSABLE_GAP_MS, SEED_RETRY_MS, SEED_VERIFY_TIMEOUT_MS } from "./live";
+import { type DeliveryLimit, type DeliveryMarket, deliveryFloorPerTao, WAITING_UNKNOWN } from "./delivery-limit";
+import { unstakeActions } from "../stake-form";
+import { SALE_PROBE_TAO, STAKE_PROBE_USDC } from "./price-veto";
+import {
+  BASE_HEAD,
+  baseAt,
+  BATCH,
+  BIT_HEAD,
+  bitAt,
+  type ChainOptions,
+  chains,
+  type Crossed,
+  crossed,
+  DAY,
+  depositBounced,
+  depositRequested,
+  enc,
+  event,
+  EXEC_TX,
+  fd as fd32,
+  H as HX,
+  LAUNCH,
+  type Log as ChainLog,
+  MSG,
+  NOW_S,
+  OTHER,
+  PARK_KEY,
+  parkedDropped,
+  parkedRefunded,
+  parkedRun,
+  payoutReceived,
+  receipt,
+  redeemRequested,
+  REQUEST_TX,
+  SHARES,
+  TAO as TAO32,
+  USER,
+  V32,
+  vault as vault32,
+  VKEY,
+} from "./__fixtures__/v32-chains";
 
 const D: Deployment = {
   frontDoor: "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750",
@@ -153,6 +194,370 @@ describe("rewards waiting (v3)", () => {
     expect(asked).toBe(0);
     expect(p).not.toHaveProperty("pendingRewardsTao");
     expect(p.taoBalance).toBeCloseTo(0.08, 12);
+  });
+});
+
+describe("R8 (the contracts review's L-1): the limits say what a stake could be once the full open batch has left (afterClose), for the form's offer to send it first", () => {
+  const D32: Deployment = {
+    ...D,
+    staker: "0x00000000000000000000000000000000000000b1",
+    oracle: "0x00000000000000000000000000000000000000b2",
+    vaultLens: "0x000000000000000000000000000000000000Ae15",
+    doorLens: "0x000000000000000000000000000000000000De15",
+  };
+  const TAO = 10n ** 18n;
+  /** A 10 TAO batch limit under a 40 TAO cap, the open batch holding `open` and able to close (half its limit or more) */
+  const door = (over: Partial<FrontDoorState> = {}): FrontDoorState => ({ ...fd, depositCap: 40n * TAO, netForwarded: 0n, maxBatchValue: 10n * TAO, openTotal: 6n * TAO, openDeposits: 1, canClose: true, ...over });
+  const limits = (over: Partial<FrontDoorState> = {}, d: Deployment = D32) => createLiveCascadeData(d, deps({ readFrontDoor: async () => door(over) })).getLimits();
+
+  it("the open batch's room binds and it can close: the next batch's whole limit, as the form judges amounts", async () => {
+    const l = await limits();
+    expect(l.maxTao).toBe(4n * TAO);
+    expect(l.full).toBeNull();
+    expect(l.afterClose?.maxTao).toBe(10n * TAO);
+    // in dollars by the same margins as maxUsd
+    const same = await limits({ openTotal: 0n, canClose: false });
+    expect(l.afterClose?.maxUsd).toBe(same.maxUsd);
+    // a batch full by value (no room for the minimum) can close too: full, and the offer stands
+    const full = await limits({ openTotal: 10n * TAO });
+    expect([full.full, full.afterClose?.maxTao]).toEqual(["batch", 10n * TAO]);
+    // its list full the same
+    expect((await limits({ openDeposits: 50 })).afterClose?.maxTao).toBe(10n * TAO);
+  });
+
+  it("held to the cap's room, which a close frees none of (the cap counts the open batch already); none at all when the cap binds, the batch can't close, or on v3-launch", async () => {
+    // 9 TAO of cap room: the next batch takes 9, not 10
+    expect((await limits({ netForwarded: 25n * TAO })).afterClose?.maxTao).toBe(9n * TAO);
+    // the cap is what binds (2 TAO left under it, 4 in the batch): a close opens nothing
+    expect((await limits({ netForwarded: 32n * TAO })).afterClose).toBeUndefined();
+    const capFull = await limits({ netForwarded: 34n * TAO, openTotal: 6n * TAO });
+    expect([capFull.full, capFull.afterClose]).toEqual(["cap", undefined]);
+    // the batch can't close now (under half its limit, before its interval)
+    expect((await limits({ openTotal: 4n * TAO, canClose: false })).afterClose).toBeUndefined();
+    // v3-launch's closeBatch() names no batch: never offered there
+    expect((await limits({}, D)).afterClose).toBeUndefined();
+  });
+
+  it("R9 (M-2, L-1): names the batch it read, and whether it is full by its limits (the keeper sends it on its next round, whatever its fees) or due by time alone (under half its limits: the keeper may hold it for its fee rule)", async () => {
+    const l = await limits();
+    expect(l.afterClose).toMatchObject({ batchId: 4n, due: "full" });
+    // half its value limit exactly; its list full; no minimum deposit fits beside it
+    expect((await limits({ openTotal: 5n * TAO })).afterClose?.due).toBe("full");
+    expect((await limits({ openTotal: TAO, openDeposits: 50 })).afterClose?.due).toBe("full");
+    // build B, the list half rule: 25 of 50 deposits is full by its list (the keeper's next round sends it), 24 is not;
+    // 25 of an odd 49 too
+    expect((await limits({ openTotal: TAO, openDeposits: 25 })).afterClose?.due).toBe("full");
+    expect((await limits({ openTotal: TAO, openDeposits: 24 })).afterClose?.due).toBe("time");
+    expect((await limits({ openTotal: TAO, openDeposits: 25, maxDeposits: 49 })).afterClose?.due).toBe("full");
+    expect((await limits({ openTotal: TAO, openDeposits: 24, maxDeposits: 49 })).afterClose?.due).toBe("time");
+    // under half, but no 6 TAO minimum deposit fits beside its 4.5 (the room rule)
+    expect((await limits({ openTotal: (9n * TAO) / 2n, minDeposit: 6n * TAO })).afterClose?.due).toBe("full");
+    // 3 TAO of a 10 TAO limit and closable: by time alone (its interval passed); a stake over its 7 TAO of room is offered
+    // the close, as due, never as full
+    const due = await limits({ openTotal: 3n * TAO });
+    expect(due.afterClose).toMatchObject({ batchId: 4n, due: "time", maxTao: 10n * TAO });
+    expect((await limits({ openTotal: 3n * TAO, openBatchId: 9n })).afterClose?.batchId).toBe(9n);
+  });
+
+  it("R9 (M-2): how long the reads have found the same open batch closable, from the first read that did: none on a first read, a refresh later 30 s; a new batch, or a read that finds it can't close, starts again", async () => {
+    let now = 1_800_000_100_000;
+    let door32 = door();
+    const data = createLiveCascadeData(D32, deps({ now: () => now, readFrontDoor: async () => door32 }));
+    const seen = async () => (await data.getLimits()).afterClose?.closableForMs;
+    expect(await seen()).toBe(0);
+    now += 30_000;
+    expect(await seen()).toBe(30_000);
+    now += 30_000;
+    expect(await seen()).toBe(60_000);
+    // the keeper closed it: the next batch, full again, starts from nothing
+    door32 = door({ openBatchId: 5n });
+    now += 30_000;
+    expect(await seen()).toBe(0);
+    now += 30_000;
+    expect(await seen()).toBe(30_000);
+    // a cancel took it under half before its interval: not closable, nothing offered; closable again, from nothing
+    door32 = door({ openBatchId: 5n, openTotal: 4n * TAO, canClose: false });
+    now += 30_000;
+    expect(await seen()).toBeUndefined();
+    door32 = door({ openBatchId: 5n });
+    now += 30_000;
+    expect(await seen()).toBe(0);
+    // timed from the start of each read, not its end: a slow read never makes a batch look closable for longer
+    let slow = 0;
+    const timed = createLiveCascadeData(
+      D32,
+      deps({
+        now: () => now,
+        readFrontDoor: async () => {
+          now += slow;
+          return door();
+        },
+      }),
+    );
+    expect((await timed.getLimits()).afterClose?.closableForMs).toBe(0);
+    slow = 5_000;
+    now += 30_000;
+    expect((await timed.getLimits()).afterClose?.closableForMs).toBe(30_000);
+  });
+
+  it("R10 (L-B): the first read to find the batch closable counts from its answer, not its start: a slow first read never counts the time it took", async () => {
+    let now = 1_800_000_100_000;
+    let slow = 5_000;
+    const data = createLiveCascadeData(
+      D32,
+      deps({
+        now: () => now,
+        readFrontDoor: async () => {
+          now += slow;
+          return door();
+        },
+      }),
+    );
+    // started at 100_000, answered 5 s later: 0, never less
+    expect((await data.getLimits()).afterClose?.closableForMs).toBe(0);
+    // the next read starts 30 s after the first one started, 25 s after it answered
+    slow = 0;
+    now += 25_000;
+    expect((await data.getLimits()).afterClose?.closableForMs).toBe(25_000);
+    // and on from there, each later read timed from its own start (a slow one adds nothing for the time it took)
+    slow = 5_000;
+    now += 30_000;
+    expect((await data.getLimits()).afterClose?.closableForMs).toBe(55_000);
+  });
+
+  it("R10 (M-A): a batch closable by time alone that then fills to its limits starts again from nothing, as full (the keeper's next round sends it for free, however long it was due); back under half, still due by time, from nothing again", async () => {
+    let now = 1_800_000_100_000;
+    let door32 = door({ openTotal: 3n * TAO });
+    const data = createLiveCascadeData(D32, deps({ now: () => now, readFrontDoor: async () => door32 }));
+    const seen = async () => {
+      const a = (await data.getLimits()).afterClose;
+      return [a?.due, a?.closableForMs];
+    };
+    // due by its interval for two minutes, the keeper holding it for its fees
+    expect(await seen()).toEqual(["time", 0]);
+    for (const ms of [30_000, 60_000, 90_000, 120_000]) {
+      now += 30_000;
+      expect(await seen()).toEqual(["time", ms]);
+    }
+    // a deposit takes it to half its limit: full now, so the keeper's next round sends it, and nothing is offered yet
+    door32 = door({ openTotal: 6n * TAO });
+    now += 30_000;
+    expect(await seen()).toEqual(["full", 0]);
+    now += 30_000;
+    expect(await seen()).toEqual(["full", 30_000]);
+    // a cancel takes it back under half, its interval passed: due by time again, from nothing
+    door32 = door({ openTotal: 3n * TAO });
+    now += 30_000;
+    expect(await seen()).toEqual(["time", 0]);
+    now += 30_000;
+    expect(await seen()).toEqual(["time", 30_000]);
+  });
+
+  it("R10 (M-A): a batch last found closable more than 65 s before this read answered (two refreshes: a hidden tab's reads stop, a cancel may have come between) starts again from nothing; a read 60 s on doesn't, a failed read between them leaving the clock as it was (R10, L-1: in the site a failed refresh puts the next read more than 65 s on, so it does start again)", async () => {
+    let now = 1_800_000_100_000;
+    let fails = false;
+    const data = createLiveCascadeData(
+      D32,
+      deps({
+        now: () => now,
+        readFrontDoor: async () => {
+          if (fails) throw new Error("the RPC is down");
+          return door();
+        },
+      }),
+    );
+    const seen = async () => (await data.getLimits()).afterClose?.closableForMs;
+    expect(CLOSABLE_GAP_MS).toBe(65_000);
+    expect(await seen()).toBe(0);
+    now += 30_000;
+    expect(await seen()).toBe(30_000);
+    // a read that fails leaves the clock as it was; the next one, 60 s after the last that found it, runs it on. In the site
+    // that next read comes later (R10, L-1): React Query tries a failed read 3 more times, 1, 2 and 4 s apart, then arms
+    // its 30 s interval again, so it starts at least 67 s after the last sighting and the clock starts again (the offer
+    // waits longer: the safe side)
+    fails = true;
+    now += 30_000;
+    await expect(data.getLimits()).rejects.toThrow("the RPC is down");
+    fails = false;
+    now += 30_000;
+    expect(await seen()).toBe(90_000);
+    // 65 s exactly: still on
+    now += 65_000;
+    expect(await seen()).toBe(155_000);
+    // the tab hidden for five minutes: what happened meanwhile isn't known, so from nothing
+    now += 5 * 60_000;
+    expect(await seen()).toBe(0);
+    now += 30_000;
+    expect(await seen()).toBe(30_000);
+    // just over 65 s: from nothing too
+    now += 65_001;
+    expect(await seen()).toBe(0);
+  });
+
+  it("R10 (M-A): the gap is timed to this read's answer, from the start of the last read that found it closable: a slow read just under the line goes over it", async () => {
+    let now = 1_800_000_100_000;
+    let slow = 0;
+    const data = createLiveCascadeData(
+      D32,
+      deps({
+        now: () => now,
+        readFrontDoor: async () => {
+          now += slow;
+          return door();
+        },
+      }),
+    );
+    const seen = async () => (await data.getLimits()).afterClose?.closableForMs;
+    expect(await seen()).toBe(0);
+    // starts 60 s after the last sighting began and answers 6 s later: up to 66 s unseen, so from nothing, from its answer
+    slow = 6_000;
+    now += 60_000;
+    expect(await seen()).toBe(0);
+    // the next starts 36 s after that read began, 30 s after it answered
+    slow = 0;
+    now += 30_000;
+    expect(await seen()).toBe(30_000);
+  });
+
+  it("R10 (N-2): reads that overlap never move the last sighting back: a slow read that began first and answers last keeps the later one's start", async () => {
+    let now = 1_800_000_100_000;
+    /** each read's answer, held until the test lets it go */
+    const held: ((v: FrontDoorState) => void)[] = [];
+    const data = createLiveCascadeData(D32, deps({ now: () => now, readFrontDoor: () => new Promise<FrontDoorState>((go) => held.push(go)) }));
+    const seen = (p: Promise<Awaited<ReturnType<typeof data.getLimits>>>) => p.then((l) => l.afterClose?.closableForMs);
+    // the first sighting, at 0
+    const first = seen(data.getLimits());
+    held.shift()!(door());
+    expect(await first).toBe(0);
+    // a slow read begins at 30 s; a click's read begins at 40 s and answers at once; the slow one answers at 45 s
+    now += 30_000;
+    const slow = seen(data.getLimits());
+    now += 10_000;
+    const quick = seen(data.getLimits());
+    held.pop()!(door());
+    expect(await quick).toBe(40_000);
+    now += 5_000;
+    held.shift()!(door());
+    expect(await slow).toBe(30_000);
+    // 60 s after the quick read began (70 s after the slow one): within the gap of the last sighting, so the clock runs on
+    now += 55_000;
+    const next = seen(data.getLimits());
+    held.shift()!(door());
+    expect(await next).toBe(100_000);
+  });
+});
+
+describe("v3.2: what holds an unstake request, from the vault lens's reads (Task 59)", () => {
+  const D32: Deployment = {
+    ...D,
+    staker: "0x00000000000000000000000000000000000000b1",
+    oracle: "0x00000000000000000000000000000000000000b2",
+    vaultLens: "0x000000000000000000000000000000000000Ae15",
+    doorLens: "0x000000000000000000000000000000000000De15",
+  };
+  const DIRECT = 2n ** 64n - 1n;
+  const at = (v: Partial<VaultState>) => createLiveCascadeData(D32, deps({ readVault: async () => ({ ...vault, stakeMissing: false, redeemOrigin: 8453n, ...v }) }));
+
+  it("marks what can be unstaked while stake is missing, and the proof of stake with it", async () => {
+    const data = at({ stakeMissing: true });
+    expect(await data.getAvailable(ME)).toMatchObject({ stakeMissing: true });
+    expect(await data.getProof()).toMatchObject({ stakeMissing: true });
+    const fine = at({});
+    expect(await fine.getAvailable(ME)).not.toHaveProperty("stakeMissing");
+    expect(await fine.getProof()).not.toHaveProperty("stakeMissing");
+  });
+
+  it("marks an address whose shares withdraw on Bittensor (DIRECT_ORIGIN), or anywhere but Base, before a request", async () => {
+    expect(await at({ redeemOrigin: DIRECT }).getAvailable(ME)).toMatchObject({ originElsewhere: true });
+    // the reward cut's shares carry no origin until the holder sets one: a door skips them too
+    expect(await at({ redeemOrigin: 0n }).getAvailable(ME)).toMatchObject({ originElsewhere: true });
+    expect(await at({}).getAvailable(ME)).not.toHaveProperty("originElsewhere");
+    // nothing staked: nothing to hold
+    expect(await at({ redeemOrigin: DIRECT, shares: 0n }).getAvailable(ME)).not.toHaveProperty("originElsewhere");
+  });
+
+  it("R6 (ChatGPT R2 claim B): marks the position of an address that already withdraws on Bittensor, for the stake form's warning before a deposit, shares or none", async () => {
+    expect(await at({ redeemOrigin: DIRECT }).getPosition(ME)).toMatchObject({ withdrawsOnBittensor: true });
+    expect(await at({ redeemOrigin: DIRECT, shares: 0n }).getPosition(ME)).toMatchObject({ withdrawsOnBittensor: true });
+    // another chain's door is no Base exit either
+    expect(await at({ redeemOrigin: 10n }).getPosition(ME)).toMatchObject({ withdrawsOnBittensor: true });
+    // Base's, or none yet (a Base deposit makes it Base's): nothing to warn
+    expect(await at({}).getPosition(ME)).not.toHaveProperty("withdrawsOnBittensor");
+    expect(await at({ redeemOrigin: 0n }).getPosition(ME)).not.toHaveProperty("withdrawsOnBittensor");
+  });
+
+  it("v3-launch reads neither, whatever its vault state says", async () => {
+    const launch = createLiveCascadeData(D, deps({ readVault: async () => ({ ...vault, stakeMissing: true, redeemOrigin: DIRECT }) }));
+    expect(await launch.getPosition(ME)).not.toHaveProperty("withdrawsOnBittensor");
+    const a = await launch.getAvailable(ME);
+    expect(a).not.toHaveProperty("stakeMissing");
+    expect(a).not.toHaveProperty("originElsewhere");
+    expect(await launch.getProof()).not.toHaveProperty("stakeMissing");
+  });
+});
+
+describe("v3.2: a request or a deposit whose batch was parked, as Unstake and the trail count it (Task 59 review, Minors 4 and 6)", () => {
+  const nowMs = NOW_S * 1000;
+  /** The account (2 × SHARES staked) with this browser's request of SHARES in batch 7, which has left Base (8 is open),
+   * or its stake of TAO there, over these chains. */
+  function account(x: Crossed, opts: ChainOptions, record: "request" | "stake" = "request") {
+    const c = chains({ ...x.base, ...opts });
+    const d = deps({
+      clients: c as never,
+      now: () => nowMs,
+      scanStore: createScanStore(memory(), V32),
+      readFrontDoor: async () => ({ ...fd32, redeemOf: 0n }),
+      readVault: async () => ({ ...vault32, shares: 2n * SHARES }),
+    });
+    d.opLog.put(record === "request" ? { ...x.requestOp, batchId: BATCH } : { ...x.stakeOp, batchId: BATCH });
+    const data = createLiveCascadeData(V32, d);
+    return { data, asked: c.asked, available: async () => (await data.getAvailable(USER)).availableShares };
+  }
+
+  it("keeps a parked request's shares counted as asked, and reads its request's receipt once a visit", async () => {
+    const x = crossed(3 * 3_600);
+    const a = account(x, { ...parkedRun(x, 0n), parks: { [PARK_KEY]: [0n, BigInt(x.parkS), true] } });
+    expect(await a.available()).toBe(SHARES);
+    expect(await a.available()).toBe(SHARES);
+    // once the batch's close is known, the request's own receipt isn't read again (Minor 6)
+    expect(a.asked.filter((k) => k === `base.receipt:${REQUEST_TX}`)).toHaveLength(1);
+  });
+
+  it("frees a request's shares once its park was dropped, or refunded with the deposits beside it", async () => {
+    const x = crossed(16 * DAY);
+    const end = bitAt(x.parkS + 14 * DAY + 3_600);
+    const empty = parkedRun(x, 0n);
+    expect(await account(x, { ...empty, bitLogs: [...empty.bitLogs, parkedDropped(end)] }).available()).toBe(2n * SHARES);
+    const full = parkedRun(x);
+    expect(await account(x, { ...full, bitLogs: [...full.bitLogs, parkedRefunded(end)] }).available()).toBe(2n * SHARES);
+  });
+
+  it("keeps them counted while that can't be told: a run not read yet, or a record gone with no end found yet", async () => {
+    const x = crossed(3 * 3_600);
+    expect(await account(x, { executed: { [MSG]: 2 } }).available()).toBe(SHARES);
+    // past its 14 days, the record is gone, and no refund or drop is in the logs yet (one gone to deliverParked whose
+    // delivery the scan hasn't read)
+    const old = crossed(16 * DAY);
+    expect(await account(old, parkedRun(old, 0n)).available()).toBe(SHARES);
+  });
+
+  it("reads a deposit's park that the logs show dropped as checking, never a step (a deposit's park carries its TAO)", async () => {
+    const x = crossed(16 * DAY);
+    const run = parkedRun(x);
+    const a = account(x, { ...run, bitLogs: [...run.bitLogs, parkedDropped(bitAt(x.parkS + 14 * DAY + 3_600))] }, "stake");
+    const [r] = await a.data.listDeposits(USER);
+    expect(r.steps[2]).toMatchObject({ status: "checking", detail: "Checking where your deposit is…" });
+  });
+
+  it("stops counting a refunded deposit as on its way once the trail has read it so", async () => {
+    const x = crossed(16 * DAY);
+    const run = parkedRun(x);
+    const a = account(x, { ...run, bitLogs: [...run.bitLogs, parkedRefunded(bitAt(x.parkS + 14 * DAY + 3_600))] }, "stake");
+    // before the trail reads it: its batch closed and nothing reached the vault, so it reads as on the bridge
+    expect((await a.data.getPositionHistory(USER)).pendingTao).toBeCloseTo(0.04, 12);
+    const [r] = await a.data.listDeposits(USER);
+    expect(r.steps[2]).toMatchObject({ status: "failed", detail: "Your deposit is on its way back to Base." });
+    expect((await a.data.getPositionHistory(USER)).pendingTao).toBe(0);
   });
 });
 
@@ -1519,5 +1924,619 @@ describe("the indexer's seed", () => {
     // batch 2 arrived (block 20,000): its receipt says so, so the unstake isn't on the bridge
     expect((await v.data.getAvailable(ME)).availableShares).toBe(8n * 10n ** 22n - 10n ** 21n);
     expect(n.asked).toContain(H(103));
+  });
+});
+
+// ---- v3.2 (Task 59a): each quote's own price impact, and the live USDC delivery limit ----
+
+describe("v3.2: each quote's price impact, against the veto's small trade", () => {
+  const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+
+  it("a stake's: the USDC it swaps and the TAO it gets, against what $100 buys, read beside it", async () => {
+    const asked: bigint[] = [];
+    const quoteBuy: LiveDeps["quoteBuy"] = async (_c, usdc) => (asked.push(usdc), (usdc * 10n ** 12n) / 252n);
+    const q = await createLiveCascadeData(V32, deps({ quoteBuy })).quoteDeposit(1_000_000_000n);
+    expect(q.impact).toEqual({
+      tradeIn: q.usdcIn - q.depositFeeUsdc - q.swapFeeUsdc,
+      tradeOut: q.expectedTao,
+      probeIn: STAKE_PROBE_USDC,
+      probeOut: (STAKE_PROBE_USDC * 10n ** 12n) / 252n,
+    });
+    expect(asked).toEqual([q.usdcIn - q.depositFeeUsdc - q.swapFeeUsdc, STAKE_PROBE_USDC]);
+  });
+
+  it("a USDC unstake's: the payout it sells and the USDC that pays, against what 0.5 TAO sells for", async () => {
+    const q = await createLiveCascadeData(V32, deps()).quoteWithdrawal(ME, 4n * 10n ** 22n);
+    const net = q.taoWei - q.bridgeFeeWei;
+    expect(q.impact).toEqual({ tradeIn: net, tradeOut: (net * 250n) / 10n ** 12n, probeIn: SALE_PROBE_TAO, probeOut: (SALE_PROBE_TAO * 250n) / 10n ** 12n });
+  });
+
+  it("v3-launch's quotes are as before: no probe read, no impact carried, the same figures", async () => {
+    const asked: bigint[] = [];
+    const quoteBuy: LiveDeps["quoteBuy"] = async (_c, usdc) => (asked.push(usdc), (usdc * 10n ** 12n) / 252n);
+    const sold: bigint[] = [];
+    const quoteSell: LiveDeps["quoteSell"] = async (_c, tao) => (sold.push(tao), (tao * 250n) / 10n ** 12n);
+    const launch = createLiveCascadeData(D3, deps({ quoteBuy, quoteSell }));
+    const q = await launch.quoteDeposit(1_000_000_000n);
+    expect(q.impact).toBeUndefined();
+    expect(asked).toEqual([q.usdcIn - q.depositFeeUsdc - q.swapFeeUsdc]);
+    const w = await launch.quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(w.impact).toBeUndefined();
+    expect(sold).not.toContain(SALE_PROBE_TAO);
+    // and v3.2's figures are the same deployment's without its lenses, the impact aside
+    const drop = (o: object, ...keys: string[]) => Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
+    const asLaunch = drop(V32, "vaultLens", "doorLens") as Deployment;
+    expect(drop(await createLiveCascadeData(V32, deps()).quoteDeposit(1_000_000_000n), "impact")).toEqual(await createLiveCascadeData(asLaunch, deps()).quoteDeposit(1_000_000_000n));
+    expect(drop(await createLiveCascadeData(V32, deps()).quoteWithdrawal(ME, 4n * 10n ** 22n), "impact")).toEqual(await createLiveCascadeData(asLaunch, deps()).quoteWithdrawal(ME, 4n * 10n ** 22n));
+  });
+});
+
+describe("v3.2: the live USDC delivery limit, and what else a USDC unstake sells", () => {
+  /** The market at launch: deep pools, 1.5% under the TWAP, 0.15% on the sale, route 0; no user floor to meet. */
+  const market: DeliveryMarket = { thin: false, slippageBps: 150n, swapFeeBps: 15n, minUsdcPerTao: 0n, sellPath: "0xabcdef", blockNumber: 40_000_000n };
+  /** Pools at the TWAP's price with nothing lost to size: every sale clears. */
+  const flat = () =>
+    vi.fn(async (...[, , sizes]: [unknown, unknown, readonly bigint[], unknown]) => sizes.map((s) => ({ taoWei: s, grossUsdc: (s * 250n) / 10n ** 12n, twapUsdc: (s * 250n) / 10n ** 12n })));
+  const reads = (over: Partial<LiveDeps> = {}) => ({
+    readDeliveryMarket: async () => market,
+    readDeliveryPreference: async () => false,
+    // no park holds deposits, no refund on its way (read from the chains themselves where a test gives them)
+    openParks: async () => false,
+    quoteDeliveries: flat() as never,
+    ...over,
+  });
+
+  it("counts the account's request in the open batch and its TAO on Base, looks first at all its TAO, and quotes at the market's block along its route", async () => {
+    const quoteDeliveries = flat();
+    const data = createLiveCascadeData(
+      V32,
+      deps({
+        // 0.001 TAO asked in the open batch (1e21 shares), 0.002 TAO claimable on Base
+        readFrontDoor: async () => ({ ...fd, redeemOf: 10n ** 21n, claimable: 2n * 10n ** 15n }),
+        // the vault's history: batches 1 to 3 delivered, so nothing of the account's crosses (batch 4 is open)
+        scan: async (_c, _d, s) => {
+          for (const id of ["1", "2", "3"]) s.delivered.set(id, { key: `0x${id.repeat(64)}`, txHash: `0x${"34".repeat(32)}`, block: 5n });
+        },
+        ...reads({ quoteDeliveries: quoteDeliveries as never }),
+      }),
+    );
+    const limit = await data.getDeliveryLimit(ME);
+    // all its TAO: the vault's 0.08 TAO of its shares and the 0.003 TAO waiting (0.083 TAO); 20.75 USDC less 0.15%
+    expect(limit).toEqual({ waitingTaoWei: 3n * 10n ** 15n, waitingComplete: true, preferenceSet: false, saleTaoWei: 83n * 10n ** 15n, saleUsdc: 20_718_875n, clearsAll: true });
+    // one read of the whole, everything clearing
+    expect(quoteDeliveries.mock.calls.map(([, , s, at]) => [s, at])).toEqual([[[83n * 10n ** 15n], { sellPath: "0xabcdef", blockNumber: 40_000_000n }]]);
+  });
+
+  it("says whether the chain holds a delivery preference for the account (I1)", async () => {
+    const data = createLiveCascadeData(V32, deps(reads({ readDeliveryPreference: async () => true })));
+    expect((await data.getDeliveryLimit(ME)).preferenceSet).toBe(true);
+  });
+
+  it("rejects when the market, a size's quote or the preference can't be read: a USDC unstake then waits, receiving TAO doesn't", async () => {
+    const down = async () => Promise.reject(new Error("rpc down"));
+    for (const over of [{ readDeliveryMarket: down }, { quoteDeliveries: down as never }, { readDeliveryPreference: down }]) {
+      await expect(createLiveCascadeData(V32, deps(reads(over))).getDeliveryLimit(ME)).rejects.toThrow("rpc down");
+    }
+  });
+
+  it("is v3.2's alone", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    await expect(createLiveCascadeData(D3, deps()).getDeliveryLimit(ME)).rejects.toThrow(/v3\.2/);
+    await expect(createLiveCascadeData(D3, deps()).deliveryRefusal(ME, {} as never)).rejects.toThrow(/v3\.2/);
+    await expect(notConfiguredData().getDeliveryLimit(ME)).rejects.toBeInstanceOf(NotConfiguredError);
+    await expect(notConfiguredData().deliveryRefusal(ME, {} as never)).rejects.toBeInstanceOf(NotConfiguredError);
+  });
+
+  it("goes by the floor a USDC request sets: the delivery terms' rule, the same as quoteWithdrawal's", async () => {
+    const q = await createLiveCascadeData(V32, deps()).quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(q.minUsdcPerTao).toBe(deliveryFloorPerTao((10n ** 18n * 250n) / 10n ** 12n, 15n));
+  });
+
+  it("at the click: the request's own sale with what waits, at its own floor, one quote when it clears (I2, M8)", async () => {
+    const quoteDeliveries = flat();
+    const data = createLiveCascadeData(V32, deps({ readFrontDoor: async () => ({ ...fd, redeemOf: 0n, claimable: 2n * 10n ** 15n }), ...reads({ quoteDeliveries: quoteDeliveries as never }) }));
+    const q = await data.quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(await data.deliveryRefusal(ME, q)).toBeNull();
+    expect(quoteDeliveries.mock.calls.map(([, , s]) => s)).toEqual([[q.taoWei - q.bridgeFeeWei + 2n * 10n ** 15n]]);
+    // a floor the pools can't meet: refused, in the limit's words
+    const high = await data.deliveryRefusal(ME, { ...q, minUsdcPerTao: 300_000_000n });
+    expect(high).toBe("Right now no USDC delivery can be made. Receive TAO and claim it on Base.");
+  });
+
+  // ---- what of the account's is on its way, from the chains' events: the vault's history and Base's logs ----
+
+  /** Batch `id`'s close on Base at `block`: where batch id + 1 opened. */
+  const closedAt = (id: bigint, block: bigint) =>
+    event(V32.frontDoor, FRONT_DOOR_V32, "BatchClosed", { id }, enc("uint256, uint256, uint256, uint256, uint256, uint256", [0n, 0n, 1n, 0n, 0n, 0n]), block, HX(0x700 + Number(id)));
+  /** Batch `id` reached its close empty: its timer restarted under the same id. */
+  const rolledAt = (id: bigint, block: bigint, tx: number) => event(V32.frontDoor, FRONT_DOOR_V32, "BatchRolled", { id }, "0x", block, HX(tx));
+  const requestedAt = (batchId: bigint, user: `0x${string}`, shares: bigint, block: bigint, tx: number) =>
+    event(V32.frontDoor, FRONT_DOOR_V32, "RedeemRequested", { batchId, user }, enc("uint256", [shares]), block, HX(tx));
+  const cancelledAt = (batchId: bigint, user: `0x${string}`, shares: bigint, block: bigint, tx: number) =>
+    event(V32.frontDoor, FRONT_DOOR_V32, "RedeemCancelled", { batchId, user }, enc("uint256", [shares]), block, HX(tx));
+  /** The vault's key for batch 6. */
+  const K6 = HX(0x66);
+  /** The account's history as its scan reads it to Bittensor's head: batch 6 delivered, and what `fill` adds. */
+  const history =
+    (fill: (s: VaultScan) => void = () => undefined): LiveDeps["scan"] =>
+    async (_c, _d, s) => {
+      s.next = BIT_HEAD - 1n;
+      s.delivered.clear();
+      s.payouts.clear();
+      s.redeemed.length = 0;
+      s.adjustments.length = 0;
+      // batches 1 to 5 before it (ids are contiguous, and the scan holds every delivery)
+      for (let id = 1; id <= 5; id++) s.delivered.set(String(id), { key: HX(0x60 + id), txHash: HX(0x600 + id), block: bitAt(NOW_S - (10 - id) * 3_600) });
+      s.delivered.set("6", { key: K6, txHash: HX(0x606), block: bitAt(NOW_S - 4 * 3_600) });
+      fill(s);
+    };
+  const CLOSED = encodeEventTopics({ abi: FRONT_DOOR_V32, eventName: "BatchClosed" })[0];
+  /** The bridge message that carried batch `id` (the Base adapter's Sent in its close). */
+  const msgOf = (id: bigint) => HX(0x5100 + Number(id));
+  /** The chains, with Base's logs `logs` (each batch's close with its receipt: the Base adapter's Sent), and each window
+   * of Base's logs read. */
+  function withLogs(logs: ChainLog[], o: ChainOptions = {}) {
+    const closes = Object.fromEntries(
+      logs
+        .filter((l) => l.topics[0] === CLOSED)
+        .map((l) => {
+          const id = BigInt(l.topics[1]);
+          const sent = event(V32.baseAdapter, ADAPTER, "Sent", { messageId: msgOf(id), sender: V32.frontDoor, recipient: V32.vault }, enc("uint64, uint256, uint256, uint256", [964n, 0n, 0n, 0n]), l.blockNumber, l.transactionHash, 1);
+          return [l.transactionHash, receipt([l, sent], l.blockNumber)];
+        }),
+    );
+    const c = chains({ ...o, baseLogs: logs, baseReceipts: { ...closes, ...o.baseReceipts } });
+    const windows: string[] = [];
+    const request = c.baseLogs.request;
+    c.baseLogs.request = async (q: Parameters<typeof request>[0]) => {
+      if (q.method === "eth_getLogs") windows.push(`${BigInt(q.params![0].fromBlock)}-${BigInt(q.params![0].toBlock)}`);
+      return request(q);
+    };
+    return { c, windows };
+  }
+
+  describe("the account's payouts on their way, from requests made anywhere (Task 59a fix round 2, C1)", () => {
+    /** The account (2 × SHARES staked, no unstake recorded in this browser) as the chains show it: batch 7 has left
+     * Base, batch 8 is open, and `fill` adds to its history. */
+    function anywhere(o: { logs?: ChainLog[]; chain?: ChainOptions; fd?: Partial<FrontDoorState>; fill?: (s: VaultScan) => void; over?: Partial<LiveDeps> } = {}) {
+      const { c, windows } = withLogs(o.logs ?? [], o.chain);
+      const quoteDeliveries = flat();
+      const data = createLiveCascadeData(
+        V32,
+        deps({
+          clients: c as never,
+          now: () => NOW_S * 1000,
+          scanStore: createScanStore(memory(), V32),
+          readFrontDoor: async () => ({ ...fd32, ...o.fd }),
+          readVault: async () => ({ ...vault32, shares: 2n * SHARES }),
+          scan: history(o.fill),
+          ...reads({ quoteDeliveries: quoteDeliveries as never, openParks: undefined }),
+          ...o.over,
+        }),
+      );
+      return { data, windows, quoteDeliveries };
+    }
+    /** Batch 7 delivered, the vault taking the account's 0.04 TAO request (a request from another device). */
+    const took = (s: VaultScan) => {
+      s.delivered.set("7", { key: VKEY, txHash: HX(0x707), block: bitAt(NOW_S - 3 * 3_600) });
+      s.redeemed.push({ key: VKEY, txHash: HX(0x707), block: bitAt(NOW_S - 3 * 3_600), assets: TAO32, shares: SHARES });
+    };
+    /** Its payout's chunk sent from Bittensor `agoS` seconds ago. */
+    const chunk = (agoS: number) => (s: VaultScan) => void s.payouts.set(VKEY, [{ txHash: HX(0x708), block: bitAt(NOW_S - agoS), chunk: 0, taken: 1 }]);
+    /** What landed on Base of it: its TAO less its share of the bridge fee. */
+    const credited = TAO32 - 10n ** 14n;
+
+    it("counts a request made on another device while it crosses to Bittensor: Base's RedeemRequested for the account, less its cancels, in the batches after the last one delivered", async () => {
+      const { data, windows } = anywhere({
+        logs: [
+          // where batch 7 opened, then its requests and its close
+          closedAt(6n, BASE_HEAD - 6_000n),
+          requestedAt(7n, USER, SHARES, BASE_HEAD - 5_000n, 0x901),
+          requestedAt(7n, OTHER, 5n * SHARES, BASE_HEAD - 4_900n, 0x902),
+          cancelledAt(7n, USER, SHARES / 4n, BASE_HEAD - 4_800n, 0x903),
+          closedAt(7n, BASE_HEAD - 3_000n),
+          // in the open batch: the front door's redeemOf counts it
+          requestedAt(8n, USER, SHARES, BASE_HEAD - 100n, 0x904),
+        ],
+        fd: { redeemOf: SHARES },
+      });
+      const limit = await data.getDeliveryLimit(USER);
+      // batch 7's 0.03 TAO (0.04 asked, 0.01 taken back; another account's isn't this one's), and the open batch's 0.04 TAO
+      expect(limit.waitingTaoWei).toBe(3n * 10n ** 16n + 4n * 10n ** 16n);
+      expect(limit.waitingComplete).toBe(true);
+      // read back from Base's head only to where batch 7 opened, then batch 7's close from its block (its crossing: crossingOf)
+      expect(windows).toHaveLength(4);
+    });
+
+    it("goes back only to where the batch last opened empty: its last roll, or the close of the one before", async () => {
+      const { data, windows } = anywhere({
+        logs: [
+          closedAt(6n, BASE_HEAD - 200_000n),
+          rolledAt(7n, BASE_HEAD - 30_000n, 0x910),
+          rolledAt(7n, BASE_HEAD - 6_000n, 0x911),
+          requestedAt(7n, USER, SHARES, BASE_HEAD - 5_000n, 0x912),
+          closedAt(7n, BASE_HEAD - 3_000n),
+        ],
+      });
+      expect(await data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      expect(windows).toHaveLength(4);
+    });
+
+    it("counts a payout the vault took for a request made on another device, until Base shows it landed (claimable then counts it)", async () => {
+      // still in the vault (its payout delay): no read of Base needed
+      const inVault = anywhere({ fill: took });
+      expect(await inVault.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      expect(inVault.windows).toEqual([]);
+      // sent from Bittensor an hour ago, not landed yet
+      const sent = anywhere({ fill: (s) => (took(s), chunk(3_600)(s)) });
+      expect(await sent.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      // another account's credit from the same batch isn't this one's
+      const theirs = anywhere({ fill: (s) => (took(s), chunk(3_600)(s)), logs: [payoutReceived(VKEY, 0, OTHER, credited, BASE_HEAD - 1_000n, HX(0x709))] });
+      expect(await theirs.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      // landed: credited on Base, where claimable counts it
+      const back = anywhere({ fill: (s) => (took(s), chunk(3_600)(s)), logs: [payoutReceived(VKEY, 0, USER, credited, BASE_HEAD - 1_000n, HX(0x709))], fd: { claimable: credited } });
+      expect(await back.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: credited, waitingComplete: true });
+    });
+
+    it("counts none undone by a cancelled payout batch, nor one redeemed directly on Bittensor", async () => {
+      const { data } = anywhere({
+        fill: (s) => {
+          took(s);
+          s.adjustments.push({ key: VKEY, txHash: HX(0x70a), block: bitAt(NOW_S - 1_800), assets: TAO32, shares: SHARES, kind: "reversed" });
+          s.redeemed.push({ key: `0x${"0".repeat(64)}`, txHash: HX(0x70b), block: bitAt(NOW_S - 1_800), assets: TAO32, shares: SHARES, kind: "direct" });
+        },
+      });
+      expect(await data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 0n, waitingComplete: true });
+    });
+
+    it("counts them at the click too", async () => {
+      const { data, quoteDeliveries } = anywhere({ logs: [closedAt(6n, BASE_HEAD - 6_000n), requestedAt(7n, USER, SHARES, BASE_HEAD - 5_000n, 0x901)] });
+      const q = { shares: SHARES, taoWei: TAO32, bridgeFeeWei: 10n ** 14n, minUsdcPerTao: 0n } as never;
+      expect(await data.deliveryRefusal(USER, q)).toBeNull();
+      expect(quoteDeliveries.mock.calls.map(([, , s]) => s)).toEqual([[TAO32 - 10n ** 14n + TAO32]]);
+    });
+
+    it("isn't complete while the indexer's blocks aren't read by the browser itself, nor with a batch crossing before any delivery is known", async () => {
+      // the account's half of its history from the indexer, the browser's own read of it not done: a payout left out of
+      // it could be on its way
+      const seeded = anywhere({
+        fill: (s) => {
+          took(s);
+          s.accountSeededFrom = V32.bitBlock;
+          s.accountSeededTo = BIT_HEAD - 10_000n;
+        },
+      });
+      expect(await seeded.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: false });
+      // no batch delivered yet and one crossing: where it opened isn't known, so nothing is read for it
+      const first = anywhere({ fill: (s) => s.delivered.clear() });
+      expect((await first.data.getDeliveryLimit(USER)).waitingComplete).toBe(false);
+      expect(first.windows).toEqual([]);
+      // the first batch still open: nothing crosses
+      const fresh = anywhere({ fill: (s) => s.delivered.clear(), fd: { openBatchId: 1n } });
+      expect((await fresh.data.getDeliveryLimit(USER)).waitingComplete).toBe(true);
+    });
+
+    it("isn't complete while a search was cut short, and reads on from there at the next read", async () => {
+      // batch 7 opened further back than one read goes back
+      const far = BASE_HEAD - 2n - 2_000n * BigInt(CROSSING_WINDOWS) - 1_000n;
+      const crossing = anywhere({ logs: [closedAt(6n, far), requestedAt(7n, USER, SHARES, far + 10n, 0x920), closedAt(7n, BASE_HEAD - 3_000n)] });
+      expect((await crossing.data.getDeliveryLimit(USER)).waitingComplete).toBe(false);
+      expect(crossing.windows).toHaveLength(CROSSING_WINDOWS);
+      expect(await crossing.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      // one window more, on from where the first read stopped, and batch 7's close (its crossing)
+      expect(crossing.windows).toHaveLength(CROSSING_WINDOWS + 2);
+
+      // a payout sent from Bittensor 30 hours ago and landed a moment ago: 28 windows of Base's logs from its send
+      const slow = anywhere({ fill: (s) => (took(s), chunk(30 * 3_600)(s)), logs: [payoutReceived(VKEY, 0, USER, credited, BASE_HEAD - 100n, HX(0x709))], fd: { claimable: credited } });
+      const short = Math.ceil(28 / LANDING_WINDOWS) - 1;
+      for (let i = 0; i < short; i++) {
+        // counted while it isn't known landed, beside what is claimable: twice, never missed
+        expect(await slow.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32 + credited, waitingComplete: false });
+      }
+      expect(await slow.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: credited, waitingComplete: true });
+      expect(slow.windows).toHaveLength(28);
+    });
+
+    // ---- bounces, refunds and parks (fix round 2, follow-up): deliver sells them too, once credited on Base ----
+
+    /** Batch 7 delivered, the vault bouncing the account's 0.04 TAO deposit back to Base (a stake from another device). */
+    const bounced = (s: VaultScan) => {
+      s.delivered.set("7", { key: VKEY, txHash: HX(0x707), block: bitAt(NOW_S - 3 * 3_600) });
+      s.adjustments.push({ key: VKEY, txHash: HX(0x707), block: bitAt(NOW_S - 3 * 3_600), assets: TAO32, shares: 0n, kind: "bounced" });
+    };
+    const creditOf = (key: `0x${string}`, chunk: number, block: bigint, tx: number) => payoutReceived(key, chunk, USER, credited, block, HX(tx));
+
+    it("reads the account's bounces, and a bounce left with nothing (PayoutDust), into its scan on v3.2 alone", async () => {
+      const b = bitAt(NOW_S - 3_600);
+      const dust = event(V32.vault, VAULT_V32, "PayoutDust", { key: VKEY, user: USER }, enc("uint256", [TAO32]), b + 5n, HX(0x70c));
+      const theirs = event(V32.vault, VAULT_V32, "DepositBounced", { key: VKEY, user: OTHER }, enc("uint256, uint8", [TAO32, 1]), b, HX(0x70e), 3);
+      const c = chains({ bitLogs: [depositBounced(b, 1), theirs, dust] });
+      const s = newScan(V32);
+      s.next = b - 10n;
+      await scanVault(c as never, V32, s, USER);
+      expect(s.adjustments).toEqual([
+        { key: VKEY, txHash: EXEC_TX, block: b, assets: TAO32, shares: 0n, kind: "bounced" },
+        { key: VKEY, txHash: HX(0x70c), block: b + 5n, assets: TAO32, shares: 0n, kind: "dust" },
+      ]);
+      // v3-launch's scan is as it was
+      const launch = newScan(LAUNCH);
+      launch.next = b - 10n;
+      await scanVault(c as never, LAUNCH, launch, USER);
+      expect(launch.adjustments).toEqual([]);
+    });
+
+    it("counts a deposit the vault bounced, until Base shows it credited; nothing for one left with nothing", async () => {
+      // in the vault still, then sent from Bittensor
+      expect(await anywhere({ fill: bounced }).data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      expect(await anywhere({ fill: (s) => (bounced(s), chunk(3_600)(s)) }).data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      // credited: claimable counts it
+      const back = anywhere({ fill: (s) => (bounced(s), chunk(3_600)(s)), logs: [creditOf(VKEY, 0, BASE_HEAD - 1_000n, 0x709)], fd: { claimable: credited } });
+      expect(await back.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: credited, waitingComplete: true });
+      // left with nothing after its share of the bridge fee: it stays in the vault, nothing comes back
+      const dust = anywhere({
+        fill: (s) => {
+          bounced(s);
+          s.adjustments.push({ key: VKEY, txHash: HX(0x70c), block: bitAt(NOW_S - 1_800), assets: TAO32, shares: 0n, kind: "dust" });
+        },
+      });
+      expect(await dust.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 0n, waitingComplete: true });
+    });
+
+    it("waits for each of the account's entries in a batch to land: a bounce and a redeem are credited one each", async () => {
+      const both = (s: VaultScan) => (took(s), bounced(s), chunk(3_600)(s));
+      // one credited so far: both still counted (which one landed isn't told), beside what is claimable
+      const one = anywhere({ fill: both, logs: [creditOf(VKEY, 0, BASE_HEAD - 1_000n, 0x709)], fd: { claimable: credited } });
+      expect(await one.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: credited + 2n * TAO32, waitingComplete: true });
+      const two = anywhere({ fill: both, logs: [creditOf(VKEY, 0, BASE_HEAD - 1_000n, 0x709), creditOf(VKEY, 1, BASE_HEAD - 900n, 0x70d)], fd: { claimable: 2n * credited } });
+      expect(await two.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 2n * credited, waitingComplete: true });
+      // the redeem undone by a cancelled payout batch: its bounce still comes back
+      const undone = anywhere({
+        fill: (s) => {
+          both(s);
+          s.adjustments.push({ key: VKEY, txHash: HX(0x70a), block: bitAt(NOW_S - 1_800), assets: TAO32, shares: SHARES, kind: "reversed" });
+        },
+      });
+      expect(await undone.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+    });
+
+    /** Batch 7 left Base 16 days ago with the account's deposit of 0.04 TAO, and Bittensor's adapter parked it. */
+    function parkedDeposit(x: Crossed) {
+      return [closedAt(6n, x.depBlock - 600n), depositRequested(x.depBlock), ...x.base.baseLogs];
+    }
+
+    it("counts a deposit of the account's that a park refunded, until Base shows the refund credited", async () => {
+      const x = crossed(16 * DAY);
+      const run = parkedRun(x);
+      const refundedAt = x.parkS + 14 * DAY + 3_600;
+      const chain = { ...run, baseReceipts: x.base.baseReceipts, bitLogs: [...run.bitLogs, parkedRefunded(bitAt(refundedAt))] };
+      /** Read until every payout of the account's on its way is read (the search back reads 30 windows a read). */
+      const settled = async (a: ReturnType<typeof anywhere>) => {
+        for (let i = 0; i < 20; i++) {
+          const l = await a.data.getDeliveryLimit(USER);
+          if (l.waitingComplete) return l;
+        }
+        throw new Error("never complete");
+      };
+      expect(await settled(anywhere({ logs: parkedDeposit(x), chain }))).toMatchObject({ waitingTaoWei: TAO32 });
+      // credited on Base (the refund's chunk under the park's key): claimable counts it
+      const credit = payoutReceived(PARK_KEY, REFUND_CHUNK, USER, TAO32, baseAt(refundedAt + 1_200), HX(0x710));
+      expect(await settled(anywhere({ logs: [...parkedDeposit(x), credit], chain, fd: { claimable: TAO32 } }))).toMatchObject({ waitingTaoWei: TAO32 });
+      // credited between the front door's read and the refund's: what is claimable is read again after it, never missed
+      let reads = 0;
+      const between = anywhere({ logs: [...parkedDeposit(x), credit], chain, over: { readFrontDoor: async () => ({ ...fd32, claimable: reads++ === 0 ? 0n : TAO32 }) } });
+      for (let i = 0; i < 20 && !(await between.data.getDeliveryLimit(USER)).waitingComplete; i++) reads = 0;
+      reads = 0;
+      expect(await between.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+    });
+
+    it("gives no figure while a deposit of the account's is parked: its outcome is open (staked, or refunded to it)", async () => {
+      const x = crossed(3 * 3_600);
+      const run = parkedRun(x);
+      const parked = anywhere({ logs: parkedDeposit(x), chain: { ...run, baseReceipts: x.base.baseReceipts, parks: { [PARK_KEY]: [TAO32, BigInt(x.parkS), false] }, parkedTotals: [0n, TAO32] } });
+      expect(await parked.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 0n, waitingComplete: false });
+      // still on the bridge: on its way to be staked, nothing of it comes back
+      const bridge = anywhere({ logs: parkedDeposit(x), chain: { baseReceipts: x.base.baseReceipts } });
+      expect(await bridge.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 0n, waitingComplete: true });
+    });
+
+    it("gives no figure while a request of the account's is in a park, or its batch's run isn't told yet: paid out, or dropped", async () => {
+      const x = crossed(3 * 3_600);
+      const asked = [closedAt(6n, x.depBlock - 600n), redeemRequested(x.depBlock), ...x.base.baseLogs];
+      // a park of requests alone owes nothing (no parked totals): its own crossing tells it parked
+      const empty = parkedRun(x, 0n);
+      const parked = anywhere({ logs: asked, chain: { ...empty, baseReceipts: x.base.baseReceipts, parks: { [PARK_KEY]: [0n, BigInt(x.parkS), true] } } });
+      expect(await parked.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: false });
+      // run on Bittensor, and neither the vault's delivery nor a park read yet
+      const unread = anywhere({ logs: asked, chain: { baseReceipts: x.base.baseReceipts, executed: { [MSG]: 2 } } });
+      expect(await unread.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: false });
+    });
+
+    it("gives no figure while any park holds deposits: whose isn't read, so any may be the account's", async () => {
+      // batch 7 crossing, none of it the account's
+      const logs = [closedAt(6n, BASE_HEAD - 6_000n), closedAt(7n, BASE_HEAD - 3_000n)];
+      const open = anywhere({ logs, chain: { parkedTotals: [TAO32, 0n] } });
+      expect((await open.data.getDeliveryLimit(USER)).waitingComplete).toBe(false);
+      // nothing parked: nothing open
+      expect(await anywhere({ logs }).data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 0n, waitingComplete: true });
+    });
+
+    // ---- a batch below the newest delivered one that the vault never delivered (re-review 2): open until it settles ----
+
+    /** Batch 7 closed 16 days ago (the fixture's close, carried by MSG) and its run on Bittensor followed 25 minutes
+     * later; batch 8 reached the vault `afterS` seconds after that run (10 minutes by default: 7 closed about 35 minutes
+     * before), so 7 is below the newest delivery (9 is open). 0.01 TAO waits on Base. */
+    function gapOf(x: Crossed, chain: ChainOptions, fill: (s: VaultScan) => void = () => undefined, afterS = 600, over: Partial<LiveDeps> = {}) {
+      return anywhere({
+        logs: x.base.baseLogs,
+        chain: { baseReceipts: x.base.baseReceipts, ...chain },
+        fd: { openBatchId: 9n, claimable: 10n ** 16n },
+        fill: (s) => {
+          s.delivered.set("8", { key: HX(0x88), txHash: HX(0x808), block: bitAt(x.parkS + afterS) });
+          fill(s);
+        },
+        over,
+      });
+    }
+    /** What the form says before the USDC button with this limit read. */
+    const lineOf = (l: DeliveryLimit) =>
+      unstakeActions({ v32: true, account: USER, shares: null, quote: undefined, limit: { data: l, isError: false }, pending: false, lowEth: false, hold: null, blocked: null }).warning;
+    const FIGURE = "This also sells the 0.0100 TAO of yours on its way back to Base or waiting there.";
+
+    it("gives the generic line while a batch below the newest delivered one has a run that failed on Bittensor, until it is delivered", async () => {
+      const x = crossed(16 * DAY);
+      // FAILED (state 3): re-executable, nothing moved, nothing parked
+      const failed = await gapOf(x, { executed: { [MSG]: 3 } }).data.getDeliveryLimit(USER);
+      expect(failed.waitingComplete).toBe(false);
+      expect(lineOf(failed)).toBe(WAITING_UNKNOWN);
+      // run again and delivered: no batch is missing below the newest
+      const delivered = gapOf(x, { executed: { [MSG]: 2 } }, (s) => void s.delivered.set("7", { key: VKEY, txHash: EXEC_TX, block: x.execBlock }));
+      expect(lineOf(await delivered.data.getDeliveryLimit(USER))).toBe(FIGURE);
+    });
+
+    it("gives the generic line while a park of unstake requests alone sits below the newest delivered batch, until it is dropped", async () => {
+      const x = crossed(16 * DAY);
+      const empty = parkedRun(x, 0n);
+      // it owes nothing (no parked totals), and its requests come back as TAO if it is delivered
+      const parked = await gapOf(x, { ...empty, parks: { [PARK_KEY]: [0n, BigInt(x.parkS), true] } }).data.getDeliveryLimit(USER);
+      expect(parked.waitingComplete).toBe(false);
+      expect(lineOf(parked)).toBe(WAITING_UNKNOWN);
+      const dropped = gapOf(x, { ...empty, bitLogs: [...empty.bitLogs, parkedDropped(bitAt(x.parkS + 14 * DAY + 3_600))] });
+      expect(lineOf(await dropped.data.getDeliveryLimit(USER))).toBe(FIGURE);
+    });
+
+    it("keeps one open while its close isn't found yet, reading back on from there at the next read", async () => {
+      const x = crossed(16 * DAY);
+      const empty = parkedRun(x, 0n);
+      // batch 8 reached the vault 15 days after 7's run: 7's close lies further back than one read goes
+      const far = gapOf(x, { ...empty, bitLogs: [...empty.bitLogs, parkedDropped(bitAt(x.parkS + 14 * DAY + 3_600))] }, undefined, 15 * DAY);
+      let l = await far.data.getDeliveryLimit(USER);
+      expect(lineOf(l)).toBe(WAITING_UNKNOWN);
+      // about 325 windows of Base back: GAP_WINDOWS a read, open until the close is found and its crossing read dropped
+      let reads = 1;
+      while (!l.waitingComplete && reads < 20) {
+        l = await far.data.getDeliveryLimit(USER);
+        reads++;
+      }
+      expect(reads).toBe(Math.ceil(325 / GAP_WINDOWS));
+      expect(lineOf(l)).toBe(FIGURE);
+    });
+
+    it("gives the generic line while a refund sent before the lookback is stuck on its way to Base, until its message runs there", async () => {
+      const x = crossed(16 * DAY);
+      const run = parkedRun(x);
+      // refunded two days ago, far past REFUND_LOOKBACK; its message (H(0x52)) failed on Base
+      const refunded = { ...run, bitLogs: [...run.bitLogs, parkedRefunded(bitAt(x.parkS + 14 * DAY + 3_600))] };
+      const stuck = await gapOf(x, { ...refunded, baseExecuted: { [HX(0x52)]: 3 } }).data.getDeliveryLimit(USER);
+      expect(stuck.waitingComplete).toBe(false);
+      expect(lineOf(stuck)).toBe(WAITING_UNKNOWN);
+      // run on Base: every depositor's credit is claimable there
+      const ran = gapOf(x, { ...refunded, baseExecuted: { [HX(0x52)]: 2 } });
+      expect(lineOf(await ran.data.getDeliveryLimit(USER))).toBe(FIGURE);
+    });
+
+    it("reads what is claimable after the refunds' checks: a refund run on Base between them is in the figure (re-review 3)", async () => {
+      const x = crossed(16 * DAY);
+      const run = parkedRun(x);
+      const executed: Record<string, number> = { [HX(0x52)]: 3 };
+      // the refund's message runs on Base, crediting the account's 0.04 TAO, just after the front door is first read
+      let credited = false;
+      const readFrontDoor: LiveDeps["readFrontDoor"] = async () => {
+        const now = { ...fd32, openBatchId: 9n, claimable: credited ? TAO32 : 0n };
+        credited = true;
+        executed[HX(0x52)] = 2;
+        return now;
+      };
+      const between = gapOf(x, { ...run, bitLogs: [...run.bitLogs, parkedRefunded(bitAt(x.parkS + 14 * DAY + 3_600))], baseExecuted: executed }, undefined, 600, { readFrontDoor });
+      const l = await between.data.getDeliveryLimit(USER);
+      // settled by the check, and its credit read after it: in the figure, never missed
+      expect(l).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
+      expect(lineOf(l)).toBe("This also sells the 0.0400 TAO of yours on its way back to Base or waiting there.");
+    });
+
+    it("gives no figure while a refund is on its way to Base that can't be told whose, until its message has run on Base", async () => {
+      const delivered = (s: VaultScan) => void s.delivered.set("7", { key: VKEY, txHash: HX(0x707), block: bitAt(NOW_S - 3 * 3_600) });
+      const refund = event(V32.bitAdapter, BIT_ADAPTER_V32, "ParkedRefunded", { key: HX(0x9b), messageId: HX(0x53) }, "0x", BIT_HEAD - 100n, HX(0x10b));
+      const flying = anywhere({ fill: delivered, chain: { bitLogs: [refund] } });
+      expect((await flying.data.getDeliveryLimit(USER)).waitingComplete).toBe(false);
+      // credited on Base (its message ran there): claimable counts whatever was the account's
+      const landed = anywhere({ fill: delivered, chain: { bitLogs: [refund], baseExecuted: { [HX(0x53)]: 2 } } });
+      expect(await landed.data.getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 0n, waitingComplete: true });
+    });
+
+    it("rejects when Base's logs or the vault's history can't be read: a USDC unstake is then refused as unreadable", async () => {
+      const down = async () => Promise.reject(new Error("rpc down"));
+      const q = { shares: SHARES, taoWei: TAO32, bridgeFeeWei: 10n ** 14n, minUsdcPerTao: 0n } as never;
+      const logsDown = (o: ChainOptions = {}) => ({ clients: { ...chains(o), baseLogs: { request: down } } as never });
+      // a request crossing, or a payout's landing
+      for (const a of [anywhere({ over: logsDown() }), anywhere({ fill: (s) => (took(s), chunk(3_600)(s)), over: logsDown() })]) {
+        await expect(a.data.getDeliveryLimit(USER)).rejects.toThrow("rpc down");
+        await expect(a.data.deliveryRefusal(USER, q)).rejects.toThrow("rpc down");
+      }
+      const scanDown = anywhere({ over: { scan: down } });
+      await expect(scanDown.data.getDeliveryLimit(USER)).rejects.toThrow("rpc down");
+      await expect(scanDown.data.deliveryRefusal(USER, q)).rejects.toThrow("rpc down");
+    });
+  });
+
+  describe("a Receive TAO payout, then a USDC request (C1)", () => {
+    const nowMs = NOW_S * 1000;
+    /** The account (2 × SHARES staked) with this browser's Receive TAO request of SHARES (0.04 TAO) in batch 7, which has
+     * left Base: on chain, batch 6's close (where batch 7 opened), the request, and batch 7's close. */
+    function account(over: Partial<LiveDeps> = {}) {
+      const x = crossed(3 * 3_600);
+      const c = chains({ ...x.base, baseLogs: [closedAt(6n, x.depBlock - 600n), redeemRequested(x.depBlock), ...x.base.baseLogs] });
+      const d = deps({
+        clients: c as never,
+        now: () => nowMs,
+        scanStore: createScanStore(memory(), V32),
+        readFrontDoor: async () => ({ ...fd32, redeemOf: 0n }),
+        readVault: async () => ({ ...vault32, shares: 2n * SHARES }),
+        scan: history(),
+        ...reads(),
+        ...over,
+      });
+      d.opLog.put({ ...x.requestOp, batchId: BATCH, usdcEstimate: 0n, keepTao: true });
+      return createLiveCascadeData(V32, d);
+    }
+
+    it("counts the payout on its way in what a USDC unstake would also sell, from the chain's events as anyone's", async () => {
+      // the request's 0.04 TAO, on its way back from batch 7
+      expect(await account().getDeliveryLimit(USER)).toMatchObject({ waitingTaoWei: 4n * 10n ** 16n, waitingComplete: true });
+    });
+
+    it("with it in the open batch, or credited on Base, the front door's figures count it", async () => {
+      // 0.02 TAO asked in the open batch (the vault prices a share at 1e-6 wei: 2e22 shares), 0.01 TAO on Base
+      const both = account({ readFrontDoor: async () => ({ ...fd32, redeemOf: 2n * 10n ** 22n, claimable: 10n ** 16n }) });
+      expect((await both.getDeliveryLimit(USER)).waitingTaoWei).toBe(4n * 10n ** 16n + 2n * 10n ** 16n + 10n ** 16n);
+    });
+
+    it("rejects when the vault can't be read: a USDC unstake waits (unreadable), receiving TAO is a flow of its own", async () => {
+      const unread = account({ readVault: async () => Promise.reject(new Error("archive down")) });
+      await expect(unread.getDeliveryLimit(USER)).rejects.toThrow();
+    });
+  });
+});
+
+describe("v3.2: an impact that can't be measured is carried, never left out (M11)", () => {
+  it("a probe that reads nothing gives the quote an impact the cap refuses", async () => {
+    const quoteBuy: LiveDeps["quoteBuy"] = async (_c, usdc) => (usdc === STAKE_PROBE_USDC ? 0n : (usdc * 10n ** 12n) / 252n);
+    const q = await createLiveCascadeData(V32, deps({ quoteBuy })).quoteDeposit(1_000_000_000n);
+    expect(q.impact).toMatchObject({ probeIn: STAKE_PROBE_USDC, probeOut: 0n });
+    const quoteSell: LiveDeps["quoteSell"] = async (_c, tao) => (tao === SALE_PROBE_TAO ? 0n : (tao * 250n) / 10n ** 12n);
+    const w = await createLiveCascadeData(V32, deps({ quoteSell })).quoteWithdrawal(ME, 4n * 10n ** 22n);
+    expect(w.impact).toMatchObject({ probeIn: SALE_PROBE_TAO, probeOut: 0n });
+  });
+});
+
+describe("v3.2: the position while TAO's price can't be read (M6)", () => {
+  it("is still there, its dollars missing, so Unstake (and Receive TAO) can open in TAO", async () => {
+    const p = await createLiveCascadeData(V32, deps({ taoPriceUsd: async () => Promise.reject(new Error("quoter reverted")) })).getPosition(ME);
+    expect(p).toMatchObject({ shares: vault.shares, taoWei: 8n * 10n ** 16n, taoPriceUsd: 0, usdValue: 0, priceMissing: true });
+    expect((await createLiveCascadeData(V32, deps()).getPosition(ME)).priceMissing).toBeUndefined();
+  });
+
+  it("v3-launch's fails as before", async () => {
+    const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
+    await expect(createLiveCascadeData(D3, deps({ taoPriceUsd: async () => Promise.reject(new Error("quoter reverted")) })).getPosition(ME)).rejects.toThrow("quoter reverted");
   });
 });

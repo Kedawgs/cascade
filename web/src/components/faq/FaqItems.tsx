@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import type { FaqItem } from "@/lib/faq";
 import { faqHashTarget } from "@/lib/faq-hash";
 import { parseInlineLinks } from "@/lib/inline-links";
+import { AddToWallet } from "../AddToWallet";
 import styles from "./Faq.module.css";
 
 function Inline({ text }: { text: string }) {
@@ -67,6 +68,12 @@ export function FaqItems({ items, compact = false }: { items: readonly FaqItem[]
                 <Inline text={para} />
               </p>
             ))}
+            {/* "See your TAO in your wallet": its button under the answer (Task 59b) */}
+            {item.action === "add-fm-tao" && (
+              <div className={styles.action}>
+                <AddToWallet />
+              </div>
+            )}
           </div>
         </details>
       ))}

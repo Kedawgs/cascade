@@ -257,7 +257,7 @@ describe("prefetch", () => {
     expect(c.stats.rowsRead).toBeLessThan(500);
   });
 
-  it("loads the open batch's deposit transactions (the staker's Staked names the real payer), and adapters' Delivered by message id", async () => {
+  it("loads the open batch's deposit transactions (the staker's Staked names the real payer) and its cancels whatever their age (R8: batch.cancel_churn), and adapters' Delivered by message id", async () => {
     const STAKER = "0x51d233584210133de458dc45c0bca0698d31396d" as Hex;
     const depositTx = h("deposit via the staker");
     const message = h("message 9");
@@ -265,6 +265,10 @@ describe("prefetch", () => {
       upsertLogs(db, [
         slog({ contract: "staker", event: "Staked", chain: "base", address: STAKER, block: 20_200n, logIndex: 0, txHash: depositTx }),
         fd("DepositRequested", 20_200n, 1, { txHash: depositTx, topic1: word(44n) }),
+        // the open batch's cancels, long before the readings' range (20,090 on): loaded; another batch's are not
+        fd("DepositCancelled", 20_010n, 0, { topic1: word(44n) }),
+        fd("DepositCancelled", 20_011n, 0, { topic1: word(44n) }),
+        fd("DepositCancelled", 20_012n, 0, { topic1: word(45n) }),
         slog({ contract: "baseAdapter", event: "Delivered", chain: "base", block: 20_300n, logIndex: 0, topic1: message }),
         slog({ contract: "bitAdapter", event: "Delivered", chain: "bittensor", block: 3_100n, logIndex: 0, topic1: h("another message") }),
       ]),
@@ -274,6 +278,10 @@ describe("prefetch", () => {
     expect(c.stats.queries).toBe(1);
     const q = logQuery(p.logs);
     expect(q.inTx("base", depositTx).map((l) => `${l.contract}:${l.event}`)).toEqual(["staker:Staked", "frontDoor:DepositRequested"]);
+    expect(q.range("base", "frontDoor", "DepositCancelled").map((l) => [l.block, l.topic1])).toEqual([
+      [20_010n, word(44n)],
+      [20_011n, word(44n)],
+    ]);
     expect(q.range("base", "baseAdapter", "Delivered").map((l) => l.topic1)).toEqual([message]);
     expect(q.range("bittensor", "bitAdapter", "Delivered")).toEqual([]);
   });
@@ -296,5 +304,112 @@ describe("prefetch", () => {
     const s = await loadTickState(db, 1);
     expect(s.openChecks.batches.map((r) => r.deliveredTx)).toEqual([deliveryTx]);
     expect(s.openChecks.chunks.map((r) => r.landedTx)).toEqual([h("landing tx")]);
+  });
+});
+
+// ---- v3.2 (Task 56): what the park rules and the refund cross-check need from D1 ----
+
+describe("prefetch: v3.2's parks", () => {
+  const AD = "0x51d233584210133de458dc45c0bca0698d31396d" as Hex;
+  const park = (event: string, key: Hex, block: bigint, o: Partial<StoredLog> = {}) =>
+    slog({ contract: "bitAdapter", event, chain: "bittensor", address: AD, block, logIndex: 0, topic1: key, txHash: h(`${event} ${key} ${block}`), ...o });
+  const steady: PrefetchNeeds = { since: { base: 20_090n, bittensor: 3_990n }, batchIds: [], bitTxs: [], baseTxs: [], payoutKeys: [], txHashes: [], blocks: [], requestsSince: 20_090n };
+  const OPEN = h("open");
+  const CLOSED = h("closed");
+  const AGAIN = h("parked again");
+  const DELIVERED = h("delivered in a checked delivery");
+  const REFUNDED = h("refunded");
+  const M5 = h("the refunded park's message");
+  const deliveryTx = h("a deliverParked tx");
+  const refundTx = h("a refund tx");
+  const closeTx = h("the parked batch's close");
+
+  beforeEach(async () => {
+    await wipe(db);
+    await db.batch([
+      ...upsertLogs(db, [
+        park("BatchParked", OPEN, 2000n),
+        park("BatchParked", CLOSED, 2100n),
+        park("ParkedDelivered", CLOSED, 2200n),
+        park("BatchParked", AGAIN, 2300n),
+        park("ParkedDropped", AGAIN, 2400n),
+        park("BatchParked", AGAIN, 2500n),
+        park("ParkedConverted", AGAIN, 2550n),
+        park("BatchParked", DELIVERED, 2600n),
+        park("ParkedDelivered", DELIVERED, 3000n, { txHash: deliveryTx, logIndex: 5 }),
+        park("BatchParked", REFUNDED, 2700n, { topic2: M5 }),
+        slog({ contract: "bitAdapter", event: "Sent", chain: "bittensor", address: AD, block: 2800n, logIndex: 0, txHash: refundTx }),
+        park("ParkedRefunded", REFUNDED, 2800n, { txHash: refundTx, logIndex: 1 }),
+        // the refunded park's batch on Base: its requests, then the close (the adapter's Sent of its message, BatchClosed)
+        slog({ contract: "frontDoor", event: "DepositRequested", chain: "base", block: 19_000n, logIndex: 0, topic1: word(47n) }),
+        slog({ contract: "baseAdapter", event: "Sent", chain: "base", block: 19_010n, logIndex: 0, txHash: closeTx, topic1: M5 }),
+        slog({ contract: "frontDoor", event: "BatchClosed", chain: "base", block: 19_010n, logIndex: 1, txHash: closeTx, topic1: word(47n) }),
+      ]),
+      ...upsertBlocks(db, [
+        { chain: "bittensor", number: 2000n, time: 1_799_000_000 },
+        { chain: "bittensor", number: 2100n, time: 1_799_000_100 },
+      ]),
+    ]);
+  });
+
+  it("loads every open park's events, with its block's time; a park that ended isn't loaded unless asked", async () => {
+    const c = countingDb(db);
+    const p = await prefetch(c.db, steady);
+    expect(c.stats.queries).toBe(1);
+    const q = logQuery(p.logs);
+    const loaded = q.range("bittensor", "bitAdapter", ["BatchParked", "ParkedConverted", "ParkedDelivered", "ParkedRefunded", "ParkedDropped"]).map((l) => [l.topic1, l.event, l.block]);
+    expect(loaded).toEqual([
+      [OPEN, "BatchParked", 2000n],
+      [AGAIN, "BatchParked", 2300n],
+      [AGAIN, "ParkedDropped", 2400n],
+      [AGAIN, "BatchParked", 2500n],
+      [AGAIN, "ParkedConverted", 2550n],
+    ]);
+    expect(p.blockTimes.get("bittensor:2000")).toBe(1_799_000_000);
+    expect(p.blockTimes.has("bittensor:2100")).toBe(false);
+  });
+
+  it("loads the parks of this tick's park events and of the deliveries it checks (their ParkedDelivered), ended or not", async () => {
+    const p = await prefetch(db, { ...steady, parkKeys: [CLOSED], bitTxs: [deliveryTx] });
+    const keys = new Set(logQuery(p.logs).range("bittensor", "bitAdapter", "BatchParked").map((l) => l.topic1));
+    expect(keys).toEqual(new Set([OPEN, AGAIN, CLOSED, DELIVERED]));
+  });
+
+  it("for a refund landing's key: the park, the refund's transaction, and the parked batch's close and requests on Base", async () => {
+    const p = await prefetch(db, { ...steady, payoutKeys: [REFUNDED] });
+    const q = logQuery(p.logs);
+    expect(q.range("bittensor", "bitAdapter", "BatchParked").map((l) => l.topic1)).toContain(REFUNDED);
+    expect(q.inTx("bittensor", refundTx).map((l) => l.event)).toEqual(["Sent", "ParkedRefunded"]);
+    expect(q.inTx("base", closeTx).map((l) => l.event)).toEqual(["Sent", "BatchClosed"]);
+    expect(q.range("base", "frontDoor", "DepositRequested").filter((l) => l.topic1 === word(47n))).toHaveLength(1);
+  });
+
+  it("loads the Deposited and DepositedDirect of the holders asked (this tick's unstakes'), from the block asked on (unstakes.wash)", async () => {
+    const A = "0x00000000000000000000000000000000000000a1" as Hex;
+    const B = "0x00000000000000000000000000000000000000b2" as Hex;
+    const topic = (a: Hex) => `0x${a.slice(2).padStart(64, "0")}` as Hex;
+    await db.batch(
+      upsertLogs(db, [
+        slog({ contract: "vault", event: "Deposited", block: 1200n, logIndex: 0, topic1: h("k1"), topic2: topic(A) }),
+        slog({ contract: "vault", event: "Deposited", block: 900n, logIndex: 0, topic1: h("k0"), topic2: topic(A) }),
+        slog({ contract: "vault", event: "Deposited", block: 1300n, logIndex: 0, topic1: h("k2"), topic2: topic(B) }),
+        slog({ contract: "vault", event: "DepositedDirect", block: 1250n, logIndex: 0, topic1: topic(A) }),
+        slog({ contract: "vault", event: "DepositedDirect", block: 1260n, logIndex: 0, topic1: topic(B) }),
+      ]),
+    );
+    const p = await prefetch(db, { ...steady, washUsers: [A], washSince: 1000n });
+    expect(logQuery(p.logs).range("bittensor", "vault", ["Deposited", "DepositedDirect"]).map((l) => [l.event, l.block])).toEqual([
+      ["Deposited", 1200n],
+      ["DepositedDirect", 1250n],
+    ]);
+    // none asked: none loaded
+    expect(logQuery((await prefetch(db, steady)).logs).range("bittensor", "vault", ["Deposited", "DepositedDirect"])).toEqual([]);
+  });
+
+  it("loads the vault's events of the payout batches still queued (the entries a chunk hasn't sent)", async () => {
+    const Q = h("a queued payout key");
+    await db.batch(upsertLogs(db, [slog({ contract: "vault", event: "PayoutBatchQueued", block: 1500n, logIndex: 0, topic1: Q }), slog({ contract: "vault", event: "Redeemed", block: 1500n, logIndex: 1, topic1: Q })]));
+    const p = await prefetch(db, { ...steady, queuedKeys: [Q] });
+    expect(logQuery(p.logs).range("bittensor", "vault", ["PayoutBatchQueued", "Redeemed"]).map((l) => l.event)).toEqual(["PayoutBatchQueued", "Redeemed"]);
   });
 });

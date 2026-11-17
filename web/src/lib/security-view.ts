@@ -8,7 +8,7 @@ import { formatDateTime, formatDuration, formatPercent, formatRelative, formatTa
 // The wording never claims safety; it says "checked", "passing", "monitored".
 
 export type Tone = "ok" | "amber" | "stale";
-export type StepId = "wallet" | "swap" | "backing" | "bridge" | "vault" | "validator" | "vaultOut" | "bridgeBack" | "swapOut" | "walletOut";
+export type StepId = "wallet" | "swap" | "backing" | "bridge" | "vault" | "validator" | "request" | "vaultOut" | "bridgeBack" | "swapOut" | "walletOut";
 export interface StepView {
   id: StepId;
   name: string;
@@ -93,15 +93,25 @@ function costText(shortfall: number | null): string {
 const SAY = {
   wallet: "You start with USDC in your own wallet. Cascade never holds your keys.",
   swap: "Your USDC is swapped for TAO on Base, on Uniswap. The pools' depth sets what a swap costs.",
-  backing: "The TAO you get on Base is ForeverMoney's bridged TAO, backed by real TAO on Bittensor.",
-  bridge: "Cascade groups deposits into batches and sends them to Bittensor over Chainlink. The bridge has a limit that refills over time.",
-  vault: "Your TAO is staked by the vault, and you hold vault shares that grow as rewards come in.",
+  backing: "The TAO you get on Base is ForeverMoney's bridged TAO. It is meant to be backed one for one by TAO on Bittensor; the figure here is the live check.",
+  bridge:
+    "Cascade groups deposits into batches and sends them to Bittensor over Chainlink. The bridge has a limit that refills over time. If a batch can't be delivered on arrival it waits on Bittensor and is sent back to Base after 14 days.",
+  vault: "Your TAO is staked by the vault, and you hold vault shares. Each share is worth more TAO as rewards come in. New shares can be unstaked through Base after about a day.",
   validator: "The validator the vault stakes with. It earns the staking rewards and keeps a cut.",
-  vaultOut: "When you withdraw, the vault unstakes your TAO and queues it to be sent back.",
+  request: "You ask on Base and pay a small ETH fee. Requests travel to Bittensor together in the next batch.",
+  // v3-launch's document carries no payout delay: the launch's, typed (a v3.2 document's is live: vaultOutSay)
+  vaultOut: "The vault takes your shares and queues your TAO. It waits 24 hours, then is unstaked and sent back. A daily limit applies, and shares from a deposit under a day old wait.",
   bridgeBack: "Unstaked TAO crosses back to Base over Chainlink. The bridge has a limit that refills over time.",
-  swapOut: "The TAO is swapped back to USDC on Base, on Uniswap.",
-  walletOut: "USDC lands back in your wallet.",
+  swapOut: "The TAO is swapped back to USDC on Base, on Uniswap. Only at your minimum price or better; otherwise it waits for you to claim.",
+  walletOut: "USDC lands back in your wallet, or TAO if you claim it yourself.",
 } as const;
+
+/** The money-out Vault step's words with the vault's live payout delay (S9, a v3.2 document's), or no time at all while
+ * it is unread. */
+function vaultOutSay(delayS: number | null | undefined): string {
+  const wait = typeof delayS === "number" && Number.isFinite(delayS) && delayS >= 0 ? formatDuration(delayS * 1000) : "a set time";
+  return `The vault takes your shares and queues your TAO. It waits ${wait}, then is unstaked and sent back. A daily limit applies, and shares from a deposit under a day old wait.`;
+}
 
 export const AMBER = {
   // by the layer that is short, in the Backing step's own words: TAO held against bridged TAO issued (ForeverMoney's
@@ -113,8 +123,8 @@ export const AMBER = {
     short: "Backing is below 100% right now.",
   },
   bridge: "The bridge has no room left, or its lane is closed, so new deposits wait longer to cross. Your existing stake isn't affected.",
-  frontDoor: "The front door is paused, so new deposits and withdrawals can't be requested until it resumes. Your existing stake isn't affected.",
-  vault: "The vault is paused, so staking and payouts wait until it resumes.",
+  frontDoor: "The front door is paused, so new deposits and automatic USDC payouts wait until it resumes. You can still ask to unstake, cancel, and claim TAO that's already back. Your existing stake isn't affected.",
+  vault: "The vault is paused, so deposits on their way, payouts and direct withdrawals wait until it resumes. Nobody's funds move.",
   bridgeBack: "The bridge back has no room left, or its lane is closed, so payouts wait longer to reach Base.",
 } as const;
 
@@ -232,6 +242,13 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
 
   const bridgeAmber = bothOk && (frontDoorPaused || bin.noRoom);
   const bridgeBackAmber = bothOk && bout.noRoom;
+  // a v3.2 document (the monitor's exits part): its front door's pause stops deposits and the automatic USDC sale only,
+  // so payouts still land (the copy audit's flagged behaviour) and the amber is the sale's; v3-launch's stays as it was
+  const ex = flow?.exits;
+  const v32 = ex !== undefined && ex !== null;
+  const delayS = ex?.payoutDelayS;
+  const parkedWei = big(ex?.parked);
+  const refundFrom = ex?.parkedRefundFrom;
 
   const link = (label: string, href: string | undefined) => (href ? { label, href } : null);
 
@@ -260,7 +277,15 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
     },
     {
       id: "bridge", name: "Bridge", chain: "Base to Bittensor", headline: bin.headline, say: SAY.bridge,
-      figures: [...bin.figures, { label: "Next batch sends", value: inText(flow?.batch?.nextSendAt, baseOk, "No batch waiting") }],
+      figures: [
+        ...bin.figures,
+        { label: "Next batch sends", value: inText(flow?.batch?.nextSendAt, baseOk, "No batch waiting") },
+        // v3.2 (N2): the front door's deposits parked on Bittensor, and when the oldest is sent back to Base
+        ...(v32 ? [{ label: "Waiting to be delivered", value: !bitOk || parkedWei === null ? DASH : parkedWei === 0n ? "None" : taoText(units(ex?.parked, 18)) }] : []),
+        ...(v32 && bitOk && parkedWei !== null && parkedWei > 0n && typeof refundFrom === "number" && Number.isFinite(refundFrom)
+          ? [{ label: "Sent back to Base from", value: formatDateTime(new Date(refundFrom * 1000)) }]
+          : []),
+      ],
       link: link("The lane on Chainlink's explorer", a && explorer.ccipLane(a.baseTokenPool)),
       tone: toneOf(bothOk, bridgeAmber),
     },
@@ -290,11 +315,26 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   ];
 
   const stepsOut: StepView[] = [
+    // an unstake starts on Base: the request and its ETH fee join the open batch, which crosses before the vault acts
     {
-      id: "vaultOut", name: "Vault", chain: "Bittensor", headline: bit(v?.pendingPayouts), say: SAY.vaultOut,
+      id: "request", name: "Your request", chain: "Base", headline: "You ask to unstake", say: SAY.request,
+      figures: [{ label: "Next batch sends", value: inText(flow?.batch?.nextSendAt, baseOk, "No batch waiting") }],
+      link: link("The front door on Basescan", a && explorer.baseAddress(a.frontDoor)),
+      tone: toneOf(baseOk, false),
+    },
+    {
+      id: "vaultOut", name: "Vault", chain: "Bittensor", headline: bit(v?.pendingPayouts), say: v32 ? vaultOutSay(bitOk ? delayS : null) : SAY.vaultOut,
       figures: [
         { label: "Waiting to send back", value: bit(v?.pendingPayouts) },
         { label: "Next payout batch", value: inText(v?.nextPayoutAt, bitOk, "None queued") },
+        // v3.2 (N5): today's limit and about what it has used (a guide: the vault works it out at each batch), and the wait
+        ...(v32
+          ? [
+              { label: "Daily unstake limit", value: bit(ex?.dailyLimit) },
+              { label: "Used today", value: bitOk && big(ex?.usedToday) !== null ? `about ${taoText(units(ex?.usedToday, 18))}` : DASH },
+              { label: "Wait before payout", value: bitOk && typeof delayS === "number" && Number.isFinite(delayS) ? formatDuration(delayS * 1000) : DASH },
+            ]
+          : []),
       ],
       link: link("The vault on the Bittensor explorer", a && explorer.bittensorAddress(a.vault)),
       tone: toneOf(bitOk, vaultPaused),
@@ -303,13 +343,13 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
       id: "bridgeBack", name: "Bridge back", chain: "Bittensor to Base", headline: bout.headline, say: SAY.bridgeBack,
       figures: bout.figures,
       link: link("The lane on Chainlink's explorer", a && explorer.ccipLane(a.baseTokenPool)),
-      tone: toneOf(bothOk, bridgeBackAmber || frontDoorPaused),
+      tone: toneOf(bothOk, bridgeBackAmber || (!v32 && frontDoorPaused)),
     },
     {
       id: "swapOut", name: "Swap to USDC", chain: "Base", headline: depthHeadline, say: SAY.swapOut,
       figures: [...poolFigures, { label: "A $1,000 payout costs", value: costText(sellCost) }],
       link: link("WETH / USDC pool on Basescan", a && explorer.baseAddress(a.wethUsdcPool)),
-      tone: toneOf(baseOk, false),
+      tone: toneOf(baseOk, v32 && frontDoorPaused),
     },
     { id: "walletOut", name: "Your wallet", chain: "Base", headline: "USDC arrives", say: SAY.walletOut, figures: [], link: null, tone: "ok" },
   ];
@@ -318,7 +358,9 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   // So does one whose amber condition is unread (a pause). The wallet steps are words, not readings: they never count.
   const unread: Partial<Record<StepId, boolean>> = {
     bridge: frontDoorPauseUnknown,
-    bridgeBack: frontDoorPauseUnknown,
+    // v3.2: the front door's pause turns the sale's step amber, not the bridge back's
+    bridgeBack: !v32 && frontDoorPauseUnknown,
+    swapOut: v32 && frontDoorPauseUnknown,
     vault: vaultPauseUnknown,
     vaultOut: vaultPauseUnknown,
   };
@@ -370,6 +412,19 @@ function contractName(addr: string, a: FlowV1["addresses"]): string {
   return shortAddress(addr);
 }
 
+/** What a pause holds, by the contract paused: v3.2's front door stops only deposits and the automatic sale to USDC;
+ * the vault holds what is on its way, payouts and direct withdrawals. */
+const PAUSED = {
+  frontDoor: "New deposits and automatic USDC payouts wait until it is unpaused. Unstake requests, cancels and claims still work.",
+  vault: "Deposits on their way, payouts and direct withdrawals wait until it is unpaused. Nobody's funds move.",
+  other: "Nothing new goes through it until it is unpaused.",
+} as const;
+
+function pausedWhich(addr: string, a: FlowV1["addresses"]): keyof typeof PAUSED {
+  const x = addr.toLowerCase();
+  return x === a.frontDoor?.toLowerCase() ? "frontDoor" : x === a.vault?.toLowerCase() ? "vault" : "other";
+}
+
 /** One event as a blue notice, or nothing for a kind this page doesn't know yet. Links to the transaction
  * that started it when the monitor stored one, else to the contract. `untilMs` is how long until a time, on the
  * visitor's clock: an earliest time already past says it can take effect now. */
@@ -387,7 +442,7 @@ function noticeView(n: Notice, flow: FlowV1, untilMs: (unix: number) => number):
   const make = (title: string, body: string): NoticeView[] => [{ tone: "info", title, body, href }];
   switch (n.kind) {
     case "paused":
-      return make(`${who} is paused`, "Nothing new goes through it until it is unpaused.");
+      return make(`${who} is paused`, PAUSED[pausedWhich(n.contract, flow.addresses)]);
     case "ownershipPending":
       return make("An ownership change is pending", `Ownership of ${who.toLowerCase().startsWith("the ") ? who.toLowerCase() : who} is moving${to}. ${timing}`);
     case "guardianProposed":
@@ -399,10 +454,63 @@ function noticeView(n: Notice, flow: FlowV1, untilMs: (unix: number) => number):
     case "fmAdminScheduled":
       return make("ForeverMoney has scheduled an admin change", `ForeverMoney's vault backs the bridged TAO${to ? `; its admin is changing${to}` : ""}. ${timing}`);
     case "fmMigration":
-      return make("ForeverMoney has announced a migration", `ForeverMoney's vault backs the bridged TAO${n.target ? `; it is moving to ${shortAddress(n.target)}` : ""}. ${timing}`);
+      return make(
+        "ForeverMoney has announced a migration",
+        "ForeverMoney, which issues the TAO used on Base, has announced a move to new contracts. Unstakes through Base are on hold from now until Cascade has a replacement bridge live; requests made meanwhile keep your stake. A regular wallet can still withdraw on Bittensor. Your staked TAO isn't affected.",
+      );
     case "fmPaused":
-      return make("ForeverMoney's vault is paused", "It backs the bridged TAO, and is paused for now.");
+      return make("ForeverMoney's vault is paused", "ForeverMoney, which issues the TAO used on Base, is paused. Deposits and unstakes through Base wait until it resumes. Your staked TAO isn't affected.");
+    case "itemScheduled":
+      return make("A change is scheduled", scheduledBody(n, who, untilMs));
+    // v3.2's states, as the v3.2 monitor sends them (flow.ts NoticeKind; the web copy audit's N1 to N4)
+    case "stakeMissing":
+      return make("The validator has changed its key", "Deposits and unstakes wait until the new key is listed. A direct withdrawal on Bittensor would pay a lower price for now.");
+    case "parked":
+      return make("Some deposits are waiting on Bittensor", "They couldn't be delivered to the vault yet and are set aside. They'll be delivered when possible, or sent back to Base after 14 days.");
+    case "payoutsClosed":
+      return make("Unstakes through Base are on hold", "The bridge can't send payouts right now. Requests keep your stake; a regular wallet can withdraw on Bittensor.");
+    case "routeDisabled":
+      return make("Cascade's route is switched off", "Deposits and unstakes through Base wait. Turning it back on takes at least 7 days' public notice.");
     default:
       return [];
   }
+}
+
+/** A scheduled setter in plain words (the web copy audit, N8). */
+const SETTER_WORDS: Readonly<Record<string, string>> = {
+  setPayoutDelay: "the wait before payouts",
+  setOutflowLimits: "the daily unstake limit",
+  setRewardCut: "Cascade's reward cut",
+  setRewardVesting: "how fast rewards are added",
+  setStakeHotkey: "the validator",
+  moveStake: "the validator",
+  activateBridge: "a new bridge",
+  activateFrontDoor: "a new front door",
+  setGuardian: "the guardian",
+  transferOwnership: "the owner",
+  setOracle: "the price check",
+  setSwapper: "the swap contract",
+};
+
+/** v3.2's pending scheduled item (the monitor's itemScheduled, Task 55) in plain words: what it changes (its setter and
+ * arguments, as the monitor decoded them), when it can run, and who can still cancel it: the guardian an Ordinary item,
+ * only the owner a GuardianSwap or a Reopen (spec §3.6). Read defensively: a setter or arguments that aren't strings are
+ * details that couldn't be read. */
+function scheduledBody(n: Notice, who: string, untilMs: (unix: number) => number): string {
+  const item = (typeof n.item === "object" && n.item !== null ? n.item : {}) as Partial<NonNullable<Notice["item"]>>;
+  const setter = typeof item.setter === "string" && item.setter !== "" ? item.setter : null;
+  const raw = typeof item.args === "object" && item.args !== null ? Object.entries(item.args) : null;
+  const args = raw && raw.every(([, v]) => typeof v === "string") ? raw.map(([k, v]) => `${k} ${/^0x[0-9a-fA-F]{40}$/.test(v) ? shortAddress(v) : v}`) : null;
+  // what it changes in plain words, then the setter and its arguments as decoded; a setter not listed reads as before
+  const decoded = setter && args ? `${setter}${args.length > 0 ? ` with ${args.join(", ")}` : ""}` : null;
+  const words = setter && Object.hasOwn(SETTER_WORDS, setter) ? SETTER_WORDS[setter] : null;
+  const what = decoded ? `: ${words ? `${words} (${decoded})` : decoded}` : " whose details couldn't be read";
+  const when =
+    typeof n.earliest !== "number" || !Number.isFinite(n.earliest)
+      ? ""
+      : untilMs(n.earliest) <= 0
+        ? ", ready now"
+        : `, ready from ${formatDateTime(new Date(n.earliest * 1000))}`;
+  const canceller = item.kind === "Ordinary" ? "guardian" : "owner";
+  return `${who} has a change scheduled${what}${when}; the ${canceller} can still cancel it.`;
 }

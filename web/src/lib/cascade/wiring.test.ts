@@ -325,3 +325,68 @@ describe("createWiringCheck", () => {
     expect(check).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("checkWiring on v3.2: the moved getters, read through the lenses", () => {
+  const VL = getAddress("0x000000000000000000000000000000000000Ae15");
+  const DL = getAddress("0x000000000000000000000000000000000000De15");
+  const D32: Deployment = { ...D3, vaultLens: VL, doorLens: DL };
+  /** v3-test's entry with its lenses, as a v3.2 entry lists them (none is committed yet: Task 67). */
+  const list = { "v3.2-x": { ...e3, vaultLens: VL, doorLens: DL } };
+  const fd = D32.frontDoor.toLowerCase();
+  const ba = D32.baseAdapter.toLowerCase();
+  const v = D32.vault.toLowerCase();
+  const bt = D32.bitAdapter.toLowerCase();
+  const vl = VL.toLowerCase();
+  const dl = DL.toLowerCase();
+  const peer = peerId(8453n, D32.frontDoor);
+  /** What each contract of a v3.2 deployment answers: the bridges and the door's state come from the lenses. */
+  const wired32 = (over: Record<string, Answer> = {}): Record<string, Answer> => {
+    const answers = wiredAs(D32);
+    for (const moved of [`base:${fd}.primaryBridge()`, `base:${fd}.bridgeEnabled(${ba})`, `bittensor:${v}.frontDoorActive(${peer})`, `bittensor:${v}.primaryBridge()`, `bittensor:${v}.bridgeEnabled(${bt})`]) {
+      delete answers[moved];
+    }
+    return {
+      ...answers,
+      [`base:${dl}.target()`]: D32.frontDoor,
+      [`base:${dl}.primaryBridge()`]: D32.baseAdapter,
+      [`base:${dl}.bridgeEnabled(${ba})`]: true,
+      [`bittensor:${vl}.target()`]: D32.vault,
+      [`bittensor:${vl}.doorState(${peer})`]: 1,
+      [`bittensor:${vl}.primaryBridge()`]: D32.bitAdapter,
+      [`bittensor:${vl}.bridgeEnabled(${bt})`]: true,
+      ...over,
+    };
+  };
+
+  it("passes a v3.2 deployment whose front door is Active in the vault's registry, each lens reading its own contract", async () => {
+    const c = chains(wired32());
+    expect(await checkWiring(c.clients, D32, list)).toBe("ok");
+    expect(c.asked).toContain(`bittensor:${vl}.doorState(${peer})`);
+    expect(c.asked).toContain(`bittensor:${vl}.target()`);
+    expect(c.asked).toContain(`base:${dl}.target()`);
+    // nothing asked of the getters v3.2 moved off the vault and the front door
+    const moved = (x: string) => x.startsWith(`bittensor:${v}.`) || (/^base:[^.]*\.(primaryBridge|bridgeEnabled)\(/.test(x) && !x.startsWith(`base:${dl}.`));
+    expect(c.asked.filter(moved)).toEqual([]);
+  });
+
+  it("refuses a door not Active (Unknown or Removed), a lens of another contract, or a bridge elsewhere or disabled", async () => {
+    const miswired: Record<string, Answer> = {
+      [`bittensor:${vl}.doorState(${peer})`]: 2,
+      [`bittensor:${vl}.target()`]: OTHER,
+      [`bittensor:${vl}.primaryBridge()`]: OTHER,
+      [`bittensor:${vl}.bridgeEnabled(${bt})`]: false,
+      [`base:${dl}.target()`]: OTHER,
+      [`base:${dl}.primaryBridge()`]: OTHER,
+      [`base:${dl}.bridgeEnabled(${ba})`]: false,
+      [`base:${fd}.vault()`]: OTHER,
+    };
+    for (const [id, answer] of Object.entries(miswired)) expect(await checkWiring(chains(wired32({ [id]: answer })).clients, D32, list), id).toBe("mismatch");
+    expect(await checkWiring(chains(wired32({ [`bittensor:${vl}.doorState(${peer})`]: 0 })).clients, D32, list)).toBe("mismatch");
+  });
+
+  it("refuses a v3.2 deployment not in the committed list without reading anything", async () => {
+    const c = chains(wired32());
+    expect(await checkWiring(c.clients, D32)).toBe("mismatch");
+    expect(c.asked).toEqual([]);
+  });
+});

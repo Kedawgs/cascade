@@ -1,6 +1,7 @@
 import type { Hex } from "viem";
 import type { Deployment } from "../config.ts";
 import type { StoredLog } from "../logs.ts";
+import { type Park, parkKeyOf } from "../parks.ts";
 import { type DeliveryGroup, pairSent } from "./pairing.ts";
 import { batchKey, encodeBatchMessage, replayBatch } from "./replay.ts";
 
@@ -8,6 +9,8 @@ import { batchKey, encodeBatchMessage, replayBatch } from "./replay.ts";
 // delivery of a batch on Bittensor against the batch the front door closed on Base.
 
 export const DEPOSIT_OUTCOMES: readonly string[] = ["Deposited", "DepositBounced", "DepositSkipped"];
+/** Each redeem entry ends in one of these. A RedeemDeferred is one outcome whatever its cause (since R4 also the one-day
+ * hold and a closed rail, which defers every entry of the delivery): the count check needs none told apart. */
 export const REDEEM_OUTCOMES: readonly string[] = ["Redeemed", "RedeemDeferred", "RedeemSkipped"];
 
 export const STEPS = {
@@ -43,6 +46,8 @@ export function checkBatch(i: {
   frontDoorLogs: readonly StoredLog[];
   /** a Base transaction's logs */
   baseTx: (hash: Hex) => StoredLog[];
+  /** v3.2: the parks loaded (src/parks.ts), for a delivery deliverParked made (its group closed by ParkedDelivered) */
+  parks?: readonly Park[];
 }): BatchVerdict {
   const { d, delivery, group } = i;
   const id = big(delivery.args.batchId);
@@ -74,15 +79,29 @@ export function checkBatch(i: {
   const messageId = String(sent.args.messageId).toLowerCase() as Hex;
   const dl = group.delivered;
   if (!dl) return fail(STEPS.message, "no Bittensor adapter Delivered to the vault closes the delivery", { closedTx, messageId });
-  if (!same(dl.args.messageId, messageId)) return fail(STEPS.message, `message id ${dl.args.messageId} delivered, ${messageId} sent`, { closedTx, messageId });
   const route = (l: StoredLog) => same(l.args.sender, d.frontDoor) && same(l.args.recipient, d.vault) && big(l.args.amount) === total;
-  if (!route(sent) || !route(dl)) return fail(STEPS.message, "the Sent or the Delivered doesn't name front door → vault with the batch's amount", { closedTx, messageId });
+  // v3.2: delivered by deliverParked, the batch's message is its park's: the BatchParked that ParkedDelivered ended
+  let park: Park | undefined;
+  if (dl.event === "ParkedDelivered") {
+    park = i.parks?.find((p) => p.ended?.uid === dl.uid);
+    if (!park) return fail(STEPS.message, `no BatchParked for the park this delivery came from (key ${String(dl.args.key)})`, { closedTx, messageId });
+    if (park.messageId !== messageId) return fail(STEPS.message, `message id ${park.messageId} parked, ${messageId} sent`, { closedTx, messageId });
+    if (!route(sent) || !park.door || park.amount !== total) return fail(STEPS.message, "the Sent or the park doesn't name front door → vault with the batch's amount", { closedTx, messageId });
+  } else {
+    if (!same(dl.args.messageId, messageId)) return fail(STEPS.message, `message id ${dl.args.messageId} delivered, ${messageId} sent`, { closedTx, messageId });
+    if (!route(sent) || !route(dl)) return fail(STEPS.message, "the Sent or the Delivered doesn't name front door → vault with the batch's amount", { closedTx, messageId });
+  }
 
-  // 5. the delivered key is the key of the batch the front door built
+  // 5. the delivered key is the key of the batch the front door built (and a park's key that batch's park key)
   const r = replayBatch(i.frontDoorLogs, id);
   if ("error" in r) return fail(STEPS.key, `can't rebuild this batch: ${r.error}`, { cantRebuild: true, closedTx, messageId });
-  const expectedKey = batchKey(8453n, d.frontDoor, encodeBatchMessage(id, r.deposits, r.redeems));
+  const message = encodeBatchMessage(id, r.deposits, r.redeems);
+  const expectedKey = batchKey(8453n, d.frontDoor, message);
   if (expectedKey !== key) return fail(STEPS.key, `delivered key ${key}, the replayed batch's ${expectedKey}`, { closedTx, messageId, expectedKey });
+  if (park) {
+    const parkKey = parkKeyOf(8453n, d.frontDoor, d.vault, message);
+    if (park.key !== parkKey) return fail(STEPS.key, `the park's key ${park.key}, the replayed batch's ${parkKey}`, { closedTx, messageId, expectedKey });
+  }
 
   // 6. the outcomes match the lists entry by entry
   const ok = { closedTx, messageId, expectedKey };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Deployment } from "./cascade/config";
-import { contractsOf, risksFor } from "./security-content";
+import { contractsLabel, contractsOf, risksFor } from "./security-content";
 
 const d = {
   frontDoor: "0xbAe5417A40613141790624bCeF6BaFc3b24ff9AA",
@@ -37,11 +37,38 @@ describe("contractsOf", () => {
 });
 
 describe("risksFor", () => {
-  it("names five risks, each with a place to watch it", () => {
+  it("names seven risks, each with a place to watch it", () => {
     const risks = risksFor("https://github.com/Kedawgs/cascade");
-    expect(risks.map((r) => r.title)).toEqual(["The contracts", "The bridged TAO", "The bridge", "The validator", "Swap prices"]);
+    expect(risks.map((r) => r.title)).toEqual(["The contracts", "The keys", "The bridged TAO", "The bridge", "The validator", "Swap prices", "Getting out"]);
     expect(risks[0]!.watch).toEqual({ kind: "link", href: "https://github.com/Kedawgs/cascade", label: "Read the code" });
-    expect(risks.slice(1).map((r) => (r.watch.kind === "step" ? r.watch.id : null))).toEqual(["backing", "bridge", "validator", "swap"]);
+    expect(risks[1]!.watch).toEqual({ kind: "link", href: "/faq/#who-controls", label: "Who controls Cascade" });
+    // until the deployment's code is published there is no code to read: the contracts' risk points at what was checked
+    const unpublished = risksFor("https://github.com/Kedawgs/cascade", false);
+    expect(unpublished[0]!.watch).toEqual({ kind: "link", href: "/faq/#audited", label: "What has been checked" });
+    expect(unpublished.slice(1)).toEqual(risks.slice(1));
+    expect(JSON.stringify(unpublished)).not.toMatch(/Read the code|open source/i);
+    // and the count of contracts says "open source" only then
+    expect([contractsLabel(true), contractsLabel(false)]).toEqual(["Contracts, all open source", "Contracts your money passes through"]);
+    expect(risks.slice(2).map((r) => (r.watch.kind === "step" ? `${r.watch.dir}:${r.watch.id}` : null))).toEqual(["in:backing", "in:bridge", "in:validator", "in:swap", "out:vaultOut"]);
+  });
+
+  it("says each risk as it is on v3.2 (the web copy audit)", () => {
+    const body = (title: string) => risksFor("https://x").find((r) => r.title === title)!.body;
+    expect(body("The keys")).toBe(
+      "One hardware wallet owns the contracts for now, with no multi-signature yet. Changes that loosen a protection wait in public, 48 hours to 8 days, and show at the top of this page. If the keys were stolen, exits could be frozen or badly limited.",
+    );
+    expect(body("The bridged TAO")).toBe(
+      "Your staked TAO is real TAO on Bittensor. ForeverMoney's bridged TAO is what carries it across: you hold it while a deposit waits on Base and when a payout comes back. If its backing fell short, that TAO would be worth less. And if ForeverMoney pauses or moves, unstaking through Base waits.",
+    );
+    expect(body("The bridge")).toBe(
+      "Chainlink's bridge caps how much can cross at a time. When it's full, deposits and payouts wait until it refills. If the bridge itself were compromised, it could forge unstakes, but only up to a day's allowance, and each waits 24 hours before paying, so it can be cancelled.",
+    );
+    expect(body("The validator")).toBe(
+      "Rewards come from the validator the vault stakes with. If it went offline or raised its cut, rewards would fall until the stake moved. If it changes its key, deposits and unstakes wait until the new key is listed.",
+    );
+    expect(body("Getting out")).toBe(
+      "Unstaking through Base has a daily limit shared first come first served, a 24-hour wait, and a one-day hold on new deposits. In a rush it can take days.",
+    );
   });
 
   it("never claims safety", () => {

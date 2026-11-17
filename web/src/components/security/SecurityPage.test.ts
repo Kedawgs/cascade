@@ -5,7 +5,7 @@ import { goodFlow } from "@/lib/cascade/__fixtures__/flow-v1";
 import type { FlowV1 } from "@/lib/cascade/flow";
 import { flowView } from "@/lib/security-view";
 import { plainText, renderWithCache } from "../test-render";
-import { SecurityPage, selectStep, tabAfterKey } from "./SecurityPage";
+import { DirectExit, SecurityPage, selectStep, tabAfterKey } from "./SecurityPage";
 import { ContractsSection } from "./SecuritySections";
 import deployments from "@/lib/cascade/deployments.json";
 import type { Deployment } from "@/lib/cascade/config";
@@ -66,6 +66,7 @@ describe("SecurityPage", () => {
     f.notices = [{ kind: "paused", chain: "base", contract: f.addresses.frontDoor, tx: "0x" + "ab".repeat(32) }];
     const h = html(f);
     expect(plainText(h)).toContain("The front door is paused");
+    expect(plainText(h)).toContain("New deposits and automatic USDC payouts wait until it is unpaused. Unstake requests, cancels and claims still work.");
     expect(h).toContain("/tx/0x" + "ab".repeat(32));
   });
 
@@ -85,17 +86,22 @@ describe("SecurityPage", () => {
     expect(h.match(/<h1[\s>]/g)).toHaveLength(1);
     expect(t).toContain("Live on-chain");
     expect(t).toContain("Security");
-    for (const label of ["Bridged TAO backed", "Last on-chain check", "Pool depth on Base", "About what a $1,000 deposit costs", "Bridge room to Bittensor", "Public notice before any contract change"])
+    for (const label of ["Bridged TAO backed", "Last on-chain check", "Pool depth on Base", "About what a $1,000 deposit costs", "Bridge room to Bittensor", "Public notice before a new bridge or front door"])
       expect(t, label).toContain(label);
     expect(t).toContain("100.00%");
     expect(h).toContain('href="#flow"');
+    expect(t).toContain("The live numbers on this page are read from the chain every minute, each with a link to check it yourself.");
+    expect(t).not.toContain("any contract change");
   });
 
   it("shows how the money is protected, with the home page's points", () => {
     const t = text(healthy());
     expect(t).toContain("How your money is protected");
-    expect(t).toContain("We can't move your TAO without 7 days' public notice.");
+    expect(t).toContain("Your TAO sits in an open-source contract anyone can read. Sending it anywhere new takes 7 days' public notice.");
     for (const point of ["Verifiable on-chain", "Open source", "Independent audit", "Built on Chainlink CCIP"]) expect(t).toContain(point);
+    // the bridge's live figures are in the map above the grid
+    expect(t).toContain("Your TAO crosses chains over Chainlink's CCIP bridge. Its limits and anything in transit are shown above.");
+    expect(t).not.toMatch(/largest DeFi|auditable/);
   });
 
   it("lists the deployment's contracts on both chains, each with a copy button and its explorer", () => {
@@ -112,8 +118,10 @@ describe("SecurityPage", () => {
   it("names the risks, each pointing at where to watch it", () => {
     const t = text(healthy());
     expect(t).toContain("Risks to know");
-    for (const watch of ["Read the code", "Watch the backing", "Watch the bridge", "Watch the validator", "Watch the swap"]) expect(t).toContain(watch);
+    for (const watch of ["Read the code", "Who controls Cascade", "Watch the backing", "Watch the bridge", "Watch the validator", "Watch the swap", "Watch the queue"]) expect(t).toContain(watch);
     expect(t).toContain("only deposit what you could afford to lose");
+    // the FAQ's answer opens on this site, in the same tab
+    expect(html(healthy())).toMatch(/<a[^>]*href="\/faq\/#who-controls"(?![^>]*target)[^>]*>Who controls Cascade/);
   });
 
   it("ends with where to report a problem", () => {
@@ -132,17 +140,32 @@ describe("SecurityPage", () => {
   });
 });
 
+describe("DirectExit", () => {
+  it("names the way out on Bittensor under the money-out map, on v3.2 only", () => {
+    // v3-launch by name: v3.2-launch is at the early stage too, and has its lenses
+    const launch = deployments["v3-launch"] as unknown as Deployment;
+    expect(launch).not.toHaveProperty("vaultLens");
+    const v32 = { ...launch, vaultLens: "0x000000000000000000000000000000000000Ae15", doorLens: "0x000000000000000000000000000000000000De15" } as Deployment;
+    const h = renderWithCache(createElement(DirectExit, { deployment: v32 }), []);
+    expect(plainText(h)).toBe("There is a second way out that skips Base and the bridge: a regular wallet can withdraw straight from the vault on Bittensor.");
+    expect(h).toMatch(/href="\/unstake\/bittensor\/?"/);
+    for (const d of [launch, null]) expect(renderWithCache(createElement(DirectExit, { deployment: d }), [])).toBe("");
+    // the live v3.2 entry, as listed, names it too
+    expect(plainText(renderWithCache(createElement(DirectExit, { deployment: deployments["v3.2-launch"] as unknown as Deployment }), []))).toMatch(/second way out/);
+  });
+});
+
 describe("selectStep", () => {
   it("selectStepDefaultsToFirst", () => {
     const v = viewOf(healthy());
     expect(selectStep(v, "in", null).id).toBe("wallet");
-    expect(selectStep(v, "out", null).id).toBe("vaultOut");
+    expect(selectStep(v, "out", null).id).toBe("request");
   });
   it("selectStepSwitchesDirection", () => {
     const v = viewOf(healthy());
     expect(selectStep(v, "in", "swap").id).toBe("swap");
     // an id from the other direction falls back to the first of this one
-    expect(selectStep(v, "out", "swap").id).toBe("vaultOut");
+    expect(selectStep(v, "out", "swap").id).toBe("request");
     expect(selectStep(v, "out", "bridgeBack").id).toBe("bridgeBack");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readDeployment, type Stage } from "./cascade/config";
+import { EXPECTED_DEPLOYMENTS, readDeployment, type Stage, wordingStage } from "./cascade/config";
 import { auditCard, howItWorksSteps, STAKE_POINTS } from "./landing";
 
 const ENV = {
@@ -53,5 +53,23 @@ describe("the landing page's promises stay true", () => {
     // a stage that isn't exactly early reads as before; an audit that is done is never "Not yet"
     expect(auditCard("bogus" as Stage, "scheduled").badge).toBe("Scheduled");
     expect(auditCard("early", "done").badge).not.toBe("Not yet");
+  });
+
+  it("words a retired deployment's audit card as the stage it was retired from (Task 60 follow-up)", () => {
+    const launch = readDeployment({
+      NEXT_PUBLIC_CASCADE_FRONT_DOOR: EXPECTED_DEPLOYMENTS["v3-launch"].frontDoor,
+      NEXT_PUBLIC_CASCADE_BASE_ADAPTER: EXPECTED_DEPLOYMENTS["v3-launch"].baseAdapter,
+      NEXT_PUBLIC_CASCADE_VAULT: EXPECTED_DEPLOYMENTS["v3-launch"].vault,
+      NEXT_PUBLIC_CASCADE_BIT_ADAPTER: EXPECTED_DEPLOYMENTS["v3-launch"].bitAdapter,
+      NEXT_PUBLIC_CASCADE_BIT_BLOCK: EXPECTED_DEPLOYMENTS["v3-launch"].bitBlock,
+      NEXT_PUBLIC_CASCADE_VAULT_SS58: EXPECTED_DEPLOYMENTS["v3-launch"].vaultSs58,
+      NEXT_PUBLIC_CASCADE_HOTKEY_SS58: EXPECTED_DEPLOYMENTS["v3-launch"].hotkeySs58,
+      NEXT_PUBLIC_CASCADE_STAKER: EXPECTED_DEPLOYMENTS["v3-launch"].staker,
+      NEXT_PUBLIC_CASCADE_ORACLE: EXPECTED_DEPLOYMENTS["v3-launch"].oracle,
+    });
+    const listed = (retiredFrom?: string) => ({ x: { ...EXPECTED_DEPLOYMENTS["v3-launch"], stage: "retired", ...(retiredFrom ? { retiredFrom } : {}) } }) as never;
+    expect(auditCard(wordingStage(launch, listed("early")), "scheduled")).toEqual(auditCard("early", "scheduled"));
+    expect(auditCard(wordingStage(launch, listed("live")), "scheduled")).toEqual(auditCard("live", "scheduled"));
+    expect(auditCard(wordingStage(launch, listed()), "scheduled")).toEqual(auditCard("testing", "scheduled"));
   });
 });

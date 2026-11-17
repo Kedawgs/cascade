@@ -8,22 +8,30 @@
 #   - place the adapter's runtime code (real constructor arguments) at an unused address,
 #   - place test/fork/Sink.sol at another as the recipient (it reverts unless msg.value == amount),
 #   - give the adapter AMOUNT of ForeverMoney's bridged TAO (one storage slot on the token),
-#   - replace the CCIP Router's code with a small stand-in (below).
+#   - replace the CCIP Router's code with test/fork/SimulationRouter.sol, a stand-in (below).
 # The real AlphaVault.withdrawLiquid then burns the tokens, unstakes through the real staking
 # precompile and pays native TAO to the adapter, which forwards it to the sink. Nothing is broadcast
 # and no key with funds is used.
 #
+# A ccipReceive that returns is not a pass: since v3.2's Task 25 the adapter parks a batch it cannot
+# convert (the real withdrawLiquid or the adapter's checks refused: a token park) or deliver (the sink
+# refused: a native park) instead of reverting. So the stand-in, after forwarding, reads the adapter's
+# parkedNative() and parkedTokens() and, unless both are 0, reverts SimulationParked(...) with both and
+# the batch's record; the verdict is then SIMULATION FAILED, naming the park, with a non-zero exit. After
+# a token park the script runs withdrawLiquid alone from the adapter, to show ForeverMoney's answer.
+#
 # The adapter's reserve: Bittensor EVM reports an account's balance net of the 500-rao existential
-# deposit, so an adapter with no native balance sees the credit 500 rao short and reverts
-# ConversionShort. The deployment funds 1e12 wei with `fundReserve()` before the first delivery. The
-# node ignores balance overrides, so the script funds it the same way: the Router stand-in calls
-# `adapter.fundReserve{value: msg.value}()` and then forwards the `ccipReceive` calldata to the
-# adapter, which therefore still sees msg.sender == Router. The eth_call is sent from FUNDER with
-# value RESERVE.
+# deposit, so an adapter with no native balance sees the credit 500 rao short, past the adapter's 1-rao
+# tolerance, and parks the tokens (ConversionShort; v3.1 reverted). The deployment funds 1e12 wei with
+# `fundReserve()` before the first delivery. The node ignores balance overrides, so the script funds it
+# the same way: the Router stand-in calls `adapter.fundReserve{value: msg.value}()` and then forwards
+# the `ccipReceive` calldata to the adapter, which therefore still sees msg.sender == Router. The
+# eth_call is sent from FUNDER with value RESERVE.
 #
 # The node silently ignores balance overrides, so before the delivery the script checks, with the same
-# overrides, that the code overrides took effect: the adapter must answer `alphaVault()` and the sink
-# `reverting()`. Otherwise the stand-in's calls would hit empty accounts, succeed, and fake an OK.
+# overrides, that the code overrides took effect: the adapter must answer `alphaVault()`, the sink
+# `reverting()` and the stand-in `adapter()`. Otherwise the calls would hit empty accounts (or the real
+# Router), and a call to an empty account succeeds and would fake an OK.
 #
 # Run from contracts/:   bash script/simulate_inbound.sh
 # Env (all optional):
@@ -32,15 +40,20 @@
 #   AMOUNT          bridged TAO to deliver, in wei; whole rao and at least the staking floor (default 1e18)
 #   GAS_BASE, GAS_PER_ENTRY  the Bittensor adapter's gas model toward Base (default 120000 / 29900,
 #                   the deployment values); they only change the bytecode's immutables
+#   INBOUND_GAS_BASE, INBOUND_GAS_PER_ENTRY  the lane's inbound gas model, the Base adapter's own pair
+#                   (default 1300000 / 57000, the R4 review's launch pair, the park reserve included):
+#                   immutables only deliverParked reads
 #   MAX_MESSAGE     the Bittensor adapter's per-message cap in wei (default 5000e18, the lane's
 #                   limit); an immutable that limits sends only, so a delivery ignores it
-#   RESERVE         the adapter's native reserve in wei (default 1e12, the deployment value; 0 shows the
-#                   ConversionShort failure of an unfunded adapter)
+#   TREASURY        the adapter's treasury, the payee of a sweep (default the launch treasury,
+#                   0x34D1f7DC8Cb62280d0bc617b784Bd2c4668809f6); an immutable a delivery never reads
+#   RESERVE         the adapter's native reserve in wei (default 1e12, the deployment value; 0 shows an
+#                   unfunded adapter's token park, ConversionShort, which fails the simulation)
 #   FUNDER          any address holding at least RESERVE, used as the eth_call's sender (default: the
 #                   Router's wrapped-native contract, which holds the CCIP fees paid in TAO)
 #
-# Needs forge, cast and anvil on PATH. About 14 requests to BITTENSOR_RPC, two of them the override
-# checks (the public endpoints allow about 128 a minute).
+# Needs forge, cast and anvil on PATH. About 15 requests to BITTENSOR_RPC, three of them the override
+# checks, and one more after a token park (the public endpoints allow about 128 a minute).
 set -euo pipefail
 
 BITTENSOR_RPC="${BITTENSOR_RPC:-https://lite.chain.opentensor.ai}"
@@ -48,8 +61,11 @@ REMOTE_ADAPTER="${REMOTE_ADAPTER:-0x1111111111111111111111111111111111111111}"
 AMOUNT="${AMOUNT:-1000000000000000000}"
 GAS_BASE="${GAS_BASE:-120000}"
 GAS_PER_ENTRY="${GAS_PER_ENTRY:-29900}"
+INBOUND_GAS_BASE="${INBOUND_GAS_BASE:-1300000}"
+INBOUND_GAS_PER_ENTRY="${INBOUND_GAS_PER_ENTRY:-57000}"
 MAX_MESSAGE="${MAX_MESSAGE:-5000000000000000000000}"
 RESERVE="${RESERVE:-1000000000000}"
+TREASURY="${TREASURY:-0x34D1f7DC8Cb62280d0bc617b784Bd2c4668809f6}"
 
 # Live addresses on Bittensor EVM (chain 964); the same values as test/fork/ForkBase.sol.
 BIT_ROUTER=0xD941fBEcD2b971d0F54b4C34286C95faB52B60B8
@@ -92,7 +108,16 @@ echo "rpc $BITTENSOR_RPC, block $BLOCK (every remote read below is pinned to it)
 echo "staking floor (getDefaultMinStake): $FLOOR_RAO rao = $(cast to-unit "$((FLOOR_RAO * 1000000000))" ether) TAO"
 echo "amount $AMOUNT wei = $(cast to-unit "$AMOUNT" ether) TAO; remote adapter $REMOTE_ADAPTER"
 
-say "1. Deploy the adapter and the sink on a local anvil, read their runtime code"
+say "1. Deploy the adapter, the sink and the Router stand-in on a local anvil, read their runtime code"
+# Addresses derived from a hash, so nothing on the live chain uses them. anvil's own deployment addresses
+# are not safe there: people use anvil's public keys on mainnets, and a balance already sitting at the
+# adapter's address would stand in for its reserve.
+ADAPTER="0x$(cast keccak "cascade simulate_inbound adapter" | cut -c27-66)"
+SINK="0x$(cast keccak "cascade simulate_inbound sink" | cut -c27-66)"
+BATCH="$(cast abi-encode "f(uint8,uint64,(address,uint256)[],(address,uint256)[])" 1 1 "[($ALICE,$AMOUNT)]" "[]")"
+# The batch's park key, as the adapter computes it: keccak256(abi.encode(remoteChainId, sender, recipient, message)).
+KEY="$(cast keccak "$(cast abi-encode "f(uint64,address,address,bytes)" 8453 "$FRONT_DOOR" "$SINK" "$BATCH")")"
+echo "live addresses: adapter $ADAPTER, sink $SINK; the batch's park key $KEY"
 # A plain local chain, not a fork: the constructors read no chain state, so the runtime code is the same,
 # and a fork's start-up alone (anvil reads every dev account from the node) can exhaust the rate limit.
 anvil --chain-id 964 --port "$ANVIL_PORT" >"$WORK/anvil.log" 2>&1 &
@@ -107,11 +132,11 @@ cast chain-id --rpc-url "$LOCAL_RPC" >/dev/null 2>&1 || {
 }
 echo "anvil pid $ANVIL_PID on $LOCAL_RPC"
 
-CONFIG="($BIT_ROUTER,$BIT_TAO,964,8453,$BASE_SELECTOR,$REMOTE_ADAPTER,$GAS_BASE,$GAS_PER_ENTRY,$MAX_MESSAGE)"
-echo "CcipBittensorAdapter($CONFIG, $ALPHA_VAULT)"
+CONFIG="($BIT_ROUTER,$BIT_TAO,964,8453,$BASE_SELECTOR,$REMOTE_ADAPTER,$GAS_BASE,$GAS_PER_ENTRY,$MAX_MESSAGE,$TREASURY)"
+echo "CcipBittensorAdapter($CONFIG, $ALPHA_VAULT, $INBOUND_GAS_BASE, $INBOUND_GAS_PER_ENTRY)"
 forge create src/adapters/CcipBittensorAdapter.sol:CcipBittensorAdapter --rpc-url "$LOCAL_RPC" \
   --mnemonic "$MNEMONIC" --mnemonic-index 0 --broadcast \
-  --constructor-args "$CONFIG" "$ALPHA_VAULT" >"$WORK/adapter.txt" 2>&1 || {
+  --constructor-args "$CONFIG" "$ALPHA_VAULT" "$INBOUND_GAS_BASE" "$INBOUND_GAS_PER_ENTRY" >"$WORK/adapter.txt" 2>&1 || {
   cat "$WORK/adapter.txt"
   fail "forge create adapter"
 }
@@ -122,14 +147,23 @@ forge create test/fork/Sink.sol:Sink --rpc-url "$LOCAL_RPC" \
   fail "forge create sink"
 }
 LOCAL_SINK="$(sed -n 's/^Deployed to: *\(0x[0-9a-fA-F]\{40\}\).*/\1/p' "$WORK/sink.txt")"
-[ -n "$LOCAL_ADAPTER" ] && [ -n "$LOCAL_SINK" ] || {
-  cat "$WORK/adapter.txt" "$WORK/sink.txt"
+# The stand-in's immutables are the live adapter's address and the batch's key, so its runtime code is right there.
+forge create test/fork/SimulationRouter.sol:SimulationRouter --rpc-url "$LOCAL_RPC" \
+  --mnemonic "$MNEMONIC" --mnemonic-index 0 --broadcast \
+  --constructor-args "$ADAPTER" "$KEY" >"$WORK/router.txt" 2>&1 || {
+  cat "$WORK/router.txt"
+  fail "forge create router stand-in"
+}
+LOCAL_ROUTER="$(sed -n 's/^Deployed to: *\(0x[0-9a-fA-F]\{40\}\).*/\1/p' "$WORK/router.txt")"
+[ -n "$LOCAL_ADAPTER" ] && [ -n "$LOCAL_SINK" ] && [ -n "$LOCAL_ROUTER" ] || {
+  cat "$WORK/adapter.txt" "$WORK/sink.txt" "$WORK/router.txt"
   fail "could not read the deployed addresses"
 }
 CODE="$(cast code "$LOCAL_ADAPTER" --rpc-url "$LOCAL_RPC")"
 SINK_CODE="$(cast code "$LOCAL_SINK" --rpc-url "$LOCAL_RPC")"
-[ "${#CODE}" -gt 2 ] && [ "${#SINK_CODE}" -gt 2 ] || fail "empty runtime code"
-echo "runtime code: adapter $(((${#CODE} - 2) / 2)) bytes, sink $(((${#SINK_CODE} - 2) / 2)) bytes"
+ROUTER_CODE="$(cast code "$LOCAL_ROUTER" --rpc-url "$LOCAL_RPC")"
+[ "${#CODE}" -gt 2 ] && [ "${#SINK_CODE}" -gt 2 ] && [ "${#ROUTER_CODE}" -gt 2 ] || fail "empty runtime code"
+echo "runtime code: adapter $(((${#CODE} - 2) / 2)) bytes, sink $(((${#SINK_CODE} - 2) / 2)) bytes, router stand-in $(((${#ROUTER_CODE} - 2) / 2)) bytes"
 echo "adapter immutables: router $(cast call "$LOCAL_ADAPTER" "router()(address)" --rpc-url "$LOCAL_RPC"), remoteAdapter $(cast call "$LOCAL_ADAPTER" "remoteAdapter()(address)" --rpc-url "$LOCAL_RPC"), alphaVault $(cast call "$LOCAL_ADAPTER" "alphaVault()(address)" --rpc-url "$LOCAL_RPC")"
 kill "$ANVIL_PID" 2>/dev/null || true
 wait "$ANVIL_PID" 2>/dev/null || true
@@ -137,11 +171,6 @@ ANVIL_PID=""
 echo "anvil stopped"
 
 say "2. Live state for the overrides"
-# Addresses derived from a hash, so nothing on the live chain uses them. anvil's own deployment addresses
-# are not safe there: people use anvil's public keys on mainnets, and a balance already sitting at the
-# adapter's address would stand in for its reserve.
-ADAPTER="0x$(cast keccak "cascade simulate_inbound adapter" | cut -c27-66)"
-SINK="0x$(cast keccak "cascade simulate_inbound sink" | cut -c27-66)"
 for a in "$ADAPTER" "$SINK"; do
   [ "$(cast balance "$a" --block "$BLOCK" --rpc-url "$BITTENSOR_RPC")" = "0" ] || fail "$a holds native TAO on the live chain"
   [ "$(cast code "$a" --block "$BLOCK" --rpc-url "$BITTENSOR_RPC")" = "0x" ] || fail "$a has code on the live chain"
@@ -169,22 +198,9 @@ FUNDER="${FUNDER:-$(cast call "$BIT_ROUTER" "getWrappedNative()(address)" --bloc
 FUNDER_BAL="$(cast balance "$FUNDER" --block "$BLOCK" --rpc-url "$BITTENSOR_RPC")"
 echo "reserve $RESERVE wei through fundReserve(), sent by $FUNDER (holds $FUNDER_BAL wei)"
 less_than "$FUNDER_BAL" "$RESERVE" && fail "FUNDER holds less than RESERVE"
-# The Router stand-in, 110 bytes of EVM code (check it with `cast disassemble`):
-#   mstore(0, fundReserve selector); ok := call(gas, adapter, callvalue, 0, 4, 0, 0); if !ok goto fail
-#   calldatacopy(0, 0, calldatasize); ok := call(gas, adapter, 0, 0, calldatasize, 0, 0)
-#   returndatacopy(0, 0, returndatasize); if ok return(0, returndatasize) else revert(0, returndatasize)
-PUSH_ADAPTER="73$(printf '%s' "${ADAPTER#0x}" | tr 'A-F' 'a-f')"
-FUND_SEL="$(cast sig "fundReserve()")"
-STAND_IN="0x 63${FUND_SEL#0x} 60e0 1b 6000 52"                 # mstore(0, selector << 224)
-STAND_IN+="6000 6000 6004 6000 34 ${PUSH_ADAPTER} 5a f1"       # call fundReserve{value: callvalue}
-STAND_IN+="15 6058 57"                                         # if it failed, jump to fail
-STAND_IN+="36 6000 6000 37"                                    # calldatacopy(0, 0, calldatasize)
-STAND_IN+="6000 6000 36 6000 6000 ${PUSH_ADAPTER} 5a f1"       # call the adapter with that calldata
-STAND_IN+="6063 57"                                            # if it succeeded, jump to ok
-STAND_IN+="5b 3d 6000 6000 3e 3d 6000 fd"                      # fail (0x58): revert with the return data
-STAND_IN+="5b 3d 6000 6000 3e 3d 6000 f3"                      # ok (0x63): return the return data
-STAND_IN="${STAND_IN// /}"
-BATCH="$(cast abi-encode "f(uint8,uint64,(address,uint256)[],(address,uint256)[])" 1 1 "[($ALICE,$AMOUNT)]" "[]")"
+# The Router stand-in (test/fork/SimulationRouter.sol, its tests in test/adapters/SimulationRouter.t.sol): it
+# calls adapter.fundReserve{value: msg.value}(), forwards the calldata to the adapter (bubbling a revert), and then
+# reverts SimulationParked(parkedNative, parkedTokens, amount, parkedAt, converted) unless both totals are 0.
 PAYLOAD="$(cast abi-encode "f(address,address,bytes)" "$SINK" "$FRONT_DOOR" "$BATCH")"
 SENDER="$(cast abi-encode "f(address)" "$REMOTE_ADAPTER")"
 MESSAGE_ID="$(cast keccak "cascade simulate_inbound")"
@@ -192,7 +208,7 @@ echo "message: id $MESSAGE_ID, source $BASE_SELECTOR, sender abi.encode($REMOTE_
 echo "payload: abi.encode(sink $SINK, front door $FRONT_DOOR, BATCH(1, [($ALICE, $AMOUNT)], []))"
 # --override-state-diff patches one slot and keeps the token's other storage (its total supply, which the
 # burn needs); --override-state would replace the token's whole storage.
-OVERRIDES=(--override-code "$BIT_ROUTER:$STAND_IN,$ADAPTER:$CODE,$SINK:$SINK_CODE"
+OVERRIDES=(--override-code "$BIT_ROUTER:$ROUTER_CODE,$ADAPTER:$CODE,$SINK:$SINK_CODE"
   --override-state-diff "$BIT_TAO:$SLOT:$AMOUNT" --block "$BLOCK" --rpc-url "$BITTENSOR_RPC")
 # Pre-flight, with the same overrides: an empty account returns no data, so cast fails and the check fails.
 lower() { tr 'A-F' 'a-f'; }
@@ -203,6 +219,10 @@ echo "pre-flight: adapter.alphaVault() at $ADAPTER = $GOT_VAULT"
 GOT_REVERTING="$(cast call "$SINK" "reverting()(bool)" "${OVERRIDES[@]}" 2>&1 || true)"
 echo "pre-flight: sink.reverting() at $SINK = $GOT_REVERTING"
 [ "$GOT_REVERTING" = "false" ] || fail "the node did not apply the sink's code override (reverting() did not return false)"
+GOT_TARGET="$(cast call "$BIT_ROUTER" "adapter()(address)" "${OVERRIDES[@]}" 2>&1 || true)"
+echo "pre-flight: router stand-in adapter() at $BIT_ROUTER = $GOT_TARGET"
+[ "$(printf '%s' "$GOT_TARGET" | lower)" = "$(printf '%s' "$ADAPTER" | lower)" ] ||
+  fail "the node did not apply the Router stand-in's code override (adapter() did not return $ADAPTER)"
 set +e
 OUT="$(cast call --from "$FUNDER" --value "$RESERVE" "$BIT_ROUTER" \
   "ccipReceive((bytes32,uint64,bytes,bytes,(address,uint256)[]))" \
@@ -213,22 +233,48 @@ set -e
 echo "result: $OUT"
 
 say "4. Verdict"
+# Only a call that returned is OK, and the stand-in returns only when nothing parked: the sink got AMOUNT.
 if [ "$STATUS" -eq 0 ]; then
-  echo "SIMULATION OK: real AlphaVault.withdrawLiquid ran through the real staking precompile and the sink received $AMOUNT wei"
+  echo "SIMULATION OK: real AlphaVault.withdrawLiquid ran through the real staking precompile and the sink received $AMOUNT wei (nothing parked)"
   exit 0
 fi
-# Name the revert: the adapter's own errors, the sink's, ForeverMoney's (docs/forevermoney-probe.md), OZ ERC-20's.
-DATA="$(printf '%s' "$OUT" | grep -o '0x[0-9a-fA-F]\{8,\}' | tail -n 1 || true)"
-if [ -n "$DATA" ]; then
-  for sig in "NotRouter()" "WrongSource()" "WrongSender()" "WrongToken()" "TooManyTokens()" "NotRaoAligned()" \
-    "BelowConversionFloor(uint256,uint256)" "ConversionShort()" "UnexpectedValue()" "SafeERC20FailedOperation(address)" \
-    "ValueMismatch()" "Reverting()" \
-    "IsHalted()" "ZeroAmount()" "NotWholeRao()" "InsufficientBalance(uint256,uint256)" "Insolvent()" "Slippage()" \
-    "NativeTransferFailed()" "ERC20InsufficientBalance(address,uint256,uint256)"; do
-    if [ "$(cast sig "$sig")" = "${DATA:0:10}" ]; then
-      echo "revert: $sig $(cast decode-error --sig "$sig" "$DATA" 2>/dev/null | tr '\n' ' ')"
-      break
+# Name a revert: the adapter's own errors, the sink's, ForeverMoney's (docs/forevermoney-probe.md), OZ ERC-20's.
+SIGS=("NotRouter()" "WrongSource()" "WrongSender()" "WrongToken()" "TooManyTokens()" "NotRaoAligned()"
+  "AmountMismatch()" "AlreadyParked()" "ReserveShort()" "OnlySelf()" "ReentrancyGuardReentrantCall()"
+  "BelowConversionFloor(uint256,uint256)" "ConversionShort()" "UnexpectedValue()" "SafeERC20FailedOperation(address)"
+  "ValueMismatch()" "Reverting()"
+  "IsHalted()" "ZeroAmount()" "NotWholeRao()" "InsufficientBalance(uint256,uint256)" "Insolvent()" "Slippage()"
+  "NativeTransferFailed()" "ERC20InsufficientBalance(address,uint256,uint256)")
+name_revert() {
+  local data="$1" sig
+  for sig in "${SIGS[@]}"; do
+    if [ "$(cast sig "$sig")" = "${data:0:10}" ]; then
+      echo "revert: $sig $(cast decode-error --sig "$sig" "$data" 2>/dev/null | tr '\n' ' ')"
+      return
     fi
   done
+}
+DATA="$(printf '%s' "$OUT" | grep -o '0x[0-9a-fA-F]\{8,\}' | tail -n 1 || true)"
+PARKED_SIG="SimulationParked(uint256,uint256,uint256,uint256,bool)"
+if [ -n "$DATA" ] && [ "$(cast sig "$PARKED_SIG")" = "${DATA:0:10}" ]; then
+  # ccipReceive returned, but the adapter parked the batch instead of delivering it: a failure.
+  read -r P_NATIVE P_TOKENS P_AMOUNT P_AT P_CONVERTED <<<"$(cast decode-error --sig "$PARKED_SIG" "$DATA" | first_word | tr '\n' ' ')"
+  echo "parked: parkedNative $P_NATIVE, parkedTokens $P_TOKENS; parked($KEY) = (amount $P_AMOUNT, parkedAt $P_AT, converted $P_CONVERTED)"
+  if [ "$P_CONVERTED" = "true" ]; then
+    echo "a native park: the conversion succeeded and the sink refused the TAO (or ran out of gas)"
+    fail "the delivery PARKED as native TAO instead of reaching the sink (parkedNative $P_NATIVE wei)"
+  fi
+  echo "a token park: the conversion failed (the real withdrawLiquid, the staking floor read or the adapter's balance check)"
+  # ForeverMoney's own answer: withdrawLiquid alone, from the adapter (which holds the tokens by the override), with
+  # no minimum out; it shows their revert, or what it pays against AMOUNT.
+  set +e
+  DIAG="$(cast call --from "$ADAPTER" "$ALPHA_VAULT" "withdrawLiquid(address,uint256,uint256)(uint256)" \
+    "$BIT_TAO" "$AMOUNT" 0 "${OVERRIDES[@]}" 2>&1)"
+  set -e
+  echo "withdrawLiquid($BIT_TAO, $AMOUNT, 0) from the adapter alone: $DIAG"
+  DIAG_DATA="$(printf '%s' "$DIAG" | grep -o '0x[0-9a-fA-F]\{8,\}' | tail -n 1 || true)"
+  if [ -n "$DIAG_DATA" ]; then name_revert "$DIAG_DATA"; fi
+  fail "the delivery PARKED as tokens instead of reaching the sink: the conversion failed (parkedTokens $P_TOKENS wei)"
 fi
+if [ -n "$DATA" ]; then name_revert "$DATA"; fi
 fail "ccipReceive reverted (see the result above)"

@@ -34,6 +34,13 @@ export const RULES = {
   "ccip.failure": critical("condition"),
   "ccip.unexpected_source": critical("event", true),
   "deposits.bounced": critical("event"),
+  // v3.2: the vault below half its launch price (totalAssets × 2,000,000 < totalSupply, its own line): it refuses every
+  // deposit, a standing state price.drop's fall between readings misses on a slow slide
+  "vault.deposits_refused": critical("condition"),
+  // R11 (ChatGPT r3, claim 1; src/rules/vault.ts): the vault lens's read of the unlisted stake reverts on two readings: the
+  // precompile read the write-off's bound makes fails (a runtime change?), and the vault takes a failed read as 0, so a
+  // write-off would run unbounded
+  "stake.writeoff_bound_off": critical("condition"),
   "fmtao.unbacked": critical("condition"),
   "fmtao.depeg": critical("condition"),
   "bridge.batch_mismatch": critical("event", true),
@@ -71,10 +78,86 @@ export const RULES = {
   "fmtao.registry_admin": critical("condition"),
   "validator.take_high": critical("condition"),
   "validator.root_uid_lost": critical("condition"),
-  "root.unlock_interval": critical("condition"),
+  // RootStakeUnlockInterval set (today's root.unlock_interval, renamed on every deployment: plan Task 57)
+  "root.hold_interval": critical("condition"),
   // the TWAP oracle's usdcValue reverts: deliveries to USDC stop (claims still work)
   "oracle.reverted": critical("condition"),
+  // v3.2 (src/rules/admin.ts): every scheduled, executed and cancelled owner change, at once, on both chains (the
+  // single-key mitigation); a pending item that would now loosen a limit at execute (a direct tightening since it was
+  // scheduled); the stake hotkey switched at once, with no scheduled item
+  "admin.scheduled": critical("event"),
+  "admin.executed": critical("event"),
+  "admin.cancelled": critical("event"),
+  "admin.item_loosens": critical("event"),
+  "admin.hotkey_switched": critical("event"),
+  // v3.2: either chain's exits machine not OPEN, or the launch chain with no active front door
+  "admin.exits_state": critical("condition"),
+  // v3.2 (src/rules/rails.ts, Task 57c): the two chains disagree on the bridge while both may read OPEN: the front
+  // door's primary's Bittensor half not enabled on the vault, or the vault's primary's Base half unknown to the front
+  // door, so every batch (or payout) is refused at one end; or a primary disabled on a chain whose exits read OPEN (or
+  // the vault's, closed or not, while the front door still sends through it). Holds: the keeper's closes would park
+  // batches for 14 days
+  "rails.incoherent": critical("condition", true),
+  // v3.2: an ownership transfer has run; the new owner can accept until pendingSince + 7 days
+  "admin.owner_pending": critical("condition"),
+  // v3.2: stake missing, the hotkey set full, and only the owner can free a slot for the swap's new hotkey
+  "stake.set_full": critical("condition"),
+  // v3.2: more items scheduled than the record tracks (each still emailed; those past it aren't judged or shown)
+  "admin.record_full": critical("condition"),
+  // v3.2 (src/rules/vault.ts): the stake guard holds (the vault's booked stake isn't on its hotkeys: a swap), naming the
+  // hotkey whose stake fell; v3.2's stake.divergence. Never a hold: the vault mints nothing meanwhile
+  "stake.missing": critical("condition"),
+  // v3.2 (src/rules/bridge.ts): a front-door batch parked in a Bittensor adapter for an hour (or the adapter's totals
+  // owing more than the parks seen); a token park while ForeverMoney's migration notice runs
+  "bridge.parked": critical("condition"),
+  "bridge.parked_tokens_during_migration": critical("condition"),
+  // R4 (src/rules/r4.ts): the stamp bot quiet past THRESHOLDS stampQuietS (off at 0; D-L3); every deposit refused by an
+  // open batch with less room than one deposit that can't close (A-L1); Bittensor's minimum stake at 80% of the redeem
+  // floor; payouts the vault's primary bridge can't send (S-H1: its canSendPayouts() false); a bounce-only payout queue
+  // on a door or bridge that is going (S-L4)
+  "admin.stamp_quiet": critical("condition"),
+  "batch.deposits_blocked": critical("condition"),
+  "stake.min_at_floor": critical("condition"),
+  "rail.payouts_closed": critical("condition"),
+  // R4 (the stuck review's S-H1 monitor rule): a front-door Redeemed stored after the monitor saw the vault's primary
+  // bridge closed: the vault should have deferred it (its guard failed open). rail.payouts_closed covers the queued
+  // batch itself; critical, so no hold mutes either
+  "payout.no_rail": critical("event"),
+  "payout.bounces_stranded": critical("condition"),
   "fmtao.role_change": warning("event"),
+  // v3.2: a scheduled item that can no longer run (its window passed, a closure or stamp killed it, it reverts at
+  // execute, or it was pruned)
+  "admin.lapsed": warning("event"),
+  // v3.2: the vault adopted a surplus of stake into the price (adoptStake: the keeper's, at most daily)
+  "vault.stake_adopted": warning("event"),
+  // v3.2: an owner that isn't a 2-of-3 Safe while Cascade is past the founder level (the stage above early, or a cap)
+  "admin.owner_kind": warning("condition"),
+  // v3.2: a surplus of stake (at least the chain's minimum) not adopted into the price for more than a day
+  "stake.surplus_unadopted": warning("condition"),
+  // v3.2: the unstake walk skipped one hotkey repeatedly (a root hold on the pair, or its gas share burned), not once
+  "stake.unstake_skipped": warning("condition"),
+  // v3.2: the chain's minimum stake rose: a smaller position can't be unstaked, nor a swapped one listed by a stranger
+  "stake.min_raised": warning("event"),
+  // v3.2: the chain kept part of a root unstake (PayoutChunkSent.unstakeCost or ShortfallAbsorbed above 0): a removal
+  // fee, which the leaver pays (Task 36b)
+  "stake.removal_fee": warning("event"),
+  // R4 (the vault-favour review's Low 1): the chain kept part of a stake add (Staked's measured short of its rao by more
+  // than 1 rao): stakeIdle books the measured, so every holder bears it
+  "stake.add_fee": warning("event"),
+  // v3.2: a stake or USDC delivery settled more than swapBelowOracleBps below the oracle's price (or a delivery below the
+  // pools' price before it)
+  "swap.below_oracle": warning("event"),
+  // v3.2: a queued payout entry bigger than the primary bridge carries in one message (its chunk can't be sent)
+  "payout.entry_above_cap": warning("condition"),
+  // v3.2: an adapter's native reserve or token cushion below its target (above what it owes its parks)
+  "bridge.cushion_low": warning("condition"),
+  // v3.2: a park refunded to its door on Base, or an empty one dropped
+  "bridge.refunded": warning("event"),
+  "bridge.dropped": warning("event"),
+  // v3.2: a Bittensor adapter that is no longer the vault's primary bridge still holds parks: the pair can't retire
+  "bridge.retire_blocked": warning("condition"),
+  // v3.2: a stranger's batch parked (not the front door's, or not to the vault: R3 A-L2), never critical
+  "bridge.parked_stranger": warning("event"),
   // 100 TAO or more of wTAO outside the lock pool for an hour: anyone can mint and keep wTAO, so a warning (more than
   // 5% of its supply for an hour is fmtao.backing_true's critical lock side)
   "fmtao.lock_outside": warning("condition"),
@@ -85,7 +168,15 @@ export const RULES = {
   "validator.root_stake_drop": warning("condition"),
   "ccip.rate_limited": warning("condition"),
   "oracle.cardinality": warning("condition"),
+  // v3.2: a pool the oracle reads thinner than the front door's floor (deliveries refused ThinPool; claims work), and
+  // held so for hours (R3 C-L1: the keeper's deliveries skipped round after round)
+  "oracle.thin_pool": warning("condition"),
+  "oracle.thin_pool_repeated": warning("condition"),
+  // v3.2: a root hold stamp on one of the pairs the deployment depends on; unjudged until Task 62 confirms its storage key
+  "root.pair_stamped": warning("event"),
   "payout.fee_ceiling": warning("condition"),
+  // R12a: a full redeem list's fees cover a full batch's close quote less than 1.5 times (fake requests' margin)
+  "batch.redeem_fee_thin": warning("condition"),
   // 6.3 warning
   "ccip.undelivered": warning("condition"),
   "ccip.foreign_send": warning("event"),
@@ -109,7 +200,26 @@ export const RULES = {
   "pool.liquidity": warning("condition"),
   "batch.one_wallet": warning("condition"),
   "cap.nearly_full": warning("condition"),
+  // R4 (src/rules/r4.ts): the deposit cap counting TAO direct exits took out (A-L2); Bittensor's minimum stake at half
+  // the redeem floor
+  "cap.exits_consumed": warning("condition"),
+  "stake.min_near_floor": warning("condition"),
+  // R6 (ChatGPT R2 claim E; src/rules/vault.ts): stake missing above dust but inside the vault's tolerance (stakeMissing()
+  // false): mints still run, at a price that leaves the gap out, so the minters gain from the holders once it is listed
+  "stake.missing_small": warning("condition"),
+  // R6 (ChatGPT R2 claim C; src/rules/vault.ts): the write-off's check of the unlisted stake, one precompile read the vault
+  // caps at 45,000,000 gas, costs more than THRESHOLDS writeOffReadGasWarn (positions anyone can add on the coldkey)
+  "stake.writeoff_read_gas": warning("condition"),
+  // R6 (Fable's full review, L-2; src/rules/r4.ts): the open batch's deposit list full of deposits near the minimum on two
+  // readings: every other deposit refused until it closes, and the slots free to hold (deposits are cancellable)
+  "batch.deposits_full": warning("condition"),
+  // R8 (the contracts review's L-1; src/rules/r4.ts): one address cancelling deposits in the open batch, half its value
+  // limit together or three times: a holder keeping it full between the keeper's once-a-minute rounds
+  "batch.cancel_churn": warning("condition"),
   "unstakes.tiny_wave": warning("condition"),
+  // R4 (B-H1's monitor rule): a holder's deposit and unstake under one key, or within the hold's day (a deferral) or two
+  // (a burn): the spec's residual, crowding the first-come allowance with a day's exposure; never a hold
+  "unstakes.wash": warning("event"),
   "outflow.near_limit": warning("condition"),
   "rewards.uncollected": warning("condition"),
   "validator.not_earning": warning("condition"),
@@ -123,7 +233,7 @@ export const RULES = {
   "indexer.unverified": warning("condition"),
   // the owner moved stake onto the stake hotkey (moveStake, removeHotkey): an owner action, every one reported
   "vault.stake_moved": warning("event"),
-  // depositDirect, redeemDirect or allowFrontDoorRedeems: the launch offers none of them
+  // depositDirect, redeemDirect or allowFrontDoorRedeems (v3.2: setRedeemOrigin, ruling A3): the launch offers none of them
   "vault.direct_use": warning("event"),
   "indexer.lag": warning("condition"),
   "bridge.check_stuck": warning("condition"),

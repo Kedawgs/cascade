@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -34,6 +34,7 @@ contract MockRouter is IRouterClient {
     error UnsupportedFeeToken();
     error DeliveryFailed(bytes reason);
     error OnlySelf();
+    error AlreadyExecuted(bytes32 messageId);
 
     /// The 4-byte tag of the 19-byte V3 extra args.
     bytes4 private constant V3_TAG = 0xa69dd4aa;
@@ -44,6 +45,12 @@ contract MockRouter is IRouterClient {
     MockTAO public immutable token;
 
     uint256 public fee;
+    /// Opt-in (the adapter and exits campaigns): a message that was executed successfully is not executed again, as
+    /// CCIP's OffRamp never does (only a FAILURE is re-executed); `deliver` then calls nothing and returns false with
+    /// AlreadyExecuted. Off by default, so a test may still replay a delivery (AdaptersEndToEnd's
+    /// test_redeliveryAfterSuccessParksAsDuplicate).
+    bool public exactlyOnce;
+    mapping(bytes32 messageId => bool) public executed;
     uint256 public maxGas = 7_000_000;
     uint256 public maxDataBytes = 32_000;
 
@@ -51,6 +58,10 @@ contract MockRouter is IRouterClient {
 
     constructor(MockTAO token_) {
         token = token_;
+    }
+
+    function setExactlyOnce(bool on) external {
+        exactlyOnce = on;
     }
 
     function setFee(uint256 fee_) external {
@@ -132,11 +143,16 @@ contract MockRouter is IRouterClient {
         external
         returns (bool called, bool ok, bytes memory reason)
     {
+        if (exactlyOnce && executed[m.messageId]) {
+            return (false, false, abi.encodeWithSelector(AlreadyExecuted.selector, m.messageId));
+        }
         if (receiver.code.length == 0 || !_supportsReceiver(receiver)) {
             _mintTo(receiver, m);
+            executed[m.messageId] = true;
             return (false, true, "");
         }
         try this.deliverAtomic(receiver, m, gas) {
+            executed[m.messageId] = true;
             return (true, true, "");
         } catch (bytes memory err) {
             return (true, false, err);

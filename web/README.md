@@ -136,7 +136,9 @@ for display only (`units.ts`).
   indexer's origin (`indexer/`, an https origin and nothing more). The `/security/` page reads all its
   numbers from it (`GET /v1/flow`), so a build without it ships a page that can never check; the
   monitor's approved CSP (`site:approved`) must come from a build that names it (an indexer node test
-  checks every approved page's `connect-src` names it). Activity works without it, as below.
+  checks every approved page's `connect-src` names it). Activity works without it, as below. **A v3.2
+  build fails without it** (`config.ts`, `readDeployment`): v3.2's outside-price veto reads `/v1/price`
+  there before every stake and USDC unstake and refuses them without it (below).
 - **A first visit's history from the indexer:** with `NEXT_PUBLIC_CASCADE_INDEXER_URL` set (unset,
   nothing below happens), a scan more than a day behind the chain asks the indexer for its two seed pages
   (`indexer.ts`: the deployment's deliveries, stakes and payout chunks, and the account's own deposits
@@ -170,7 +172,8 @@ for display only (`units.ts`).
   the scan over without blame. Any failure, refusal (a 429 included), timeout or stale seed falls back
   to today's full scan with a line in the console. With no indexer named, saved history loads and shows
   exactly as before. Balances, prices, limits, quotes and anything a wallet signs never come from the
-  indexer.
+  indexer. (v3.2's outside-price veto reads its reference price there, and may only refuse a trade with
+  it: nothing sent is priced from it.)
 - **Prices and fees:** TAO from Uniswap's quoter (what selling 0.01 TAO pays), swap fees from the
   route's pool fees, the bridge fee from the Bittensor adapter's own `quoteFee`.
 - **Nothing is sent on one source's word.** Every figure above comes from `https://mainnet.base.org`,
@@ -186,6 +189,74 @@ for display only (`units.ts`).
   isn't made, and **Claim as TAO instead** is offered; a claim kept as TAO never waits on any price
   check (`flows.ts`, `saleFloor`). These second-RPC reads go over their own connection with a 3-second
   timeout and one retry (`chain.ts`, `baseCheck`), so a server that hangs can't hold a wallet prompt.
+- **v3.2: the Base pools against the wider market (`price-veto.ts`), a veto only.** A pool held off its
+  price for the TWAP's whole 30 minutes drags the oracle, and every floor cut from it, along with it, so
+  before a stake and before an unstake asking for USDC the site also compares the pools with an outside
+  price: the indexer's `GET /v1/price` (the median of CoinGecko and Coinbase it reads every fifth
+  minute; no other host, so the policy gains nothing). The pools' price is a fixed small quote along the
+  trade's route on the second Base RPC ($100 of USDC for a stake, 0.5 TAO for an unstake), never the
+  user's own amount. A stake is refused when TAO costs more than 3% over the market on Base
+  (`OUTSIDE_PRICE_BPS`), an unstake when it sells for more than 3% under it; the other way is the user's
+  gain. It fails closed: a reading that is unavailable, missing (`at` null), not exactly a v1 reading,
+  any answer but 200, or older than 12 minutes sends nothing ("Can't check the price right now. Try
+  again shortly."); one answering source counts. The age is judged by the later of the two Base RPCs'
+  latest blocks, so a lagging server can't make a reading look younger, and never by the device's clock:
+  when neither RPC gives its block, nothing is sent. The whole check gives up, refusing, after 15
+  seconds (`CHECK_DEADLINE_MS`). It can only refuse: it gives nothing
+  back, so every amount, minimum and floor sent is what it would be without it, and the contracts'
+  floors stay the binding limits. A refused stake stops before the wallet is asked anything (its record
+  waits for **Continue**, which checks again); a refused unstake is refused before it is recorded. The
+  ways out (claim, cancel, swapping wallet TAO) never wait on it, and v3-launch's flows don't have it.
+- **v3.2: price impact on every quote (`impact.ts`).** Each stake and USDC unstake quote is read beside
+  the veto's small trade along the same route, and its impact is that trade's rate against the quote's
+  (the user's own size, not the market's offset, which is the veto's). The quote shows it ("Price
+  impact"); from 1% the form says "This trade moves the price by {p}%."; above 3% (`IMPACT_CAP_BPS`,
+  the site's own cap, inside the staker's 5% floor on chain) it refuses: "This trade would move the
+  price by more than 3%. Try a smaller amount." A small trade that reads nothing leaves the impact
+  unmeasured, and that is refused too ("Can't check this trade's price impact right now. Try again
+  shortly."). The flows check again before anything is recorded (and a stake carried on, on its fresh
+  quote). It refuses or allows; it changes nothing that is sent.
+- **v3.2: the live USDC delivery limit, and Receive TAO (`delivery-limit.ts`).** The front door's
+  `deliver` sells everything credited to the user in one sale, and only when it clears every floor:
+  each pool's mean depth (`minPoolLiquidity`, `ThinPool`), the user's minimum, the TWAP less
+  `maxDeliverySlippageBps`; and the keeper sends only with its 0.5% of room over them
+  (`KEEPER_ROOM_BPS`, held to `ops/src/keeper/delivery.ts` by a test), quoting the sale along the
+  staker's live delivery route (`routes[deliveryRouteId]`; one that is off, or not Uniswap v3, delivers
+  nothing). The unstake form reads those floors and the route from the contracts, all at one block, and
+  searches the pools for the largest sale that clears right now, up to all the account's TAO: the whole
+  first (most accounts clear it, one read), then up to three multicalls of at most sixteen sizes, within
+  1/256 of the limit and never above it. A size the contracts refuse (a revert) doesn't clear; any other
+  failed read makes the limit unreadable. It shows "Right now up to {X} USDC can be delivered. Above
+  that, receive TAO and claim it on Base." while that binds, and refuses a USDC unstake above it, with no
+  delivery to be had, or when the limit can't be read (fail closed, a failed refetch included). At the
+  click the request's own sale is checked again, fresh, at the minimum it sends (the larger of its own
+  floor and the market's), searching for the figure only when it is refused.
+  **The latest request decides for all of the account's waiting TAO**: the front door keeps one delivery
+  preference per account. So before the USDC button the form says "This also sells the {w} TAO of yours
+  on its way back to Base or waiting there." whenever there is any, from the chains, wherever it was
+  asked: what is credited on Base, the account's request in the open batch, and its payouts on their way
+  back, from the chains' events with the user indexed: its entries in a batch's payout (the vault's
+  `Redeemed`, and its `DepositBounced` less one left with nothing, `PayoutDust`), in the account's scan,
+  until Base's `PayoutReceived` for the batch and the account shows each landed; Base's
+  `RedeemRequested` and `DepositRequested`, less their cancels, in the batches crossing to Bittensor, read
+  back to where the first of them opened (the close before it, or its last roll), each batch's crossing
+  then read: on the bridge its request counts, refunded its deposit counts until the refund lands. While
+  not all of that is read or settled (the indexer's blocks the browser hasn't read itself, a search of
+  Base's logs cut short and read on at the next refresh, the first batch crossing before any delivery, a
+  batch of the account's parked or not told yet, any park holding deposits, a refund on its way that
+  can't be told whose, any batch below the newest delivered one that the vault never took and that isn't
+  read settled (dropped, or refunded with the refund's message run on Base), or the read loading), it says "A USDC unstake also sells any of your TAO on its
+  way back to Base or waiting there." instead; a read that fails refuses USDC as unreadable. **Receive TAO** is always offered beside it: `requestRedeemWithDelivery` with a zero floor,
+  which clears the account's delivery preference, so the payout comes back to Base as TAO to claim and
+  nothing is sold ("…A later USDC unstake would sell it too."); when the chain holds a preference
+  (`deliveryOf`), or that isn't read yet or can't be, it adds that it turns off automatic USDC delivery
+  for the account's other unstakes. No price check holds it: not the veto, not the indexer, not the impact cap
+  or the limit, not even a USD price (without one, the amount is typed in TAO); only what holds any
+  request (an amount, a flow running, a hold, the contracts' mismatch, too little ETH for the request
+  fee). Every refusal of a USDC unstake (the veto's included) says "You can receive TAO instead." A
+  Receive TAO record that a later USDC unstake's delivery sold shows as sold, and Claim as TAO leads
+  its claim buttons. The limit and the cap refuse or allow; they never change an amount, a minimum or a
+  call.
 
 ## How it sends transactions
 
@@ -221,7 +292,7 @@ until the next approval replaces it.
   claim banner and the receipt's **Claim as USDC** appear only when automatic delivery can't happen
   (price below the floor, deadline passed) or more than an hour has passed since the TAO landed on
   Base ("It's taking longer than usual").
-- **Cancel:** `cancelDeposit` / `cancelRedeem` while the batch is still open.
+- **Cancel:** `cancelDeposit` / `cancelRedeem` while the batch is still open; on v3.2 a deposit's cancel works 5 minutes after the last deposit to the entry (`cancelableAt`, R11: the receipt counts it down, and the click reads `depositOf` first, then the cooldown, then runs the call).
 - **Stake (v2):** approve exactly the swap's most USDC to Uniswap's SwapRouter02 if needed (what it
   doesn't spend, up to the 0.5% margin, stays approved to the router), `exactOutput` along
   TAO←WETH←USDC for exactly the deposit's TAO (0.5% slippage), approve that TAO to the front door,

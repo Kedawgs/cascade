@@ -1,10 +1,12 @@
 import { type Address, getContractAddress, type Hex, hexToBigInt, hexToNumber, parseAbi } from "viem";
+import { assertCheckoutIs } from "./builds.ts";
 import { type Cadence, type ChainName, PRECOMPILE, type VaultLimits, WALLET } from "./config.ts";
 import {
   buildOf,
   buildPlan,
   buildPlanV3,
   CONTRACTS_BUILD,
+  type ContractsBuild,
   cadenceOf,
   isPlanV3,
   type Plan,
@@ -19,8 +21,9 @@ import { archiveRecord, type DeploymentRecord, type DoneStep, loadRecordFor, sav
 import type { VerifyAllow } from "./registry.ts";
 import { type Roles, rolesDiffer } from "./roles.ts";
 import { balanceOf, codeAt, firstBlockWithCode, nonceOf, read } from "./rpc.ts";
-import { type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
+import { bin, type Ctx, chainLabel, ReceiptTimeout, type Sent, sendCall, sendCreate } from "./send.ts";
 import type { CallRequest, CreateRequest, PlannedStep, StepId } from "./types.ts";
+import { isPlanV32 } from "./v32/plan.ts";
 import { refuseV2Verify, verifyAndSave } from "./verify.ts";
 
 export interface DeployDeps {
@@ -30,6 +33,8 @@ export interface DeployDeps {
   readColdkey(ctx: Ctx, vault: Address): Promise<Hex>;
   /** The block a contract was created in, from its code */
   deployBlock(ctx: Ctx, chain: ChainName, address: Address): Promise<number>;
+  /** Throws unless this checkout is `build`: a create sends this checkout's code. */
+  checkCheckout(ctx: Ctx, build: ContractsBuild): Promise<void>;
 }
 
 const VIEWS = parseAbi([
@@ -169,12 +174,26 @@ export const readColdkey = async (ctx: Ctx, vault: Address): Promise<Hex> =>
     args: [vault],
   })) as Hex;
 
+/** The real checkout check. `forge create` compiles the checkout's sources before it sends, so the
+ * check builds them first (`forge build` in contracts/, as forge create would) and only then compares
+ * the fresh contracts/out with `build`: a stale contracts/out (sources changed since the last build)
+ * cannot pass for the build it no longer is. A checkout that does not build is refused too. */
+export async function checkCheckout(ctx: Ctx, build: ContractsBuild): Promise<void> {
+  const out = await ctx.runner.run(bin(ctx, "forge"), ["build"], { cwd: ctx.paths.contractsDir });
+  if (out.code !== 0) {
+    const why = (out.stderr.trim() || out.stdout.trim()).split("\n")[0] || `exit ${out.code}`;
+    throw new Error(`could not build this checkout's contracts (forge build: ${why}); a create sends what the checkout builds, so nothing sent`);
+  }
+  assertCheckoutIs(ctx.paths.contractsDir, build);
+}
+
 const realDeps: DeployDeps = {
   sendCreate,
   sendCall,
   effectPresent,
   readColdkey,
   deployBlock: (ctx, chain, address) => firstBlockWithCode(ctx.rpc, chain, address),
+  checkCheckout,
 };
 
 /** The Bittensor adapter, whose block every Bittensor log scan starts from (startBlock): the one create
@@ -316,12 +335,25 @@ function checkResumedRoles(path: string, plan: Plan | PlanV3, opts: DeployOpts):
 const formatRoles = (r: Roles) =>
   `owner ${r.owner.base} on Base and ${r.owner.bittensor} on Bittensor; guardian ${r.guardian.base} on Base and ${r.guardian.bittensor} on Bittensor; keeper ${r.keeper}; treasury ${r.treasury}`;
 
+/** A v3.2 record is deploy --v32's (v32/deploy.ts), never this v3-launch path's. */
+export const refuseV32Record = (path: string, rec: DeploymentRecord | null): void => {
+  if (rec && isPlanV32(rec.plan)) throw new Error(`${path} holds a v3.2 plan: deploy it with deploy --v32; nothing sent`);
+};
+
 export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: DeployDeps = realDeps) {
   const v3 = opts.v3 ?? false;
   let rec = loadRecordFor(path, ctx.live);
+  refuseV32Record(path, rec);
   if (rec && isPlanV3(rec.plan) !== v3) {
     const [has, wants] = v3 ? ["v2", "v3"] : ["v3", "v2"];
     throw new Error(`${path} holds a ${has} plan, not ${wants}: check OPS_DEPLOYMENT (a deployment named v3-… is v3); nothing sent`);
+  }
+  // a create sends this checkout's code (forge create builds contracts/), so a v3 plan with creates to
+  // send (a new one, or one resumed before its last create) must be deployed from a checkout of its
+  // build: refused before anything is read, archived or sent (an a2b4412 plan is refused below)
+  const createsLeft = (r: DeploymentRecord) => r.plan.steps.some((s) => s.kind === "create" && !r.done[s.id]);
+  if (v3 && (!rec || opts.newPlan || (isPlanV3(rec.plan) && buildOf(rec.plan) === CONTRACTS_BUILD && createsLeft(rec)))) {
+    await deps.checkCheckout(ctx, CONTRACTS_BUILD);
   }
   // a new launch plan's roles, refused before anything else is read or the old plan archived: no plan
   // without every role in place
@@ -428,6 +460,7 @@ export async function deploy(ctx: Ctx, path: string, opts: DeployOpts, deps: Dep
  * read-back and save a failed code comparison into it. A record of the other kind of run is refused. */
 export async function deployAndVerify(ctx: Ctx, path: string, opts: DeployOpts & { v3: boolean; allow?: VerifyAllow }, deps: DeployDeps = realDeps) {
   const existing = loadRecordFor(path, ctx.live);
+  refuseV32Record(path, existing);
   if (!opts.v3 && (opts.newPlan || !existing)) {
     throw new Error("a new deployment uses the v3 contracts: set OPS_DEPLOYMENT=v3-test (the v2 record is left as it is); nothing sent");
   }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseArgs, UsageError } from "../src/args.ts";
+import { encodeSs58 } from "../src/ss58.ts";
 import { gasPriceCapFor, WALLET } from "../src/config.ts";
 import { deployAndVerify } from "../src/deploy.ts";
 import { buildPlan } from "../src/plan.ts";
@@ -65,6 +66,16 @@ describe("cli arguments", () => {
     expect(parseArgs(["cardinality"])).toEqual({ cmd: "cardinality", live: false, users: [] });
   });
 
+  it("parses pool-floors (Task 61 step 4: reads Base's archive, takes nothing) and rehearse --v32", () => {
+    expect(parseArgs(["pool-floors"])).toEqual({ cmd: "pool-floors", live: false, users: [] });
+    expect(() => parseArgs(["pool-floors", "--v32"])).toThrow(UsageError);
+    expect(parseArgs(["rehearse", "--v32"])).toEqual({ cmd: "rehearse", live: false, users: [], v32: true });
+    expect(parseArgs(["rehearse", "--v32", "--no-build"])).toEqual({ cmd: "rehearse", live: false, users: [], v32: true, noBuild: true });
+    expect(() => parseArgs(["rehearse", "--no-build"])).toThrow(/--no-build goes with rehearse --v32/);
+    expect(() => parseArgs(["rehearse", "--v32", "--live"])).toThrow(/rehearse runs on local forks only/);
+    expect(() => parseArgs(["deploy", "--no-build"])).toThrow(UsageError);
+  });
+
   it("parses rewards, claim and deliver", () => {
     expect(parseArgs(["rewards"])).toEqual({ cmd: "rewards", live: false, users: [] });
     expect(parseArgs(["rewards", "--live"])).toEqual({ cmd: "rewards", live: true, users: [] });
@@ -74,6 +85,79 @@ describe("cli arguments", () => {
     // deliver sends a transaction naming the user: a mistyped address is refused here
     expect(() => parseArgs(["deliver", "--user", "0x1"])).toThrow(UsageError);
     expect(() => parseArgs(["claim", "--new-plan"])).toThrow(UsageError);
+  });
+
+  it("Task 53's one-shots: claim, adopt, add-hotkey, remove-hotkey and park check first and send only with --send; a hotkey as hex or SS58", () => {
+    const HK = `0x${"5e".repeat(32)}` as const;
+    expect(parseArgs(["claim", HK, "--live", "--send"])).toEqual({ cmd: "claim", live: true, users: [], hotkey: HK, send: true });
+    expect(parseArgs(["claim", "--live"])).toEqual({ cmd: "claim", live: true, users: [] });
+    expect(parseArgs(["adopt", "--live"])).toEqual({ cmd: "adopt", live: true, users: [] });
+    expect(parseArgs(["adopt", "--send"])).toEqual({ cmd: "adopt", live: false, users: [], send: true });
+    expect(parseArgs(["add-hotkey", HK, "--live"])).toEqual({ cmd: "add-hotkey", live: true, users: [], hotkey: HK });
+    // taostats shows a hotkey's SS58 address: taken as its 32 bytes
+    expect(parseArgs(["add-hotkey", encodeSs58(HK), "--live", "--send"])).toEqual({ cmd: "add-hotkey", live: true, users: [], hotkey: HK, send: true });
+    expect(parseArgs(["remove-hotkey", HK, "--live", "--send"])).toEqual({ cmd: "remove-hotkey", live: true, users: [], hotkey: HK, send: true });
+    expect(parseArgs(["park", "--live"])).toEqual({ cmd: "park", live: true, users: [] });
+    expect(parseArgs(["park", `0x${"ab".repeat(32)}`, "--live", "--send"])).toEqual({ cmd: "park", live: true, users: [], parkKey: `0x${"ab".repeat(32)}`, send: true });
+    // the owner's or the guardian's call files
+    expect(parseArgs(["add-hotkey", HK, "--as", "guardian", "--for-wallet", "--live"])).toEqual({ cmd: "add-hotkey", live: true, users: [], hotkey: HK, as: "guardian", forWallet: true });
+    expect(parseArgs(["remove-hotkey", HK, "--forfeit", "--as", "owner", "--for-wallet", "--live"])).toEqual({ cmd: "remove-hotkey", live: true, users: [], hotkey: HK, forfeit: true, as: "owner", forWallet: true });
+    expect(parseArgs(["set-stake-hotkey", HK, "--for-wallet", "--live"])).toEqual({ cmd: "set-stake-hotkey", live: true, users: [], hotkey: HK, forWallet: true });
+    expect(parseArgs(["set-redeem-origin", "--for-wallet", "--live"])).toEqual({ cmd: "set-redeem-origin", live: true, users: [], forWallet: true });
+    const refused: [string[], string][] = [
+      [["add-hotkey", "--live"], "add-hotkey needs the hotkey: add-hotkey <hotkey>"],
+      [["add-hotkey", "0x1234", "--live"], "0x1234 is not a hotkey (32 bytes of hex, 0x…, or its SS58 address, 5…)"],
+      [["add-hotkey", `0x${"00".repeat(32)}`], `0x${"00".repeat(32)} is the zero hotkey`],
+      [["add-hotkey", HK, "--as", "owner"], "--as goes with --for-wallet (a call file for the owner's or the guardian's Ledger); without them the keeper sends it"],
+      [["add-hotkey", HK, "--for-wallet", "--live"], "add-hotkey --for-wallet writes the owner's or the guardian's call: add --as owner or --as guardian"],
+      [["add-hotkey", HK, "--as", "owner", "--for-wallet"], "add-hotkey --for-wallet is for the live deployment: add --live (it only reads; it sends nothing)"],
+      [["add-hotkey", HK, "--as", "owner", "--for-wallet", "--live", "--send"], "add-hotkey --for-wallet writes a call for the sign page and sends nothing: drop --send"],
+      [["remove-hotkey", HK, "--forfeit", "--live", "--send"], "--forfeit is the owner's: remove-hotkey <hotkey> --forfeit --as owner --for-wallet --live"],
+      [["remove-hotkey", HK, "--forfeit", "--as", "guardian", "--for-wallet", "--live"], "--forfeit is the owner's: remove-hotkey <hotkey> --forfeit --as owner --for-wallet --live"],
+      [["set-stake-hotkey", HK, "--live"], "set-stake-hotkey writes the owner's call for the sign page and sends nothing: add --for-wallet"],
+      [["set-stake-hotkey", HK, "--for-wallet"], "set-stake-hotkey --for-wallet is for the live deployment: add --live (it only reads; it sends nothing)"],
+      [["set-stake-hotkey", HK, "--send", "--for-wallet", "--live"], "unexpected argument --send"],
+      [["park", "--send"], "park --send needs the park's key: park <key> --send"],
+      [["set-redeem-origin", "--live"], "set-redeem-origin writes the treasury's call for the sign page and sends nothing: add --for-wallet"],
+      [["set-redeem-origin", "--for-wallet"], "set-redeem-origin --for-wallet is for the live deployment: add --live (it only reads; it sends nothing)"],
+      [["park", "0xab"], "0xab is not a park's key (32 bytes of hex)"],
+      [["stake", "--send"], "unexpected argument --send"],
+      [["close", HK], `unexpected argument ${HK}`],
+    ];
+    for (const [argv, why] of refused) expect(() => parseArgs(argv), argv.join(" ")).toThrow(new UsageError(why));
+  });
+
+  it("R5 Minor 3: set-claim-gas <gas> --for-wallet --live, the owner's immediate setClaimGasRequired, within the vault's bounds", () => {
+    expect(parseArgs(["set-claim-gas", "58000000", "--for-wallet", "--live"])).toEqual({ cmd: "set-claim-gas", live: true, users: [], claimGas: "58000000", forWallet: true });
+    const refused: [string[], string][] = [
+      [["set-claim-gas", "5.8e7", "--for-wallet", "--live"], "set-claim-gas needs a whole number of gas within the vault's bounds, 54,100,000 to 63,400,000, not 5.8e7"],
+      [["set-claim-gas", "54099999", "--for-wallet", "--live"], "set-claim-gas needs a whole number of gas within the vault's bounds, 54,100,000 to 63,400,000, not 54099999"],
+      [["set-claim-gas", "63400001", "--for-wallet", "--live"], "set-claim-gas needs a whole number of gas within the vault's bounds, 54,100,000 to 63,400,000, not 63400001"],
+      [["set-claim-gas", "58000000", "--live"], "set-claim-gas writes a call for the sign page and sends nothing: add --for-wallet"],
+    ];
+    for (const [argv, why] of refused) expect(() => parseArgs(argv), argv.join(" ")).toThrow(new UsageError(why));
+  });
+
+  it("Task 53's fix round: the four call files' commands (set-keeper, fund-reserve, disable-bridge, set-idle-buffer), each --for-wallet --live", () => {
+    const A = "0x00000000000000000000000000000000000a11ce";
+    const B = "0x000000000000000000000000000000000000b0b0";
+    expect(parseArgs(["set-keeper", A, "--for-wallet", "--live"])).toEqual({ cmd: "set-keeper", live: true, users: [], newKeeper: A, forWallet: true });
+    expect(parseArgs(["fund-reserve", "--from", A, "--for-wallet", "--live"])).toEqual({ cmd: "fund-reserve", live: true, users: [], from: A, forWallet: true });
+    expect(parseArgs(["disable-bridge", "both", A, B, "--as", "guardian", "--for-wallet", "--live"])).toEqual({ cmd: "disable-bridge", live: true, users: [], target: "both", bridges: [A, B], as: "guardian", forWallet: true });
+    expect(parseArgs(["disable-bridge", "front-door", B, "--as", "owner", "--for-wallet", "--live"])).toEqual({ cmd: "disable-bridge", live: true, users: [], target: "front-door", bridges: [B], as: "owner", forWallet: true });
+    expect(parseArgs(["set-idle-buffer", "240", "--for-wallet", "--live"])).toEqual({ cmd: "set-idle-buffer", live: true, users: [], bps: "240", forWallet: true });
+    const refused: [string[], string][] = [
+      [["set-keeper", "--for-wallet", "--live"], "set-keeper needs the new keeper's address: set-keeper <0x…>"],
+      [["set-keeper", "0x12", "--for-wallet", "--live"], "0x12 is not an address (or its checksum is wrong)"],
+      [["set-keeper", A, "--live"], "set-keeper writes a call for the sign page and sends nothing: add --for-wallet"],
+      [["fund-reserve", "--for-wallet", "--live"], "fund-reserve needs --from <0x…>, the account that will send it from MetaMask"],
+      [["disable-bridge", "both", A, "--as", "guardian", "--for-wallet", "--live"], "disable-bridge both needs two bridges: the vault's, then the front door's"],
+      [["disable-bridge", "vault", A, "--for-wallet", "--live"], "disable-bridge needs --as owner or --as guardian: who signs it"],
+      [["disable-bridge", "nowhere", A, "--as", "guardian", "--for-wallet", "--live"], "disable-bridge takes vault, front-door or both first, not nowhere"],
+      [["set-idle-buffer", "2.5", "--for-wallet", "--live"], "set-idle-buffer needs a whole number of bps (0 to 1000), not 2.5"],
+      [["set-idle-buffer", "240", "--for-wallet"], "set-idle-buffer --for-wallet is for the live deployment: add --live (it only reads; it sends nothing)"],
+    ];
+    for (const [argv, why] of refused) expect(() => parseArgs(argv), argv.join(" ")).toThrow(new UsageError(why));
   });
 });
 

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
+import {CascadeVaultLens} from "../../src/lens/CascadeVaultLens.sol";
 import {CcipAdapterBase} from "../../src/adapters/CcipAdapterBase.sol";
 import {CcipBittensorAdapter} from "../../src/adapters/CcipBittensorAdapter.sol";
 import {ADDRESS_MAPPING_ADDRESS} from "../../src/interfaces/IAddressMapping.sol";
@@ -15,10 +16,12 @@ import {ISTAKING_ADDRESS} from "../../src/interfaces/IStaking.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {Client} from "../../src/vendor/ccip/Client.sol";
 import {mirror} from "../mocks/Mirror.sol";
+import {defaultVaultParams} from "../utils/DefaultParams.sol";
 import {MockAddressMapping} from "../mocks/MockAddressMapping.sol";
 import {MockStaking} from "../mocks/MockStaking.sol";
 import {MessageV1Codec} from "../vendor/ccip/MessageV1Codec.sol";
 import {ForkBase, IOffRamp20, IPoolView, IRouterView, ITypeAndVersion} from "./ForkBase.sol";
+import {PayoutChunkSent, Redeemed} from "../../src/CascadeEvents.sol";
 
 /// @notice The Bittensor adapter and vault against the live CCIP lane on a Bittensor EVM fork: deliveries
 /// come in through the real OffRamp 2.0.0 (verifiers stubbed), Router and LockRelease pool and are
@@ -39,6 +42,7 @@ contract BittensorForkTest is ForkBase {
     address owner = makeAddr("owner");
     address guardian = makeAddr("guardian");
     address keeper = makeAddr("keeper");
+    address treasury = makeAddr("treasury");
     address alice = makeAddr("alice");
     address fdAddr = makeAddr("frontDoor");
     address remoteAdapter = makeAddr("adapterBase");
@@ -50,13 +54,15 @@ contract BittensorForkTest is ForkBase {
     bytes32 avColdkey;
     CcipBittensorAdapter adapterBit;
     CascadeVault vault;
+    /// The read-only lens on `vault` (spec §8.1), built after the planned addresses.
+    CascadeVaultLens vaultLens;
 
     function setUp() public {
         forkFrom("BITTENSOR_RPC", "https://lite.chain.opentensor.ai");
         if (!isFork()) return;
         // Bittensor's (Frontier) block header carries no prevrandao, which the Cancun EVM requires
         vm.prevrandao(bytes32(uint256(1)));
-        emit log_named_uint("fork block", block.number);
+        emit log_named_uint("fork block", vm.getBlockNumber());
         offRamp = offRamp20(BIT_ROUTER, BASE_SELECTOR);
 
         // precompile mocks: the forked EVM has none. The staking mock moves native TAO with vm.deal, and
@@ -90,23 +96,28 @@ contract BittensorForkTest is ForkBase {
                 remoteAdapter: remoteAdapter,
                 gasBase: 1_000_000,
                 gasPerEntry: 25_000,
-                maxMessageValue: 5_000e18
+                maxMessageValue: 5_000e18,
+                treasury: treasury
             }),
-            IAlphaVault(ALPHA_VAULT)
+            IAlphaVault(ALPHA_VAULT),
+            // the lane's inbound model (R4): the fixtures' Base-side pair
+            1_000_000,
+            25_000
         );
         // the Base front door is named at deploy, as the deployment does, so it is active with no delay
         vault = new CascadeVault(
-            mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, 1e15, BASE, fdAddr
+            defaultVaultParams(
+                mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, keeper, BASE, fdAddr
+            )
         );
         assertEq(address(adapterBit), pAdapterBit, "adapter address");
         assertEq(address(vault), pVault, "vault address");
+        vaultLens = new CascadeVaultLens(address(vault));
 
         // the operator funds the vault's existential reserve and the adapter's native reserve
         vm.deal(address(vault), ED);
         vm.deal(address(this), 1 ether);
         adapterBit.fundReserve{value: RESERVE}();
-        vm.prank(owner);
-        vault.setKeeper(keeper);
     }
 
     // ---- lane limits ----
@@ -126,6 +137,11 @@ contract BittensorForkTest is ForkBase {
         assertEq(IERC20Metadata(BIT_TAO).decimals(), 18, "bridged TAO decimals");
         assertFalse(IAlphaVault(ALPHA_VAULT).isPaused(), "AlphaVault not halted");
         assertTrue(IAlphaVault(ALPHA_VAULT).isListed(BIT_TAO), "AlphaVault lists bridged TAO");
+        // the rail's three reads (R4 S-H1) answer on the deployed AlphaVault: no migration announced or finished, so the
+        // adapter can send payouts (a getter missing there would read false and defer every door redeem)
+        assertEq(IAlphaVault(ALPHA_VAULT).migrationReadyAt(), 0, "no migration announced");
+        assertFalse(IAlphaVault(ALPHA_VAULT).migrationFinished(), "no migration finished");
+        assertTrue(adapterBit.canSendPayouts(), "the adapter can send payouts");
     }
 
     // ---- receiving ----
@@ -150,49 +166,16 @@ contract BittensorForkTest is ForkBase {
         assertEq(address(adapterBit).balance, RESERVE, "adapter holds its reserve");
 
         // delivery does not stake; the keeper does
-        assertEq(staking.getStake(HK1, vault.coldkey(), 0), 0, "nothing staked on delivery");
+        assertEq(staking.getStake(HK1, vaultLens.coldkey(), 0), 0, "nothing staked on delivery");
         vm.prank(keeper);
         vault.stakeIdle();
-        assertEq(staking.getStake(HK1, vault.coldkey(), 0), 1e9, "vault stake (rao)");
+        assertEq(staking.getStake(HK1, vaultLens.coldkey(), 0), 1e9, "vault stake (rao)");
         assertEq(address(vault).balance, ED, "vault keeps its reserve");
     }
 
-    function test_fork_pausedAlphaVaultFailsAndRetries() public onlyFork {
-        MessageV1Codec.MessageV1 memory m = fromBase(depositBatch(), 1e18);
-        uint256 poolBefore = tao.balanceOf(BIT_POOL);
-        uint256 supplyBefore = tao.totalSupply();
-
-        // ForeverMoney halted: the real AlphaVault reverts IsHalted() on withdrawLiquid
-        bytes memory halted = abi.encodeWithSignature("IsHalted()");
-        vm.mockCallRevert(ALPHA_VAULT, abi.encodeWithSelector(IAlphaVault.withdrawLiquid.selector), halted);
-        (bytes32 id, bool ok, bytes memory err) = execute(offRamp, m);
-
-        assertFalse(ok, "first attempt failed");
-        assertEq(IOffRamp20(offRamp).getExecutionState(id), FAILURE, "state FAILURE");
-        assertEq(err, abi.encodeWithSignature("ReceiverError(bytes)", halted), "AlphaVault's revert, wrapped");
-        assertEq(tao.balanceOf(BIT_POOL), poolBefore, "release rolled back");
-        assertEq(tao.totalSupply(), supplyBefore, "nothing burned");
-        assertEq(tao.balanceOf(address(adapterBit)), 0, "adapter holds no tokens");
-        assertEq(address(adapterBit).balance, RESERVE, "adapter holds its reserve");
-        assertEq(vault.balanceOf(alice), 0, "no shares");
-        assertEq(vault.totalSupply(), 0, "no supply");
-        assertEq(address(vault).balance, ED, "vault unchanged");
-
-        // ForeverMoney resumes; anyone re-executes the same message
-        vm.clearMockedCalls();
-        (bytes32 id2, bool ok2, bytes memory err2) = execute(offRamp, m);
-
-        assertEq(id2, id, "same message");
-        assertEq(err2, "", "no error");
-        assertTrue(ok2, "retry executed");
-        assertEq(IOffRamp20(offRamp).getExecutionState(id), SUCCESS, "state SUCCESS");
-        assertEq(tao.balanceOf(BIT_POOL), poolBefore - 1e18, "released once");
-        assertEq(tao.totalSupply(), supplyBefore - 1e18, "burned once");
-        assertEq(tao.balanceOf(address(adapterBit)), 0, "adapter holds no tokens");
-        assertEq(address(adapterBit).balance, RESERVE, "adapter holds its reserve");
-        assertEq(vault.balanceOf(alice), 1e24, "alice's shares");
-        assertEq(address(vault).balance, ED + 1e18, "vault holds the deposit");
-    }
+    // The v3.1 test of a paused AlphaVault (CCIP FAILURE, then a re-execution) is gone since v3.2's parks (Task 25: a halted
+    // ForeverMoney parks the batch as tokens, CCIP SUCCESS): BittensorForkV32's test_fork_v32_haltedAlphaVaultParksTokens
+    // and test_fork_v32_tokenParkWithTheBurnRolledBack replace it (Task 61).
 
     function test_fork_receiverGasMeasured() public onlyFork {
         bytes memory batch = depositBatch();
@@ -223,7 +206,7 @@ contract BittensorForkTest is ForkBase {
 
     function test_fork_payoutThroughRealAlphaVaultAndPool() public onlyFork {
         (bytes32 key, CascadeMessages.Payout[] memory payouts) = depositThenRedeemAll();
-        vm.warp(block.timestamp + vault.payoutDelay());
+        vm.warp(vm.getBlockTimestamp() + vaultLens.payoutDelay());
         (uint256 fee, uint256 net, uint256 quote, bytes memory payoutsMessage) = vaultFee(key, payouts[0].assets);
         Snapshot memory before = snapshot();
 
@@ -244,9 +227,9 @@ contract BittensorForkTest is ForkBase {
         assertEq(address(adapterBit).balance, RESERVE + (fee - quote), "adapter keeps the rounding surplus");
         assertEq(before.wrapped.balance - before.wrappedNative, quote, "router wrapped exactly the fee");
         assertEq(BIT_ROUTER.balance, before.router, "router keeps no TAO");
-        assertEq(staking.getStake(HK1, vault.coldkey(), 0), 0, "vault unstaked the payout");
+        assertEq(staking.getStake(HK1, vaultLens.coldkey(), 0), 0, "vault unstaked the payout");
         assertEq(address(vault).balance, ED, "vault keeps its reserve");
-        assertEq(vault.pendingPayouts(), 0, "nothing pending");
+        assertEq(vaultLens.pendingPayouts(), 0, "nothing pending");
         assertPayoutSent(logs, adapterBit.encodePayload(fdAddr, address(vault), payoutsMessage), net);
     }
 
@@ -277,13 +260,15 @@ contract BittensorForkTest is ForkBase {
         s.router = BIT_ROUTER.balance;
     }
 
-    /// Alice deposits 1 TAO (batch 1), the keeper stakes it, then batch 2 (no token, data only) redeems
-    /// all her shares. Returns batch 2's key and its payout list, rebuilt from the vault's Redeemed events.
+    /// Alice deposits 1 TAO (batch 1), the keeper stakes it, and a day later (her shares past the door hold, R4 B-H1)
+    /// batch 2 (no token, data only) redeems all her shares. Returns batch 2's key and its payout list, rebuilt from the
+    /// vault's Redeemed events.
     function depositThenRedeemAll() internal returns (bytes32 key, CascadeMessages.Payout[] memory payouts) {
         (, bool ok,) = execute(offRamp, fromBase(depositBatch(), 1e18));
         assertTrue(ok, "deposit delivered");
         vm.prank(keeper);
         vault.stakeIdle();
+        vm.warp(vm.getBlockTimestamp() + 1 days);
 
         uint256 shares = vault.balanceOf(alice);
         bytes memory batch2 = CascadeMessages.encodeBatch(2, noEntries(), entries1(alice, shares));
@@ -389,10 +374,10 @@ contract BittensorForkTest is ForkBase {
         uint256 n;
         for (uint256 i; i < logs.length; ++i) {
             if (
-                logs[i].emitter != address(vault) || logs[i].topics[0] != CascadeVault.PayoutChunkSent.selector
+                logs[i].emitter != address(vault) || logs[i].topics[0] != PayoutChunkSent.selector
                     || logs[i].topics[1] != key
             ) continue;
-            (,,, net, fee) = abi.decode(logs[i].data, (uint32, uint32, uint256, uint256, uint256));
+            (,,, net, fee,,) = abi.decode(logs[i].data, (uint32, uint32, uint256, uint256, uint256, uint256, uint256));
             ++n;
         }
         assertEq(n, 1, "one PayoutChunkSent event");
@@ -420,7 +405,7 @@ contract BittensorForkTest is ForkBase {
     }
 
     function isRedeemed(Vm.Log memory log, bytes32 key) internal view returns (bool) {
-        return log.emitter == address(vault) && log.topics.length > 2 && log.topics[0] == CascadeVault.Redeemed.selector
+        return log.emitter == address(vault) && log.topics.length > 2 && log.topics[0] == Redeemed.selector
             && log.topics[1] == key;
     }
 

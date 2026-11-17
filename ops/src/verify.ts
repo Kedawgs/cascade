@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { type Abi, type Address, decodeEventLog, type Hex, isAddress, parseAbi, zeroAddress } from "viem";
-import { type Artifact, loadArtifact, maskImmutables } from "./artifacts.ts";
-import { codeFor } from "./builds.ts";
+import { type Artifact, maskImmutables } from "./artifacts.ts";
+import { artifactFor, codeFor } from "./builds.ts";
 import { cardinalityChecks } from "./cardinality.ts";
 import { BASE_V3, type ChainName, FRONT_DOOR_DEFAULTS, LIVE, PRECOMPILE, SETTINGS, V2_DEPLOYMENT, WALLET } from "./config.ts";
 import {
@@ -443,16 +443,15 @@ export function refuseV2Verify(path: string, rec: DeploymentRecord): void {
 }
 
 /** Reads everything back on both chains and compares it with the plan; saves nothing itself. Each
- * contract's code is compared with the build the plan was deployed from (see builds.ts). Refuses a v2
- * plan, or a plan from a build this tool does not know, before reading anything. */
+ * contract is read with, and its code compared with, the build the plan was deployed from (builds.ts:
+ * v3-launch's frozen build, never contracts/out). Refuses a v2 plan, or a plan from a build this tool
+ * does not know, before reading anything. */
 export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: VerifyAllow } = {}): Promise<VerifyResult> {
   const plan = rec.plan;
   if (!isPlanV3(plan)) throw new Error(V2_VERIFY_REFUSED);
   buildOf(plan);
   const exp = [...expectations(plan), ...limitExpectations(plan)];
-  const artifacts = new Map<string, Artifact>();
-  const art = (name: string) => artifacts.get(name) ?? artifacts.set(name, loadArtifact(ctx.paths.contractsDir, name)).get(name)!;
-  const actual = await readBack(ctx, exp, art);
+  const actual = await readBack(ctx, exp, (name) => artifactFor(plan, name));
   const failures = compare(exp, actual);
 
   const warnings: string[] = [];
@@ -540,7 +539,7 @@ export async function verify(ctx: Ctx, rec: DeploymentRecord, opts: { allow?: Ve
       : []),
   ];
   for (const [c, name, addr] of contracts) {
-    const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), codeFor(plan, name, art));
+    const m = codeMismatch(c, name, await codeAt(ctx.rpc, c, addr), codeFor(plan, name));
     if (m) failures.push(m);
   }
   return {

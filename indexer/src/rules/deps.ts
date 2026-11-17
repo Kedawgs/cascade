@@ -4,8 +4,9 @@ import { BURNER_ROLE, CCIP_SELECTOR, DEFAULT_ADMIN_ROLE, DEPENDENCY_EVENTS, MINT
 import type { Finding } from "../alerts.ts";
 import { type ChainName, DEPENDENCY_ROLES, type DependencyRole } from "../config.ts";
 import type { StoredLog } from "../logs.ts";
-import type { BaseState, BitState, Bucket, ChainReading } from "../snapshot.ts";
+import type { BaseState, BitState, Bucket, ChainReading, HourAgg } from "../snapshot.ts";
 import { addressLink, isNew, onset, type Readings, type RuleCtx, twice, txLink, unjudged, utc } from "./context.ts";
+import type { RuleId } from "./ids.ts";
 import type { Rule } from "./index.ts";
 
 // What Cascade depends on and doesn't control (the economics and security review of 2026-10-31): ForeverMoney's rail
@@ -53,7 +54,8 @@ export const fmtaoBackingTrue: Rule = {
         "wTAO outside the lock pool": s.lockPoolFmTao === undefined ? "unknown" : tao(supply - s.lockPoolFmTao),
         "share of wTAO's supply": s.lockPoolFmTao === undefined ? "unknown" : pct(((supply - s.lockPoolFmTao) * 10_000n) / supply),
         block: String(block),
-        alphaVault: addressLink("bittensor", ctx.cfg.tokens.bittensor.alphaVault),
+        // the vault read: the rail now primary's (R4-O round 4)
+        alphaVault: (s.alphaVaults ?? [ctx.cfg.tokens.bittensor.alphaVault]).map((v) => addressLink("bittensor", v)).join(", "),
         lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool),
       };
     };
@@ -75,7 +77,16 @@ export const fmtaoBackingTrue: Rule = {
         rule: "fmtao.backing_true",
         key: "fmtao.backing_true:alpha",
         subject: `${what} by ${tao(short(now.state) as bigint)}: FM-TAO isn't fully backed`,
-        facts: { side: "alpha", ...facts(now.state, now.block), tolerance: pct(BigInt(ctx.t.backingToleranceBps)), hold: ctx.cfg.backingHold ? "on (BACKING_HOLD)" : "off (BACKING_HOLD is false)" },
+        facts: {
+          side: "alpha",
+          ...facts(now.state, now.block),
+          tolerance: pct(BigInt(ctx.t.backingToleranceBps)),
+          hold: ctx.cfg.backingHold ? "on (BACKING_HOLD)" : "off (BACKING_HOLD is false)",
+          ...(ctx.cfg.deployment.version === "v3.2" ? { contracts: "v3.2" } : {}),
+          // R6b (U6): backing(wTAO) is stakedValueRao(wTAO) in wei, the stake on ForeverMoney's validator hotkey; a full
+          // swap_hotkey moves that stake to a new hotkey, so the old one reads 0 until ForeverMoney repoints it
+          ...(now.state.alpha.backing === 0n ? { "a stake of 0": "yes: most likely ForeverMoney's validator swapped its hotkey" } : {}),
+        },
       };
       if (ctx.cfg.backingHold && onset(ctx, "bittensor", cond)) f.hold = { id: `fmtao.backing_true:alpha:${ctx.previous.bittensor!.block}`, summary: `${what}: FM-TAO isn't fully backed` };
       out.push(f);
@@ -265,6 +276,8 @@ export const fmtaoRoleChange: Rule = {
         "sent by": ctx.txs.get(k)?.from ?? "not known yet",
         block: String(block),
         transaction: txLink(chain, txHash),
+        // v3.2: the runbook's own branch (a paused front door never stops a close, I-20)
+        ...(ctx.cfg.deployment.version === "v3.2" ? { contracts: "v3.2" } : {}),
       });
       out.push({
         rule,
@@ -291,7 +304,11 @@ export const railAlphaVaultAdmin: Rule = {
         rule: "rail.alpha_vault_admin",
         key: `rail.alpha_vault_admin:${p.admin}`,
         subject: `ForeverMoney's AlphaVault has an admin transfer pending, to ${p.admin}`,
-        facts: { "new admin": p.admin, "it may accept from": utc(p.schedule), alphaVault: addressLink("bittensor", ctx.cfg.tokens.bittensor.alphaVault) },
+        facts: {
+          "new admin": p.admin,
+          "it may accept from": utc(p.schedule),
+          alphaVault: (ctx.snap.bittensor?.state.alphaVaults ?? [ctx.cfg.tokens.bittensor.alphaVault]).map((v) => addressLink("bittensor", v)).join(", "),
+        },
       },
     ];
   },
@@ -339,7 +356,7 @@ function railProblems(ctx: RuleCtx, side: RailSide, s: BaseState | BitState | un
  * bucket holding less than maxBatchValue for railPoolLowS (an hour; meta rail_pool_low_since:{chain}) is the warning:
  * the next full batch waits for it to refill. The payout lane's buckets are ccip.rate_limited's. A side it can't read
  * (a reading or a field missing) is unjudged, its mark left as it is. On every deployment: ForeverMoney's contracts
- * are the same for every deployment. */
+ * are the same under v3-launch and v3.2. */
 export const railPool: Rule = {
   name: "rail.pool",
   raises: ["rail.pool_low"],
@@ -373,6 +390,8 @@ export const railPool: Rule = {
             "a full batch": maxBatch === undefined ? "unknown" : tao(maxBatch),
             setting: side.setting,
             block: String(now.block),
+            // v3.2: its runbook's own branch (a paused front door never stops a close, I-20)
+            ...(ctx.cfg.deployment.version === "v3.2" ? { contracts: "v3.2" } : {}),
           },
         });
       }
@@ -424,7 +443,7 @@ export const fmtaoRebalancerSet: Rule = {
         rule: "fmtao.rebalancer_set",
         key: `fmtao.rebalancer_set:${who}`,
         subject: `${who} can now withdraw the wTAO locked behind every FM-TAO (the lock pool's rebalancer)`,
-        facts: { rebalancer: who, lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool), "wTAO in the lock pool": s.state.lockPoolFmTao === undefined ? "unknown" : tao(s.state.lockPoolFmTao), block: String(s.block) },
+        facts: { rebalancer: who, lockPool: addressLink("bittensor", ctx.cfg.tokens.bittensor.lockPool), "wTAO in the lock pool": s.state.lockPoolFmTao === undefined ? "unknown" : tao(s.state.lockPoolFmTao), block: String(s.block), ...(ctx.cfg.deployment.version === "v3.2" ? { contracts: "v3.2" } : {}) },
       },
     ];
   },
@@ -480,7 +499,6 @@ export const fmtaoRegistryAdmin: Rule = {
 };
 
 type Validator = NonNullable<BitState["validator"]>;
-const validatorOf = (r: ChainReading<BitState> | undefined): Validator | undefined => r?.state.validator;
 /** SubtensorModule Delegates is a ValueQuery: a hotkey with no entry has the chain's default take, 11,796 of 65,535
  * (18%: the storage entry's default, 0x142e, read from the live runtime's metadata on 2026-10-31). */
 export const DEFAULT_DELEGATE_TAKE = 11_796;
@@ -488,10 +506,36 @@ const takeOf = (t: number | null) => (t === null ? DEFAULT_DELEGATE_TAKE : t);
 const share = (t: number) => `${((t * 100) / 65_535).toFixed(2)}%`;
 const takeText = (t: number | null | undefined) => (t === undefined ? "unknown" : t === null ? `no entry: the chain's default take, ${share(DEFAULT_DELEGATE_TAKE)}` : share(t));
 
-/** validator.take_changed (warning, once per change) and validator.take_high (critical, while it lasts): the stake
- * hotkey's take (SubtensorModule Delegates, of 65,535; no entry is the chain's default, 18%) differs from the reading
- * before last and is the same on the last two readings (one bad answer can't trip it); or it is above
- * validatorTakeMaxBps on two readings. 0 at launch. */
+/** A validator the validator rules judge (B7e: the same rules for each, keyed per hotkey). The primary is the vault's
+ * stake hotkey (tao.bot's today); the standby is STANDBY_HOTKEY (Yuma's at v3.2's launch: a configuration value, never
+ * a constant), read beside it (snapshot.ts), and judged only while it is set and isn't the stake hotkey (then it is the
+ * primary, judged once). The standby's emails say "standby" (the `validator` fact, which the runbook reads too); the
+ * primary's are as they always were. */
+interface Seat {
+  /** the validator in a reading */
+  of: (s: BitState | undefined) => Validator | undefined;
+  /** its root stake's highest in an hour row */
+  high: (h: HourAgg) => bigint | undefined;
+  /** how a subject names it */
+  name: string;
+  /** the facts its emails add */
+  facts: Record<string, string>;
+  /** the hotkey it is configured as (the standby): unread, its own alerts are left as they are */
+  configured?: Hex;
+}
+const PRIMARY: Seat = { of: (s) => s?.validator, high: (h) => h.validatorStakeHigh, name: "The validator", facts: {} };
+function seatsOf(ctx: RuleCtx): Seat[] {
+  const standby = ctx.cfg.standbyHotkey;
+  if (!standby || ctx.snap.bittensor?.state.validator?.hotkey === standby) return [PRIMARY];
+  return [PRIMARY, { of: (s) => s?.standby, high: (h) => h.standbyStakeHigh, name: "The standby validator", facts: { validator: "standby (STANDBY_HOTKEY)" }, configured: standby }];
+}
+/** A seat's validator unread: the primary's leaves every alert of the rule as it is; the standby's, its own. */
+const blind = (ctx: RuleCtx, rule: RuleId, seat: Seat) => (seat.configured ? unjudged(ctx, rule, `${rule}:${seat.configured}`) : unjudged(ctx, rule));
+
+/** validator.take_changed (warning, once per change) and validator.take_high (critical, while it lasts), for each validator
+ * (the primary and the standby): its take (SubtensorModule Delegates, of 65,535; no entry is the chain's default, 18%)
+ * differs from the reading before last and is the same on the last two readings (one bad answer can't trip it); or it
+ * is above validatorTakeMaxBps on two readings. The primary's is 0 at launch, the standby's 9%. */
 export const validatorTake: Rule = {
   name: "validator.take",
   raises: ["validator.take_changed", "validator.take_high"],
@@ -499,108 +543,142 @@ export const validatorTake: Rule = {
     const s = ctx.snap.bittensor;
     const [p, e] = ctx.history.bittensor;
     const out: Finding[] = [];
-    const vs = validatorOf(s);
-    // the hotkey unread: every take_high alert left as it is
-    if (!s || !vs) return unjudged(ctx, "validator.take_high");
-    const hk = vs.hotkey;
-    const same = (r: ChainReading<BitState> | undefined) => validatorOf(r)?.hotkey === hk;
-    const take = (r: ChainReading<BitState> | undefined) => validatorOf(r)?.take;
-    if (p && e && same(p) && same(e) && e.block < p.block && p.block < s.block && take(s) !== undefined && take(s) === take(p) && take(e) !== undefined && take(e) !== take(s)) {
-      out.push({
-        rule: "validator.take_changed",
-        key: `validator.take_changed:${hk}:${p.block}`,
-        subject: `The validator's take changed: ${takeText(take(e))} → ${takeText(take(s))}`,
-        facts: { hotkey: hk, before: takeText(take(e)), after: takeText(take(s)), block: String(p.block), taostats: `https://taostats.io/hotkey/${hk}` },
-      });
+    for (const seat of seatsOf(ctx)) {
+      const vs = seat.of(s?.state);
+      // the hotkey unread: its take_high alerts left as they are
+      if (!s || !vs) {
+        blind(ctx, "validator.take_high", seat);
+        continue;
+      }
+      const hk = vs.hotkey;
+      const same = (r: ChainReading<BitState> | undefined) => seat.of(r?.state)?.hotkey === hk;
+      const take = (r: ChainReading<BitState> | undefined) => seat.of(r?.state)?.take;
+      if (p && e && same(p) && same(e) && e.block < p.block && p.block < s.block && take(s) !== undefined && take(s) === take(p) && take(e) !== undefined && take(e) !== take(s)) {
+        out.push({
+          rule: "validator.take_changed",
+          key: `validator.take_changed:${hk}:${p.block}`,
+          subject: `${seat.name}'s take changed: ${takeText(take(e))} → ${takeText(take(s))}`,
+          facts: { hotkey: hk, ...seat.facts, before: takeText(take(e)), after: takeText(take(s)), block: String(p.block), taostats: `https://taostats.io/hotkey/${hk}` },
+        });
+      }
+      // another hotkey's reading is no reading of this one's take: false; this one's, its take unread: unknown
+      const high = (r: Readings) => {
+        const v = seat.of(r.bittensor);
+        if (v === undefined || (v.hotkey === hk && v.take === undefined)) return undefined;
+        return v.hotkey === hk && takeOf(v.take as number | null) * 10_000 > ctx.t.validatorTakeMaxBps * 65_535;
+      };
+      const held = twice(ctx, "bittensor", high);
+      if (held === undefined) unjudged(ctx, "validator.take_high", `validator.take_high:${hk}`);
+      if (held) {
+        out.push({
+          rule: "validator.take_high",
+          key: `validator.take_high:${hk}`,
+          subject: `${seat.name}'s take is ${takeText(vs.take)}, above ${pct(BigInt(ctx.t.validatorTakeMaxBps))}`,
+          facts: { hotkey: hk, ...seat.facts, take: takeText(vs.take), limit: pct(BigInt(ctx.t.validatorTakeMaxBps)), block: String(s.block), taostats: `https://taostats.io/hotkey/${hk}` },
+        });
+      }
     }
-    // another hotkey's reading is no reading of this one's take: false; this one's, its take unread: unknown
-    const high = (r: Readings) => {
-      const v = r.bittensor?.validator;
-      if (v === undefined || (v.hotkey === hk && v.take === undefined)) return undefined;
-      return v.hotkey === hk && takeOf(v.take as number | null) * 10_000 > ctx.t.validatorTakeMaxBps * 65_535;
-    };
-    const held = twice(ctx, "bittensor", high);
-    if (held === undefined) unjudged(ctx, "validator.take_high", `validator.take_high:${hk}`);
-    if (held) {
+    return out;
+  },
+};
+
+/** validator.root_stake_drop (warning), for each validator: the stake on its hotkey on root (everyone's:
+ * TotalHotkeyAlpha(hotkey, 0)) more than validatorStakeDropBps below its highest of the last 24 hours (its own hour rows,
+ * validatorStakeHigh or standbyStakeHigh, and the readings), on two readings: nominators leaving, a sign of trouble
+ * before the rewards show it. */
+export const validatorRootStakeDrop: Rule = {
+  name: "validator.root_stake_drop",
+  run(ctx) {
+    const s = ctx.snap.bittensor;
+    const out: Finding[] = [];
+    for (const seat of seatsOf(ctx)) {
+      const vs = seat.of(s?.state);
+      if (!s || !vs) {
+        blind(ctx, "validator.root_stake_drop", seat);
+        continue;
+      }
+      const hk = vs.hotkey;
+      if (vs.rootStake === undefined) {
+        unjudged(ctx, "validator.root_stake_drop", `validator.root_stake_drop:${hk}`);
+        continue;
+      }
+      const since = ctx.nowS - 86_400;
+      const highs = [
+        ...ctx.hours.filter((h) => h.hour + 3600 > since).map(seat.high),
+        ...ctx.history.bittensor.filter((r) => r.time >= since && seat.of(r.state)?.hotkey === hk).map((r) => seat.of(r.state)?.rootStake),
+        vs.rootStake,
+      ].filter((x): x is bigint => x !== undefined);
+      const high = highs.reduce((a, b) => (a > b ? a : b));
+      const low = (r: Readings) => {
+        const v = seat.of(r.bittensor);
+        if (v === undefined || (v.hotkey === hk && v.rootStake === undefined)) return undefined;
+        return v.hotkey === hk && high > 0n && (high - (v.rootStake as bigint)) * 10_000n > high * BigInt(ctx.t.validatorStakeDropBps);
+      };
+      const held = twice(ctx, "bittensor", low);
+      if (held === undefined) {
+        unjudged(ctx, "validator.root_stake_drop", `validator.root_stake_drop:${hk}`);
+        continue;
+      }
+      if (!held) continue;
+      const rao = (x: bigint) => tao(x * 10n ** 9n);
       out.push({
-        rule: "validator.take_high",
-        key: `validator.take_high:${hk}`,
-        subject: `The validator's take is ${takeText(vs.take)}, above ${pct(BigInt(ctx.t.validatorTakeMaxBps))}`,
-        facts: { hotkey: hk, take: takeText(vs.take), limit: pct(BigInt(ctx.t.validatorTakeMaxBps)), block: String(s.block), taostats: `https://taostats.io/hotkey/${hk}` },
+        rule: "validator.root_stake_drop",
+        key: `validator.root_stake_drop:${hk}`,
+        subject: `${seat.name}'s root stake fell ${pct(((high - vs.rootStake) * 10_000n) / high)} in a day`,
+        facts: {
+          hotkey: hk,
+          ...seat.facts,
+          "root stake": rao(vs.rootStake),
+          "the day's high": rao(high),
+          "below the day's high": pct(((high - vs.rootStake) * 10_000n) / high),
+          block: String(s.block),
+          taostats: `https://taostats.io/hotkey/${hk}`,
+        },
       });
     }
     return out;
   },
 };
 
-/** validator.root_stake_drop (warning): the stake on the validator's hotkey on root (everyone's: TotalHotkeyAlpha(hotkey,
- * 0)) more than validatorStakeDropBps below its highest of the last 24 hours (hour rows and readings), on two
- * readings: nominators leaving, a sign of trouble before the rewards show it. */
-export const validatorRootStakeDrop: Rule = {
-  name: "validator.root_stake_drop",
-  run(ctx) {
-    const s = ctx.snap.bittensor;
-    const vs = validatorOf(s);
-    if (!s || !vs) return unjudged(ctx, "validator.root_stake_drop");
-    if (vs.rootStake === undefined) return unjudged(ctx, "validator.root_stake_drop", `validator.root_stake_drop:${vs.hotkey}`);
-    const hk = vs.hotkey;
-    const since = ctx.nowS - 86_400;
-    const highs = [
-      ...ctx.hours.filter((h) => h.hour + 3600 > since).map((h) => h.validatorStakeHigh),
-      ...ctx.history.bittensor.filter((r) => r.time >= since && validatorOf(r)?.hotkey === hk).map((r) => validatorOf(r)?.rootStake),
-      vs.rootStake,
-    ].filter((x): x is bigint => x !== undefined);
-    const high = highs.reduce((a, b) => (a > b ? a : b));
-    const low = (r: Readings) => {
-      const v = r.bittensor?.validator;
-      if (v === undefined || (v.hotkey === hk && v.rootStake === undefined)) return undefined;
-      return v.hotkey === hk && high > 0n && (high - (v.rootStake as bigint)) * 10_000n > high * BigInt(ctx.t.validatorStakeDropBps);
-    };
-    const held = twice(ctx, "bittensor", low);
-    if (held === undefined) return unjudged(ctx, "validator.root_stake_drop", `validator.root_stake_drop:${hk}`);
-    if (!held) return [];
-    const rao = (x: bigint) => tao(x * 10n ** 9n);
-    return [
-      {
-        rule: "validator.root_stake_drop",
-        key: `validator.root_stake_drop:${hk}`,
-        subject: `The validator's root stake fell ${pct(((high - vs.rootStake) * 10_000n) / high)} in a day`,
-        facts: { hotkey: hk, "root stake": rao(vs.rootStake), "the day's high": rao(high), "below the day's high": pct(((high - vs.rootStake) * 10_000n) / high), block: String(s.block), taostats: `https://taostats.io/hotkey/${hk}` },
-      },
-    ];
-  },
-};
-
-/** validator.root_uid_lost (critical): the validator's hotkey has no uid on root (SubtensorModule Uids(0, hotkey)) on two
- * readings, once a uid has been read for it (now, in the readings kept, or remembered in meta root_uid_seen:{hotkey}),
- * so a storage key the chain stops answering can't page from the start. Off root, the hotkey earns no root dividends. */
+/** validator.root_uid_lost (critical), for each validator: its hotkey has no uid on root (SubtensorModule Uids(0, hotkey))
+ * on two readings, once a uid has been read for it (now, in the readings kept, or remembered in meta
+ * root_uid_seen:{hotkey}), so a storage key the chain stops answering can't page from the start. Off root, the hotkey
+ * earns no root dividends. */
 export const validatorRootUidLost: Rule = {
   name: "validator.root_uid_lost",
   run(ctx) {
     const s = ctx.snap.bittensor;
-    const vs = validatorOf(s);
-    if (!s || !vs) return unjudged(ctx, "validator.root_uid_lost");
-    const hk = vs.hotkey;
-    const seenKey = `root_uid_seen:${hk}`;
-    if (typeof vs.rootUid === "number" && ctx.meta[seenKey] === undefined) ctx.writes.meta.push({ k: seenKey, v: String(vs.rootUid) });
-    const seen = ctx.meta[seenKey] !== undefined || ctx.history.bittensor.some((r) => validatorOf(r)?.hotkey === hk && typeof validatorOf(r)?.rootUid === "number");
-    const gone = (r: Readings) => {
-      const v = r.bittensor?.validator;
-      if (v === undefined || (v.hotkey === hk && v.rootUid === undefined)) return undefined;
-      return v.hotkey === hk && v.rootUid === null;
-    };
-    if (!seen) return [];
-    const held = twice(ctx, "bittensor", gone);
-    if (held === undefined) return unjudged(ctx, "validator.root_uid_lost", `validator.root_uid_lost:${hk}`);
-    if (!held) return [];
-    return [
-      {
+    const out: Finding[] = [];
+    for (const seat of seatsOf(ctx)) {
+      const vs = seat.of(s?.state);
+      if (!s || !vs) {
+        blind(ctx, "validator.root_uid_lost", seat);
+        continue;
+      }
+      const hk = vs.hotkey;
+      const seenKey = `root_uid_seen:${hk}`;
+      if (typeof vs.rootUid === "number" && ctx.meta[seenKey] === undefined) ctx.writes.meta.push({ k: seenKey, v: String(vs.rootUid) });
+      const seen = ctx.meta[seenKey] !== undefined || ctx.history.bittensor.some((r) => seat.of(r.state)?.hotkey === hk && typeof seat.of(r.state)?.rootUid === "number");
+      const gone = (r: Readings) => {
+        const v = seat.of(r.bittensor);
+        if (v === undefined || (v.hotkey === hk && v.rootUid === undefined)) return undefined;
+        return v.hotkey === hk && v.rootUid === null;
+      };
+      if (!seen) continue;
+      const held = twice(ctx, "bittensor", gone);
+      if (held === undefined) {
+        unjudged(ctx, "validator.root_uid_lost", `validator.root_uid_lost:${hk}`);
+        continue;
+      }
+      if (!held) continue;
+      out.push({
         rule: "validator.root_uid_lost",
         key: `validator.root_uid_lost:${hk}`,
-        subject: "The validator's hotkey is no longer registered on root",
-        facts: { hotkey: hk, "uid before": ctx.meta[seenKey] ?? "seen in an earlier reading", block: String(s.block), taostats: `https://taostats.io/hotkey/${hk}` },
-      },
-    ];
+        subject: `${seat.name}'s hotkey is no longer registered on root`,
+        facts: { hotkey: hk, ...seat.facts, "uid before": ctx.meta[seenKey] ?? "seen in an earlier reading", block: String(s.block), taostats: `https://taostats.io/hotkey/${hk}` },
+      });
+    }
+    return out;
   },
 };
 
@@ -649,27 +727,68 @@ export const ccipRateLimited: Rule = {
   },
 };
 
-/** root.unlock_interval (critical): SubtensorModule's RootStakeUnlockInterval set (above 0) on two readings. Root stake
- * must then sit that many blocks after the last root stake add, remove or claim for its coldkey and hotkey before it
- * can leave root, and anyone can restart that clock on the vault's coldkey with a transfer_stake gift: the vault's
- * unstakes (and so its payouts) can be held off. 0, unset, at launch. */
-export const rootUnlockInterval: Rule = {
-  name: "root.unlock_interval",
+/** root.hold_interval (critical; today's root.unlock_interval, renamed on every deployment: plan Task 57): SubtensorModule's
+ * RootStakeUnlockInterval set (above 0) on two readings. Root stake must then sit that many blocks after the last root
+ * stake add, remove or claim for its coldkey and hotkey before it can leave root, and anyone can restart that clock on
+ * the vault's coldkey with a transfer_stake gift: the vault's unstakes (and so its payouts) can be held off. 0, unset,
+ * at launch. On v3.2 the answer is not needing an unstake (spec §3.8): the email names the idle buffer the vault keeps
+ * liquid (the larger of idleBufferBps of the booked stake and a day's floor, _idleBuffer) and the idleBufferBps that would
+ * cover the pending payouts plus a day's floor, which the owner then sets (an increase is immediate). */
+export const rootHoldInterval: Rule = {
+  name: "root.hold_interval",
   run(ctx) {
     const set = (r: Readings) => (r.bittensor?.rootUnlockInterval === undefined ? undefined : r.bittensor.rootUnlockInterval > 0n);
     const held = twice(ctx, "bittensor", set);
-    if (held === undefined) return unjudged(ctx, "root.unlock_interval", "root.unlock_interval");
+    if (held === undefined) return unjudged(ctx, "root.hold_interval", "root.hold_interval");
     if (!held) return [];
     const s = ctx.snap.bittensor!;
     const blocks = s.state.rootUnlockInterval as bigint;
+    const facts: Record<string, string> = { blocks: String(blocks), about: `${Math.round((Number(blocks) * 12) / 60)} minutes`, block: String(s.block) };
+    if (ctx.cfg.deployment.version === "v3.2") Object.assign(facts, { contracts: "v3.2", ...bufferFacts(s.state) });
     return [
       {
-        rule: "root.unlock_interval",
-        key: "root.unlock_interval",
+        rule: "root.hold_interval",
+        key: "root.hold_interval",
         subject: `Bittensor now holds root stake ${blocks} blocks before it can leave root (RootStakeUnlockInterval)`,
-        facts: { blocks: String(blocks), about: `${Math.round(Number(blocks) * 12 / 60)} minutes`, block: String(s.block) },
+        facts,
       },
     ];
+  },
+};
+
+/** The vault's MAX_IDLE_BUFFER_BPS: idleBufferBps is at most 10% of the booked stake. */
+const MAX_IDLE_BUFFER_BPS = 1000n;
+/** v3.2: the idle buffer now (CascadeVault _idleBuffer: idleBufferBps of the booked stake, at least minDailyOutflow once
+ * above 0), and the idleBufferBps whose buffer covers the pending payouts plus a day's floor (spec §3.8). */
+function bufferFacts(s: BitState): Record<string, string> {
+  const { bookedStake: booked, idleBufferBps: bps, pendingPayouts: pending, minDailyOutflow: floor } = s;
+  if (booked === undefined || bps === undefined || pending === undefined || floor === undefined) return { "idle buffer": "unknown (a reading it needs is missing)" };
+  const share = (booked * 10n ** 9n * BigInt(bps)) / 10_000n;
+  const now = bps === 0 ? 0n : share > floor ? share : floor;
+  const need = pending + floor;
+  if (booked === 0n) return { "idle buffer": `${bps} bps: ${tao(now)} kept liquid`, "a buffer that covers the pending payouts and a day's floor": "not known: no stake is booked" };
+  const want = pending === 0n ? 1n : (need * 10_000n + booked * 10n ** 9n - 1n) / (booked * 10n ** 9n);
+  return {
+    "idle buffer": `${bps} bps: ${tao(now)} kept liquid`,
+    "a buffer that covers the pending payouts and a day's floor": `${want} bps (${tao(need)})${want > MAX_IDLE_BUFFER_BPS ? `: more than the ${MAX_IDLE_BUFFER_BPS} bps the vault allows` : ""}`,
+  };
+}
+
+/** The storage key of the per-pair root hold stamp (the block a (coldkey, hotkey) pair's hold runs from), which a
+ * hold stamp on one of the pairs the deployment depends on would show. Not confirmed: Task 62 reads it on testnet
+ * (spec §3.8, plan Task 62 step 2); until then it is undefined and root.pair_stamped judges nothing. */
+export const ROOT_HOLD_STAMP_KEY: undefined = undefined;
+
+/** root.pair_stamped (warning event, v3.2): a root hold stamp landing on one of the pairs the deployment depends on
+ * (spec §3.8: a transfer_stake gift or a claim restamps one of the vault's pairs, holding its unstakes off). Its
+ * storage key isn't confirmed (ROOT_HOLD_STAMP_KEY), so the rule is unjudged on every tick, never a silent "no stamp":
+ * root.hold_interval (the hold switched on at all) and stake.unstake_skipped (the walk refused on a pair) are what see
+ * it meanwhile. */
+export const rootPairStamped: Rule = {
+  name: "root.pair_stamped",
+  run(ctx) {
+    if (ctx.cfg.deployment.version !== "v3.2") return [];
+    return unjudged(ctx, "root.pair_stamped");
   },
 };
 
@@ -677,13 +796,15 @@ export const rootUnlockInterval: Rule = {
  * it needs, on two readings. The oracle reads 1,800 seconds back, and a pool writes at most one observation a second: with
  * a swap in every block, fewer than windowObservations at Base's block time as the readings measure it (1,801 on its 200 ms
  * blocks since 2026-11-05, 901 on its old 2-second ones) don't reach back, and usdcValue reverts ("OLD"). Never fewer than
- * oracleMinCardinality. It grows to cardinalityNext by itself as swaps write new observations. TAO/WETH kept 600 (growing
- * to 2,000) on 2026-10-31. */
+ * oracleMinCardinality (1,801: the window at one observation a second, the v3.2 oracle's MIN_CARDINALITY since Revision
+ * 28); on v3.2, never fewer than the oracle's own MIN_CARDINALITY (its constructor's precondition), when read. It grows to cardinalityNext by itself as swaps write new observations. TAO/WETH kept 600 (growing to 2,000) on
+ * 2026-10-31. */
 export const oracleCardinality: Rule = {
   name: "oracle.cardinality",
   run(ctx) {
     const out: Finding[] = [];
-    const needed = Math.max(ctx.t.oracleMinCardinality, windowObservations(ctx.blockS.base) ?? 0);
+    const window = windowObservations(ctx.blockS.base) ?? 0;
+    const needed = (b?: BaseState) => Math.max(ctx.t.oracleMinCardinality, window, ctx.cfg.deployment.version === "v3.2" && b?.minCardinality !== undefined ? b.minCardinality : 0);
     for (const [pool, name] of [
       ["taoWeth", "TAO/WETH"],
       ["wethUsdc", "WETH/USDC"],
@@ -691,22 +812,23 @@ export const oracleCardinality: Rule = {
       const of = (s?: BaseState) => (pool === "taoWeth" ? s?.taoWethPool : s?.wethUsdcPool);
       const few = (r: Readings) => {
         const c = of(r.base)?.cardinality;
-        return c === undefined ? undefined : c < needed;
+        return c === undefined ? undefined : c < needed(r.base);
       };
       const held = twice(ctx, "base", few);
       if (held === undefined) unjudged(ctx, "oracle.cardinality", `oracle.cardinality:${pool}`);
       if (!held) continue;
       const p = of(ctx.snap.base!.state)!;
+      const need = needed(ctx.snap.base!.state);
       out.push({
         rule: "oracle.cardinality",
         key: `oracle.cardinality:${pool}`,
-        subject: `The ${name} pool keeps ${p.cardinality} observations; the TWAP oracle needs ${needed}`,
+        subject: `The ${name} pool keeps ${p.cardinality} observations; the TWAP oracle needs ${need}`,
         facts: {
           pool: name,
           address: addressLink("base", pool === "taoWeth" ? ctx.cfg.tokens.base.taoWethPool : ctx.cfg.tokens.base.wethUsdcPool),
           observations: String(p.cardinality),
           "growing to": String(p.cardinalityNext ?? "unknown"),
-          needed: String(needed),
+          needed: String(need),
           block: String(ctx.snap.base!.block),
         },
       });
@@ -775,6 +897,55 @@ export const payoutFeeCeiling: Rule = {
   },
 };
 
+/** The front door's MAX_REDEEM_REQUEST_FEE: the most setRedeemRequestFee takes (0.001 ETH). */
+const MAX_REDEEM_REQUEST_FEE = 10n ** 15n;
+const eth = (wei: bigint) => `${formatUnits(wei, 18)} ETH`;
+
+/** batch.redeem_fee_thin (warning, R12a: the ChatGPT r3 DoS scan's fake redeem requests): a full redeem list's fees,
+ * redeemRequestFee × maxRedeems, under redeemFeeCoverPct (150%) of the bridge fee to close a full batch (50 deposits and
+ * 50 redeem requests: fullBatchQuote, the front door's primary bridge's quote), on two readings. A request needs only
+ * its fee, no shares, so anyone can fill the list; its fees pay the close from the pot only while they cover the fee.
+ * At launch, 0.0002 ETH × 50 (the founder, 2026-11-16) against about 0.0043 ETH: about 2.3 times (2.32), quiet until a
+ * rise in TAO/ETH or Bittensor's gas price takes a full batch's quote past about 0.0067 ETH (at 0.0001 ETH, 1.16 times, it
+ * warned from the start). Past 0.01 ETH a junk-filled list can't self-close (InsufficientFee) and the closer, the keeper,
+ * pays the rest. The owner's setRedeemRequestFee is immediate, at most 0.001 ETH. */
+export const redeemFeeThin: Rule = {
+  name: "batch.redeem_fee_thin",
+  run(ctx) {
+    const thin = (r: Readings) => {
+      const s = r.base;
+      if (s?.redeemRequestFee === undefined || s.maxRedeems === undefined || s.fullBatchQuote === undefined) return undefined;
+      return s.redeemRequestFee * BigInt(s.maxRedeems) * 100n < s.fullBatchQuote * BigInt(ctx.t.redeemFeeCoverPct);
+    };
+    const held = twice(ctx, "base", thin);
+    if (held === undefined) return unjudged(ctx, "batch.redeem_fee_thin", "batch.redeem_fee_thin");
+    if (!held) return [];
+    const s = ctx.snap.base!.state;
+    const fee = s.redeemRequestFee as bigint;
+    const n = BigInt(s.maxRedeems as number);
+    const quote = s.fullBatchQuote as bigint;
+    const pays = fee * n;
+    const cover = quote > 0n ? (Number((pays * 100n) / quote) / 100).toFixed(2) : "0.00";
+    const want = n > 0n ? (quote * BigInt(ctx.t.redeemFeeCoverPct) + 100n * n - 1n) / (100n * n) : 0n;
+    return [
+      {
+        rule: "batch.redeem_fee_thin",
+        key: "batch.redeem_fee_thin",
+        subject: `A full redeem list's fees cover a full batch's bridge fee only ${cover} times`,
+        facts: {
+          "redeem request fee": eth(fee),
+          "a full redeem list pays": `${eth(pays)} (${n} requests)`,
+          "a full batch's close quote (50 + 50)": eth(quote),
+          cover: `${cover}×`,
+          [`the fee that covers ${ctx.t.redeemFeeCoverPct / 100}×`]: want > MAX_REDEEM_REQUEST_FEE ? `${eth(want)}, above the front door's most (${eth(MAX_REDEEM_REQUEST_FEE)})` : eth(want),
+          bridge: s.primaryBridge ?? ctx.cfg.deployment.baseAdapter,
+          block: String(ctx.snap.base!.block),
+        },
+      },
+    ];
+  },
+};
+
 export const DEPENDENCY_RULES: Rule[] = [
   fmtaoBackingTrue,
   fmtaoRoleChange,
@@ -786,8 +957,10 @@ export const DEPENDENCY_RULES: Rule[] = [
   validatorRootStakeDrop,
   validatorRootUidLost,
   ccipRateLimited,
-  rootUnlockInterval,
+  rootHoldInterval,
+  rootPairStamped,
   oracleCardinality,
   oracleReverted,
   payoutFeeCeiling,
+  redeemFeeThin,
 ];

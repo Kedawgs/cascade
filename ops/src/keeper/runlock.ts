@@ -42,9 +42,11 @@ const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
  * release, which removes the lock only while it is still this process's. */
 export function takeRunLock(
   path: string,
-  o: { pid?: number; alive?: (pid: number) => boolean; log?: (line: string) => void; now?: () => Date; settle?: () => void } = {},
+  o: { pid?: number; alive?: (pid: number) => boolean; log?: (line: string) => void; now?: () => Date; settle?: () => void; what?: string } = {},
 ): () => void {
   const pid = o.pid ?? process.pid;
+  // what holds the lock, in the refusals: a keeper by default, as `run`'s; v3.2's stamps take it as "stamp run"
+  const what = o.what ?? "keeper";
   const alive = o.alive ?? processAlive;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -55,7 +57,7 @@ export function takeRunLock(
         const now = holder(path);
         if (now !== pid) {
           throw new RunLockHeld(
-            `another keeper (PID ${now ?? "unknown"}) took the lock first: ${path} no longer names this process after the stale one was taken over; never run two keepers at once; nothing started`,
+            `another ${what} (PID ${now ?? "unknown"}) took the lock first: ${path} no longer names this process after the stale one was taken over; never run two ${what}s at once; nothing started`,
           );
         }
       }
@@ -71,11 +73,11 @@ export function takeRunLock(
     }
     const held = holder(path);
     if (held === undefined) {
-      throw new RunLockHeld(`${path} exists but can't be read: if no keeper is running for this deployment, delete it; nothing started`);
+      throw new RunLockHeld(`${path} exists but can't be read: if no ${what} is running for this deployment, delete it; nothing started`);
     }
     if (alive(held)) {
       throw new RunLockHeld(
-        `another keeper (PID ${held}) is already running for this deployment: it holds ${path}; never run two keepers at once. If no keeper is running (Windows reused that PID), delete ${path}; nothing started`,
+        `another ${what} (PID ${held}) is already running for this deployment: it holds ${path}; never run two ${what}s at once. If no ${what} is running (Windows reused that PID), delete ${path}; nothing started`,
       );
     }
     try {
@@ -86,5 +88,5 @@ export function takeRunLock(
     }
     o.log?.(`took over a stale lock: ${path} named PID ${held}, which is gone`);
   }
-  throw new RunLockHeld(`could not take ${path}: another keeper took it first; nothing started`);
+  throw new RunLockHeld(`could not take ${path}: another ${what} took it first; nothing started`);
 }

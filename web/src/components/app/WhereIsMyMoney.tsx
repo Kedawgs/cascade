@@ -1,6 +1,7 @@
 "use client";
 
-import { depositMoving, movingOffBase, useBalances, useDeposits, usePosition, useProof } from "@/lib/cascade/hooks";
+import { depositMoving, movingOffBase, useBalances, useCancelsSent, useDeposits, usePosition, useProof } from "@/lib/cascade/hooks";
+import { STAKE_MISSING } from "@/lib/cascade/trail";
 import { toDisplay } from "@/lib/cascade/units";
 import { useNow } from "@/lib/client-state";
 import { formatRelative } from "@/lib/format";
@@ -21,6 +22,9 @@ export function WhereIsMyMoney({ account }: { account: string }) {
   const balance = useUsdcBalance();
   const wallet = useBalances(account);
   const now = useNow();
+  // a deposit this browser has already sent a cancel for isn't waiting to leave, though the list, read before, still
+  // shows it in its batch (cancel-sent.ts): nothing is offered to send for it
+  const cancelSent = useCancelsSent(account, "deposit");
 
   const lane = deriveLane({
     usdcBalance: balance.status === "success" ? (balance.data ?? null) : null,
@@ -75,8 +79,14 @@ export function WhereIsMyMoney({ account }: { account: string }) {
             </li>
           ))}
         </ol>
+        {/* v3.2: the vault lens reads stake missing, so whatever crosses now waits until Cascade is reconnected */}
+        {proof.data?.stakeMissing && (
+          <p role="status" className={styles.notice}>
+            {STAKE_MISSING}
+          </p>
+        )}
         {/* a deposit waiting in the open batch: when it leaves, and Send it now */}
-        <SendItNow account={account} what="deposit" waiting={(deposits.data ?? []).some((d) => d.cancellableWei !== undefined)} href="/activity" />
+        <SendItNow account={account} what="deposit" waiting={(deposits.data ?? []).some((d) => d.cancellableWei !== undefined && cancelSent(d) === null)} href="/activity" />
       </div>
     </section>
   );

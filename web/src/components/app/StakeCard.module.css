@@ -140,6 +140,14 @@
   color: var(--ink-2);
 }
 
+/* a note that takes a line of its own under the row's text and actions */
+.rowFull {
+  flex-basis: 100%;
+  margin-top: 0;
+  /* the token's address, when the wallet can't add it, breaks rather than running past a phone's edge */
+  overflow-wrap: anywhere;
+}
+
 .rowError {
   margin: 8px 0 0;
   font-size: 13px;

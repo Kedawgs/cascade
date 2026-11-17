@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -7,12 +7,28 @@ import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC2
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
+import {CascadeDoorLens} from "../../src/lens/CascadeDoorLens.sol";
 import {CascadeStaker} from "../../src/CascadeStaker.sol";
 import {CascadeTwapOracle, IUniswapV3PoolOracle} from "../../src/CascadeTwapOracle.sol";
 import {IUniswapV3Router02} from "../../src/interfaces/IUniswapV3Router02.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {StubBridge} from "../mocks/StubBridge.sol";
+import {defaultFrontDoorParams, defaultStakerParams} from "../utils/DefaultParams.sol";
 import {ForkBase} from "./ForkBase.sol";
+
+/// The pool state the oracle's depth view is checked against: the in-range liquidity now, and an observation's time.
+interface IPoolDepth {
+    function liquidity() external view returns (uint128);
+    function observations(uint256 index)
+        external
+        view
+        returns (
+            uint32 blockTimestamp,
+            int56 tickCumulative,
+            uint160 secondsPerLiquidityCumulativeX128,
+            bool initialized
+        );
+}
 
 /// Uniswap v3 QuoterV2 (and Slipstream's Quoter, same selector): quotes by running the swap and
 /// reverting, so it is not `view`.
@@ -47,6 +63,12 @@ contract BaseForkV3Test is ForkBase {
     uint256 constant RAO = 1e9;
     uint16 constant SWAP_FEE_BPS = 15;
     uint256 constant DEPOSIT_FEE = 50_000;
+    /// The front door's pool-depth floors here (Task 32): below the lowest 30-minute mean liquidity read on the live
+    /// pools (TAO/WETH 6.2e20 at its lowest across Task 31's samples, which swung about fivefold over days; WETH/USDC
+    /// about 8.5e17 to 9.4e17), so the live deliveries run the check and pass it. Not a launch value: Task 61
+    /// calibrates that from the pools' 30-day history.
+    uint128 constant LIVE_TAO_WETH_FLOOR = 1e20;
+    uint128 constant LIVE_WETH_USDC_FLOOR = 1e17;
 
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -65,48 +87,52 @@ contract BaseForkV3Test is ForkBase {
     CascadeTwapOracle oracle;
     StubBridge bridge;
     CascadeFrontDoor fd;
+    /// The read-only lens on `fd` (spec §8.1).
+    CascadeDoorLens doorLens;
     CascadeStaker staker;
     uint256 payoutCount;
 
     function setUp() public {
         forkFrom("BASE_RPC", "https://mainnet.base.org");
         if (!isFork()) return;
-        emit log_named_uint("fork block", block.number);
+        emit log_named_uint("fork block", vm.getBlockNumber());
+        // a fork pinned before the TAO/WETH pool grew skips here instead of failing in the constructor
+        skipBelowMinCardinality(TAO_WETH_POOL);
+        skipBelowMinCardinality(WETH_USDC_POOL);
         oracle = new CascadeTwapOracle(TAO_WETH_POOL, WETH_USDC_POOL, BASE_TAO, BASE_WETH, BASE_USDC);
+        assertEq(oracle.MIN_CARDINALITY(), ORACLE_MIN_CARDINALITY, "the fork base's copy of the minimum");
 
         bridge = new StubBridge(tao);
-        fd = new CascadeFrontDoor(
-            IERC20Metadata(BASE_TAO),
-            bridge,
-            BITTENSOR,
-            vaultAddr,
-            owner,
-            guardian,
-            12 hours,
-            0.01e18,
-            10_000e18,
-            1e14,
-            usdc
+        // the front door names its keeper, its oracle and its swapper (the staker, deployed next) at deploy
+        address pStaker = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        CascadeFrontDoor.Params memory p = defaultFrontDoorParams(
+            IERC20Metadata(BASE_TAO), bridge, BITTENSOR, vaultAddr, usdc, owner, guardian, keeper
         );
-        staker = new CascadeStaker(IERC20Permit(BASE_USDC), tao, fd, owner, treasury);
+        p.minDeposit = 0.03e18;
+        p.oracle = oracle;
+        p.swapper = pStaker;
+        p.minPoolLiquidity = [LIVE_TAO_WETH_FLOOR, LIVE_WETH_USDC_FLOOR];
+        fd = new CascadeFrontDoor(p);
+        // route 0 (SwapRouter02, also the delivery route) and the launch fees from the staker's constructor
+        staker = new CascadeStaker(
+            defaultStakerParams(
+                IERC20Permit(BASE_USDC), tao, fd, owner, treasury, SWAP_ROUTER_02, uniBuyPath(), uniSellPath()
+            )
+        );
+        assertEq(address(staker), pStaker);
+        assertEq(staker.swapFeeBps(), SWAP_FEE_BPS, "the fixture's swap fee");
+        assertEq(staker.depositFeeUsdc(), DEPOSIT_FEE, "the fixture's deposit fee");
+        doorLens = new CascadeDoorLens(address(fd));
+        assertEq(doorLens.keeper(), keeper);
 
-        vm.startPrank(owner);
-        staker.setRoute(
-            0,
-            CascadeStaker.Route(CascadeStaker.RouterKind.UniswapV3, SWAP_ROUTER_02, uniBuyPath(), uniSellPath(), true)
-        );
+        // route 1, Slipstream, added by the owner as a later route would be
+        vm.prank(owner);
         staker.setRoute(
             1,
             CascadeStaker.Route(
                 CascadeStaker.RouterKind.Slipstream, SLIPSTREAM_ROUTER, slipBuyPath(), slipSellPath(), true
             )
         );
-        staker.setDeliveryRoute(0);
-        staker.setFees(SWAP_FEE_BPS, DEPOSIT_FEE);
-        fd.setKeeper(keeper);
-        fd.setSwapper(address(staker));
-        fd.setOracle(oracle);
-        vm.stopPrank();
     }
 
     // ---- helpers ----
@@ -168,7 +194,7 @@ contract BaseForkV3Test is ForkBase {
     /// `user`'s delivery preference, live for a day, to Base.
     function prefer(address user, uint128 minUsdcPerTao) internal {
         vm.prank(user);
-        fd.setDelivery(minUsdcPerTao, uint64(block.timestamp + 1 days), BASE_DOMAIN);
+        fd.setDelivery(minUsdcPerTao, uint64(vm.getBlockTimestamp() + 1 days), BASE_DOMAIN);
     }
 
     function signPermit(uint256 key, address holder, uint256 value, uint256 nonce, uint256 deadline)
@@ -235,6 +261,42 @@ contract BaseForkV3Test is ForkBase {
         assertApproxEqRel(twap, spot, 0.03e18);
     }
 
+    /// The depth and inverse views on the live pools. Each pool's 30-minute harmonic-mean liquidity is positive and,
+    /// for a pool that wrote no observation in the window (nothing swapped, minted or burned, so its liquidity L never
+    /// moved), L to within the rounding: both ends of the window are then extrapolated from the newest observation,
+    /// each rounded down, so the growth is within 1 of 1,800 x 2^128 / L either way and the mean within
+    /// L^2 / (1,800 x 2^128 - L), plus 1 for its own floor, of L. A TAO round trip through USDC rounds down and loses
+    /// about one USDC unit's worth (the unit tests' bound): under 1e-6 of a TAO at any price above $1.
+    function test_fork_depthAndInverseAtTheLivePools() public onlyFork {
+        (uint128 taoWethMean, uint128 wethUsdcMean) = oracle.meanLiquidity();
+        address[2] memory pools = [TAO_WETH_POOL, WETH_USDC_POOL];
+        uint128[2] memory means = [taoWethMean, wethUsdcMean];
+        for (uint256 i; i < 2; ++i) {
+            uint128 now_ = IPoolDepth(pools[i]).liquidity();
+            (,, uint16 index,,,,) = IUniswapV3PoolOracle(pools[i]).slot0();
+            (uint32 newest,,,) = IPoolDepth(pools[i]).observations(index);
+            emit log_named_address("pool", pools[i]);
+            emit log_named_uint("  30-min harmonic-mean liquidity", means[i]);
+            emit log_named_uint("  liquidity now", now_);
+            emit log_named_uint("  seconds since its newest observation", block.timestamp - newest);
+            assertGt(means[i], 0, "a live pool has depth");
+            // test-controlled time: the fork's own clock, read only to choose which assertion applies
+            // forge-lint: disable-next-line(block-timestamp)
+            if (block.timestamp - newest >= oracle.TWAP_WINDOW()) {
+                uint256 excess = uint256(now_) * now_ / ((uint256(oracle.TWAP_WINDOW()) << 128) - now_) + 1;
+                emit log_named_uint("  unchanged over the window; rounding bound", excess);
+                assertLe(means[i], uint256(now_) + excess, "an unchanged pool: its liquidity, within the rounding");
+                assertGe(uint256(means[i]) + excess, now_, "an unchanged pool: its liquidity, within the rounding");
+            }
+        }
+
+        uint256 back = oracle.taoValue(oracle.usdcValue(1e18));
+        emit log_named_decimal_uint("1 TAO -> USDC -> TAO", back, 18);
+        emit log_named_decimal_uint("250 USDC in TAO (oracle)", oracle.taoValue(250e6), 18);
+        assertLe(back, 1e18, "the round trip rounds down");
+        assertApproxEqRel(back, 1e18, 1e12, "the round trip within a USDC unit's worth");
+    }
+
     // ---- staking ----
 
     /// A fresh key signs a real USDC permit; one `stakeWithPermit` call pulls the USDC, takes the fees,
@@ -253,7 +315,7 @@ contract BaseForkV3Test is ForkBase {
             "USDC permit domain: USD Coin / 2 / 8453"
         );
         uint256 nonce = IERC20Permit(BASE_USDC).nonces(payer);
-        uint256 permitDeadline = block.timestamp + 1 hours;
+        uint256 permitDeadline = vm.getBlockTimestamp() + 1 hours;
         (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, usdcIn, nonce, permitDeadline);
 
         uint256 fees = stakeFees(usdcIn);
@@ -266,7 +328,7 @@ contract BaseForkV3Test is ForkBase {
 
         vm.prank(payer);
         uint256 deposited =
-            staker.stakeWithPermit(payer, usdcIn, minTaoOut, 0, block.timestamp, permitDeadline, v, r, s);
+            staker.stakeWithPermit(payer, usdcIn, minTaoOut, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         emit log_named_decimal_uint("TAO deposited", deposited, 18);
 
         assertEq(IERC20Permit(BASE_USDC).nonces(payer), nonce + 1, "the permit was used");
@@ -281,10 +343,13 @@ contract BaseForkV3Test is ForkBase {
         assertStakerClean(taoQuote % RAO, SWAP_ROUTER_02);
     }
 
-    /// Route 1: a $10 stake through Aerodrome's Slipstream router, path USDC -(tickSpacing 100)-> TAO.
+    /// Route 1: a stake through Aerodrome's Slipstream router, path USDC -(tickSpacing 100)-> TAO, of $10 or twice the
+    /// front door's minimum-deposit floor at the oracle's 30-minute value, whichever is more, so a TAO price rise cannot
+    /// take the swap's TAO under MIN_DEPOSIT_FLOOR (a parameter of the test, not an assertion).
     function test_fork_slipstreamRoute() public onlyFork {
         address payer = makeAddr("v3 slipstream payer");
-        uint256 usdcIn = 10e6;
+        uint256 usdcIn = Math.max(10e6, 2 * oracle.usdcValue(fd.MIN_DEPOSIT_FLOOR()));
+        emit log_named_decimal_uint("USDC in", usdcIn, 6);
         deal(BASE_USDC, payer, usdcIn);
 
         uint256 fees = stakeFees(usdcIn);
@@ -295,7 +360,7 @@ contract BaseForkV3Test is ForkBase {
 
         vm.startPrank(payer);
         usdc.approve(address(staker), usdcIn);
-        uint256 deposited = staker.stake(payer, usdcIn, minTaoOut, 1, block.timestamp);
+        uint256 deposited = staker.stake(payer, usdcIn, minTaoOut, 1, vm.getBlockTimestamp());
         vm.stopPrank();
         emit log_named_decimal_uint("TAO deposited", deposited, 18);
 
@@ -361,6 +426,53 @@ contract BaseForkV3Test is ForkBase {
         assertStakerClean(0, SWAP_ROUTER_02);
         (uint128 m,,) = fd.deliveryOf(user);
         assertEq(m, pref, "preference survives the delivery");
+    }
+
+    /// The depth floor on the live pools (spec §3.7, I-31; Task 32). The fixture's floors sit below the live depth, so
+    /// every other delivery here runs the check and passes it. A floor raised one above its pool's 30-minute mean (an
+    /// owner raise, at once) makes the delivery revert ThinPool(index, mean) with nothing moved, while the user's claim
+    /// by hand still pays; each floor exactly at its pool's mean lets the same delivery settle.
+    function test_fork_thinPoolBlocksDeliveryNotClaim() public onlyFork {
+        address user = makeAddr("v3 thin-pool user");
+        payout(user, 1e18);
+        uint128 pref = 1e6; // 1 USDC per TAO: the user's floor never binds
+        prefer(user, pref);
+        (uint128 taoWethMean, uint128 wethUsdcMean) = oracle.meanLiquidity();
+        emit log_named_uint("TAO/WETH 30-min harmonic-mean liquidity", taoWethMean);
+        emit log_named_uint("WETH/USDC 30-min harmonic-mean liquidity", wethUsdcMean);
+        assertGt(taoWethMean, LIVE_TAO_WETH_FLOOR, "the fixture's TAO/WETH floor is below the live depth");
+        assertGt(wethUsdcMean, LIVE_WETH_USDC_FLOOR, "the fixture's WETH/USDC floor is below the live depth");
+        uint128[2] memory means = [taoWethMean, wethUsdcMean];
+        uint256 untouched = vm.snapshotState();
+
+        for (uint8 i; i < 2; ++i) {
+            vm.revertToState(untouched);
+            vm.prank(owner);
+            fd.setMinPoolLiquidity(i, means[i] + 1);
+            vm.prank(keeper);
+            vm.expectRevert(abi.encodeWithSelector(CascadeFrontDoor.ThinPool.selector, i, means[i]));
+            fd.deliver(user, 0);
+            assertClaimRestored(user, 1e18, pref);
+
+            vm.prank(user);
+            fd.claim();
+            assertEq(tao.balanceOf(user), 1e18, "the claim by hand pays");
+            assertEq(fd.claimable(user), 0, "claim spent");
+        }
+
+        // both floors exactly at the live means: the delivery settles, at least the TWAP floor
+        vm.revertToState(untouched);
+        vm.startPrank(owner);
+        fd.setMinPoolLiquidity(0, taoWethMean);
+        fd.setMinPoolLiquidity(1, wethUsdcMean);
+        vm.stopPrank();
+        uint256 marketFloor = marketFloorOf(1e18);
+        vm.prank(keeper);
+        uint256 received = fd.deliver(user, 0);
+        emit log_named_decimal_uint("USDC delivered with both floors at the live depth", received, 6);
+        assertGe(received, marketFloor, "at least the TWAP floor");
+        assertEq(usdc.balanceOf(user), received, "user paid");
+        assertEq(fd.claimable(user), 0, "claim spent");
     }
 
     /// An attacker dumps TAO into the TAO/WETH pool in the same block as a delivery whose user and keeper

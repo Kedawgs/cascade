@@ -1,6 +1,6 @@
 import { type AbiEvent, decodeEventLog, type Hex, hexToBigInt, hexToNumber, keccak256, toBytes, toEventSelector } from "viem";
 import { abiFor } from "./abi.ts";
-import type { ChainName, Role, RoleOf } from "./config.ts";
+import type { ChainName, Role, RoleOf, Version } from "./config.ts";
 
 /** A log as eth_getLogs returns it. */
 export interface RawLog {
@@ -94,33 +94,37 @@ export function identify(chain: ChainName, logs: readonly RawLog[]): Identified[
   });
 }
 
-/** Topic 0 of a role's event, by name (undefined for "unknown" or a name the role doesn't have). */
-export function topic0Of(role: Role, event: string): Hex | undefined {
-  let m = topicsByName.get(role);
+/** Topic 0 of a role's event, by name, in the deployment's contracts version (undefined for "unknown" or a name the
+ * role doesn't have). Within one version a name is one event. */
+export function topic0Of(role: Role, event: string, version: Version = "v3.1"): Hex | undefined {
+  const k = `${version}:${role}`;
+  let m = topicsByName.get(k);
   if (!m) {
-    m = new Map([...eventsOf(role)].map(([selector, e]) => [e.name, selector as Hex]));
-    topicsByName.set(role, m);
+    m = new Map([...eventsOf(role, version)].map(([selector, e]) => [e.name, selector as Hex]));
+    topicsByName.set(k, m);
   }
   return m.get(event);
 }
-const topicsByName = new Map<Role, Map<string, Hex>>();
+const topicsByName = new Map<string, Map<string, Hex>>();
 
 /** The identity (identityOf) of a stored log, from its columns: topic 0 comes from its role and event
- * name (not stored). Undefined for an "unknown" log, whose topic 0 can't be known. */
-export function storedIdentity(s: StoredRef): string | undefined {
-  const t0 = topic0Of(s.contract, s.event);
+ * name (not stored), in the version it was decoded with (the deployment's). Undefined for an "unknown" log, whose
+ * topic 0 can't be known. */
+export function storedIdentity(s: StoredRef, version: Version = "v3.1"): string | undefined {
+  const t0 = topic0Of(s.contract, s.event, version);
   if (!t0) return undefined;
   const topics = [t0, s.topic1, s.topic2, s.topic3].filter((t): t is Hex => t !== null);
   return identityOf({ transactionHash: s.txHash, topics, data: s.data });
 }
 
-/** Each role's events by topic 0, worked out once. */
-const selectors = new Map<Role, Map<string, AbiEvent>>();
-function eventsOf(role: Role): Map<string, AbiEvent> {
-  let m = selectors.get(role);
+/** Each role's events by topic 0, per version, worked out once. */
+const selectors = new Map<string, Map<string, AbiEvent>>();
+function eventsOf(role: Role, version: Version): Map<string, AbiEvent> {
+  const k = `${version}:${role}`;
+  let m = selectors.get(k);
   if (!m) {
-    m = new Map(abiFor(role).filter((x): x is AbiEvent => x.type === "event").map((e) => [toEventSelector(e), e]));
-    selectors.set(role, m);
+    m = new Map(abiFor(role, version).filter((x): x is AbiEvent => x.type === "event").map((e) => [toEventSelector(e), e]));
+    selectors.set(k, m);
   }
   return m;
 }
@@ -142,9 +146,9 @@ function plain(args: Record<string, unknown>): StoredLog["args"] {
   return out;
 }
 
-/** The log decoded against its contract's ABI on its chain; undefined when its address isn't one of
- * the deployment's contracts there. */
-export function decode(chain: ChainName, { uid, raw }: Identified, roleOf: RoleOf): StoredLog | undefined {
+/** The log decoded against its contract's ABI on its chain, in the deployment's contracts version (v3.1, the live
+ * v3-launch's, unless given); undefined when its address isn't one of the deployment's contracts there. */
+export function decode(chain: ChainName, { uid, raw }: Identified, roleOf: RoleOf, version: Version = "v3.1"): StoredLog | undefined {
   const address = raw.address.toLowerCase() as Hex;
   const contract = roleOf(chain, address);
   if (!contract) return undefined;
@@ -152,7 +156,7 @@ export function decode(chain: ChainName, { uid, raw }: Identified, roleOf: RoleO
   const data = raw.data.toLowerCase() as Hex;
   let event = "unknown";
   let args: StoredLog["args"] = {};
-  const abiEvent = topics[0] === undefined ? undefined : eventsOf(contract).get(topics[0]);
+  const abiEvent = topics[0] === undefined ? undefined : eventsOf(contract, version).get(topics[0]);
   if (abiEvent) {
     try {
       const d = decodeEventLog({ abi: [abiEvent], topics: topics as [Hex, ...Hex[]], data, strict: true });

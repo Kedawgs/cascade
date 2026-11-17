@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std/Test.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
@@ -37,7 +37,7 @@ contract MockUSDCTest is Test {
     function test_permitUnderVersion2() public {
         (address holder, uint256 key) = makeAddrAndKey("holder");
         address spender = makeAddr("spender");
-        uint256 deadline = block.timestamp + 1 hours;
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19\x01",

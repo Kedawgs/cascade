@@ -39,7 +39,8 @@ describe("hold:clear", () => {
       expect(t.indexOf("SELECT id, public_id, rule, summary, raised_at FROM holds WHERE cleared_at IS NULL")).toBeGreaterThan(-1);
       expect(t).toContain(`UPDATE holds SET cleared_at = 1800000000, cleared_note = 'checked: honest batch' WHERE (id = '${id}' OR public_id = '${id}') AND cleared_at IS NULL`);
       expect(t.indexOf("SELECT")).toBeLessThan(t.indexOf("UPDATE"));
-      expect(t).toContain("cascade-indexer-test --env test --remote");
+      // the database by its binding, which wrangler resolves in the environment's config (never a name of the script's)
+      expect(t).toContain("d1 execute DB --env test --remote");
     }
   });
 

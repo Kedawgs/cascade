@@ -5,14 +5,14 @@ import { encodeFunctionData, getAddress, type Hex, numberToHex, parseAbi } from 
 import { describe, expect, it } from "vitest";
 import { parseArgs, UsageError } from "../src/args.ts";
 import { cardinalityReport, cardinalityTxs, POOL_ABI } from "../src/cardinality.ts";
-import { BASE_V3, WALLET } from "../src/config.ts";
+import { BASE_V3, paths, WALLET } from "../src/config.ts";
 import { handoff } from "../src/handoff.ts";
 import { PAUSE_ABI, pauseCommand } from "../src/pause.ts";
 import { buildPlanV3 } from "../src/plan.ts";
 import { SAFE_PROBE_ABI, TIMELOCK_ABI } from "../src/safe.ts";
 import { knownContracts } from "../src/sign.ts";
 import { checkCalls, decodeKnownCall, describeCalls, KNOWN_ABI, parseWalletFile, type WalletFile, walletFile, writeWalletFile } from "../src/wallet.ts";
-import { COLDKEY, fakeChain, headers, revert, v3Record } from "./fake-keeper.ts";
+import { COLDKEY, fakeChain, revert, v3Record } from "./fake-keeper.ts";
 import { ROLES } from "./launch-roles.ts";
 
 const launch = v3Record("live", buildPlanV3(4, 9, COLDKEY, "launch", ROLES));
@@ -45,8 +45,59 @@ describe("the known functions: what the signing page can show", () => {
   });
 
   it("doesn't know transferOwnership, the one call that could hand a contract away", () => {
-    expect(KNOWN_ABI.map((f) => f.name)).toEqual(["acceptOwnership", "pause", "unpause", "increaseObservationCardinalityNext"]);
+    // v3-launch's four, then v3.2's (Task 49): the scheduler's entry points and the direct owner and guardian calls
+    expect(KNOWN_ABI.map((f) => f.name)).toEqual([
+      "acceptOwnership",
+      "pause",
+      "unpause",
+      "increaseObservationCardinalityNext",
+      "schedule",
+      "execute",
+      "cancel",
+      "removeFrontDoor",
+      "disableBridge",
+      "setPrimaryBridge",
+      "cancelPayoutBatch",
+      "setCaps",
+      // R6b (U4): the owner's batch limits (pnpm ops set-batch-limits)
+      "setBatchLimits",
+      "setMaxTotalAssets",
+      "addHotkey",
+      "setStakeHotkey",
+      "removeHotkey",
+      "setRedeemOrigin",
+      "setKeeper",
+      "setIdleBuffer",
+      // R5 Minor 3: the owner's claimGasRequired (pnpm ops set-claim-gas)
+      "setClaimGasRequired",
+      "fundReserve",
+      // merge 7b (R4, F-1): the token cushion's approve and fundCushion (pnpm ops fund-cushion)
+      "approve",
+      "fundCushion",
+    ]);
     expect(() => decodeKnownCall(TRANSFER_OWNERSHIP)).toThrow(/0xf2fde38b is not one of the known functions/);
+  });
+
+  it("merge 7b: v3-launch's contracts take no approve and no fundCushion (a v3.2 deployment's adapter and token only)", () => {
+    for (const [fn, args] of [
+      ["approve", [a.vault, 1n]],
+      ["fundCushion", [1n]],
+    ] as const) {
+      const f = walletFile({ title: "t", deployment: "v3-launch", now: NOW, calls: [{ chainId: 964, to: a.vault, data: enc(fn, args), label: `${fn}()`, from: ROLES.owner.bittensor }] });
+      expect(() => checkCalls(f, knownContracts(launch), NOW)).toThrow(`call 1: ${fn}() is not a call this tool makes to the Vault on Bittensor`);
+    }
+  });
+
+  it("sends none of v3.2's functions to v3-launch's contracts", () => {
+    const id = `0x${"ab".repeat(32)}` as Hex;
+    for (const [fn, args] of [
+      ["cancel", [id]],
+      ["schedule", ["0x8456cb59"]],
+      ["setMaxTotalAssets", [1n]],
+    ] as const) {
+      const f = walletFile({ title: "t", deployment: "v3-launch", now: NOW, calls: [{ chainId: 964, to: a.vault, data: enc(fn, args), label: `${fn}()`, from: ROLES.owner.bittensor }] });
+      expect(() => checkCalls(f, knownContracts(launch), NOW)).toThrow(`call 1: ${fn}() is not a call this tool makes to the Vault on Bittensor`);
+    }
   });
 
   it("refuses an unknown function, extra bytes, a missing argument, or an argument out of its type's range", () => {
@@ -90,6 +141,21 @@ describe("the call file", () => {
     expect(() => walletFile({ title: "t", now: 1, calls: [{ ...call, chainId: 31338 }] })).toThrow(/only on Base \(8453\) and Bittensor EVM \(964\), not chain 31338/);
   });
 
+  it("R6 (ChatGPT R2 claim C): a gas limit is held to its own chain's most: Base's 16,777,216 (EIP-7825), Bittensor's 64,900,000 (the keeper's ceiling, which a write-off's execute needs)", () => {
+    const onChain = (chainId: number, gas: string) => bad((f) => ((f.calls[0].chainId = chainId), (f.calls[0].gas = gas)));
+    const ok = (chainId: number, gas: string) => {
+      const f = good();
+      f.calls[0].chainId = chainId;
+      f.calls[0].gas = gas;
+      return parseWalletFile(JSON.parse(JSON.stringify(f))).calls[0].gas;
+    };
+    expect(ok(964, "47000000")).toBe("47000000");
+    expect(ok(964, "64900000")).toBe("64900000");
+    expect(onChain(964, "64900001")).toThrow("call 1: gas 64900001 is not a gas limit up to 64,900,000 (Bittensor EVM's most)");
+    expect(ok(8453, "16777216")).toBe("16777216");
+    expect(onChain(8453, "47000000")).toThrow("call 1: gas 47000000 is not a gas limit up to 16,777,216 (Base's most)");
+  });
+
   it("is written as JSON that reads back the same", () => {
     const path = writeWalletFile(join(tmp(), "wallet"), "v3-launch-accept-ownership", good());
     expect(path).toMatch(/[\\/]wallet[\\/]v3-launch-accept-ownership\.json$/);
@@ -101,16 +167,42 @@ describe("the call file", () => {
     expect(bad((f) => (f.format = "safe" as never))).toThrow(/not a call file/);
     expect(bad((f) => (f.version = 2 as never))).toThrow(/version/);
     expect(bad((f) => (f.calls = []))).toThrow(/no calls/);
-    expect(bad((f) => (f.calls[0].value = "1"))).toThrow(/call 1: value must be 0/);
+    expect(bad((f) => (f.calls[0].value = "1.5"))).toThrow(/call 1: value must be an amount in wei/);
     expect(bad((f) => (f.calls[0].to = "0x1234" as never))).toThrow(/call 1: to/);
     // the pool's checksummed address with one letter's case flipped: a mistyped address
     expect(bad((f) => (f.calls[0].from = "0x82Dd34C6631C286cDD1dB16f2c232f60E402Dd5A" as never))).toThrow(/call 1: from/);
     expect(bad((f) => (f.calls[0].data = "0xzz" as never))).toThrow(/call 1: data/);
     expect(bad((f) => (f.calls[0].gas = "-5"))).toThrow(/call 1: gas/);
-    expect(bad((f) => (f.calls[0].gas = "20000000"))).toThrow(/call 1: gas/);
+    expect(bad((f) => (f.calls[0].gas = "70000000"))).toThrow(/call 1: gas/);
     expect(bad((f) => (f.calls[0].label = 5 as never))).toThrow(/call 1: label/);
     expect(bad((f) => (f.deployment = "../etc"))).toThrow(/deployment/);
     expect(bad((f) => (f.ordered = "yes" as never))).toThrow(/ordered/);
+  });
+
+  it("holds stamps for the owner to sign instead of calls (Task 49): each one's chain, contract, time, owner and what is done with it", () => {
+    const stamp = { chainId: 964, contract: a.vault, asOf: "1900000000", from: ROLES.owner.bittensor, mode: "relay" as const, label: "the owner's stamp on the vault" };
+    const f = walletFile({ title: "Cascade v3.2-launch: the owner's stamps", deployment: "v3.2-launch", now: NOW, calls: [], stamps: [stamp] });
+    expect(f).toEqual({ format: "cascade-wallet-calls", version: 1, title: "Cascade v3.2-launch: the owner's stamps", createdAt: NOW, deployment: "v3.2-launch", ordered: false, calls: [], stamps: [stamp] });
+    expect(parseWalletFile(JSON.parse(JSON.stringify(f)))).toEqual(f);
+    const bad = (change: (s: Record<string, unknown>, file: Record<string, unknown>) => void) => {
+      const g = structuredClone(f) as unknown as Record<string, unknown> & { stamps: Record<string, unknown>[] };
+      change(g.stamps[0], g);
+      return () => parseWalletFile(g);
+    };
+    expect(bad((s) => (s.chainId = 31337))).toThrow(/stamp 1: chainId 31337 is neither Base \(8453\) nor Bittensor EVM \(964\)/);
+    expect(bad((s) => (s.contract = "0x1234"))).toThrow(/stamp 1: contract 0x1234 is not an address/);
+    expect(bad((s) => (s.asOf = "soon"))).toThrow(/stamp 1: asOf soon is not a time in seconds/);
+    expect(bad((s) => (s.asOf = (1n << 64n).toString()))).toThrow(/stamp 1: asOf .* is not a time in seconds/);
+    expect(bad((s) => (s.asOf = 1_900_000_000))).toThrow(/stamp 1: asOf 1900000000 is not a time in seconds/);
+    expect(bad((s) => (s.mode = "later"))).toThrow(/stamp 1: mode later is neither relay nor stack/);
+    expect(bad((s) => (s.from = "0x0000000000000000000000000000000000000000"))).toThrow(/stamp 1: from/);
+    expect(bad((s) => (s.label = `stamp${char(0x202e)}`))).toThrow(/stamp 1: label .*printable ASCII/);
+    expect(bad((s) => (s.typedData = "{}"))).toThrow(/stamp 1 has fields this tool doesn't know: typedData/);
+    // one or the other: never stamps and calls in one file
+    expect(bad((_s, file) => (file.calls = [{ chainId: 964, to: a.vault, data: ACCEPT, value: "0", label: "acceptOwnership()", from: ROLES.owner.bittensor }]))).toThrow(
+      /the file holds stamps to sign and calls to send: a file holds one or the other/,
+    );
+    expect(bad((_s, file) => (file.stamps = []))).toThrow(/the file's stamps are not a list of stamps/);
   });
 
   it("takes calldata in lower-case hex only, as the tools write it", () => {
@@ -120,6 +212,19 @@ describe("the call file", () => {
   it("refuses fields it doesn't know, so nothing unchecked rides along", () => {
     expect(bad((f) => (f.note = "trust me"))).toThrow(/the call file has fields this tool doesn't know: note/);
     expect(bad((f) => ((f.calls[0] as unknown as Record<string, unknown>).sender = "the owner"))).toThrow(/call 1 has fields this tool doesn't know: sender/);
+  });
+
+  it("carries a rail change's one-sided reason (Task 47b), in printable text, and only in a file of calls", () => {
+    // a file without one (every v3-launch file) has no such field at all
+    expect(good()).not.toHaveProperty("oneSided");
+    const f = walletFile({ title: "t", now: NOW, calls: [call], oneSided: "the vault moves first" });
+    expect(f.oneSided).toBe("the vault moves first");
+    expect(parseWalletFile(JSON.parse(JSON.stringify(f)))).toEqual(f);
+    expect(bad((g) => (g.oneSided = `why${char(0x202e)}`))).toThrow(/the call file's one-sided reason has a character outside printable ASCII/);
+    expect(bad((g) => (g.oneSided = ""))).toThrow(/the call file's one-sided reason is missing/);
+    expect(bad((g) => (g.oneSided = "x".repeat(201)))).toThrow(/the call file's one-sided reason is longer than 200 characters/);
+    const stamps = walletFile({ title: "t", now: NOW, calls: [], stamps: [{ chainId: 964, contract: a.vault, asOf: "1900000000", from: ROLES.owner.bittensor, mode: "relay", label: "a stamp" }] });
+    expect(() => parseWalletFile({ ...stamps, oneSided: "why" })).toThrow(/a file of stamps carries no one-sided reason/);
   });
 
   it("allows only printable ASCII in its text: no direction overrides, zero-width or C1 control characters", () => {
@@ -214,8 +319,10 @@ describe("checking each call against the deployment record", () => {
     );
   });
 
-  it("sets a gas limit only on the pool steps", () => {
-    expect(() => checkCalls(file([{ ...accept(8453, a.frontDoor), gas: 100_000 }]), known)).toThrow(/call 1: a gas limit is set only on the pool steps; acceptOwnership\(\) takes MetaMask's estimate/);
+  it("sets a gas limit only on the pool steps (and, on v3.2, a write-off's execute: v32-sign-page.test.ts)", () => {
+    expect(() => checkCalls(file([{ ...accept(8453, a.frontDoor), gas: 100_000 }]), known)).toThrow(
+      "call 1: a gas limit is set only on the pool steps and a write-off's execute; acceptOwnership() takes MetaMask's estimate",
+    );
   });
 
   it("refuses an address that is none of the deployment's contracts nor an oracle pool, or one on the wrong chain", () => {
@@ -431,39 +538,39 @@ describe("pause and unpause --for-wallet", () => {
 });
 
 describe("cardinality --for-wallet", () => {
-  // Base's 200 ms blocks: the window needs 1,801, the target stays 2,000
+  // the oracle's pools grow to the v3.2 oracle's MIN_CARDINALITY (1,801: TWAP_WINDOW + 1), WETH/USDC already past it
   const pools = (taoWeth: { cardinality: number; next: number }) =>
     fakeChain(
       [POOL_ABI],
       {
         slot0: (_a, c) => {
-          const s = c.to.toLowerCase() === BASE_V3.TAO_WETH_POOL.toLowerCase() ? taoWeth : { cardinality: 5_000, next: 5_000 };
+          const s = c.to.toLowerCase() === BASE_V3.TAO_WETH_POOL.toLowerCase() ? taoWeth : { cardinality: 18_001, next: 18_001 };
           return [2n ** 96n, 0, 0, s.cardinality, s.next, 0, true];
         },
       },
-      { eth_getBlockByNumber: headers() },
+      { eth_gasPrice: () => numberToHex(6_000_000n) },
     );
+  const contracts = paths({}).contractsDir;
 
   it("writes the steps in order, each with its gas limit, for the account given", async () => {
     const dir = tmp();
-    const lines = await cardinalityReport(pools({ cardinality: 600, next: 600 }).ctx, { from: NEW_OWNER, dir, now: 1_800_000_000_000 });
+    const lines = await cardinalityReport(pools({ cardinality: 601, next: 601 }).ctx, contracts, { from: NEW_OWNER, dir, now: 1_800_000_000_000 });
     const path = join(dir, "cardinality.json");
     const f = parseWalletFile(readJson(path));
-    const txs = cardinalityTxs(BASE_V3.TAO_WETH_POOL, [1_200, 1_800, 2_000]);
+    const txs = cardinalityTxs(BASE_V3.TAO_WETH_POOL, [1_201, 1_801]);
     expect(f).toMatchObject({ ordered: true, createdAt: 1_800_000_000_000 });
     expect(f).not.toHaveProperty("deployment");
     expect(f.calls).toEqual([
-      { chainId: 8453, to: txs[0].to, data: txs[0].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1200) on the TAO/WETH 0.3% pool, step 1 of 3", from: NEW_OWNER },
-      { chainId: 8453, to: txs[1].to, data: txs[1].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1800) on the TAO/WETH 0.3% pool, step 2 of 3", from: NEW_OWNER },
-      { chainId: 8453, to: txs[2].to, data: txs[2].data, value: "0", gas: "5100000", label: "increaseObservationCardinalityNext(2000) on the TAO/WETH 0.3% pool, step 3 of 3", from: NEW_OWNER },
+      { chainId: 8453, to: txs[0].to, data: txs[0].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1201) on the TAO/WETH 0.3% pool, step 1 of 2", from: NEW_OWNER },
+      { chainId: 8453, to: txs[1].to, data: txs[1].data, value: "0", gas: "15100000", label: "increaseObservationCardinalityNext(1801) on the TAO/WETH 0.3% pool, step 2 of 2", from: NEW_OWNER },
     ]);
-    expect(checkCalls(f, knownContracts(null)).calls).toHaveLength(3);
-    expect(lines.at(-1)).toBe(`Wrote ${path} (3 calls): send them from MetaMask with: pnpm ops sign ${path}`);
+    expect(checkCalls(f, knownContracts(null)).calls).toHaveLength(2);
+    expect(lines.at(-1)).toBe(`Wrote ${path} (2 calls): send them from MetaMask with: pnpm ops sign ${path}`);
   });
 
   it("writes nothing when the pools have enough", async () => {
     const dir = tmp();
-    const lines = await cardinalityReport(pools({ cardinality: 2_000, next: 2_000 }).ctx, { from: NEW_OWNER, dir, now: 1 });
+    const lines = await cardinalityReport(pools({ cardinality: 1_801, next: 1_801 }).ctx, contracts, { from: NEW_OWNER, dir, now: 1 });
     expect(readdirSync(dir)).toEqual([]);
     expect(lines.at(-1)).toBe("Both pools have enough slots: there is nothing for the wallet page to send.");
   });

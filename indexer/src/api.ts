@@ -1,10 +1,14 @@
 import { type Hex, pad } from "viem";
 import type { Config } from "./config.ts";
-import { type AdminLog, flowOf } from "./flow.ts";
+import { blockSKey, storedBlockS } from "./blocktime.ts";
+import { type AdminLog, doorParksOf, flowOf } from "./flow.ts";
+import { PARK_EVENTS } from "./parks.ts";
+import { ITEMS_KEY, parseItems } from "./scheduler.ts";
+import { parseReferenceReading, REFERENCE_KEY } from "./prices.ts";
 import { lagLimitOf } from "./rules/ops.ts";
 import { type AccountEvent, accountHalf, sharedHalfJson } from "./seed.ts";
 import { expand } from "./snapshot.ts";
-import { seedPageOf } from "./store.ts";
+import { logOf, seedPageOf } from "./store.ts";
 import { DEFAULTS, type Thresholds } from "./thresholds.ts";
 import { DEFAULT_PAYOUT_DELAY_S } from "./tick.ts";
 
@@ -32,7 +36,7 @@ const CURSOR =
  * with no client IP (never one through Cloudflare's edge, which sets it) isn't counted, and a limiter that
  * fails lets the request through: the routes are accelerators and signals, and a 429 is itself a refusal
  * their clients handle. Only requests that reach the Worker count: a cached answer never does. */
-async function withinLimit(limiter: RateLimit | undefined, request: Request, route: "scan" | "status" | "health" | "flow"): Promise<boolean> {
+async function withinLimit(limiter: RateLimit | undefined, request: Request, route: "scan" | "status" | "health" | "flow" | "price"): Promise<boolean> {
   const ip = request.headers.get("cf-connecting-ip");
   if (!limiter || !ip) return true;
   try {
@@ -49,7 +53,7 @@ export interface RouteEnv {
   SCAN_LIMITER?: RateLimit;
 }
 
-/** How long /v1/status and /v1/health answers are cached (Workers Cache, `Cache-Control: public, max-age`):
+/** How long /v1/status, /v1/flow, /v1/price and /v1/health answers are cached (Workers Cache, `Cache-Control: public, max-age`):
  * a burst reaches D1 once per TTL per Cloudflare location. Short enough for an uptime checker (its probes are
  * 30-60 s apart) and for the keeper (whose outage limit is minutes); the status's generatedAt says when its
  * answer was computed. */
@@ -245,6 +249,11 @@ export const FLOW_LOGS_SQL = `SELECT chain, address, event, args, tx_hash, block
   .map(([c, r]) => `SELECT chain, address, event, args, tx_hash, block, log_index FROM logs WHERE chain = '${c}' AND contract = '${r}' AND event IN (${FLOW_MARKS}) AND removed = 0`)
   .join(" UNION ALL ")}) ORDER BY block, log_index`;
 
+/** v3.2: every park event of the Bittensor adapters, with its block's time when stored (doorParksOf reads them). */
+export const FLOW_PARKS_SQL = `SELECT l.*, b.time AS block_time FROM logs l INDEXED BY logs_by_event LEFT JOIN blocks b ON b.chain = l.chain AND b.number = l.block
+  WHERE l.chain = 'bittensor' AND l.contract = 'bitAdapter' AND l.event IN (${PARK_EVENTS.map((e) => `'${e}'`).join(", ")}) AND l.removed = 0
+  ORDER BY l.block, l.log_index`;
+
 /** GET /v1/flow, the public facts behind the site's /security page (flowOf): the newest reading of each chain
  * (a partial tick leaves the other chain's own newest in place), the bridge messages in flight and the stored
  * admin events. Public chain facts only. Cached for CACHE_TTL_S; no query string; counted against the client's
@@ -269,6 +278,11 @@ export async function handleFlow(request: Request, env: RouteEnv, cfg: Config, n
         db.prepare("SELECT direction, COUNT(*) AS n FROM messages WHERE dst_tx IS NULL AND state <> 'SUCCESS' GROUP BY direction"),
         db.prepare(FLOW_LOGS_SQL).bind(...FLOW_EVENTS),
         db.prepare("SELECT v FROM meta WHERE k = 'deployment'"),
+        // v3.2: the scheduled items the admin rules keep (the same record, judged the same way), and the Bittensor
+        // adapters' park events with their blocks' times (the deposits waiting on Bittensor: few, by the event index)
+        ...(cfg.deployment.version === "v3.2"
+          ? [db.prepare("SELECT v FROM meta WHERE k = ?1").bind(ITEMS_KEY), db.prepare(FLOW_PARKS_SQL), db.prepare("SELECT v FROM meta WHERE k = ?1").bind(blockSKey("bittensor"))]
+          : []),
       ])
     ).map((r) => r.results);
   } catch (e) {
@@ -289,11 +303,21 @@ export async function handleFlow(request: Request, env: RouteEnv, cfg: Config, n
       txHash: r.tx_hash as string,
       block: Number(r.block),
     }));
+    const bittensor = rows[1][0] ? (expand(rows[1][0].json as string).bittensor ?? null) : null;
+    const v32 = cfg.deployment.version === "v3.2";
+    const parkRows = v32 ? (rows[6] ?? []) : [];
+    const parkTimes = new Map(parkRows.filter((r) => r.block_time !== null && r.block_time !== undefined).map((r) => [BigInt(r.block as number), Number(r.block_time)]));
     const body = flowOf({
       base: rows[0][0] ? (expand(rows[0][0].json as string).base ?? null) : null,
-      bittensor: rows[1][0] ? (expand(rows[1][0].json as string).bittensor ?? null) : null,
+      bittensor,
       inFlight: { toBittensor: count("base>bittensor"), toBase: count("bittensor>base") },
       adminLogs,
+      ...(v32
+        ? {
+            items: parseItems((rows[5]?.[0]?.v as string | undefined) ?? undefined),
+            parks: doorParksOf(parkRows.map(logOf), cfg.deployment, (b) => parkTimes.get(b), bittensor ?? undefined, storedBlockS({ [blockSKey("bittensor")]: String(rows[7]?.[0]?.v ?? "") }, "bittensor")),
+          }
+        : {}),
       cfg,
       nowS,
     });
@@ -302,6 +326,50 @@ export async function handleFlow(request: Request, env: RouteEnv, cfg: Config, n
     console.error(`flow failed: ${e instanceof Error ? e.message : String(e)}`);
     return plain(503, "not available", noStore);
   }
+}
+
+/** GET /v1/price: the newest outside reference price of TAO in USD that the tick stored (src/prices.ts: the median
+ * of PRICE_SOURCES, asked every fifth minute; unavailable when none answered or they disagreed by more than 2%), for
+ * the site's outside-price check.
+ *
+ * VETO ONLY. The site may use it to refuse a stake or a USDC delivery request when the Base pools' TAO price is too
+ * far from it: never to approve or loosen a trade, and never as a price to trade at. The contracts' floors (the
+ * staker's TWAP floor, the delivery floor, the user's own minimum) stay the binding limits, so a wrong or forged
+ * figure here can only make a trade wait. Like every route here it is never signed. So the body holds the reading
+ * and nothing else: no verdict, no band, no quote.
+ *
+ * Never a guess: the body is the stored reading as it is, `{ v: 1, usd, sources, at }` or `{ v: 1, unavailable, at }`,
+ * `at` being when the sources were asked (unix s). The indexer never calls a reading fresh: the site judges its age
+ * from `at`. No reading yet, or no price source configured, is `{ v: 1, unavailable, at: null }`; a stored row that
+ * isn't exactly one of the two shapes is 503. It reads no contract, so it is the same for every deployment and
+ * version, and isn't refused when the database holds another deployment (no tick writes it then, so its `at` ages).
+ * Otherwise as /v1/flow: CORS for the site's one origin on every answer, cached for CACHE_TTL_S, no query string,
+ * counted against the client's rate limit under its own key (429 past it); 503 when D1 fails (never cached). */
+export async function handlePrice(request: Request, env: RouteEnv, cfg: Config): Promise<Response> {
+  const cors = { "Access-Control-Allow-Origin": cfg.site.origin };
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { ...cors, "Access-Control-Allow-Methods": "GET", "Access-Control-Max-Age": "86400" } });
+  }
+  if (request.method !== "GET") return plain(405, "method not allowed", { ...cors, Allow: "GET, OPTIONS" });
+  if (!(await withinLimit(env.SCAN_LIMITER, request, "price"))) return plain(429, "too many requests", { ...cors, "Retry-After": "60" });
+  if (request.url.includes("?")) return plain(400, "no query string", cors);
+  const answer = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": CACHED } });
+  // a reading stored before PRICE_SOURCES was emptied is never refreshed: not served
+  if (cfg.priceSources.length === 0) return answer({ v: 1, unavailable: "no price source is configured", at: null });
+  let stored: string | null;
+  try {
+    stored = await env.DB.prepare("SELECT v FROM meta WHERE k = ?1").bind(REFERENCE_KEY).first<string>("v");
+  } catch (e) {
+    console.error(`price read failed: ${e instanceof Error ? e.message : String(e)}`);
+    return plain(503, "not available", cors);
+  }
+  if (stored === null) return answer({ v: 1, unavailable: "no reference price has been read yet", at: null });
+  const r = parseReferenceReading(stored);
+  if (!r) {
+    console.error("the stored reference price can't be read: not serving it");
+    return plain(503, "not available", cors);
+  }
+  return answer("usd" in r ? { v: 1, usd: r.usd, sources: r.sources, at: r.at } : { v: 1, unavailable: r.unavailable, at: r.at });
 }
 
 /** A tick must have completed this recently for /v1/health to be ok. */

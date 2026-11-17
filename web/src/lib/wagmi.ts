@@ -4,9 +4,10 @@ import { baseAccount } from "wagmi/connectors/baseAccount";
 import { injected } from "wagmi/connectors/injected";
 import { RPC } from "./cascade/config";
 
-/** Base only: every transaction and signature the site asks for is on Base (Bittensor is only read,
- * through its own public clients). A wallet on any other chain is asked to switch before anything is
- * sent (use-flows.ts, switchToBase). */
+/** Base only: every transaction and signature the site's flows ask for is on Base (Bittensor is read through
+ * its own public clients). A wallet on any other chain is asked to switch before anything is sent (use-flows.ts,
+ * switchToBase). The one exception, v3.2's emergency page, sends on Bittensor through the wallet's own provider,
+ * checking its chain first (use-direct-exit.ts), so this config stays Base only. */
 export const wagmiConfig = createConfig({
   chains: [base],
   // Base Account, and the browser's own wallets (EIP-6963 announces each; `injected` is the fallback).

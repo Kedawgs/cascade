@@ -7,6 +7,7 @@ import type { RegistryScan } from "./registry.ts";
 import type { StepReport } from "./roundtrip.ts";
 import type { Sent } from "./send.ts";
 import type { StepId } from "./types.ts";
+import type { DeploymentRecordV32 } from "./v32/deploy.ts";
 
 export interface VerifyResult {
   ok: boolean;
@@ -91,9 +92,9 @@ export function needRecord(path: string, live: boolean): DeploymentRecord {
   return rec;
 }
 
-/** The record file a command works from is gone, or now holds another deployment (planned anew, or
- * replaced): `run` stops on it rather than act for a deployment it can no longer see. */
-export class RecordMismatch extends Error {}
+/** The record file a command works from is gone, or now holds another deployment: the keeper core's error (one class,
+ * so the keeper's classifier knows it), re-exported here. */
+export { RecordMismatch } from "./keeper/core/errors.ts";
 
 /** Whether two records are of one deployment: the same kind of run and the same contract addresses. A
  * command that saves into a record it loaded earlier checks this first, since the file may since have
@@ -104,8 +105,9 @@ export function sameDeployment(x: DeploymentRecord, y: DeploymentRecord): boolea
   return x.target === y.target && [...new Set([...Object.keys(a), ...Object.keys(b)])].every((k) => a[k]?.toLowerCase() === b[k]?.toLowerCase());
 }
 
-/** Writes a temp file and renames it over the record, so a crash never leaves half a record. */
-export function saveRecord(path: string, rec: DeploymentRecord): void {
+/** Writes a temp file and renames it over the record, so a crash never leaves half a record. A v3.2 record
+ * (v32/deploy.ts) is saved the same way. */
+export function saveRecord(path: string, rec: DeploymentRecord | DeploymentRecordV32): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(rec, replacer, 2));

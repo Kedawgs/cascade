@@ -43,7 +43,7 @@ import {
   type StepReport,
   standInDebits,
 } from "./roundtrip.ts";
-import { cardinalitySteps, cardinalityTxs, readPool } from "./cardinality.ts";
+import { cardinalityNeededNow, cardinalitySteps, cardinalityTxs, readPool } from "./cardinality.ts";
 import { launchRolesFromEnv } from "./roles.ts";
 import { balanceOf, chainIdOf, createRpc, nonceOf, read, type Rpc } from "./rpc.ts";
 import { type Ctx, describeRevert, execFileRunner } from "./send.ts";
@@ -75,11 +75,31 @@ export interface Rehearsal {
   stop(): void;
 }
 
+/** Whether something already answers JSON-RPC at `url` (another anvil on the port): a fork started there would fail,
+ * and the rehearsal would then talk to that other process. */
+export async function rpcAnswers(url: string, timeoutMs = 2_000): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Two local anvil forks at the live state with their own chain ids (31337, 31338), so nothing signed
- * here can be replayed on Base or Bittensor; stand-ins at Bittensor's precompile addresses. */
-export async function startForks(env: Env, log: (l: string) => void): Promise<Rehearsal> {
+ * here can be replayed on Base or Bittensor; stand-ins at Bittensor's precompile addresses. v3.2's rehearsal
+ * gives `chainIds`, the live ones (runbook section 6: a T61 fork keeps them, so the sign page serves its files):
+ * the forks then answer them, and the context's targets carry them. */
+export async function startForks(env: Env, log: (l: string) => void, o: { chainIds?: Record<ChainName, number> } = {}): Promise<Rehearsal> {
   const p = paths(env);
-  const t = targets(env);
+  const base = targets(env);
+  const ids = o.chainIds ?? { base: base.rehearsal.base.chainId, bittensor: base.rehearsal.bittensor.chainId };
+  const t = { ...base, rehearsal: { base: { ...base.rehearsal.base, chainId: ids.base }, bittensor: { ...base.rehearsal.bittensor, chainId: ids.bittensor } } };
   mkdirSync(p.deploymentsDir, { recursive: true });
   const anvil = join(p.foundryBin, process.platform === "win32" ? "anvil.exe" : "anvil");
   const procs: ChildProcess[] = [];
@@ -88,15 +108,22 @@ export async function startForks(env: Env, log: (l: string) => void): Promise<Re
     procs.push(spawn(anvil, args, { stdio: ["ignore", out, out], windowsHide: true }));
   };
   const stop = () => {
+    // each fork by its own process (its exact pid), never by name
     for (const c of procs) c.kill();
   };
+  for (const chain of ["base", "bittensor"] as const) {
+    if (await rpcAnswers(t.rehearsal[chain].rpcUrl)) {
+      throw new Error(`something already answers at ${t.rehearsal[chain].rpcUrl} (another fork?): stop it first; no fork started`);
+    }
+  }
   try {
-    start(["--fork-url", PUBLIC_BASE_RPC, "--port", "8545", "--chain-id", "31337"], "rehearsal-anvil-base.log");
+    start(["--fork-url", PUBLIC_BASE_RPC, "--port", "8545", "--chain-id", String(ids.base)], "rehearsal-anvil-base.log");
     start(
-      ["--fork-url", BITTENSOR_ARCHIVE, "--port", "8547", "--chain-id", "31338", "--retries", "12", "--fork-retry-backoff", "20000", "--timeout", "60000"],
+      ["--fork-url", BITTENSOR_ARCHIVE, "--port", "8547", "--chain-id", String(ids.bittensor), "--retries", "12", "--fork-retry-backoff", "20000", "--timeout", "60000"],
       "rehearsal-anvil-bittensor.log",
     );
-    const rpc = createRpc(t.rehearsal, { minIntervalMs: { bittensor: 0 } });
+    log(`The forks' anvil processes: ${procs.map((c) => `pid ${c.pid}`).join(" and ")} (stopped by these pids when the run ends)`);
+    const rpc = createRpc(t.rehearsal, { minIntervalMs: { bittensor: 0, base: 0 } });
     await waitUp(rpc, "base");
     await waitUp(rpc, "bittensor");
     const standIns: [string, string][] = [
@@ -113,7 +140,7 @@ export async function startForks(env: Env, log: (l: string) => void): Promise<Re
       // the forked Bittensor block has no prevrandao, which anvil's EVM requires; a local block has one
       await rpc.request(chain, "evm_mine", []);
     }
-    log("Started local forks of Base and Bittensor (chain ids 31337 and 31338)");
+    log(`Started local forks of Base and Bittensor (chain ids ${ids.base} and ${ids.bittensor})`);
     const ctx: Ctx = { live: false, targets: t.rehearsal, rpc, runner: execFileRunner, paths: p, log, receiptTimeoutMs: 120_000, pollMs: 500 };
     return { ctx, stop };
   } catch (e) {
@@ -124,10 +151,10 @@ export async function startForks(env: Env, log: (l: string) => void): Promise<Re
 
 // ---- the forks' plumbing ----
 
-type Log = { address: Address; topics: Hex[]; data: Hex };
-type Receipt = { status: Hex; gasUsed: Hex; effectiveGasPrice: Hex; logs: Log[]; transactionHash: Hex };
+export type Log = { address: Address; topics: Hex[]; data: Hex };
+export type Receipt = { status: Hex; gasUsed: Hex; effectiveGasPrice: Hex; logs: Log[]; transactionHash: Hex; blockNumber?: Hex; contractAddress?: Address | null };
 
-async function receiptOf(rpc: Rpc, chain: ChainName, hash: Hex): Promise<Receipt> {
+export async function receiptOf(rpc: Rpc, chain: ChainName, hash: Hex): Promise<Receipt> {
   for (let i = 0; i < 240; i++) {
     const r = (await rpc.request(chain, "eth_getTransactionReceipt", [hash])) as Receipt | null;
     if (r) return r;
@@ -173,7 +200,7 @@ async function submit(ctx: Ctx, chain: ChainName, tx: { from: Address; to: Addre
     const { gas, ...rest } = tx;
     hash = (await ctx.rpc.request(chain, "eth_sendTransaction", [{ ...rest, ...(gas === undefined ? {} : { gas: numberToHex(gas) }) }])) as Hex;
   } catch (e) {
-    throw new Error(`${label} would fail (${describeRevert(ctx, e)})`);
+    throw new Error(`${label} would fail (${describeRevert(e)})`);
   }
   const r = await receiptOf(ctx.rpc, chain, hash);
   if (r.status !== "0x1") throw new Error(`${label} reverted (transaction ${hash})`);
@@ -190,7 +217,7 @@ async function sendAsUser(ctx: Ctx, user: PrivateKeyAccount, to: Address, data: 
   try {
     gas = hexToBigInt((await rpc.request("base", "eth_estimateGas", [{ from: user.address, to, data, value: numberToHex(value) }])) as Hex);
   } catch (e) {
-    throw new Error(`${label} would fail (${describeRevert(ctx, e)})`);
+    throw new Error(`${label} would fail (${describeRevert(e)})`);
   }
   const block = (await rpc.request("base", "eth_getBlockByNumber", ["latest", false])) as { baseFeePerGas: Hex };
   const tip = 1_000_000n;
@@ -213,7 +240,7 @@ async function sendAsUser(ctx: Ctx, user: PrivateKeyAccount, to: Address, data: 
 
 /** Settles what the staking stand-in could not debit in the transaction (its Debit events): the payer's
  * balance down and the stand-in's up, as the precompile's stake would have moved them. */
-async function settleDebits(rpc: Rpc, logs: readonly Log[]) {
+export async function settleDebits(rpc: Rpc, logs: readonly Log[]) {
   for (const d of standInDebits(logs, PRECOMPILE.staking)) {
     const balance = await balanceOf(rpc, "bittensor", d.who);
     if (balance < d.amount) throw new Error(`the staking stand-in recorded a ${formatEther(d.amount)} TAO stake from ${d.who}, which holds only ${formatEther(balance)}`);
@@ -364,7 +391,7 @@ export async function forkRoundTrip(r: Rehearsal, rec: DeploymentRecord, path: s
       try {
         estimate = hexToBigInt((await rpc.request(to, "eth_estimateGas", [{ from: router, to: dstAdapter, data }])) as Hex);
       } catch (e) {
-        throw new Error(`${label} would fail (${describeRevert(ctx, e)})`);
+        throw new Error(`${label} would fail (${describeRevert(e)})`);
       }
       const need = estimate - overhead;
       if (need > limit) {
@@ -591,9 +618,9 @@ export async function rehearse(env: Env, log: (l: string) => void): Promise<bool
     const rec = await deploy(r.ctx, path, { newPlan: true, v3: true, cadence, roles: () => launchRolesFromEnv(env) });
     if (cadence === "launch") {
       // what the owner sends on Base before launch (pnpm ops cardinality): a launch's read-back fails
-      // until the TAO/WETH pool has the oracle's 30 minutes of slots reserved
+      // until the TAO/WETH pool has the oracle's 30 minutes of slots reserved (at Base's block time, measured)
       const pool = BASE_V3.TAO_WETH_POOL;
-      for (const t of cardinalityTxs(pool, cardinalitySteps((await readPool(r.ctx, pool)).next))) {
+      for (const t of cardinalityTxs(pool, cardinalitySteps((await readPool(r.ctx, pool)).next, await cardinalityNeededNow(r.ctx)))) {
         const grown = await sendAs(r.ctx, "base", WALLET, t.to, t.data, `increaseObservationCardinalityNext(${t.next}) on the TAO/WETH pool`);
         log(`Base: the TAO/WETH pool reserves ${t.next} observation slots (${hexToBigInt(grown.gasUsed).toLocaleString("en-US")} gas)`);
       }

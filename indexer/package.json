@@ -17,7 +17,8 @@
     "site:approved": "node scripts/site-approved.ts",
     "hold:clear": "node scripts/hold-clear.ts",
     "alerts:ack": "node scripts/alerts-ack.ts",
-    "checks:approve": "node scripts/checks-approve.ts"
+    "checks:approve": "node scripts/checks-approve.ts",
+    "alpha-target": "node scripts/alpha-target.ts"
   },
   "dependencies": {
     "@noble/hashes": "1.8.0",

@@ -29,11 +29,16 @@ export const realDeps: Deps = {
   now: () => Math.floor(Date.now() / 1000),
 };
 
-/** The arguments of `wrangler d1 execute` for one statement on an environment's remote database. */
+/** The binding every environment gives its database in wrangler.jsonc (test/node/env-vars.test.ts holds them to it). */
+export const DB_BINDING = "DB";
+
+/** The arguments of `wrangler d1 execute` for one statement on an environment's remote database. The database is
+ * named by its binding, which wrangler resolves in that environment's config: never by a name of this file's, which a
+ * new database (v3.2-launch's, 2026-11-16) would leave pointing at the old one. */
 export const d1Args = (env: Env, sql: string, json = false): string[] => [
   "d1",
   "execute",
-  `cascade-indexer-${env}`,
+  DB_BINDING,
   "--env",
   env,
   "--remote",

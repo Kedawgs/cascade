@@ -1,6 +1,7 @@
 import { type Hex, keccak256, numberToHex, pad, toBytes } from "viem";
 import { batchKey, type Entry, encodeBatchMessage } from "../../src/crosscheck/replay.ts";
 import type { StoredLog } from "../../src/logs.ts";
+import { parkKeyOf } from "../../src/parks.ts";
 import { testConfig } from "./fixtures.ts";
 import { slog } from "./rule-ctx.ts";
 
@@ -130,12 +131,14 @@ export interface PayoutFixture {
 
 /** A payout batch for `key` (bounced entries have 0 shares, then redeemed ones), sent in chunks of
  * `taken` entries, each paid assets − ceil(assets × fee / gross), floored to rao, zeros dropped, and
- * landed on Base through `bridge` (the Base adapter by default). Positions can be shared with another
- * fixture to put two chunks, or two landings, in one transaction. */
+ * landed on Base through `bridge` (the Base adapter by default). A chunk with `charged` is v3.2's: its entries
+ * bear charged + unstakeCost (the fee the bridge was paid may be more, the caller's top-up), and its
+ * PayoutChunkSent has eight fields. Positions can be shared with another fixture to put two chunks, or two
+ * landings, in one transaction. */
 export function payoutBatch(o: {
   key: Hex;
   list: PayoutEntry[];
-  chunks: { taken: number; fee: bigint }[];
+  chunks: { taken: number; fee: bigint; charged?: bigint; unstakeCost?: bigint }[];
   deliveryBlock?: bigint;
   chunkBlock?: bigint;
   chunkTx?: Hex;
@@ -144,6 +147,9 @@ export function payoutBatch(o: {
   landTx?: Hex;
   landAt?: number;
   bridge?: Hex;
+  /** v3.2: the owner's cancel after chunk `after`, carrying the last `bouncesCarried` bounced entries forward as
+   * the batch's new list (the cursor back to 0, the chunk number going on) */
+  cancel?: { after: number; bouncesCarried: number };
 }): PayoutFixture {
   const bridge = o.bridge ?? D.baseAdapter;
   const deliveryTx = h(`payout delivery ${o.key}`);
@@ -161,13 +167,22 @@ export function payoutBatch(o: {
   let cursor = 0;
   let ci = o.chunkAt ?? 0;
   let li = o.landAt ?? 0;
-  o.chunks.forEach(({ taken, fee }, n) => {
-    const part = o.list.slice(cursor, cursor + taken);
+  let current = o.list;
+  o.chunks.forEach(({ taken, fee, charged, unstakeCost }, n) => {
+    if (o.cancel && n === o.cancel.after + 1) {
+      const bounces = o.list.filter((x) => x.shares === 0n);
+      current = bounces.slice(bounces.length - o.cancel.bouncesCarried);
+      cursor = 0;
+      const block = (o.chunkBlock ?? 6_900_400n) + BigInt(n);
+      bit.push(vault("PayoutBatchCancelled", { key: o.key, reminted: "1", bouncesCarried: o.cancel.bouncesCarried }, { block, txHash: h(`cancel tx ${o.key}`), logIndex: ci++ }));
+    }
+    const part = current.slice(cursor, cursor + taken);
     cursor += taken;
     const gross = part.reduce((s, p) => s + p.assets, 0n);
+    const borne = charged === undefined ? fee : charged + (unstakeCost ?? 0n);
     const entries: Entry[] = [];
     for (const p of part) {
-      let a = p.assets - (p.assets * fee + gross - 1n) / gross;
+      let a = p.assets - (p.assets * borne + gross - 1n) / gross;
       a -= a % RAO;
       if (a > 0n) entries.push({ user: p.user, amount: a });
     }
@@ -192,7 +207,8 @@ export function payoutBatch(o: {
         }),
       );
     }
-    bit.push(vault("PayoutChunkSent", { key: o.key, chunk: n, taken, gross: String(gross), net: String(net), fee: String(net === 0n ? 0n : fee) }, { block: chunkBlock, txHash: chunkTx, logIndex: ci++ }));
+    const v32: StoredLog["args"] = charged === undefined ? {} : { charged: String(net === 0n ? 0n : charged), unstakeCost: String(unstakeCost ?? 0n) };
+    bit.push(vault("PayoutChunkSent", { key: o.key, chunk: n, taken, gross: String(gross), net: String(net), fee: String(net === 0n ? 0n : fee), ...v32 }, { block: chunkBlock, txHash: chunkTx, logIndex: ci++ }));
     const c: LandedChunk = { chunk: n, net, entries, messageId, chunkTx, landTx };
     if (net > 0n) {
       const fd = (event: string, args: StoredLog["args"]) =>
@@ -221,3 +237,69 @@ export function payoutBatch(o: {
 
 /** A copy of a log with some args changed. */
 export const withArgs = (l: StoredLog, args: StoredLog["args"]): StoredLog => ({ ...l, args: { ...l.args, ...args } });
+
+// v3.2's parks (CcipBittensorAdapter): BatchParked, ParkedConverted, ParkedDelivered, ParkedRefunded, ParkedDropped
+
+/** StakeMissing()'s selector, the reason a vault refusal while stake is missing logs */
+export const STAKE_MISSING = keccak256(toBytes("StakeMissing()")).slice(0, 10) as Hex;
+
+/** A Bittensor adapter park event (topic1 the key; BatchParked's and ParkedRefunded's topic2 the message id). */
+export function parkLog(
+  event: "BatchParked" | "ParkedConverted" | "ParkedDelivered" | "ParkedRefunded" | "ParkedDropped",
+  o: { key: Hex; block: bigint; txHash?: Hex; logIndex?: number; adapter?: Hex; messageId?: Hex; amount?: bigint; sender?: Hex; recipient?: Hex; converted?: boolean; reason?: Hex },
+): StoredLog {
+  const args: StoredLog["args"] =
+    event === "BatchParked"
+      ? {
+          key: o.key,
+          messageId: o.messageId ?? h(`park message ${o.key}`),
+          recipient: o.recipient ?? D.vault,
+          sender: o.sender ?? D.frontDoor,
+          amount: String(o.amount ?? 0n),
+          converted: o.converted ?? true,
+          reason: o.reason ?? STAKE_MISSING,
+        }
+      : event === "ParkedRefunded"
+        ? { key: o.key, messageId: o.messageId ?? h(`refund message ${o.key}`) }
+        : { key: o.key };
+  return slog({
+    contract: "bitAdapter",
+    chain: "bittensor",
+    address: o.adapter ?? D.bitAdapter,
+    event,
+    block: o.block,
+    txHash: o.txHash ?? h(`${event} tx ${o.key} ${o.block}`),
+    logIndex: o.logIndex ?? 0,
+    topic1: o.key,
+    ...(args.messageId ? { topic2: args.messageId as Hex } : {}),
+    args,
+  });
+}
+
+/** An honest batch that parked (the vault refused it: its ccipReceive logged BatchParked, then Delivered) and was
+ * delivered later with deliverParked: that transaction holds the vault's BatchDelivered and outcomes, then the
+ * adapter's ParkedDelivered in the place of a Delivered. `parkKey` is the adapter's key for it. */
+export function parkedBatch(o: Parameters<typeof honestBatch>[0] & { parkBlock?: bigint }): BatchFixture & { parkKey: Hex; park: StoredLog[] } {
+  const b = honestBatch(o);
+  const parkKey = parkKeyOf(8453n, D.frontDoor, D.vault, encodeBatchMessage(b.id, b.deposits, b.redeems));
+  const total = b.deposits.reduce((s, e) => s + e.amount, 0n);
+  const parkBlock = o.parkBlock ?? b.delivery.block - 100n;
+  const parkTx = h(`park tx ${b.id}`);
+  const park = [
+    parkLog("BatchParked", { key: parkKey, block: parkBlock, txHash: parkTx, logIndex: 0, messageId: b.messageId, amount: total }),
+    slog({
+      contract: "bitAdapter",
+      chain: "bittensor",
+      address: D.bitAdapter,
+      event: "Delivered",
+      block: parkBlock,
+      txHash: parkTx,
+      logIndex: 1,
+      topic1: b.messageId,
+      args: { messageId: b.messageId, sourceChain: "8453", sender: D.frontDoor, recipient: D.vault, amount: String(total) },
+    }),
+  ];
+  const last = b.bit[b.bit.length - 1];
+  const bit = [...b.bit.slice(0, -1), parkLog("ParkedDelivered", { key: parkKey, block: last.block, txHash: last.txHash, logIndex: last.logIndex })];
+  return { ...b, bit, parkKey, park };
+}

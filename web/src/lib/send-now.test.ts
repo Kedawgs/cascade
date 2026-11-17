@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { STALE_MS } from "./batch-clock";
 import type { CloseOp, Operation } from "./cascade/oplog";
 import type { OpenBatch } from "./cascade/types";
-import { closeEconomicsOf, closeSentFromHere, feeToPay, SEND_GRACE_S, sendGate, sendNowValue, sendNowView } from "./send-now";
+import { CLOSE_FIRST_SEEN_MS, closeEconomicsOf, closeFirstView, closeSentFromHere, feeToPay, SEND_GRACE_S, sendGate, sendNowValue, sendNowView } from "./send-now";
 
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 const ME = "0x000000000000000000000000000000000000a11c" as const;
@@ -51,7 +51,7 @@ const view = (over: Partial<OpenBatch> = {}, x: { after?: number; maxWaitS?: num
   });
 const button = (over: Partial<OpenBatch> = {}) => view(over)?.button;
 
-const LEAVES = "Leaves in 22 h (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.";
+const LEAVES = "Leaves in 22 h (by 8:00 AM tomorrow), or sooner.";
 
 describe("what the user pays toward the bridge fee", () => {
   it("is the fee less what the batch's unstake fees (its pot) already hold", () => {
@@ -161,12 +161,12 @@ describe("when Send it now is offered", () => {
 describe("Send it now, before it's offered", () => {
   it("counts down to when the batch leaves on its own and to when the user can send it, on Base's clock", () => {
     expect(view(young())).toEqual({
-      leaves: "Leaves in 23 h 50 min (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.",
+      leaves: "Leaves in 23 h 50 min (by 8:00 AM tomorrow), or sooner.",
       yourself: "Send it yourself in 55 min (from 9:05 AM).",
     });
     // two minutes later by this device's clock, before the next read
     expect(view(young(), { after: 120_000 })).toEqual({
-      leaves: "Leaves in 23 h 48 min (by 8:00 AM tomorrow), or sooner once its fees cover the bridge fee.",
+      leaves: "Leaves in 23 h 48 min (by 8:00 AM tomorrow), or sooner.",
       yourself: "Send it yourself in 53 min (from 9:05 AM).",
     });
   });
@@ -191,14 +191,14 @@ describe("Send it now, before it's offered", () => {
 });
 
 describe("Send it now, once it's offered", () => {
-  it("offers the fee the user pays, in dollars of ETH, and what the wallet sends at most", () => {
+  it("offers the fee the user pays, in dollars (paid in ETH, as its note says), and what the wallet sends at most", () => {
     expect(view()).toEqual({
       leaves: LEAVES,
       button: {
         // 0.000744898 ETH at $2,330
-        label: "Send it now: about $1.74 in ETH",
+        label: "Send it now: about $1.74",
         // 0.000969 ETH at $2,330, to the cent above
-        note: "You pay the bridge fee for the whole batch. Your wallet sends up to $2.26 in ETH; anything extra is refunded.",
+        note: "You pay the whole batch's bridge fee, in ETH. Up to $2.26 is sent; any extra is refunded.",
         disabled: false,
       },
     });
@@ -207,14 +207,14 @@ describe("Send it now, once it's offered", () => {
   it("takes the batch's unstake fees off what the user pays", () => {
     // fee 0.001, pot 0.0004: about 0.0006 ETH to pay, 0.0009 sent
     const b = button({ feeWei: 10n ** 15n, potWei: 4n * 10n ** 14n, ethPriceUsd: 2_000 });
-    expect(b).toMatchObject({ label: "Send it now: about $1.20 in ETH", disabled: false });
-    expect(b?.note).toContain("up to $1.80 in ETH");
+    expect(b).toMatchObject({ label: "Send it now: about $1.20", disabled: false });
+    expect(b?.note).toContain("Up to $1.80 is sent");
   });
 
   it("says so when the pot already covers the fee: nothing to pay but the network fee", () => {
     expect(button({ feeWei: 10n ** 15n, potWei: 2n * 10n ** 15n })).toEqual({
       label: "Send it now: no bridge fee to pay",
-      note: "The fees already in this batch cover its bridge fee, so you pay only Base's network fee.",
+      note: "This batch's fees already cover its bridge fee, so you pay only Base's network fee.",
       disabled: false,
     });
   });
@@ -222,22 +222,23 @@ describe("Send it now, once it's offered", () => {
   it("names the margin the wallet sends when the pot covers the fee but not the 30%", () => {
     expect(button({ feeWei: 10n ** 15n, potWei: 11n * 10n ** 14n, ethPriceUsd: 2_000 })).toMatchObject({
       label: "Send it now: no bridge fee to pay",
-      note: "The fees already in this batch cover its bridge fee, so you pay only Base's network fee. Your wallet sends up to $0.40 in ETH in case the fee rises; anything extra is refunded.",
+      // ETH is named with the figure: this note says it nowhere else
+      note: "This batch's fees already cover its bridge fee, so you pay only Base's network fee. Up to $0.40 in ETH is sent in case the fee rises; any extra is refunded.",
     });
   });
 
   it("says under $0.01, never $0.00, for a tiny amount, and rounds what the wallet may send up to the cent", () => {
     // 0.000002 ETH at $2,330 is $0.0047; 0.000003 sent is $0.007
     expect(button({ feeWei: 2n * 10n ** 12n })).toMatchObject({
-      label: "Send it now: under $0.01 in ETH",
-      note: "You pay the bridge fee for the whole batch. Your wallet sends up to $0.01 in ETH; anything extra is refunded.",
+      label: "Send it now: under $0.01",
+      note: "You pay the whole batch's bridge fee, in ETH. Up to $0.01 is sent; any extra is refunded.",
     });
   });
 
   it("asks for the ETH the wallet is short of, the network fee included, and holds the button", () => {
     // 0.000969 sent + 0.00001 for gas = 0.000979 ETH at $2,330 = $2.281, to the cent above
     expect(button({ ethWei: 5n * 10n ** 14n })).toMatchObject({
-      label: "Send it now: about $1.74 in ETH",
+      label: "Send it now: about $1.74",
       warning: "You need about $2.29 of ETH on Base for this.",
       disabled: true,
     });
@@ -252,20 +253,48 @@ describe("Send it now, once it's offered", () => {
     expect(button({ ethWei: undefined })).toMatchObject({ disabled: false });
   });
 
-  it("shows ETH when its price can't be read, never a dollar figure it can't stand behind", () => {
+  it("shows ETH when its price can't be read, never a dollar figure it can't stand behind, nor an amount without its unit", () => {
     expect(button({ ethPriceUsd: undefined, ethWei: 0n })).toMatchObject({
       label: "Send it now: about 0.000745 ETH",
-      note: "You pay the bridge fee for the whole batch. Your wallet sends up to 0.000969 ETH; anything extra is refunded.",
+      note: "You pay the whole batch's bridge fee, in ETH. Up to 0.000969 ETH is sent; any extra is refunded.",
       warning: "You need about 0.000979 ETH on Base for this.",
     });
+    // nor when the batch's fees cover the fee and only the margin is sent
+    expect(button({ feeWei: 10n ** 15n, potWei: 11n * 10n ** 14n, ethPriceUsd: undefined })?.note).toBe(
+      "This batch's fees already cover its bridge fee, so you pay only Base's network fee. Up to 0.0002 ETH is sent in case the fee rises; any extra is refunded.",
+    );
+  });
+
+  it("each note says that what is paid or sent is ETH, whether or not there is a dollar price", () => {
+    for (const price of [2_000, undefined]) {
+      // a fee to pay: its first sentence says so; fees that cover it, a margin sent: said with the margin
+      expect(button({ ethPriceUsd: price })?.note, String(price)).toContain("ETH");
+      expect(button({ feeWei: 10n ** 15n, potWei: 11n * 10n ** 14n, ethPriceUsd: price })?.note, String(price)).toMatch(/Up to \S+ (in )?ETH is sent in case the fee rises/);
+    }
+    // nothing sent at all (the pot covers the fee and its margin): no amount, and none named
+    expect(button({ feeWei: 10n ** 15n, potWei: 2n * 10n ** 15n })?.note).not.toContain("ETH");
+  });
+
+  it("every amount on the button and in its note has its unit: a dollar sign, or ETH", () => {
+    const cases: Partial<OpenBatch>[] = [{}, { ethPriceUsd: undefined }, { feeWei: 2n * 10n ** 12n }, { feeWei: 10n ** 15n, potWei: 4n * 10n ** 14n }, { feeWei: 10n ** 15n, potWei: 11n * 10n ** 14n }, { ethPriceUsd: 0 }];
+    for (const over of cases) {
+      const b = button(over);
+      for (const words of [b?.label ?? "", b?.note ?? ""]) {
+        // each number in the words is a dollar figure or is followed by ETH
+        for (const m of words.matchAll(/\$?\d[\d.,]*\d|\$?\d/g)) {
+          const after = words.slice((m.index ?? 0) + m[0].length);
+          expect(m[0].startsWith("$") || after.startsWith(" ETH"), `${JSON.stringify(over, (_k, v) => (typeof v === "bigint" ? String(v) : v))}: ${words}`).toBe(true);
+        }
+      }
+    }
   });
 
   it("offers it again once the keeper is overdue, five minutes past the max wait, saying when it was due", () => {
     expect(view({ chainTime: START + DAY_S + 400 })).toEqual({
       leaves: "It was due to leave by 8:00 AM and hasn't left yet; you can send it yourself.",
       button: {
-        label: "Send it now: about $1.74 in ETH",
-        note: "You pay the bridge fee for the whole batch. Your wallet sends up to $2.26 in ETH; anything extra is refunded.",
+        label: "Send it now: about $1.74",
+        note: "You pay the whole batch's bridge fee, in ETH. Up to $2.26 is sent; any extra is refunded.",
         disabled: false,
       },
     });
@@ -368,5 +397,82 @@ describe("a send from this browser that Base hasn't shown yet", () => {
     expect(closeSentFromHere([close({ hashes: {} })], 7n, now)).toBeUndefined();
     expect(closeSentFromHere([close({ state: "failed" })], 7n, now)).toBeUndefined();
     expect(closeSentFromHere([close()], 7n, 1_000_000 + 10 * 60_000)).toBeUndefined();
+  });
+});
+
+describe("Send it now on v3.2", () => {
+  it("is offered while the front door is paused: v3.2's pause stops new stakes, never a close", () => {
+    expect(button({ paused: true, closesWhilePaused: true })).toMatchObject({ label: "Send it now: about $1.74", disabled: false });
+    expect(view({ paused: true, closesWhilePaused: true })?.leaves).toBe(LEAVES);
+    // v3-launch's paused front door: nothing, as before
+    expect(view({ paused: true })).toBeNull();
+  });
+});
+
+describe("R8 (the contracts review's L-1), R9 (M-2): the stake form's offer to send the open batch first, then stake (closeFirstView)", () => {
+  const FULL = "The current batch is full. It normally leaves on its own within a minute or two, at no cost to you, and the next batch then has room for your stake";
+  const DUE = "The current batch has no room for this stake. It is due to leave, but it isn't full, so the keeper may hold it for more fees before sending it at no cost to you";
+  /** A full batch of someone else's deposits, as the account reads it: nothing of the account's in it */
+  const full = (over: Partial<OpenBatch> = {}) => batch({ mine: { depositWei: 0n, redeemShares: 0n }, totalWei: 10n ** 19n, ...over });
+  /** The limits' word on it: batch 7, full by its limits, found closable by reads a refresh apart */
+  const seen = (over: Partial<{ batchId: bigint; due: "full" | "time"; closableForMs: number }> = {}) => ({ batchId: 7n, due: "full" as const, closableForMs: 30_000, ...over });
+  const v = (b: OpenBatch | undefined, after = seen(), unread = false) => closeFirstView({ batch: b, after, ...(unread ? { unread } : {}) });
+
+  it("R9 (M-2): says plainly that the batch normally leaves on its own, free, within a minute or two, and that sending it now costs the bridge fee shown, with the network fee for both steps and the most the wallet sends", () => {
+    expect(v(full())).toEqual({
+      note: `${FULL}. It hasn't left yet, so you can send it now yourself: sending it now costs its bridge fee, about $1.74 in ETH, and Base's network fee for the two steps. Your wallet sends up to $2.26 in ETH with the close; anything extra is refunded.`,
+      disabled: false,
+      batchId: 7n,
+    });
+    // fee 0.001, pot 0.0004 at $2,000: about 0.0006 ETH to pay, 0.0009 sent
+    expect(v(full({ feeWei: 10n ** 15n, potWei: 4n * 10n ** 14n, ethPriceUsd: 2_000 })).note).toBe(
+      `${FULL}. It hasn't left yet, so you can send it now yourself: sending it now costs the part of its bridge fee its own fees don't cover, about $1.20 in ETH, and Base's network fee for the two steps. Your wallet sends up to $1.80 in ETH with the close; anything extra is refunded.`,
+    );
+    // its unstake fees cover the fee and the margin: only the network fee
+    expect(v(full({ feeWei: 10n ** 15n, potWei: 2n * 10n ** 15n })).note).toBe(
+      `${FULL}. It hasn't left yet, so you can send it now yourself: the fees already in it cover its bridge fee, so sending it now costs only Base's network fee for the two steps.`,
+    );
+  });
+
+  it("R9 (M-2): a batch closable by time alone (under half its limits) isn't called full: it is due, and the keeper may be holding it for its fees", () => {
+    const due = v(full({ totalWei: 3n * 10n ** 18n }), seen({ due: "time" }));
+    expect(due.note).toBe(
+      `${DUE}. It hasn't left yet, so you can send it now yourself: sending it now costs its bridge fee, about $1.74 in ETH, and Base's network fee for the two steps. Your wallet sends up to $2.26 in ETH with the close; anything extra is refunded.`,
+    );
+    expect(due.disabled).toBe(false);
+    expect(due.note).not.toContain("is full");
+    // waiting on the second read too
+    expect(v(full(), seen({ due: "time", closableForMs: 0 }))).toEqual({ note: `${DUE}. If it hasn't left in a moment, you can send it yourself.`, disabled: true });
+  });
+
+  it("R9 (M-2): no paid close until two reads a refresh apart have found the same batch closable (the keeper's free round, once a minute, given a chance first): until then the button waits, saying why", () => {
+    expect(CLOSE_FIRST_SEEN_MS).toBe(25_000);
+    for (const ms of [0, 24_999]) expect(v(full(), seen({ closableForMs: ms })), String(ms)).toEqual({ note: `${FULL}. If it hasn't left in a moment, you can send it yourself.`, disabled: true });
+    expect(v(full(), seen({ closableForMs: 25_000 })).disabled).toBe(false);
+  });
+
+  it("R10 (M-1): the limits' reading failed, or is too old to count (more than two refreshes: a hidden tab's), holds the button until a fresh one comes, saying so", () => {
+    expect(closeFirstView({ batch: full(), after: seen(), limits: "old" })).toEqual({ note: `${FULL}. Checking whether it has left yet…`, disabled: true });
+    expect(closeFirstView({ batch: full(), after: seen(), limits: "unread" })).toEqual({ note: `${FULL}. We couldn't check the batch again just now, so it can't be sent from here yet.`, disabled: true });
+    expect(closeFirstView({ batch: full(), after: seen(), limits: "fresh" }).disabled).toBe(false);
+  });
+
+  it("R9 (L-1): an open batch read that isn't the batch the limits found closable (it just left, or a read lags the other) offers nothing until they agree", () => {
+    expect(v(full({ id: 8n }))).toEqual({ note: "The batch may have just left. Checking the room again…", disabled: true });
+    expect(v(full({ id: 8n }), seen({ batchId: 8n })).disabled).toBe(false);
+    expect(v(full({ id: 8n }), seen({ batchId: 8n })).batchId).toBe(8n);
+  });
+
+  it("holds the button, saying why, while the batch or its fee can't be read, Bittensor's side can't take it, it can't close, deposits are paused, or the wallet is short", () => {
+    expect(v(undefined)).toEqual({ note: `${FULL}. Checking what sending it costs…`, disabled: true });
+    expect(v(undefined, seen(), true)).toEqual({ note: `${FULL}. We can't read the batch on Base right now, so it can't be sent from here yet.`, disabled: true });
+    expect(v(full({ feeWei: undefined }))).toMatchObject({ note: expect.stringContaining("We can't read the bridge fee right now"), disabled: true });
+    expect(v(full({ feeWei: undefined, feeUnconfirmed: true }))).toMatchObject({ note: expect.stringContaining("our two sources for it disagree"), disabled: true });
+    expect(v(full({ bittensor: "paused" }))).toMatchObject({ note: expect.stringContaining("Bittensor's side isn't accepting batches"), disabled: true });
+    expect(v(full({ bittensor: "unchecked" }))).toMatchObject({ note: expect.stringContaining("We couldn't check Bittensor's side"), disabled: true });
+    expect(v(full({ canClose: false }))).toEqual({ note: "The current batch is full and can't be sent yet. Try again in a minute.", disabled: true });
+    expect(v(full({ paused: true }))).toEqual({ note: "Staking is paused right now. Try again later.", disabled: true });
+    // 0.000969 sent + 0.00001 for the close's gas = 0.000979 ETH at $2,330
+    expect(v(full({ ethWei: 5n * 10n ** 14n }))).toMatchObject({ warning: "You need about $2.29 of ETH on Base for this.", disabled: true });
   });
 });

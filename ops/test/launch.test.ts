@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type AbiFunction, type Address, encodeFunctionData, getAddress, type Hex, numberToHex, parseAbi, toFunctionSignature, zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
-import { loadArtifact } from "../src/artifacts.ts";
+import { preauditArtifact } from "../src/builds.ts";
 import { paths, SETTINGS_V3, targets, WALLET } from "../src/config.ts";
 import { type DeployDeps, deploy, effectPresent } from "../src/deploy.ts";
 import { buildPlanV3, type PlanV3, rolesOf } from "../src/plan.ts";
@@ -123,9 +123,8 @@ describe("a launch plan separates the roles", () => {
   });
 
   it("hands off every contract that has an owner: the front door, the staker and the vault; the oracle and the adapters have none", () => {
-    const dir = paths({}).contractsDir;
     const owned = ["CcipBaseAdapter", "CcipBittensorAdapter", "CascadeTwapOracle", "CascadeFrontDoor", "CascadeStaker", "CascadeVault"].filter((n) =>
-      loadArtifact(dir, n).abi.some((i) => i.type === "function" && ["owner", "transferOwnership", "acceptOwnership"].includes(i.name)),
+      preauditArtifact(n).abi.some((i) => i.type === "function" && ["owner", "transferOwnership", "acceptOwnership"].includes(i.name)),
     );
     expect(owned).toEqual(["CascadeFrontDoor", "CascadeStaker", "CascadeVault"]);
     const at = { CascadeFrontDoor: launch.addresses.frontDoor, CascadeStaker: launch.addresses.staker, CascadeVault: launch.addresses.vault };
@@ -133,7 +132,7 @@ describe("a launch plan separates the roles", () => {
     expect(handed).toEqual(owned.map((n) => at[n as keyof typeof at]));
     // each is Ownable2Step: it has pendingOwner and acceptOwnership, so the transfer only offers
     for (const n of owned) {
-      const sigs = loadArtifact(dir, n).abi.filter((i): i is AbiFunction => i.type === "function").map((i) => toFunctionSignature(i));
+      const sigs = preauditArtifact(n).abi.filter((i): i is AbiFunction => i.type === "function").map((i) => toFunctionSignature(i));
       expect(sigs, n).toEqual(expect.arrayContaining(["pendingOwner()", "acceptOwnership()", "transferOwnership(address)"]));
     }
   });
@@ -212,6 +211,8 @@ function world(code: Record<string, Hex> = {}) {
     effectPresent: async () => false,
     readColdkey: async () => COLDKEY,
     deployBlock: async () => 1,
+    // the checkout's build is deploy.test.ts's subject
+    checkCheckout: async () => {},
   };
   return { ctx, deps, recordPath, asked, sent };
 }

@@ -1,89 +1,14 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
-import {Vm} from "forge-std/Vm.sol";
-import {CascadeBase} from "../../src/CascadeBase.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {StubBridge} from "../mocks/StubBridge.sol";
-import {FrontDoorTestBase} from "../FrontDoorTestBase.sol";
+import {BridgeNotEnabled, NotBridge, PrimaryBridgeDisabled} from "../../src/CascadeErrors.sol";
+import {Schedule} from "../governance/Schedule.sol";
+import {FrontDoorPayoutsBase} from "./FrontDoorPayoutsBase.sol";
 
-contract FrontDoorPayoutsTest is FrontDoorTestBase {
-    uint64 constant BASE = 8453;
-    bytes32 constant KEY = keccak256("batch-1");
-    bytes32 constant KEY2 = keccak256("batch-2");
-
-    // ---- helpers ----
-
-    /// Delivers a PAYOUTS chunk from (BITTENSOR, vault) through the stub bridge for Σ payouts,
-    /// first minting Σ to the front door (the bridge's token transfer) when `mintFirst`.
-    function deliverPayouts(bytes32 key, uint32 chunk, CascadeMessages.Entry[] memory payouts, bool mintFirst)
-        internal
-    {
-        uint256 sum = sumOf(payouts);
-        if (mintFirst) tao.mint(address(fd), sum);
-        vm.prank(address(bridge));
-        fd.onBridgeMessage(BITTENSOR, vault, CascadeMessages.encodePayouts(key, chunk, payouts), sum);
-    }
-
-    /// The replay-record key of a PAYOUTS message.
-    function hashOf(bytes32 key, uint32 chunk, CascadeMessages.Entry[] memory payouts) internal pure returns (bytes32) {
-        return keccak256(CascadeMessages.encodePayouts(key, chunk, payouts));
-    }
-
-    /// A second stub bridge, proposed and activated after the registry delay.
-    function enableBridge2() internal returns (StubBridge bridge2) {
-        bridge2 = new StubBridge(tao);
-        vm.prank(owner);
-        fd.proposeBridge(address(bridge2));
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(owner);
-        fd.activateBridge(address(bridge2));
-    }
-
-    function sumOf(CascadeMessages.Entry[] memory payouts) internal pure returns (uint256 sum) {
-        for (uint256 i; i < payouts.length; ++i) {
-            sum += payouts[i].amount;
-        }
-    }
-
-    function entries1(address user, uint256 amount) internal pure returns (CascadeMessages.Entry[] memory e) {
-        e = new CascadeMessages.Entry[](1);
-        e[0] = CascadeMessages.Entry(user, amount);
-    }
-
-    function entries2(address u1, uint256 a1, address u2, uint256 a2)
-        internal
-        pure
-        returns (CascadeMessages.Entry[] memory e)
-    {
-        e = new CascadeMessages.Entry[](2);
-        e[0] = CascadeMessages.Entry(u1, a1);
-        e[1] = CascadeMessages.Entry(u2, a2);
-    }
-
-    function noEntries() internal pure returns (CascadeMessages.Entry[] memory) {
-        return new CascadeMessages.Entry[](0);
-    }
-
-    function dep(address user, uint256 amount) internal {
-        vm.prank(user);
-        fd.deposit(amount);
-    }
-
-    function pauseFd() internal {
-        vm.prank(guardian);
-        fd.pause();
-    }
-
-    function openTotal() internal view returns (uint256 total) {
-        (,, total,,,) = fd.openBatch();
-    }
-
-    function assertTokenIdentity() internal view {
-        assertGe(tao.balanceOf(address(fd)), openTotal() + fd.totalClaimable());
-    }
-
+contract FrontDoorPayoutsTest is FrontDoorPayoutsBase {
     // ---- payouts in ----
 
     function test_payoutCreditsClaimable() public {
@@ -112,21 +37,24 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         assertEq(tao.balanceOf(bob), 1_000e18);
     }
 
-    function test_payoutFromAnyEnabledBridge() public {
+    /// Only a bridge once activated delivers (bridgeKnown, spec §3.5): not one merely scheduled, not a stranger. One
+    /// since disabled still delivers: test_payoutFromAKnownDisabledBridgeCredited.
+    function test_payoutFromAnyActivatedBridge() public {
         StubBridge bridge2 = new StubBridge(tao);
         bytes memory m = CascadeMessages.encodePayouts(KEY, 0, entries1(alice, 3e18));
         tao.mint(address(fd), 3e18);
 
-        // proposed but not yet active: not a bridge
+        // scheduled but not yet active: not a bridge
+        bytes memory activation = abi.encodeCall(fd.activateBridge, (address(bridge2)));
         vm.prank(owner);
-        fd.proposeBridge(address(bridge2));
+        fd.schedule(activation);
         vm.prank(address(bridge2));
-        vm.expectRevert(CascadeBase.NotBridge.selector);
+        vm.expectRevert(NotBridge.selector);
         fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
 
-        vm.warp(block.timestamp + 7 days);
+        Schedule.warpTo(vm.getBlockTimestamp() + 7 days);
         vm.prank(owner);
-        fd.activateBridge(address(bridge2));
+        fd.execute(activation);
         vm.prank(address(bridge2));
         fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
         assertEq(fd.claimable(alice), 3e18);
@@ -134,221 +62,127 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         assertTrue(fd.delivered(address(bridge2), keccak256(m)));
         assertFalse(fd.delivered(address(bridge), keccak256(m)));
         // the primary bridge is unchanged
-        assertEq(fd.primaryBridge(), address(bridge));
+        assertEq(doorLens.primaryBridge(), address(bridge));
 
         // a stranger is not a bridge
         bytes memory m1 = CascadeMessages.encodePayouts(KEY, 1, entries1(alice, 1e18));
         tao.mint(address(fd), 1e18);
         address stranger = makeAddr("stranger");
         vm.prank(stranger);
-        vm.expectRevert(CascadeBase.NotBridge.selector);
+        vm.expectRevert(NotBridge.selector);
         fd.onBridgeMessage(BITTENSOR, vault, m1, 1e18);
+        assertFalse(fd.delivered(stranger, keccak256(m1)));
+        assertEq(fd.totalClaimable(), 3e18);
+    }
 
-        // a disabled bridge is no longer a bridge
+    // ---- known bridges (spec §3.2, the front door's side; §3.5; H-2 i) ----
+
+    /// A payout is accepted from any known bridge, ever activated (bridgeKnown), so one the guardian has since disabled
+    /// still delivers a late payout or a refund, bounded exactly as an enabled one: only tokens that have arrived are
+    /// credited (TokensNotReceived), each bridge delivers a message once (its own replay record), and the peer is
+    /// checked as ever. The primary's disable stops its sends, never what it brings in.
+    function test_payoutFromAKnownDisabledBridgeCredited() public {
+        StubBridge bridge2 = enableBridge2();
         vm.prank(guardian);
         fd.disableBridge(address(bridge2));
-        vm.prank(address(bridge2));
-        vm.expectRevert(CascadeBase.NotBridge.selector);
-        fd.onBridgeMessage(BITTENSOR, vault, m1, 1e18);
-        assertFalse(fd.delivered(address(bridge2), keccak256(m1)));
-        assertFalse(fd.delivered(stranger, keccak256(m1)));
-    }
+        assertFalse(doorLens.bridgeEnabled(address(bridge2)));
+        assertTrue(doorLens.bridgeKnown(address(bridge2)));
 
-    function test_payoutWrongPeerReverts() public {
-        bytes memory m = CascadeMessages.encodePayouts(KEY, 0, entries1(alice, 3e18));
-        tao.mint(address(fd), 3e18);
-        address other = makeAddr("other");
-
-        vm.prank(address(bridge));
-        vm.expectRevert(CascadeFrontDoor.UnknownPeer.selector);
-        fd.onBridgeMessage(BITTENSOR, other, m, 3e18);
-
-        // the vault's address on another chain is another peer
-        vm.prank(address(bridge));
-        vm.expectRevert(CascadeFrontDoor.UnknownPeer.selector);
-        fd.onBridgeMessage(BASE, vault, m, 3e18);
-
-        assertFalse(fd.delivered(address(bridge), keccak256(m)));
-        assertEq(fd.totalClaimable(), 0);
-
-        // the vault itself is accepted
-        vm.prank(address(bridge));
-        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
-        assertEq(fd.claimable(alice), 3e18);
-    }
-
-    function test_payoutValueMismatchReverts() public {
-        bytes memory m = CascadeMessages.encodePayouts(KEY, 0, entries1(alice, 3e18));
-        tao.mint(address(fd), 3e18);
-        vm.deal(address(bridge), 1);
-
-        vm.prank(address(bridge));
-        vm.expectRevert(CascadeFrontDoor.ValueMismatch.selector);
-        fd.onBridgeMessage{value: 1}(BITTENSOR, vault, m, 3e18);
-
-        assertFalse(fd.delivered(address(bridge), keccak256(m)));
-        assertEq(address(fd).balance, 0);
-        assertEq(address(bridge).balance, 1);
-    }
-
-    function test_payoutAmountMismatchReverts() public {
-        bytes memory m = CascadeMessages.encodePayouts(KEY, 0, entries2(alice, 3e18, bob, 2e18));
-        tao.mint(address(fd), 6e18);
-
-        // Σ 5e18 against 4e18 and 6e18
-        vm.prank(address(bridge));
-        vm.expectRevert(CascadeFrontDoor.AmountMismatch.selector);
-        fd.onBridgeMessage(BITTENSOR, vault, m, 4e18);
-        vm.prank(address(bridge));
-        vm.expectRevert(CascadeFrontDoor.AmountMismatch.selector);
-        fd.onBridgeMessage(BITTENSOR, vault, m, 6e18);
-
-        // an empty list with tokens attached
-        bytes memory empty = CascadeMessages.encodePayouts(KEY, 0, noEntries());
-        vm.prank(address(bridge));
-        vm.expectRevert(CascadeFrontDoor.AmountMismatch.selector);
-        fd.onBridgeMessage(BITTENSOR, vault, empty, 1e18);
-
-        assertFalse(fd.delivered(address(bridge), keccak256(m)));
-        assertFalse(fd.delivered(address(bridge), keccak256(empty)));
-        assertEq(fd.totalClaimable(), 0);
-    }
-
-    function test_payoutTokensNotReceivedThenRedelivered() public {
-        CascadeMessages.Entry[] memory p = entries1(alice, 5e18);
-
-        vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
-        deliverPayouts(KEY, 0, p, false);
-
-        // the open batch's deposits are not payout tokens: 10e18 held, 10e18 + 0 + 5e18 needed
-        dep(bob, 10e18);
-        vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
-        deliverPayouts(KEY, 0, p, false);
-
-        // one wei short: 15e18 - 1 held
-        tao.mint(address(fd), 5e18 - 1);
-        vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
-        deliverPayouts(KEY, 0, p, false);
-        assertFalse(fd.delivered(address(bridge), hashOf(KEY, 0, p)));
-
-        // the rest arrives; the same message is re-delivered and goes through
-        tao.mint(address(fd), 1);
-        deliverPayouts(KEY, 0, p, false);
-        assertEq(fd.claimable(alice), 5e18);
-        assertEq(fd.totalClaimable(), 5e18);
-        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, p)));
-
-        // existing claimable is not payout tokens either: 15e18 held, 10e18 + 5e18 + 2e18 needed
-        vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
-        deliverPayouts(KEY, 1, entries1(carol, 2e18), false);
-        deliverPayouts(KEY, 1, entries1(carol, 2e18), true);
-        assertEq(fd.claimable(carol), 2e18);
-        assertEq(fd.totalClaimable(), 7e18);
-        assertEq(tao.balanceOf(address(fd)), 17e18);
-    }
-
-    function test_payoutDuplicateChunkReverts() public {
-        StubBridge bridge2 = enableBridge2();
-        CascadeMessages.Entry[] memory p = entries1(alice, 3e18);
+        CascadeMessages.Entry[] memory p = entries2(alice, 3e18, bob, 2e18);
         bytes memory m = CascadeMessages.encodePayouts(KEY, 0, p);
-        deliverPayouts(KEY, 0, p, true);
-        assertTrue(fd.delivered(address(bridge), keccak256(m)));
-
-        // a copy from a second enabled bridge with no tokens behind it: 3e18 held, 3e18 + 3e18 needed
+        // no tokens behind it: nothing credited
         vm.prank(address(bridge2));
         vm.expectRevert(CascadeFrontDoor.TokensNotReceived.selector);
-        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
-
-        // the same message from the same bridge, even with its tokens here again
-        tao.mint(address(fd), 3e18);
-        vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
-        deliverPayouts(KEY, 0, p, false);
-        assertEq(fd.claimable(alice), 3e18);
-        assertEq(fd.totalClaimable(), 3e18);
-
-        // the same message from the second bridge is its own slot: accepted, as tokens now back it
-        assertFalse(fd.delivered(address(bridge2), keccak256(m)));
+        fd.onBridgeMessage(BITTENSOR, vault, m, 5e18);
+        // a sender other than the vault
+        tao.mint(address(fd), 5e18);
+        address other = makeAddr("other");
         vm.prank(address(bridge2));
-        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
-        assertTrue(fd.delivered(address(bridge2), keccak256(m)));
-        assertEq(fd.claimable(alice), 6e18);
-        // and only once from that bridge too
-        tao.mint(address(fd), 3e18);
-        vm.prank(address(bridge2));
-        vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
-        fd.onBridgeMessage(BITTENSOR, vault, m, 3e18);
+        vm.expectRevert(CascadeFrontDoor.UnknownPeer.selector);
+        fd.onBridgeMessage(BITTENSOR, other, m, 5e18);
 
-        // the next chunk of the same batch (those tokens now back it)
-        deliverPayouts(KEY, 1, p, false);
-        // chunk 0 of another batch
-        deliverPayouts(KEY2, 0, p, true);
-
-        assertEq(fd.claimable(alice), 12e18);
-        assertEq(fd.totalClaimable(), 12e18);
-        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 1, p)));
-        assertTrue(fd.delivered(address(bridge), hashOf(KEY2, 0, p)));
-        assertEq(tao.balanceOf(address(fd)), 12e18);
-    }
-
-    function test_payoutReducesNetForwardedFloored() public {
-        dep(alice, 10e18);
-        vm.warp(block.timestamp + 12 hours);
-        vm.prank(carol);
-        fd.closeBatch{value: 1e15}();
-        assertEq(fd.netForwarded(), 10e18);
-
-        deliverPayouts(KEY, 0, entries1(alice, 4e18), true);
-        assertEq(fd.netForwarded(), 6e18);
-
-        // more paid out than forwarded (gains): floored at 0
-        deliverPayouts(KEY, 1, entries1(bob, 20e18), true);
-        assertEq(fd.netForwarded(), 0);
-        assertEq(fd.totalClaimable(), 24e18);
-
-        // and stays at 0
-        deliverPayouts(KEY2, 0, entries1(carol, 1e18), true);
-        assertEq(fd.netForwarded(), 0);
-    }
-
-    function test_payoutWorksWhilePaused() public {
-        pauseFd();
-        assertTrue(fd.paused());
-
-        tao.mint(address(fd), 3e18);
         vm.expectEmit(address(fd));
-        emit CascadeFrontDoor.PayoutReceived(KEY, 0, alice, 3e18);
-        deliverPayouts(KEY, 0, entries1(alice, 3e18), false);
-
+        emit CascadeFrontDoor.PayoutsDelivered(KEY, 0, 5e18, address(bridge2));
+        vm.prank(address(bridge2));
+        fd.onBridgeMessage(BITTENSOR, vault, m, 5e18);
         assertEq(fd.claimable(alice), 3e18);
-        assertEq(fd.totalClaimable(), 3e18);
-        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, entries1(alice, 3e18))));
+        assertEq(fd.claimable(bob), 2e18);
+        assertEq(fd.totalClaimable(), 5e18);
+        assertTrue(fd.delivered(address(bridge2), keccak256(m)));
+        assertFalse(fd.delivered(address(bridge), keccak256(m)));
+        // once from that bridge, even with its tokens here again
+        tao.mint(address(fd), 5e18);
+        vm.prank(address(bridge2));
+        vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
+        fd.onBridgeMessage(BITTENSOR, vault, m, 5e18);
+
+        // the primary, disabled (the guardian's hold): its late payout is credited too, on those 5e18
+        vm.prank(guardian);
+        fd.disableBridge(address(bridge));
+        assertTrue(doorLens.guardianHold());
+        deliverPayouts(KEY2, 0, entries1(carol, 5e18), false);
+        assertEq(fd.claimable(carol), 5e18);
+        assertTrue(fd.delivered(address(bridge), hashOf(KEY2, 0, entries1(carol, 5e18))));
+        assertEq(fd.totalClaimable(), 10e18);
+        assertTokenIdentity();
+
+        vm.prank(alice);
+        fd.claim();
+        vm.prank(carol);
+        fd.claim();
+        assertEq(tao.balanceOf(alice), 1_003e18);
+        assertEq(tao.balanceOf(carol), 1_005e18);
+        assertEq(tao.balanceOf(address(fd)), 2e18);
     }
 
-    function test_payoutEmptyListAccepted() public {
-        vm.recordLogs();
-        deliverPayouts(KEY, 0, noEntries(), false);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        // exactly one event: PayoutsDelivered(KEY, 0, 0, bridge)
-        assertEq(logs.length, 1);
-        assertEq(logs[0].emitter, address(fd));
-        assertEq(logs[0].topics.length, 2);
-        assertEq(logs[0].topics[0], CascadeFrontDoor.PayoutsDelivered.selector);
-        assertEq(logs[0].topics[1], KEY);
-        assertEq(logs[0].data, abi.encode(uint32(0), uint256(0), address(bridge)));
+    /// Known is not enabled for a send: the front door's disableBridge stops only the sends (closes) through that
+    /// bridge (spec §3.2, the front door's side). With the primary disabled a close reverts PrimaryBridgeDisabled, as
+    /// does a request meeting a full redeem list (its self-close), while that bridge's payout is still credited; a
+    /// known bridge that is disabled cannot become the primary (BridgeNotEnabled). Once the owner switches to an
+    /// enabled one, the batch leaves through it, and the old primary still delivers.
+    function test_disabledBridgeCannotCarryAClose() public {
+        StubBridge bridge2 = enableBridge2();
+        bridge2.setFee(1e15);
+        dep(alice, 10e18);
+        requestWithFee(bob, 1e24);
+        vm.prank(owner);
+        fd.setBatchLimits(50, 1);
+        Schedule.warpTo(vm.getBlockTimestamp() + 12 hours);
+        vm.prank(guardian);
+        fd.disableBridge(address(bridge));
 
-        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, noEntries())));
-        assertEq(fd.totalClaimable(), 0);
-        assertEq(fd.netForwarded(), 0);
-        assertEq(tao.balanceOf(address(fd)), 0);
+        vm.prank(carol);
+        vm.expectRevert(PrimaryBridgeDisabled.selector);
+        fd.closeBatch{value: 1e15}(1, 0);
+        vm.prank(carol);
+        vm.expectRevert(PrimaryBridgeDisabled.selector);
+        fd.requestRedeem{value: 1e14}(1e24);
+        // what it brings in is credited
+        deliverPayouts(KEY, 0, entries1(carol, 2e18), true);
+        assertEq(fd.claimable(carol), 2e18);
 
-        // and is not replayable
-        vm.expectRevert(CascadeFrontDoor.DuplicatePayouts.selector);
-        deliverPayouts(KEY, 0, noEntries(), false);
+        // a known bridge that is disabled is no primary
+        vm.prank(guardian);
+        fd.disableBridge(address(bridge2));
+        vm.prank(owner);
+        vm.expectRevert(BridgeNotEnabled.selector);
+        fd.setPrimaryBridge(address(bridge2));
+        assertEq(bridge.sendCount() + bridge2.sendCount(), 0, "nothing sent");
+        (uint64 id,, uint256 total,,,) = fd.openBatch();
+        assertEq(id, 1);
+        assertEq(total, 10e18);
 
-        // an empty (KEY, 0) does not occupy the real chunk 0 of that batch
-        deliverPayouts(KEY, 0, entries1(alice, 3e18), true);
-        assertEq(fd.claimable(alice), 3e18);
-        assertTrue(fd.delivered(address(bridge), hashOf(KEY, 0, entries1(alice, 3e18))));
+        // re-enabled (its Reopen) and made the primary, it carries the batch; the old primary still delivers
+        Schedule.run(fd, owner, abi.encodeCall(fd.activateBridge, (address(bridge2))));
+        vm.prank(owner);
+        fd.setPrimaryBridge(address(bridge2));
+        vm.prank(carol);
+        fd.closeBatch{value: 1e15}(1, 10e18);
+        assertEq(bridge2.sendCount(), 1);
+        assertEq(bridge2.lastAmount(), 10e18);
+        assertEq(bridge.sendCount(), 0);
+        deliverPayouts(KEY, 1, entries1(carol, 1e18), true);
+        assertEq(fd.claimable(carol), 3e18);
     }
 
     // ---- claims out ----
@@ -404,15 +238,16 @@ contract FrontDoorPayoutsTest is FrontDoorTestBase {
         vm.prank(bob);
         fd.claim();
         assertTokenIdentity();
+        waitCancel(alice);
         vm.prank(alice);
         fd.cancelDeposit(4e18);
         assertTokenIdentity();
         assertEq(tao.balanceOf(address(fd)), 9e18);
 
         // a close forwards only the open deposits
-        vm.warp(block.timestamp + 12 hours);
+        Schedule.warpTo(vm.getBlockTimestamp() + 12 hours);
         vm.prank(carol);
-        fd.closeBatch{value: 1e15}();
+        fd.closeBatch{value: 1e15}(1, 6e18);
         assertEq(bridge.lastAmount(), 6e18);
         assertEq(tao.balanceOf(address(fd)), 3e18);
         assertEq(openTotal() + fd.totalClaimable(), 2e18);

@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeFunctionData, encodeFunctionResult, type Hex, numberToHex } from "viem";
 import { describe, expect, it } from "vitest";
+import { buildingRunner, checkoutOf, type Sources } from "./checkouts.ts";
 import { ROLES } from "./launch-roles.ts";
-import { loadArtifact } from "../src/artifacts.ts";
+import { artifactFor, assertCheckoutIs, checkoutDiffers, PREAUDIT_CONTRACTS } from "../src/builds.ts";
 import { type ChainName, paths, targets, WALLET } from "../src/config.ts";
-import { type DeployDeps, deploy, effectPresent } from "../src/deploy.ts";
-import { buildPlan, buildPlanV3 } from "../src/plan.ts";
+import { checkCheckout, type DeployDeps, deploy, effectPresent } from "../src/deploy.ts";
+import { buildPlan, buildPlanV3, type ContractsBuild } from "../src/plan.ts";
 import { type DeploymentRecord, loadRecord, saveRecord } from "../src/record.ts";
 import type { Rpc } from "../src/rpc.ts";
 import type { Ctx, Sent } from "../src/send.ts";
@@ -58,14 +59,17 @@ function world(start: Record<ChainName, number>, opts: { latest?: Partial<Record
     effects.add(step.id);
     return { hash: HASH, block: 1, gasUsed: 21_000n, costWei: 1n };
   };
+  /** The builds deploy asked the checkout to be (the test chains take whatever is sent). */
+  const checks: ContractsBuild[] = [];
   const deps: DeployDeps = {
     sendCreate: (_c, req) => fakeSend(req as PlannedStep),
     sendCall: (_c, req) => fakeSend(req as PlannedStep),
     effectPresent: async (_c, _p, step) => effects.has(step.id),
     readColdkey: async () => COLDKEY,
     deployBlock: async () => 777,
+    checkCheckout: async (_c, build) => void checks.push(build),
   };
-  return { ctx, deps, nonce, receipts, sent, sentNonces, effects, dir, recordPath, logs };
+  return { ctx, deps, nonce, receipts, sent, sentNonces, effects, dir, recordPath, logs, checks };
 }
 
 const ALL: StepId[] = ["baseAdapter", "frontDoor", "bitAdapter", "vault", "adapterReserve", "vaultReserve", "setKeeper", "setPayoutDelay"];
@@ -342,8 +346,7 @@ describe("deploy v3", () => {
 describe("effectPresent v3", () => {
   const plan = buildPlanV3(0, 40, COLDKEY);
   const step = (id: StepId) => plan.steps.find((s) => s.id === id)!;
-  const dir = paths({}).contractsDir;
-  const abi = ["CascadeFrontDoor", "CascadeStaker", "CascadeVault"].flatMap((n) => loadArtifact(dir, n).abi);
+  const abi = ["CascadeFrontDoor", "CascadeStaker", "CascadeVault"].flatMap((n) => artifactFor(plan, n).abi);
   const route = step("stakerSetRoute0").args[1] as { kind: number; router: Hex; buyPath: Hex; sellPath: Hex; active: boolean };
   const ZERO = "0x0000000000000000000000000000000000000000";
   const configured: Record<string, unknown> = {
@@ -460,6 +463,83 @@ describe("deploy and the contracts build a plan was made with", () => {
     const rec = await deploy(w.ctx, w.recordPath, { newPlan: false, v3: true }, w.deps);
     expect(rec.plan).toMatchObject({ version: 3, build: "preaudit" });
     expect(loadRecord(w.recordPath)!.plan).toMatchObject({ build: "preaudit" });
+    expect(w.checks).toEqual(["preaudit"]);
+  });
+
+  it("a v3 plan's creates go only from a checkout of its build: refused before anything is read, archived or sent", async () => {
+    // forge create builds and sends the checkout's code, so the checkout must build to the plan's build
+    // (the real check, run as real deploys run it: forge build, then the comparison)
+    const deployFrom = (checkout: string, w: ReturnType<typeof world>, newPlan = false, sources: Sources = "other") =>
+      deploy(
+        { ...w.ctx, runner: buildingRunner(sources, []), paths: { ...w.ctx.paths, contractsDir: checkout } },
+        w.recordPath,
+        { newPlan, v3: true },
+        { ...w.deps, checkCheckout },
+      );
+    const other = checkoutOf(true);
+    const REFUSED_CHECKOUT =
+      /this checkout's contracts are not the preaudit build its plans deploy \(ops\/builds\/preaudit\/build\.json\): CcipBaseAdapter, CascadeTwapOracle, CascadeFrontDoor, CascadeStaker, CcipBittensorAdapter, CascadeVault differ in contracts\/out.*nothing sent/;
+    // a new plan: nothing planned, read or sent
+    const fresh = world({ base: 4, bittensor: 9 });
+    await expect(deployFrom(other, fresh)).rejects.toThrow(REFUSED_CHECKOUT);
+    expect(fresh.sent).toEqual([]);
+    expect(existsSync(fresh.recordPath)).toBe(false);
+    // a new plan over a record: the old record is not archived
+    const over = world({ base: 4, bittensor: 9 });
+    saveRecord(over.recordPath, recordWith(["baseAdapter"], { plan: buildPlanV3(4, 9, COLDKEY) }));
+    const before = readFileSync(over.recordPath, "utf8");
+    await expect(deployFrom(other, over, true)).rejects.toThrow(REFUSED_CHECKOUT);
+    expect(readdirSync(over.dir).some((n) => n.includes("abandoned"))).toBe(false);
+    expect(readFileSync(over.recordPath, "utf8")).toBe(before);
+    // a resumed plan with a create left
+    const resumed = world({ base: 5, bittensor: 9 });
+    saveRecord(resumed.recordPath, recordWith(["baseAdapter"], { plan: buildPlanV3(4, 9, COLDKEY) }));
+    await expect(deployFrom(other, resumed)).rejects.toThrow(REFUSED_CHECKOUT);
+    expect(resumed.sent).toEqual([]);
+    // every create landed: the configuration calls left send nothing the checkout builds, so they go
+    const creates = buildPlanV3(4, 9, COLDKEY).steps.filter((s) => s.kind === "create").map((s) => s.id);
+    const calls = world({ base: 8, bittensor: 11 });
+    saveRecord(calls.recordPath, recordWith(creates, { plan: buildPlanV3(4, 9, COLDKEY) }));
+    await deployFrom(other, calls);
+    expect(calls.sent).toEqual(V3.filter((id) => !creates.includes(id)));
+    // from a checkout of the build, the plan deploys
+    const ok = world({ base: 4, bittensor: 9 });
+    await deployFrom(checkoutOf(), ok, false, "frozen");
+    expect(ok.sent).toEqual(V3);
+  });
+
+  it("the check builds the checkout first: a stale contracts/out holding the build passes only if the sources still build to it", async () => {
+    const ctxOf = (checkout: string, sources: Sources, runs: string[][]) => {
+      const w = world({ base: 4, bittensor: 9 });
+      return { ...w.ctx, runner: buildingRunner(sources, runs), paths: { ...w.ctx.paths, contractsDir: checkout } };
+    };
+    // contracts/out still holds the preaudit build, but the sources are another build's (v3.2's, say,
+    // before anyone ran forge build): forge create would send the other, so it is refused
+    const stale = checkoutOf();
+    const runs: string[][] = [];
+    await expect(checkCheckout(ctxOf(stale, "other", runs), "preaudit")).rejects.toThrow(
+      /this checkout's contracts are not the preaudit build its plans deploy .*CascadeVault differ in contracts\/out.*nothing sent/,
+    );
+    // forge build ran first, in the checkout, and nothing else ran
+    expect(runs).toEqual([["forge", "build", stale]]);
+    // a checkout that does not build is refused, whatever its contracts/out holds
+    const broken: string[][] = [];
+    await expect(checkCheckout(ctxOf(checkoutOf(), "fails", broken), "preaudit")).rejects.toThrow(
+      /could not build this checkout's contracts \(forge build: Error: Compiler run failed:\).*nothing sent/,
+    );
+    expect(broken.map((r) => r.slice(0, 2))).toEqual([["forge", "build"]]);
+    // sources that build to the preaudit build pass, over a stale contracts/out of another build too
+    const fresh: string[][] = [];
+    await checkCheckout(ctxOf(checkoutOf(true), "frozen", fresh), "preaudit");
+    expect(fresh.map((r) => r.slice(0, 2))).toEqual([["forge", "build"]]);
+  });
+
+  it("a checkout is the preaudit build only when all six contracts' runtime code equals the frozen build's", () => {
+    expect(checkoutDiffers(checkoutOf(), "preaudit")).toEqual([]);
+    expect(checkoutDiffers(checkoutOf(true), "preaudit")).toEqual([...PREAUDIT_CONTRACTS]);
+    // a checkout with nothing built is not the build either
+    expect(checkoutDiffers(join(tmpdir(), "ops-no-such-checkout"), "preaudit")).toEqual([...PREAUDIT_CONTRACTS]);
+    expect(() => assertCheckoutIs(checkoutOf(), "preaudit")).not.toThrow();
   });
 
   it("refuses to resume an unfinished plan from the a2b4412 build: it would mix two builds' contracts", async () => {

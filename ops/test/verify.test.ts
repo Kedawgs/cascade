@@ -15,8 +15,10 @@ import {
   zeroAddress,
 } from "viem";
 import { describe, expect, it } from "vitest";
+import { checkoutOf } from "./checkouts.ts";
 import { ROLES } from "./launch-roles.ts";
-import { loadArtifact } from "../src/artifacts.ts";
+import { loadArtifact, maskImmutables } from "../src/artifacts.ts";
+import { artifactFor, preauditArtifact } from "../src/builds.ts";
 import { POOL_ABI } from "../src/cardinality.ts";
 import { type ChainName, paths, WALLET } from "../src/config.ts";
 import { buildPlan, buildPlanV3, type PlanV3 } from "../src/plan.ts";
@@ -41,7 +43,7 @@ import {
   verify,
   verifyAndSave,
 } from "../src/verify.ts";
-import { fakeChain, headers } from "./fake-keeper.ts";
+import { fakeChain, fakeHeader } from "./fake-keeper.ts";
 
 const plan = buildPlan(0, 0, `0x${"33".repeat(32)}`);
 const plan3 = buildPlanV3(0, 40, `0x${"33".repeat(32)}`);
@@ -172,7 +174,7 @@ describe("verify v3", () => {
   });
 
   it("reads a route once and picks each of its fields", async () => {
-    const abi = loadArtifact(paths({}).contractsDir, "CascadeStaker").abi;
+    const abi = artifactFor(plan3, "CascadeStaker").abi;
     const route = exp3.filter((e) => e.field.startsWith("routes(0)."));
     const calls: string[] = [];
     const rpc = {
@@ -269,7 +271,7 @@ describe("activationLogs", () => {
 });
 
 type Ranges = { start: number; length: number }[];
-/** The a2b4412 build's contracts that differ from this build's, read straight from the checked-in data. */
+/** The a2b4412 build's contracts that differ from the preaudit build's, read straight from the checked-in data. */
 const A2B4412 = JSON.parse(readFileSync(new URL("../builds/a2b4412.json", import.meta.url), "utf8")) as {
   build: string;
   contracts: Record<string, { deployedBytecode: Hex; immutableReferences: Record<string, Ranges> }>;
@@ -281,11 +283,12 @@ const asDeployed = (code: Hex, ranges: Ranges): Hex => {
   for (const { start, length } of ranges) for (let i = start * 2; i < (start + length) * 2; i++) b[i] = i % 2 ? "b" : "a";
   return `0x${b.join("")}`;
 };
-const contractsDir = paths({}).contractsDir;
-/** This build's code for all six contracts, and a2b4412's: its own adapters, front door, staker and vault, the oracle the same. */
+/** The preaudit build's code for all six contracts (v3-launch's, frozen in ops/builds/preaudit: the build
+ * a new v3 plan records; contracts/out holds v3.2), and a2b4412's: its own adapters, front door, staker
+ * and vault, the oracle the same. */
 const THIS_CODE: Record<string, Hex> = Object.fromEntries(
   CONTRACTS.map((n) => {
-    const a = loadArtifact(contractsDir, n);
+    const a = preauditArtifact(n);
     return [n, asDeployed(a.deployedBytecode, a.immutableRanges)];
   }),
 );
@@ -329,10 +332,9 @@ const recordOf = (plan: PlanV3): DeploymentRecord => ({
 function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
   const plan = rec.plan as PlanV3;
   const exp = [...expectations(plan), ...limitExpectations(plan)];
-  const fns = [...CONTRACTS.flatMap((n) => loadArtifact(contractsDir, n).abi), ...VAULT_VIEWS, ...POOL_ABI].filter((i): i is AbiFunction => i.type === "function");
+  const fns = [...CONTRACTS.flatMap((n) => preauditArtifact(n).abi), ...VAULT_VIEWS, ...POOL_ABI].filter((i): i is AbiFunction => i.type === "function");
   /** A clean deployment's state for the reads beyond the expectations: nothing pending, nothing extra, not
-   * paused, and both of the oracle's pools at the target's 2,000 observation slots (the window needs 1,801 on Base's
-   * 200 ms blocks). */
+   * paused, and both of the oracle's pools at the target's 1,800 observation slots. */
   const clean: Record<string, unknown> = {
     pendingOwner: zeroAddress,
     guardianProposedAt: 0n,
@@ -367,12 +369,11 @@ function chainsFor(rec: DeploymentRecord, code: Record<string, Hex>) {
       if (method === "eth_getCode") return code[name[`${chain}:${(params[0] as string).toLowerCase()}`]] ?? "0x";
       if (method === "eth_getBalance") return numberToHex(10n ** 20n);
       if (method === "eth_getTransactionReceipt") return { logs: [activated] };
+      // the headers Base's block time is measured from (the oracle's pools)
+      if (method === "eth_getBlockByNumber") return fakeHeader(chain, params[0], 100);
       // the registry scan: no registry events since the deployment
       if (method === "eth_blockNumber") return numberToHex(100);
       if (method === "eth_getLogs") return [];
-      // headers up to the fake head, block 100, at Base's old 2 s and Bittensor's 12 s: the pools' history (901 slots) and
-      // the registry scan's settle margin (60 s and 120 s: 30 and 10 blocks) at each chain's block time, measured
-      if (method === "eth_getBlockByNumber") return headers(chain === "base" ? 2 : 12, 100)(chain, params);
       if (method !== "eth_call") throw new Error(`unexpected ${method}`);
       const { to, data } = params[0] as { to: Address; data: Hex };
       const fn = fns.find((f) => toFunctionSelector(f) === data.slice(0, 10));
@@ -399,17 +400,17 @@ describe("verify compares each contract with the build its plan was deployed fro
   const marked = buildPlanV3(5, 8, V3_TEST_COLDKEY);
   const old = unmarked(marked);
 
-  it("the checked-in a2b4412 data holds the adapters, front door, staker and vault, which differ from this build's", () => {
+  it("the checked-in a2b4412 data holds the adapters, front door, staker and vault, which differ from the preaudit build's", () => {
     expect(A2B4412.build).toBe("a2b4412");
     expect(Object.keys(A2B4412.contracts)).toEqual(["CcipBaseAdapter", "CascadeFrontDoor", "CascadeStaker", "CcipBittensorAdapter", "CascadeVault"]);
     for (const n of Object.keys(A2B4412.contracts)) {
-      expect(A2B4412.contracts[n].deployedBytecode, n).not.toBe(loadArtifact(contractsDir, n).deployedBytecode);
+      expect(A2B4412.contracts[n].deployedBytecode, n).not.toBe(preauditArtifact(n).deployedBytecode);
     }
-    // the a2b4412 adapters have no per-message cap view; this build's do
+    // the a2b4412 adapters have no per-message cap view; the preaudit build's do
     const capView = (code: Hex) => code.includes(toFunctionSelector("maxMessageValue()").slice(2));
     expect(capView(A2B4412.contracts.CcipBaseAdapter.deployedBytecode)).toBe(false);
     expect(capView(A2B4412.contracts.CcipBittensorAdapter.deployedBytecode)).toBe(false);
-    expect(capView(loadArtifact(contractsDir, "CcipBaseAdapter").deployedBytecode)).toBe(true);
+    expect(capView(preauditArtifact("CcipBaseAdapter").deployedBytecode)).toBe(true);
   });
 
   it("a new v3 plan records the build it is deployed from", () => {
@@ -421,13 +422,42 @@ describe("verify compares each contract with the build its plan was deployed fro
     expect(await verifyOn(recordOf(old), A2B4412_CODE)).toMatchObject({ ok: true, failures: [] });
   });
 
-  it("the same plan given this build's contracts fails, naming each that differs", async () => {
+  it("the same plan given the preaudit build's contracts fails, naming each that differs", async () => {
     expect(await verifyOn(recordOf(old), THIS_CODE)).toMatchObject({ ok: false, failures: DIFFERS });
   });
 
-  it("a plan that records this build verifies against contracts/out, and fails given a2b4412's code", async () => {
+  it("a plan that records the preaudit build verifies against its frozen build, and fails given a2b4412's code", async () => {
     expect(await verifyOn(recordOf(marked), THIS_CODE)).toMatchObject({ ok: true, failures: [] });
     expect(await verifyOn(recordOf(marked), A2B4412_CODE)).toMatchObject({ ok: false, failures: DIFFERS });
+  });
+
+  it("a preaudit plan reads its frozen build even when contracts/out holds another build (v3.2's)", async () => {
+    // the checkout's contracts/out: other code and another ABI for every contract
+    const other = checkoutOf(true);
+    for (const n of CONTRACTS) {
+      const a = loadArtifact(other, n);
+      const f = preauditArtifact(n);
+      expect(maskImmutables(a.deployedBytecode, a.immutableRanges), n).not.toBe(maskImmutables(f.deployedBytecode, f.immutableRanges));
+    }
+    expect(loadArtifact(other, "CascadeVault").abi.some((i) => i.type === "function" && i.name === "guardian")).toBe(false);
+    // a chain holding v3-launch's code verifies clean: every read decodes with, and every contract's code
+    // is compared with, the frozen build, whatever the checkout holds
+    const onFrozen = (rec: DeploymentRecord, code: Record<string, Hex>) => {
+      const { ctx } = chainsFor(rec, code);
+      return verify({ ...ctx, paths: { ...ctx.paths, contractsDir: other } }, rec);
+    };
+    expect(await onFrozen(recordOf(marked), THIS_CODE)).toMatchObject({ ok: true, failures: [] });
+    // and a chain holding the checkout's code fails on every contract
+    const checkoutCode = Object.fromEntries(CONTRACTS.map((n) => [n, asDeployed(loadArtifact(other, n).deployedBytecode, loadArtifact(other, n).immutableRanges)]));
+    const r = await onFrozen(recordOf(marked), checkoutCode);
+    expect(r.ok).toBe(false);
+    for (const n of CONTRACTS) {
+      const chain = n === "CcipBittensorAdapter" || n === "CascadeVault" ? "Bittensor" : "Base";
+      expect(r.failures, n).toContain(`${chain} ${n}: deployed code differs from the build`);
+    }
+    // the read surface is the frozen build's: the plan's guardian and primary bridge are read back
+    expect(artifactFor(marked, "CascadeVault").abi.some((i) => i.type === "function" && i.name === "guardian")).toBe(true);
+    expect(artifactFor(marked, "CascadeFrontDoor").abi.some((i) => i.type === "function" && i.name === "primaryBridge")).toBe(true);
   });
 
   it("each contract is compared with its build's code: one byte off fails it", async () => {
@@ -635,7 +665,7 @@ describe("verify reads back the registries, the pending proposals and the state"
       request: (c, m, p) => {
         if (m === "eth_getLogs" && c === "base") return Promise.reject(new Error("range too large"));
         // the gap's first block is 8 days old
-        if (m === "eth_getBlockByNumber") return Promise.resolve(p[0] === "latest" ? { number: numberToHex(100), timestamp: numberToHex(T) } : { timestamp: numberToHex(T - 8 * 86_400) });
+        if (m === "eth_getBlockByNumber") return Promise.resolve({ ...fakeHeader(c, p[0], 100), timestamp: numberToHex(p[0] === "latest" ? T : T - 8 * 86_400) });
         return request(c, m, p);
       },
     };

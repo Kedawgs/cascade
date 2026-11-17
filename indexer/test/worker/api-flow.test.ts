@@ -3,9 +3,10 @@ import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { CACHE_TTL_S, FLOW_LOGS_SQL, handleFlow } from "../../src/api.ts";
 import worker from "../../src/index.ts";
-import { deploymentStatement } from "../../src/store.ts";
+import { ITEMS_KEY } from "../../src/scheduler.ts";
+import { deploymentStatement, setMeta } from "../../src/store.ts";
 import { countingDb, wipe } from "./d1-count.ts";
-import { testConfig, testVars, tx } from "./fixtures.ts";
+import { testConfig, testConfigV32, testVars, tx } from "./fixtures.ts";
 
 const cfg = testConfig();
 const db = env.DB;
@@ -186,5 +187,82 @@ describe("GET /v1/flow", () => {
     expect([o.r.status, o.queries]).toEqual([204, 0]);
     const p = await fetchCounted({ method: "POST", body: "{}" });
     expect([p.r.status, p.queries]).toEqual([405, 0]);
+  });
+});
+
+describe("GET /v1/flow on a v3.2 deployment", () => {
+  it("shows the pending items the admin rules keep (meta scheduled_items), judged by the newest reading's lens reads", async () => {
+    const cfg32 = testConfigV32();
+    const G = "0x00000000000000000000000000000000000000b2";
+    const readyAt = NOW + 86_400;
+    const item = (id: string, uid: number) => ({
+      chain: "bittensor",
+      role: "vault",
+      id,
+      kind: 1,
+      selector: "0xa7016023",
+      readyAt,
+      data: "0xa7016023",
+      setter: "setGuardian",
+      args: { newGuardian: G },
+      canonical: true,
+      uid: tx(uid),
+      block: "6900200",
+      tx: tx(uid + 1),
+    });
+    const lens = (r: number) => ({ scheduledAt: readyAt - 8 * 86_400, readyAt: r, class: 2, kind: 1, selector: "0xa7016023", readyBlock: big(1) });
+    const exits = { open: true, ownerHold: false, guardianHold: false, pausedBy: 0, primaryDisabledBy: 0, launchDoorRemovedBy: 0, lastOwnerClose: 0, lastGuardianClose: 0, pendingSince: 0 };
+    const bit = { ...bitHalf, block: big(500), state: { ...bitHalf.state, exits, scheduled: { [tx(1)]: lens(readyAt), [tx(2)]: lens(0) } } };
+    await wipe(db);
+    await purge();
+    await db.batch([
+      deploymentStatement(db, cfg32.deployment),
+      db.prepare("INSERT INTO readings (at, base_block, bit_block, json) VALUES (?, ?, ?, ?)").bind(NOW - 5, 123, 500, reading({ base: baseHalf, bittensor: bit })),
+      setMeta(db, ITEMS_KEY, JSON.stringify([item(tx(1), 10), item(tx(2), 20)])),
+    ]);
+    const r = await handleFlow(new Request(URL_), { DB: db }, cfg32, NOW);
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { notices: unknown[] };
+    // the one the lens still holds; the other reads gone
+    expect(body.notices).toEqual([
+      { kind: "itemScheduled", chain: "bittensor", contract: cfg32.deployment.vault, target: G, earliest: readyAt, tx: tx(11), item: { id: tx(1), kind: "GuardianSwap", setter: "setGuardian", args: { newGuardian: G } } },
+    ]);
+  });
+
+  it("carries the deposits parked on Bittensor from the stored park events (the front door's, still open, with TAO), with the oldest's refund date, and the exits part", async () => {
+    const cfg32 = testConfigV32();
+    const d32 = cfg32.deployment;
+    const park = (uid: string, event: string, key: string, block: number, args: Record<string, string> = {}) =>
+      db
+        .prepare("INSERT INTO logs (uid, chain, contract, address, block, log_index, tx_hash, event, topic1, data, args, removed) VALUES (?, 'bittensor', 'bitAdapter', ?, ?, 0, ?, ?, ?, '0x', ?, 0)")
+        .bind(uid, d32.bitAdapter, block, tx(block), event, key, JSON.stringify({ key, ...args }));
+    const parked = (uid: string, key: string, block: number, sender = d32.frontDoor) =>
+      park(uid, "BatchParked", key, block, { messageId: tx(7), recipient: d32.vault, sender, amount: String(2n * E18), converted: "false", reason: "0x00000000" });
+    const exits = { open: true, ownerHold: false, guardianHold: false, pausedBy: 0, primaryDisabledBy: 0, launchDoorRemovedBy: 0, lastOwnerClose: 0, lastGuardianClose: 0, pendingSince: 0 };
+    const bit = { ...bitHalf, block: big(500), state: { ...bitHalf.state, exits, payoutDelay: 86_400 } };
+    await wipe(db);
+    await purge();
+    await db.batch([
+      deploymentStatement(db, cfg32.deployment),
+      db.prepare("INSERT INTO readings (at, base_block, bit_block, json) VALUES (?, ?, ?, ?)").bind(NOW - 5, 123, 500, reading({ base: baseHalf, bittensor: bit })),
+      parked("p1", tx(31), 400),
+      parked("p2", tx(32), 410),
+      park("p3", "ParkedDelivered", tx(32), 420),
+      parked("p4", tx(33), 430, OTHER),
+      db.prepare("INSERT INTO blocks (chain, number, time) VALUES ('bittensor', 400, ?)").bind(NOW - 3_000),
+    ]);
+    const r = await handleFlow(new Request(URL_), { DB: db }, cfg32, NOW);
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { notices: unknown[]; exits: Record<string, unknown> };
+    expect(body.notices).toEqual([{ kind: "parked", chain: "bittensor", contract: d32.bitAdapter, earliest: NOW - 3_000 + 14 * 86_400 }]);
+    expect(body.exits).toMatchObject({ payoutDelayS: 86_400, parked: String(2n * E18), parkedRefundFrom: NOW - 3_000 + 14 * 86_400 });
+    // a park whose block's time isn't stored is told by its block, at Bittensor's block time as the tick last measured it:
+    // 100 blocks before the reading's (block 500, 10 s old) at 6 s (block_s:bittensor): 600 s before it
+    await db.batch([db.prepare("DELETE FROM blocks WHERE chain = 'bittensor' AND number = 400"), setMeta(db, "block_s:bittensor", "6")]);
+    const told = (await (await handleFlow(new Request(URL_), { DB: db }, cfg32, NOW)).json()) as { exits: Record<string, unknown> };
+    expect(told.exits).toMatchObject({ parkedRefundFrom: NOW - 10 - 100 * 6 + 14 * 86_400 });
+    // v3-launch's document has no exits part and reads no park events
+    const old = (await (await direct()).json()) as Record<string, unknown>;
+    expect(old).not.toHaveProperty("exits");
   });
 });

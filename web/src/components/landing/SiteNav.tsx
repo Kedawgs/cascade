@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { DEPLOYMENT, deploymentStage, type Stage } from "@/lib/cascade/config";
 import { SITE_LINKS } from "@/lib/site";
 import { Logo } from "../Logo";
 import styles from "./Landing.module.css";
@@ -18,8 +19,9 @@ function PageLinks() {
 
 /** The bar stays on screen as the page scrolls, so Stake & Earn, the one way in to staking, is always in
  * reach. On narrow screens only the logo and that button stay: the links take their own row underneath,
- * which scrolls away. Only one of the two link lists shows at a time. */
-export function SiteNav() {
+ * which scrolls away. Only one of the two link lists shows at a time. A retired deployment (`stage`, the build's
+ * deployments.json entry) has no stake, so no Stake & Earn (Task 60 follow-up). */
+export function SiteNav({ stage = deploymentStage(DEPLOYMENT) }: { stage?: Stage }) {
   return (
     <>
       <div className={styles.navBar}>
@@ -32,9 +34,11 @@ export function SiteNav() {
               <PageLinks />
             </div>
             <div className={styles.navRight}>
-              <Link href="/stake" className={`pill ${styles.navCta}`}>
-                Stake &amp; Earn
-              </Link>
+              {stage !== "retired" && (
+                <Link href="/stake" className={`pill ${styles.navCta}`}>
+                  Stake &amp; Earn
+                </Link>
+              )}
             </div>
           </nav>
         </div>

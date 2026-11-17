@@ -1,4 +1,5 @@
-/* Send it now: under the lane in "Where your money is", and on a receipt still in its open batch. */
+/* Send it now: under the lane in "Where your money is", and on a receipt still in its open batch (there with the
+   receipt's own cancel beside it). */
 
 .box {
   margin-top: 16px;
@@ -17,14 +18,42 @@
   margin-top: 4px;
 }
 
-.button {
+/* The block's buttons, in one row: equal in width, and one alone fills it. A narrow phone stacks them. */
+.row {
+  display: flex;
+  gap: 12px;
   margin-top: 12px;
-  /* a long label ("Send it now: about $1.74 in ETH") wraps inside the pill on a narrow phone */
-  max-width: 100%;
-  white-space: normal;
 }
 
-.note {
+/* the box's first thing (a receipt's cancel with nothing above it): the box's own padding is its room */
+.row:first-child {
+  margin-top: 4px;
+}
+
+/* min-width auto: a pill is never narrower than its longest word, so a label wraps inside it and is never clipped */
+.row > :global(.pill) {
+  flex: 1 1 0;
+  min-width: auto;
+  padding: 6px 18px;
+  /* a long label ("Send it now: no bridge fee to pay") wraps inside its pill, in lines of even length */
+  white-space: normal;
+  text-wrap: balance;
+}
+
+@media (max-width: 480px) {
+  .row {
+    flex-direction: column;
+  }
+
+  .row > :global(.pill) {
+    flex: none;
+    width: 100%;
+  }
+}
+
+/* the small print under the row: Send it now's, then the receipt's own (.notes) */
+.note,
+.notes > p {
   margin-top: 8px;
   font-size: 13px;
   color: var(--ink-3);

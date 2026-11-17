@@ -60,6 +60,10 @@ describe("pendingEntry", () => {
     });
   });
 
+  it("a v3.2 unstake that receives TAO: its TAO estimate alone, no USDC it never asked for (Task 59a)", () => {
+    expect(pendingEntry(unstake({ usdcEstimate: 0n, keepTao: true }))?.notice).toEqual({ kind: "unstake", id: "w1", tao: 0.07, keepTao: true });
+  });
+
   it("nothing for what hasn't gone through, was taken back out, or isn't a deposit or unstake", () => {
     for (const state of ["running", "needs-you", "failed"] as const) {
       expect(pendingEntry(deposit({ state }))).toBeNull();

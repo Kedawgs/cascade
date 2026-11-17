@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -10,7 +11,29 @@ import type { DeploymentRecord } from "./record.ts";
 import { read } from "./rpc.ts";
 import { type Ctx, chainLabel } from "./send.ts";
 import { renderPage } from "./sign-page.ts";
+import type { DeploymentRecordV32 } from "./v32/deploy.ts";
+import { isPlanV32 } from "./v32/plan.ts";
+import type { SignV32Deps } from "./v32/sign.ts";
 import { checkCalls, describeCalls, type KnownCall, type KnownContract, parseWalletFile, type Sender, type WalletView } from "./wallet.ts";
+
+/** What pnpm ops sign's server answers the page (Task 49): whether it may go on, and what to say. */
+export interface PageAnswer {
+  ok: boolean;
+  text: string;
+}
+/** The page's two requests to its server (Task 49): a v3.2 call's re-check just before it is sent, and a stamp's
+ * signature, handed on to pnpm ops stamp's relay path. */
+export interface PageApi {
+  check(i: number): Promise<PageAnswer>;
+  stamp(i: number, sig: unknown): Promise<PageAnswer>;
+}
+/** The page as served: its HTML, its CSP, and the token its requests to the server carry (a page that makes none has
+ * none). */
+export interface SignPage {
+  html: string;
+  csp: string;
+  token?: string;
+}
 
 const CHAIN_ID: Record<ChainName, number> = { base: 8453, bittensor: 964 };
 const CHAIN_NAME: Record<number, ChainName> = { 8453: "base", 964: "bittensor" };
@@ -114,16 +137,20 @@ export function knownContracts(rec: DeploymentRecord | null, live: LiveReads = n
  * pause and unpause only, each target contract's guardian and owner are also read now, once each
  * (`readRoles`), so a role replaced on-chain since the record can still send them; a read that fails
  * leaves the record's roles alone and says so. Then the page and the terminal's description of the same
- * calls, with a warning for a file over a day old at `now`. */
+ * calls, with a warning for a file over a day old at `now`.
+ * A v3.2 deployment's file (Task 49) is checked against the chain when it is served (`v32`, v32/sign.ts): its
+ * scheduled items, its warnings, a door removal's guard, its stamps; its page gets a token and `api`, which its server
+ * answers, only when it asks the server something (a re-check before a send, a stamp's signature). */
 export async function prepareSign(
   path: string,
   o: {
     deployment: string;
-    recordOf: (deployment: string) => DeploymentRecord | null;
+    recordOf: (deployment: string) => DeploymentRecord | DeploymentRecordV32 | null;
     now: number;
     readRoles: (chain: ChainName, address: Address) => Promise<LiveRoles>;
+    v32?: SignV32Deps;
   },
-): Promise<{ view: WalletView; page: { html: string; csp: string }; lines: string[] }> {
+): Promise<{ view: WalletView; page: SignPage; lines: string[]; api?: PageApi }> {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -136,10 +163,22 @@ export async function prepareSign(
       `this file is for deployment ${file.deployment}, but this run's deployment is ${o.deployment} (OPS_DEPLOYMENT, or --deployment): run it with OPS_DEPLOYMENT=${file.deployment} or --deployment ${file.deployment}`,
     );
   }
-  const rec = file.deployment ? o.recordOf(file.deployment) : null;
-  if (file.deployment && !rec) {
+  const found = file.deployment ? o.recordOf(file.deployment) : null;
+  if (file.deployment && !found) {
     throw new Error(`the call file is for deployment ${file.deployment}, but there's no live record for it (deployments/${file.deployment}.json): refusing to show calls to contracts it can't name`);
   }
+  if (found && isPlanV32(found.plan)) {
+    if (!o.v32) {
+      throw new Error(`the file is for a v3.2 deployment (${file.deployment}), whose calls the page checks against the chain when it is served, and this run gives it no v3.2 reads; nothing served`);
+    }
+    const v32 = await import("./v32/sign.ts");
+    const { view, api } = await v32.prepareSignV32(file, found as DeploymentRecordV32, o.v32, o.now);
+    const asks = Boolean(view.stamps?.length) || view.calls.some((c) => c.recheck);
+    const token = asks ? randomBytes(16).toString("hex") : undefined;
+    return { view, page: renderPage(view, { token }), lines: describeCalls(view), ...(asks ? { api } : {}) };
+  }
+  if (file.stamps) throw new Error(`a file of stamps is for a v3.2 deployment's owner, and ${file.deployment ? `${file.deployment} is not one` : "this file names no deployment"}: refusing it`);
+  const rec = found as DeploymentRecord | null;
   // the pause and unpause targets among the record's contracts, each read once
   const pausable = knownContracts(rec).filter((k) => k.calls.pause);
   const targets = new Map<string, KnownContract>();
@@ -175,17 +214,60 @@ export interface PageServer {
   close(): Promise<void>;
 }
 
+/** The most a request from the page may carry: a stamp's signature is 132 characters. */
+const MAX_BODY = 4_096;
+
 /** Serves `page` at http://127.0.0.1:<a port the system picks>/ and nothing else: GET or HEAD of / only,
  * and only under that exact host name (a page that reached it by another name, DNS rebinding included,
- * gets a 403). The page goes out with its CSP and headers that keep it out of caches and frames. */
-export async function servePage(page: { html: string; csp: string }): Promise<PageServer> {
+ * gets a 403). The page goes out with its CSP and headers that keep it out of caches and frames.
+ * A page with a token and `api` (a v3.2 file's, Task 49) may also POST /check/<i> (a call's re-check just before it
+ * is sent) and /stamp/<i> (a stamp's signature), as JSON, from its own origin and with its token, one request at a
+ * time; anything else is refused before `api` is asked. */
+export async function servePage(page: SignPage, api?: PageApi): Promise<PageServer> {
   let host = "";
+  // the page's requests, one at a time: a stamp's relay and a stack's lock never overlap
+  let queue: Promise<unknown> = Promise.resolve();
   const server = createServer((req, res) => {
     const reply = (status: number, headers: Record<string, string> = {}, body?: string) => {
       res.writeHead(status, { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...headers });
       res.end(body);
     };
-    if (req.headers.host !== host) return reply(403, { "Content-Type": "text/plain; charset=utf-8" }, `This page is served only as http://${host}/\n`);
+    const text = { "Content-Type": "text/plain; charset=utf-8" };
+    if (req.headers.host !== host) return reply(403, text, `This page is served only as http://${host}/\n`);
+    if (req.method === "POST" && api && page.token) {
+      const route = /^\/(check|stamp)\/(\d{1,3})$/.exec(req.url ?? "");
+      if (!route) return reply(404);
+      // only the page itself: its own origin (another site's page has its own) and the token only it was given
+      if (req.headers.origin !== `http://${host}` || req.headers["x-cascade-token"] !== page.token) return reply(403, text, "Only the page this server serves may ask it.\n");
+      if (!/^application\/json(;|$)/i.test(String(req.headers["content-type"] ?? ""))) return reply(415);
+      let body = "";
+      let tooBig = false;
+      req.setEncoding("utf8");
+      req.on("data", (d: string) => {
+        body += d;
+        if (body.length > MAX_BODY && !tooBig) {
+          tooBig = true;
+          reply(413);
+          req.destroy();
+        }
+      });
+      req.on("end", () => {
+        if (tooBig) return;
+        let sent: { sig?: unknown };
+        try {
+          sent = JSON.parse(body || "{}") as { sig?: unknown };
+        } catch {
+          return reply(400);
+        }
+        const i = Number(route[2]);
+        const answer = (route[1] === "check" ? () => api.check(i) : () => api.stamp(i, sent?.sig)) as () => Promise<PageAnswer>;
+        queue = queue
+          .then(answer)
+          .catch((e: unknown): PageAnswer => ({ ok: false, text: (e instanceof Error ? e.message : String(e)).split("\n")[0] }))
+          .then((a) => reply(200, { "Content-Type": "application/json; charset=utf-8" }, JSON.stringify({ ok: a.ok === true, text: String(a.text) })));
+      });
+      return;
+    }
     if (req.method !== "GET" && req.method !== "HEAD") return reply(405, { Allow: "GET, HEAD" });
     if (req.url !== "/") return reply(404);
     reply(

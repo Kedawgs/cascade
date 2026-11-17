@@ -13,7 +13,12 @@ export type Scheduled = number | "none" | null;
 export interface FlowChain { block: string; time: number; stale: boolean }
 export type NoticeKind =
   | "paused" | "ownershipPending" | "guardianProposed" | "bridgeProposed" | "frontDoorProposed"
-  | "fmAdminScheduled" | "fmMigration" | "fmPaused";
+  | "fmAdminScheduled" | "fmMigration" | "fmPaused"
+  | "itemScheduled"
+  // v3.2's states (the web copy audit, N1 to N4), as the v3.2 monitor sends them: stake missing (a validator key change),
+  // the front door's deposits parked on Bittensor (`earliest`: when the oldest can be sent back to Base), the vault's
+  // primary bridge unable to send payouts (its canSendPayouts() false), and Cascade's route switched off
+  | "stakeMissing" | "parked" | "payoutsClosed" | "routeDisabled";
 export interface Notice {
   kind: NoticeKind;
   chain: "base" | "bittensor";
@@ -25,6 +30,9 @@ export interface Notice {
   earliest?: number;
   /** the transaction that started it, when the monitor stored it */
   tx?: string;
+  /** v3.2's itemScheduled (Task 55): the scheduled item (its kind, Ordinary, GuardianSwap or Reopen; its setter and
+   * arguments as decoded from its calldata, decimal integers and lowercase hex, null when the calldata didn't decode) */
+  item?: { id: string; kind: string; setter: string | null; args: Record<string, string> | null };
 }
 /** One bridge direction: the binding one of the source pool's outbound limiter and the destination pool's inbound one. */
 export interface Bucket {
@@ -72,6 +80,19 @@ export interface FlowV1 {
   addresses: {
     vault: string; frontDoor: string; staker: string; taoWethPool: string; wethUsdcPool: string;
     alphaVault: string; lockPool: string; baseTokenPool: string; wTao: string; fmTaoBase: string;
+  };
+  /** v3.2 only (absent on v3-launch): the money-out figures (the web copy audit's N5 and S9) and the deposits waiting on
+   * Bittensor (N2). The limit and what it has burned are a guide: the vault works the base out again at each delivery */
+  exits?: {
+    /** the vault's payoutDelay, seconds */
+    payoutDelayS: number | null;
+    /** today's unstake limit through the front door (the binding window's allowance), and what that window has burned */
+    dailyLimit: Amount;
+    usedToday: Amount;
+    /** the front door's deposits parked on Bittensor, wei ("0" when none), and when the oldest can be sent back to Base
+     * ("none" with none parked) */
+    parked: Amount;
+    parkedRefundFrom: Scheduled;
   };
 }
 

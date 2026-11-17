@@ -2,17 +2,29 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-# Bittensor EVM docs: compile with Solidity <= 0.8.24, EVM target Cancun.
-solc_version = "0.8.24"
+solc_version = "0.8.38"
+via_ir = true
+ast = true
+# The storage layout beside each artifact, for the lens-layout generator (Task 5c); no effect on bytecode.
+extra_output = ["storageLayout"]
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
 # The rehearsal stand-ins force-send with selfdestruct on purpose (local forks only).
-ignored_warnings_from = ["test/rehearsal"]
+ignored_warnings_from = ["test/rehearsal", "lib/openzeppelin-contracts"]
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "forge-std/=lib/forge-std/src/",
 ]
+
+# The whole-suite profile from Task 5c on: `FOUNDRY_PROFILE=parity forge test` (ruling DB1). It
+# inherits every [profile.default] setting, so the compiler settings and the bytecode are identical,
+# and changes only the test EVM's code-size limit, for test-only subclasses such as VaultInternals
+# that may grow past EIP-170. `forge build` and `node script/build-checks.mjs` stay on the default
+# profile: the size gate, not this profile, is the authority on EIP-170. Foundry 1.7 has no
+# `disable_code_size_limit` key; `code_size_limit` is the setting, here 2^32 - 1 bytes: no practical limit.
+[profile.parity]
+code_size_limit = 4294967295
 
 [fuzz]
 runs = 512

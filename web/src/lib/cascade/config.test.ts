@@ -4,9 +4,13 @@ import { toFunctionSelector } from "viem";
 import { ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
 import {
   ALPHA_VAULT,
+  checkedDeployment,
   DELIVERY_TOLERANCE_BPS,
   DELIVERY_VALIDITY_S,
+  type Deployment,
+  deploymentStage,
   DESTINATION_BASE,
+  type ExpectedDeployment,
   indexerOrigin,
   isV3,
   PATH_TAO_TO_USDC,
@@ -14,6 +18,7 @@ import {
   readDeployment,
   RPC,
   USDC_PERMIT,
+  usdcDeliveryOn,
 } from "./config";
 
 const ENV = {
@@ -112,6 +117,56 @@ describe("readDeployment", () => {
 const STAKER_ADDR = "0x221Cc4cF9c72EA7270f90E8C0756F8f003b6887b";
 const ORACLE_ADDR = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750";
 
+// Task 60: the founder's two switches, each a deployment's line in deployments.json (reviewed in git)
+describe("the site's switches (Task 60)", () => {
+  const LENSES = { NEXT_PUBLIC_CASCADE_VAULT_LENS: "0x000000000000000000000000000000000000Ae15", NEXT_PUBLIC_CASCADE_DOOR_LENS: "0x000000000000000000000000000000000000De15" };
+  const v3 = { ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR };
+  const d32 = readDeployment({ ...v3, ...LENSES, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })!;
+  const d3 = readDeployment(v3)!;
+  /** `d` listed as `x`, with `usdcDelivery` as given (absent when undefined). */
+  const listed = (d: Deployment, usdcDelivery?: unknown, stage: string = "early") =>
+    ({
+      x: {
+        version: 3,
+        stage,
+        frontDoor: d.frontDoor,
+        baseAdapter: d.baseAdapter,
+        vault: d.vault,
+        bitAdapter: d.bitAdapter,
+        staker: d.staker,
+        oracle: d.oracle,
+        ...(d.vaultLens ? { vaultLens: d.vaultLens, doorLens: d.doorLens } : {}),
+        bitBlock: String(d.bitBlock),
+        vaultSs58: d.vaultSs58,
+        hotkeySs58: d.hotkeySs58,
+        ...(usdcDelivery !== undefined ? { usdcDelivery } : {}),
+      },
+    }) as unknown as Readonly<Record<string, ExpectedDeployment>>;
+
+  it("usdcDeliveryOffHidesTheOptionAndPromptsAClaim: USDC delivery is off only where a v3.2 entry says false, and fails closed on a value that isn't a boolean", () => {
+    expect(usdcDeliveryOn(d32, listed(d32, false))).toBe(false);
+    expect(usdcDeliveryOn(d32, listed(d32, true))).toBe(true);
+    // absent: on, as every deployment before the switch
+    expect(usdcDeliveryOn(d32, listed(d32))).toBe(true);
+    // anything but true or false: off (never traps anyone: Receive TAO and the claim stay open)
+    for (const bad of ["false", "true", 0, 1, null, "off"]) expect(usdcDeliveryOn(d32, listed(d32, bad)), JSON.stringify(bad)).toBe(false);
+    // v3-launch has no Receive TAO, so the switch is v3.2's alone: it stays on there, whatever the entry says
+    expect(usdcDeliveryOn(d3, listed(d3, false))).toBe(true);
+    expect(usdcDeliveryOn(null)).toBe(true);
+  });
+
+  it("refuses to build a deployment that isn't v3.2 with USDC delivery off: it has no Receive TAO, so its unstakes would have nowhere to go", () => {
+    expect(() => checkedDeployment(d3, listed(d3, false))).toThrow(/usdcDelivery/);
+    expect(checkedDeployment(d3, listed(d3, true))).toBe(d3);
+    expect(checkedDeployment(d32, listed(d32, false))).toBe(d32);
+  });
+
+  it("knows the retired stage, exactly", () => {
+    expect(deploymentStage(d32, listed(d32, undefined, "retired"))).toBe("retired");
+    expect(deploymentStage(d3, listed(d3, undefined, "retired"))).toBe("retired");
+  });
+});
+
 describe("v3 deployment", () => {
   it("reads staker and oracle, and isV3 needs both", () => {
     const both = readDeployment({ ...ENV, NEXT_PUBLIC_CASCADE_STAKER: STAKER_ADDR, NEXT_PUBLIC_CASCADE_ORACLE: ORACLE_ADDR });
@@ -174,7 +229,8 @@ describe("v3 ABIs match the contracts (selectors from cast sig)", () => {
     expect(FRONT_DOOR.some((x) => x.type === "event" && x.name === "Delivered")).toBe(true);
   });
   it("Send it now's call, reads and event, as the front door declares them", () => {
-    const src = readFileSync(new URL("../../../../contracts/src/CascadeFrontDoor.sol", import.meta.url), "utf8");
+    // v3-launch's source, frozen in ops/builds/preaudit (contracts/ now holds v3.2)
+    const src = readFileSync(new URL("../../../../ops/builds/preaudit/src/CascadeFrontDoor.sol", import.meta.url), "utf8");
     expect(src).toMatch(/function closeBatch\(\) external payable whenNotPaused/);
     const close = FRONT_DOOR.find((x) => x.type === "function" && x.name === "closeBatch");
     expect(close && "stateMutability" in close ? close.stateMutability : undefined).toBe("payable");

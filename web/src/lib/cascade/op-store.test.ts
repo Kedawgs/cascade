@@ -2,7 +2,7 @@ import type { Hex } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import { cancelCall, FlowError, runFlow, sendNowCall, stakeV3Calls, type WalletPort } from "./flows";
 import { type CloseOp, createOpLog, type DepositOp, type WithdrawalOp } from "./oplog";
-import { cancelStore, opStore } from "./op-store";
+import { cancelStore, confirmCancel, opStore, settleCancel } from "./op-store";
 
 const FD = "0x1694FcFCDb99CD1D64f54c787C47aDA5684E5750" as const;
 const ME = "0x000000000000000000000000000000000000A11c" as const;
@@ -162,6 +162,88 @@ describe("cancelStore", () => {
     log.put(sent);
     await runFlow(wallet(async () => ({ status: "success" })), cancelStore(log, ME, "d1", () => T0 + 42), [cancelCall("deposit", 1n, D)]);
     expect(log.get(ME, "d1")).toMatchObject({ state: "sent", cancelled: { hash: CANCEL, at: T0 + 42 } });
+    // the store itself confirms nothing: its flow does, on the cancel's own receipt (confirmCancel, for that cancel's hash)
+    expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: CANCEL, at: T0 + 42 });
+    confirmCancel(log, ME, "d1", CANCEL);
+    expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: CANCEL, at: T0 + 42, confirmed: true });
+    expect((log.get(ME, "d1") as DepositOp).state).toBe("sent");
+  });
+
+  it("confirmCancel is bound to the cancel whose receipt was read: another hash than the record's mark holds now writes nothing", () => {
+    const log = createOpLog(memoryStorage(), FD);
+    const OTHER = `0x${"dd".repeat(32)}` as Hex;
+    log.put({ ...sent, cancelled: { hash: CANCEL, at: T0 + 42 } });
+    confirmCancel(log, ME, "d1", OTHER);
+    expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: CANCEL, at: T0 + 42 });
+    // (a second tab's cancel took the mark's place while the first tab read its own receipt: the first confirms nothing)
+    log.update(ME, "d1", { cancelled: { hash: OTHER, at: T0 + 50 } });
+    confirmCancel(log, ME, "d1", CANCEL);
+    expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: OTHER, at: T0 + 50 });
+    confirmCancel(log, ME, "d1", OTHER);
+    expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: OTHER, at: T0 + 50, confirmed: true });
+  });
+
+  it("takeBack: a cancel the wallet saw through whose own receipt shows it didn't take the record out is taken back off it, as one Base reverted is; only this store's, and only while it is still the record's", async () => {
+    const earlier = { hash: `0x${"ee".repeat(32)}` as Hex, at: T0 + 7 };
+    const OTHER = `0x${"dd".repeat(32)}` as Hex;
+    const ran = async (before?: { hash: Hex; at: number }) => {
+      const log = createOpLog(memoryStorage(), FD);
+      log.put({ ...sent, ...(before ? { cancelled: before } : {}) });
+      const store = cancelStore(log, ME, "d1", () => T0 + 42);
+      await runFlow(wallet(async () => ({ status: "success" })), store, [cancelCall("deposit", 1n, D)]);
+      expect((log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: CANCEL, at: T0 + 42 });
+      return { log, store };
+    };
+    const plain = await ran();
+    plain.store.takeBack(CANCEL);
+    expect((plain.log.get(ME, "d1") as DepositOp).cancelled).toBeUndefined();
+    expect((plain.log.get(ME, "d1") as DepositOp).state).toBe("sent");
+    // the cancel the record had before comes back, as on "failed"
+    const again = await ran(earlier);
+    again.store.takeBack(CANCEL);
+    expect((again.log.get(ME, "d1") as DepositOp).cancelled).toEqual(earlier);
+    // another hash than the record's: nothing; nor once another tab's cancel has taken the mark's place
+    const other = await ran();
+    other.store.takeBack(OTHER);
+    expect((other.log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: CANCEL, at: T0 + 42 });
+    other.log.update(ME, "d1", { cancelled: { hash: OTHER, at: T0 + 50 } });
+    other.store.takeBack(CANCEL);
+    expect((other.log.get(ME, "d1") as DepositOp).cancelled).toEqual({ hash: OTHER, at: T0 + 50 });
+    // a store that has sent nothing takes nothing back
+    const idle = createOpLog(memoryStorage(), FD);
+    idle.put({ ...sent, cancelled: earlier });
+    cancelStore(idle, ME, "d1").takeBack(earlier.hash);
+    expect((idle.get(ME, "d1") as DepositOp).cancelled).toEqual(earlier);
+  });
+
+  it("settleCancel writes what the cancel's own receipt said: confirmed, taken back, or (unreadable) nothing", async () => {
+    /** `hash`: the cancel the receipt was read for; null when nothing was read */
+    const settled = async (outcome: boolean | undefined, hash: Hex | null = CANCEL) => {
+      const log = createOpLog(memoryStorage(), FD);
+      log.put(sent);
+      const store = cancelStore(log, ME, "d1", () => T0 + 42);
+      await runFlow(wallet(async () => ({ status: "success" })), store, [cancelCall("deposit", 1n, D)]);
+      settleCancel(store, log, ME, "d1", hash ?? undefined, outcome);
+      return (log.get(ME, "d1") as DepositOp).cancelled;
+    };
+    expect(await settled(true)).toEqual({ hash: CANCEL, at: T0 + 42, confirmed: true });
+    expect(await settled(false)).toBeUndefined();
+    expect(await settled(undefined)).toEqual({ hash: CANCEL, at: T0 + 42 });
+    expect(await settled(true, null)).toEqual({ hash: CANCEL, at: T0 + 42 });
+    expect(await settled(false, null)).toEqual({ hash: CANCEL, at: T0 + 42 });
+  });
+
+  it("confirmCancel leaves a record with no cancel sent, a claim or a close, and a record that isn't there, as they were", () => {
+    const log = createOpLog(memoryStorage(), FD);
+    log.put(sent);
+    const close: CloseOp = { id: "c1", kind: "close", account: ME, createdAt: T0 + 1, batchId: 7n, value: 1n, hashes: {}, state: "sent" };
+    log.put(close);
+    confirmCancel(log, ME, "d1", CANCEL);
+    confirmCancel(log, ME, "c1", CANCEL);
+    confirmCancel(log, ME, "gone", CANCEL);
+    expect(log.get(ME, "d1")).toEqual(sent);
+    expect(log.get(ME, "c1")).toEqual(close);
+    expect(log.get(ME, "gone")).toBeNull();
   });
 
   it("forgets a cancel Base reverted, keeping the one recorded before it", async () => {

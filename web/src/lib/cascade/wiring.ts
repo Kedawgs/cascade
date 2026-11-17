@@ -10,15 +10,18 @@ import {
   keccak256,
   type PublicClient,
 } from "viem";
-import { ADAPTER, FRONT_DOOR, STAKER, VAULT } from "./abi";
+import { ADAPTER, DOOR_LENS, FRONT_DOOR, FRONT_DOOR_V32, STAKER, VAULT, VAULT_LENS } from "./abi";
 import type { Clients } from "./chain";
-import { type Deployment, isV3, knownDeployment, TOKENS } from "./config";
+import { type Deployment, EXPECTED_DEPLOYMENTS, type ExpectedDeployment, isV3, isV32, knownDeployment, TOKENS } from "./config";
 
 const BASE_ID = 8453n;
 const BITTENSOR_ID = 964n;
 
 /** Whether the contracts are wired to each other as the build's config says. */
 export type Wiring = "ok" | "mismatch";
+
+/** v3.2's registry state of an active front door (CascadeTypes.DoorState: 0 unknown, 1 active, 2 removed). */
+const DOOR_ACTIVE = 1;
 
 /** How the vault keys a front door in its registry (CascadeVault.peerId): keccak256(abi.encode(chain, address)). */
 export const peerId = (chain: bigint, addr: Address): Hex =>
@@ -30,7 +33,7 @@ interface Link {
   abi: Abi;
   functionName: string;
   args?: readonly unknown[];
-  want: Address | bigint | boolean;
+  want: Address | bigint | boolean | number;
 }
 
 const link = (address: Address, abi: Abi, functionName: string, want: Link["want"], args?: readonly unknown[]): Link => ({
@@ -47,6 +50,7 @@ const link = (address: Address, abi: Abi, functionName: string, want: Link["want
  * oracle. On Bittensor: the vault takes batches from this front door and sends through this adapter,
  * which pairs back with the Base one. */
 function links(d: Deployment): { base: Link[]; bittensor: Link[] } {
+  if (isV32(d)) return linksV32(d);
   const base = [
     link(d.frontDoor, FRONT_DOOR, "asset", TOKENS.tao),
     link(d.frontDoor, FRONT_DOOR, "vault", d.vault),
@@ -72,6 +76,42 @@ function links(d: Deployment): { base: Link[]; bittensor: Link[] } {
     link(d.vault, VAULT, "frontDoorActive", true, [peerId(BASE_ID, d.frontDoor)]),
     link(d.vault, VAULT, "primaryBridge", d.bitAdapter),
     link(d.vault, VAULT, "bridgeEnabled", true, [d.bitAdapter]),
+    link(d.bitAdapter, ADAPTER, "remoteAdapter", d.baseAdapter),
+    link(d.bitAdapter, ADAPTER, "remoteChainId", BASE_ID),
+  ];
+  return { base, bittensor };
+}
+
+/** The same on v3.2, where the bridges and the vault's registry are read through the lenses (spec §8.1): each
+ * lens must read the contract the deployment names (`target`), the front door must be Active in the vault's
+ * registry (`doorState(peer) == Active`, in place of v3-launch's frontDoorActive), and the bridges are the lenses'
+ * `primaryBridge` and `bridgeEnabled`. The rest is v3-launch's, asked of the same contracts. */
+function linksV32(d: Deployment): { base: Link[]; bittensor: Link[] } {
+  const doorLens = d.doorLens as Address;
+  const vaultLens = d.vaultLens as Address;
+  const staker = d.staker as Address;
+  const base = [
+    link(d.frontDoor, FRONT_DOOR_V32, "asset", TOKENS.tao),
+    link(d.frontDoor, FRONT_DOOR_V32, "vault", d.vault),
+    link(d.frontDoor, FRONT_DOOR_V32, "vaultChain", BITTENSOR_ID),
+    link(doorLens, DOOR_LENS, "target", d.frontDoor),
+    link(doorLens, DOOR_LENS, "primaryBridge", d.baseAdapter),
+    link(doorLens, DOOR_LENS, "bridgeEnabled", true, [d.baseAdapter]),
+    link(d.baseAdapter, ADAPTER, "token", TOKENS.tao),
+    link(d.baseAdapter, ADAPTER, "remoteAdapter", d.bitAdapter),
+    link(d.baseAdapter, ADAPTER, "remoteChainId", BITTENSOR_ID),
+    link(d.frontDoor, FRONT_DOOR_V32, "usdc", TOKENS.usdc),
+    link(d.frontDoor, FRONT_DOOR_V32, "oracle", d.oracle as Address),
+    link(d.frontDoor, FRONT_DOOR_V32, "swapper", staker),
+    link(staker, STAKER, "frontDoor", d.frontDoor),
+    link(staker, STAKER, "usdc", TOKENS.usdc),
+    link(staker, STAKER, "tao", TOKENS.tao),
+  ];
+  const bittensor = [
+    link(vaultLens, VAULT_LENS, "target", d.vault),
+    link(vaultLens, VAULT_LENS, "doorState", DOOR_ACTIVE, [peerId(BASE_ID, d.frontDoor)]),
+    link(vaultLens, VAULT_LENS, "primaryBridge", d.bitAdapter),
+    link(vaultLens, VAULT_LENS, "bridgeEnabled", true, [d.bitAdapter]),
     link(d.bitAdapter, ADAPTER, "remoteAdapter", d.baseAdapter),
     link(d.bitAdapter, ADAPTER, "remoteChainId", BASE_ID),
   ];
@@ -109,10 +149,14 @@ async function holds(client: Pick<PublicClient, "multicall">, ls: Link[]): Promi
 }
 
 /** Reads the contracts and checks they are wired to each other as the build's config says, after
- * checking the config is one of the committed deployments (no read for one that isn't). Throws when
- * either chain can't be read: the caller must then send nothing ("can't check right now"). */
-export async function checkWiring(c: Pick<Clients, "base" | "bittensor">, d: Deployment): Promise<Wiring> {
-  if (!knownDeployment(d)) return "mismatch";
+ * checking the config is one of the committed deployments (`list`, deployments.json; no read for one that
+ * isn't). Throws when either chain can't be read: the caller must then send nothing ("can't check right now"). */
+export async function checkWiring(
+  c: Pick<Clients, "base" | "bittensor">,
+  d: Deployment,
+  list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS,
+): Promise<Wiring> {
+  if (!knownDeployment(d, list)) return "mismatch";
   const { base, bittensor } = links(d);
   const [onBase, onBittensor] = await Promise.all([holds(c.base, base), holds(c.bittensor, bittensor)]);
   return onBase && onBittensor ? "ok" : "mismatch";

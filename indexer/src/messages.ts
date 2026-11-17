@@ -12,12 +12,16 @@ const same = (a: unknown, b: Hex) => typeof a === "string" && a.toLowerCase() ==
 const lower = (x: unknown) => String(x).toLowerCase() as Hex;
 
 /** The messages in these logs: each adapter Sent whose sender is the front door (Base → Bittensor) or the
- * vault (Bittensor → Base). Its source time is its block's, or the tick's while that isn't known yet. */
-export function messagesFrom(logs: readonly StoredLog[], d: Pick<Deployment, "frontDoor" | "vault">, blockTime: (chain: ChainName, block: bigint) => number | undefined, nowS: number): MessageRow[] {
+ * vault (Bittensor → Base). Its source time is its block's, or the tick's while that isn't known yet. On v3.2 a vault
+ * Sent counts only when it names the front door: the vault's payouts always do (CascadePayoutLib.sol:160, the batch's
+ * door), and so does a door park's refund, but refundParked sends a stranger's park back to the stranger with the vault
+ * as its sender (CcipBittensorAdapter.sol:209, R3 A-L2). That one isn't Cascade's message: delivered to an address with
+ * no onBridgeMessage it fails for good, and no fix of ours could clear its ccip.failure. bridge.refunded reports it. */
+export function messagesFrom(logs: readonly StoredLog[], d: Pick<Deployment, "frontDoor" | "vault" | "version">, blockTime: (chain: ChainName, block: bigint) => number | undefined, nowS: number): MessageRow[] {
   return logs.flatMap((l) => {
     if (l.event !== "Sent" || (l.contract !== "baseAdapter" && l.contract !== "bitAdapter")) return [];
     const fromFrontDoor = l.chain === "base" && same(l.args.sender, d.frontDoor);
-    const fromVault = l.chain === "bittensor" && same(l.args.sender, d.vault);
+    const fromVault = l.chain === "bittensor" && same(l.args.sender, d.vault) && (d.version !== "v3.2" || same(l.args.recipient, d.frontDoor));
     if (!fromFrontDoor && !fromVault) return [];
     return [
       {
@@ -38,10 +42,13 @@ export function messagesFrom(logs: readonly StoredLog[], d: Pick<Deployment, "fr
   });
 }
 
-/** Each adapter Delivered in these logs: the message it ends. */
+/** Each adapter Delivered in these logs: the message it ends. Not a Bittensor Delivered whose own transaction parked
+ * that message (v3.2: ccipReceive logs Delivered after a park too, R3 B-I3): the vault never got it. */
 export function arrivals(logs: readonly StoredLog[]): { messageId: Hex; dstTx: Hex; dstBlock: bigint }[] {
+  const parked = new Set(logs.filter((l) => l.contract === "bitAdapter" && l.event === "BatchParked").map((l) => `${l.txHash}:${lower(l.args.messageId)}`));
   return logs
     .filter((l) => l.event === "Delivered" && (l.contract === "baseAdapter" || l.contract === "bitAdapter"))
+    .filter((l) => !(l.contract === "bitAdapter" && parked.has(`${l.txHash}:${lower(l.args.messageId)}`)))
     .map((l) => ({ messageId: lower(l.args.messageId), dstTx: l.txHash, dstBlock: l.block }));
 }
 

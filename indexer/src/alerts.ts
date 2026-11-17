@@ -107,8 +107,12 @@ export function reconcile(
     quiet?: (a: { rule: string; key: string }) => boolean;
     /** conditions the rules couldn't judge this tick: their open alerts stay open (and are sent as usual) */
     unjudged?: readonly Unjudged[];
+    /** the most critical emails due this tick (the tick's criticalEmailsPerTick; R4-O's fix round, Minor 6): new alerts
+     * first, then the resolved, then the resends; one cut waits for the next ticks, and a cut "resolved" email leaves
+     * its alert open until a tick has room for it. Absent: no cap (the hourly job's, the logs check's) */
+    criticalCap?: number;
   },
-): { statements: D1PreparedStatement[]; due: Due[]; holds: { id: string; rule: RuleId; summary: string }[] } {
+): { statements: D1PreparedStatement[]; due: Due[]; holds: { id: string; rule: RuleId; summary: string }[]; waiting: number } {
   const { nowS, t } = o;
   const off = new Set(t.rules.off);
   const quiet = o.quiet ?? (() => false);
@@ -127,6 +131,8 @@ export function reconcile(
   const statements: D1PreparedStatement[] = [];
   const due: Due[] = [];
   const live: Live[] = [];
+  /** critical conditions that cleared and were sent: resolved with their "resolved" email (R4-O, Minor 6) */
+  const resolving: { id: number; due: Due }[] = [];
 
   const insert = db.prepare(
     "INSERT INTO alerts (alert_key, rule, tier, kind, subject, body, runbook, opened_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) RETURNING id, alert_key",
@@ -168,8 +174,8 @@ export function reconcile(
       // (a first send that failed is retried, a warning goes out with the digest, a critical is re-sent hourly)
       live.push(row);
     } else if (a.kind === "condition") {
-      statements.push(resolve.bind(nowS, a.id));
-      if (a.tier === "critical" && a.notifiedAt !== null) due.push(asDue(row, "resolved"));
+      if (a.tier === "critical" && a.notifiedAt !== null) resolving.push({ id: a.id, due: asDue(row, "resolved") });
+      else statements.push(resolve.bind(nowS, a.id));
     } else if (a.acknowledgedAt !== null || nowS - a.openedAt >= EVENT_CLOSES_AFTER_S) {
       // an event closes quietly: never a "resolved" email
       statements.push(resolve.bind(nowS, a.id));
@@ -190,7 +196,17 @@ export function reconcile(
   }
 
   const holds = [...kept.values()].flatMap((f) => (f.hold && RULES[f.rule].canHold ? [{ id: f.hold.id, rule: f.rule, summary: f.hold.summary }] : []));
-  return { statements, due, holds };
+  if (o.criticalCap === undefined) {
+    for (const x of resolving) statements.push(resolve.bind(nowS, x.id));
+    return { statements, due: [...resolving.map((x) => x.due), ...due], holds, waiting: 0 };
+  }
+  // the cap (R4-O's fix round, Minor 6): a cleared alert whose "resolved" email is cut stays open, so the next tick finds
+  // it cleared again and its email is due again; never resolved with its email unsent
+  const RANK: Record<Due["reason"], number> = { alert: 0, resolved: 1, resend: 2 };
+  const criticals = [...due.filter((x) => x.tier === "critical"), ...resolving.map((x) => x.due)].sort((x, y) => RANK[x.reason] - RANK[y.reason]);
+  const sending = new Set(criticals.slice(0, o.criticalCap));
+  for (const x of resolving) if (sending.has(x.due)) statements.push(resolve.bind(nowS, x.id));
+  return { statements, due: [...criticals.filter((x) => sending.has(x)), ...due.filter((x) => x.tier !== "critical")], holds, waiting: criticals.length - sending.size };
 }
 
 /** Commit 2: the emails that went out, marked sent (and when the last warnings went out). A "resolved"

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
+import {CascadeVaultLens} from "../../src/lens/CascadeVaultLens.sol";
+import {CascadeDoorLens} from "../../src/lens/CascadeDoorLens.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
 import {CcipAdapterBase} from "../../src/adapters/CcipAdapterBase.sol";
 import {CcipBaseAdapter} from "../../src/adapters/CcipBaseAdapter.sol";
@@ -21,6 +23,10 @@ import {MockStaking} from "../mocks/MockStaking.sol";
 import {MockTAO} from "../mocks/MockTAO.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {mirror} from "../mocks/Mirror.sol";
+import {defaultFrontDoorParams, defaultVaultParams} from "../utils/DefaultParams.sol";
+import {Schedule} from "../governance/Schedule.sol";
+import {Redeemed} from "../../src/CascadeEvents.sol";
+import {VaultLayout} from "../../src/lens/generated/VaultLayout.sol";
 
 /// @notice Two "chains" in one EVM, joined by the two CCIP adapters over two mock routers: Base holds the
 /// front door, its adapter and `taoBase` (the ERC-20); Bittensor holds the vault, its adapter, the alpha
@@ -39,6 +45,7 @@ abstract contract AdaptersFixture is Test {
     address owner = makeAddr("owner");
     address guardian = makeAddr("guardian");
     address keeper = makeAddr("keeper");
+    address treasury = makeAddr("treasury");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
 
@@ -52,7 +59,11 @@ abstract contract AdaptersFixture is Test {
     CcipBaseAdapter adapterBase;
     CcipBittensorAdapter adapterBit;
     CascadeVault vault;
+    /// The read-only lens on `vault` (spec §8.1), built after the planned addresses.
+    CascadeVaultLens vaultLens;
     CascadeFrontDoor fd;
+    /// The read-only lens on `fd` (spec §8.1).
+    CascadeDoorLens doorLens;
 
     function setUp() public virtual {
         vm.etch(ISTAKING_ADDRESS, address(new MockStaking()).code);
@@ -86,7 +97,8 @@ abstract contract AdaptersFixture is Test {
                 remoteAdapter: pAdapterBit,
                 gasBase: 1_000_000,
                 gasPerEntry: 25_000,
-                maxMessageValue: 5_000e18
+                maxMessageValue: 5_000e18,
+                treasury: treasury
             }),
             0.01e18
         );
@@ -100,26 +112,34 @@ abstract contract AdaptersFixture is Test {
                 remoteAdapter: pAdapterBase,
                 gasBase: 1_000_000,
                 gasPerEntry: 25_000,
-                maxMessageValue: 5_000e18
+                maxMessageValue: 5_000e18,
+                treasury: treasury
             }),
-            IAlphaVault(address(av))
+            IAlphaVault(address(av)),
+            // the Base adapter's own pair, the lane's inbound model (R4)
+            1_000_000,
+            25_000
         );
         // the front door is named at deploy, as the deployment does, so it is active with no delay
-        vault = new CascadeVault(
-            mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, 1e15, BASE, pFd
+        vault = newVault(
+            defaultVaultParams(
+                mirror(pVault), HK1, ICascadeBridge(address(adapterBit)), owner, guardian, keeper, BASE, pFd
+            )
         );
         fd = newFrontDoor();
         assertEq(address(adapterBase), pAdapterBase);
         assertEq(address(adapterBit), pAdapterBit);
         assertEq(address(vault), pVault);
         assertEq(address(fd), pFd);
+        vaultLens = new CascadeVaultLens(address(vault));
+        doorLens = new CascadeDoorLens(address(fd));
+        assertEq(doorLens.primaryBridge(), address(adapterBase));
+        assertEq(doorLens.keeper(), keeper);
 
         // the operator funds the vault's existential reserve and the adapter's native reserve
         vm.deal(address(vault), ED);
         vm.deal(address(this), 1 ether);
         adapterBit.fundReserve{value: ED}();
-        vm.prank(owner);
-        vault.setKeeper(keeper);
 
         address[2] memory users = [alice, bob];
         for (uint256 i; i < users.length; ++i) {
@@ -131,10 +151,16 @@ abstract contract AdaptersFixture is Test {
         vm.deal(keeper, 1 ether);
     }
 
+    /// ForeverMoney's operator holds the AlphaVault (adminHold, for ten years): every conversion reverts IsHalted
+    /// until `av.unpause()`.
+    function holdRail() internal {
+        av.adminHold(vm.getBlockTimestamp() + 3650 days);
+    }
+
     // ---- relay ----
 
     /// Delivers router `from`'s send number `sendIndex` to `toAdapter` through router `to`, minting the
-    /// token on the destination side as the real network would.
+    /// token on the destination side as the real network would (relayMessage, shared with the adapter campaign).
     function relay(
         MockRouter from,
         MockRouter to,
@@ -143,14 +169,7 @@ abstract contract AdaptersFixture is Test {
         uint64 fromSelector,
         uint256 sendIndex
     ) internal returns (bool ok, bytes memory reason) {
-        MockRouter.Sent memory s = from.sendAt(sendIndex);
-        Client.EVMTokenAmount[] memory t = new Client.EVMTokenAmount[](s.tokenAmounts.length);
-        for (uint256 i; i < t.length; ++i) {
-            t[i] = Client.EVMTokenAmount(address(to.token()), s.tokenAmounts[i].amount);
-        }
-        Client.Any2EVMMessage memory m =
-            Client.Any2EVMMessage(s.messageId, fromSelector, abi.encode(fromAdapter), s.data, t);
-        (, ok, reason) = to.deliver(toAdapter, m, to.gasLimitOf(s.extraArgs));
+        return relayMessage(from, to, toAdapter, fromAdapter, fromSelector, sendIndex);
     }
 
     function relayToBittensor(uint256 i) internal returns (bool, bytes memory) {
@@ -172,28 +191,29 @@ abstract contract AdaptersFixture is Test {
 
     // ---- lifecycle helpers ----
 
+    /// A front door on the Base adapter, the keeper from its constructor; a 0.03 TAO minimum deposit (the floor).
     function newFrontDoor() internal returns (CascadeFrontDoor) {
-        return new CascadeFrontDoor(
-            taoBase,
-            adapterBase,
-            BITTENSOR,
-            address(vault),
-            owner,
-            guardian,
-            12 hours,
-            0.01e18,
-            10_000e18,
-            REQUEST_FEE,
-            usdcBase
-        );
+        CascadeFrontDoor.Params memory p =
+            defaultFrontDoorParams(taoBase, adapterBase, BITTENSOR, address(vault), usdcBase, owner, guardian, keeper);
+        p.minDeposit = 0.03e18;
+        p.redeemRequestFee = REQUEST_FEE;
+        return newDoor(p);
     }
 
+    /// Hooks: the vault and the front doors the fixture creates from their params, each at its place in the creation
+    /// order (a campaign creates the test-only subclasses, VaultInternals and DoorInternals, and may change values).
+    function newVault(CascadeVault.Params memory p) internal virtual returns (CascadeVault) {
+        return new CascadeVault(p);
+    }
+
+    function newDoor(CascadeFrontDoor.Params memory p) internal virtual returns (CascadeFrontDoor) {
+        return new CascadeFrontDoor(p);
+    }
+
+    /// Activates front door (chain, addr) on the vault through the scheduler: its activation scheduled, the
+    /// Registry class's 7 days warped, then executed.
     function registerFrontDoor(uint64 chain, address addr) internal {
-        vm.prank(owner);
-        vault.proposeFrontDoor(chain, addr);
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(owner);
-        vault.activateFrontDoor(chain, addr);
+        Schedule.run(vault, owner, abi.encodeCall(CascadeVault.activateFrontDoor, (chain, addr)));
     }
 
     function depositVia(CascadeFrontDoor door, address user, uint256 amount) internal {
@@ -209,12 +229,12 @@ abstract contract AdaptersFixture is Test {
     /// Closes `door`'s open batch, warping to its due time first if needed; the keeper pays the router fee.
     /// The send is only recorded; relay it with `relayToBittensor`.
     function close(CascadeFrontDoor door) internal {
-        (, uint64 start,,,,) = door.openBatch();
+        (uint64 id, uint64 start,,,,) = door.openBatch();
         // test-controlled time
         // forge-lint: disable-next-line(block-timestamp)
-        if (block.timestamp < uint256(start) + 12 hours) vm.warp(uint256(start) + 12 hours);
+        if (vm.getBlockTimestamp() < uint256(start) + 12 hours) vm.warp(uint256(start) + 12 hours);
         vm.prank(keeper);
-        door.closeBatch{value: FEE}();
+        door.closeBatch{value: FEE}(id, 0);
     }
 
     /// The batch key by its formula, independent of the vault.
@@ -259,16 +279,26 @@ abstract contract AdaptersFixture is Test {
     }
 
     function isRedeemed(Vm.Log memory log, bytes32 key) internal view returns (bool) {
-        return log.emitter == address(vault) && log.topics.length > 2 && log.topics[0] == CascadeVault.Redeemed.selector
+        return log.emitter == address(vault) && log.topics.length > 2 && log.topics[0] == Redeemed.selector
             && log.topics[1] == key;
     }
 
-    /// A deposit of `amount` by `user` through `door`, closed and relayed as the router's send `sendIndex`.
+    /// A deposit of `amount` by `user` through `door`, closed and relayed as the router's send `sendIndex`, the holder's
+    /// shares then aged past the door hold (matureShares), as a holder of long standing's are.
     function depositAndRelay(CascadeFrontDoor door, address user, uint256 amount, uint256 sendIndex) internal {
         depositVia(door, user, amount);
         close(door);
         (bool ok,) = relayToBittensor(sendIndex);
         assertTrue(ok, "deposit relay");
+        matureShares(user);
+    }
+
+    /// `user`'s fresh shares aged past the door hold (spec §3.5, R4 B-H1) with nothing else moved: its holder record's
+    /// clock and fresh shares cleared at the generated layout, its redeem origin kept.
+    function matureShares(address user) internal {
+        bytes32 slot = keccak256(abi.encode(user, VaultLayout.SLOT_HOLDERS));
+        uint256 word = uint256(vm.load(address(vault), slot));
+        vm.store(address(vault), slot, bytes32(word & type(uint64).max));
     }
 
     /// Requests `shares` for `user` through `door` as batch `batchId`, closes it, relays it as send
@@ -297,8 +327,29 @@ abstract contract AdaptersFixture is Test {
 
     /// The keeper pays out `key` after the payout delay; the send is recorded on `routerBit`.
     function pay(bytes32 key, CascadeMessages.Payout[] memory list) internal {
-        vm.warp(block.timestamp + vault.payoutDelay());
+        vm.warp(vm.getBlockTimestamp() + vaultLens.payoutDelay());
         vm.prank(keeper);
         vault.processPayouts(key, list, 50);
     }
+}
+
+/// Delivers router `from`'s send number `sendIndex` to `toAdapter` through router `to`, minting the token on the
+/// destination side as the real network would: the send's data and token amount as CCIP's message from `fromAdapter`
+/// on `fromSelector`, with the gas its extra args name. Returns whether the delivery succeeded and its revert data.
+function relayMessage(
+    MockRouter from,
+    MockRouter to,
+    address toAdapter,
+    address fromAdapter,
+    uint64 fromSelector,
+    uint256 sendIndex
+) returns (bool ok, bytes memory reason) {
+    MockRouter.Sent memory s = from.sendAt(sendIndex);
+    Client.EVMTokenAmount[] memory t = new Client.EVMTokenAmount[](s.tokenAmounts.length);
+    for (uint256 i; i < t.length; ++i) {
+        t[i] = Client.EVMTokenAmount(address(to.token()), s.tokenAmounts[i].amount);
+    }
+    Client.Any2EVMMessage memory m =
+        Client.Any2EVMMessage(s.messageId, fromSelector, abi.encode(fromAdapter), s.data, t);
+    (, ok, reason) = to.deliver(toAdapter, m, to.gasLimitOf(s.extraArgs));
 }

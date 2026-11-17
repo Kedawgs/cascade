@@ -11,6 +11,10 @@ export const DEFAULTS = {
   /** stake.unexplained_drop: a hotkey's stake may fall this much without a vault event; stake.divergence: stake
    * on an unlisted hotkey up to this much is dust, not a divergence */
   stakeDustRao: 1000n,
+  /** stake.writeoff_read_gas (R6, ChatGPT R2 claim C): the write-off's aggregate read may cost this much gas before it
+   * warns: well under the vault's WRITE_OFF_READ_GAS cap (45,000,000), so there is time to act; at launch it costs about
+   * 16,875 (one listed hotkey with root stake) */
+  writeOffReadGasWarn: 10_000_000n,
   /** stake.divergence: stake on an unlisted hotkey holds only when it is at least this share of the vault's
    * stake (counted plus unlisted) and the counted stake fell by as much; a smaller or unmatched amount (a
    * stranger's transfer_stake gift) is the stake.unlisted warning */
@@ -53,14 +57,25 @@ export const DEFAULTS = {
   checkStuckS: 3600,
   /** delivery.overdue: this long after a user's PayoutReceived */
   deliveryGraceS: 7200,
-  /** keeper.low_eth: 0.002 ETH on Base */
-  keeperMinEthWei: 2n * 10n ** 15n,
+  /** keeper.low_eth: the floor, 0.015 ETH on Base (R12a; 0.002 before): a full 50 + 50 batch's close float, three quotes
+   * of about 0.0045 ETH, and its gas, which the keeper must hold for the close to go at all */
+  keeperMinEthWei: 15n * 10n ** 15n,
+  /** keeper.low_eth (R12a): also below this many of the read full batch's close quote (fullBatchQuote), when that is more:
+   * the keeper's float for such a close (three) and one more close's fee, so it warns while one more full close still goes */
+  keeperCloseQuotes: 4,
+  /** batch.redeem_fee_thin (R12a): a full redeem list's fees (redeemRequestFee × maxRedeems) below this share of a full
+   * batch's close quote (150%: 1.5 times) */
+  redeemFeeCoverPct: 150,
   /** keeper.low_tao: a round of the keeper's actions on Bittensor, 0.01 TAO (about 0.0002-0.0008 TAO an action). The
-   * floor is this plus a claim's up-front gas, (claimGasRequired + claimGasMargin) × the base fee (0.285 TAO at
-   * launch): Bittensor takes a transaction's whole gas limit up front, so a keeper below it can't claim at all. */
+   * floor is this plus a claim's up-front gas, (claimGasRequired + claimGasMargin, at most claimGasCeiling) × the base
+   * fee (0.285 TAO at launch): Bittensor takes a transaction's whole gas limit up front, so a keeper below it can't claim
+   * at all. */
   keeperMinTaoWei: 10n ** 16n,
   /** the gas the keeper sends a claim with above the vault's claimGasRequired (ops CLAIM_GAS_MARGIN) */
   claimGasMargin: 2_000_000,
+  /** the most gas the keeper sends a claim with: Bittensor's per-transaction ceiling (ops BITTENSOR_TX_GAS_CEILING, Task
+   * 65), which holds claimGasRequired + claimGasMargin at the vault's top (63,400,000) */
+  claimGasCeiling: 64_900_000,
   /** fmtao.backing_true: the AlphaVault's backing may fall short of wTAO's supply by this share of it (0.1%; at least
    * fmtaoBackingSlackWei). Before BACKING_HOLD is switched on, set it from a week of hour rows (README) */
   backingToleranceBps: 10,
@@ -80,9 +95,11 @@ export const DEFAULTS = {
   /** validator.root_stake_drop: the validator's root stake this far (25%) below its highest of the last 24 hours */
   validatorStakeDropBps: 2500,
   /** oracle.cardinality: the fewest observations each pool the TWAP oracle reads must keep, whatever the block time: its
-   * 1,800-second window on 2-second Base blocks, plus one. The rule asks more when Base's block time, as the readings
-   * measure it, needs more (1,801 on its 200 ms blocks: a pool keeps at most one observation a second) */
-  oracleMinCardinality: 901,
+   * 1,800-second window at one observation a second, plus one (a pool writes at most one per block timestamp, and
+   * timestamps are whole seconds: Base's 200 ms blocks share them), the v3.2 oracle's own MIN_CARDINALITY (TWAP_WINDOW + 1,
+   * Revision 28). The rule asks more when Base's block time, as the readings measure it, ever needs more (blocks slower
+   * than a second), and on v3.2 at least the oracle's MIN_CARDINALITY as read */
+  oracleMinCardinality: 1_801,
   /** payout.fee_ceiling: a full payout chunk's quoted fee above this share of the vault's maxFeeAbs */
   payoutFeeCeilingPct: 70,
   /** keeper.idle_unstaked: stakeable TAO idle this long */
@@ -97,6 +114,10 @@ export const DEFAULTS = {
   /** batch.one_wallet: one payer with this share of a batch at least half full, or this many entries */
   oneWalletPct: 50,
   oneWalletEntries: 10,
+  /** batch.cancel_churn (R8): one address's deposit cancels in the open batch adding up to this share of its
+   * maxBatchValue, or this many of them */
+  cancelChurnPct: 50,
+  cancelChurnCount: 3,
   capNearlyFullPct: 90,
   /** unstakes.tiny_wave: this many redeems in 24 h each under this amount, or a redeem list this full */
   tinyUnstakeWei: 2n * 10n ** 16n,
@@ -143,6 +164,38 @@ export const DEFAULTS = {
   siteUnjudgedS: 3 * 3600,
   /** site.redeploy_race: passes in a row that dropped files as gone with a redeployed build */
   siteRaceStreak: 3,
+  /** bridge.parked (v3.2): a front-door batch parked this long, by the settled history, is critical (spec §7: "critical
+   * after one hour"); the keeper delivers a park as soon as it would succeed */
+  parkedCriticalS: 3600,
+  /** stake.surplus_unadopted (v3.2): a surplus of at least the chain's minimum waiting this long (the keeper adopts at
+   * most once a day) */
+  surplusUnadoptedS: 86_400,
+  /** stake.unstake_skipped (v3.2): this many UnstakeSkipped of one hotkey within unstakeSkippedS; one skip is the walk
+   * doing its job */
+  unstakeSkippedCount: 3,
+  unstakeSkippedS: 86_400,
+  /** oracle.thin_pool_repeated (v3.2): a pool held thinner than the front door's floor this long (two hours: four of the
+   * oracle's 30-minute windows) */
+  thinPoolRepeatedS: 7200,
+  /** oracle.thin_pool_repeated (v3.2), its other form (Task 57's review, Minor 4): this many thin episodes (each held on
+   * two readings) within thinPoolEpisodesS, the pool deep between them. One or two in a day can be liquidity providers
+   * moving their ranges; three in a day is a pattern, a griefer thinning the pool only around the keeper's rounds (about
+   * $88 a time, R3 C-L1) or a pool losing its depth on and off. A day spans every keeper round, however they are spaced. */
+  thinPoolEpisodes: 3,
+  thinPoolEpisodesS: 86_400,
+  /** swap.below_oracle (v3.2): a settled stake or delivery this far (1%) below the oracle's value (the user's concern of
+   * 2026-11-04: swaps must never hurt a customer; the on-chain floors allow 5% and 1.5%) */
+  swapBelowOracleBps: 100,
+  /** R4 (D-L3) admin.stamp_quiet: a chain's owner clock (its last relayed stamp) may be this old before it pages; 0, the
+   * default, is off (the founder sets it with the stamp bot, e.g. 50400 for a 12-hour stack relayed hourly) */
+  stampQuietS: 0,
+  /** R4 (A-L2) cap.exits_consumed: the front door's netForwarded may exceed the vault's assets by this much (1 TAO) */
+  capExitsGapWei: 10n ** 18n,
+  /** stake.min_near_floor and stake.min_at_floor: Bittensor's minimum stake as a share of MIN_REDEEM_VALUE (0.03 TAO) */
+  minStakeWarnPct: 50,
+  minStakeCriticalPct: 80,
+  /** R4 (the email flood): the most critical emails a tick sends; the rest stay due and go on the next ticks, each once */
+  criticalEmailsPerTick: 25,
   /** rule ids switched off (the proposed rules, open question 13, can be turned off here) */
   rules: { off: [] as string[] },
 };
@@ -164,23 +217,14 @@ export function jsonSetting(field: string, raw: unknown): unknown {
   }
 }
 
-/** Thresholds a later version retired, with what replaced them: still accepted and ignored, with a warning, so a
- * THRESHOLDS_SECRET set before never stops the monitor (a refused config runs no tick at all). The logs cross-check's caps
- * counted Base's 2-second blocks; since its 200 ms blocks (2026-11-05) they are in seconds. */
-const RETIRED: Readonly<Record<string, string>> = { logsCheckBaseBlocks: "logsCheckBaseS", logsCheckBittensorBlocks: "logsCheckBittensorS" };
-
-/** One source's overrides applied to `t`: every key must be a threshold (or a RETIRED one, ignored), numbers must be
- * finite and not negative, amounts decimal strings, and `rules.off` a list of rule ids. */
+/** One source's overrides applied to `t`: every key must be a threshold, numbers must be finite and
+ * not negative, amounts decimal strings, and `rules.off` a list of rule ids. */
 function apply(t: Thresholds, field: string, raw: unknown): void {
   const over = jsonSetting(field, raw);
   if (over === undefined) return;
   if (!isObject(over)) throw new ConfigError(field, "is not a JSON object");
   const out = t as Record<Key, unknown>;
   for (const [key, value] of Object.entries(over)) {
-    if (Object.hasOwn(RETIRED, key)) {
-      console.warn(`thresholds: ${field} names "${key}", retired: set "${RETIRED[key]}" (seconds) instead; ignored`);
-      continue;
-    }
     if (!Object.hasOwn(DEFAULTS, key)) throw new ConfigError(field, `names an unknown threshold "${key}"`);
     const k = key as Key;
     const kind = typeof DEFAULTS[k];

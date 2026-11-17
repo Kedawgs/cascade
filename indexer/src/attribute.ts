@@ -20,6 +20,11 @@ export const ATTRIBUTABLE: ReadonlySet<`${Role}:${string}`> = new Set([
   "vault:RewardsClaimed",
   "vault:HotkeyAdded",
   "vault:StakeMoved",
+  // v3.2's routine actions, not admin events: the keeper's adoptStake (vault.stake_adopted) and anyone's surplus sweep
+  // (the daily digest), so a watched key that sends one is explained
+  "vault:StakeAdopted",
+  "baseAdapter:SurplusSwept",
+  "bitAdapter:SurplusSwept",
   ...ADMIN_EVENTS,
   // ForeverMoney's admin events (only these of theirs are scanned): who sent each is named in its alert
   ...DEPENDENCY_EVENTS.flatMap((e) => (["fmTao", "tokenPool", "alphaVault"] as const).map((r) => `${r}:${e.name}` as const)),
@@ -37,6 +42,8 @@ const SENDER_ARG: Readonly<Record<string, string>> = {
   "frontDoor:DeliverySet": "user",
   "staker:Staked": "payer",
   "bitAdapter:ReserveFunded": "from",
+  // R4 (F-1): fundCushion books the token cushion from its caller's approved wTAO
+  "bitAdapter:CushionFunded": "from",
   "vault:DepositedDirect": "user",
   "vault:RedeemedDirect": "user",
   "vault:FrontDoorRedeemsAllowed": "user",

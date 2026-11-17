@@ -123,7 +123,9 @@ describe("GET /v1/status", () => {
   });
 });
 
-describe("the Workers Cache in front of /v1/status and /v1/health", () => {
+// 30 s, not vitest's 5 s: the burst test makes 262 requests (under a second alone), and under load on a
+// busy PC it has run past 5 s while passing
+describe("the Workers Cache in front of /v1/status and /v1/health", { timeout: 30_000 }, () => {
   /** The Worker with a counting D1, and a fresh execution context per request (its cache write is awaited). */
   async function fetchCounted(path: string, o: { db?: D1Database; limiter?: RateLimit; init?: RequestInit } = {}) {
     const c = countingDb(o.db ?? db);

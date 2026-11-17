@@ -17,7 +17,7 @@ import { REREAD_S } from "../../src/scan.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { TICK_RULES } from "../../src/tick.ts";
 import { wipe } from "./d1-count.ts";
-import { rawLog, testConfig } from "./fixtures.ts";
+import { rawLog, testConfig, testConfigV32 } from "./fixtures.ts";
 import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
 // The rules on what Cascade depends on and doesn't control: ForeverMoney's rail (FM-TAO, wTAO, the CCIP pools and the
@@ -80,7 +80,10 @@ describe("the dependency rules", () => {
     expect(RULES["validator.root_stake_drop"]).toMatchObject({ tier: "warning", kind: "condition" });
     expect(RULES["validator.root_uid_lost"]).toMatchObject({ tier: "critical", kind: "condition", canHold: false });
     expect(RULES["ccip.rate_limited"]).toMatchObject({ tier: "warning", kind: "condition" });
-    expect(RULES["root.unlock_interval"]).toMatchObject({ tier: "critical", kind: "condition", canHold: false });
+    // today's root.unlock_interval, renamed on every deployment (plan Task 57)
+    expect(RULES["root.hold_interval"]).toMatchObject({ tier: "critical", kind: "condition", canHold: false });
+    expect(Object.hasOwn(RULES, "root.unlock_interval")).toBe(false);
+    expect(RULES["root.pair_stamped"]).toMatchObject({ tier: "warning", kind: "event" });
     expect(RULES["oracle.cardinality"]).toMatchObject({ tier: "warning", kind: "condition" });
     expect(RULES["oracle.reverted"]).toMatchObject({ tier: "critical", kind: "condition", canHold: false });
     expect(RULES["payout.fee_ceiling"]).toMatchObject({ tier: "warning", kind: "condition" });
@@ -95,7 +98,8 @@ describe("the dependency rules", () => {
       "validator.root_stake_drop",
       "validator.root_uid_lost",
       "ccip.rate_limited",
-      "root.unlock_interval",
+      "root.hold_interval",
+      "root.pair_stamped",
       "oracle.cardinality",
       "oracle.reverted",
       "payout.fee_ceiling",
@@ -533,6 +537,191 @@ describe("the validator", () => {
   });
 });
 
+describe("the standby validator (STANDBY_HOTKEY), watched beside the primary by the same rules (B7e)", () => {
+  // Yuma (spec question 11): root uid 20, take 9%; a configuration value, never a constant
+  const YUMA = "0x40c47b6a294686fe9612b5d78dd369f4c77fa3bbf96a4286ede97410ba2e3209" as Hex;
+  const withStandby = testConfigV32({ STANDBY_HOTKEY: YUMA });
+  type V = NonNullable<BitState["validator"]>;
+  const primary: V = { hotkey: HK, take: 0, rootStake: 1_000_000n * 10n ** 9n, rootUid: 1 };
+  const yuma: V = { hotkey: YUMA, take: 5898, rootStake: 500_000n * 10n ** 9n, rootUid: 20 };
+  const r = (block: bigint, sb: Partial<V> = {}, pv: Partial<V> = {}) => bit(block, { validator: { ...primary, ...pv }, standby: { ...yuma, ...sb } });
+  const c = (o: Parameters<typeof ctx>[0]) => ctx({ cfg: withStandby, ...o });
+  const four = (x: RuleCtx) => [...deps.validatorTake.run(x), ...deps.validatorRootStakeDrop.run(x), ...deps.validatorRootUidLost.run(x)];
+
+  it("the live pair is quiet: Yuma's 9% take is at the limit, not above it", () => {
+    const x = c({ bit: r(12n), bitBefore: [r(11n), r(10n)] });
+    expect(four(x)).toEqual([]);
+    expect(x.unjudged).toEqual([]);
+  });
+
+  it("validator.take_changed and validator.take_high run for the standby, keyed by its hotkey, its emails saying standby", () => {
+    const up = { take: 7864 }; // 12%
+    const found = deps.validatorTake.run(c({ bit: r(12n, up), bitBefore: [r(11n, up), r(10n)] }));
+    const changed = found.find((f) => f.rule === "validator.take_changed");
+    expect(changed).toMatchObject({ key: `validator.take_changed:${YUMA}:11`, facts: { hotkey: YUMA, before: "9.00%", after: "12.00%", validator: "standby (STANDBY_HOTKEY)" } });
+    expect(changed?.subject).toBe("The standby validator's take changed: 9.00% → 12.00%");
+    const high = found.find((f) => f.rule === "validator.take_high");
+    expect(high).toMatchObject({ key: `validator.take_high:${YUMA}`, facts: { take: "12.00%", validator: "standby (STANDBY_HOTKEY)" } });
+    expect(high?.subject).toBe("The standby validator's take is 12.00%, above 9.00%");
+    expect(RUNBOOK["validator.take_high"](high!.facts)).toContain("standby");
+    // the primary's alerts are as they were: no standby fact, today's subject
+    const p = deps.validatorTake.run(c({ bit: r(12n, {}, { take: 5965 }), bitBefore: [r(11n, {}, { take: 5965 }), r(10n, {}, { take: 5965 })] }));
+    expect(p.map((f) => f.key)).toEqual([`validator.take_high:${HK}`]);
+    expect(p[0].subject).toBe("The validator's take is 9.10%, above 9.00%");
+    expect(p[0].facts.validator).toBeUndefined();
+  });
+
+  it("validator.root_stake_drop reads the standby's own hour rows (standbyStakeHigh)", () => {
+    const day = 500_000n * 10n ** 9n;
+    const hours: HourAgg[] = [{ hour: NOW - 7200, ticks: 60, spotSum: 0, spotCount: 0, validatorStakeHigh: primary.rootStake, standbyStakeHigh: day }];
+    const fell = { rootStake: (day * 70n) / 100n };
+    const [f] = deps.validatorRootStakeDrop.run(c({ bit: r(12n, fell), bitBefore: [r(11n, fell)], hours }));
+    expect(f).toMatchObject({ rule: "validator.root_stake_drop", key: `validator.root_stake_drop:${YUMA}`, facts: { "below the day's high": "30.00%", validator: "standby (STANDBY_HOTKEY)" } });
+    expect(f.subject).toBe("The standby validator's root stake fell 30.00% in a day");
+    // the primary's high doesn't stand in for the standby's
+    expect(deps.validatorRootStakeDrop.run(c({ bit: r(12n), bitBefore: [r(11n)], hours: [{ ...hours[0], standbyStakeHigh: undefined }] }))).toEqual([]);
+  });
+
+  it("validator.root_uid_lost for the standby, once a uid was read for it (remembered per hotkey)", () => {
+    const off = { rootUid: null };
+    const [f] = deps.validatorRootUidLost.run(c({ bit: r(12n, off), bitBefore: [r(11n, off), r(10n)] }));
+    expect(f).toMatchObject({ rule: "validator.root_uid_lost", key: `validator.root_uid_lost:${YUMA}`, facts: { "uid before": "seen in an earlier reading", validator: "standby (STANDBY_HOTKEY)" } });
+    expect(f.subject).toBe("The standby validator's hotkey is no longer registered on root");
+    const first = c({ bit: r(10n) });
+    deps.validatorRootUidLost.run(first);
+    expect(written(first)).toEqual({ [`root_uid_seen:${HK}`]: "1", [`root_uid_seen:${YUMA}`]: "20" });
+  });
+
+  it("a standby that is the stake hotkey (Task 68's setStakeHotkey(Yuma) for a moveStake) is judged once, as the primary", () => {
+    const same = (block: bigint) => bit(block, { validator: { ...yuma, take: 7864 }, standby: { ...yuma, take: 7864 } });
+    const found = deps.validatorTake.run(c({ bit: same(12n), bitBefore: [same(11n), same(10n)] }));
+    expect(found.map((f) => [f.key, f.facts.validator])).toEqual([[`validator.take_high:${YUMA}`, undefined]]);
+  });
+
+  it("STANDBY_HOTKEY set but the standby unread is unjudged under its own keys; unset, nothing is said of a standby", () => {
+    const unread = c({ bit: bit(12n, { validator: primary }), bitBefore: [bit(11n, { validator: primary })] });
+    expect(four(unread)).toEqual([]);
+    expect(unread.unjudged).toEqual(
+      expect.arrayContaining([
+        { rule: "validator.take_high", key: `validator.take_high:${YUMA}` },
+        { rule: "validator.root_stake_drop", key: `validator.root_stake_drop:${YUMA}` },
+        { rule: "validator.root_uid_lost", key: `validator.root_uid_lost:${YUMA}` },
+      ]),
+    );
+    expect(unread.unjudged.some((u) => u.key?.includes(HK))).toBe(false);
+    const none = ctx({ cfg: testConfigV32(), bit: r(12n, { take: 7864 }), bitBefore: [r(11n, { take: 7864 }), r(10n)] });
+    expect(four(none)).toEqual([]);
+    expect(none.unjudged).toEqual([]);
+  });
+});
+
+describe("ForeverMoney's admin-action rules on a v3.2 deployment", () => {
+  it("are the same rules: quiet on the live rail, and keyed as on v3-launch", () => {
+    const SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
+    const lane = { inbound: { tokens: 5000n * E18, isEnabled: true, capacity: 5000n * E18, rate: 1n }, outbound: { tokens: 5000n * E18, isEnabled: true, capacity: 5000n * E18, rate: 1n }, supported: true };
+    const b = (block: bigint, pool: Hex) => base(block, { maxBatchValue: 10n * E18, lane, registry: { administrator: SAFE, pendingAdministrator: ZERO, tokenPool: pool } });
+    const x = (block: bigint) => bit(block, { lane, registry: { administrator: SAFE, pendingAdministrator: ZERO, tokenPool: t.bittensor.lockPool }, lockPoolRebalancer: ZERO });
+    const v32 = testConfigV32();
+    const quiet = ctx({ cfg: v32, base: b(11n, t.base.tokenPool), baseBefore: [b(10n, t.base.tokenPool)], bit: x(11n), bitBefore: [x(10n)] });
+    expect([...deps.railPool.run(quiet), ...deps.fmtaoRebalancerSet.run(quiet), ...deps.fmtaoRegistryAdmin.run(quiet)]).toEqual([]);
+    const OTHER = "0x00000000000000000000000000000000000000cc" as Hex;
+    const moved = ctx({ cfg: v32, base: b(11n, OTHER), baseBefore: [b(10n, OTHER)], bit: x(11n), bitBefore: [x(10n)] });
+    expect(deps.railPool.run(moved).map((f) => f.key)).toEqual(["rail.pool:base"]);
+  });
+
+  it("rail.pool's runbook on v3.2: a paused front door never stops a close (I-20), so the guardian's option is disableBridge of the primary", () => {
+    const SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
+    const OTHER = "0x00000000000000000000000000000000000000cc" as Hex;
+    const lane = { inbound: { tokens: 5000n * E18, isEnabled: true, capacity: 5000n * E18, rate: 1n }, outbound: { tokens: 5000n * E18, isEnabled: true, capacity: 5000n * E18, rate: 1n }, supported: true };
+    const b = (block: bigint) => base(block, { maxBatchValue: 10n * E18, lane, registry: { administrator: SAFE, pendingAdministrator: ZERO, tokenPool: OTHER } });
+    const x = (block: bigint) => bit(block, { lane, registry: { administrator: SAFE, pendingAdministrator: ZERO, tokenPool: t.bittensor.lockPool }, lockPoolRebalancer: ZERO });
+    const run = (c?: Config) => deps.railPool.run(ctx({ cfg: c, base: b(11n), baseBefore: [b(10n)], bit: x(11n), bitBefore: [x(10n)] }))[0];
+    const f = run(testConfigV32());
+    expect(f.facts.contracts).toBe("v3.2");
+    const says = RUNBOOK["rail.pool"](f.facts);
+    expect(says).toContain("A pool that isn't ForeverMoney's takes the next batch or payout sent through it");
+    expect(says).toContain("never stops a close");
+    expect(says).toContain("pause() the vault");
+    expect(says).toContain("disableBridge(<the primary bridge>) on the front door");
+    expect(says).toContain("PrimaryBridgeDisabled");
+    expect(says).toContain("your call");
+    // v3-launch's facts and line are as the port has them: its door's pause stops closes
+    const g = run(cfg);
+    expect(g.facts.contracts).toBeUndefined();
+    expect(RUNBOOK["rail.pool"](g.facts)).toContain("pause() the front door and the vault until the pool is checked");
+    expect(RUNBOOK["rail.pool"](g.facts)).not.toContain("disableBridge");
+  });
+});
+
+describe("ForeverMoney's runbooks on v3.2 say what a front-door pause doesn't stop (I-20: never a close)", () => {
+  const v32 = testConfigV32();
+  const SAFE = "0xadf60fcc63217961c931d57f1dce2c5d70af3546" as Hex;
+  /** What every v3.2 line must say, and the v3-launch claim it must not make. */
+  const saysV32 = (text: string) => {
+    expect(text).not.toMatch(/no new batch crosses|new batches stop|stops new batches|no new FM-TAO enters/);
+    expect(text).toContain("never stops a close");
+    expect(text).toContain("deposit, depositFor and deliver");
+    expect(text).toContain("pause() the vault");
+    expect(text).toContain("disableBridge(<the primary bridge>) on the front door");
+    expect(text).toContain("cancelPayoutBatch(key, payouts)");
+  };
+
+  it("fmtao.backing_true's alpha side", () => {
+    const live = { alpha: { backing: 13_992_856_362_690_000_000_000n }, wTaoSupply: 13_985_652_876_083_000_000_000n, lockPoolFmTao: 13_985_605_961_534_429_495_505n };
+    const short = { ...live, alpha: { backing: (live.wTaoSupply * 9985n) / 10_000n } };
+    const run = (c: Config) => deps.fmtaoBackingTrue.run(ctx({ cfg: c, bit: bit(12n, short), bitBefore: [bit(11n, short), bit(10n, live)] }))[0];
+    const f = run(v32);
+    expect(f.facts).toMatchObject({ side: "alpha", contracts: "v3.2" });
+    saysV32(RUNBOOK["fmtao.backing_true"](f.facts));
+    // v3-launch's line is as it was: its door's pause stops closes
+    const g = run(cfg);
+    expect(g.facts.contracts).toBeUndefined();
+    expect(RUNBOOK["fmtao.backing_true"](g.facts)).toContain("pause() the front door (new batches stop) and the vault (payouts stop)");
+  });
+
+  it("R6b (U6): fmtao.backing_true's alpha side at a backing of 0, ForeverMoney's validator hotkey swapped (stakedValueRao reads 0): the cause, the queued burns and the owner's cancel are named", () => {
+    const live = { alpha: { backing: 13_992_856_362_690_000_000_000n }, wTaoSupply: 13_985_652_876_083_000_000_000n, lockPoolFmTao: 13_985_605_961_534_429_495_505n };
+    const gone = { ...live, alpha: { backing: 0n } };
+    const f = deps.fmtaoBackingTrue.run(ctx({ cfg: v32, bit: bit(12n, gone), bitBefore: [bit(11n, gone), bit(10n, live)] }))[0];
+    expect(f).toMatchObject({ key: "fmtao.backing_true:alpha", facts: { side: "alpha", "AlphaVault backing (backing(wTAO))": "0 TAO", "a stake of 0": "yes: most likely ForeverMoney's validator swapped its hotkey" } });
+    const line = RUNBOOK["fmtao.backing_true"](f.facts);
+    expect(line).toMatch(
+      /^ForeverMoney's AlphaVault reads no stake at all \(its backing is 0\): most likely its validator swapped its hotkey, so its conversions both ways revert until ForeverMoney repoints it \(migrateValidator\)\. Unstakes from Base delivered meanwhile can burn into the payout queue and wait until then; owner: cancelPayoutBatch\(key, payouts\) gives their shares back \(runbook 7\.8\)\. Tell ForeverMoney now\. /,
+    );
+    // a short backing that isn't 0 says no swap
+    const short = { ...live, alpha: { backing: (live.wTaoSupply * 9985n) / 10_000n } };
+    const g = deps.fmtaoBackingTrue.run(ctx({ cfg: v32, bit: bit(12n, short), bitBefore: [bit(11n, short), bit(10n, live)] }))[0];
+    expect(g.facts["a stake of 0"]).toBeUndefined();
+    expect(RUNBOOK["fmtao.backing_true"](g.facts)).not.toContain("swapped its hotkey");
+  });
+
+  it("fmtao.role_change_critical", () => {
+    const revoke = slog({ contract: "fmTao", chain: "base", event: "RoleRevoked", args: { role: MINTER_ROLE, account: t.base.tokenPool, sender: SAFE }, block: 37_000_500n, address: t.base.fmTao, txHash: keccak256(toBytes("v3.2 revoke")) });
+    const [f] = deps.fmtaoRoleChange.run(ctx({ cfg: v32, logs: [revoke] }));
+    expect(f).toMatchObject({ rule: "fmtao.role_change_critical", facts: { contracts: "v3.2" } });
+    saysV32(RUNBOOK["fmtao.role_change_critical"](f.facts));
+    const [g] = deps.fmtaoRoleChange.run(ctx({ logs: [revoke] }));
+    expect(g.facts.contracts).toBeUndefined();
+    expect(RUNBOOK["fmtao.role_change_critical"](g.facts)).toContain("guardian pause() the front door (no new batch crosses) and the vault (no payout crosses)");
+  });
+
+  it("fmtao.rebalancer_set", () => {
+    const REB = "0x00000000000000000000000000000000000000dd" as Hex;
+    const run = (c: Config) => deps.fmtaoRebalancerSet.run(ctx({ cfg: c, bit: bit(11n, { lockPoolRebalancer: REB }), bitBefore: [bit(10n, { lockPoolRebalancer: REB })] }))[0];
+    const f = run(v32);
+    expect(f.facts.contracts).toBe("v3.2");
+    saysV32(RUNBOOK["fmtao.rebalancer_set"](f.facts));
+    expect(RUNBOOK["fmtao.rebalancer_set"](f.facts)).toContain("LiquidityRemoved");
+    const g = run(cfg);
+    expect(g.facts.contracts).toBeUndefined();
+    expect(RUNBOOK["fmtao.rebalancer_set"](g.facts)).toContain("pause() the front door (no new FM-TAO enters a rail that may be drained)");
+  });
+
+  it("rail.pool's v3.2 line names the same options, the cancel of payouts not yet sent among them", () => {
+    saysV32(RUNBOOK["rail.pool"]({ contracts: "v3.2", setting: "TOKENS.base.tokenPool" }));
+  });
+});
+
 describe("ccip.rate_limited", () => {
   const lane = (inbound: bigint, outbound = 5000n): BitState["lane"] => ({ inbound: bucketOf(inbound), outbound: bucketOf(outbound) });
   const bucketOf = (tao: bigint, isEnabled = true): Bucket => ({ tokens: tao * E18, isEnabled, capacity: 5000n * E18, rate: 6n * 10n ** 17n });
@@ -559,16 +748,53 @@ describe("ccip.rate_limited", () => {
   });
 });
 
-describe("root.unlock_interval", () => {
+describe("root.hold_interval (today's root.unlock_interval, renamed)", () => {
   it("is critical once RootStakeUnlockInterval is set, on two readings; unset (0) is quiet", () => {
     const set = (block: bigint) => bit(block, { rootUnlockInterval: 360n });
-    const [f] = deps.rootUnlockInterval.run(ctx({ bit: set(12n), bitBefore: [set(11n)] }));
-    expect(f).toMatchObject({ rule: "root.unlock_interval", key: "root.unlock_interval", facts: { blocks: "360", "about": "72 minutes" } });
-    expect(deps.rootUnlockInterval.run(ctx({ bit: set(12n), bitBefore: [bit(11n, { rootUnlockInterval: 0n })] }))).toEqual([]);
-    expect(deps.rootUnlockInterval.run(ctx({ bit: bit(12n, { rootUnlockInterval: 0n }), bitBefore: [bit(11n, { rootUnlockInterval: 0n })] }))).toEqual([]);
+    const [f] = deps.rootHoldInterval.run(ctx({ bit: set(12n), bitBefore: [set(11n)] }));
+    expect(f).toMatchObject({ rule: "root.hold_interval", key: "root.hold_interval", facts: { blocks: "360", "about": "72 minutes" } });
+    expect(deps.rootHoldInterval.run(ctx({ bit: set(12n), bitBefore: [bit(11n, { rootUnlockInterval: 0n })] }))).toEqual([]);
+    expect(deps.rootHoldInterval.run(ctx({ bit: bit(12n, { rootUnlockInterval: 0n }), bitBefore: [bit(11n, { rootUnlockInterval: 0n })] }))).toEqual([]);
     // the front door has pause() only: no redeem-only pause to point at
-    expect(RUNBOOK["root.unlock_interval"](f.facts)).not.toMatch(/pausing redeems|pause redeems/);
-    expect(RUNBOOK["root.unlock_interval"](f.facts)).toContain("no redeem-only pause");
+    expect(RUNBOOK["root.hold_interval"](f.facts)).not.toMatch(/pausing redeems|pause redeems/);
+    expect(RUNBOOK["root.hold_interval"](f.facts)).toContain("no redeem-only pause");
+    // v3-launch's email is today's: no buffer facts
+    expect(f.facts["idle buffer"]).toBeUndefined();
+  });
+
+  it("on v3.2 names the idle buffer that keeps exits liquid, and the one that covers the pending payouts plus a day's floor (spec §3.8)", () => {
+    // 1,000 TAO booked, a 0.5% buffer (5 TAO, so the 10-TAO daily floor: _idleBuffer keeps the larger), 30 TAO of
+    // payouts pending: 40 TAO is 4%
+    const s = { rootUnlockInterval: 360n, bookedStake: 1000n * 10n ** 9n, idleBufferBps: 50, pendingPayouts: 30n * E18, minDailyOutflow: 10n * E18 };
+    const [f] = deps.rootHoldInterval.run(ctx({ cfg: testConfigV32(), bit: bit(12n, s), bitBefore: [bit(11n, s)] }));
+    expect(f.facts).toMatchObject({ contracts: "v3.2", "idle buffer": "50 bps: 10 TAO kept liquid", "a buffer that covers the pending payouts and a day's floor": "400 bps (40 TAO)" });
+    expect(RUNBOOK["root.hold_interval"](f.facts)).toContain("setIdleBuffer(400)");
+    // R6b: under a hold the guardian pauses the front door's deposits and the founder funds the buffer with
+    // depositDirect
+    expect(RUNBOOK["root.hold_interval"](f.facts)).toContain(
+      "Payouts the buffer can't cover revert and wait; nothing is lost. Guardian: pause() the front door (deposits stop; batches of unstakes still deliver and pay out). Founder: fund the buffer with depositDirect() on Bittensor (runbook 7.6).",
+    );
+    // above the 10% cap: says so
+    const big = { ...s, pendingPayouts: 200n * E18 };
+    const [g] = deps.rootHoldInterval.run(ctx({ cfg: testConfigV32(), bit: bit(12n, big), bitBefore: [bit(11n, big)] }));
+    expect(g.facts["a buffer that covers the pending payouts and a day's floor"]).toBe("2100 bps (210 TAO): more than the 1000 bps the vault allows");
+    // a missing reading leaves it unjudged, never quiet
+    const c = ctx({ cfg: testConfigV32(), bit: bit(12n, {}), bitBefore: [bit(11n, s)] });
+    expect(deps.rootHoldInterval.run(c)).toEqual([]);
+    expect(c.unjudged).toEqual([{ rule: "root.hold_interval", key: "root.hold_interval" }]);
+  });
+});
+
+describe("root.pair_stamped", () => {
+  it("is unjudged on v3.2 while the hold stamp's storage key is unconfirmed (Task 62), never a silent 'no stamp'; v3-launch doesn't run it", () => {
+    const c = ctx({ cfg: testConfigV32(), bit: bit(12n, { rootUnlockInterval: 360n }), bitBefore: [bit(11n, { rootUnlockInterval: 360n })] });
+    expect(deps.rootPairStamped.run(c)).toEqual([]);
+    expect(c.unjudged).toEqual([{ rule: "root.pair_stamped" }]);
+    expect(deps.ROOT_HOLD_STAMP_KEY).toBeUndefined();
+    const v31 = ctx({ bit: bit(12n), bitBefore: [bit(11n)] });
+    expect(deps.rootPairStamped.run(v31)).toEqual([]);
+    expect(v31.unjudged).toEqual([]);
+    expect(RUNBOOK["root.pair_stamped"]({})).toContain("Task 62");
   });
 });
 
@@ -578,17 +804,36 @@ describe("the oracle", () => {
   it("oracle.cardinality: a pool keeping fewer observations than the 30-minute window needs at Base's block time as measured (1,801 on its 200 ms blocks: one a second at most) warns, saying when it grows by itself", () => {
     // the live TAO/WETH pool on 2026-10-31: 600, growing to 2,000
     const [f] = deps.oracleCardinality.run(ctx({ base: base(11n, pools(600)), baseBefore: [base(10n, pools(600))] }));
-    expect(f).toMatchObject({ rule: "oracle.cardinality", key: "oracle.cardinality:taoWeth", subject: "The TAO/WETH pool keeps 600 observations; the TWAP oracle needs 1801", facts: { observations: "600", needed: "1801", "growing to": "2000" } });
+    expect(f).toMatchObject({ rule: "oracle.cardinality", key: "oracle.cardinality:taoWeth", facts: { observations: "600", needed: "1801", "growing to": "2000" } });
     expect(deps.oracleCardinality.run(ctx({ base: base(11n, pools(1_801)), baseBefore: [base(10n, pools(1_801))] }))).toEqual([]);
     expect(deps.oracleCardinality.run(ctx({ base: base(11n, pools(1_800)), baseBefore: [base(10n, pools(1_800))] }))[0].facts.needed).toBe("1801");
-    // on 2-second blocks, 901; with the block time unread, the threshold (901)
+    // the threshold is the window at one observation a second, 1,801, whatever the block time reads (a pool never writes
+    // two in one second, Revision 28): on 2-second blocks too, and with the block time unread
     const at = (blockS: Record<string, number>, n: number) => deps.oracleCardinality.run({ ...ctx({ base: base(11n, pools(n)), baseBefore: [base(10n, pools(n))] }), blockS });
-    expect(at({ base: 2, bittensor: 12 }, 901)).toEqual([]);
-    expect(at({ base: 2, bittensor: 12 }, 900)[0].facts.needed).toBe("901");
-    expect(at({}, 901)).toEqual([]);
-    // the runbook names the number needed
-    expect(RUNBOOK["oracle.cardinality"](f.facts)).toContain("needs 1801");
-    expect(RUNBOOK["oracle.cardinality"](f.facts)).toContain("growing to 2000 by itself");
+    expect(at({ base: 2, bittensor: 12 }, 1_801)).toEqual([]);
+    expect(at({ base: 2, bittensor: 12 }, 901)[0].facts.needed).toBe("1801");
+    expect(at({}, 1_801)).toEqual([]);
+    expect(at({}, 1_800)[0].facts.needed).toBe("1801");
+  });
+
+  it("oracle.cardinality on v3.2 judges against the oracle's own MIN_CARDINALITY (its constructor's precondition) too, whichever needs more", () => {
+    const v32 = testConfigV32();
+    // both pools at `n`
+    const at = (block: bigint, n: number, min?: number) =>
+      base(block, { taoWethPool: { cardinality: n, cardinalityNext: n }, wethUsdcPool: { cardinality: n, cardinalityNext: n }, ...(min === undefined ? {} : { minCardinality: min }) });
+    // an oracle asking more (a later one's constant) is followed
+    expect(deps.oracleCardinality.run(ctx({ cfg: v32, base: at(11n, 18_000, 18_001), baseBefore: [at(10n, 18_000, 18_001)] })).map((f) => f.facts)).toMatchObject([
+      { observations: "18000", needed: "18001" },
+      { observations: "18000", needed: "18001" },
+    ]);
+    expect(deps.oracleCardinality.run(ctx({ cfg: v32, base: at(11n, 18_001, 18_001), baseBefore: [at(10n, 18_001, 18_001)] }))).toEqual([]);
+    // v3.2's own oracle: MIN_CARDINALITY 1,801 (TWAP_WINDOW + 1, Revision 28)
+    expect(deps.oracleCardinality.run(ctx({ cfg: v32, base: at(11n, 1_801, 1_801), baseBefore: [at(10n, 1_801, 1_801)] }))).toEqual([]);
+    expect(deps.oracleCardinality.run(ctx({ cfg: v32, base: at(11n, 1_800, 1_801), baseBefore: [at(10n, 1_800, 1_801)] }))[0].facts.needed).toBe("1801");
+    // an oracle asking less than the window needs at Base's block time: the window's 1,801
+    expect(deps.oracleCardinality.run(ctx({ cfg: v32, base: at(11n, 950, 901), baseBefore: [at(10n, 950, 901)] }))[0].facts.needed).toBe("1801");
+    // unread, the window and the threshold stand in
+    expect(deps.oracleCardinality.run(ctx({ cfg: v32, base: at(11n, 1_801), baseBefore: [at(10n, 1_801)] }))).toEqual([]);
   });
 
   it("oracle.reverted: usdcValue reverting on two readings is critical (deliveries stop); twap.divergence no longer reports it", () => {
@@ -611,6 +856,13 @@ describe("keeper.low_tao", () => {
     // without the claim's inputs: the round alone, as before
     expect(keeperLowTao.run(ctx({ bit: bit(10n, { keeperBalance: 11n * 10n ** 15n }) }))).toEqual([]);
   });
+
+  it("Task 65: the claim's gas is held to Bittensor's per-transaction ceiling, as the keeper sends it: at claimGasRequired 63.4M, 64.9M gas, not 65.4M", () => {
+    const top = { claimGasRequired: 63_400_000n, baseFee: 5_000_000_000n };
+    const [f] = keeperLowTao.run(ctx({ bit: bit(10n, { ...top, keeperBalance: 10n ** 16n }) }));
+    expect(f).toMatchObject({ facts: { needed: "0.3345 TAO", "a claim's gas up front": "0.3245 TAO (64900000 gas at 5 gwei)" } });
+    expect(keeperLowTao.run(ctx({ bit: bit(10n, { ...top, keeperBalance: 3345n * 10n ** 14n }) }))).toEqual([]);
+  });
 });
 
 describe("payout.fee_ceiling", () => {
@@ -623,6 +875,78 @@ describe("payout.fee_ceiling", () => {
     expect(f).toMatchObject({ rule: "payout.fee_ceiling", key: "payout.fee_ceiling", facts: { "share of maxFeeAbs": "72%" } });
     expect(f.facts["a chunk is refused below"]).toContain("0.36 TAO");
     expect(deps.payoutFeeCeiling.run(ctx({ bit: bit(11n, fee(over)), bitBefore: [bit(10n, fee(1n))] }))).toEqual([]);
+  });
+});
+
+describe("R12a: batch.redeem_fee_thin", () => {
+  // the launch (the founder, 2026-11-16): 0.0002 ETH a request, 50 of them, 0.01 ETH; a full 50 + 50 batch quotes about
+  // 0.0043 ETH toward Bittensor (7,000,000 gas): 2.32 times, quiet. The 0.0001 ETH before (v3-launch's) paid 0.005 ETH:
+  // 1.16 times, a warning
+  const LAUNCH_FEE = 2n * 10n ** 14n;
+  const OLD_FEE = 10n ** 14n;
+  const door = (quote: bigint, fee = LAUNCH_FEE, maxRedeems = 50) => ({ redeemRequestFee: fee, maxRedeems, fullBatchQuote: quote });
+  const QUOTE = 43n * 10n ** 14n;
+
+  it("is a warning in the tick, and its runbook line names the owner's setRedeemRequestFee, immediate, at most 0.001 ETH", () => {
+    expect(RULES["batch.redeem_fee_thin"]).toEqual({ tier: "warning", kind: "condition", canHold: false, mutedByHold: false });
+    expect(TICK_RULES).toContain(deps.redeemFeeThin);
+    const line = RUNBOOK["batch.redeem_fee_thin"]({ "the fee that covers 1.5×": "0.000129 ETH" });
+    expect(line).toContain("setRedeemRequestFee(");
+    expect(line).toContain("immediate");
+    expect(line).toContain("0.001 ETH");
+    expect(line).toContain("0.000129 ETH");
+    // R12d (a nit): no ops command writes it yet, as the runbook says: the email says so too
+    expect(line).toContain("No ops command writes setRedeemRequestFee yet (the sign page refuses a call it doesn't know)");
+    expect(line).toContain("SETTINGS_V32_LAUNCH.frontDoor.redeemRequestFee");
+  });
+
+  it("warns on two readings when a full redeem list's fees cover a full batch's close quote less than 1.5 times", () => {
+    // the 0.0001 ETH before: 0.005 against 0.0043, 1.16 times
+    const thin = door(QUOTE, OLD_FEE);
+    const [f] = deps.redeemFeeThin.run(ctx({ base: base(11n, thin), baseBefore: [base(10n, thin)] }));
+    expect(f).toMatchObject({
+      rule: "batch.redeem_fee_thin",
+      key: "batch.redeem_fee_thin",
+      subject: "A full redeem list's fees cover a full batch's bridge fee only 1.16 times",
+      facts: {
+        "redeem request fee": "0.0001 ETH",
+        "a full redeem list pays": "0.005 ETH (50 requests)",
+        "a full batch's close quote (50 + 50)": "0.0043 ETH",
+        cover: "1.16×",
+        "the fee that covers 1.5×": "0.000129 ETH",
+      },
+    });
+    // one reading only, or the one before it covered: quiet
+    const launch = door(QUOTE);
+    expect(deps.redeemFeeThin.run(ctx({ base: base(11n, thin), baseBefore: [base(10n, launch)] }))).toEqual([]);
+    // the launch's 0.0002 ETH (the founder, 2026-11-16): 0.01 against 0.0043, 2.32 times: quiet
+    expect(deps.redeemFeeThin.run(ctx({ base: base(11n, launch), baseBefore: [base(10n, launch)] }))).toEqual([]);
+    // at the launch's fee it warns once a full batch's quote passes 0.01 ETH / 1.5, about 0.0067 ETH
+    const near = door(66n * 10n ** 14n);
+    expect(deps.redeemFeeThin.run(ctx({ base: base(11n, near), baseBefore: [base(10n, near)] }))).toEqual([]);
+    const risen = door(67n * 10n ** 14n);
+    const [r] = deps.redeemFeeThin.run(ctx({ base: base(11n, risen), baseBefore: [base(10n, risen)] }));
+    expect(r).toMatchObject({
+      subject: "A full redeem list's fees cover a full batch's bridge fee only 1.49 times",
+      facts: { "redeem request fee": "0.0002 ETH", "a full redeem list pays": "0.01 ETH (50 requests)", cover: "1.49×", "the fee that covers 1.5×": "0.000201 ETH" },
+    });
+    // exactly 1.5 times is enough; a wei less is not
+    const edge = door(3n * 10n ** 15n, 9n * 10n ** 13n);
+    expect(deps.redeemFeeThin.run(ctx({ base: base(11n, edge), baseBefore: [base(10n, edge)] }))).toEqual([]);
+    const under = door(3n * 10n ** 15n, 9n * 10n ** 13n - 1n);
+    expect(rules(deps.redeemFeeThin, ctx({ base: base(11n, under), baseBefore: [base(10n, under)] }))).toEqual(["batch.redeem_fee_thin"]);
+    // a fee that would cover it above the front door's 0.001 ETH says so
+    const dear = door(10n ** 17n);
+    const [d] = deps.redeemFeeThin.run(ctx({ base: base(11n, dear), baseBefore: [base(10n, dear)] }));
+    expect(d.facts["the fee that covers 1.5×"]).toBe("0.003 ETH, above the front door's most (0.001 ETH)");
+  });
+
+  it("is unjudged while the fee, the redeem limit or the quote is unread", () => {
+    for (const o of [{ ...door(QUOTE), fullBatchQuote: undefined }, { ...door(QUOTE), redeemRequestFee: undefined }, { ...door(QUOTE), maxRedeems: undefined }]) {
+      const c = ctx({ base: base(11n, o), baseBefore: [base(10n, o)] });
+      expect(deps.redeemFeeThin.run(c)).toEqual([]);
+      expect(c.unjudged).toContainEqual({ rule: "batch.redeem_fee_thin", key: "batch.redeem_fee_thin" });
+    }
   });
 });
 

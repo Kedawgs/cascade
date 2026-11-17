@@ -1,6 +1,6 @@
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpRequestError, parseAbiParameters, TransactionReceiptNotFoundError } from "viem";
 import { describe, expect, it } from "vitest";
-import { VAULT } from "./abi";
+import { VAULT, VAULT_V32 } from "./abi";
 import type { Deployment } from "./config";
 import { HistoryMismatchError, newScan, REREAD, restartScan } from "./facts";
 import { StaleChainError } from "./fresh";
@@ -564,5 +564,61 @@ describe("checkSeededHistory", () => {
     expect(await checkSeededHistory(n.clients, D, scan, ME, 3)).toBe("stopped");
     expect(scan.sharedCheckedTo).toBe(3_000n);
     expect(n.windows).toHaveLength(1);
+  });
+});
+
+describe("vaultEvents on v3.2: the vault's events as the published ABI has them", () => {
+  /** A v3.2 deployment: v3 (a staker and an oracle) with its lenses. */
+  const D32: Deployment = {
+    ...D,
+    staker: "0x0000000000000000000000000000000000005a4E",
+    oracle: "0x000000000000000000000000000000000000041E",
+    vaultLens: "0x000000000000000000000000000000000000Ae15",
+    doorLens: "0x000000000000000000000000000000000000De15",
+  };
+  // Task 36b's eight-field PayoutChunkSent, a bounce with its reason, a direct exit with acceptedMissing
+  const chunk32 = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT_V32, eventName: "PayoutChunkSent", args: { key: H(5) } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256, uint256, uint256"), [0, 3, 10n ** 16n, 9n * 10n ** 15n, 10n ** 15n, 10n ** 15n, 10n ** 9n]),
+    7_000n,
+    H(201),
+  );
+  const bounced32 = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT_V32, eventName: "DepositBounced", args: { key: H(5), user: ME } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint256, uint8"), [10n ** 16n, 1]),
+    7_000n,
+    H(202),
+    1,
+  );
+  const direct32 = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT_V32, eventName: "RedeemedDirect", args: { user: ME } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint256, uint256, bool"), [10n ** 22n, 10n ** 16n, false]),
+    7_100n,
+    H(203),
+  );
+
+  it("reads them on a v3.2 deployment: the chunk, the bounce and the direct exit", () => {
+    const ev = vaultEvents([chunk32, bounced32, direct32] as never, D32, ME);
+    expect(ev.payouts).toEqual([{ key: H(5), chunk: 0, taken: 3, txHash: H(201), block: 7_000n }]);
+    expect(ev.entries).toEqual([{ key: H(5), block: 7_000n, txHash: H(202) }]);
+    expect(ev.redeemed).toEqual([{ key: `0x${"00".repeat(32)}`, txHash: H(203), block: 7_100n, assets: 10n ** 16n, shares: 10n ** 22n, kind: "direct" }]);
+    // the bounce is the account's too, as the scan keeps it (TAO on its way back to Base: Task 59a fix round 2)
+    expect(ev.adjustments).toEqual([{ key: H(5), txHash: H(202), block: 7_000n, assets: 10n ** 16n, shares: 0n, kind: "bounced" }]);
+  });
+
+  it("reads a bounce left with nothing (PayoutDust) as the account's on v3.2, as the scan keeps it", () => {
+    const dust = log(D.vault, encodeEventTopics({ abi: VAULT_V32, eventName: "PayoutDust", args: { key: H(5), user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256"), [10n ** 12n]), 7_200n, H(204));
+    expect(vaultEvents([dust] as never, D32, ME).adjustments).toEqual([{ key: H(5), txHash: H(204), block: 7_200n, assets: 10n ** 12n, shares: 0n, kind: "dust" }]);
+    // v3-launch: as it was
+    expect(vaultEvents([dust, bounced32] as never, D, ME).adjustments).toEqual([]);
+  });
+
+  it("and v3-launch's six-field events only on v3-launch: each deployment's ABI reads its own vault", () => {
+    expect(vaultEvents([chunk32, bounced32, direct32] as never, D, ME).payouts).toEqual([]);
+    expect(vaultEvents([chunkLog(H(5), 0, 3, 7_000n, H(201))] as never, D32, ME).payouts).toEqual([]);
+    expect(vaultEvents([chunkLog(H(5), 0, 3, 7_000n, H(201))] as never, D, ME).payouts).toHaveLength(1);
   });
 });

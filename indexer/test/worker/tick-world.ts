@@ -7,8 +7,9 @@ import { encodePayoutsMessage } from "../../src/crosscheck/payouts.ts";
 import { batchKey, encodeBatchMessage } from "../../src/crosscheck/replay.ts";
 import type { RawLog } from "../../src/logs.ts";
 import { poolPriceUsd } from "../../src/prices.ts";
+import { setMeta } from "../../src/store.ts";
 import { runTick, type TickReport } from "../../src/tick.ts";
-import { deploymentState, fakeDeployment, KEEPER } from "./fake-deployment.ts";
+import { type DeploymentState, deploymentState, fakeDeployment, KEEPER } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog, testConfig } from "./fixtures.ts";
 
@@ -26,7 +27,11 @@ export interface SentEmail {
   text: string;
 }
 
-export function tickWorld(o: { over?: Record<string, unknown>; heads?: { base: bigint; bittensor: bigint } } = {}) {
+/** `setup` changes the chains' state before the fake is built (its Safes are fixed then). */
+/** `unmeasured`: the store starts with no block time (meta block_s), so its first ticks count the scan's margins at the
+ * fallback (scan.ts MARGIN_FALLBACK_S: Base's 0.2 s, ten times this world's 2-second blocks); else it starts knowing this
+ * world's 2 s and 12 s, as a store does after its first two minutes. */
+export function tickWorld(o: { over?: Record<string, unknown>; heads?: { base: bigint; bittensor: bigint }; setup?: (state: DeploymentState) => void; unmeasured?: boolean } = {}) {
   const cfg: Config = testConfig({
     PRICE_SOURCES: "[]",
     BASE_RPC_URL: TEST_URLS.base,
@@ -47,7 +52,10 @@ export function tickWorld(o: { over?: Record<string, unknown>; heads?: { base: b
     cfg.tokens,
   );
   if (spot !== undefined) state.base.oracleValue = BigInt(Math.round(spot * 1e6));
+  o.setup?.(state);
   const heads = o.heads ?? START_HEADS;
+  /** whether the store was given this world's block times yet (`unmeasured`) */
+  let measured = false;
   const world = fakeDeployment(cfg, state, { heads: { ...heads } });
   const { specs, net } = world;
   specs.base.logs = [];
@@ -100,8 +108,13 @@ export function tickWorld(o: { over?: Record<string, unknown>; heads?: { base: b
       specs[chain].logs = [...(specs[chain].logs ?? []), ...logs];
     },
     /** one tick at the clock's time; `minute` is the cron's minute (1 unless given: 0 sends db_failing) */
-    tick(t: { minute?: number; db?: D1Database; email?: SendEmail; holder?: string; cfg?: Config } = {}): Promise<TickReport> {
+    async tick(t: { minute?: number; db?: D1Database; email?: SendEmail; holder?: string; cfg?: Config } = {}): Promise<TickReport> {
       const minute = t.minute ?? 1;
+      if (!o.unmeasured && !measured) {
+        measured = true;
+        const db = t.db ?? env.DB;
+        await db.batch([setMeta(db, "block_s:base", "2"), setMeta(db, "block_s:bittensor", "12")]);
+      }
       const scheduled = Math.floor(clock.ms / 3_600_000) * 3_600_000 + minute * 60_000;
       return runTick({
         env: { DB: t.db ?? env.DB, EMAIL: t.email ?? email },

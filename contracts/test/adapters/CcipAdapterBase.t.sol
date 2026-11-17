@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std/Test.sol";
 import {CcipAdapterBase} from "../../src/adapters/CcipAdapterBase.sol";
+import {InvalidParameter} from "../../src/CascadeErrors.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {Client} from "../../src/vendor/ccip/Client.sol";
 import {MockTAO} from "../mocks/MockTAO.sol";
@@ -86,7 +87,8 @@ contract CcipAdapterBaseTest is Test {
             remoteAdapter: makeAddr("remoteAdapter"),
             gasBase: base,
             gasPerEntry: perEntry,
-            maxMessageValue: 5_000e18
+            maxMessageValue: 5_000e18,
+            treasury: makeAddr("treasury")
         });
     }
 
@@ -118,7 +120,8 @@ contract CcipAdapterBaseTest is Test {
 
     function test_gasFor_batchCountsDepositsAndRedeems() public view {
         assertEq(h.gasFor(CascadeMessages.encodeBatch(1, entries(1), entries(0))), 1_025_000);
-        assertEq(h.gasFor(CascadeMessages.encodeBatch(1, entries(100), entries(100))), 6_000_000);
+        // the largest legal batch, 50 + 50 (MAX_ENTRIES)
+        assertEq(h.gasFor(CascadeMessages.encodeBatch(1, entries(50), entries(50))), 3_500_000);
         assertEq(h.gasFor(CascadeMessages.encodeBatch(1, entries(0), entries(0))), 1_000_000);
     }
 
@@ -127,8 +130,10 @@ contract CcipAdapterBaseTest is Test {
     }
 
     function test_gasFor_capsAtGasCap() public {
-        AdapterHarness big = new AdapterHarness(cfgWith(6_000_000, 5_000)); // 6_000_000 + 200 * 5_000 == cap
-        assertEq(big.gasFor(CascadeMessages.encodeBatch(1, entries(100), entries(100))), 7_000_000);
+        AdapterHarness big = new AdapterHarness(cfgWith(6_500_000, 5_000)); // 6_500_000 + 100 * 5_000 == cap
+        assertEq(big.gasFor(CascadeMessages.encodeBatch(1, entries(50), entries(50))), 7_000_000);
+        // a longer message (more than MAX_ENTRIES a side, which the receiver refuses) is quoted the cap
+        assertEq(big.gasFor(CascadeMessages.encodeBatch(1, entries(60), entries(60))), 7_000_000);
     }
 
     function test_gasFor_malformedMessageQuotesCap() public view {
@@ -160,9 +165,39 @@ contract CcipAdapterBaseTest is Test {
         c = cfgWithChains(964, 964);
         vm.expectRevert(CcipAdapterBase.SameChain.selector);
         new AdapterHarness(c);
-        c = cfgWith(6_000_001, 5_000);
+        // the largest legal message, 2 * MAX_ENTRIES = 100 entries, must fit the cap
+        c = cfgWith(6_500_001, 5_000);
         vm.expectRevert(CcipAdapterBase.GasModelTooLarge.selector);
         new AdapterHarness(c);
+    }
+
+    /// A zero `remoteSelector` names no lane: every send would fail at the router and every delivery `WrongSource`.
+    /// The constructor refuses it (R3 A-I4).
+    function test_constructorRefusesAZeroSelector() public {
+        CcipAdapterBase.Config memory c = cfgWith(1_000_000, 25_000);
+        c.remoteSelector = 0;
+        vm.expectRevert(InvalidParameter.selector);
+        new AdapterHarness(c);
+        c.remoteSelector = 1;
+        assertEq(new AdapterHarness(c).remoteSelector(), 1, "any other selector is accepted");
+    }
+
+    /// A gas model of 0 and 0 gives every message no gas (a FAILURE on Base, a park with reason 0 on Bittensor). The
+    /// constructor refuses `gasBase + gasPerEntry == 0` (R3 A-I4); either term alone may be 0.
+    function test_constructorRefusesAZeroGasModel() public {
+        vm.expectRevert(InvalidParameter.selector);
+        new AdapterHarness(cfgWith(0, 0));
+        assertEq(new AdapterHarness(cfgWith(0, 1)).gasPerEntry(), 1, "a per-entry figure alone");
+        assertEq(new AdapterHarness(cfgWith(1, 0)).gasBase(), 1, "a base alone");
+    }
+
+    /// The treasury, the one payee of a sweep, is an immutable the constructor requires.
+    function test_zeroTreasuryRefused() public {
+        CcipAdapterBase.Config memory c = cfgWith(1_000_000, 25_000);
+        c.treasury = address(0);
+        vm.expectRevert(CcipAdapterBase.ZeroAddress.selector);
+        new AdapterHarness(c);
+        assertEq(h.treasury(), makeAddr("treasury"));
     }
 
     // ---- send ----
@@ -311,6 +346,53 @@ contract CcipAdapterBaseTest is Test {
         assertEq(h.quoteFee(964, recipient, message, 3e18), asFrontDoor);
     }
 
+    // ---- the shared send path ----
+
+    /// The shared path makes no amount check: `send` makes its two, the per-message cap and the side's minimum,
+    /// before it collects, and a refund (the Bittensor adapter's, Task 27) makes neither (spec §3.2: the
+    /// conversion floor applies only to conversions; I-10: no floor or cap may trap a refund). So `_ccipSend`
+    /// sends an amount below the minimum and one above the cap, and `send` itself still refuses both.
+    function test_ccipSend_makesNoAmountCheck() public {
+        h.setMinAmount(1e18);
+        tao.mint(address(h), 6_000e18);
+        bytes memory message = oneEntryBatch();
+
+        h.exposedCcipSend{value: 2e15}(recipient, frontDoor, message, 1e18 - 1, 2e15);
+        assertEq(fakeRouter.lastTokens()[0].amount, 1e18 - 1);
+        h.exposedCcipSend{value: 2e15}(recipient, frontDoor, message, 5_000e18 + 1, 2e15);
+        assertEq(fakeRouter.lastTokens()[0].amount, 5_000e18 + 1);
+        assertEq(fakeRouter.sends(), 2);
+
+        vm.prank(frontDoor);
+        vm.expectRevert(abi.encodeWithSelector(CcipAdapterBase.BelowSendMinimum.selector, 1e18 - 1, 1e18));
+        h.send{value: 2e15}(964, recipient, message, 1e18 - 1);
+        vm.prank(frontDoor);
+        vm.expectRevert(CcipAdapterBase.MessageTooLarge.selector);
+        h.send{value: 2e15}(964, recipient, message, 5_000e18 + 1);
+    }
+
+    /// The shared path checks the fee budget it is given (not msg.value), names the sender it is given in the
+    /// payload and in `Sent` (not the caller), pays the router exactly the fee and resets the approval.
+    function test_ccipSend_usesTheGivenBudgetAndSender() public {
+        tao.mint(address(h), 3e18);
+        bytes memory message = oneEntryBatch();
+        fakeRouter.setBaseFee(1e15 - 1_025_000); // fee is exactly 1e15 for a one-entry batch
+
+        vm.expectRevert(CcipAdapterBase.InsufficientFee.selector);
+        h.exposedCcipSend{value: 5e15}(recipient, stranger, message, 3e18, 1e15 - 1);
+
+        bytes32 id = keccak256(abi.encode("id", uint256(1)));
+        vm.expectEmit(true, true, true, true, address(h));
+        emit CcipAdapterBase.Sent(id, 964, stranger, recipient, 3e18, 1e15, 1_025_000);
+        assertEq(h.exposedCcipSend{value: 5e15}(recipient, stranger, message, 3e18, 1e15), id);
+        assertEq(fakeRouter.lastData(), h.encodePayload(recipient, stranger, message));
+        assertEq(fakeRouter.lastExtraArgs(), h.extraArgs(1_025_000));
+        assertEq(fakeRouter.lastValue(), 1e15);
+        assertEq(address(h).balance, 4e15);
+        assertEq(tao.balanceOf(address(fakeRouter)), 3e18);
+        assertEq(tao.allowance(address(h), address(fakeRouter)), 0);
+    }
+
     // ---- ccipReceive ----
 
     function oneToken(address t, uint256 amount) internal pure returns (Client.EVMTokenAmount[] memory a) {
@@ -389,6 +471,14 @@ contract CcipAdapterBaseTest is Test {
         assertEq(h.lastMessage(), hex"aa");
         assertEq(h.lastAmount(), 7e18);
         assertEq(h.deliveries(), 1);
+    }
+
+    /// The delivery hook is handed the CCIP message id (the Bittensor adapter's parks record it).
+    function test_ccipReceive_handsTheMessageIdToTheHook() public {
+        Client.Any2EVMMessage memory m = goodMessage(7e18);
+        vm.prank(address(fakeRouter));
+        h.ccipReceive(m);
+        assertEq(h.lastMessageId(), keccak256("incoming"));
     }
 
     function test_ccipReceive_noTokensDeliversZero() public {

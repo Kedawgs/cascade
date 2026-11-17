@@ -1,9 +1,7 @@
 import {
   type AbiEvent,
   type Address,
-  decodeEventLog,
   decodeFunctionResult,
-  encodeEventTopics,
   encodeFunctionData,
   encodePacked,
   type Hex,
@@ -16,15 +14,19 @@ import { BASE_V3, baseLogsTarget, type ChainName, LIVE, PRECOMPILE } from "../co
 import { closeMaxWaitS as planMaxWait, isPlanV3, ROUTE_0 } from "../plan.ts";
 import { type DeploymentRecord, loadRecord, RecordMismatch, sameDeployment, saveRecord } from "../record.ts";
 import { balanceOf, codeAt, gasPriceOf, isRevert, nonceOf, read, RpcError } from "../rpc.ts";
-import { type Ctx, describeRevert, logsOf, replaceCall, type Sent, sendCall, signerOf } from "../send.ts";
-import type { Rpc } from "../rpc.ts";
-import type { KeeperDeps, KeeperState, Message } from "./actions.ts";
-import { blocksIn, blockTimeOf, marginBlocks } from "./blocktime.ts";
-import { encodeBatch, type Entry } from "./batch.ts";
-import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./delivery.ts";
-import { type CloseEconomics, closeEconomicsOf, closesWithoutFees, type State } from "./due.ts";
-import type { PayoutLog } from "./payouts.ts";
-import { vaultColdkey } from "./rewards.ts";
+import { type Ctx, describeRevert, replaceCall, type Sent, sendCall, signerOf } from "../send.ts";
+import type { KeeperDeps, KeeperState, Message } from "./core/actions.ts";
+import { encodeBatch, type Entry } from "./core/batch.ts";
+import { DELIVER_ABI, type DeliveryRead, NO_ANSWER, netOfFee, preferenceProblem, uniqueUsers } from "./core/delivery.ts";
+import { type CloseEconomics, closeEconomicsOf, closesWithoutFees, type State } from "./core/due.ts";
+import { blocksIn, blockTimeOf } from "./core/blocktime.ts";
+import { blockAtOrAfter, event, identified, logsOf, REREAD, type ScannedLog, SETTLE, scanLogs, windowOf } from "./core/logs.ts";
+import type { PayoutLog } from "./core/payouts.ts";
+import { vaultColdkey } from "./core/rewards.ts";
+
+// The log scans moved to the keeper's core (core/logs.ts); verify, registry, preflight and the v3.2 scheduler keep
+// reading them from here.
+export { blockAtOrAfter, type ScannedLog, scanLogs, WINDOW, windowOf } from "./core/logs.ts";
 
 const FRONT = parseAbi([
   "struct Entry { address user; uint256 amount; }",
@@ -113,128 +115,13 @@ export { isRevert } from "../rpc.ts";
 const unanswered = (e: unknown) => e instanceof RpcError && !isRevert(e);
 export const EXECUTION_STATES = ["UNTOUCHED", "IN_PROGRESS", "SUCCESS", "FAILURE"];
 const ED_RESERVE = 10n ** 12n;
-/** eth_getLogs block ranges the public RPCs accept. Base's go to OPS_BASE_LOGS_RPC (mainnet.base.org
- * refuses eth_getLogs altogether); some public Base endpoints refuse more than 200 blocks. */
-export const WINDOW: Record<ChainName, bigint> = { base: 100n, bittensor: 1_000n };
-/** One eth_getLogs's block range on `chain`: the logs server's own (live Base: OPS_BASE_LOGS_WINDOW), else WINDOW. */
-export const windowOf = (ctx: Pick<Ctx, "logsWindow">, chain: ChainName): bigint => ctx.logsWindow?.[chain] ?? WINDOW[chain];
 /** The most eth_getLogs queries the keeper's first look at a batch's deposits makes on Base: that many of
  * the logs window (REQUESTED_MAX_QUERIES × windowOf) back from the head at most. The live logs server's
- * 10,000-block window covers a day's batch (432,000 of Base's 200 ms blocks since 2026-11-05) in 44, and
- * 40 hours in all; a public RPC's 100-block window would reach only 24 minutes back, and the keeper then
- * says so (a batch older than that counts its earlier deposits as unpaid). The look-back starts at the
- * batch's first block (blockAtOrAfter), so a keeper restarted at any hour of a batch sees its whole life. */
+ * 10,000-block window covers a day's batch (43,200 blocks) in 5; a public RPC's 100-block window would
+ * reach only four hours back, and the keeper then says so (a batch older than that counts its earlier
+ * deposits as unpaid). The look-back starts at the batch's first block (blockAtOrAfter), so a keeper
+ * restarted at any hour of a batch sees its whole life. */
 const REQUESTED_MAX_QUERIES = 72n;
-/** The first step of blockAtOrAfter's bracket around its guess: a minute of the chain's blocks. */
-const BLOCK_SEARCH_STEP_S = 60;
-
-/** The first block of `chain` at or after `time` (a Unix second), by its timestamps: a guess from the head's time at
- * the chain's block time, measured from its headers (blocktime.ts, once for each `rpc`), a bracket around it (each side
- * stepped away from a minute of blocks, doubling, until it is on its side of `time`), then bisected. About two reads
- * when the guess is right (and two more to measure), a handful more when blocks ran late; when the block time can't be
- * read, a bracket up from block 0 (correct, in more reads). `head + 1` when no block is at `time` yet. */
-export async function blockAtOrAfter(rpc: Rpc, chain: ChainName, time: number, head: bigint, headTime: number): Promise<bigint> {
-  const timeOf = async (n: bigint) => hexToNumber(((await rpc.request(chain, "eth_getBlockByNumber", [numberToHex(n), false])) as { timestamp: Hex }).timestamp);
-  if (headTime < time) return head + 1n;
-  const blockS = await blockTimeOf(rpc, chain, { block: head, time: headTime }).catch(() => undefined);
-  const back = blockS === undefined ? head : BigInt(Math.floor((headTime - time) / blockS));
-  const guess = back < head ? head - back : 0n;
-  const first = blockS === undefined ? 1n : blocksIn(BLOCK_SEARCH_STEP_S, blockS);
-  // lo is before `time` (or -1, before the chain); hi is at or after it
-  let lo = guess - 1n;
-  let hi = guess;
-  for (let step = first; hi < head && (await timeOf(hi)) < time; step *= 2n) {
-    lo = hi;
-    hi = hi + step < head ? hi + step : head;
-  }
-  for (let step = first; lo >= 0n && (await timeOf(lo)) >= time; step *= 2n) {
-    hi = lo;
-    lo -= step;
-  }
-  if (lo < 0n) lo = -1n;
-  while (hi - lo > 1n) {
-    const mid = (lo + hi) / 2n;
-    if ((await timeOf(mid)) >= time) hi = mid;
-    else lo = mid;
-  }
-  return hi;
-}
-/** Each later scan of an event starts this long of the chain's blocks before the last head it reached, so a log a
- * lagging (load-balanced) node or a reorg hid is found on a later round: 140 s of Base's blocks (700 of its 200 ms ones
- * since block 53,556,128) and 4,800 s of Bittensor's (400 of its 12 s), what 70 and 400 blocks meant on Base's
- * 2-second blocks. Still one query a round on the live logs server's 10,000-block window (Bittensor's 1,000: 400 + 5).
- * In blocks at each chain's block time, measured (marginsOf). The indexer's are the same (a test holds them equal). */
-export const REREAD_S: Record<ChainName, number> = { base: 140, bittensor: 4_800 };
-/** Logs this close to the head, in time, are returned but not kept: they are read again next round, so one from a
- * block that is then dropped (a reorg) never sticks: 60 s of Base's blocks (300 of its 200 ms ones), 120 s of
- * Bittensor's (10). */
-export const SETTLE_S: Record<ChainName, number> = { base: 60, bittensor: 120 };
-
-/** REREAD_S and SETTLE_S in `chain`'s blocks now: at its block time measured from `rpc`'s headers (read once for each
- * `rpc`), or at the block times they were set at while that can't be read (blocktime.ts marginBlocks). */
-export async function marginsOf(rpc: Rpc, chain: ChainName): Promise<{ reread: bigint; settle: bigint }> {
-  return { reread: await marginBlocks(rpc, chain, REREAD_S[chain]), settle: await marginBlocks(rpc, chain, SETTLE_S[chain]) };
-}
-
-/** Each log with an id from its transaction and content, numbered when one transaction logs the same
- * thing twice: the same in every read of its block, and the same when a reorg mines the transaction
- * again in another block or at another index, so that copy is not taken for a second log. */
-function identified(logs: readonly ScannedLog[]): [string, ScannedLog][] {
-  const count = new Map<string, number>();
-  return logs.map((l) => {
-    const what = `${l.transactionHash}:${l.raw.topics.join(",")}:${l.raw.data}`;
-    const n = count.get(what) ?? 0;
-    count.set(what, n + 1);
-    return [`${what}#${n}`, l];
-  });
-}
-
-const event = (abi: readonly unknown[], name: string) =>
-  (abi as AbiEvent[]).find((i) => i.type === "event" && i.name === name) as AbiEvent;
-
-export interface ScannedLog {
-  raw: { address: Address; topics: Hex[]; data: Hex };
-  args: Record<string, unknown>;
-  blockNumber: bigint;
-  logIndex: number;
-  transactionHash: Hex;
-}
-
-/** One event from one contract, from `from` to `to` (default: the latest block), in windows the public
- * RPCs accept. */
-export async function scanLogs(
-  ctx: Ctx,
-  chain: ChainName,
-  address: Address,
-  ev: AbiEvent,
-  from: bigint,
-  topics: (Hex | null)[] = [],
-  to?: bigint,
-) {
-  const rpc = logsOf(ctx);
-  const step = windowOf(ctx, chain);
-  const latest = to ?? hexToBigInt((await rpc.request(chain, "eth_blockNumber", [])) as Hex);
-  const topic0 = encodeEventTopics({ abi: [ev], eventName: ev.name } as never)[0];
-  const out: ScannedLog[] = [];
-  for (let start = from; start <= latest; start += step) {
-    const end = start + step - 1n < latest ? start + step - 1n : latest;
-    const logs = (await rpc.request(chain, "eth_getLogs", [
-      { address, fromBlock: numberToHex(start), toBlock: numberToHex(end), topics: [topic0, ...topics] },
-    ])) as { address: Address; topics: Hex[]; data: Hex; blockNumber: Hex; logIndex: Hex; transactionHash: Hex }[];
-    for (const l of logs) {
-      const d = decodeEventLog({ abi: [ev], topics: l.topics as [Hex, ...Hex[]], data: l.data });
-      out.push({
-        raw: { address: l.address, topics: l.topics, data: l.data },
-        args: d.args as Record<string, unknown>,
-        blockNumber: hexToBigInt(l.blockNumber),
-        logIndex: hexToNumber(l.logIndex),
-        transactionHash: l.transactionHash,
-      });
-    }
-  }
-  return out;
-}
-
 /** The block the deployment's Bittensor contracts start at, where every Bittensor log scan starts: its
  * Bittensor adapter's (the first created there), recorded with its transaction or, when its creation was
  * recovered, found by deploy from its code. A record without one is refused: a window counted back from
@@ -251,7 +138,7 @@ export function startBlock(rec: DeploymentRecord): bigint {
  * last blocks, when its fees decide its close (its public RPC allows 200 blocks a query): bridge messages
  * come from the record, which the keeper fills as it sends. The vault's payout events (and with them the
  * delivery candidates) and the open batch's deposits are kept for the life of these deps (one `run`
- * loop), so each round scans only the blocks since the last, and some before them (REREAD_S). */
+ * loop), so each round scans only the blocks since the last, and some before them (REREAD). */
 export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, users: Address[] = []): KeeperDeps {
   const a = rec.plan.addresses;
   /** Who the keeper's sends come from (the context's signer: keeperSigner), whose nonces, balances and
@@ -260,38 +147,31 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   const r = (chain: ChainName, address: Address, abi: readonly unknown[], functionName: string, args?: unknown[]) =>
     read(ctx.rpc, chain, { address, abi: abi as never, functionName, args });
 
-  /** One event's logs found so far, for the life of these deps. Each call scans to the head from REREAD_S of
-   * blocks before the last head it reached, and never from after the last call's settled point (a block time read
-   * slower since, after a halt, shortens the re-read below the last settle margin), the first time from
-   * `first(head)`, and never before it; it moves on only once the whole range is in, so a failed scan is retried.
-   * Logs SETTLE_S of blocks below the head are kept; nearer ones are returned and read again next round (marginsOf:
-   * at the chain's block time). */
+  /** One event's logs found so far, for the life of these deps. Each call scans to the head from REREAD
+   * blocks before the last head it reached (the first time from `first(head)`, and never before it), and
+   * moves on only once the whole range is in, so a failed scan is retried. Logs SETTLE blocks below the
+   * head are kept; nearer ones are returned and read again next round. */
   function logCursor(chain: ChainName, address: Address, ev: AbiEvent, topics: (Hex | null)[] = []) {
     const kept: ScannedLog[] = [];
     const seen = new Set<string>();
     let scannedTo: bigint | undefined;
-    /** the last call's head less its settle margin: every log at or below it is kept */
-    let settledTo: bigint | undefined;
     return async (first: (head: bigint) => bigint | Promise<bigint>): Promise<{ logs: ScannedLog[]; head: bigint }> => {
       // the head from the server the logs come from
       const head = hexToBigInt((await logsOf(ctx).request(chain, "eth_blockNumber", [])) as Hex);
       const earliest = await first(head);
-      const { reread, settle } = await marginsOf(logsOf(ctx), chain);
-      const reach = scannedTo === undefined ? undefined : scannedTo + 1n - reread;
-      const back = reach === undefined || settledTo === undefined ? earliest : reach < settledTo + 1n ? reach : settledTo + 1n;
+      const back = scannedTo === undefined ? earliest : scannedTo + 1n - REREAD[chain];
       const from = back > earliest ? back : earliest;
       const fresh: ScannedLog[] = [];
       if (from <= head) {
         for (const [id, l] of identified(await scanLogs(ctx, chain, address, ev, from, topics, head))) {
           if (seen.has(id)) continue;
-          if (l.blockNumber + settle <= head) {
+          if (l.blockNumber + SETTLE[chain] <= head) {
             seen.add(id);
             kept.push(l);
           } else fresh.push(l);
         }
       }
       scannedTo = head;
-      settledTo = head - settle;
       return { logs: [...kept, ...fresh], head };
     };
   }
@@ -305,7 +185,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
   let redeemedLogs = vaultLogs("Redeemed");
   /** Payout batches the vault has deleted (paid out or cancelled), not read again for the life of these
    * deps. A batch reads count 0 both once deleted and on a node not yet showing its queue, so it is taken
-   * for deleted only when its queue is REREAD_S of blocks deep, further behind than the scans allow a node. */
+   * for deleted only when its queue is REREAD blocks deep, further behind than the scans allow a node. */
   const deleted = new Set<string>();
 
   async function messageState(m: { id: Hex; direction: Message["direction"] }): Promise<string> {
@@ -338,14 +218,13 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       const balance = await balanceOf(ctx.rpc, "bittensor", a.vault);
       const payoutDelay = Number(await r("bittensor", a.vault, VAULT, "payoutDelay"));
       const { logs: queued, head } = await queuedLogs();
-      const { reread } = await marginsOf(logsOf(ctx), "bittensor");
       const batches = [];
       for (const q of queued) {
         const key = q.args.key as Hex;
         if (deleted.has(key.toLowerCase())) continue;
         const b = (await r("bittensor", a.vault, VAULT, "getPayoutBatch", [key])) as { queuedAt: bigint; cursor: number; count: number };
         if (b.count > 0) batches.push({ key, queuedAt: Number(b.queuedAt), cursor: b.cursor, count: b.count });
-        else if (q.blockNumber + reread <= head) deleted.add(key.toLowerCase());
+        else if (q.blockNumber + REREAD.bittensor <= head) deleted.add(key.toLowerCase());
       }
       const block = (await ctx.rpc.request("bittensor", "eth_getBlockByNumber", ["latest", false])) as { timestamp: Hex };
       const available = balance > ED_RESERVE + pending ? balance - ED_RESERVE - pending : 0n;
@@ -499,7 +378,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
         out.quoteUsdc = netOfFee(gross, feeBps);
       } catch (e) {
         if (unanswered(e)) out.quoteError = NO_ANSWER;
-        else if (isRevert(e)) out.quoteError = `Uniswap could not quote the sale (${describeRevert(ctx, e)}); it waits`;
+        else if (isRevert(e)) out.quoteError = `Uniswap could not quote the sale (${describeRevert(e)}); it waits`;
         else throw e;
       }
       return out;
@@ -512,7 +391,7 @@ export function keeperDeps(ctx: Ctx, rec: DeploymentRecord, recordPath: string, 
       } catch (e) {
         if (unanswered(e)) return { ok: false, reason: NO_ANSWER, unanswered: true };
         if (!isRevert(e)) throw e;
-        return { ok: false, reason: describeRevert(ctx, e) };
+        return { ok: false, reason: describeRevert(e) };
       }
     },
     log: ctx.log,

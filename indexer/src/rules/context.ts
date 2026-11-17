@@ -176,12 +176,18 @@ export function twice(ctx: RuleCtx, chains: ChainName | readonly ChainName[], co
  * hold id is never raised again), and keeps finding the same alert while the condition lasts. A reading before the
  * previous one that couldn't tell (the field unread) counts as not holding: a condition that outlasts an unread
  * reading raises its hold again under a new id. That fails closed (one more hold to look at and clear), and
- * test/worker/rules-unjudged.test.ts pins it. */
-export function onset(ctx: RuleCtx, chain: ChainName, cond: Cond): boolean {
-  if (!twice(ctx, chain, cond)) return false;
-  const [p, e] = ctx.history[chain];
-  if (!p || !e || e.block >= p.block) return true;
-  return !cond({ [chain]: e.state });
+ * test/worker/rules-unjudged.test.ts pins it. A condition on both chains (rails.incoherent) is in its first tick when
+ * the readings before the previous ones, on both chains, didn't hold together (either one missing: first). */
+export function onset(ctx: RuleCtx, chains: ChainName | readonly ChainName[], cond: Cond): boolean {
+  if (!twice(ctx, chains, cond)) return false;
+  const earlier: Readings = {};
+  for (const c of typeof chains === "string" ? [chains] : chains) {
+    const [p, e] = ctx.history[c];
+    if (!p || !e || e.block >= p.block) return true;
+    if (c === "base") earlier.base = e.state as BaseState;
+    else earlier.bittensor = e.state as BitState;
+  }
+  return !cond(earlier);
 }
 
 /** The other chain's stored history reaches past `time`: a cross-chain rule may judge an event then, and
@@ -207,11 +213,36 @@ export interface PrefetchNeeds {
   blocks: { chain: ChainName; number: bigint }[];
   /** Base block 24 hours back: the redeem requests since */
   requestsSince: bigint;
-  /** the open batch: its deposits' transactions (the staker's Staked there names who really paid) */
+  /** the open batch: its deposits' transactions (the staker's Staked there names who really paid) and its deposit
+   * cancels' (R8: batch.cancel_churn) */
   openBatch?: bigint;
   /** bridge messages whose destination adapter's Delivered to load (one stored before its Sent arrived) */
   messageIds?: Hex[];
+  /** v3.2: the keys of this tick's own park events, whose earlier park events to load (every open park's are loaded
+   * anyway, and the parks of the deliveries `bitTxs` checks, and of the landings `payoutKeys` names: a refund's key is
+   * its park's) */
+  parkKeys?: Hex[];
+  /** v3.2: payout batches still queued (pendingPayoutKeys): their vault events, so the entries not sent yet are known */
+  queuedKeys?: Hex[];
+  /** v3.2 (unstakes.wash): the holders of this tick's new Redeemed and RedeemDeferred, whose vault Deposited (by topic2)
+   * and DepositedDirect (by topic1) to load from Bittensor block `washSince` on */
+  washUsers?: Hex[];
+  washSince?: bigint;
 }
+
+const PARK_EVENT_LIST = "'BatchParked', 'ParkedConverted', 'ParkedDelivered', 'ParkedRefunded', 'ParkedDropped'";
+/** The keys of the parks still open in D1: a BatchParked with no ParkedDelivered, ParkedRefunded or ParkedDropped of
+ * its adapter and key after it (src/parks.ts). */
+const OPEN_PARK_KEYS = `SELECT p.topic1 FROM logs p INDEXED BY logs_by_event WHERE p.chain = 'bittensor' AND p.contract = 'bitAdapter'
+  AND p.event = 'BatchParked' AND p.removed = 0 AND NOT EXISTS (
+    SELECT 1 FROM logs c WHERE c.contract = 'bitAdapter' AND c.event IN ('ParkedDelivered', 'ParkedRefunded', 'ParkedDropped')
+    AND c.topic1 = p.topic1 AND c.chain = 'bittensor' AND c.address = p.address AND c.removed = 0
+    AND (c.block > p.block OR (c.block = p.block AND c.log_index > p.log_index)))`;
+/** The Base adapter's Sent of each park a refund landing names (by the BatchParked's message id): the parked batch's
+ * close transaction. */
+const REFUNDED_CLOSE_TXS = `SELECT s.tx_hash FROM logs s WHERE s.contract = 'baseAdapter' AND s.event = 'Sent' AND s.chain = 'base' AND s.removed = 0
+  AND s.topic1 IN (SELECT b.topic2 FROM logs b WHERE b.contract = 'bitAdapter' AND b.event = 'BatchParked' AND b.chain = 'bittensor'
+    AND b.removed = 0 AND b.topic1 IN (SELECT value FROM json_each(?1)))`;
 
 export interface Prefetched {
   logs: StoredLog[];
@@ -231,6 +262,11 @@ const REQUESTS = ["DepositRequested", "DepositCancelled", "RedeemRequested", "Re
 export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefetched> {
   const batchTopics = json(n.batchIds.map((id) => pad(numberToHex(id))));
   const keys = json(n.payoutKeys.map((k) => k.toLowerCase()));
+  // the vault's events of the payout keys the checks look at, and of the batches still queued
+  const vaultKeys = json([...new Set([...n.payoutKeys, ...(n.queuedKeys ?? [])].map((k) => k.toLowerCase()))]);
+  const parkKeys = json([...new Set([...(n.parkKeys ?? []), ...n.payoutKeys].map((k) => k.toLowerCase()))]);
+  const washTopics = json([...new Set((n.washUsers ?? []).map((u) => pad(u.toLowerCase() as Hex)))]);
+  const washSince = Number(n.washSince ?? 0n);
   const rs = await db.batch<Row>([
     db.prepare("SELECT * FROM logs WHERE chain = 'bittensor' AND block >= ?1 AND removed = 0").bind(Number(n.since.bittensor)),
     db.prepare("SELECT * FROM logs WHERE chain = 'base' AND block >= ?1 AND removed = 0").bind(Number(n.since.base)),
@@ -255,10 +291,10 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
     db
       .prepare(
         `SELECT * FROM logs INDEXED BY logs_by_topic1 WHERE contract = 'vault'
-         AND event IN ('BatchDelivered', 'DepositBounced', 'Redeemed', 'PayoutBatchQueued', 'PayoutChunkSent')
+         AND event IN ('BatchDelivered', 'DepositBounced', 'Redeemed', 'PayoutBatchQueued', 'PayoutChunkSent', 'PayoutBatchCancelled')
          AND topic1 IN (SELECT value FROM json_each(?1)) AND chain = 'bittensor' AND removed = 0`,
       )
-      .bind(keys),
+      .bind(vaultKeys),
     // the chunks' transactions (the Bittensor adapter's Sent comes before each PayoutChunkSent)
     db
       .prepare(
@@ -280,7 +316,10 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
            SELECT block FROM logs WHERE chain = 'bittensor' AND tx_hash IN (SELECT value FROM json_each(?2)))
          UNION SELECT chain, number, time FROM blocks WHERE chain = 'base' AND number IN (
            SELECT block FROM logs WHERE chain = 'base' AND tx_hash IN (SELECT value FROM json_each(?3)))
-         UNION SELECT chain, number, time FROM blocks WHERE (chain = 'base' AND number >= ?4) OR (chain = 'bittensor' AND number >= ?5)`,
+         UNION SELECT chain, number, time FROM blocks WHERE (chain = 'base' AND number >= ?4) OR (chain = 'bittensor' AND number >= ?5)
+         UNION SELECT chain, number, time FROM blocks WHERE chain = 'bittensor' AND number IN (
+           SELECT block FROM logs WHERE chain = 'bittensor' AND contract = 'bitAdapter' AND event = 'BatchParked' AND removed = 0
+           AND topic1 IN (${OPEN_PARK_KEYS}))`,
       )
       .bind(
         json(n.blocks.map((b) => ({ chain: b.chain, number: Number(b.number) }))),
@@ -289,12 +328,14 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
         Number(n.since.base < n.requestsSince ? n.since.base : n.requestsSince),
         Number(n.since.bittensor),
       ),
-    db.prepare("SELECT * FROM logs WHERE chain = 'base' AND contract = 'frontDoor' AND event = 'RedeemRequested' AND block >= ?1 AND removed = 0").bind(Number(n.requestsSince)),
-    // the open batch's deposits' transactions (nothing matches '' when there is none)
+    // the last 25 hours' redeem requests (unstakes.tiny_wave) and closes (batch.deposits_full: lists closed at their half)
+    db.prepare("SELECT * FROM logs WHERE chain = 'base' AND contract = 'frontDoor' AND event IN ('RedeemRequested', 'BatchClosed') AND block >= ?1 AND removed = 0").bind(Number(n.requestsSince)),
+    // the open batch's deposits' and deposit cancels' transactions (nothing matches '' when there is none): the cancels
+    // whatever their age, for batch.cancel_churn (R8)
     db
       .prepare(
         `SELECT * FROM logs WHERE chain = 'base' AND removed = 0 AND tx_hash IN (
-           SELECT tx_hash FROM logs INDEXED BY logs_by_topic1 WHERE contract = 'frontDoor' AND event = 'DepositRequested' AND topic1 = ?1)`,
+           SELECT tx_hash FROM logs INDEXED BY logs_by_topic1 WHERE contract = 'frontDoor' AND event IN ('DepositRequested', 'DepositCancelled') AND topic1 = ?1)`,
       )
       .bind(n.openBatch === undefined ? "" : pad(numberToHex(n.openBatch))),
     db
@@ -303,10 +344,52 @@ export async function prefetch(db: D1Database, n: PrefetchNeeds): Promise<Prefet
          AND topic1 IN (SELECT value FROM json_each(?1)) AND removed = 0`,
       )
       .bind(json((n.messageIds ?? []).map((m) => m.toLowerCase()))),
+    // v3.2's parks (src/parks.ts): every event of each park still open, of this tick's park events' keys and the payout
+    // keys (a refund's key is its park's), and of the parks the checked deliveries delivered (their ParkedDelivered)
+    db
+      .prepare(
+        `SELECT * FROM logs INDEXED BY logs_by_event WHERE chain = 'bittensor' AND contract = 'bitAdapter' AND event IN (${PARK_EVENT_LIST})
+         AND removed = 0 AND (topic1 IN (${OPEN_PARK_KEYS}) OR topic1 IN (SELECT value FROM json_each(?1))
+           OR topic1 IN (SELECT d.topic1 FROM logs d WHERE d.chain = 'bittensor' AND d.contract = 'bitAdapter' AND d.event = 'ParkedDelivered'
+             AND d.removed = 0 AND d.tx_hash IN (SELECT value FROM json_each(?2))))`,
+      )
+      .bind(parkKeys, json(n.bitTxs)),
+    // a refund landing's: the refund's transaction (the adapter's Sent, then ParkedRefunded) ...
+    db
+      .prepare(
+        `SELECT * FROM logs WHERE chain = 'bittensor' AND removed = 0 AND tx_hash IN (
+           SELECT r.tx_hash FROM logs r WHERE r.contract = 'bitAdapter' AND r.event = 'ParkedRefunded' AND r.chain = 'bittensor'
+           AND r.removed = 0 AND r.topic1 IN (SELECT value FROM json_each(?1)))`,
+      )
+      .bind(keys),
+    // ... the parked batch's close on Base (the Base adapter's Sent of the park's message, then BatchClosed) ...
+    db.prepare(`SELECT * FROM logs WHERE chain = 'base' AND removed = 0 AND tx_hash IN (${REFUNDED_CLOSE_TXS})`).bind(keys),
+    // ... and that batch's requests and cancels
+    db
+      .prepare(
+        `SELECT * FROM logs INDEXED BY logs_by_topic1 WHERE contract = 'frontDoor' AND event IN (SELECT value FROM json_each(?2)) AND chain = 'base'
+         AND removed = 0 AND topic1 IN (SELECT c.topic1 FROM logs c WHERE c.chain = 'base' AND c.contract = 'frontDoor' AND c.event = 'BatchClosed'
+           AND c.removed = 0 AND c.tx_hash IN (${REFUNDED_CLOSE_TXS}))`,
+      )
+      .bind(keys, json(REQUESTS)),
+    // v3.2 (unstakes.wash): the mints of this tick's unstaking holders, a door's deposit (user in topic2) or a direct one
+    // (user in topic1), back to washSince (nothing matches with none asked)
+    db
+      .prepare(
+        `SELECT * FROM logs INDEXED BY logs_by_topic2 WHERE contract = 'vault' AND event = 'Deposited' AND topic2 IN (SELECT value FROM json_each(?1))
+         AND chain = 'bittensor' AND block >= ?2 AND removed = 0`,
+      )
+      .bind(washTopics, washSince),
+    db
+      .prepare(
+        `SELECT * FROM logs INDEXED BY logs_by_topic1 WHERE contract = 'vault' AND event = 'DepositedDirect' AND topic1 IN (SELECT value FROM json_each(?1))
+         AND chain = 'bittensor' AND block >= ?2 AND removed = 0`,
+      )
+      .bind(washTopics, washSince),
   ]);
   const rows = (i: number) => rs[i].results;
   return {
-    logs: [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14].flatMap((i) => rows(i).map(logOf)),
+    logs: [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19, 20].flatMap((i) => rows(i).map(logOf)),
     batchChecks: rows(8).map(batchCheckOf),
     chunkChecks: rows(9).map(chunkCheckOf),
     txs: rows(10).map(txRowOf),

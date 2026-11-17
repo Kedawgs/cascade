@@ -25,8 +25,9 @@ export interface ScanState {
   payouts: { key: Hex; chunk: number; taken: number; txHash: Hex; block: string }[];
   deposited: { key: Hex; txHash: Hex; block: string; assets: string; kind?: "direct" }[];
   redeemed: { key: Hex; txHash: Hex; block: string; assets: string; kind?: "direct" }[];
-  /** The account's reversed redeems and reward cuts (absent in the indexer's seed and in older saves). */
-  adjustments?: { key: Hex; txHash: Hex; block: string; assets: string; kind: "reversed" | "cut" }[];
+  /** The account's reversed redeems and reward cuts, and v3.2's bounces and their dust (absent in the indexer's seed
+   * and in older saves). */
+  adjustments?: { key: Hex; txHash: Hex; block: string; assets: string; kind: "reversed" | "cut" | "bounced" | "dust" }[];
   /** Version 2 only: the events in [seededFrom, seededTo) came from the indexer's seed, not this browser's
    * own read of the chain. A contradiction found later on one of them is the indexer's (facts.ts,
    * HistoryMismatchError), and nothing from them shows until the chain confirms it. */
@@ -95,7 +96,7 @@ export function decodeScanState(x: unknown, scan: Pick<VaultScan, "vault" | "fro
     list("staked").every(inRange) &&
     list("payouts").every((e) => inRange(e) && isHash(e.key) && isUint32(e.chunk) && isUint32(e.taken)) &&
     [...list("deposited"), ...list("redeemed")].every((e) => inRange(e) && isHash(e.key) && isDecimal(e.assets) && kindOk(e, ["direct"])) &&
-    list("adjustments").every((e) => inRange(e) && isHash(e.key) && isDecimal(e.assets) && typeof e.kind === "string" && ["reversed", "cut"].includes(e.kind));
+    list("adjustments").every((e) => inRange(e) && isHash(e.key) && isDecimal(e.assets) && typeof e.kind === "string" && ["reversed", "cut", "bounced", "dust"].includes(e.kind));
   if (!ok) return null;
   const block = (e: Record<string, unknown>) => BigInt(e.block as string);
   const inSeed = (b: bigint) => seededFrom !== undefined && seededTo !== undefined && b >= seededFrom && b < seededTo;

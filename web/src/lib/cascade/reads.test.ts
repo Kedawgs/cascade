@@ -1,20 +1,26 @@
 import { type Address, decodeAbiParameters, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, parseAbiParameters, size } from "viem";
 import { describe, expect, it } from "vitest";
 import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, MULTICALL3 } from "./config";
-import { FRONT_DOOR } from "./abi";
+import { FRONT_DOOR, FRONT_DOOR_V32 } from "./abi";
 import { basketTwrKey, STORAGE_QUERY } from "./apy";
+import { nextBatchLine } from "../batch-clock";
+import { requestHold } from "../stake-form";
 import {
   CLOSE_GAS,
   encodeBatch,
   feesAgree,
   readApyPercent,
+  readCancelState,
   readCloseOutcome,
   readFrontDoor,
   readNextBatch,
   readOpenBatch,
   readOraclePrice,
   readPendingRewards,
+  readRedeemList,
   readRewardCutBps,
+  readRewardVesting,
+  readThinPool,
   readVault,
   readWallet,
   taoPriceUsd,
@@ -95,6 +101,84 @@ describe("reads", () => {
       maxBatchValue: 10n ** 19n,
       maxDeposits: 50,
     });
+  });
+
+  it("R11: on v3.2 reads the account's cancelableAt in the same multicall as its deposit (one block for both), and 0 as 0; v3-launch asks nothing of it", async () => {
+    const answers = {
+      depositOf: 10n ** 16n,
+      redeemOf: 0n,
+      claimable: 0n,
+      openBatch: [3n, 1_800_000_000n, 10n ** 16n, 0n, 1n, 0n],
+      netForwarded: 0n,
+      depositCap: 15n * 10n ** 16n,
+      minDeposit: 10n ** 16n,
+      redeemRequestFee: 10n ** 14n,
+      canClose: false,
+      batchInterval: 600n,
+      maxBatchValue: 10n ** 19n,
+      maxDeposits: 50,
+      cancelableAt: 1_800_000_300n,
+      getCurrentBlockTimestamp: 1_800_000_100n,
+    };
+    const D32: Deployment = { ...D, staker: D.frontDoor, oracle: D.frontDoor, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const v32 = fake(answers);
+    const fd = await readFrontDoor({ base: v32.client }, D32, ME);
+    expect(fd.cancelableAt).toBe(1_800_000_300);
+    expect(v32.asked.at(-1)).toBe("cancelableAt");
+    expect(v32.asked.filter((x) => x === "depositOf")).toHaveLength(1);
+    // build B: 0, no wait (the door paused or its primary disabled)
+    expect((await readFrontDoor({ base: fake({ ...answers, cancelableAt: 0n }).client }, D32, ME)).cancelableAt).toBe(0);
+    const launch = fake(answers);
+    expect(await readFrontDoor({ base: launch.client }, D, ME)).not.toHaveProperty("cancelableAt");
+    expect(launch.asked).not.toContain("cancelableAt");
+  });
+
+  it("R12d (M1): on v3.2 the block's own time comes with cancelableAt, in the same multicall, and the device's clock when the read landed: the receipt counts the wait on Base's clock; v3-launch asks neither", async () => {
+    const answers = {
+      depositOf: 10n ** 16n,
+      redeemOf: 0n,
+      claimable: 0n,
+      openBatch: [3n, 1_800_000_000n, 10n ** 16n, 0n, 1n, 0n],
+      netForwarded: 0n,
+      depositCap: 15n * 10n ** 16n,
+      minDeposit: 10n ** 16n,
+      redeemRequestFee: 10n ** 14n,
+      canClose: false,
+      batchInterval: 600n,
+      maxBatchValue: 10n ** 19n,
+      maxDeposits: 50,
+      cancelableAt: 1_800_000_300n,
+      getCurrentBlockTimestamp: 1_800_000_100n,
+    };
+    const D32: Deployment = { ...D, staker: D.frontDoor, oracle: D.frontDoor, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const v32 = fake(answers);
+    const before = Date.now();
+    const fd = await readFrontDoor({ base: v32.client }, D32, ME);
+    expect(fd.cancelClock?.chainTime).toBe(1_800_000_100);
+    expect(fd.cancelClock?.readAt).toBeGreaterThanOrEqual(before);
+    expect(fd.cancelClock?.readAt).toBeLessThanOrEqual(Date.now());
+    // one multicall: the block's time and the cooldown from the same block
+    expect(v32.pinned).toHaveLength(1);
+    expect(v32.asked.filter((x) => x === "getCurrentBlockTimestamp")).toHaveLength(1);
+    const launch = fake(answers);
+    expect(await readFrontDoor({ base: launch.client }, D, ME)).not.toHaveProperty("cancelClock");
+    expect(launch.asked).not.toContain("getCurrentBlockTimestamp");
+  });
+
+  it("R12d (M2): a cancel's own read: the open batch's id, the account's deposit and cooldown, and Base's clock, in one multicall of four, nothing else (no fee quote, price, log or Bittensor)", async () => {
+    const D32: Deployment = { ...D, staker: D.frontDoor, oracle: D.frontDoor, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const base = fake({ openBatch: [7n, 1_800_000_000n, 10n ** 17n, 0n, 1n, 0n], depositOf: 10n ** 17n, getCurrentBlockTimestamp: 1_800_000_100n, cancelableAt: 1_800_000_300n });
+    expect(await readCancelState({ base: base.client }, D32, ME)).toEqual({ id: 7n, chainTime: 1_800_000_100, mine: { depositWei: 10n ** 17n, cancelableAt: 1_800_000_300 } });
+    expect(base.asked.sort()).toEqual(["cancelableAt", "depositOf", "getCurrentBlockTimestamp", "openBatch"]);
+    expect(base.pinned).toHaveLength(1);
+  });
+
+  it("R12d (M2): the redeem list's own read before an unstake: its count, its limit and the account's request, in one multicall of three", async () => {
+    const D32: Deployment = { ...D, staker: D.frontDoor, oracle: D.frontDoor, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const base = fake({ openBatch: [7n, 1_800_000_000n, 10n ** 17n, 0n, 1n, 50n], maxRedeems: 50, redeemOf: 3n });
+    expect(await readRedeemList({ base: base.client }, D32, ME)).toEqual({ nRedeems: 50, maxRedeems: 50, redeemShares: 3n });
+    expect(base.asked.sort()).toEqual(["maxRedeems", "openBatch", "redeemOf"]);
+    expect(base.pinned).toHaveLength(1);
   });
 
   it("reads the vault on Bittensor", async () => {
@@ -296,6 +380,9 @@ describe("the open batch, for Send it now", () => {
 
   /** Base and Bittensor as the front door, its adapter, the staker, the oracle, the wallet, Uniswap's quoter,
    * the vault and ForeverMoney's AlphaVault answer them, `at` seconds into the batch; each read recorded. */
+  /** v3.2's deploy rail in these reads (R4-O round 3): the door's primary and its Bittensor half */
+  const RAIL_BASE = "0x000000000000000000000000000000000000Ad02";
+  const RAIL_BIT = "0x000000000000000000000000000000000000Ad01";
   function chains(
     over: {
       at?: number;
@@ -307,6 +394,9 @@ describe("the open batch, for Send it now", () => {
       quote2?: () => bigint;
       gas?: () => bigint;
       bittensor?: Record<string, unknown> | "down";
+      /** v3.2 (R4-O round 3): each side's primary, the door's primary's Bittensor half, each Bittensor adapter's
+       * AlphaVault, and each AlphaVault's three (absent: the deploy's rail, and `bittensor`'s answers for any vault) */
+      rail?: { doorPrimary: string; doorHalf: string; vaultPrimary: string; vaultOf: Record<string, string>; health: Record<string, Record<string, unknown>> };
     } = {},
   ) {
     const calls: { address: string; functionName: string; args?: readonly unknown[]; account?: unknown }[] = [];
@@ -322,6 +412,15 @@ describe("the open batch, for Send it now", () => {
       paused: over.paused ?? false,
       depositOf: empty ? 0n : 10n ** 17n,
       redeemOf: 0n,
+      // v3.2 (R11): the account's cancel works five minutes after its last deposit; and the redeem list's limit
+      cancelableAt: BigInt(START + 300),
+      maxRedeems: 50,
+      // v3.2 (R12c): the door's limits, for the minValue of a close the site sends before a stake
+      maxDeposits: 50,
+      maxBatchValue: 10n ** 19n,
+      minDeposit: 4n * 10n ** 16n,
+      depositCap: 4n * 10n ** 19n,
+      netForwarded: 3n * 10n ** 19n,
       getCurrentBlockTimestamp: BigInt(START + (over.at ?? 7_200)),
       swapFeeBps: 15,
       depositFeeUsdc: 50_000n,
@@ -346,6 +445,9 @@ describe("the open batch, for Send it now", () => {
         if (c.functionName === "quoteExactInput") return [((c.args?.[1] as bigint) * 2_330_000_000n) / 10n ** 18n, [], [], 0n];
         // the oracle: 1 TAO is worth $250
         if (c.functionName === "usdcValue") return ((c.args?.[0] as bigint) * 250_000_000n) / 10n ** 18n;
+        // v3.2: the door lens's primary, and that Base adapter's Bittensor half (R4-O round 3)
+        if (c.functionName === "primaryBridge") return over.rail?.doorPrimary ?? RAIL_BASE;
+        if (c.functionName === "remoteAdapter") return over.rail?.doorHalf ?? RAIL_BIT;
         throw new Error(`unexpected ${c.functionName}`);
       },
       async getBalance({ address }: { address: string }) {
@@ -371,7 +473,13 @@ describe("the open batch, for Send it now", () => {
     const bittensor = {
       async multicall({ contracts }: { contracts: { address: string; functionName: string }[] }) {
         if (over.bittensor === "down") throw new Error("HTTP request failed");
-        return contracts.map((c) => (bitAsked.push({ address: c.address, functionName: c.functionName }), bitAnswers[c.functionName]));
+        return contracts.map((c) => {
+          bitAsked.push({ address: c.address, functionName: c.functionName });
+          if (c.functionName === "primaryBridge") return over.rail?.vaultPrimary ?? RAIL_BIT;
+          if (c.functionName === "alphaVault") return over.rail?.vaultOf[c.address] ?? ALPHA_VAULT;
+          const h = over.rail?.health[c.address];
+          return h && c.functionName in h ? h[c.functionName] : bitAnswers[c.functionName];
+        });
       },
     };
     return {
@@ -436,6 +544,8 @@ describe("the open batch, for Send it now", () => {
       chainTime: START + 7_200,
       mine: { depositWei: 10n ** 17n, redeemShares: 0n },
       potWei: 10n ** 14n,
+      // R8: the deposits it holds, a v3.2 close's minValue when the site sends it before a stake
+      totalWei: 3n * 10n ** 17n,
       feeWei: FEE,
       ethWei: 10n ** 16n,
       // a generous allowance for closeBatch's gas at today's price
@@ -559,6 +669,91 @@ describe("the open batch, for Send it now", () => {
     expect(batch).toMatchObject({ ethWei: 10n ** 16n, ethPriceUsd: 2_330, canClose: true });
   });
 
+  it("R11: on v3.2 the account's cancelableAt comes with its entries, in the batch's one multicall; and the redeem list's count and limit (a full one's request closes it first, on its pot)", async () => {
+    const D32: Deployment = { ...D3, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const b = chains({ canClose: false });
+    const batch = await readOpenBatch(b.c, D32, ME);
+    expect(batch.mine).toEqual({ depositWei: 10n ** 17n, redeemShares: 0n, cancelableAt: START + 300 });
+    expect([batch.nRedeems, batch.maxRedeems]).toEqual([1, 50]);
+    expect(b.multicalls).toBe(1);
+    // v3-launch: neither asked
+    const launch = chains({ canClose: false });
+    const l = await readOpenBatch(launch.c, D3, ME);
+    expect(l.mine).toEqual({ depositWei: 10n ** 17n, redeemShares: 0n });
+    expect(l).not.toHaveProperty("maxRedeems");
+    expect(launch.asked).not.toContain("cancelableAt");
+    expect(launch.asked).not.toContain("maxRedeems");
+  });
+
+  it("R12c: on v3.2 the door's limits come with the batch, in its one multicall (the same block): the minValue of a close the site sends before a stake (flows.ts planCloseFirst, units.ts closeFirstFloor)", async () => {
+    const D32: Deployment = { ...D3, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const b = chains({ canClose: false });
+    const batch = await readOpenBatch(b.c, D32, ME);
+    expect(batch.limits).toEqual({ nDeposits: 2, maxDeposits: 50, maxBatchValue: 10n ** 19n, minDeposit: 4n * 10n ** 16n, depositCap: 4n * 10n ** 19n, netForwarded: 3n * 10n ** 19n });
+    expect(b.multicalls).toBe(1);
+    // v3-launch: none asked
+    const launch = chains({ canClose: false });
+    expect(await readOpenBatch(launch.c, D3, ME)).not.toHaveProperty("limits");
+    for (const f of ["maxDeposits", "maxBatchValue", "minDeposit", "depositCap", "netForwarded"]) expect(launch.asked).not.toContain(f);
+  });
+
+  it("on v3.2 reads a paused front door's batch on, and says so: its pause stops new stakes, never a close", async () => {
+    const D32: Deployment = { ...D3, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const batch = await readOpenBatch(chains({ paused: true }).c, D32, ME);
+    expect(batch).toMatchObject({ paused: true, closesWhilePaused: true, feeWei: FEE, bittensor: "open" });
+    // v3-launch's paused front door: nothing more read, and no such flag
+    const launch = await readOpenBatch(chains({ paused: true }).c, D3, ME);
+    expect(launch).not.toHaveProperty("closesWhilePaused");
+    expect(launch).not.toHaveProperty("feeWei");
+  });
+
+  it("R4-O round 3: on v3.2 Bittensor's side is read at the AlphaVault of the rail now primary on each chain: the new vault's after a migration and the switch, the old one's notice before it", async () => {
+    const D32: Deployment = { ...D3, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const NEW = "0x000000000000000000000000000000000000a2Fa";
+    const BASE2 = "0x000000000000000000000000000000000000Ad12";
+    const BIT2 = "0x000000000000000000000000000000000000Ad11";
+    const healthy = { isPaused: false, migrationReadyAt: 0n, migrationFinished: false };
+    const finished = { ...healthy, migrationFinished: true };
+    const notice = { ...healthy, migrationReadyAt: 1_800_000_000n };
+    // the migration done and both primaries the replacement pair's, whose Bittensor adapter names the new vault: open
+    const switched = chains({ rail: { doorPrimary: BASE2, doorHalf: BIT2, vaultPrimary: BIT2, vaultOf: { [BIT2]: NEW }, health: { [ALPHA_VAULT]: finished, [NEW]: healthy } } });
+    expect((await readOpenBatch(switched.c, D32, ME)).bittensor).toBe("open");
+    const at = (b: ReturnType<typeof chains>) => b.bitAsked.filter((x) => x.functionName === "migrationFinished").map((x) => x.address);
+    expect(at(switched)).toEqual([NEW]);
+    // before the switch the deploy's rail and its vault, whose notice holds the side
+    const before = chains({ rail: { doorPrimary: RAIL_BASE, doorHalf: RAIL_BIT, vaultPrimary: RAIL_BIT, vaultOf: { [RAIL_BIT]: ALPHA_VAULT }, health: { [ALPHA_VAULT]: notice, [NEW]: healthy } } });
+    expect((await readOpenBatch(before.c, D32, ME)).bittensor).toBe("paused");
+    expect(at(before)).toEqual([ALPHA_VAULT]);
+    // half switched (the door on the new pair, the vault still on the old): both vaults count, and the old one is done
+    const half = chains({ rail: { doorPrimary: BASE2, doorHalf: BIT2, vaultPrimary: RAIL_BIT, vaultOf: { [BIT2]: NEW, [RAIL_BIT]: ALPHA_VAULT }, health: { [ALPHA_VAULT]: finished, [NEW]: healthy } } });
+    expect((await readOpenBatch(half.c, D32, ME)).bittensor).toBe("paused");
+    // and the other half (the vault on the new pair, the door still sending through the old one): paused too
+    const other = chains({ rail: { doorPrimary: RAIL_BASE, doorHalf: RAIL_BIT, vaultPrimary: BIT2, vaultOf: { [BIT2]: NEW, [RAIL_BIT]: ALPHA_VAULT }, health: { [ALPHA_VAULT]: finished, [NEW]: healthy } } });
+    expect((await readOpenBatch(other.c, D32, ME)).bittensor).toBe("paused");
+    // v3-launch reads ForeverMoney's one vault, as before
+    const launch = chains({ rail: { doorPrimary: BASE2, doorHalf: BIT2, vaultPrimary: BIT2, vaultOf: { [BIT2]: NEW }, health: { [ALPHA_VAULT]: finished, [NEW]: healthy } } });
+    expect((await readOpenBatch(launch.c, D3, ME)).bittensor).toBe("paused");
+  });
+
+  it("on v3.2 decodes the seven-field BatchClosed: the batch the user meant, its fee and the pot's part", async () => {
+    const D32: Deployment = { ...D3, vaultLens: "0x000000000000000000000000000000000000Ae15" as Address, doorLens: "0x000000000000000000000000000000000000De15" as Address };
+    const log = {
+      address: D32.frontDoor,
+      topics: encodeEventTopics({ abi: FRONT_DOOR_V32, eventName: "BatchClosed", args: { id: 7n } }),
+      data: encodeAbiParameters(parseAbiParameters("uint256, uint256, uint256, uint256, uint256, uint256"), [3n * 10n ** 17n, 2n, 1n, FEE, 10n ** 14n, 0n]),
+      blockNumber: 1n,
+      logIndex: 0,
+      transactionHash: H32,
+      transactionIndex: 0,
+      blockHash: H32,
+      removed: false,
+    };
+    const receipt = { base: { getTransactionReceipt: async () => ({ logs: [log] }) } as never };
+    expect(await readCloseOutcome(receipt, D32, H32, 7n)).toEqual({ kind: "sent", feeWei: FEE, potUsedWei: 10n ** 14n });
+    // v3-launch's six-field event is another topic: a v3.2 receipt never reads as one
+    expect(await readCloseOutcome(receipt, D3, H32, 7n)).toBeUndefined();
+  });
+
   describe("what a send did, from its receipt", () => {
     const closed = (id: bigint, address: string = D.frontDoor) => ({
       address,
@@ -590,5 +785,248 @@ describe("the open batch, for Send it now", () => {
       expect(await readCloseOutcome(receipt([closed(7n, D.baseAdapter)]), D, H32, 7n)).toBeUndefined();
       expect(await readCloseOutcome({ base: { getTransactionReceipt: async () => Promise.reject(new Error("not found")) } as never }, D, H32, 7n)).toBeUndefined();
     });
+  });
+});
+
+describe("v3.2: the vault's moved getters, read through its lens", () => {
+  const VL = "0x000000000000000000000000000000000000Ae15" as Address;
+  const D32: Deployment = {
+    ...D,
+    staker: "0x00000000000000000000000000000000005A4E12" as Address,
+    oracle: "0x000000000000000000000000000000000000041E" as Address,
+    vaultLens: VL,
+    doorLens: "0x000000000000000000000000000000000000De15" as Address,
+  };
+  const HOTKEY = `0x${"58".repeat(32)}` as Hex;
+  const COLDKEY = `0x${"11".repeat(32)}` as Hex;
+  /** Bittensor answering by `address.functionName`, every read recorded so: the vault, its lens and the precompile. */
+  function bittensor(answers: Record<string, unknown>, balance = 0n) {
+    const asked: string[] = [];
+    const answer = (address: string, functionName: string, args?: readonly unknown[]) => {
+      const key = `${address.toLowerCase()}.${functionName}`;
+      asked.push(key);
+      if (!(key in answers)) throw new Error(`unexpected ${key}`);
+      const a = answers[key];
+      return typeof a === "function" ? (a as (x?: readonly unknown[]) => unknown)(args) : a;
+    };
+    const client = {
+      async getBlock() {
+        return { number: 9_400_000n, timestamp: BigInt(Math.floor(Date.now() / 1000)) };
+      },
+      async multicall({ contracts }: { contracts: { address: string; functionName: string; args?: readonly unknown[] }[] }) {
+        return contracts.map((c) => answer(c.address, c.functionName, c.args));
+      },
+      async readContract(c: { address: string; functionName: string; args?: readonly unknown[] }) {
+        return answer(c.address, c.functionName, c.args);
+      },
+      async getBalance() {
+        return balance;
+      },
+    };
+    return { client: client as never, asked };
+  }
+  const v = D32.vault.toLowerCase();
+  const lens = VL.toLowerCase();
+  const staking = "0x0000000000000000000000000000000000000805";
+
+  it("reads the share token on the vault and the rest on the lens, its stake priced at min(visible, booked) in rao", async () => {
+    const bit = bittensor(
+      {
+        [`${v}.balanceOf`]: 10n ** 22n,
+        [`${v}.totalSupply`]: 2n * 10n ** 22n,
+        [`${lens}.totalAssets`]: 2n * 10n ** 16n,
+        [`${lens}.visibleStakeRao`]: 16_000_000n,
+        [`${lens}.bookedStake`]: 15_000_000n,
+        [`${lens}.pendingPayouts`]: 3n,
+        [`${lens}.stakeHotkey`]: HOTKEY,
+        [`${lens}.payoutDelay`]: 86_400n,
+        [`${lens}.maxEntryValue`]: 10n * 10n ** 18n,
+        [`${lens}.stakeMissing`]: false,
+        [`${lens}.redeemOrigin`]: (a?: readonly unknown[]) => (a?.[0] === ME ? 8453n : 0n),
+        [`${staking}.getNominatorMinRequiredStake`]: 20_000_000n,
+      },
+      2n * 10n ** 16n,
+    );
+    const r = await readVault({ bittensor: bit.client }, D32, ME);
+    expect(r).toEqual({
+      shares: 10n ** 22n,
+      totalAssets: 2n * 10n ** 16n,
+      totalSupply: 2n * 10n ** 22n,
+      // the vault prices the smaller of the stake the chain shows on its hotkeys and the stake it booked
+      rootStakeWei: 15n * 10n ** 15n,
+      pendingPayouts: 3n,
+      balanceWei: 2n * 10n ** 16n,
+      stakeHotkey: HOTKEY,
+      payoutDelay: 86_400,
+      nominatorMinWei: 2n * 10n ** 16n,
+      maxEntryValue: 10n * 10n ** 18n,
+      // v3.2's guard and the account's redeem origin, read in the same multicall (Task 59)
+      stakeMissing: false,
+      redeemOrigin: 8453n,
+    });
+    // nothing asked of the vault but its token surface
+    expect(bit.asked.filter((k) => k.startsWith(`${v}.`)).sort()).toEqual([`${v}.balanceOf`, `${v}.totalSupply`]);
+    // a stake the chain shows below what was booked prices at what it shows
+    const fallen = bittensor({ ...Object.fromEntries(bit.asked.map((k) => [k, 0n])), [`${lens}.visibleStakeRao`]: 9_000_000n, [`${lens}.bookedStake`]: 15_000_000n, [`${lens}.stakeHotkey`]: HOTKEY });
+    expect((await readVault({ bittensor: fallen.client }, D32, ME)).rootStakeWei).toBe(9n * 10n ** 15n);
+  });
+
+  it("reads the coldkey and the reward cut on the lens, for the rewards waiting on the stake hotkey", async () => {
+    const bit = bittensor({
+      [`${lens}.coldkey`]: COLDKEY,
+      [`${lens}.rewardCutBps`]: 1000,
+      [`${lens}.hotkeyCount`]: 1n,
+      [`${lens}.hotkeys`]: (a?: readonly unknown[]) => (a?.[0] === 0n ? HOTKEY : `0x${"00".repeat(32)}`),
+      [`${staking}.getUnclaimedRootTaoByHotkey`]: (a?: readonly unknown[]) => (a?.[0] === COLDKEY && a?.[1] === HOTKEY ? 5n : 0n),
+    });
+    expect(await readPendingRewards({ bittensor: bit.client }, D32, HOTKEY)).toEqual({ wei: 5n, cutBps: 1000 });
+    expect(bit.asked.some((k) => k.startsWith(`${v}.`))).toBe(false);
+  });
+
+  // ---- Task 59: v3.2's states read through the lens and the front door ----
+
+  it("pendingRewards: reads what every listed hotkey has waiting, the standby's too, not only the stake hotkey's", async () => {
+    const STANDBY = `0x${"40".repeat(32)}` as Hex;
+    const unclaimed: Record<string, bigint> = { [HOTKEY]: 5n, [STANDBY]: 7n };
+    const bit = bittensor({
+      [`${lens}.coldkey`]: COLDKEY,
+      [`${lens}.rewardCutBps`]: 1000,
+      [`${lens}.hotkeyCount`]: 2n,
+      [`${lens}.hotkeys`]: (a?: readonly unknown[]) => [HOTKEY, STANDBY][Number(a?.[0])],
+      [`${staking}.getUnclaimedRootTaoByHotkey`]: (a?: readonly unknown[]) => (a?.[0] === COLDKEY ? (unclaimed[a?.[1] as string] ?? 0n) : 0n),
+    });
+    expect(await readPendingRewards({ bittensor: bit.client }, D32, HOTKEY)).toEqual({ wei: 12n, cutBps: 1000 });
+    expect(bit.asked.filter((k) => k === `${staking}.getUnclaimedRootTaoByHotkey`)).toHaveLength(2);
+    // more hotkeys than the vault can list is no reading to stand behind: unknown, never a figure
+    const odd = bittensor({ [`${lens}.coldkey`]: COLDKEY, [`${lens}.rewardCutBps`]: 1000, [`${lens}.hotkeyCount`]: 5n });
+    expect(await readPendingRewards({ bittensor: odd.client }, D32, HOTKEY)).toBeUndefined();
+  });
+
+  /** The vault's figures with v3.2's guard and the account's redeem origin as the lens gives them. */
+  const status = (over: { stakeMissing?: boolean; origin?: bigint }) =>
+    bittensor({
+      [`${v}.balanceOf`]: 10n ** 22n,
+      [`${v}.totalSupply`]: 2n * 10n ** 22n,
+      [`${lens}.totalAssets`]: 2n * 10n ** 16n,
+      [`${lens}.visibleStakeRao`]: 15_000_000n,
+      [`${lens}.bookedStake`]: 16_000_000n,
+      [`${lens}.pendingPayouts`]: 0n,
+      [`${lens}.stakeHotkey`]: HOTKEY,
+      [`${lens}.payoutDelay`]: 86_400n,
+      [`${lens}.maxEntryValue`]: 10n * 10n ** 18n,
+      [`${lens}.stakeMissing`]: over.stakeMissing ?? false,
+      [`${lens}.redeemOrigin`]: (a?: readonly unknown[]) => (a?.[0] === ME ? (over.origin ?? 8453n) : 0n),
+      [`${staking}.getNominatorMinRequiredStake`]: 20_000_000n,
+    });
+
+  it("stakeMissing: the lens's guard, read with the vault's figures, and said in plain words while it holds", async () => {
+    const missing = await readVault({ bittensor: status({ stakeMissing: true }).client }, D32, ME);
+    expect(missing.stakeMissing).toBe(true);
+    expect(requestHold({ stakeMissing: true })).toBe(
+      "Staking and unstaking are paused for a short while: Cascade is reconnecting to its validator after a change on Bittensor. Nothing has been lost.",
+    );
+    expect((await readVault({ bittensor: status({}).client }, D32, ME)).stakeMissing).toBe(false);
+    expect(requestHold({})).toBeNull();
+  });
+
+  it("originElsewhere: the account's redeem origin, read before a request, holds the request while it isn't Base's", async () => {
+    const DIRECT = 2n ** 64n - 1n;
+    expect((await readVault({ bittensor: status({ origin: DIRECT }).client }, D32, ME)).redeemOrigin).toBe(DIRECT);
+    expect((await readVault({ bittensor: status({}).client }, D32, ME)).redeemOrigin).toBe(8453n);
+    expect(requestHold({ originElsewhere: true })).toBe(
+      "This address withdraws on Bittensor, not here. Withdraw there, or set Base as its withdrawal chain from Bittensor.",
+    );
+    // an origin elsewhere is said first: setting Base from Bittensor is the user's to do, the reconnection isn't
+    expect(requestHold({ originElsewhere: true, stakeMissing: true })).toMatch(/^This address withdraws on Bittensor/);
+  });
+
+  it("thinPool: a pool whose 30-minute mean liquidity is under the front door's floor holds USDC delivery", async () => {
+    const asked: string[] = [];
+    const base = (mean: readonly [bigint, bigint], floors: readonly [bigint, bigint]) => ({
+      async multicall({ contracts }: { contracts: { address: string; functionName: string; args?: readonly unknown[] }[] }) {
+        return contracts.map((c) => {
+          asked.push(`${c.address.toLowerCase()}.${c.functionName}${c.args ? `(${c.args.join(",")})` : ""}`);
+          if (c.functionName === "meanLiquidity") return mean;
+          if (c.functionName === "minPoolLiquidity") return floors[Number(c.args?.[0])];
+          throw new Error(`unexpected ${c.functionName}`);
+        });
+      },
+    });
+    expect(await readThinPool({ base: base([100n, 10n ** 12n], [1_000n, 10n ** 9n]) as never }, D32)).toBe(true);
+    expect(asked).toEqual([`${D32.oracle!.toLowerCase()}.meanLiquidity`, `${D32.frontDoor.toLowerCase()}.minPoolLiquidity(0)`, `${D32.frontDoor.toLowerCase()}.minPoolLiquidity(1)`]);
+    // the WETH/USDC pool alone under its floor holds it too
+    expect(await readThinPool({ base: base([10n ** 6n, 10n], [1_000n, 10n ** 9n]) as never }, D32)).toBe(true);
+    expect(await readThinPool({ base: base([10n ** 6n, 10n ** 12n], [1_000n, 10n ** 9n]) as never }, D32)).toBe(false);
+    // a floor of 0 checks nothing
+    expect(await readThinPool({ base: base([0n, 0n], [0n, 0n]) as never }, D32)).toBe(false);
+  });
+
+  it("pausedDoor: a paused v3.2 front door's batch line says only that new stakes are paused (its batch still leaves)", async () => {
+    const batch = (paused: boolean) => ({
+      async multicall({ contracts }: { contracts: { functionName: string }[] }) {
+        const answers: Record<string, unknown> = { openBatch: [7n, 1_800_000_000n, 10n ** 17n, 0n, 1n, 0n], canClose: false, batchInterval: 3_600n, paused, getCurrentBlockTimestamp: 1_800_000_600n };
+        return contracts.map((c) => answers[c.functionName]);
+      },
+    });
+    const at = { readAt: 1_000, now: 1_000 };
+    const paused = await readNextBatch({ base: batch(true) as never }, D32);
+    expect(paused).toMatchObject({ paused: true, closesWhilePaused: true });
+    expect(nextBatchLine(paused, at)).toBe("New stakes and automatic USDC delivery are paused; withdrawals and claims still work.");
+    // v3-launch's paused front door holds its batch, and says so as before
+    const launch: Deployment = { ...D, staker: D32.staker, oracle: D32.oracle };
+    const held = await readNextBatch({ base: batch(true) as never }, launch);
+    expect(held).not.toHaveProperty("closesWhilePaused");
+    expect(nextBatchLine(held, at)).toBe("Next batch: on hold while Cascade is paused");
+    // not paused: the countdown, on either
+    expect(nextBatchLine(await readNextBatch({ base: batch(false) as never }, D32), at)).toMatch(/^Next batch leaves within /);
+  });
+
+  it("reads the reward cut and the stake hotkey (for the yield) on the lens", async () => {
+    const bit = bittensor({ [`${lens}.rewardCutBps`]: 1000, [`${lens}.stakeHotkey`]: HOTKEY });
+    expect(await readRewardCutBps({ bittensor: bit.client }, D32)).toBe(1000);
+    expect(bit.asked).toEqual([`${lens}.rewardCutBps`]);
+    const history = {
+      ...(bit.client as object),
+      async getBlock() {
+        return { number: 100_000n, timestamp: 1_800_000_000n };
+      },
+    };
+    // too young a chain for a 30-day figure: only the hotkey and the cut are read, both on the lens
+    expect(await readApyPercent({ bittensorHistory: history as never }, D32)).toBeUndefined();
+    expect(bit.asked).toEqual([`${lens}.rewardCutBps`, `${lens}.stakeHotkey`, `${lens}.rewardCutBps`]);
+  });
+
+  it("reads the owner's reward vesting period, the running schedule's and the adoption drip's on the lens, in seconds, for the FAQ (Task 60; review, Minor 4; Revision 27)", async () => {
+    const mc = MULTICALL3.toLowerCase();
+    const NOW = 1_800_000_000n;
+    const DAY = 86_400n;
+    const answers = (adopt: { amount: bigint; start: bigint; period: bigint }) => ({
+      [`${lens}.rewardVesting`]: 3n * DAY,
+      [`${lens}.vestingPeriod`]: 10n * DAY,
+      [`${lens}.adoptVestingAmount`]: adopt.amount,
+      [`${lens}.adoptVestingStart`]: adopt.start,
+      [`${lens}.adoptVestingPeriod`]: adopt.period,
+      [`${mc}.getCurrentBlockTimestamp`]: NOW,
+    });
+    // an adopted gift on its own 14-day drip (Revision 27), a day in at the chain's time: its period
+    const bit = bittensor(answers({ amount: 10n ** 15n, start: NOW - DAY, period: 14n * DAY }));
+    expect(await readRewardVesting({ bittensor: bit.client }, D32)).toEqual({ rewardVestingS: 259_200, vestingPeriodS: 864_000, adoptVestingPeriodS: 1_209_600 });
+    expect(bit.asked).toEqual([
+      `${lens}.rewardVesting`,
+      `${lens}.vestingPeriod`,
+      `${lens}.adoptVestingAmount`,
+      `${lens}.adoptVestingStart`,
+      `${lens}.adoptVestingPeriod`,
+      `${mc}.getCurrentBlockTimestamp`,
+    ]);
+    // a second before its end it still runs; at its end it has nothing left to add (CascadeFormulas.unvestedRewards)
+    const drip = async (adopt: { amount: bigint; start: bigint; period: bigint }) => (await readRewardVesting({ bittensor: bittensor(answers(adopt)).client }, D32)).adoptVestingPeriodS;
+    expect(await drip({ amount: 10n ** 15n, start: NOW - 14n * DAY + 1n, period: 14n * DAY })).toBe(1_209_600);
+    expect(await drip({ amount: 10n ** 15n, start: NOW - 14n * DAY, period: 14n * DAY })).toBe(0);
+    // never adopted; or set with nothing in it (a write-down at a supply of 0 with no adoption): 0
+    expect(await drip({ amount: 0n, start: 0n, period: 0n })).toBe(0);
+    expect(await drip({ amount: 0n, start: NOW - DAY, period: 14n * DAY })).toBe(0);
+    // v3-launch's vesting is a constant in its vault, never read
+    await expect(readRewardVesting({ bittensor: bit.client }, D)).rejects.toThrow(/v3\.2/);
   });
 });

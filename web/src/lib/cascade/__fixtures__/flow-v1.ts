@@ -8,6 +8,16 @@ export const YUMA = "0x40c47b6a294686fe9612b5d78dd369f4c77fa3bbf96a4286ede97410b
 const e18 = (n: number) => (BigInt(Math.round(n * 1e6)) * 10n ** 12n).toString();
 const A = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
 
+/** A healthy v3.2 flow document: goodFlow's with the v3.2 monitor's exits part (24 hours' wait, 200 TAO today, 30 burned,
+ * nothing parked). */
+export function goodFlowV32(): FlowV1 {
+  return {
+    ...goodFlow(),
+    deployment: "v3.2-launch",
+    exits: { payoutDelayS: 86_400, dailyLimit: e18(200), usedToday: e18(30), parked: "0", parkedRefundFrom: "none" },
+  };
+}
+
 export function goodFlow(): FlowV1 {
   const chain = { block: "1000", time: GENERATED_AT - 60, stale: false };
   return {

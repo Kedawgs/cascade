@@ -1,7 +1,7 @@
 import { type Address, type Hex, parseEventLogs } from "viem";
-import { VAULT } from "./abi";
+import { vaultEventsAbi } from "./abi";
 import type { Clients } from "./chain";
-import type { Deployment } from "./config";
+import { type Deployment, isV32 } from "./config";
 import {
   type AccountEvent,
   chunkIn,
@@ -78,7 +78,7 @@ export interface WindowEvents {
  * numbers) or viem's formatted ones alike. */
 export function vaultEvents(raw: RawLog[], d: Deployment, account: Address): WindowEvents {
   const out: WindowEvents = { delivered: [], staked: [], payouts: [], deposited: [], redeemed: [], adjustments: [], entries: [] };
-  for (const l of parseEventLogs({ abi: VAULT, logs: raw as never, strict: false })) {
+  for (const l of parseEventLogs({ abi: vaultEventsAbi(d), logs: raw as never, strict: false })) {
     if (!same(l.address, d.vault)) continue;
     const block = asBig(l.blockNumber);
     const txHash = l.transactionHash as Hex;
@@ -119,6 +119,11 @@ export function vaultEvents(raw: RawLog[], d: Deployment, account: Address): Win
       case "RedeemSkipped":
       case "RedeemDeferred":
         if (mine(a.user)) out.entries.push({ key: a.key as Hex, block, txHash });
+        // v3.2: a bounce is the account's TAO on its way back to Base, as the scan keeps it (facts.ts scanVault)
+        if (l.eventName === "DepositBounced" && isV32(d) && mine(a.user)) out.adjustments.push({ key: a.key as Hex, txHash, block, assets: a.assets as bigint, shares: 0n, kind: "bounced" });
+        break;
+      case "PayoutDust":
+        if (isV32(d) && mine(a.user)) out.adjustments.push({ key: a.key as Hex, txHash, block, assets: a.assets as bigint, shares: 0n, kind: "dust" });
         break;
     }
   }

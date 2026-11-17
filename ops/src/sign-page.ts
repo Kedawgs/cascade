@@ -10,10 +10,24 @@ export interface PageCall {
   value: string;
   gas?: string;
   from: string;
+  /** Asked again of pnpm ops sign's server just before it is sent (POST /check/<i>), and not sent if that fails. */
+  recheck?: boolean;
+}
+/** What the page's script gets about a stamp (Task 49): the chain MetaMask must be on, the owner who signs, and the
+ * typed data, as pnpm ops sign built it. */
+export interface PageStamp {
+  chainId: number;
+  from: string;
+  typedData: string;
+  /** relay: the click also sends stampBySig from the relayer; stack: it writes the stack only */
+  mode: "relay" | "stack";
 }
 export interface PageData {
   ordered: boolean;
   calls: PageCall[];
+  stamps?: PageStamp[];
+  /** The token the page's requests to its server carry (absent when it makes none). */
+  token?: string;
 }
 /** busy: between its click and its hash. sent: waiting for its receipt. mismatch: mined, but not as sent. */
 type CallState = "ready" | "busy" | "sent" | "confirmed" | "reverted" | "mismatch";
@@ -169,6 +183,42 @@ export function signLogic() {
     return typeof m === "string" && m ? m : String(e);
   }
   const walletText = (w: WalletState): string => (w.accounts.length ? `Connected: ${w.accounts[0]} on ${networkName(w.chainId)}.` : "Not connected.");
+
+  // ---- stamps and the server (Task 49) ----
+
+  const shortName = (chainId: number): string => (NETWORKS[chainId] ? NETWORKS[chainId].name : `chain id ${chainId}`);
+  const withoutStop = (s: string): string => s.replace(/\.$/, "");
+  /** MetaMask stayed on another chain than the stamp's: it signs typed data only for the chain it is on. */
+  const stillOn = (current: unknown, chainId: number): string =>
+    `MetaMask is still on ${networkName(current)}, not ${networkName(chainId)}. A stamp is signed only on its own chain: switch MetaMask to ${shortName(chainId)} yourself, then click Sign again. Nothing was signed.`;
+  /** MetaMask refused to switch, or can't. */
+  const switchRefused = (chainId: number, e: unknown): string =>
+    `MetaMask didn't switch to ${networkName(chainId)}: ${withoutStop(errorText(e))}. A stamp is signed only on its own chain: switch MetaMask to ${shortName(chainId)} yourself, then click Sign again. Nothing was signed.`;
+  /** Whether `stamp` may be signed now: MetaMask connected, its selected account the owner, on the stamp's chain. */
+  function stampReadiness(stamp: PageStamp, w: WalletState): Readiness {
+    if (!w.accounts.length) return { ok: false, problem: "connect", reason: "Connect MetaMask first." };
+    if (!sameAddress(w.accounts[0], stamp.from)) {
+      return {
+        ok: false,
+        problem: "account",
+        reason: `MetaMask is using ${w.accounts[0]}, but this stamp must be signed by the owner, ${stamp.from}. Nothing was signed. Select that account in MetaMask (your Ledger's), then click Sign again.`,
+      };
+    }
+    if (!isChain(w.chainId, stamp.chainId)) return { ok: false, problem: "chain", reason: stillOn(w.chainId, stamp.chainId) };
+    return { ok: true };
+  }
+  /** eth_signTypedData_v4's parameters: the owner, and the typed data as pnpm ops sign built it. */
+  const signParams = (stamp: PageStamp): string[] => [stamp.from, stamp.typedData];
+  /** The server's answer, as the page takes it. */
+  function answerOf(v: unknown): { ok: boolean; text: string } {
+    const a = v as { ok?: unknown; text?: unknown } | null;
+    return typeof a === "object" && a !== null && typeof a.text === "string" ? { ok: a.ok === true, text: a.text } : { ok: false, text: "pnpm ops sign's server gave an answer this page doesn't know." };
+  }
+  const serverDown = (e: unknown): string => `pnpm ops sign's server didn't answer (${withoutStop(errorText(e))}): is it still running?`;
+  /** A stamp's button says what its click does (Task 49's review, M1): a relay stamp's also sends it. */
+  const stampAction = (mode: string): string => (mode === "relay" ? "Sign and relay" : "Sign and add to the stack");
+  const stampButtonText = (s: string, mode: string): string => (s === "busy" ? "Signing…" : s === "done" ? "Done" : s === "failed" ? `${stampAction(mode)} again` : stampAction(mode));
+  const canSign = (s: string): boolean => s === "ready" || s === "failed";
   /** `away`: a sent call's chain id while MetaMask is on another chain. */
   const buttonText = (s: string, away?: number): string =>
     s === "busy"
@@ -207,6 +257,15 @@ export function signLogic() {
     buttonText,
     networkName,
     isChain,
+    stillOn,
+    switchRefused,
+    stampReadiness,
+    signParams,
+    answerOf,
+    serverDown,
+    stampAction,
+    stampButtonText,
+    canSign,
   };
 }
 
@@ -237,10 +296,14 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
   /** The call between its click and its hash, if any: one at a time. The wait for a receipt holds only
    * its own call, and the calls on other chains (waitingOn). */
   let sending: number | null = null;
+  /** The stamp between its click and the server's answer, if any (Task 49): one at a time, and no call meanwhile. */
+  let signing: number | null = null;
+  const stamps = D.stamps ?? [];
+  const stampStates: string[] = stamps.map(() => "ready");
   let eth: Eth | undefined;
   let looking = true;
   let wallet: WalletState = { accounts: [], chainId: null };
-  const busy = () => sending !== null;
+  const busy = () => sending !== null || signing !== null;
 
   const say = (i: number, text: string, kind: string) => {
     const s = el(`status-${i}`);
@@ -259,6 +322,20 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
       b.disabled = !eth || !L.canSend(states, i, D.ordered, busy());
       b.textContent = L.buttonText(states[i], away[i] ? D.calls[i].chainId : undefined);
     });
+    stamps.forEach((_s, i) => {
+      const b = el(`stamp-${i}`);
+      b.disabled = !eth || busy() || !L.canSign(stampStates[i]);
+      b.textContent = L.stampButtonText(stampStates[i], stamps[i].mode);
+    });
+  };
+  /** A request to pnpm ops sign's server, which serves this page: its answer, or why there was none. */
+  const post = async (path: string, body: unknown): Promise<{ ok: boolean; text: string }> => {
+    try {
+      const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Cascade-Token": D.token ?? "" }, body: JSON.stringify(body) });
+      return L.answerOf(await res.json());
+    } catch (err) {
+      return { ok: false, text: L.serverDown(err) };
+    }
   };
   const refresh = async () => {
     if (!eth) return;
@@ -362,6 +439,16 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
         say(i, r.reason, "bad");
         return;
       }
+      // just before it is sent: what the server checks again (a door removal's guard, Task 49)
+      if (c.recheck) {
+        say(i, "Checking again with pnpm ops sign that it is still safe to send…", "wait");
+        const a = await post(`/check/${i}`, {});
+        if (!a.ok) {
+          states[i] = before;
+          say(i, `Not sent: ${a.text}`, "bad");
+          return;
+        }
+      }
       say(i, "Compare the selector, the parameter words and the To address with the Ledger (Debug data on) or MetaMask's Hex tab, then approve or reject…", "wait");
       hash = String(await e.request({ method: "eth_sendTransaction", params: [L.txParams(c)] }));
       hashes[i] = hash;
@@ -402,6 +489,65 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
     render();
   };
 
+  /** Stamp `i` (Task 49): MetaMask on the owner's account and switched to the stamp's own chain (it signs typed data only
+   * for the chain it is on), the chain checked once more, the owner's signature asked for, then handed to the server,
+   * which checks it is the owner's before passing it on. */
+  const sayStamp = (i: number, text: string, kind: string) => {
+    const s = el(`stamp-status-${i}`);
+    s.textContent = text;
+    s.className = `status ${kind}`;
+  };
+  const signStamp = async (i: number) => {
+    const e = eth;
+    if (!e || busy() || !L.canSign(stampStates[i])) return;
+    const s = stamps[i];
+    const before = stampStates[i];
+    signing = i;
+    stampStates[i] = "busy";
+    render();
+    sayStamp(i, "Checking MetaMask…", "wait");
+    try {
+      await e.request({ method: "eth_requestAccounts" });
+      await refresh();
+      let r = L.stampReadiness(s, wallet);
+      if (!r.ok && r.problem === "chain") {
+        sayStamp(i, `Asking MetaMask to switch to ${L.networkName(s.chainId)}…`, "wait");
+        try {
+          await toChain(e, s.chainId);
+        } catch (err) {
+          stampStates[i] = before;
+          sayStamp(i, L.switchRefused(s.chainId, err), "bad");
+          return;
+        }
+        await refresh();
+        r = L.stampReadiness(s, wallet);
+      }
+      if (!r.ok) {
+        stampStates[i] = before;
+        sayStamp(i, r.reason, "bad");
+        return;
+      }
+      const on = await e.request({ method: "eth_chainId" });
+      if (!L.isChain(on, s.chainId)) {
+        stampStates[i] = before;
+        sayStamp(i, L.stillOn(on, s.chainId), "bad");
+        return;
+      }
+      sayStamp(i, "Compare the domain hash and the message hash with the Ledger's screen, then approve or reject…", "wait");
+      const sig = await e.request({ method: "eth_signTypedData_v4", params: L.signParams(s) });
+      sayStamp(i, "Signed. Checking it and handing it on…", "wait");
+      const a = await post(`/stamp/${i}`, { sig });
+      stampStates[i] = a.ok ? "done" : "failed";
+      sayStamp(i, a.text, a.ok ? "good" : "bad");
+    } catch (err) {
+      stampStates[i] = before;
+      sayStamp(i, `Not signed: ${L.errorText(err)}`, "bad");
+    } finally {
+      signing = null;
+      render();
+    }
+  };
+
   el("connect").addEventListener("click", async () => {
     if (!eth) return;
     try {
@@ -412,6 +558,7 @@ export function pageMain(L: ReturnType<typeof signLogic>, D: PageData): void {
     }
   });
   D.calls.forEach((_c, i) => el(`send-${i}`).addEventListener("click", () => send(i)));
+  stamps.forEach((_s, i) => el(`stamp-${i}`).addEventListener("click", () => signStamp(i)));
   render();
 
   // EIP-6963: each wallet announces itself when asked, so MetaMask is found even when another wallet
@@ -486,29 +633,38 @@ const sha256 = (s: string) => `'sha256-${createHash("sha256").update(s).digest("
 
 /** The signing page for `view` (checked by checkCalls), and the CSP to serve it with: one inline script
  * and one inline style, each allowed by its hash, and nothing else from anywhere. Headings, effects and
- * roles come from the decoded calls and the record; the file's title and labels appear only as notes. */
-export function renderPage(view: WalletView): { html: string; csp: string } {
+ * roles come from the decoded calls and the record; the file's title and labels appear only as notes.
+ * A v3.2 page (Task 49) also shows each call's own rows and warnings, and its stamps; one that asks its server
+ * something (a re-check before a send, a stamp's signature) carries `o.token`, and its CSP lets it reach only the
+ * server it came from (connect-src 'self'). */
+export function renderPage(view: WalletView, o: { token?: string } = {}): { html: string; csp: string; token?: string } {
+  const stamps = view.stamps ?? [];
   const data: PageData = {
     ordered: view.ordered,
-    calls: view.calls.map((c) => ({ chainId: c.chainId, to: c.to, data: c.data, value: c.value, ...(c.gas ? { gas: c.gas } : {}), from: c.from })),
+    calls: view.calls.map((c) => ({ chainId: c.chainId, to: c.to, data: c.data, value: c.value, ...(c.gas ? { gas: c.gas } : {}), from: c.from, ...(c.recheck ? { recheck: true } : {}) })),
+    ...(stamps.length ? { stamps: stamps.map((s) => ({ chainId: s.chainId, from: s.from, typedData: s.typedData, mode: s.mode })) } : {}),
+    ...(o.token ? { token: o.token } : {}),
   };
   const script = `"use strict";\n(${pageMain.toString()})((${signLogic.toString()})(), ${scriptJson(data)});\n`;
   const calls = view.calls
     .map((c, i) => {
       const args = c.fn.args.length ? c.fn.args.map((x) => `<code>${esc(x.name)}</code> (${esc(x.type)}) = <code>${esc(x.value)}</code>`).join("<br>") : "none";
       const words = c.words.length ? c.words.map((w, j) => `${j + 1}: <code>${esc(w)}</code>`).join("<br>") : "none";
-      const gas = c.gas
-        ? `${Number(c.gas).toLocaleString("en-US")}, set by this page: leave it as it is in MetaMask (Base refuses a transaction above 16,777,216 gas)`
-        : "MetaMask estimates it";
+      // R6 (claim C): on Bittensor a write-off's execute sets its own (its read is given 45,000,000 whole)
+      const why = c.chainId === 964 ? "the owner's account must hold it at the gas price; only the gas used is paid" : "Base refuses a transaction above 16,777,216 gas";
+      const gas = c.gas ? `${Number(c.gas).toLocaleString("en-US")}, set by this page: leave it as it is in MetaMask (${why})` : "MetaMask estimates it";
+      const warned = (c.callWarnings ?? []).map((w) => `<p class="warning">WARNING: ${esc(w)}</p>\n`).join("");
+      const rows = (c.details ?? []).map((d) => `<dt>${esc(d.name)}</dt><dd>${d.lines.map(esc).join("<br>")}</dd>\n`).join("");
+      const recheck = c.recheck ? `<p class="note">Just before it is sent, this page asks pnpm ops sign to check again ${esc(c.recheck)}; if that fails, nothing is sent.</p>\n` : "";
       return `<li class="call">
 <h2><span class="n">${i + 1}.</span> ${esc(c.heading)}</h2>
 <p class="effect">${esc(c.effect)}</p>
-<dl>
+${warned}<dl>
 <dt>Network</dt><dd>${esc(c.network)} (chain id ${c.chainId})</dd>
 <dt>Contract</dt><dd>${esc(c.contract)}<br><code>${esc(c.to)}</code></dd>
 <dt>Function</dt><dd><code>${esc(c.fn.signature)}</code></dd>
 <dt>Arguments</dt><dd>${args}</dd>
-<dt>Value</dt><dd>${esc(c.valueText)}</dd>
+${rows}<dt>Value</dt><dd>${esc(c.valueText)}</dd>
 <dt>Gas limit</dt><dd>${gas}</dd>
 <dt>Send from</dt><dd><code>${esc(c.from)}</code> (${esc(c.senderRole)})</dd>
 <dt>Selector</dt><dd><code>${esc(c.selector)}</code></dd>
@@ -516,19 +672,47 @@ export function renderPage(view: WalletView): { html: string; csp: string } {
 <dt>Calldata</dt><dd><code class="data">${esc(c.data)}</code></dd>
 </dl>
 <p class="note">Note from the file: ${esc(c.label)}</p>
-<button type="button" id="send-${i}" disabled>Send</button>
+${recheck}<button type="button" id="send-${i}" disabled>Send</button>
 <p class="status" id="status-${i}" role="status" aria-live="polite"></p>
 </li>`;
     })
     .join("\n");
+  const stampItems = stamps
+    .map(
+      (s, i) => `<li class="call">
+<h2><span class="n">${i + 1}.</span> ${esc(s.heading)}</h2>
+<p class="effect">${esc(s.effect)}</p>
+<dl>
+<dt>Network</dt><dd>${esc(s.network)} (chain id ${s.chainId})</dd>
+<dt>Contract</dt><dd>${esc(s.contractName)}<br><code>${esc(s.contract)}</code></dd>
+<dt>As of</dt><dd>${esc(s.asOfText)} (<code>${esc(s.asOf)}</code>)</dd>
+<dt>Domain hash</dt><dd><code>${esc(s.domainHash)}</code></dd>
+<dt>Message hash</dt><dd><code>${esc(s.messageHash)}</code></dd>
+<dt>Digest</dt><dd><code>${esc(s.digest)}</code></dd>
+<dt>Sign as</dt><dd><code>${esc(s.from)}</code> (the owner the contract names now)</dd>
+<dt>Then</dt><dd>${esc(s.then)}</dd>
+</dl>
+<p class="note">Note from the file: ${esc(s.label)}</p>
+<p class="note">${esc(s.click)}</p>
+<button type="button" id="stamp-${i}" disabled>${s.mode === "relay" ? "Sign and relay" : "Sign and add to the stack"}</button>
+<p class="status" id="stamp-status-${i}" role="status" aria-live="polite"></p>
+</li>`,
+    )
+    .join("\n");
   const warnings = view.warnings.map((w) => `<p class="warning">WARNING: ${esc(w)}</p>`).join("\n");
+  const callsNotice = view.calls.length
+    ? `<p><strong>Check each call before you approve it.</strong> With Blind signing on, a Ledger signs a contract call without showing what it does. To see the call on the Ledger, also turn on Debug data in its Ethereum app settings (some versions call it Contract data): it then shows the selector and each parameter word. Or open the Hex (Data) tab of MetaMask's confirmation. Either way, compare the selector, each parameter word and the To address with the call below before you approve. Afterwards, turn Blind signing and Debug data off again.</p>\n`
+    : "";
+  const stampsNotice = stamps.length
+    ? `<p><strong>Check each stamp before you approve it.</strong> A Ledger may sign a stamp blind: it then shows only the domain hash and the message hash. Compare both with the stamp below before you approve. MetaMask signs a stamp only on the stamp's own network, so the page asks it to switch first.${stamps.some((s) => s.mode === "relay") ? " Signing a stamp to relay also sends it, from the relayer, on the same click." : ""}</p>\n`
+    : "";
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Cascade: send with MetaMask</title>
+<title>Cascade: ${stamps.length ? "sign" : "send"} with MetaMask</title>
 <style>${STYLE}</style>
 </head>
 <body>
@@ -539,24 +723,36 @@ export function renderPage(view: WalletView): { html: string; csp: string } {
 ${warnings}
 <section class="notice" aria-label="Safety">
 <p><strong>This page never asks for your seed words, recovery phrase, private key or password, and has nothing to type into.</strong> If anything asks you for them, stop: it isn't this page.</p>
-<p><strong>Check each call before you approve it.</strong> With Blind signing on, a Ledger signs a contract call without showing what it does. To see the call on the Ledger, also turn on Debug data in its Ethereum app settings (some versions call it Contract data): it then shows the selector and each parameter word. Or open the Hex (Data) tab of MetaMask's confirmation. Either way, compare the selector, each parameter word and the To address with the call below before you approve. Afterwards, turn Blind signing and Debug data off again.</p>
-<p>When you're done, disconnect this site in MetaMask (Connected sites), then stop the server with Ctrl-C.</p>
+${callsNotice}${stampsNotice}<p>When you're done, disconnect this site in MetaMask (Connected sites), then stop the server with Ctrl-C.</p>
 </section>
 <section class="wallet">
 <button type="button" id="connect" disabled>Connect MetaMask</button>
 <p id="wallet">Looking for MetaMask…</p>
 </section>
 <p id="provider" class="note"></p>
-<p class="order">${view.ordered ? "Send these in order: each one waits until the one before it has succeeded." : "Send each call with its own button."}</p>
+<p class="order">${view.ordered ? "Send these in order: each one waits until the one before it has succeeded." : stamps.length ? "Sign each stamp with its own button." : "Send each call with its own button."}</p>
 <ol class="calls">
-${calls}
+${stamps.length ? stampItems : calls}
 </ol>
-<p class="foot">Reloading this page forgets what was sent from it: check a call on the explorer (or with <code>pnpm ops ownership</code>, <code>pnpm ops pause</code>'s dry run, or <code>pnpm ops cardinality</code>) before sending it again.</p>
+<p class="foot">${
+    stamps.length
+      ? "Reloading this page forgets what was signed on it: what was handed on is in the terminal's lines, and a stack's in its file."
+      : "Reloading this page forgets what was sent from it: check a call on the explorer (or with <code>pnpm ops ownership</code>, <code>pnpm ops pause</code>'s dry run, or <code>pnpm ops cardinality</code>) before sending it again."
+  }</p>
 </main>
 <script>${script}</script>
 </body>
 </html>
 `;
-  const csp = [`default-src 'none'`, `script-src ${sha256(script)}`, `style-src ${sha256(STYLE)}`, `base-uri 'none'`, `form-action 'none'`, `frame-ancestors 'none'`].join("; ");
-  return { html, csp };
+  const csp = [
+    `default-src 'none'`,
+    `script-src ${sha256(script)}`,
+    `style-src ${sha256(STYLE)}`,
+    // only a page that asks its own server something may reach it; v3-launch's pages reach nothing
+    ...(o.token ? [`connect-src 'self'`] : []),
+    `base-uri 'none'`,
+    `form-action 'none'`,
+    `frame-ancestors 'none'`,
+  ].join("; ");
+  return { html, csp, ...(o.token ? { token: o.token } : {}) };
 }

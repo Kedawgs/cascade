@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
 import {CascadeStaker} from "../../src/CascadeStaker.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
+import {ICascadeTwap} from "../../src/interfaces/ICascadeTwap.sol";
 import {ISlipstreamRouter} from "../../src/interfaces/ISlipstreamRouter.sol";
 import {IUniswapV3Router02} from "../../src/interfaces/IUniswapV3Router02.sol";
 import {MockSwapRouter} from "../mocks/MockSwapRouter.sol";
@@ -16,6 +18,8 @@ import {MockTAO} from "../mocks/MockTAO.sol";
 import {MockTwap} from "../mocks/MockTwap.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {FrontDoorTestBase} from "../FrontDoorTestBase.sol";
+import {Schedule} from "../governance/Schedule.sol";
+import {defaultStakerParams} from "../utils/DefaultParams.sol";
 
 /// A contract payer (a bridge executor later): holds USDC, approves exactly and stakes for someone else.
 contract StakeCaller {
@@ -29,9 +33,11 @@ contract StakeCaller {
 }
 
 /// @notice CascadeStaker against a real front door (FrontDoorTestBase: 1 TAO minimum, 10,000 TAO cap,
-/// 4,000 TAO batch value) and a mock router that buys at 4,000,000,001 TAO wei per USDC unit (about
-/// $250/TAO, leaving sub-rao dust) and sells at 250 USDC per TAO. Route 0 is the Uniswap two-hop
-/// USDC -0.05%-> WETH -0.3%-> TAO, also the delivery route; fees 15 bps and 50_000 ($0.05).
+/// 4,000 TAO batch value) whose oracle, from its constructor, is a mock TWAP at 250 USDC per TAO (so the
+/// staker's buy floor is 95% of 4e9 TAO wei per USDC unit swapped), and a mock router that buys at
+/// 4,000,000,001 TAO wei per USDC unit (about $250/TAO, just above the TWAP's value, leaving sub-rao dust) and
+/// sells at 250 USDC per TAO. Route 0 is the Uniswap two-hop USDC -0.05%-> WETH -0.3%-> TAO, also the delivery
+/// route; fees 15 bps and 50_000 ($0.05); all three from the staker's constructor (defaultStakerParams).
 contract StakerTest is FrontDoorTestBase {
     bytes32 constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
@@ -40,6 +46,7 @@ contract StakerTest is FrontDoorTestBase {
     uint256 constant SELL_RATE = 250e6;
     uint16 constant SWAP_FEE = 15;
     uint256 constant DEPOSIT_FEE = 50_000;
+    uint256 constant RAO = 1e9;
 
     uint256 constant USDC_IN = 1_000e6;
     /// 0.15% of 1_000e6 - 50_000 = 999_950_000, rounded down
@@ -50,33 +57,78 @@ contract StakerTest is FrontDoorTestBase {
     uint256 constant DEPOSITED = 3_993_800_300_000_000_000;
     uint256 constant DUST = 998_450_075;
     uint256 constant MIN_TAO = 3.9e18;
+    /// The order tripwires' revert data (tripThePull, tripTheSwap).
+    bytes usdcMoved = abi.encodeWithSignature("Error(string)", "the USDC moved");
+    bytes swapRan = abi.encodeWithSignature("Error(string)", "the swap ran");
 
     address treasury = makeAddr("treasury");
     address weth = makeAddr("weth");
-    address keeper = makeAddr("keeper");
 
     CascadeStaker staker;
     MockSwapRouter router;
+    /// The front door's oracle (its constructor's): 250 USDC per TAO until a test sets it.
+    MockTwap twap;
     bytes buyPath;
     bytes sellPath;
 
     function setUp() public override {
         super.setUp();
-        staker = new CascadeStaker(usdc, tao, fd, owner, treasury);
         router = new MockSwapRouter();
         router.setRate(address(usdc), BUY_PER_UNIT * 1e18);
         router.setRate(address(tao), SELL_RATE);
         buyPath = abi.encodePacked(address(usdc), uint24(500), weth, uint24(3000), address(tao));
         sellPath = abi.encodePacked(address(tao), uint24(3000), weth, uint24(500), address(usdc));
+        staker = new CascadeStaker(stakerParams());
+    }
 
-        vm.startPrank(owner);
-        staker.setRoute(0, route(CascadeStaker.RouterKind.UniswapV3, buyPath, sellPath, true));
-        staker.setDeliveryRoute(0);
-        staker.setFees(SWAP_FEE, DEPOSIT_FEE);
-        vm.stopPrank();
+    function beforeFrontDoor() internal override {
+        twap = new MockTwap(250e6);
+    }
+
+    function frontDoorParams() internal view override returns (CascadeFrontDoor.Params memory p) {
+        p = super.frontDoorParams();
+        p.oracle = twap;
     }
 
     // ---- helpers ----
+
+    /// The fixture staker's constructor arguments: route 0 through `router` along the two-hop paths, also the
+    /// delivery route, and fees 15 bps and 50_000.
+    function stakerParams() internal view returns (CascadeStaker.Params memory) {
+        return defaultStakerParams(usdc, tao, fd, owner, treasury, address(router), buyPath, sellPath);
+    }
+
+    /// Makes the router pay exactly `taoOut` TAO wei for `usdcSwapped` USDC units: the rate ceil(taoOut * 1e18 /
+    /// usdcSwapped) pays floor(usdcSwapped * rate / 1e18), which is taoOut for any usdcSwapped up to 1e18.
+    function payExactly(uint256 usdcSwapped, uint256 taoOut) internal {
+        uint256 rate = Math.ceilDiv(taoOut * 1e18, usdcSwapped);
+        router.setRate(address(usdc), rate);
+        assertEq(usdcSwapped * rate / 1e18, taoOut, "the router pays exactly taoOut");
+    }
+
+    /// The staker's fees on a stake of `usdcIn` at the fixture's fees: the deposit fee, then the swap fee on the rest.
+    function feesOn(uint256 usdcIn) internal pure returns (uint256) {
+        return DEPOSIT_FEE + (usdcIn - DEPOSIT_FEE) * SWAP_FEE / 10_000;
+    }
+
+    /// The order tripwires (Task 33's review, M1): alice's USDC pull into the staker, the first token a stake moves,
+    /// mocked to revert "the USDC moved"; and every swap through the router mocked to revert "the swap ran". A refusal
+    /// that still comes first was decided before that step.
+    function tripThePull() internal {
+        vm.mockCallRevert(
+            address(usdc), abi.encodeCall(usdc.transferFrom, (alice, address(staker), USDC_IN)), usdcMoved
+        );
+    }
+
+    function tripTheSwap() internal {
+        vm.mockCallRevert(address(router), abi.encodeWithSelector(IUniswapV3Router02.exactInput.selector), swapRan);
+    }
+
+    /// The buy floor as I-31 states it, written apart from the contract's expression: the oracle's value of the USDC
+    /// swapped, times 95%, rounded down.
+    function floorOf(uint256 usdcSwapped) internal view returns (uint256) {
+        return twap.taoValue(usdcSwapped) * 95 / 100;
+    }
 
     function route(CascadeStaker.RouterKind kind, bytes memory buy, bytes memory sell, bool active)
         internal
@@ -94,7 +146,7 @@ contract StakerTest is FrontDoorTestBase {
 
     function stakeAs(address payer, address beneficiary, uint256 usdcIn, uint8 routeId) internal returns (uint256) {
         vm.prank(payer);
-        return staker.stake(beneficiary, usdcIn, MIN_TAO, routeId, block.timestamp);
+        return staker.stake(beneficiary, usdcIn, MIN_TAO, routeId, vm.getBlockTimestamp());
     }
 
     function signPermit(uint256 key, address holder, uint256 value, uint256 nonce, uint256 deadline)
@@ -203,7 +255,7 @@ contract StakerTest is FrontDoorTestBase {
         fund(carol, 50_000);
         vm.expectRevert(CascadeStaker.AmountTooSmall.selector);
         vm.prank(carol);
-        staker.stake(carol, 50_000, 0, 0, block.timestamp);
+        staker.stake(carol, 50_000, 0, 0, vm.getBlockTimestamp());
     }
 
     function test_minTaoOutEnforcedByBalanceDelta() public {
@@ -328,14 +380,15 @@ contract StakerTest is FrontDoorTestBase {
     function test_permitPaths() public {
         (address payer, uint256 key) = makeAddrAndKey("payer");
         usdc.mint(payer, 3_000e6);
-        uint256 permitDeadline = block.timestamp + 1 hours;
+        uint256 permitDeadline = vm.getBlockTimestamp() + 1 hours;
 
         // a valid permit stakes
         (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, permitDeadline);
         vm.expectEmit(address(staker));
         emit CascadeStaker.Staked(payer, payer, USDC_IN, FEES, DEPOSITED);
         vm.prank(payer);
-        uint256 got = staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, block.timestamp, permitDeadline, v, r, s);
+        uint256 got =
+            staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         assertEq(got, DEPOSITED);
         assertEq(usdc.nonces(payer), 1);
         assertEq(usdc.allowance(payer, address(staker)), 0);
@@ -347,7 +400,7 @@ contract StakerTest is FrontDoorTestBase {
         vm.prank(carol);
         usdc.permit(payer, address(staker), USDC_IN, permitDeadline, v, r, s);
         vm.prank(payer);
-        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, block.timestamp, permitDeadline, v, r, s);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         assertEq(usdc.nonces(payer), 2);
         assertEq(usdc.allowance(payer, address(staker)), 0);
         assertEq(usdc.balanceOf(payer), 1_000e6);
@@ -359,7 +412,7 @@ contract StakerTest is FrontDoorTestBase {
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(staker), 0, USDC_IN)
         );
         vm.prank(payer);
-        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, block.timestamp, permitDeadline, v, r, s);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         // ... nor with a smaller allowance already in place, which is never exceeded
         vm.prank(payer);
         usdc.approve(address(staker), 500e6);
@@ -367,7 +420,7 @@ contract StakerTest is FrontDoorTestBase {
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(staker), 500e6, USDC_IN)
         );
         vm.prank(payer);
-        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, block.timestamp, permitDeadline, v, r, s);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         assertEq(usdc.balanceOf(payer), 1_000e6);
         assertEq(usdc.nonces(payer), 2);
         assertEq(usdc.balanceOf(treasury), 2 * FEES);
@@ -382,7 +435,7 @@ contract StakerTest is FrontDoorTestBase {
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(staker), 0, USDC_IN)
         );
         vm.prank(payer);
-        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, block.timestamp, permitDeadline, v, r, s);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         assertEq(usdc.balanceOf(payer), 1_000e6);
 
         // ... and stakes when an approve (the fallback for wallets whose permits fail) is in place,
@@ -390,7 +443,7 @@ contract StakerTest is FrontDoorTestBase {
         vm.prank(payer);
         usdc.approve(address(staker), 5_000e6);
         vm.prank(payer);
-        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, block.timestamp, permitDeadline, v, r, s);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
         assertEq(usdc.balanceOf(payer), 0);
         assertEq(usdc.allowance(payer, address(staker)), 4_000e6);
         assertEq(usdc.nonces(payer), 2);
@@ -427,10 +480,12 @@ contract StakerTest is FrontDoorTestBase {
         // the permit entry point too
         (address payer, uint256 key) = makeAddrAndKey("payer");
         usdc.mint(payer, USDC_IN);
-        (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, block.timestamp);
+        (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, vm.getBlockTimestamp());
         vm.expectRevert(CascadeStaker.BadBeneficiary.selector);
         vm.prank(payer);
-        staker.stakeWithPermit(address(fd), USDC_IN, MIN_TAO, 0, block.timestamp, block.timestamp, v, r, s);
+        staker.stakeWithPermit(
+            address(fd), USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), vm.getBlockTimestamp(), v, r, s
+        );
 
         assertEq(usdc.balanceOf(alice), USDC_IN);
         assertEq(usdc.balanceOf(payer), USDC_IN);
@@ -441,7 +496,7 @@ contract StakerTest is FrontDoorTestBase {
 
     function test_expiredDeadline() public {
         fund(alice, USDC_IN);
-        uint256 deadline = block.timestamp;
+        uint256 deadline = vm.getBlockTimestamp();
         vm.warp(deadline + 1);
         vm.expectRevert(CascadeStaker.Expired.selector);
         vm.prank(alice);
@@ -449,7 +504,7 @@ contract StakerTest is FrontDoorTestBase {
 
         // the deadline itself is still in time
         vm.prank(alice);
-        staker.stake(alice, USDC_IN, MIN_TAO, 0, block.timestamp);
+        staker.stake(alice, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp());
         assertEq(fd.depositOf(alice), DEPOSITED);
     }
 
@@ -472,11 +527,10 @@ contract StakerTest is FrontDoorTestBase {
         stakeAs(alice, alice, USDC_IN, 0);
         assertWholeStakeReverted();
 
-        // the front door's minimum
-        vm.startPrank(owner);
-        fd.setMaxBatchValue(4_000e18);
+        // the front door's minimum (the batch value back up is a loosening: through the scheduler, Task 11)
+        Schedule.run(fd, owner, abi.encodeCall(fd.setMaxBatchValue, (4_000e18)));
+        vm.prank(owner);
         fd.setCaps(5e18, 10_000e18);
-        vm.stopPrank();
         vm.expectRevert(CascadeFrontDoor.BelowMinDeposit.selector);
         stakeAs(alice, alice, USDC_IN, 0);
         assertWholeStakeReverted();
@@ -497,6 +551,251 @@ contract StakerTest is FrontDoorTestBase {
         assertEq(usdc.balanceOf(address(router)), 0, "router usdc");
         assertEq(router.calls(), 0, "router calls");
         assertEq(totalOpenDeposits(), 0, "deposits");
+        assertClean(0);
+    }
+
+    // ---- the buy floor (spec §3.7, I-31; Task 33) ----
+
+    /// A route paying 6% under the oracle's value of the USDC swapped is refused BelowOracleFloor though it pays the
+    /// caller's own minimum (or with none at all), by `stake` and by `stakeWithPermit`, with nothing moved.
+    function test_sixPercentShortReverts() public {
+        assertEq(staker.MAX_BUY_SLIPPAGE_BPS(), 500);
+        // 998_450_075 USDC units swapped at 4e9 TAO wei each; the floor 95% of it
+        uint256 value = twap.taoValue(TO_ROUTER);
+        assertEq(value, 3_993_800_300e9);
+        assertEq(floorOf(TO_ROUTER), 3_794_110_285e9);
+        uint256 paid = value * 94 / 100;
+        assertEq(paid, 3_754_172_282e9);
+        payExactly(TO_ROUTER, paid);
+        fund(alice, USDC_IN);
+
+        // a minimum the route meets (the router's own check passes), and none at all
+        uint256[2] memory minimums = [paid, 0];
+        for (uint256 i; i < minimums.length; ++i) {
+            vm.expectRevert(CascadeStaker.BelowOracleFloor.selector);
+            vm.prank(alice);
+            staker.stake(alice, USDC_IN, minimums[i], 0, vm.getBlockTimestamp());
+        }
+        assertWholeStakeReverted();
+
+        // the permit entry point: the permit is undone with the stake
+        (address payer, uint256 key) = makeAddrAndKey("payer");
+        usdc.mint(payer, USDC_IN);
+        uint256 permitDeadline = vm.getBlockTimestamp() + 1 hours;
+        (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, permitDeadline);
+        vm.expectRevert(CascadeStaker.BelowOracleFloor.selector);
+        vm.prank(payer);
+        staker.stakeWithPermit(payer, USDC_IN, paid, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
+        assertEq(usdc.balanceOf(payer), USDC_IN);
+        assertEq(usdc.nonces(payer), 0);
+        assertEq(fd.depositOf(payer), 0);
+        assertClean(0);
+    }
+
+    /// A route paying 4% under the oracle's value clears the floor: `stake` and `stakeWithPermit` each deposit what
+    /// it paid (here whole rao).
+    function test_fourPercentShortStakes() public {
+        uint256 paid = twap.taoValue(TO_ROUTER) * 96 / 100;
+        assertEq(paid, 3_834_048_288e9);
+        assertGt(paid, floorOf(TO_ROUTER));
+        payExactly(TO_ROUTER, paid);
+        uint256 minTaoOut = paid * 995 / 1000; // the site's quote less 0.5%
+        fund(alice, USDC_IN);
+
+        vm.expectEmit(address(staker));
+        emit CascadeStaker.Staked(alice, alice, USDC_IN, FEES, paid);
+        vm.prank(alice);
+        assertEq(staker.stake(alice, USDC_IN, minTaoOut, 0, vm.getBlockTimestamp()), paid);
+        assertEq(fd.depositOf(alice), paid);
+
+        (address payer, uint256 key) = makeAddrAndKey("payer");
+        usdc.mint(payer, USDC_IN);
+        uint256 permitDeadline = vm.getBlockTimestamp() + 1 hours;
+        (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, permitDeadline);
+        vm.prank(payer);
+        assertEq(
+            staker.stakeWithPermit(payer, USDC_IN, minTaoOut, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s), paid
+        );
+        assertEq(fd.depositOf(payer), paid);
+        assertEq(usdc.balanceOf(treasury), 2 * FEES);
+        assertEq(totalOpenDeposits(), 2 * paid);
+        assertClean(0);
+    }
+
+    /// The floor's boundary at every size (I-31): one wei under taoValue(usdcIn - fees) x 95%, rounded down (never
+    /// above the exact 95%), reverts BelowOracleFloor; exactly at it the floor passes and the front door decides: it
+    /// takes the deposit (the TAO floored to whole rao) or refuses it by its own limits, ZeroAmount when no whole rao
+    /// is left, BelowMinDeposit under its 1 TAO minimum, CapExceeded above its cap (lowered here to its 4,000 TAO
+    /// batch value, so that one refusal covers every deposit too large). First at the fixture's TWAP (250 USDC per
+    /// TAO), where `usdcIn` from one unit above the deposit fee to $1M runs from tiny stakes the door's minimum refuses
+    /// to deposits of up to 3,800 TAO; then at any TWAP price from 1 USDC unit a TAO to 1e30, which reaches prices at
+    /// which the floor rounds to 0 (a value of 1 wei or none), where no payment is under the floor and only the front
+    /// door refuses.
+    function testFuzz_floorAtEverySize(uint256 usdcIn, uint256 usdcPerTao) public {
+        usdcIn = bound(usdcIn, DEPOSIT_FEE + 1, 1_000_000e6);
+        (uint256 minDeposit, uint256 batchValue) = (fd.minDeposit(), fd.maxBatchValue());
+        vm.prank(owner);
+        fd.setCaps(minDeposit, batchValue);
+        fund(alice, usdcIn);
+        uint256 untouched = vm.snapshotState();
+        assertFloorBoundary(usdcIn);
+
+        vm.revertToState(untouched);
+        twap.setPrice(bound(usdcPerTao, 1, 1e30));
+        assertFloorBoundary(usdcIn);
+    }
+
+    /// alice stakes `usdcIn` with no minimum of her own: one wei under the floor reverts BelowOracleFloor; exactly at
+    /// it she gets the front door's own outcome for the floored amount.
+    function assertFloorBoundary(uint256 usdcIn) internal {
+        uint256 swapped = usdcIn - feesOn(usdcIn);
+        uint256 value = twap.taoValue(swapped);
+        uint256 atFloor = floorOf(swapped);
+        // the largest whole wei at or under the exact 95% of the value
+        assertLe(atFloor * 100, value * 95, "never above the exact 95%");
+        assertGt((atFloor + 1) * 100, value * 95, "the largest such");
+        if (atFloor > 0) {
+            payExactly(swapped, atFloor - 1);
+            vm.expectRevert(CascadeStaker.BelowOracleFloor.selector);
+            vm.prank(alice);
+            staker.stake(alice, usdcIn, 0, 0, vm.getBlockTimestamp());
+        }
+
+        payExactly(swapped, atFloor);
+        uint256 amount = atFloor - atFloor % RAO;
+        bytes4 refusal;
+        if (amount == 0) refusal = CascadeFrontDoor.ZeroAmount.selector;
+        else if (amount < fd.minDeposit()) refusal = CascadeFrontDoor.BelowMinDeposit.selector;
+        else if (amount > fd.depositCap()) refusal = CascadeFrontDoor.CapExceeded.selector;
+        if (refusal != bytes4(0)) {
+            vm.expectRevert(refusal);
+            vm.prank(alice);
+            staker.stake(alice, usdcIn, 0, 0, vm.getBlockTimestamp());
+            assertEq(usdc.balanceOf(alice), usdcIn, "nothing moved");
+            assertEq(totalOpenDeposits(), 0, "no deposit");
+        } else {
+            vm.prank(alice);
+            assertEq(staker.stake(alice, usdcIn, 0, 0, vm.getBlockTimestamp()), amount);
+            assertEq(fd.depositOf(alice), amount, "the floored TAO deposited");
+            assertEq(tao.balanceOf(address(staker)), atFloor % RAO, "the sub-rao dust stays");
+            assertEq(usdc.balanceOf(treasury), usdcIn - swapped, "the fees");
+        }
+    }
+
+    /// No oracle, no stake (I-31 fails closed): while the front door's oracle is the zero address (a scheduled
+    /// `setOracle(0)`, which also stops deliveries) a stake reverts NoOracle, by either entry point, before any token
+    /// moves, pinned by which revert wins: with the USDC pull and the swap each made to fail with its own error,
+    /// NoOracle still comes first, and with the oracle back each tripwire fires. A non-zero oracle address with no
+    /// code reverts with no data (the call's return data does not decode). There is no switch that skips the floor:
+    /// staking resumes when an oracle is back.
+    function test_zeroOracleRefusesStake() public {
+        Schedule.run(fd, owner, abi.encodeCall(fd.setOracle, (ICascadeTwap(address(0)))));
+        assertEq(address(fd.oracle()), address(0));
+        fund(alice, USDC_IN);
+        vm.expectRevert(CascadeStaker.NoOracle.selector);
+        stakeAs(alice, alice, USDC_IN, 0);
+
+        (address payer, uint256 key) = makeAddrAndKey("payer");
+        usdc.mint(payer, USDC_IN);
+        uint256 permitDeadline = vm.getBlockTimestamp() + 1 hours;
+        (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, permitDeadline);
+        vm.expectRevert(CascadeStaker.NoOracle.selector);
+        vm.prank(payer);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
+        assertEq(usdc.nonces(payer), 0);
+        assertEq(usdc.balanceOf(payer), USDC_IN);
+        assertWholeStakeReverted();
+
+        // the pull and the swap both trip, then the swap alone: NoOracle comes first each time
+        tripThePull();
+        tripTheSwap();
+        vm.expectRevert(CascadeStaker.NoOracle.selector);
+        stakeAs(alice, alice, USDC_IN, 0);
+        vm.clearMockedCalls();
+        tripTheSwap();
+        vm.expectRevert(CascadeStaker.NoOracle.selector);
+        stakeAs(alice, alice, USDC_IN, 0);
+        vm.clearMockedCalls();
+
+        Schedule.run(fd, owner, abi.encodeCall(fd.setOracle, (ICascadeTwap(makeAddr("codeless oracle")))));
+        vm.expectRevert(bytes(""));
+        stakeAs(alice, alice, USDC_IN, 0);
+        assertWholeStakeReverted();
+
+        // an oracle back: each tripwire is live, the stake reaching the pull, then (the pull let through) the swap
+        Schedule.run(fd, owner, abi.encodeCall(fd.setOracle, (twap)));
+        tripThePull();
+        tripTheSwap();
+        vm.expectRevert(usdcMoved);
+        stakeAs(alice, alice, USDC_IN, 0);
+        vm.clearMockedCalls();
+        tripTheSwap();
+        vm.expectRevert(swapRan);
+        stakeAs(alice, alice, USDC_IN, 0);
+        vm.clearMockedCalls();
+        assertWholeStakeReverted();
+        assertEq(stakeAs(alice, alice, USDC_IN, 0), DEPOSITED);
+    }
+
+    /// An oracle that cannot answer (a pool whose history no longer reaches the window: "OLD") refuses the stake with
+    /// its own reason, by either entry point, before any token moves, pinned by which revert wins: with the USDC pull
+    /// and the swap each made to fail with its own error, "OLD" still comes first, and with the oracle answering each
+    /// tripwire fires. Staking resumes when it answers.
+    function test_revertingOracleRefusesStake() public {
+        twap.setReverts(true);
+        fund(alice, USDC_IN);
+        vm.expectRevert(bytes("OLD"));
+        stakeAs(alice, alice, USDC_IN, 0);
+
+        (address payer, uint256 key) = makeAddrAndKey("payer");
+        usdc.mint(payer, USDC_IN);
+        uint256 permitDeadline = vm.getBlockTimestamp() + 1 hours;
+        (uint8 v, bytes32 r, bytes32 s) = signPermit(key, payer, USDC_IN, 0, permitDeadline);
+        vm.expectRevert(bytes("OLD"));
+        vm.prank(payer);
+        staker.stakeWithPermit(payer, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp(), permitDeadline, v, r, s);
+        assertEq(usdc.nonces(payer), 0);
+        assertEq(usdc.balanceOf(payer), USDC_IN);
+        assertWholeStakeReverted();
+
+        // the pull and the swap both trip: "OLD" comes first; the tripwire is live, as the answering oracle shows
+        tripThePull();
+        tripTheSwap();
+        vm.expectRevert(bytes("OLD"));
+        stakeAs(alice, alice, USDC_IN, 0);
+        twap.setReverts(false);
+        vm.expectRevert(usdcMoved);
+        stakeAs(alice, alice, USDC_IN, 0);
+
+        // the swap alone trips: "OLD" still comes first, and with the oracle answering the swap's own error does
+        vm.clearMockedCalls();
+        tripTheSwap();
+        twap.setReverts(true);
+        vm.expectRevert(bytes("OLD"));
+        stakeAs(alice, alice, USDC_IN, 0);
+        twap.setReverts(false);
+        vm.expectRevert(swapRan);
+        stakeAs(alice, alice, USDC_IN, 0);
+        vm.clearMockedCalls();
+        assertWholeStakeReverted();
+
+        assertEq(stakeAs(alice, alice, USDC_IN, 0), DEPOSITED);
+    }
+
+    /// The buy floor is the stake's alone: `sellFor` never reads the oracle (the front door's delivery floor covers
+    /// the sale), so it sells while the oracle cannot answer and while the front door has none.
+    function test_sellForReadsNoBuyFloor() public {
+        twap.setReverts(true);
+        sendTaoFromFrontDoor(10e18);
+        vm.expectCall(address(twap), abi.encodeWithSelector(ICascadeTwap.taoValue.selector), 0);
+        vm.prank(address(fd));
+        assertEq(staker.sellFor(10e18, alice, 0), 2_496_250_000);
+
+        Schedule.run(fd, owner, abi.encodeCall(fd.setOracle, (ICascadeTwap(address(0)))));
+        sendTaoFromFrontDoor(10e18);
+        vm.prank(address(fd));
+        assertEq(staker.sellFor(10e18, alice, 0), 2_496_250_000);
+        assertEq(usdc.balanceOf(alice), 2 * 2_496_250_000);
         assertClean(0);
     }
 
@@ -546,12 +845,8 @@ contract StakerTest is FrontDoorTestBase {
 
     /// The real delivery path: the front door sends alice's 10 TAO to the staker and checks her USDC.
     function test_deliverThroughStaker() public {
-        MockTwap twap = new MockTwap(250e6);
-        vm.startPrank(owner);
-        fd.setKeeper(keeper);
-        fd.setSwapper(address(staker));
-        fd.setOracle(twap);
-        vm.stopPrank();
+        // the swapper is scheduled only (Task 11); the oracle is the fixture's, from the front door's constructor
+        Schedule.run(fd, owner, abi.encodeCall(fd.setSwapper, (address(staker))));
 
         CascadeMessages.Entry[] memory e = new CascadeMessages.Entry[](1);
         e[0] = CascadeMessages.Entry(alice, 10e18);
@@ -559,7 +854,7 @@ contract StakerTest is FrontDoorTestBase {
         vm.prank(address(bridge));
         fd.onBridgeMessage(BITTENSOR, vault, CascadeMessages.encodePayouts(keccak256("batch-1"), 0, e), 10e18);
         vm.prank(alice);
-        fd.setDelivery(240e6, uint64(block.timestamp + 7 days), 6);
+        fd.setDelivery(240e6, uint64(vm.getBlockTimestamp() + 7 days), 6);
 
         // a route selling below the market floor (2_462.5e6) only makes the delivery revert
         router.setRate(address(tao), 245e6);
@@ -586,7 +881,7 @@ contract StakerTest is FrontDoorTestBase {
         staker.setRoute(1, route(CascadeStaker.RouterKind.Slipstream, buy, sell, true));
 
         fund(alice, 2 * USDC_IN);
-        uint256 deadline = block.timestamp + 600;
+        uint256 deadline = vm.getBlockTimestamp() + 600;
         vm.prank(alice);
         staker.stake(alice, USDC_IN, MIN_TAO, 1, deadline);
         assertEq(uint8(router.lastKind()), uint8(MockSwapRouter.Kind.Slipstream));
@@ -606,12 +901,12 @@ contract StakerTest is FrontDoorTestBase {
         vm.prank(owner);
         staker.setDeliveryRoute(1);
         assertEq(staker.deliveryRouteId(), 1);
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(vm.getBlockTimestamp() + 1 days);
         sendTaoFromFrontDoor(10e18);
         vm.prank(address(fd));
         staker.sellFor(10e18, alice, 0);
         assertEq(uint8(router.lastKind()), uint8(MockSwapRouter.Kind.Slipstream));
-        assertEq(router.lastDeadline(), block.timestamp);
+        assertEq(router.lastDeadline(), vm.getBlockTimestamp());
         assertEq(router.lastPath(), sell);
     }
 
@@ -651,6 +946,109 @@ contract StakerTest is FrontDoorTestBase {
         assertClean(0);
     }
 
+    /// The constructor stores route 0, the delivery route and the fees, each checked as its setter checks it and
+    /// logged as its setter logs it (after the treasury's TreasurySet), so a deploy needs no owner call before the
+    /// first stake. Only route 0 exists then, so the delivery route can only be 0.
+    function test_constructorSetsRouteAndFees() public {
+        CascadeStaker.Params memory p = stakerParams();
+        p.route0.kind = CascadeStaker.RouterKind.Slipstream;
+        // the caps themselves are accepted
+        p.swapFeeBps = 50;
+        p.depositFeeUsdc = 250_000;
+        address next = nextAddress();
+        vm.expectEmit(next);
+        emit CascadeStaker.TreasurySet(treasury);
+        vm.expectEmit(next);
+        emit CascadeStaker.RouteSet(0, CascadeStaker.RouterKind.Slipstream, address(router), buyPath, sellPath, true);
+        vm.expectEmit(next);
+        emit CascadeStaker.DeliveryRouteSet(0);
+        vm.expectEmit(next);
+        emit CascadeStaker.FeesSet(50, 250_000);
+        CascadeStaker s = new CascadeStaker(p);
+        assertEq(address(s), next);
+
+        (
+            CascadeStaker.RouterKind kind,
+            address routerAddr,
+            bytes memory storedBuy,
+            bytes memory storedSell,
+            bool active
+        ) = s.routes(0);
+        assertEq(uint8(kind), uint8(CascadeStaker.RouterKind.Slipstream));
+        assertEq(routerAddr, address(router));
+        assertEq(storedBuy, buyPath);
+        assertEq(storedSell, sellPath);
+        assertTrue(active);
+        (, address router1,,, bool active1) = s.routes(1);
+        assertEq(router1, address(0));
+        assertFalse(active1);
+        assertEq(s.deliveryRouteId(), 0);
+        assertEq(s.swapFeeBps(), 50);
+        assertEq(s.depositFeeUsdc(), 250_000);
+        assertEq(s.treasury(), treasury);
+        assertEq(s.owner(), owner);
+        assertEq(s.pendingOwner(), address(0));
+
+        // it stakes and sells at once, with no owner call first: at the caps 994_751_250 USDC units are swapped
+        usdc.mint(alice, USDC_IN);
+        vm.startPrank(alice);
+        usdc.approve(address(s), USDC_IN);
+        s.stake(alice, USDC_IN, MIN_TAO, 0, vm.getBlockTimestamp());
+        vm.stopPrank();
+        assertEq(uint8(router.lastKind()), uint8(MockSwapRouter.Kind.Slipstream));
+        assertEq(fd.depositOf(alice), 994_751_250 * BUY_PER_UNIT / 1e9 * 1e9);
+        tao.mint(address(s), 10e18);
+        vm.prank(address(fd));
+        // 2_500e6 less 0.5%
+        assertEq(s.sellFor(10e18, alice, 0), 2_487_500_000);
+
+        // what a setter refuses, the constructor refuses
+        p = stakerParams();
+        p.swapFeeBps = 51;
+        vm.expectRevert(CascadeStaker.FeeTooHigh.selector);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.depositFeeUsdc = 250_001;
+        vm.expectRevert(CascadeStaker.FeeTooHigh.selector);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.route0.router = address(0);
+        vm.expectRevert(CascadeStaker.ZeroAddress.selector);
+        new CascadeStaker(p);
+        bytes[4] memory badBuys = [
+            sellPath, // TAO -> USDC
+            abi.encodePacked(address(usdc), uint24(500), weth), // ends at WETH
+            abi.encodePacked(address(usdc), uint24(500), uint8(0), address(tao)), // 44 bytes
+            bytes("")
+        ];
+        for (uint256 i; i < badBuys.length; ++i) {
+            p = stakerParams();
+            p.route0.buyPath = badBuys[i];
+            vm.expectRevert(CascadeStaker.BadPath.selector);
+            new CascadeStaker(p);
+        }
+        p = stakerParams();
+        p.route0.sellPath = buyPath; // USDC -> TAO
+        vm.expectRevert(CascadeStaker.BadPath.selector);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.route0.sellPath = abi.encodePacked(weth, uint24(500), address(usdc)); // starts at WETH
+        vm.expectRevert(CascadeStaker.BadPath.selector);
+        new CascadeStaker(p);
+        // the delivery route must be active: not an inactive route 0, nor an id that names no route yet
+        p = stakerParams();
+        p.route0.active = false;
+        vm.expectRevert(CascadeStaker.RouteInactive.selector);
+        new CascadeStaker(p);
+        uint8[2] memory otherIds = [1, 255];
+        for (uint256 i; i < otherIds.length; ++i) {
+            p = stakerParams();
+            p.deliveryRouteId = otherIds[i];
+            vm.expectRevert(CascadeStaker.RouteInactive.selector);
+            new CascadeStaker(p);
+        }
+    }
+
     function test_constructorAndAdmin() public {
         assertEq(address(staker.usdc()), address(usdc));
         assertEq(address(staker.tao()), address(tao));
@@ -658,23 +1056,35 @@ contract StakerTest is FrontDoorTestBase {
         assertEq(staker.owner(), owner);
         assertEq(staker.treasury(), treasury);
 
+        CascadeStaker.Params memory p = stakerParams();
+        p.usdc = IERC20Permit(address(0));
         vm.expectRevert(CascadeStaker.ZeroAddress.selector);
-        new CascadeStaker(IERC20Permit(address(0)), tao, fd, owner, treasury);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.tao = IERC20(address(0));
         vm.expectRevert(CascadeStaker.ZeroAddress.selector);
-        new CascadeStaker(usdc, IERC20(address(0)), fd, owner, treasury);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.frontDoor = CascadeFrontDoor(payable(address(0)));
         vm.expectRevert(CascadeStaker.ZeroAddress.selector);
-        new CascadeStaker(usdc, tao, CascadeFrontDoor(payable(address(0))), owner, treasury);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.treasury = address(0);
         vm.expectRevert(CascadeStaker.ZeroAddress.selector);
-        new CascadeStaker(usdc, tao, fd, owner, address(0));
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.owner = address(0);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new CascadeStaker(usdc, tao, fd, address(0), treasury);
-        // tokens other than the front door's own
-        MockTAO otherTao = new MockTAO(18);
-        MockUSDC otherUsdc = new MockUSDC();
+        new CascadeStaker(p);
+        // tokens other than the front door's own (checked before route 0's paths, which name the fixture's)
+        p = stakerParams();
+        p.tao = new MockTAO(18);
         vm.expectRevert(CascadeStaker.TokenMismatch.selector);
-        new CascadeStaker(usdc, otherTao, fd, owner, treasury);
+        new CascadeStaker(p);
+        p = stakerParams();
+        p.usdc = new MockUSDC();
         vm.expectRevert(CascadeStaker.TokenMismatch.selector);
-        new CascadeStaker(otherUsdc, tao, fd, owner, treasury);
+        new CascadeStaker(p);
 
         address newTreasury = makeAddr("newTreasury");
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));

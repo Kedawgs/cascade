@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { DEPLOYMENT, type Deployment } from "@/lib/cascade/config";
+import { DEPLOYMENT, type Deployment, sourcePublished } from "@/lib/cascade/config";
 import { shortAddress } from "@/lib/format";
 import { contractsOf, type ContractRow, risksFor } from "@/lib/security-content";
 import type { StepId } from "@/lib/security-view";
 import { SITE_LINKS } from "@/lib/site";
 import { Mark } from "../Logo";
-import { PROTECTION_LEDE, ProtectionGrid } from "../landing/ProtectionGrid";
+import { protectionLede, ProtectionGrid } from "../landing/ProtectionGrid";
 import styles from "./Security.module.css";
 
 export function ProtectedSection() {
@@ -16,8 +16,8 @@ export function ProtectedSection() {
       <h2 id="protected-heading" className={styles.h2}>
         How your money is protected
       </h2>
-      <p className={styles.sectionLede}>{PROTECTION_LEDE}</p>
-      <ProtectionGrid />
+      <p className={styles.sectionLede}>{protectionLede()}</p>
+      <ProtectionGrid onSecurityPage />
     </section>
   );
 }
@@ -100,7 +100,7 @@ export function ContractsSection({ deployment = DEPLOYMENT }: { deployment?: Dep
 }
 
 export function RisksSection({ onWatch }: { onWatch: (dir: "in" | "out", id: StepId) => void }) {
-  const risks = risksFor(SITE_LINKS.github);
+  const risks = risksFor(SITE_LINKS.github, sourcePublished(DEPLOYMENT));
   return (
     <section className={styles.section} aria-labelledby="risks-heading">
       <h2 id="risks-heading" className={styles.h2}>
@@ -117,6 +117,11 @@ export function RisksSection({ onWatch }: { onWatch: (dir: "in" | "out", id: Ste
                 <button type="button" className={styles.watch} onClick={() => onWatch(w.dir, w.id)}>
                   {w.label} ↑
                 </button>
+              ) : w.href.startsWith("/") ? (
+                // a page of this site (the FAQ's answer on who controls Cascade) opens here, not in a new tab
+                <a className={styles.watch} href={w.href}>
+                  {w.label} →
+                </a>
               ) : (
                 <a className={styles.watch} href={w.href} target="_blank" rel="noopener noreferrer">
                   {w.label} ↗

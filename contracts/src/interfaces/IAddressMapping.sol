@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 /// @dev Bittensor address-mapping precompile address.
 address constant ADDRESS_MAPPING_ADDRESS = 0x000000000000000000000000000000000000080C;

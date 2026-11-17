@@ -2,29 +2,41 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState, type ReactNode } from "react";
+import { Suspense, useId, useState, type ReactNode } from "react";
 import { useCascadeAccount } from "@/lib/account";
+import { cancelSentCopy } from "@/lib/cancel-sent";
+import { useNow } from "@/lib/client-state";
+import { CANCEL_AT_ONCE, CANCEL_OPEN_STATUS, CANCEL_WAITING_STATUS, cancelHoldS, cancelWaitText } from "@/lib/cascade/flows";
+import { SEE_YOUR_TAO } from "@/lib/add-to-wallet";
 import {
   useBalances,
+  useCancelsSent,
+  useDeliveryPreference,
   useDeposit,
   useDeposits,
   useIndexerNamed,
   useIsV3,
+  useIsV32,
   usePendingEntries,
   usePendingEntry,
   usePosition,
   usePositionHistory,
+  useRetired,
+  useUsdcDelivery,
   useWithdrawal,
   useWithdrawals,
 } from "@/lib/cascade/hooks";
 import { type ActivityTab, parseActivityParams } from "@/lib/activity-params";
+import { requestFeeEth } from "@/lib/faq";
 import { type PendingEntry, receiptShows } from "@/lib/cascade/pending";
-import { offersClaim } from "@/lib/cascade/trail";
+import type { DepositRecord } from "@/lib/cascade/records";
+import { depositCancelSent, isDelivering, offersClaim, withdrawalCancelSent } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { sentRows } from "@/lib/sent";
-import { stakeAgainHref } from "@/lib/stake-form";
+import { claimButtonLabel, claimChoices, deliveryOffClaim, stakeAgainHref, TURN_OFF_DELIVERY, turnOffDeliveryOffered } from "@/lib/stake-form";
 import { DepositList, WithdrawalList } from "../ActivityList";
+import { AddToWallet } from "../AddToWallet";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
@@ -32,7 +44,8 @@ import { ReceiptLink } from "../ReceiptLink";
 import { Trail } from "../Trail";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
-import { SendItNow } from "./SendItNow";
+import { RetiredNotice } from "./RetiredNotice";
+import { BlockNotice, SendItNow } from "./SendItNow";
 import styles from "./ActivityScreen.module.css";
 
 function BackLink({ href = "/activity" }: { href?: string }) {
@@ -65,7 +78,9 @@ export function PendingReceipt({ entry, onRetry }: { entry: PendingEntry; onRetr
   const deposit = n.kind === "deposit";
   const title = deposit
     ? `Where your ${n.usdc !== undefined ? formatUsdShort(n.usdc) : `${formatTao(n.tao, 4)} TAO`} is going`
-    : `Your unstake of about ${formatUsd(n.usdc)}`;
+    : n.usdc !== undefined
+      ? `Your unstake of about ${formatUsd(n.usdc)}`
+      : `Your unstake of about ${formatTao(n.tao, 4)} TAO`;
   return (
     <>
       <BackLink href={deposit ? "/activity" : "/activity?tab=unstakes"} />
@@ -101,14 +116,69 @@ export function PendingReceipt({ entry, onRetry }: { entry: PendingEntry; onRetr
   );
 }
 
+/** A deposit's cancel while it waits in its open batch. On v3.2 (R11) it waits out the five-minute cooldown first: until
+ * `cancelableAt` (the account's, as last read; 0 is no wait) it says how long, each second, and holds the button; the
+ * click checks the deposit and the clock on Base again (flows.ts planCancelDeposit), and that check decides. R12d (M1):
+ * the wait is counted on Base's clock (the block's time the read came with, and the time since by this device:
+ * flows.ts cancelHoldS), never this device's clock alone, which can be minutes off; never held more than the cooldown
+ * past the read; a record without that clock holds nothing. The countdown is no live region: a screen reader is told the
+ * state, once as it changes (waiting, then open). Build B's 0 (deposits paused, or batches unable to leave) says a
+ * cancel works at once.
+ *
+ * The button and its words sit apart on the receipt (the button in the row beside Send it now, the words under the row:
+ * SendItNow's `action` and `actionNote`), so each counts the same wait for itself, each second. */
+function useCancelHold(deposit: DepositRecord): { wait: string | null; atOnce: boolean; read: boolean } {
+  const now = useNow(1_000);
+  const at = deposit.cancelableAt;
+  const hold = at !== undefined && deposit.cancelClock ? cancelHoldS(at, deposit.cancelClock, now) : 0;
+  // atOnce, build B: 0 is the door's word that nothing waits now (deposits paused, or its primary bridge disabled);
+  // read: a cooldown was read at all (v3.2), so its state is told to a screen reader
+  return { wait: cancelWaitText(hold), atOnce: at === 0, read: at !== undefined };
+}
+
+/** The cancel itself: held while a flow runs (`busy`: its label, "cancel" while it is this one, which then says to
+ * confirm in the wallet, as every other button here does), and through the cooldown. */
+function CancelDepositButton({ deposit, busy, onCancel }: { deposit: DepositRecord; busy: string | null; onCancel: () => void }) {
+  const { wait } = useCancelHold(deposit);
+  return (
+    <button type="button" className="pill pill-ghost pill-danger" disabled={busy !== null || wait !== null} onClick={onCancel}>
+      {busy === "cancel" ? "Confirm in your wallet…" : "Cancel deposit"}
+    </button>
+  );
+}
+
+/** Its words, under the row: how long until a cancel works, or that it works at once, and the state for a screen reader. */
+function CancelDepositNote({ deposit }: { deposit: DepositRecord }) {
+  const { wait, atOnce, read } = useCancelHold(deposit);
+  return (
+    <>
+      {wait !== null && <p>{wait}</p>}
+      {atOnce && <p>{CANCEL_AT_ONCE}</p>}
+      {read && (
+        <p role="status" className="sr-only">
+          {wait !== null ? CANCEL_WAITING_STATUS : CANCEL_OPEN_STATUS}
+        </p>
+      )}
+    </>
+  );
+}
+
 export function DepositDetail({ account, id }: { account: string; id: string }) {
-  const { data: deposit, isPending, isFetching, isError, refetch } = useDeposit(account, id);
+  const { data: read, isPending, isFetching, isError, refetch } = useDeposit(account, id);
   const entry = usePendingEntry(account, "deposit", id);
   const v3 = useIsV3();
   const { data: position } = usePosition(account);
   const wallet = useBalances(account);
   const flows = useFlows(account);
   const router = useRouter();
+  // a cancel this browser sent that the record, read before it, doesn't show yet: the receipt goes by this browser's own
+  // word until the read catches up, so a deposit already taken back out is never offered its cancel, or Send it now,
+  // again (cancel-sent.ts). With no such cancel, the record as read
+  const cancelSent = useCancelsSent(account, "deposit", flows.busy !== null)(read);
+  const deposit = read && cancelSent ? depositCancelSent(read, cancelSent) : read;
+  // a retired deployment carries on no stake, and with USDC delivery off no swap back to USDC is offered (Task 60)
+  const retired = useRetired();
+  const usdcDelivery = useUsdcDelivery();
   const shows = receiptShows({ record: deposit, entry, isPending, isFetching, isError });
   if (entry && (shows === "pending" || shows === "pending-error")) {
     return <PendingReceipt entry={entry} {...(shows === "pending-error" ? { onRetry: () => void refetch() } : {})} />;
@@ -119,10 +189,13 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
 
   const staked = deposit.status === "staked";
   const walletTao = wallet.data?.tao ?? 0n;
-  const walletTaoBack = deposit.status === "cancelled" ? (walletTao < deposit.taoWei ? walletTao : deposit.taoWei) : 0n;
+  const walletTaoBack = usdcDelivery && deposit.status === "cancelled" ? (walletTao < deposit.taoWei ? walletTao : deposit.taoWei) : 0n;
   const amount = deposit.amountUsd !== undefined ? formatUsdShort(deposit.amountUsd) : `${formatTao(deposit.taoAmount, 4)} TAO`;
-  // a stake to carry on here: held, with its reason, while the contracts don't match
-  const carriesOn = deposit.status === "needs_you" || (deposit.status === "failed" && !!deposit.retryable);
+  // a stake to carry on here: held, with its reason, while the contracts don't match; none on a retired deployment
+  const carriesOn = !retired && (deposit.status === "needs_you" || (deposit.status === "failed" && !!deposit.retryable));
+  const restake = !retired && deposit.status === "failed" && !!deposit.restake;
+  // still in its open batch: the TAO a cancel takes back out of it
+  const cancellableWei = deposit.cancellableWei;
   return (
     <>
       <BackLink />
@@ -135,7 +208,7 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
             <dt>{staked ? "Worth now" : "TAO in this deposit"}</dt>
             <dd>
               {staked
-                ? position
+                ? position && !position.priceMissing
                   ? formatUsd(deposit.taoAmount * position.taoPriceUsd)
                   : "–"
                 : `${formatTao(deposit.taoAmount, 4)} TAO`}
@@ -149,11 +222,32 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
             </div>
           )}
         </dl>
-        {/* still in its open batch: when it leaves, and Send it now */}
-        <SendItNow account={account} what="deposit" waiting={deposit.cancellableWei !== undefined} href={`/activity?deposit=${id}`} />
-        {(deposit.status === "needs_you" || deposit.retryable || deposit.restake || deposit.nothingSent || deposit.cancellableWei !== undefined || walletTaoBack > 0n) && (
+        {/* still in its open batch: when it leaves, and its two buttons in one row, Send it now and the cancel. The cancel
+            is the receipt's own: it shows whatever the batch's block has to show (SendItNow, `action`) */}
+        <SendItNow
+          account={account}
+          what="deposit"
+          waiting={cancellableWei !== undefined}
+          href={`/activity?deposit=${id}`}
+          {...(cancellableWei !== undefined
+            ? {
+                action: (
+                  <CancelDepositButton
+                    deposit={deposit}
+                    busy={flows.busy}
+                    onCancel={() => void flows.cancel("deposit", id, cancellableWei, deposit.cancelBatchId).catch(() => undefined)}
+                  />
+                ),
+                actionNote: <CancelDepositNote deposit={deposit} />,
+              }
+            : {})}
+        />
+        {/* a cancel sent from this browser, in the buttons' place: on its way, then what it came to */}
+        {cancelSent && <BlockNotice {...cancelSentCopy("deposit", cancelSent)} />}
+        {(carriesOn || restake || deposit.nothingSent || walletTaoBack > 0n) && (
           <Actions>
-            {deposit.status === "needs_you" &&
+            {carriesOn &&
+              deposit.status === "needs_you" &&
               (flows.moved?.id === id ? (
                 // the price moved since the user last saw a figure (flows.error says by how much): today's
                 // quote goes only once they say so, and is quoted again on the way (use-flows.ts, resumeStake)
@@ -165,12 +259,12 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
                   {flows.busy === "stake" ? "Confirm in your wallet…" : "Continue this deposit"}
                 </button>
               ))}
-            {deposit.status === "failed" && deposit.retryable && (
+            {carriesOn && deposit.status === "failed" && deposit.retryable && (
               <button type="button" className="pill pill-block" disabled={flows.locked} onClick={() => void flows.resumeStake(id).catch(() => undefined)}>
                 {flows.busy === "stake" ? "Confirm in your wallet…" : "Try the deposit again"}
               </button>
             )}
-            {deposit.status === "failed" && deposit.restake && (
+            {restake && (
               // a fresh stake of the same amount, quoted afresh on the stake form
               <Link href={stakeAgainHref(deposit.amountUsd)} className="pill pill-block">
                 Stake again at today&apos;s price
@@ -194,16 +288,6 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
                 Remove it (nothing was sent)
               </button>
             )}
-            {deposit.cancellableWei !== undefined && (
-              <button
-                type="button"
-                className="pill pill-ghost pill-block"
-                disabled={flows.busy !== null}
-                onClick={() => void flows.cancel("deposit", id, deposit.cancellableWei as bigint).catch(() => undefined)}
-              >
-                Cancel this deposit before its batch closes
-              </button>
-            )}
           </Actions>
         )}
         {/* the contracts not matching holds only the carrying on; the ways out stay open */}
@@ -218,13 +302,25 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
 }
 
 export function WithdrawalDetail({ account, id }: { account: string; id: string }) {
-  const { data: withdrawal, isPending, isFetching, isError, refetch } = useWithdrawal(account, id);
+  const { data: read, isPending, isFetching, isError, refetch } = useWithdrawal(account, id);
   const entry = usePendingEntry(account, "withdrawal", id);
   // the same query as the receipt's: one read serves both
   const all = useWithdrawals(account);
   const flows = useFlows(account);
+  // a cancel this browser sent that the record, read before it, doesn't show yet (as a deposit's receipt: cancel-sent.ts)
+  const cancelSent = useCancelsSent(account, "withdrawal", flows.busy !== null)(read);
+  const withdrawal = read && cancelSent ? withdrawalCancelSent(read, cancelSent) : read;
+  // the cancel's small print, which its button is described by
+  const cancelNoteId = useId();
+  // v3.2 with USDC delivery off (Task 60, spec §5): claims as TAO alone, and the prompt while the chain holds a preference
+  const usdcDelivery = useUsdcDelivery();
+  const preference = useDeliveryPreference(account, !usdcDelivery);
+  // the request fee the cancel doesn't refund, as the deployment launched with it (v3.2's 0.0002 ETH, v3-launch's 0.0001)
+  const feeEth = requestFeeEth(useIsV32());
   // a claim whose swap failed (with a batching wallet both roll back): offer the TAO without the swap
   const [claimFailed, setClaimFailed] = useState(false);
+  // the claim button pressed (its keepTao), while its claim runs: only it says to confirm in the wallet
+  const [pressed, setPressed] = useState<boolean | null>(null);
   // one claim pays everything back on Base, so it settles every unstake that is ready
   const ready = (all.data ?? []).filter(offersClaim).map((w) => w.id);
   const claimIds = ready.includes(id) ? ready : [...ready, id];
@@ -237,6 +333,13 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
   if (!withdrawal) return <NotFound what="unstake" />;
 
   const paid = withdrawal.status === "paid";
+  // what this receipt claims: the claim it offers, and with USDC delivery off one being delivered too (claiming it as TAO
+  // now clears the preference before the keeper sells it)
+  const claimHere = offersClaim(withdrawal) || (!usdcDelivery && isDelivering(withdrawal) && withdrawal.claimable > 0n);
+  const choices = claimHere ? claimChoices({ keepsTao: withdrawal.keepsTao === true, saleHeld: flows.saleHeld, claimFailed, usdcDelivery }) : [];
+  const prompt = !usdcDelivery && claimHere ? deliveryOffClaim(withdrawal.claimable, { data: preference.data, isError: preference.isError })?.prompt : null;
+  // the TAO this receipt claims or claimed as TAO: Add to wallet beside it, so the wallet shows it (Task 59b review, M4)
+  const seeTao = choices.some((c) => c.keepTao) || withdrawal.received?.keptTao !== undefined;
   // dollars first: what comes back in USDC, falling back to TAO when there is no estimate
   const got = paid ? withdrawal.received?.usdc : undefined;
   const title =
@@ -245,6 +348,8 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
       : withdrawal.usdcAmount !== undefined
         ? `Your unstake of about ${formatUsd(withdrawal.usdcAmount)}`
         : `Your unstake of ${formatTao(withdrawal.taoAmount, 4)} TAO`;
+  // still in its open batch: the shares a cancel takes back out of it
+  const cancellableShares = withdrawal.cancellableShares;
   return (
     <>
       <BackLink href="/activity?tab=unstakes" />
@@ -281,9 +386,33 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
             )
           )}
         </dl>
-        {/* still in its open batch: when it leaves, and Send it now */}
-        <SendItNow account={account} what="unstake" waiting={withdrawal.cancellableShares !== undefined} href={`/activity?withdrawal=${id}`} />
-        {withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
+        {/* still in its open batch: when it leaves, and its two buttons in one row, Send it now and the cancel (the
+            receipt's own, shown whatever the batch's block has to show), with what the cancel doesn't refund under them */}
+        <SendItNow
+          account={account}
+          what="unstake"
+          waiting={cancellableShares !== undefined}
+          href={`/activity?withdrawal=${id}`}
+          {...(cancellableShares !== undefined
+            ? {
+                action: (
+                  <button
+                    type="button"
+                    className="pill pill-ghost pill-danger"
+                    aria-describedby={cancelNoteId}
+                    disabled={flows.busy !== null}
+                    onClick={() => void flows.cancel("withdrawal", id, cancellableShares).catch(() => undefined)}
+                  >
+                    {flows.busy === "cancel" ? "Confirm in your wallet…" : "Cancel unstake"}
+                  </button>
+                ),
+                actionNote: <p id={cancelNoteId}>{`If you cancel, the ${feeEth} ETH request fee isn't refunded.`}</p>,
+              }
+            : {})}
+        />
+        {/* a cancel sent from this browser, in the buttons' place: on its way, then what it came to */}
+        {cancelSent && <BlockNotice {...cancelSentCopy("unstake", cancelSent)} />}
+        {usdcDelivery && withdrawal.status === "needs_you" && withdrawal.steps[3]?.status === "action" && (
           <Actions>
             <button type="button" className="pill pill-block" disabled={flows.busy !== null} onClick={() => void flows.resumeClaim(id).catch(() => undefined)}>
               {flows.busy === "claim" ? "Confirm in your wallet…" : "Swap it to USDC"}
@@ -297,37 +426,46 @@ export function WithdrawalDetail({ account, id }: { account: string; id: string 
             </Link>
           </Actions>
         )}
-        {(offersClaim(withdrawal) || withdrawal.cancellableShares !== undefined) && (
+        {claimHere && (
           <Actions>
-            {offersClaim(withdrawal) && (
-              <>
-                <button
-                  type="button"
-                  className="pill pill-block"
-                  disabled={flows.busy !== null}
-                  onClick={() => void flows.claim(claimIds, false).then(() => setClaimFailed(false), () => setClaimFailed(true))}
-                >
-                  {flows.busy === "claim" ? "Confirm in your wallet…" : "Claim as USDC"}
-                </button>
-                {(claimFailed || flows.saleHeld) && (
-                  // the TAO itself is always there to claim: after a sale held by the price check (flows.error says
-                  // why), or a claim whose swap failed
-                  <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.claim(claimIds, true).catch(() => undefined)}>
-                    {flows.saleHeld ? "Claim as TAO instead" : "Claim now and swap to USDC separately"}
-                  </button>
-                )}
-              </>
+            {prompt && (
+              <p role="status" className={styles.panelText}>
+                {prompt}
+              </p>
             )}
-            {withdrawal.cancellableShares !== undefined && (
-              <button
-                type="button"
-                className="pill pill-ghost pill-block"
-                disabled={flows.busy !== null}
-                onClick={() => void flows.cancel("withdrawal", id, withdrawal.cancellableShares as bigint).catch(() => undefined)}
-              >
-                Cancel this unstake (the 0.0001 ETH request fee isn&apos;t refunded)
+            {claimHere &&
+              // Claim as USDC first, the TAO itself after a sale held by the price check (flows.error says why) or a claim
+              // whose swap failed; v3.2's Receive TAO asked for it as TAO from the start, so that leads (stake-form.ts); with
+              // USDC delivery off, Claim as TAO alone
+              choices.map((choice, i) => (
+                <button
+                  key={choice.label}
+                  type="button"
+                  className={i === 0 ? "pill pill-block" : "pill pill-ghost pill-block"}
+                  disabled={flows.busy !== null}
+                  onClick={() => {
+                    setPressed(choice.keepTao);
+                    void (choice.keepTao
+                      ? flows.claim(claimIds, true).catch(() => undefined)
+                      : flows.claim(claimIds, false).then(() => setClaimFailed(false), () => setClaimFailed(true))
+                    ).finally(() => setPressed(null));
+                  }}
+                >
+                  {claimButtonLabel(choice, { busy: flows.busy, pressed })}
+                </button>
+              ))}
+            {/* beside the claim with USDC delivery off: the preference turned off at once (Task 60 follow-up) */}
+            {claimHere && turnOffDeliveryOffered(usdcDelivery, { data: preference.data, isError: preference.isError }) && (
+              <button type="button" className="pill pill-ghost pill-block" disabled={flows.busy !== null} onClick={() => void flows.turnOffDelivery().catch(() => undefined)}>
+                {flows.busy === "delivery" ? "Confirm in your wallet…" : TURN_OFF_DELIVERY}
               </button>
             )}
+          </Actions>
+        )}
+        {seeTao && (
+          <Actions>
+            <p className={styles.panelText}>{SEE_YOUR_TAO}</p>
+            <AddToWallet className="pill pill-ghost pill-block" noteClassName={styles.panelText} />
           </Actions>
         )}
         {/* an unstake's actions here (claim, swap, cancel) are all ways out, never held */}
@@ -361,6 +499,8 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   // browser may still be missing from the list, so the list says so. Read only for the deposits, and
   // only where an indexer is named (with none, nothing is ever seeded: no reads for it)
   const indexer = useIndexerNamed();
+  // a retired deployment's empty deposit list invites no stake (Task 60 review, Minor 1)
+  const retired = useRetired();
   const asked = tab === "deposits" && indexer;
   const history = usePositionHistory(account, asked);
   const olderChecking = asked && history.data?.provisional === true;
@@ -374,7 +514,7 @@ export function Lists({ account, tab }: { account: string; tab: ActivityTab }) {
   const sent = pending[tab];
   const rows =
     tab === "deposits" ? (
-      <DepositList deposits={deposits.data ?? []} pending={sent} />
+      <DepositList deposits={deposits.data ?? []} pending={sent} retired={retired} />
     ) : (
       <WithdrawalList withdrawals={withdrawals.data ?? []} pending={sent} />
     );
@@ -450,6 +590,7 @@ export function ActivityScreen() {
     <AppShell active="activity">
       <h1 className={app.title}>Activity</h1>
       <p className={app.sub}>Every deposit and unstake, with receipts</p>
+      <RetiredNotice />
       {state.status === "loading" ? (
         <Loading />
       ) : account ? (

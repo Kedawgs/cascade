@@ -135,21 +135,26 @@ What it guards:
 
 ## Settings
 
-| Setting | Launch | Default or test | Why |
-|---|---|---|---|
-| Deposit cap (front door) | 40 TAO | same | Already set. About $10k. |
-| Batch value (front door) | 10 TAO | same | A batch carries at most a quarter of the cap. |
-| Minimum deposit | 0.04 TAO | same | |
-| Batch interval / payout delay | 1 h / 24 h | 10 min / 1 h (test) | The payout delay gives the guardian a day to stop a bad batch. |
-| Redeem request fee | 0.0001 ETH | same | Kept: 50 redeems pay about 0.005 ETH, the bridge fee to close a full batch. |
-| **Outflow: `maxDailyOutflowBps` / `minDailyOutflow`** | **20% / 10 TAO** | 20% / 100 TAO | See below. **Decision.** |
-| **`maxEntryValue` / `maxMessageValue` / `minChunk`** | **10 TAO / 15 TAO / 10** | 2,000 / 4,000 / 10 | One redeem entry burns at most 10 TAO per delivery. One payout message carries at most 15 TAO: near the 10 TAO batch, and above a day's largest allowance at 60 TAO (12 TAO), so a day's exits still go home in one message and pay one bridge fee. **Decision** (15 TAO). |
-| **`maxFeeBps` / `maxFeeAbs`** (payout bridge-fee ceiling) | **1% / 0.005 TAO** | 1% / 0.02 TAO | The live fee is about 0.00105 TAO, so this leaves about 5x. Above the ceiling, payouts wait (nothing is lost) until fees fall or the owner raises it. 0.02 TAO could take half of a 0.04 TAO minimum deposit; 0.005 takes at most an eighth. **Decision.** |
-| **`maxTotalAssets`** | **44 TAO** | 1,000 TAO | Stops direct (Bittensor) deposits 10% above the cap. It never stops a front-door batch. It also bounds the large direct deposit that draining the outflow allowance's base with a gift needs (a direct deposit no longer raises the base, which counts only ramped-in stake). **Decision.** |
-| **Adapter caps (`maxMessageValue`, each adapter's constructor)** | **50 TAO each** | 5,000 TAO (test: the lane's limit, as before) | One bridge message carries at most 50 TAO either way: five times the 10 TAO batch and above the 15 TAO payout message, so a bug or a stolen key moves at most that per message. The Base adapter's must hold a full batch (`maxBatchValue`); the Bittensor adapter's the vault's payout message and entry and a full batch (a bounced deposit can be one); deploy refuses to plan otherwise and verify fails. Raising those limits past 50 TAO needs new adapters first (7 days). **Decision** (about 50 TAO). |
-| Reward cut / swap fee / deposit fee | 10% / 0.15% / $0.05 | same | Unchanged from the test. |
-| Delivery slippage | 1.5% | same | Default. |
-| `maxDeposits` / `maxRedeems`, claim gas, hotkey dust, floors, unstake margin | defaults | same | Unchanged. verify now reads them all back. |
+The Launch column is v3-launch's (`src/config.ts`). The v3.2 column is v3.2's constructor arguments
+(`src/v32/settings.ts` `SETTINGS_V32_LAUNCH`, spec Appendix B), set at deploy and never after; where it differs, its
+Why says so.
+
+| Setting | Launch | v3.2 | Default or test | Why |
+|---|---|---|---|---|
+| Deposit cap (front door) | 40 TAO | 40 TAO | same | Already set. About $10k. |
+| Batch value (front door) | 10 TAO | 10 TAO | same | A batch carries at most a quarter of the cap. |
+| Minimum deposit | 0.04 TAO | 0.04 TAO | same | v3.2 refuses one below 0.03 TAO (`MIN_DEPOSIT_FLOOR`, twice `MAX_FEE_ABS`). |
+| Batch interval / payout delay | 1 h / 24 h | 1 h / 24 h | 10 min / 1 h (test) | The payout delay gives the guardian a day to stop a bad batch. |
+| Redeem request fee | 0.0001 ETH | **0.0002 ETH** | 0.0001 ETH | v3-launch's is kept. v3.2's is twice it (**the founder, 2026-11-16**): a full redeem list (50 requests) pays 0.01 ETH into the pot, which must cover the bridge fee to close a full batch, 50 deposits and 50 redeem requests (about 0.0031 to 0.0043 ETH on v3.2: 7,000,000 gas toward Bittensor), not a one-entry batch's: about 2.3 times at the 0.0043 ETH quote. At 0.0001 ETH a full list paid 0.005 ETH, about 1.0 to 1.6 times, a thin margin that a rise in TAO/ETH or in Bittensor's gas price takes away. Below it a list filled with fake requests (a request needs only its fee) can't close itself, and the keeper pays the rest. v3.2's monitor warns below 1.5 times (`batch.redeem_fee_thin`: at 0.0002 ETH, a full batch's quote above about 0.0067 ETH); the owner's `setRedeemRequestFee` is immediate, at most 0.001 ETH. Each user pays it once per batch they request in. **Decision.** |
+| **Outflow: `maxDailyOutflowBps` / `minDailyOutflow`** | **20% / 10 TAO** | **20% / 10 TAO** (and `globalOutflowBps` 20%) | 20% / 100 TAO | See below. **Decision.** |
+| **`maxEntryValue` / `maxMessageValue` / `minChunk`** | **10 TAO / 15 TAO / 10** | **10 TAO / 15 TAO / 10** | 2,000 / 4,000 / 10 | One redeem entry burns at most 10 TAO per delivery. One payout message carries at most 15 TAO: near the 10 TAO batch, and above a day's largest allowance at 60 TAO (12 TAO), so a day's exits still go home in one message and pay one bridge fee. **Decision** (15 TAO). |
+| **`maxFeeBps` / `maxFeeAbs`** (payout bridge-fee ceiling) | **1% / 0.005 TAO** | **1% / 0.015 TAO** | 1% / 0.02 TAO | The live fee is about 0.00105 TAO, so v3-launch's leaves about 5x. Above the ceiling, payouts wait (nothing is lost) until fees fall or the owner raises it. 0.02 TAO could take half of a 0.04 TAO minimum deposit; 0.005 takes at most an eighth. v3.2 bounds it to 0.01 to 0.015 TAO (`MIN_FEE_ABS` to `MAX_FEE_ABS`, half its 0.03 TAO smallest redeem) and launches at the top, about 14x the live fee: a fee above the ceiling is the caller's to top up, and the charge on a payout is at most half its sum. **Decision.** |
+| **`maxTotalAssets`** | **44 TAO** | **44 TAO** | 1,000 TAO | Stops direct (Bittensor) deposits 10% above the cap. It never stops a front-door batch. It also bounds the large direct deposit that draining the outflow allowance's base with a gift needs (a direct deposit no longer raises the base, which counts only ramped-in stake). **Decision.** |
+| **Adapter caps (`maxMessageValue`, each adapter's constructor)** | **50 TAO each** | **50 TAO each** | 5,000 TAO (test: the lane's limit, as before) | One bridge message carries at most 50 TAO either way: five times the 10 TAO batch and above the 15 TAO payout message, so a bug or a stolen key moves at most that per message. The Base adapter's must hold a full batch (`maxBatchValue`); the Bittensor adapter's the vault's payout message and entry and a full batch (a bounced deposit can be one); deploy refuses to plan otherwise and verify fails. Raising those limits past 50 TAO needs new adapters first (7 days). **Decision** (about 50 TAO). |
+| Reward cut / swap fee / deposit fee | 10% / 0.15% / $0.05 | 10% / 0.15% / $0.05 | same | Unchanged from the test. |
+| Delivery slippage | 1.5% | 1.5% | same | Default. |
+| `maxDeposits` / `maxRedeems`, claim gas, hotkey dust, floors, unstake margin | defaults | 50 / 50, 55,000,000, 0.001 TAO, the pools' measured floors (`MEASURED_V32`), 0 | same | Unchanged. verify now reads them all back. Build B's list half rule: a deposit list at half its limit (25 of 50) can close at once and the keeper closes it on its next round, whatever its fees (the list still refuses a new depositor only at 50); the redeem list closes at full. A forced close commits at least 1 TAO at the 0.04 minimum to the vault: its close names the least 25 entries carry (R12d), so it is 25 entries, or, with the others cancelled under the close past the interval, as few as one entry of at least 1 TAO. At 0.01 ETH a day the keeper's Base cap holds the closes of about 7 TAO so committed instead of about 10 (about 13 one-entry closes need 13 TAO; before R12d a cancel-down made each one entry of 0.04 TAO, about 0.00075 ETH, so about 13 closes and 0.52 TAO reached the cap) (runbook 7.10, `batch.deposits_full`). |
+| v3.2 only: `rewardVesting` / `idleBufferBps` / `unstakeGas` / `minDirectDeposit` | none | 30 days / 0 / 400,000 / 0.01 TAO | | Spec Appendix B. |
 
 ### The outflow limit, the main trade-off
 
@@ -179,10 +184,10 @@ Alternatives: a 5 TAO floor exits a big holder in 8 windows; a 15 TAO floor boun
 
 - **Grow the TAO/WETH pool's observation slots.** `pnpm ops cardinality` prints the exact
   transactions. The oracle's 30-minute TWAP needed 901 slots on Base's 2-second blocks, and the pool had
-  600 (read 2026-10-28). The target is 2,000, for margin. Since Base's 200 ms blocks (block 53,556,128,
-  2026-11-05) a pool still writes at most one observation a second, so the window needs 1,801: the
-  pools' 2,000 and 6,700 (read 2026-11-14) cover it. ops measures Base's block time from its headers,
-  so preflight, verify and `pnpm ops cardinality` judge the need as it is.
+  600 (read 2026-10-28). The target was 2,000, for margin. Since Base's 200 ms blocks (2026-11-05) a pool
+  still writes at most one observation a second, so the window needs 1,801: the pool's 2,000 cover it.
+  1,801 is also the v3.2 oracle's `MIN_CARDINALITY` (`TWAP_WINDOW + 1`, Revision 28), which `pnpm ops
+  cardinality` now grows both pools to (more only if Base's measured block time ever needs more).
   - Base refuses any transaction above 16,777,216 gas, and one call from 600 to 2,000 needs about 31M.
     Two steps of 700 would each need about 15.7M, within 6% of the cap.
   - So it takes three transactions, from any wallet: `increaseObservationCardinalityNext(1200)` (a
@@ -283,7 +288,7 @@ Each has its own loud line, in capitals, so it stands out in the log.
 - **The gas price cap.** The keeper's sends (`run`, and the hand-run `close`, `stake`, `payouts`,
   `deliver`, `claim`; `deploy` too) go out at no gas price over `OPS_MAX_GAS_PRICE_BASE` /
   `OPS_MAX_GAS_PRICE_BITTENSOR` (gwei, decimals allowed; by default 5 and 100, against prices that sit
-  under 0.1 and about 10). Over it the send is refused (`the gas price is … gwei, over the … gwei cap
+  under 0.1 and about 5: Bittensor's base fee read 5 gwei on 2026-11-08). Over it the send is refused (`the gas price is … gwei, over the … gwei cap
   (OPS_MAX_GAS_PRICE_…); … waits for it to fall; nothing sent`) and tried again later, and so is a
   replacement whose effective price (what it would pay a gas now, judged as a fresh send's is) would be
   over it: a fee spike costs a wait, never the wallet's funds. **The emergency and owner commands have
@@ -447,3 +452,33 @@ Register-ScheduledTask -TaskName 'Cascade keeper' -Action $action -Trigger $trig
   keeper sleeps with it.
 - Start it now: `Start-ScheduledTask -TaskName 'Cascade keeper'`. Stop it with `-Stop` (above). Remove
   it: `Unregister-ScheduledTask -TaskName 'Cascade keeper'`.
+
+## v3.2 (the keeper Worker and its settings)
+
+v3.2 deploys constructor-only (`ops/src/v32/settings.ts`, spec Appendix B): nothing is set after deploy. The keeper is
+its own Cloudflare Worker, `cascade-keeper-production` (`keeper/wrangler.jsonc`). How to run each step:
+`docs/runbook-v3.2.md`. The values the keeper runs with:
+
+| Setting | Default | Where | What it is |
+|---|---|---|---|
+| The keeper's key | none: a fresh key | `pnpm keeper:new-key`, then `OPS_V32_KEEPER_ADDRESS` | never v3-launch's `0xBE2a34…`; one key on both chains, a Worker secret and a password-protected keystore on this PC for hand runs |
+| Its funding | about 0.45 TAO and 0.03 ETH | the founder sends it (`pnpm ops budget` prints the ETH) | Bittensor: one claim's up-front fee (a 57,000,000 gas limit, about 0.285 TAO at 5 gwei) and a day of payouts and stakes. Base (R12a): a close sends a float of three times its bridge fee quote, which the wallet must hold whole (the door sends back what the fee leaves), so a full 50 + 50 batch's, about 0.013 ETH at 0.0043 ETH a quote, beside the 24 h cap; 0.005 ETH couldn't send a close quoting above about 0.0016 ETH |
+| The 24 h spend cap, Bittensor | 0.4 TAO | `OPS_KEEPER_SPEND_CAP_BITTENSOR` (into the Worker's `DEPLOYMENT` by `pnpm config:from-record`) | one claim's worst case and a day of payouts and stakes; a claim fits up to about 5.5 gwei (Task 65's 2,000,000 exit reserve), above it claims wait, said loudly. A send whose worst case would cross what is left is refused; a mined one counts what it cost. 0.6 TAO before other people's money (runbook 2.2) |
+| The 24 h spend cap, Base | 0.01 ETH | `OPS_KEEPER_SPEND_CAP_BASE` (into the Worker's `DEPLOYMENT` by `pnpm config:from-record`) | a day's closes: about two full 50 + 50 batches (about 0.0043 ETH each, gas and fee) or a dozen one-entry ones (about 0.00075). It was 0.0017 ETH, less than one full-list close, so one forced close stopped every Base send for up to 24 h (R12a). A send whose worst case, its gas and the value it keeps (a close's quoted fee less its batch's pot, not its whole float), would cross what is left is refused; a mined one counts what it cost. One fake redeem request a day in an empty batch costs about 0.00055 ETH net at the max wait (its 0.0002 ETH fee pays the rest): harmless at this cap |
+| Payout top-up | 0 | `OPS_PAYOUT_TOPUP_MAX` (TAO, whole rao) | the most the keeper adds to a payout's bridge fee above what its entries pay; at 0 a fee above the ceiling waits |
+| Park refund fee cap | 0.05 TAO | `OPS_PARK_REFUND_FEE_MAX` | the most the keeper pays as a park refund's bridge fee; bounded only by the spend cap |
+| Automatic re-execution | off | the Worker's `OPS_REEXEC_AUTO` var | the keeper reports each CCIP FAILURE; you re-run it by hand (`pnpm ops reexec`); on only after the rehearsals |
+| Gas price caps | 5 gwei (Base), 100 gwei (Bittensor) | `MAX_GAS_PRICE_*_GWEI` vars, `OPS_MAX_GAS_PRICE_*` for hand runs | Bittensor's base fee read 5 gwei on 2026-11-08 |
+| Bittensor's per-transaction gas | at most 64,900,000 | `ops/src/keeper/core/ceiling.ts` (a constant) | the pool refuses a gas limit above about 64,998,400 (read 2026-11-15), whatever the 75,000,000 block; every keeper limit is held under it, a claim's included |
+| Subrequests a run | 300 | `KEEPER_SUBREQUEST_BUDGET` | RPC requests a Worker run makes at most (the platform allows 1,000) |
+| The claim policy | a claim at 25 × its cost, or monthly under $20 | `src/config.ts` `CLAIM_POLICY`; `OPS_CLAIM_COST_TAO` (a claim's measured cost) for hand runs | per listed hotkey; a hotkey with none of the vault's stake is claimed whenever credits wait |
+
+**What ops/.env holds for a v3.2 hand run.** `OPS_DEPLOYMENT=v3.2-launch`; `OPS_BITTENSOR_RPC` an archive node
+(`https://archive.chain.opentensor.ai`: the lite node keeps minutes of logs); `OPS_V32_KEEPER_KEYSTORE` and
+`OPS_V32_KEEPER_PASSWORD_FILE` (the password file leaves the keystore guarded by your Windows login alone, as v3-launch's
+keeper is); `OPS_KEEPER_URL` and `OPS_KEEPER_CONTROL_TOKEN` (the Worker's lease and control routes); `OPS_HOLD_URL` (the
+monitor); `OPS_RELAYER_KEYSTORE` and `OPS_RELAYER_PASSWORD_FILE` (the stamp relayer, a fresh key made with
+`cast wallet new`, never from the Ledger seed).
+
+**The roles** are one Ledger's accounts: account 1 the owner, account 2 the guardian, account 3 the treasury; the keeper
+its own key; the relayer its own. The Safe is recommended before other people's money (`docs/runbook-v3.2.md`, section 10).

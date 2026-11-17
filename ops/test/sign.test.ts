@@ -812,6 +812,29 @@ describe("pnpm ops sign <file>", () => {
     expect(p.page.html).toContain('<p class="warning">WARNING: This file was prepared 48 hours ago');
   });
 
+  it("serves v3-launch's page as before (Task 49): no token, nothing it may ask of the server, which takes no request from it", async () => {
+    const p = await prepareSign(write(handoffFile()), opts());
+    expect(p.api).toBeUndefined();
+    expect(p.page.token).toBeUndefined();
+    expect(p.page.csp).not.toContain("connect-src");
+    const s = await servePage(p.page, p.api);
+    try {
+      const host = `127.0.0.1:${s.port}`;
+      expect((await get(s.port, "/check/0", host, "POST")).status).toBe(405);
+      expect((await get(s.port, "/stamp/0", host, "POST")).status).toBe(405);
+      expect((await get(s.port, "/", host)).body).toBe(p.page.html);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("refuses a v3.2 deployment's file when the run gives it no v3.2 reads (the CLI always does)", async () => {
+    const file = walletFile({ title: "t", deployment: "v3.2-launch", now: NOW, calls: [{ chainId: 964, to: a.vault, data: ACCEPT, label: "acceptOwnership()", from: OWNER }] });
+    await expect(prepareSign(write(file), opts({ deployment: "v3.2-launch", recordOf: () => ({ target: "live", plan: { version: 32 } }) as never }))).rejects.toThrow(
+      "the file is for a v3.2 deployment (v3.2-launch), whose calls the page checks against the chain when it is served, and this run gives it no v3.2 reads; nothing served",
+    );
+  });
+
   it("refuses a file whose deployment has no live record, one edited to call something else, one with a hidden character, and one that isn't JSON", async () => {
     await expect(prepareSign(write(handoffFile()), opts({ recordOf: () => null }))).rejects.toThrow(/deployment v3-launch, but there's no live record for it/);
     const edited = handoffFile();

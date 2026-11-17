@@ -9,6 +9,9 @@ import type { BitState, ChainReading, HourAgg } from "../../src/snapshot.ts";
 import type { HoldRow } from "../../src/store.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
+import type { Config } from "../../src/config.ts";
+import { withArgs } from "./bridge-fixtures.ts";
+import { testConfigV32 } from "./fixtures.ts";
 
 const h = (s: string) => keccak256(toBytes(s)) as Hex;
 const E18 = 10n ** 18n;
@@ -24,10 +27,11 @@ const bit = (block: bigint, price: bigint, over: Partial<BitState> = {}): ChainR
 function ctx(
   s: ChainReading<BitState> | undefined,
   history: ChainReading<BitState>[],
-  o: { logs?: StoredLog[]; hours?: HourAgg[]; holds?: HoldRow[]; settledBlock?: bigint; meta?: Record<string, string>; t?: typeof DEFAULTS } = {},
+  o: { logs?: StoredLog[]; hours?: HourAgg[]; holds?: HoldRow[]; settledBlock?: bigint; meta?: Record<string, string>; t?: typeof DEFAULTS; cfg?: Config } = {},
 ) {
   const base = ruleCtx();
   return ruleCtx({
+    ...(o.cfg ? { cfg: o.cfg } : {}),
     snap: { ...base.snap, at: NOW, bittensor: s },
     history: { base: [], bittensor: history },
     previous: { bittensor: history[0] },
@@ -82,6 +86,43 @@ describe("price.drop", () => {
     }
     // an event outside the drop's blocks explains nothing
     expect(priceDrop.run(ctx(S, [P, E], { logs: [{ ...staked, block: 100n }] }))).toHaveLength(1);
+  });
+
+  it("on v3.2, a chunk's rounding is gross - net - charged - unstakeCost: the caller's top-up never hides it", () => {
+    const cfg = testConfigV32();
+    // 3 rao kept from the chunk's entries: 1 charged, 1 the walk's cost, 1 rounding; the bridge was paid 5 (a top-up of 4)
+    const chunk = vault("PayoutChunkSent", 104n, {
+      key: h("k"),
+      chunk: 0,
+      taken: 1,
+      gross: String(10n ** 15n),
+      net: String(10n ** 15n - 3n * 10n ** 9n),
+      fee: String(5n * 10n ** 9n),
+      charged: String(10n ** 9n),
+      unstakeCost: String(10n ** 9n),
+    });
+    expect(priceDrop.run(ctx(S, [P, E], { logs: [chunk], cfg }))).toEqual([]);
+    // no rounding left (2 rao charged): nothing explains the drop
+    expect(priceDrop.run(ctx(S, [P, E], { logs: [withArgs(chunk, { charged: String(2n * 10n ** 9n) })], cfg }))).toHaveLength(1);
+  });
+
+  it("on v3.2 the leaver bears a walk's cost: an Unstaked short of its want in a payout's or a direct exit's transaction explains nothing; the owner's hotkey removal's still does", () => {
+    const cfg = testConfigV32();
+    const short = (txHash: Hex) => ({ ...vault("Unstaked", 104n, { hotkey: HOTKEY, wantRao: "10", receivedWei: String(9n * 10n ** 9n) }), txHash });
+    const inTx = (txHash: Hex, event: string, args: StoredLog["args"]) => ({ ...vault(event, 104n, args), txHash });
+    // a chunk with no rounding of its own (2 rao kept: 1 charged, 1 the walk's cost)
+    const payout = [
+      short(h("payout tx")),
+      inTx(h("payout tx"), "PayoutChunkSent", { key: h("k"), chunk: 0, taken: 1, gross: String(10n ** 15n), net: String(10n ** 15n - 2n * 10n ** 9n), fee: String(10n ** 9n), charged: String(10n ** 9n), unstakeCost: String(10n ** 9n) }),
+    ];
+    const direct = [short(h("direct tx")), inTx(h("direct tx"), "ShortfallAbsorbed", { amount: String(10n ** 9n) }), inTx(h("direct tx"), "RedeemedDirect", { user: h("u").slice(0, 42), shares: "1", assets: "1", acceptedMissing: false })];
+    const removal = [short(h("removal tx")), inTx(h("removal tx"), "HotkeyRemoved", { hotkey: HOTKEY, unclaimed: "0", forfeit: false })];
+    expect(priceDrop.run(ctx(S, [P, E], { logs: payout, cfg }))).toHaveLength(1);
+    expect(priceDrop.run(ctx(S, [P, E], { logs: direct, cfg }))).toHaveLength(1);
+    expect(priceDrop.run(ctx(S, [P, E], { logs: removal, cfg }))).toEqual([]);
+    // v3-launch (v3.1) is unchanged: the Unstaked explains its own wei wherever it is
+    expect(priceDrop.run(ctx(S, [P, E], { logs: payout }))).toEqual([]);
+    expect(priceDrop.run(ctx(S, [P, E], { logs: direct }))).toEqual([]);
   });
 
   it("waits until the confirming reading is settled, so a rounding log not stored yet can't read as unexplained", () => {
@@ -491,3 +532,105 @@ describe("stake.divergence and stake.unlisted", () => {
   });
 });
 
+
+// ---- v3.2 (Task 56): stake.missing replaces stake.divergence; stake.unlisted comes from unlistedStakeRao ----
+
+describe("v3.2: stake.unlisted from unlistedStakeRao, and no stake.divergence", () => {
+  const cfg32 = testConfigV32();
+  const RAO = 10n ** 9n;
+  const X = 49n * RAO;
+  const GIFT = h("a stranger's validator hotkey");
+  const NEW = h("the swap's new hotkey");
+  const at = (block: bigint, stakes: Record<Hex, bigint>, over: Partial<BitState> = {}) =>
+    bit(block, E18, { stakeHotkey: HOTKEY, hotkeys: [HOTKEY], stakedHotkeys: Object.keys(stakes) as Hex[], rootStakeRao: stakes[HOTKEY] ?? 0n, stakes, ...over });
+
+  it("raises no stake.divergence on a v3.2 deployment, even on the swap that raises it on v3-launch (stake.missing has it there), and writes no marker", () => {
+    const swap = (block: bigint) => at(block, { [HOTKEY]: 0n, [NEW]: X }, { unlistedStakeRao: X, stakeMissing: true, missingStakeRao: X, bookedStake: X });
+    const c = ctx(swap(115n), [swap(110n), at(105n, { [HOTKEY]: X }, { stakeMissing: false, bookedStake: X })], { cfg: cfg32 });
+    expect(stakeDivergence.run(c)).toEqual([]);
+    expect(c.writes.meta).toEqual([]);
+  });
+
+  it("warns on stake sitting on a hotkey the vault doesn't list while nothing is missing (a gift, or stake back after a write-off), naming the hotkey and the T16 note", () => {
+    const s = at(115n, { [HOTKEY]: X, [GIFT]: 3n * RAO }, { unlistedStakeRao: 3n * RAO, stakeMissing: false, missingStakeRao: 0n, bookedStake: X });
+    const [f] = stakeDivergence.run(ctx(s, [at(110n, { [HOTKEY]: X })], { cfg: cfg32 }));
+    expect(f).toMatchObject({ rule: "stake.unlisted", key: `stake.unlisted:${GIFT}`, subject: "3 TAO sits on a hotkey the vault doesn't list, and nothing is missing" });
+    expect(f.facts).toMatchObject({
+      hotkey: GIFT,
+      stake: `${3n * RAO} rao (3 TAO)`,
+      "unlisted on the vault's coldkey": "3 TAO (unlistedStakeRao)",
+      "listed by the vault": HOTKEY,
+      contracts: "v3.2",
+      taostats: `https://taostats.io/hotkey/${GIFT}`,
+    });
+    // the T16 note: after a write-off nothing is missing, so no stranger can list it and the last slot stays shut
+    expect(f.facts.note).toBe("nothing is missing, so only the owner, guardian or keeper can list it (addHotkey), and the last of the 4 slots stays shut: no stranger can");
+    const line = RUNBOOK["stake.unlisted"](f.facts);
+    expect(line).toContain("write-off");
+    expect(line).toContain("adoptStake");
+    expect(line).not.toContain("stake.divergence");
+    // v3-launch's line is kept
+    expect(RUNBOOK["stake.unlisted"]({ hotkey: GIFT })).toContain("stake.divergence takes over");
+  });
+
+  it("names the coldkey's unlisted total when no hotkey read holds it, and says nothing for dust, while stake is missing (stake.missing names it) or unread", () => {
+    const unnamed = at(115n, { [HOTKEY]: X }, { unlistedStakeRao: 3n * RAO, stakeMissing: false });
+    const [f] = stakeDivergence.run(ctx(unnamed, [at(110n, { [HOTKEY]: X })], { cfg: cfg32 }));
+    expect(f).toMatchObject({ rule: "stake.unlisted", key: "stake.unlisted:coldkey" });
+    expect(f.facts.hotkey).toBe("not named: no unlisted hotkey the readings asked holds it");
+    for (const over of [{ unlistedStakeRao: 1000n, stakeMissing: false }, { unlistedStakeRao: 3n * RAO, stakeMissing: true }, { unlistedStakeRao: undefined, stakeMissing: false }, { unlistedStakeRao: 3n * RAO, stakeMissing: undefined }]) {
+      expect(stakeDivergence.run(ctx(at(115n, { [HOTKEY]: X, [GIFT]: 3n * RAO }, over), [at(110n, { [HOTKEY]: X })], { cfg: cfg32 })), JSON.stringify(over, (_, v) => (typeof v === "bigint" ? String(v) : v))).toEqual([]);
+    }
+  });
+});
+
+// ---- Task 56 fix round 1: on v3.2 a swap that stake.missing explains holds nothing (review Minor 2) ----
+
+describe("v3.2: a swap's fall that stake.missing explains is no stake.unexplained_drop or price.drop, and holds nothing", () => {
+  const cfg32 = testConfigV32();
+  const RAO = 10n ** 9n;
+  const X = 49n * RAO;
+  const SECOND = h("a second listed hotkey");
+  const NEW = h("the swap's new hotkey");
+  /** 51 TAO of stake behind 51e18 shares: a price of 1 TAO a share while all of it is visible */
+  const SUPPLY51 = 51n * E18;
+  const priceAt = (visibleRao: bigint) => (visibleRao * RAO * E18) / SUPPLY51;
+  const at = (block: bigint, stakes: Record<Hex, bigint>, over: Partial<BitState> = {}) => {
+    const visible = (stakes[HOTKEY] ?? 0n) + (stakes[SECOND] ?? 0n);
+    return bit(block, priceAt(visible), { totalSupply: SUPPLY51, hotkeys: [HOTKEY, SECOND], stakes, rootStakeRao: visible, bookedStake: X + 2n * RAO, ...over });
+  };
+  const healthy = (block: bigint) => at(block, { [HOTKEY]: X, [SECOND]: 2n * RAO }, { unlistedStakeRao: 0n, stakeMissing: false, missingStakeRao: 0n });
+  /** the swap: HOTKEY's stake moved to NEW under the vault's coldkey (unlistedStakeRao rose by it); the vault's guard on */
+  const swapped = (block: bigint, second = 2n * RAO, over: Partial<BitState> = {}) =>
+    at(block, { [HOTKEY]: 0n, [SECOND]: second, [NEW]: X }, { unlistedStakeRao: X, stakeMissing: true, missingStakeRao: X + 2n * RAO - second, ...over });
+  const drops = (s: ChainReading<BitState>, history: ChainReading<BitState>[], cfg?: Config) => stakeUnexplainedDrop.run(ctx(s, history, { settledBlock: 10n ** 9n, ...(cfg ? { cfg } : {}) }));
+
+  it("an explained swap: the swapped hotkey's fall raises no stake.unexplained_drop and no price.drop, so nothing holds the keeper", () => {
+    expect(drops(swapped(110n), [healthy(105n)], cfg32)).toEqual([]);
+    expect(priceDrop.run(ctx(swapped(115n), [swapped(110n), healthy(105n)], { cfg: cfg32 }))).toEqual([]);
+    // the same readings on v3-launch: unchanged, both raise and hold
+    const [d] = drops(swapped(110n), [healthy(105n)]);
+    expect(d).toMatchObject({ rule: "stake.unexplained_drop", key: `stake.unexplained_drop:${HOTKEY}:110` });
+    expect(d.hold).toBeDefined();
+    const [p] = priceDrop.run(ctx(swapped(115n), [swapped(110n), healthy(105n)]));
+    expect(p.hold).toBeDefined();
+  });
+
+  it("an unexplained fall alongside it still raises and holds: stake that left the coldkey (no unlisted rise covers it)", () => {
+    const found = drops(swapped(110n, RAO), [healthy(105n)], cfg32);
+    expect(found.map((f) => f.key)).toEqual([`stake.unexplained_drop:${SECOND}:110`]);
+    expect(found[0].hold?.id).toBe(`stake.unexplained_drop:${SECOND}:110`);
+    const [p] = priceDrop.run(ctx(swapped(115n, RAO), [swapped(110n, RAO), healthy(105n)], { cfg: cfg32 }));
+    expect(p).toMatchObject({ rule: "price.drop", key: "price.drop:110" });
+    expect(p.hold).toBeDefined();
+  });
+
+  it("explains nothing while the vault's guard is off (a fall within its tolerance), or an unlisted total is unread: those hold as today", () => {
+    for (const s of [swapped(110n, 2n * RAO, { stakeMissing: false }), swapped(110n, 2n * RAO, { stakeMissing: undefined }), swapped(110n, 2n * RAO, { unlistedStakeRao: undefined })]) {
+      expect(drops(s, [healthy(105n)], cfg32).map((f) => f.key)).toEqual([`stake.unexplained_drop:${HOTKEY}:110`]);
+    }
+    expect(drops(swapped(110n), [at(105n, { [HOTKEY]: X, [SECOND]: 2n * RAO }, { stakeMissing: false })], cfg32).map((f) => f.key)).toEqual([`stake.unexplained_drop:${HOTKEY}:110`]);
+    // an unlisted rise smaller than the fall covers none of it
+    expect(drops(swapped(110n, 2n * RAO, { unlistedStakeRao: X / 2n }), [healthy(105n)], cfg32).map((f) => f.key)).toEqual([`stake.unexplained_drop:${HOTKEY}:110`]);
+  });
+});

@@ -1,13 +1,16 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
-import { type Address, getContractAddress, parseAbi } from "viem";
+import { type Address, parseAbi } from "viem";
 import { type Budget, budgetChecks } from "./budget.ts";
 import { poolProblems } from "./cardinality.ts";
-import { type ChainName, LIVE, SETTINGS, WALLET } from "./config.ts";
+import { type ChainName, LIVE, WALLET } from "./config.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { windowOf } from "./keeper/state.ts";
 import { nonceOf, read } from "./rpc.ts";
 import { type Ctx, chainLabel, logsOf } from "./send.ts";
+import type { DeploymentRecordV32 } from "./v32/deploy.ts";
+import { isPlanV32 } from "./v32/plan.ts";
+import { FUNDING_V32, SETTINGS_V32_LAUNCH } from "./v32/settings.ts";
 
 const ROUTER = parseAbi([
   "struct OffRamp { uint64 sourceChainSelector; address offRamp; }",
@@ -63,8 +66,42 @@ export const bashPath = (env: Record<string, string | undefined>) =>
   env.OPS_BASH ??
   (process.platform === "win32" && existsSync("C:\\Program Files\\Git\\bin\\bash.exe") ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash");
 
-/** Read-only checks against the live chains before deploying (and before any batch). */
-export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?: Budget): Promise<{ ok: boolean; lines: string[] }> {
+/** What contracts/script/simulate_inbound.sh simulates, by the deployment's plan: this checkout's Bittensor adapter is
+ * v3.2's, so a v3.2 deployment (its record's plan, or, before its record exists, its name) simulates it with v3.2's
+ * launch values (its gas model toward Base, its cap, its treasury, the reserve the deploy funds (RESERVE_TARGET and 500 rao), and the
+ * record's Base adapter as the sender once planned); any other deployment would simulate v3.2's adapter in place of the
+ * one it deployed, so the check is refused for it, with the reason (`skip`), and fails. The script's own defaults stand
+ * for what is not given. */
+export function simulationInputs(rec: DeploymentRecord | DeploymentRecordV32 | null, v32Deployment: boolean): { env: Record<string, string> } | { skip: string } {
+  if (rec && isPlanV32(rec.plan)) {
+    const p = rec.plan;
+    return { env: v32SimulationEnv(p.addresses.baseAdapter, p.roles.treasury) };
+  }
+  if (!rec && v32Deployment) return { env: v32SimulationEnv(undefined, SETTINGS_V32_LAUNCH.treasury) };
+  return {
+    skip: "this checkout's adapter is v3.2's, not the one v3-launch deployed, so the simulation would test other code: run preflight for v3-launch from a checkout of its build (main)",
+  };
+}
+
+const v32SimulationEnv = (remote: Address | undefined, treasury: Address): Record<string, string> => ({
+  ...(remote ? { REMOTE_ADAPTER: remote } : {}),
+  GAS_BASE: SETTINGS_V32_LAUNCH.gas.towardBase.base.toString(),
+  GAS_PER_ENTRY: SETTINGS_V32_LAUNCH.gas.towardBase.perEntry.toString(),
+  INBOUND_GAS_BASE: SETTINGS_V32_LAUNCH.gas.towardBittensor.base.toString(),
+  INBOUND_GAS_PER_ENTRY: SETTINGS_V32_LAUNCH.gas.towardBittensor.perEntry.toString(),
+  MAX_MESSAGE: SETTINGS_V32_LAUNCH.adapters.maxMessageValue.bittensor.toString(),
+  TREASURY: treasury,
+  RESERVE: FUNDING_V32.adapterReserve.toString(),
+});
+
+/** Read-only checks against the live chains before deploying (and before any batch). `o.v32`: the deployment is a
+ * v3.2 one (OPS_DEPLOYMENT v3.2-…), which matters before its record exists. */
+export async function preflight(
+  ctx: Ctx,
+  rec: DeploymentRecord | DeploymentRecordV32 | null,
+  budget?: Budget,
+  o: { v32?: boolean } = {},
+): Promise<{ ok: boolean; lines: string[] }> {
   const lines: string[] = [];
   let ok = true;
   const check = (label: string, problem: string | null) => {
@@ -107,12 +144,18 @@ export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?:
   // the oracle's 30-minute TWAP needs that much history in both pools, or deliveries can revert
   for (const [label, problem] of await poolProblems(ctx)) check(label, problem);
 
-  const nonces = { base: await nonceOf(ctx.rpc, "base", WALLET), bittensor: await nonceOf(ctx.rpc, "bittensor", WALLET) };
-  for (const chain of ["base", "bittensor"] as const) {
-    const next = rec?.plan.steps.find((s) => s.chain === chain && !rec.done[s.id]);
+  // whose nonces: v3.2's deployers (deploy --v32 checks them again, both nonces, before it sends), else the test wallet
+  const v32Plan = rec && isPlanV32(rec.plan) ? rec.plan : undefined;
+  const sender = (chain: ChainName): Address => v32Plan?.deployers[chain] ?? WALLET;
+  const nonces = { base: await nonceOf(ctx.rpc, "base", sender("base")), bittensor: await nonceOf(ctx.rpc, "bittensor", sender("bittensor")) };
+  // a v3.2 deployment not yet planned has no deployer to name here: the test wallet's nonces say nothing of it
+  for (const chain of o.v32 && !rec ? [] : (["base", "bittensor"] as const)) {
+    const steps = rec?.plan.steps as { id: string; chain: ChainName; nonce: number }[] | undefined;
+    const done = (rec?.done ?? {}) as Record<string, unknown>;
+    const next = steps?.find((s) => s.chain === chain && !done[s.id]);
     check(
-      `${chainLabel(chain)} nonce is ${nonces[chain]}`,
-      next && next.nonce !== nonces[chain] ? `the deployment record expects ${next.nonce}: run deploy --new-plan` : null,
+      `${chainLabel(chain)} nonce${v32Plan ? ` of the deployer ${sender(chain)}` : ""} is ${nonces[chain]}`,
+      next && next.nonce !== nonces[chain] ? `the deployment record expects ${next.nonce}: run deploy${v32Plan ? " --v32" : ""} --new-plan${v32Plan ? " with fresh keys" : ""}` : null,
     );
   }
 
@@ -121,16 +164,20 @@ export async function preflight(ctx: Ctx, rec: DeploymentRecord | null, budget?:
     for (const [label, problem] of budgetChecks(budget)) check(label, problem);
   }
 
-  const remote = rec?.plan.addresses.baseAdapter ?? getContractAddress({ from: WALLET, nonce: BigInt(nonces.base) });
+  // the simulation runs this checkout's Bittensor adapter, v3.2's: routed by the deployment's plan
+  const sim = simulationInputs(rec, o.v32 ?? false);
+  if ("skip" in sim) {
+    check("a delivery simulated on the live node", sim.skip);
+    return { ok, lines };
+  }
+  const remote = sim.env.REMOTE_ADAPTER ?? "0x1111111111111111111111111111111111111111";
   const out = await ctx.runner.run(bashPath(process.env), ["script/simulate_inbound.sh"], {
     cwd: ctx.paths.contractsDir,
     env: {
       ...process.env,
       PATH: `${ctx.paths.foundryBin}${delimiter}${process.env.PATH ?? ""}`,
       BITTENSOR_RPC: ctx.targets.bittensor.rpcUrl,
-      REMOTE_ADAPTER: remote,
-      GAS_BASE: SETTINGS.bitGas.base.toString(),
-      GAS_PER_ENTRY: SETTINGS.bitGas.perEntry.toString(),
+      ...sim.env,
     },
   });
   const verdict = `${out.stdout}\n${out.stderr}`.split("\n").find((l) => l.startsWith("SIMULATION")) ?? out.stderr.trim();

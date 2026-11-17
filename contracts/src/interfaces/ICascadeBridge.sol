@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 interface ICascadeBridge {
     /// ERC-20 side: pulls `amount` tokens from msg.sender (approve first); msg.value is the fee budget.
@@ -12,6 +12,15 @@ interface ICascadeBridge {
         external
         view
         returns (uint256);
+
+    /// The most value one message carries (the adapters' immutable, at most their MAX_MESSAGE_VALUE): the vault's
+    /// maxMessageValue and the front door's maxBatchValue stay at or below the primary's (spec §3.9, AboveBridgeCap).
+    /// It must never change for the bridge's lifetime (the CCIP adapters' is `immutable`): the vault and the front
+    /// door check their limits against it only when they set them or switch the primary, and every later setter call,
+    /// a tightening included, is checked again. A cap that fell below a limit already set would make the owner's
+    /// tightening revert AboveBridgeCap, breaking I-23 (a tightening is never refused); a bridge with another cap is a
+    /// new bridge, activated and made primary through the scheduler.
+    function maxMessageValue() external view returns (uint256);
 }
 
 interface ICascadeReceiver {

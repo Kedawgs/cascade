@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {CascadeFrontDoor} from "../../src/CascadeFrontDoor.sol";
+import {CascadeDoorLens} from "../../src/lens/CascadeDoorLens.sol";
 import {CcipAdapterBase} from "../../src/adapters/CcipAdapterBase.sol";
 import {CcipBaseAdapter} from "../../src/adapters/CcipBaseAdapter.sol";
 import {CascadeMessages} from "../../src/libraries/CascadeMessages.sol";
 import {IRouterClient} from "../../src/vendor/ccip/IRouterClient.sol";
 import {MessageV1Codec} from "../vendor/ccip/MessageV1Codec.sol";
+import {defaultFrontDoorParams} from "../utils/DefaultParams.sol";
 import {ForkBase, IOffRamp20, IPoolView, ITypeAndVersion} from "./ForkBase.sol";
 import {Probe} from "./Probe.sol";
 import {Sink} from "./Sink.sol";
@@ -29,6 +31,7 @@ contract BaseForkTest is ForkBase {
     address owner = makeAddr("owner");
     address guardian = makeAddr("guardian");
     address keeper = makeAddr("keeper");
+    address treasury = makeAddr("treasury");
     address alice = makeAddr("alice");
     address vaultAddr = makeAddr("vault");
     address remoteAdapter = makeAddr("adapterBit");
@@ -36,12 +39,14 @@ contract BaseForkTest is ForkBase {
     address offRamp;
     CcipBaseAdapter adapterBase;
     CascadeFrontDoor fd;
+    /// The read-only lens on `fd` (spec §8.1).
+    CascadeDoorLens doorLens;
     IERC20 tao = IERC20(BASE_TAO);
 
     function setUp() public {
         forkFrom("BASE_RPC", "https://mainnet.base.org");
         if (!isFork()) return;
-        emit log_named_uint("fork block", block.number);
+        emit log_named_uint("fork block", vm.getBlockNumber());
         offRamp = offRamp20(BASE_ROUTER, BITTENSOR_SELECTOR);
         adapterBase = new CcipBaseAdapter(
             CcipAdapterBase.Config({
@@ -53,23 +58,18 @@ contract BaseForkTest is ForkBase {
                 remoteAdapter: remoteAdapter,
                 gasBase: 1_000_000,
                 gasPerEntry: 25_000,
-                maxMessageValue: 5_000e18
+                maxMessageValue: 5_000e18,
+                treasury: treasury
             }),
             0.01e18
         );
-        fd = new CascadeFrontDoor(
-            IERC20Metadata(BASE_TAO),
-            adapterBase,
-            BITTENSOR,
-            vaultAddr,
-            owner,
-            guardian,
-            12 hours,
-            0.01e18,
-            10_000e18,
-            1e14,
-            IERC20(BASE_USDC)
+        CascadeFrontDoor.Params memory p = defaultFrontDoorParams(
+            IERC20Metadata(BASE_TAO), adapterBase, BITTENSOR, vaultAddr, IERC20(BASE_USDC), owner, guardian, keeper
         );
+        p.minDeposit = 0.03e18;
+        fd = new CascadeFrontDoor(p);
+        doorLens = new CascadeDoorLens(address(fd));
+        assertEq(doorLens.primaryBridge(), address(adapterBase));
         vm.deal(keeper, 1 ether);
     }
 
@@ -131,7 +131,7 @@ contract BaseForkTest is ForkBase {
         tao.approve(address(fd), type(uint256).max);
         fd.deposit(1e18);
         vm.stopPrank();
-        vm.warp(block.timestamp + 12 hours);
+        vm.warp(vm.getBlockTimestamp() + 12 hours);
 
         // the front door's own message and quote (the adapter takes msg.sender as the payload sender)
         bytes memory batch = CascadeMessages.encodeBatch(1, entries1(alice, 1e18), noEntries());
@@ -147,7 +147,7 @@ contract BaseForkTest is ForkBase {
 
         vm.recordLogs();
         vm.prank(keeper);
-        fd.closeBatch{value: quote + 1}();
+        fd.closeBatch{value: quote + 1}(1, 1e18);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(tao.totalSupply(), supplyBefore - 1e18, "BurnMint pool burned the deposit");

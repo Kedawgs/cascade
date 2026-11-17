@@ -2,15 +2,19 @@
 
 import { keepPreviousData, type Query, type QueryClient, useQuery } from "@tanstack/react-query";
 import type { Address } from "viem";
+import { type CancelRecord, cancelSentFromHere } from "../cancel-sent";
 import { useNow } from "../client-state";
 import { shownFigure, STATS_KEEP_MS } from "../stats";
-import { DEPLOYMENT, isV3 } from "./config";
+import { DEPLOYMENT, isV3, isV32, minUnstakeWei, type Stage } from "./config";
+import { readExitHold } from "./exit-hold";
+import { readRewardVesting } from "./reads";
 import { fetchFlow } from "./flow";
 import { useCascadeData, useSnapshotAt } from "./context";
 import type { Operation } from "./oplog";
 import { type PendingEntry, pendingEntries } from "./pending";
 import type { DepositRecord, WithdrawalRecord } from "./records";
 import type { Snapshot } from "./snapshot";
+import type { CancelSent } from "./trail";
 import type { CascadeData } from "./types";
 import { WIRING_TTL_MS } from "./wiring";
 
@@ -36,6 +40,15 @@ export const cascadeKeys = {
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
   withdrawals: (account: string) => ["cascade", account, "withdrawals"] as const,
   openBatch: (account: string) => ["cascade", account, "open-batch"] as const,
+  deliveryLimit: (account: string) => ["cascade", account, "delivery-limit"] as const,
+  /** v3.2 with USDC delivery off: whether the front door holds a delivery preference for the account (Task 60). */
+  deliveryPreference: (account: string) => ["cascade", account, "delivery-preference"] as const,
+  /** v3.2: the owner's reward vesting period, the running schedule's and the adoption drip's, in seconds, for the FAQ (reads.ts readRewardVesting). */
+  rewardVesting: () => ["cascade", "reward-vesting"] as const,
+  /** v3.2: what the emergency page on Bittensor reads (direct-exit.ts readDirectExit). */
+  directExit: (account: string) => ["cascade", account, "direct-exit"] as const,
+  /** v3.2 (R4): what holds the account's front-door unstake now: its fresh shares, the rail, today's limit (exit-hold.ts). */
+  exitHold: (account: string) => ["cascade", account, "exit-hold"] as const,
   nextBatch: () => ["cascade", "next-batch"] as const,
   flow: () => ["cascade", "flow"] as const,
   depositQuote: (usdc: bigint) => ["quote", "deposit", usdc.toString()] as const,
@@ -58,6 +71,83 @@ export function useIsV3(): boolean {
     return isV3(data.deployment);
   } catch {
     return false;
+  }
+}
+
+/** Whether the site talks to a v3.2 deployment (config.isV32); false when none is configured. */
+export function useIsV32(): boolean {
+  const data = useCascadeData();
+  try {
+    return isV32(data.deployment);
+  } catch {
+    return false;
+  }
+}
+
+/** The deployment's stage (deployments.json, config.deploymentStage: "testing" for anything not exactly one of the
+ * four). "retired" shows only the ways out (Task 60). */
+export function useStage(): Stage {
+  return useCascadeData().stage;
+}
+
+/** Whether the deployment is retired: the site then shows only the ways out (withdraw, claim, Receive TAO, the emergency
+ * page), never a stake, a deposit or Send it now for a deposit. */
+export const useRetired = (): boolean => useStage() === "retired";
+
+/** Whether the site offers USDC delivery (config.usdcDeliveryOn: off only where a v3.2 entry says so, spec §5). */
+export function useUsdcDelivery(): boolean {
+  return useCascadeData().usdcDelivery;
+}
+
+/** v3.2 with USDC delivery off: whether the chain holds a USDC delivery preference for the account (its claim clears
+ * it), every 30 s, only when `enabled`. */
+export function useDeliveryPreference(account: string | null, enabled: boolean) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.deliveryPreference(account ?? ""),
+    queryFn: () => data.getDeliveryPreference(account as string),
+    enabled: enabled && account !== null,
+    refetchInterval: IDLE_MS,
+  });
+}
+
+/** v3.2: the owner's reward vesting period, the running schedule's and the adoption drip's while it runs (seconds,
+ * reads.ts RewardVesting), read once a half hour from the vault lens for the FAQ; nothing is read on any other deployment, whose period is its vault's
+ * constant. */
+export function useRewardVesting() {
+  const data = useCascadeData();
+  const v32 = useIsV32();
+  return useQuery({
+    queryKey: cascadeKeys.rewardVesting(),
+    queryFn: () => readRewardVesting(data.clients, data.deployment),
+    enabled: v32,
+    staleTime: APY_MS,
+    refetchInterval: APY_MS,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** v3.2 (R4): what holds the account's front-door unstake now (exit-hold.ts readExitHold): its fresh shares (the one-day
+ * hold), whether the vault's primary bridge can send payouts, and today's limit left; read every 30 seconds while the
+ * Unstake form shows. */
+export function useExitHold(account: string | null) {
+  const data = useCascadeData();
+  const v32 = useIsV32();
+  return useQuery({
+    queryKey: cascadeKeys.exitHold(account ?? ""),
+    queryFn: () => readExitHold(data.clients, data.deployment, account as Address),
+    enabled: v32 && account !== null,
+    refetchInterval: 30_000,
+  });
+}
+
+/** The smallest unstake the site's deployment takes (config.minUnstakeWei): 0.033 TAO on v3.2, else 0.011 TAO. */
+export function useMinUnstakeWei(): bigint {
+  const data = useCascadeData();
+  try {
+    return minUnstakeWei(data.deployment);
+  } catch {
+    return minUnstakeWei(null);
   }
 }
 
@@ -156,12 +246,14 @@ export function useRewards(account: string) {
   return useQuery({ queryKey: cascadeKeys.rewards(account), queryFn: () => data.listRewards(account) });
 }
 
-export function usePosition(account: string, live = false) {
+/** The account's stake (getPosition); `enabled` false asks nothing of its own (the stake form with no wallet yet). */
+export function usePosition(account: string, live = false, enabled = true) {
   const data = useCascadeData();
   return useQuery({
     queryKey: cascadeKeys.position(account),
     queryFn: () => data.getPosition(account),
     refetchInterval: live ? LIVE_MS : IDLE_MS,
+    enabled,
   });
 }
 
@@ -200,9 +292,11 @@ export function useIndexerNamed(): boolean {
   }
 }
 
-export function useProof(live = false) {
+/** The stake proof (getProof), every 10 s while something is moving (`live`), every 30 s otherwise; `enabled` false
+ * asks nothing of its own (the v3-launch stake form, which has no use for it) and reads whatever the cache holds. */
+export function useProof(live = false, enabled = true) {
   const data = useCascadeData();
-  return useQuery({ queryKey: cascadeKeys.proof(), queryFn: () => data.getProof(), refetchInterval: live ? LIVE_MS : IDLE_MS });
+  return useQuery({ queryKey: cascadeKeys.proof(), queryFn: () => data.getProof(), refetchInterval: live ? LIVE_MS : IDLE_MS, enabled });
 }
 
 const moving = (s: string) => s === "in_progress" || s === "needs_you";
@@ -292,6 +386,17 @@ export function usePendingEntry(account: string, kind: "deposit" | "withdrawal",
   return pendingEntries(opsOf(data, account), kind, undefined, now).find((e) => e.notice.id === id) ?? null;
 }
 
+/** For a record of the account's deposits or unstakes (`kind`), the cancel this browser sent for it that the record, as
+ * last read, doesn't show yet (cancel-sent.ts), or null: asked of this browser's own records as they are at this render.
+ * They change with no render of their own (a cancel is recorded as the wallet sends it), so they are read again every
+ * second while a flow runs (`live`), every half minute otherwise. */
+export function useCancelsSent(account: string, kind: "deposit" | "withdrawal", live = false): (record: CancelRecord | null | undefined) => CancelSent | null {
+  const data = useCascadeData();
+  const now = useNow(live ? 1_000 : 30_000);
+  const ops = opsOf(data, account);
+  return (record) => (record ? cancelSentFromHere(ops, kind, record, now) : null);
+}
+
 export function useDepositQuote(usdcUnits: bigint | null) {
   const data = useCascadeData();
   const amount = usdcUnits ?? 0n;
@@ -313,6 +418,20 @@ export function useWithdrawalQuote(account: string | null, shares: bigint | null
     enabled: account !== null && amount > 0n,
     placeholderData: keepPreviousData,
     refetchInterval: 15_000,
+  });
+}
+
+/** v3.2: the account's live USDC delivery limit (delivery-limit.ts), with what else of its TAO a USDC unstake sells
+ * and whether the chain holds a delivery preference for it, read again every 30 seconds: the largest delivery that
+ * clears every floor right now moves with the market (the click checks its own sale again in any case: use-flows.ts).
+ * Only when `enabled` (v3.2's form). */
+export function useDeliveryLimit(account: string | null, enabled: boolean) {
+  const data = useCascadeData();
+  return useQuery({
+    queryKey: cascadeKeys.deliveryLimit(account ?? ""),
+    queryFn: () => data.getDeliveryLimit(account as string),
+    enabled: enabled && account !== null,
+    refetchInterval: 30_000,
   });
 }
 

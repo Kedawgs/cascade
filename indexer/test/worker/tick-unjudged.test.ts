@@ -23,6 +23,8 @@ describe("monitor.unjudged through the tick", () => {
     }
     expect(await rows("SELECT k, v FROM meta WHERE k LIKE 'unjudged_since:%' AND v != ''")).toEqual([]);
     expect(await rows("SELECT alert_key FROM alerts WHERE rule = 'monitor.unjudged'")).toEqual([]);
+    // v3-launch runs no root.pair_stamped: the digest's list of warning rules not judged doesn't name it
+    expect(((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'unjudged_warnings'"))[0]?.v ?? "").split(",")).not.toContain("root.pair_stamped");
   });
 
   it("one read broken for good while the chain reads fine pages after 30 minutes, once, and resolves when it reads again", async () => {

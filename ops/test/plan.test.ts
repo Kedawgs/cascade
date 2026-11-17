@@ -1,7 +1,7 @@
 import { type AbiFunction, encodeDeployData, encodeFunctionData, getContractAddress, type Hex, toFunctionSignature } from "viem";
 import { describe, expect, it } from "vitest";
-import { loadArtifact } from "../src/artifacts.ts";
-import { LAUNCH_VAULT_LIMITS, LIVE, PRECOMPILE, paths, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, VAULT_DEFAULTS, WALLET } from "../src/config.ts";
+import { preauditArtifact } from "../src/builds.ts";
+import { LAUNCH_VAULT_LIMITS, LIVE, PRECOMPILE, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, VAULT_DEFAULTS, WALLET } from "../src/config.ts";
 import { type AdapterCapInputs, adapterCapProblems, adapterCapsOf, buildPlan, buildPlanV3, checkAdapterCaps, isPlanV3 } from "../src/plan.ts";
 import { castArg } from "../src/send.ts";
 import { ROLES } from "./launch-roles.ts";
@@ -307,7 +307,6 @@ describe("buildPlanV3", () => {
   });
 
   it("encodes every step against the contracts build", () => {
-    const dir = paths({}).contractsDir;
     const contractAt = new Map<string, string>([
       [plan.addresses.frontDoor, "CascadeFrontDoor"],
       [plan.addresses.staker, "CascadeStaker"],
@@ -318,7 +317,7 @@ describe("buildPlanV3", () => {
     for (const id of ["baseAdapter", "bitAdapter"]) expect(Object.keys(step(id).args[0] as object), id).toContain("maxMessageValue");
     for (const s of plan.steps) {
       if (s.kind === "create") {
-        const a = loadArtifact(dir, s.contract.split(":")[1]);
+        const a = preauditArtifact(s.contract.split(":")[1]);
         expect(() => encodeDeployData({ abi: a.abi, bytecode: a.bytecode, args: s.args } as never), s.id).not.toThrow();
         continue;
       }
@@ -326,7 +325,7 @@ describe("buildPlanV3", () => {
       const name = contractAt.get(s.to);
       if (!name) continue; // the transfer precompile
       const fn = s.abi.find((i) => i.type === "function" && i.name === s.functionName) as AbiFunction;
-      const built = loadArtifact(dir, name)
+      const built = preauditArtifact(name)
         .abi.filter((i): i is AbiFunction => i.type === "function")
         .map((i) => toFunctionSignature(i));
       expect(built, s.id).toContain(toFunctionSignature(fn));

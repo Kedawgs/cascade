@@ -499,8 +499,8 @@ describe("the scan's numbers", () => {
     expect(marginsAt("base", 2)).toEqual({ reread: 70n, settle: 30n });
     expect(marginsAt("bittensor", 12)).toEqual({ reread: 400n, settle: 10n });
     // a block time not yet measured (a new store's first ticks): the block times they were set at
-    expect(MARGIN_FALLBACK_S).toEqual({ base: 2, bittensor: 12 });
-    expect(marginsAt("base", undefined)).toEqual({ reread: 70n, settle: 30n });
+    expect(MARGIN_FALLBACK_S).toEqual({ base: 0.2, bittensor: 12 });
+    expect(marginsAt("base", undefined)).toEqual({ reread: 700n, settle: 300n });
   });
 });
 

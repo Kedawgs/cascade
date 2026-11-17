@@ -8,6 +8,9 @@ import type { Rule } from "../../src/rules/index.ts";
 import * as ops from "../../src/rules/ops.ts";
 import type { BaseState, BitState, HourAgg } from "../../src/snapshot.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
+import { RULES } from "../../src/rules/ids.ts";
+import { RUNBOOK } from "../../src/runbook.ts";
+import { testConfigV32 } from "./fixtures.ts";
 import { D, h } from "./bridge-fixtures.ts";
 import { baseState, bitState, reading, ruleCtx, slog } from "./rule-ctx.ts";
 
@@ -134,13 +137,33 @@ describe("batches and payouts", () => {
 });
 
 describe("keeper and vault housekeeping", () => {
-  it("keeper.low_eth below 0.002 ETH and keeper.low_tao below 0.01 TAO", () => {
-    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 19n * 10n ** 14n } }))).toEqual(["keeper.low_eth"]);
-    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 21n * 10n ** 14n } }))).toEqual([]);
+  it("keeper.low_eth below 0.015 ETH (R12a: a full batch's close float and its gas) and keeper.low_tao below 0.01 TAO", () => {
+    expect(DEFAULTS.keeperMinEthWei).toBe(15n * 10n ** 15n);
+    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 149n * 10n ** 14n } }))).toEqual(["keeper.low_eth"]);
+    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 15n * 10n ** 15n } }))).toEqual([]);
+    // the 0.005 ETH a keeper held before R12a can't send a full batch's close (its float is three quotes)
+    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 5n * 10n ** 15n } }))).toEqual(["keeper.low_eth"]);
     expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 9n * 10n ** 15n } }))).toEqual(["keeper.low_tao"]);
     expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 11n * 10n ** 15n } }))).toEqual([]);
     // the launch keeper's 0.06 TAO (about 0.0002-0.0008 TAO an action) is no warning
     expect(rules(ops.keeperLowTao, ctx({ bit: { keeperBalance: 6n * 10n ** 16n } }))).toEqual([]);
+  });
+
+  it("R12a: keeper.low_eth warns before a full batch's close would fail: below its float (three of the read 50 + 50 quote) and one more close, when that is above the floor", () => {
+    expect(DEFAULTS.keeperCloseQuotes).toBe(4);
+    // a 0.0043 ETH quote: 0.0172 ETH, above the 0.015 floor
+    const quote = 43n * 10n ** 14n;
+    const [f] = ops.keeperLowEth.run(ctx({ base: { keeperBalance: 171n * 10n ** 14n, fullBatchQuote: quote } }));
+    expect(f).toMatchObject({
+      rule: "keeper.low_eth",
+      subject: "The keeper has 0.0171 ETH on Base; a full batch's close needs 0.0172 ETH",
+      facts: { balance: "0.0171 ETH", needed: "0.0172 ETH", "a full batch's close quote (50 + 50)": "0.0043 ETH", "the float a close sends": "0.0129 ETH (three quotes)" },
+    });
+    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 172n * 10n ** 14n, fullBatchQuote: quote } }))).toEqual([]);
+    // a low quote never lowers the floor
+    expect(rules(ops.keeperLowEth, ctx({ base: { keeperBalance: 149n * 10n ** 14n, fullBatchQuote: 10n ** 15n } }))).toEqual(["keeper.low_eth"]);
+    // the runbook line says what to send
+    expect(RUNBOOK["keeper.low_eth"](f.facts)).toContain("0.0172 ETH");
   });
 
   it("keeper.idle_unstaked: stakeable idle at least the minimum stake for more than 2 hours", () => {
@@ -242,3 +265,95 @@ describe("the monitor itself", () => {
   });
 });
 
+
+// ---- v3.2 (Task 56): the outflow rule with the global window; a queued entry above the primary's cap ----
+
+describe("v3.2's outflow and payout rules", () => {
+  const cfg32 = testConfigV32();
+  const c32 = (o: Parameters<typeof ctx>[0]) => ({ ...ctx(o), cfg: cfg32 });
+  /** visible 1,000 TAO, booked 990 (priced 990), 20 TAO ramping since 6 hours ago (15 TAO still ramps): a base of 975 TAO;
+   * the door's 10% a day is 97.5 TAO, every door's together 5% is 48.75 */
+  const bit32 = (over: Partial<BitState> = {}): Partial<BitState> => ({
+    rootStakeRao: 1000n * TAO_RAO,
+    bookedStake: 990n * TAO_RAO,
+    rampingStake: 20n * E18,
+    lastStakeAt: NOW - 6 * 3600,
+    balance: 500n * E18,
+    maxDailyOutflowBps: 1000n,
+    globalOutflowBps: 500n,
+    minDailyOutflow: 10n * E18,
+    burnWindow: { start: NOW - 3600, burned: 0n },
+    globalWindow: { start: NOW - 3600, burned: 10n * E18 },
+    price: E18,
+    ...over,
+  });
+  const waiting = [slog({ contract: "frontDoor", chain: "base", event: "RedeemRequested", block: 37_000_000n, args: { batchId: "9", user: USER, shares: String(30n * E18) } })];
+  const base = { openBatch: { id: 9n, start: 0, totalDeposits: 0n, feePot: 0n, nDeposits: 0, nRedeems: 1 } };
+
+  it("outflow.near_limit: the base is the priced stake (the lower of visible and booked) less what still ramps, never the balance; each window has its allowance, and every door's together counts too", () => {
+    // every door's: 10 burned + 30 waiting = 40 TAO, at 80% of 48.75 (39): near
+    const [f] = ops.outflowNearLimit.run(c32({ base, bit: bit32(), logs: waiting }));
+    expect(f).toMatchObject({ rule: "outflow.near_limit", key: "outflow.near_limit", subject: "Exits are near the vault's daily outflow limit: every front door's together" });
+    expect(f.facts).toMatchObject({
+      base: "975 TAO (the lower of the visible and booked stake, less 15 TAO still ramping in)",
+      waiting: "30 TAO",
+      "this front door": "0 TAO burned of 97.5 TAO",
+      "every front door": "10 TAO burned of 48.75 TAO",
+    });
+    // its line names the deferral's other causes on v3.2 (R4: the hold, a closed rail)
+    expect(RUNBOOK["outflow.near_limit"](f.facts)).toMatch(/one-day hold/);
+    // 8 burned: 38 TAO, under 39
+    expect(rules(ops.outflowNearLimit, c32({ base, bit: bit32({ globalWindow: { start: NOW - 3600, burned: 8n * E18 } }), logs: waiting }))).toEqual([]);
+    // the door's own: 50 burned + 30 = 80 TAO at 80% of 97.5 (78)
+    const door = ops.outflowNearLimit.run(c32({ base, bit: bit32({ burnWindow: { start: NOW - 3600, burned: 50n * E18 }, globalWindow: { start: NOW - 86_401, burned: 99n * E18 } }), logs: waiting }));
+    expect(door.map((x) => x.subject)).toEqual(["Exits are near the vault's daily outflow limit: this front door's"]);
+    // the floor: a tiny base gives minDailyOutflow (10 TAO) to each window
+    const floor = ops.outflowNearLimit.run(c32({ base, bit: bit32({ rootStakeRao: 0n, bookedStake: 0n, globalWindow: { start: NOW - 3600, burned: 0n } }), logs: waiting }));
+    expect(floor[0].facts["every front door"]).toBe("0 TAO burned of 10 TAO");
+  });
+
+  it("outflow.near_limit on v3.2 is unjudged while the ledger, the ramp or either window is unread", () => {
+    for (const over of [{ bookedStake: undefined }, { rampingStake: undefined }, { globalOutflowBps: undefined }, { globalWindow: undefined }, { burnWindow: undefined }]) {
+      const c = c32({ base, bit: bit32(over) });
+      expect(ops.outflowNearLimit.run(c), Object.keys(over)[0]).toEqual([]);
+      expect(c.unjudged, Object.keys(over)[0]).toEqual([{ rule: "outflow.near_limit", key: "outflow.near_limit" }]);
+    }
+  });
+
+  describe("payout.entry_above_cap", () => {
+    const vault = (event: string, args: StoredLog["args"], block = 6_900_100n, logIndex = 0) => slog({ contract: "vault", event, block, logIndex, topic1: KEY, args: { key: KEY, ...args } });
+    const big = 20n * E18;
+    const queued = [
+      vault("DepositBounced", { user: USER, assets: String(big), reason: "1" }, 6_900_100n, 0),
+      vault("Redeemed", { user: h("a") as Hex, shares: "1", assets: String(E18) }, 6_900_100n, 1),
+      vault("PayoutBatchQueued", { sourceChain: "8453", batchId: "9", count: 2, total: String(big + E18), price: "1" }, 6_900_100n, 2),
+    ];
+    it("warns when a queued, unsent entry is bigger than the primary bridge carries in a message: its chunk can't be sent", () => {
+      expect(RULES["payout.entry_above_cap"]).toMatchObject({ tier: "warning", kind: "condition" });
+      const [f] = ops.payoutEntryAboveCap.run(c32({ bit: { bridgeMaxMessageValue: 15n * E18, primaryBridge: cfg32.deployment.bitAdapter }, logs: queued, pendingPayoutKeys: [KEY] }));
+      expect(f).toMatchObject({ rule: "payout.entry_above_cap", key: `payout.entry_above_cap:${KEY}`, subject: "A queued payout of 20 TAO is above the 15 TAO the primary bridge carries in one message" });
+      expect(f.facts).toMatchObject({ key: KEY, "entries above it": `${USER}: 20 TAO`, "the primary bridge": cfg32.deployment.bitAdapter, "it carries at most": "15 TAO" });
+      expect(RUNBOOK["payout.entry_above_cap"](f.facts)).toContain("setPrimaryBridge");
+    });
+
+    it("judges only what isn't sent yet: an entry a chunk took is out of it, as is a cancel's redeem; a cap that covers it raises nothing", () => {
+      const sent = vault("PayoutChunkSent", { chunk: 0, taken: 1, gross: String(big), net: String(big), fee: "0", charged: "0", unstakeCost: "0" }, 6_900_101n);
+      expect(ops.payoutEntryAboveCap.run(c32({ bit: { bridgeMaxMessageValue: 15n * E18 }, logs: [...queued, sent], pendingPayoutKeys: [KEY] }))).toEqual([]);
+      expect(ops.payoutEntryAboveCap.run(c32({ bit: { bridgeMaxMessageValue: 20n * E18 }, logs: queued, pendingPayoutKeys: [KEY] }))).toEqual([]);
+      // a redeem above the cap that a cancel re-minted (only the bounces are carried) is out of it
+      const redeemBig = [vault("Redeemed", { user: USER, shares: "1", assets: String(big) }, 6_900_100n, 0), vault("PayoutBatchQueued", { sourceChain: "8453", batchId: "9", count: 1, total: String(big), price: "1" }, 6_900_100n, 1)];
+      const cancel = vault("PayoutBatchCancelled", { reminted: "1", bouncesCarried: 0 }, 6_900_102n);
+      expect(ops.payoutEntryAboveCap.run(c32({ bit: { bridgeMaxMessageValue: 15n * E18 }, logs: [...redeemBig, cancel], pendingPayoutKeys: [KEY] }))).toEqual([]);
+    });
+
+    it("is unjudged while the cap is unread or the batch's events aren't loaded, and v3.2's only", () => {
+      const a = c32({ bit: {}, logs: queued, pendingPayoutKeys: [KEY] });
+      expect(ops.payoutEntryAboveCap.run(a)).toEqual([]);
+      expect(a.unjudged).toEqual([{ rule: "payout.entry_above_cap" }]);
+      const b = c32({ bit: { bridgeMaxMessageValue: 15n * E18 }, logs: [], pendingPayoutKeys: [KEY] });
+      expect(ops.payoutEntryAboveCap.run(b)).toEqual([]);
+      expect(b.unjudged).toEqual([{ rule: "payout.entry_above_cap", key: `payout.entry_above_cap:${KEY}` }]);
+      expect(ops.payoutEntryAboveCap.run(ctx({ bit: { bridgeMaxMessageValue: 15n * E18 }, logs: queued, pendingPayoutKeys: [KEY] }))).toEqual([]);
+    });
+  });
+});

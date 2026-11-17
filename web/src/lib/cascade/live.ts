@@ -6,23 +6,35 @@ import {
   DELIVERY_TOLERANCE_BPS,
   DELIVERY_VALIDITY_S,
   type Deployment,
+  deploymentStage,
+  EXPECTED_DEPLOYMENTS,
+  type ExpectedDeployment,
   explorer,
   isV3,
+  isV32,
   SLIPPAGE_BPS,
   STAKE_MINUTES,
+  usdcDeliveryOn,
 } from "./config";
 import {
   cancelTook,
   chainDeposits,
   confirmAccountEvents,
+  crossingsOnTheWay,
   checkDeliveries,
+  crossingSettled,
   deliveryMayBeSeeded,
   depositFacts,
+  entriesCrossing,
+  gapsOpen,
   droppedRequestMined,
   HistoryMismatchError,
   newScan,
+  openParks,
+  payoutsOnTheWay,
   type Placed,
   requestBatch,
+  requestDropped,
   requestReplacement,
   restartScan,
   scanVault,
@@ -31,15 +43,17 @@ import {
   type VaultScan,
   withdrawalFacts,
 } from "./facts";
+import { clickRefusal, type DeliveryMarket, findDeliveryLimit } from "./delivery-limit";
 import { freshTip } from "./fresh";
 import { DISTRUST_MS, distrustIndexer, fetchSeed, indexerDistrusted, type SeedHalves } from "./indexer";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type StringStorage, type WithdrawalOp } from "./oplog";
+import { SALE_PROBE_TAO, STAKE_PROBE_USDC } from "./price-veto";
 import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore, seedHalves } from "./scan-store";
 import { type CheckMemo, checkSeededHistory, SEED_MIN_BLOCKS, type SeedVerdict, seededRanges, verifySeed } from "./seed";
 import { chainOnlyDeposit, depositRecord, isCancelled, withdrawalRecord } from "./trail";
 import type { Available, CascadeData, DepositQuote, DepositRecord, Limits, Position, PositionHistory, WithdrawalRecord } from "./types";
-import { batchFree, capFree, ceilRao, floorRao, lessSlippage, taoFor, toDisplay, unstakeMostWei } from "./units";
+import { batchFree, capFree, ceilRao, depositLimitsReached, floorRao, lessSlippage, taoFor, toDisplay, unstakeMostWei } from "./units";
 import { checkWiring, createWiringCheck } from "./wiring";
 
 export class NotConfiguredError extends Error {
@@ -80,6 +94,17 @@ export interface LiveDeps {
   readSharesAt: typeof reads.readSharesAt;
   /** The pause between the windows the background check reads (CHECK_PACE_MS; tests run it flat out). */
   checkPaceMs?: number;
+  /** v3.2: what a USDC delivery meets now, and the market's quote of each sale size (reads.ts; the live delivery
+   * limit, delivery-limit.ts). The reads themselves unless given. */
+  readDeliveryMarket?: typeof reads.readDeliveryMarket;
+  quoteDeliveries?: typeof reads.quoteDeliveries;
+  /** v3.2: whether the front door holds a USDC delivery preference for an account (reads.ts). The read unless given. */
+  readDeliveryPreference?: typeof reads.readDeliveryPreference;
+  /** v3.2: whether a park, or a refund on its way, could hold TAO of the account's whose outcome isn't told (facts.ts).
+   * The reads unless given. */
+  openParks?: typeof openParks;
+  /** The committed deployments the switches are read from: deployments.json unless given (tests give their own). */
+  deployments?: Readonly<Record<string, ExpectedDeployment>>;
   now(): number;
 }
 
@@ -104,6 +129,13 @@ const LIMIT_MARGIN = 0.02;
 const ED_RESERVE = 10n ** 12n;
 /** The chain's smallest stake (getDefaultMinStake, 2e6 rao). */
 const MIN_STAKE_WEI = 2n * 10n ** 15n;
+/** R10 (M-A): the longest the limits' reads may go without finding the open batch closable before its clock starts
+ * again: about two refreshes (the limits are read every 30 seconds), so a hidden tab's stopped reads start it again, a
+ * cancel and a new deposit perhaps between them. R10 (L-1): a failed refresh starts it again too. React Query tries a
+ * failed read 3 more times (1, 2 and 4 seconds apart) and then arms its 30-second interval again, so the next read
+ * starts at least 67 seconds after the last one that found the batch closable. That errs on the safe side: the offer of
+ * a paid close only waits longer. */
+export const CLOSABLE_GAP_MS = 65_000;
 
 function memoryStorage(): StringStorage {
   const m = new Map<string, string>();
@@ -183,8 +215,12 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     quotePayoutFee: reads.quotePayoutFee,
     readRewardCutBps: reads.readRewardCutBps,
     readApyPercent: reads.readApyPercent,
+    readDeliveryMarket: reads.readDeliveryMarket,
+    quoteDeliveries: reads.quoteDeliveries,
+    readDeliveryPreference: reads.readDeliveryPreference,
     checkWiring,
     scan: scanVault,
+    deployments: EXPECTED_DEPLOYMENTS,
     now,
     ...given,
   };
@@ -550,7 +586,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         const k = `${o.id}:${o.cancelled.hash}`;
         let took = settledCancels.get(k);
         if (took === undefined) {
-          took = await cancelTook(c, o);
+          took = await cancelTook(c, d, o);
           if (took !== undefined) settledCancels.set(k, took);
         }
         if (took) out.add(o.id);
@@ -569,7 +605,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
   const closesAt = (fd: reads.FrontDoorState) => batchCloseAt(fd.openStart, fd.batchInterval, d.batchMaxWaitS);
   /** Sent, its batch closed, not yet arrived in the vault (as far as `scan` has read and confirmed). */
   const onTheBridge = (op: { batchId?: bigint }, fd: reads.FrontDoorState, scan: VaultScan) =>
-    op.batchId !== undefined && op.batchId < fd.openBatchId && !deliveredFor(scan, op.batchId);
+    // v3.2: one whose park was refunded (crossingOf found it so) isn't on its way either
+    op.batchId !== undefined && op.batchId < fd.openBatchId && !deliveredFor(scan, op.batchId) && !crossingSettled(scan, op.batchId);
   /** The batch's delivery is in the scan and confirmed by the chain. */
   const deliveredFor = (scan: VaultScan, batchId: bigint) => {
     const hit = scan.delivered.get(String(batchId));
@@ -600,14 +637,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       withdrawals
         .filter((o) => takenForDropped(o, deps.now()))
         .map(async (o): Promise<WithdrawalOp | undefined> => {
-          const batchId = await droppedRequestMined(c, o);
+          const batchId = await droppedRequestMined(c, d, o);
           if (batchId === undefined) return undefined;
           deps.opLog.update(a, o.id, { state: "sent", error: undefined, droppedAt: undefined, batchId });
           return { ...o, state: "sent", error: undefined, droppedAt: undefined, batchId };
         }),
     );
     const open = [...withdrawals.filter((o) => o.state !== "failed"), ...revived.filter((o) => o !== undefined)];
-    const places = await Promise.all(open.map((o) => requestBatch(c, o, deps.now())));
+    const places = await Promise.all(open.map((o) => requestBatch(c, d, o, deps.now())));
     // those whose hash can't be mined, one at a time and oldest first: a request one takes for its
     // replacement is never another's, nor one another record already owns
     const adopted = new Set<string>();
@@ -637,10 +674,14 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       .map(({ id, batchId, shares, unsure }) => ({ id, batchId, shares, ...(unsure ? { unsure } : {}) }));
   }
 
-  /** The stake itself, from contract reads alone: it never waits on the vault's history. */
+  /** The stake itself, from contract reads alone: it never waits on the vault's history. On v3.2 a price that can't be
+   * read (its quote reverting, as in a pool pushed off its price) leaves the position there with its dollars missing
+   * (`priceMissing`), so Unstake still opens, in TAO, and Receive TAO with it (Task 59a review, M6); v3-launch's fails as
+   * before. */
   async function getPosition(account: string): Promise<Position> {
     const a = account as Address;
-    const [v, price] = await Promise.all([deps.readVault(c, d, a), deps.taoPriceUsd(c)]);
+    const [v, read] = await Promise.all([deps.readVault(c, d, a), isV32(d) ? deps.taoPriceUsd(c).catch(() => undefined) : deps.taoPriceUsd(c)]);
+    const price = read ?? 0;
     // v3 only (v2's Rewards page stays as it was); a failed read leaves it unknown, never zero
     const waiting = isV3(d) ? await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined) : undefined;
     const pendingRewardsTao =
@@ -655,8 +696,60 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       usdValue: toDisplay(taoWei, 18) * price,
       taoPriceUsd: price,
       ...(pendingRewardsTao !== undefined ? { pendingRewardsTao } : {}),
+      ...(read === undefined ? { priceMissing: true as const } : {}),
+      ...(isV32(d) && reads.depositLeavesElsewhere(v) ? { withdrawsOnBittensor: true as const } : {}),
     };
   }
+
+  /** v3.2: what a USDC delivery of a new unstake would also sell of the account's (the latest request decides for all
+   * its waiting TAO: Task 59a review, C1), from the chains, wherever it was asked: what is credited to it on Base
+   * (`claimable`), its request in the open batch (`redeemOf`, at the vault's price), and its payouts on their way back
+   * (fix round 2, facts.ts): its entries in the payouts of batches the vault took (its Redeemed and its bounced deposits,
+   * in its scan brought up to Bittensor's head) until Base shows them landed, its requests in batches crossing to
+   * Bittensor (Base's RedeemRequested, at the vault's price), and its deposits in parks refunded until the refund lands.
+   * In that order: a credit landing between the reads is counted twice (on its way, and claimable), never missed.
+   * `waitingComplete` once every one of them was read and settled: not while the indexer's blocks the browser hasn't
+   * read itself could hold one left out, nor while a search of Base's logs was cut short, nor while a park's outcome is
+   * open (a batch of the account's parked or not told yet, any park holding deposits, a refund on its way whose it
+   * isn't told, any batch below the newest delivered one not read settled: gapsOpen). With the market at one block, and the most it could ever sell at once (its shares' TAO and all that
+   * waits) to search up to. Rejects when any of it can't be read. */
+  async function deliveryReads(a: Address): Promise<{ waitingTaoWei: bigint; waitingComplete: boolean; capTaoWei: bigint; market: DeliveryMarket }> {
+    if (!isV32(d)) throw new Error("Only v3.2 has a live USDC delivery limit");
+    const readMarket = deps.readDeliveryMarket ?? reads.readDeliveryMarket;
+    const [market, mine] = await Promise.all([
+      readMarket(c, d),
+      (async () => {
+        const scan = await scanFor(a);
+        // judged at once: the background check of the indexer's blocks, started with the read, may end meanwhile
+        const seeded = seededRanges(scan) !== undefined;
+        const sent = await payoutsOnTheWay(c, d, scan, a);
+        const [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
+        const crossing = await entriesCrossing(c, d, scan, a, fd.openBatchId);
+        const held = await crossingsOnTheWay(c, d, scan, a, crossing.batches);
+        const parks = await (deps.openParks ?? openParks)(c, d, scan);
+        // a batch below the newest delivered one the vault never took: open until read settled (re-review 2); while the
+        // indexer's blocks aren't read by the browser itself the figure isn't complete anyway, and its gaps aren't known
+        const gaps = !seeded && (await gapsOpen(c, d, scan, a));
+        // what is claimable, read last, after every landing and refund check: a credit a check saw as not landed or not
+        // run is counted twice, and one it saw run (settled) is in this read, never missed (re-review 3)
+        const { claimable } = await deps.readFrontDoor(c, d, a);
+        return {
+          claimable,
+          redeemOf: fd.redeemOf,
+          v,
+          onTheWay: sent.taoWei + taoFor(held.shares, v.totalAssets, v.totalSupply) + held.refundWei,
+          complete: !seeded && sent.complete && crossing.complete && !held.open && !parks && !gaps,
+        };
+      })(),
+    ]);
+    const { v } = mine;
+    const waitingTaoWei = mine.claimable + taoFor(mine.redeemOf, v.totalAssets, v.totalSupply) + mine.onTheWay;
+    return { waitingTaoWei, waitingComplete: mine.complete, capTaoWei: taoFor(v.shares, v.totalAssets, v.totalSupply) + waitingTaoWei, market };
+  }
+
+  /** Each size quoted as a delivery would sell it, at the market's block along its route. */
+  const salesAt = (market: DeliveryMarket) => (sizes: readonly bigint[]) =>
+    (deps.quoteDeliveries ?? reads.quoteDeliveries)(c, d, sizes, { sellPath: market.sellPath, blockNumber: market.blockNumber });
 
   /** Shares not already asked back: the open batch's request (the front door's own figure) and this
    * browser's unstakes whose batch closed and hasn't reached the vault. The scan as far as it has been
@@ -694,20 +787,33 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         // a delivery the scan found may have burned the shares since the first reads: read them again
         [fd, v] = await Promise.all([deps.readFrontDoor(c, d, a), deps.readVault(c, d, a)]);
       }
+      // v3.2: a request whose parked batch was refunded or dropped asked for nothing, so its shares are free again
+      // (crossingOf; never on v3-launch, and not while that can't be told: it then still counts as asked)
+      const dropped = new Set<string>();
+      if (isV32(d)) {
+        for (const w of away()) {
+          const op = w.batchId !== undefined ? (deps.opLog.get(a, w.id) as WithdrawalOp | undefined) : undefined;
+          if (op && (await requestDropped(c, d, scan, op, w.batchId as bigint))) dropped.add(w.id);
+        }
+      }
+      const asking = () => away().filter((w) => !dropped.has(w.id));
       // one request carries at most the vault's maxEntryValue, this batch's earlier request included
       const most = v.maxEntryValue !== undefined ? unstakeMostWei(v.maxEntryValue, taoFor(fd.redeemOf, v.totalAssets, v.totalSupply)) : undefined;
-      const unsure = away().some((w) => {
+      const unsure = asking().some((w) => {
         if (w.batchId === undefined) return false;
         const hit = scan.delivered.get(String(w.batchId));
         return hit ? hit.unconfirmed === true && seededShared(scan, hit.block) : deliveryMayBeSeeded(scan);
       });
       if (unsure) return { availableShares: 0n, availableTaoWei: 0n, ...(most !== undefined ? { mostTaoWei: most } : {}), checking: true };
-      const asked = fd.redeemOf + sum(away().map((w) => w.shares));
+      const asked = fd.redeemOf + sum(asking().map((w) => w.shares));
       const availableShares = v.shares > asked ? v.shares - asked : 0n;
       return {
         availableShares,
         availableTaoWei: taoFor(availableShares, v.totalAssets, v.totalSupply),
         ...(most !== undefined ? { mostTaoWei: most } : {}),
+        // v3.2: what holds a request now (stake-form.ts, requestHold): stake missing, or shares that withdraw elsewhere
+        ...(isV32(d) && v.stakeMissing ? { stakeMissing: true as const } : {}),
+        ...(isV32(d) && reads.originElsewhere(v) ? { originElsewhere: true as const } : {}),
       };
     });
   }
@@ -743,8 +849,21 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     };
   }
 
+  /** v3.2 (R9, M-2): the open batch the limits last found closable, how (`due`: full by its limits, or by time alone),
+   * since when (`at`), and when the last read that found it so began (`seen`). The keeper sends a full batch for free on
+   * its next round (once a minute), so the stake form offers a paid close only once reads a refresh apart have found the
+   * same batch still closable the same way (send-now.ts closeFirstView). Forgotten as soon as a read finds it can't close,
+   * or another batch open. R10 (M-A): started again when it becomes closable another way (a batch due by time for
+   * minutes that fills to its limits is one the keeper's next round sends, however long it was due), and when no read
+   * has found it closable for more than CLOSABLE_GAP_MS (a hidden tab's reads stop; a cancel may have come between). */
+  let closable: { id: bigint; due: "full" | "time"; at: number; seen: number } | undefined;
+
   async function getLimits(): Promise<Limits> {
+    // the read's own start: a slow answer never makes a batch look closable for longer than it was seen to be
+    const at = deps.now();
     const [fd, price, fees] = await Promise.all([deps.readFrontDoor(c, d), deps.taoPriceUsd(c), isV3(d) ? deps.readStakerFees(c, d) : undefined]);
+    // R10 (L-B): and its answer: what it read may be as late as this
+    const back = deps.now();
     // a deposit must fit under the deposit cap and in the open batch, or the front door refuses it
     const capRoom = capFree(fd);
     const batchRoom = batchFree(fd);
@@ -759,6 +878,38 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const minCents = Math.ceil(minUsd * 100) / 100;
     // what a room in TAO lets the form take, in whole cents
     const usdFor = (room: bigint) => Math.floor(toDisplay(floorRao(room), 18) * price * (1 - LIMIT_MARGIN) * 100) / 100;
+    // v3.2 (R8): the open batch is what limits a stake, and anyone may close it now: once it has left, the next batch takes
+    // up to its whole limit, held to the cap's room (a close moves the batch's deposits into what the cap counts, so it
+    // frees none of the cap). The form offers to close it first (stake-form.ts closeFirstNeeded)
+    const next = floorRao(capRoom < fd.maxBatchValue ? capRoom : fd.maxBatchValue);
+    // R9 (M-2): full by its limits (the keeper's next round sends it for free) or due by time alone (the keeper may hold it
+    // for its fees)
+    const due = depositLimitsReached(fd) ? ("full" as const) : ("time" as const);
+    // R9 (M-2): the same batch found closable the same way since `closable.at`, by this read or earlier ones. Each figure
+    // is the sure one: the time from the first sighting's answer (R10, L-B) to this read's start, and the gap from the
+    // last sighting's start to this read's answer, the longest it may have gone unseen (R10, M-A)
+    const v32 = isV32(d);
+    if (v32 && fd.canClose) {
+      const last = closable;
+      closable =
+        last && last.id === fd.openBatchId && last.due === due && back - last.seen <= CLOSABLE_GAP_MS
+          ? // R10 (N-2): reads overlap (the form's refresh and a click's): one that began earlier but answers later never
+            // moves the last sighting back
+            { ...last, seen: Math.max(last.seen, at) }
+          : { id: fd.openBatchId, due, at: back, seen: at };
+    } else closable = undefined;
+    const since = closable?.at ?? at;
+    const afterClose =
+      v32 && fd.canClose && batchRoom < capRoom && usdFor(next) > usdFor(maxTao) && usdFor(next) >= minCents
+        ? {
+            maxTao: next,
+            maxUsd: usdFor(next),
+            // R9 (L-1): the batch it was read from
+            batchId: fd.openBatchId,
+            due,
+            closableForMs: Math.max(0, at - since),
+          }
+        : undefined;
     return {
       minTao: fd.minDeposit,
       maxTao,
@@ -767,6 +918,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       // judged in dollars, as the form judges amounts: a room just over minDeposit is still under the
       // dollar minimum once the margins are counted
       full: usdFor(capRoom) < minCents ? "cap" : usdFor(batchRoom) < minCents ? "batch" : null,
+      ...(afterClose ? { afterClose } : {}),
     };
   }
 
@@ -798,7 +950,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       // staking minimum; one whose arrival is still being checked may be in the vault already, so it isn't
       // said to be on its way
       const incomingWei = found
-        .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !facts.deliveryUnknown && !isCancelled(op, facts))
+        .filter(({ op, facts }) => facts.depositMined && !facts.delivered && !facts.deliveryUnknown && (!facts.crossing || facts.crossing.kind === "parked") && !isCancelled(op, facts))
         .reduce((sum, { op }) => sum + op.targetTao, 0n);
       for (const { op, facts } of found) out.push(depositRecord(op, { ...facts, incomingWei }));
       for (const e of await chainDeposits(c, d, scan)) if (!seen.has(e.txHash.toLowerCase())) out.push(chainOnlyDeposit(e));
@@ -835,7 +987,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     const depositFee = fees.depositFeeUsdc;
     const swapFee = usdcUnits > depositFee ? ((usdcUnits - depositFee) * fees.swapFeeBps) / 10_000n : 0n;
     const rest = usdcUnits > depositFee + swapFee ? usdcUnits - depositFee - swapFee : 0n;
-    const expected = rest > 0n ? await deps.quoteBuy(c, rest) : 0n;
+    // v3.2: the veto's small trade read beside it, for the swap's own price impact (impact.ts)
+    const [expected, probeOut] = await Promise.all([
+      rest > 0n ? deps.quoteBuy(c, rest) : Promise.resolve(0n),
+      isV32(d) && rest > 0n ? deps.quoteBuy(c, STAKE_PROBE_USDC) : Promise.resolve(undefined),
+    ]);
     const amountUsd = toDisplay(usdcUnits, 6);
     const cascadeFeesUsd = toDisplay(depositFee + swapFee, 6);
     const at = closesAt(fd);
@@ -855,6 +1011,8 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       depositFeeUsdc: depositFee,
       swapFeeUsdc: swapFee,
       cascadeFeesUsd,
+      // a probe that read nothing is carried too: the cap then refuses, unmeasured (Task 59a review, M11)
+      ...(probeOut !== undefined ? { impact: { tradeIn: rest, tradeOut: expected, probeIn: STAKE_PROBE_USDC, probeOut } } : {}),
     };
   }
 
@@ -873,6 +1031,9 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     deployment: d,
     clients: c,
     opLog: deps.opLog,
+    // the founder's switches, from the deployment's committed entry (fail closed: config.ts)
+    stage: deploymentStage(d, deps.deployments),
+    usdcDelivery: usdcDeliveryOn(d, deps.deployments),
     checkWiring: () => wiring(),
     forgetWiring: () => wiring.forget(),
 
@@ -905,6 +1066,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         checkedAt: new Date(deps.now()),
         validatorHotkey: d.hotkeySs58,
         explorerUrl: explorer.account(d.vaultSs58),
+        ...(isV32(d) && v.stakeMissing ? { stakeMissing: true as const } : {}),
       };
     },
 
@@ -957,7 +1119,11 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       const taoWei = taoFor(shares, v.totalAssets, v.totalSupply);
       const bridgeFeeWei = await deps.quotePayoutFee(c, d, a, taoWei);
       const net = taoWei > bridgeFeeWei ? taoWei - bridgeFeeWei : 0n;
-      const gross = await deps.quoteSell(c, net);
+      // v3.2: the veto's small sale read beside it, for the delivery sale's own price impact (impact.ts)
+      const [gross, probeOut] = await Promise.all([
+        deps.quoteSell(c, net),
+        isV32(d) && net > 0n ? deps.quoteSell(c, SALE_PROBE_TAO) : Promise.resolve(undefined),
+      ]);
       // v3 delivery pays the sale less the staker's swap fee (as sellFor takes it); v2 stays gross
       const deliveryFee = isV3(d) ? (gross * (await deps.readStakerFees(c, d)).swapFeeBps) / 10_000n : 0n;
       const usdc = gross - deliveryFee;
@@ -977,7 +1143,36 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
         etaMinutes: minutesUntil(at, deps.now()) + 2 * BRIDGE_MINUTES + Math.round(v.payoutDelay / 60),
         batchIntervalS: fd.batchInterval,
         ...(await deliveryTerms()),
+        // a probe that read nothing is carried too: the cap then refuses, unmeasured (Task 59a review, M11)
+        ...(probeOut !== undefined ? { impact: { tradeIn: net, tradeOut: gross, probeIn: SALE_PROBE_TAO, probeOut } } : {}),
       };
+    },
+
+    /** v3.2: the live USDC delivery limit for the account (delivery-limit.ts). What of its TAO a delivery would sell
+     * with a new unstake's payout (deliveryReads: its request in the open batch, its payouts on their way from requests
+     * made anywhere, its TAO on Base), and whether all of that was read; and the largest sale, at most all its TAO, that
+     * clears every floor now. */
+    async getDeliveryLimit(account) {
+      const a = account as Address;
+      const [{ waitingTaoWei, waitingComplete, capTaoWei, market }, preferenceSet] = await Promise.all([
+        deliveryReads(a),
+        isV32(d) ? (deps.readDeliveryPreference ?? reads.readDeliveryPreference)(c, d, a) : Promise.resolve(false),
+      ]);
+      return { waitingTaoWei, waitingComplete, preferenceSet, ...(await findDeliveryLimit(capTaoWei, market, salesAt(market))) };
+    },
+
+    /** v3.2: whether the front door holds a USDC delivery preference for the account, alone (the prompt to claim while
+     * USDC delivery is off reads nothing of the pools). */
+    async getDeliveryPreference(account) {
+      if (!isV32(d)) throw new Error("Only a v3.2 site reads the delivery preference on its own");
+      return (deps.readDeliveryPreference ?? reads.readDeliveryPreference)(c, d, account as Address);
+    },
+
+    /** v3.2: the check at the click before a USDC unstake (delivery-limit.ts clickRefusal): its own sale, with everything
+     * of the account's waiting, at the minimum it sends, read fresh. */
+    async deliveryRefusal(account, q) {
+      const { waitingTaoWei, capTaoWei, market } = await deliveryReads(account as Address);
+      return clickRefusal({ q, waitingTaoWei, capTaoWei, market, read: salesAt(market) });
     },
 
     async quoteRoundTrip(taoWei) {
@@ -1019,6 +1214,10 @@ export function notConfiguredData(): CascadeData {
     get opLog() {
       return missing();
     },
+    // no deployment: the careful stage, and nothing switched off (every read fails anyway)
+    stage: "testing",
+    usdcDelivery: true,
+    getDeliveryPreference: fail,
     getProtocolStats: fail,
     getApy: fail,
     getPosition: fail,
@@ -1032,6 +1231,8 @@ export function notConfiguredData(): CascadeData {
     listWithdrawals: fail,
     quoteDeposit: fail,
     quoteWithdrawal: fail,
+    getDeliveryLimit: fail,
+    deliveryRefusal: fail,
     quoteRoundTrip: fail,
     getOpenBatch: fail,
     getNextBatch: fail,

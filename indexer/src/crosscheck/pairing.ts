@@ -48,10 +48,12 @@ export interface DeliveryGroup {
 }
 
 /** The transaction's deliveries: each opener's group holds the receiver's events after it, up to the
- * first adapter Delivered to `recipient`, which closes it. */
+ * first adapter Delivered to `recipient`, which closes it. With `parked` (v3.2's Bittensor adapter), an adapter
+ * ParkedDelivered closes it too: deliverParked delivers a parked batch with no Delivered (that was logged when it
+ * parked), its key the park's, whose BatchParked names the recipient. */
 export function groupDelivered(
   txLogs: readonly StoredLog[],
-  o: { opener: "vault:BatchDelivered" | "frontDoor:PayoutsDelivered"; adapter: Role; recipient: Hex },
+  o: { opener: "vault:BatchDelivered" | "frontDoor:PayoutsDelivered"; adapter: Role; recipient: Hex; parked?: boolean },
 ): DeliveryGroup[] {
   const receiver = o.opener.split(":")[0] as Role;
   const out: DeliveryGroup[] = [];
@@ -60,7 +62,7 @@ export function groupDelivered(
     if (is(l, o.opener)) {
       open = { opener: l, events: [] };
       out.push(open);
-    } else if (open && l.contract === o.adapter && l.event === "Delivered" && same(l.args.recipient, o.recipient)) {
+    } else if (open && l.contract === o.adapter && ((l.event === "Delivered" && same(l.args.recipient, o.recipient)) || (o.parked && l.event === "ParkedDelivered"))) {
       open.delivered = l;
       open = undefined;
     } else if (open && l.contract === receiver) {

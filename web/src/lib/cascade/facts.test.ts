@@ -1,10 +1,12 @@
-import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpRequestError, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
+import { ContractFunctionZeroDataError, encodeAbiParameters, encodeEventTopics, getAddress, type Hex, HttpRequestError, parseAbiParameters, TransactionNotFoundError, TransactionReceiptNotFoundError } from "viem";
 import { baseHeaders } from "./__fixtures__/base-blocks";
-import { describe, expect, it } from "vitest";
-import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT } from "./abi";
+import { describe, expect, it, vi } from "vitest";
+import { ADAPTER, ERC20, FRONT_DOOR, STAKER, VAULT, VAULT_V32 } from "./abi";
 import { CLOCK_AHEAD_MS, type Deployment } from "./config";
 import {
+  cancelTook,
   chainDeposits,
+  chunkIn,
   claimWentThrough,
   confirmAccountEvents,
   confirmedChunks,
@@ -451,6 +453,24 @@ describe("facts", () => {
     expect(f.facts.waitingForMinimum).toBe(true);
   });
 
+  it("R11: carries the account's cancelableAt as the front door was read (v3.2), and nothing on v3-launch", async () => {
+    const c = chains({ baseReceipts: { [H(1)]: { status: "success", logs: [] }, [H(2)]: { status: "success", logs: [] } } });
+    const op = { kind: "deposit", id: "x", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: { swap: H(1), deposit: H(2) }, state: "sent" } as const;
+    const read = await depositFacts(c.clients, D, op, { fd: { ...fd, cancelableAt: 1_800_000_300 }, vault, scan: newScan(D) });
+    expect(read.facts.cancelableAt).toBe(1_800_000_300);
+    expect((await depositFacts(c.clients, D, op, { fd: { ...fd, cancelableAt: 0 }, vault, scan: newScan(D) })).facts.cancelableAt).toBe(0);
+    expect((await depositFacts(c.clients, D, op, { fd, vault, scan: newScan(D) })).facts).not.toHaveProperty("cancelableAt");
+  });
+
+  it("R12d (M1): carries the block's time and the device's read time with cancelableAt, so the receipt counts on Base's clock", async () => {
+    const c = chains({ baseReceipts: { [H(1)]: { status: "success", logs: [] }, [H(2)]: { status: "success", logs: [] } } });
+    const op = { kind: "deposit", id: "x", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: { swap: H(1), deposit: H(2) }, state: "sent" } as const;
+    const cancelClock = { chainTime: 1_800_000_100, readAt: 1_700_000_000_000 };
+    const read = await depositFacts(c.clients, D, op, { fd: { ...fd, cancelableAt: 1_800_000_300, cancelClock }, vault, scan: newScan(D) });
+    expect(read.facts.cancelClock).toEqual(cancelClock);
+    expect((await depositFacts(c.clients, D, op, { fd, vault, scan: newScan(D) })).facts).not.toHaveProperty("cancelClock");
+  });
+
   it("closes at the interval, or by the deployment's max wait (flagged as an upper bound)", async () => {
     const c = chains({ baseReceipts: { [H(1)]: { status: "success", logs: [] }, [H(2)]: { status: "success", logs: [] } } });
     const scan = newScan(D);
@@ -786,6 +806,68 @@ describe("facts", () => {
     expect(cancelled.facts.payout).toBeUndefined();
   });
 
+  it("cancelTook believes only the deployment's own front door: a cancel of the same shape logged by any other contract in the transaction is none", async () => {
+    const ELSEWHERE = getAddress("0x00000000000000000000000000000000000000ff");
+    const cancelLog = (address: string, eventName: "DepositCancelled" | "RedeemCancelled", batchId: bigint, tx: Hex, index = 0) =>
+      log(address, encodeEventTopics({ abi: FRONT_DOOR, eventName, args: { batchId, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256"), [10n ** 16n]), 60n, tx, index);
+    const c = chains({
+      baseReceipts: {
+        [H(12)]: { status: "success", logs: [cancelLog(D.frontDoor, "DepositCancelled", 3n, H(12))] },
+        // the same events, for the same account and batch, from a contract that isn't the front door (a bundle's other call)
+        [H(13)]: { status: "success", logs: [cancelLog(ELSEWHERE, "DepositCancelled", 3n, H(13))] },
+        [H(14)]: { status: "success", logs: [cancelLog(ELSEWHERE, "RedeemCancelled", 3n, H(14))] },
+        [H(15)]: { status: "success", logs: [cancelLog(D.frontDoor, "RedeemCancelled", 3n, H(15))] },
+        // the other contract's names batch 3, the front door's own names batch 4: the front door's is the cancel
+        [H(17)]: { status: "success", logs: [cancelLog(ELSEWHERE, "DepositCancelled", 3n, H(17)), cancelLog(D.frontDoor, "DepositCancelled", 4n, H(17), 1)] },
+        [H(18)]: { status: "success", logs: [cancelLog(ELSEWHERE, "DepositCancelled", 4n, H(18)), cancelLog(D.frontDoor.toLowerCase(), "DepositCancelled", 3n, H(18), 1)] },
+      },
+    });
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: { swap: H(1), deposit: H(2) }, batchId: 3n, state: "sent" };
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, hash: H(3), batchId: 3n, state: "sent" };
+    const took = (op: DepositOp | WithdrawalOp, hash: Hex) => cancelTook(c.clients, D, { ...op, cancelled: { hash, at: 1 } });
+    expect(await took(dep, H(12))).toBe(true);
+    expect(await took(dep, H(13))).toBe(false);
+    expect(await took(w, H(15))).toBe(true);
+    expect(await took(w, H(14))).toBe(false);
+    expect(await took(dep, H(17))).toBe(false);
+    expect(await took(dep, H(18))).toBe(true);
+    // and so the trail: not cancelled, and (its receipt read) not cancelling either, so the cancel is offered again
+    const f = (await depositFacts(c.clients, D, { ...dep, batchId: 4n, cancelled: { hash: H(13), at: 1 } }, { fd, vault, scan: newScan(D) })).facts;
+    expect(f.cancelMined).toBe(false);
+    expect(f.cancelPending).toBeUndefined();
+  });
+
+  it("cancelTook doesn't call a record cancelled while its own batch isn't known: nothing says the cancel came out of it", async () => {
+    const cancelIn = (eventName: "DepositCancelled" | "RedeemCancelled", batchId: bigint, tx: Hex) => ({
+      status: "success",
+      logs: [log(D.frontDoor, encodeEventTopics({ abi: FRONT_DOOR, eventName, args: { batchId, user: ME } }) as Hex[], encodeAbiParameters(parseAbiParameters("uint256"), [10n ** 16n]), 60n, tx)],
+    });
+    const c = chains({
+      baseReceipts: {
+        [H(12)]: cancelIn("DepositCancelled", 3n, H(12)),
+        [H(15)]: cancelIn("RedeemCancelled", 3n, H(15)),
+        [H(14)]: { status: "reverted", logs: [] },
+        [H(19)]: { status: "success", logs: [] },
+      },
+    });
+    // records whose batch was never recorded
+    const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: {}, state: "sent" };
+    const w: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: 10n ** 22n, taoEstimate: 1n, usdcEstimate: 1n, fee: 0n, state: "sent" };
+    const took = (op: DepositOp | WithdrawalOp, hash: Hex, batchId?: bigint) => cancelTook(c.clients, D, { ...op, cancelled: { hash, at: 1 } }, batchId);
+    // a cancel of the account's went through, out of some batch: not known to be this record's, so never true
+    expect(await took(dep, H(12))).toBeUndefined();
+    expect(await took(w, H(15))).toBeUndefined();
+    // told the batch (the receipt page names the open one it read), it is decided
+    expect(await took(dep, H(12), 3n)).toBe(true);
+    expect(await took(dep, H(12), 4n)).toBe(false);
+    expect(await took(w, H(15), 3n)).toBe(true);
+    // a definite no needs no batch: reverted, or no cancel of the account's in it at all
+    expect(await took(dep, H(14))).toBe(false);
+    expect(await took(dep, H(19))).toBe(false);
+    // and one Base can't show is unknown, as ever
+    expect(await took(dep, H(20))).toBeUndefined();
+  });
+
   it("knows whether a cancel with no receipt can still go through: still waiting, or its nonce taken by another transaction", async () => {
     const dep: DepositOp = { id: "d", kind: "deposit", account: ME, createdAt: 0, usdcIn: 1n, targetTao: 10n ** 16n, priceUsd: 1, hashes: {}, batchId: 4n, state: "sent", cancelled: { hash: H(16), at: 1 } };
     const pendingWith = async (nonce: number, blockNumber: bigint | null = null) =>
@@ -822,14 +904,14 @@ describe("facts", () => {
       if (q.hash === H(25)) throw new Error("HTTP request failed. Status: 503");
       return known(q);
     };
-    const went = (hash: Hex) => claimWentThrough(c.clients, { account: ME, hashes: { claim: hash } });
+    const went = (hash: Hex) => claimWentThrough(c.clients, D, { account: ME, hashes: { claim: hash } });
     expect(await went(H(21))).toBe(true);
     expect(await went(H(22))).toBe(false);
     expect(await went(H(23))).toBe(false);
     // not found (a node that is behind, or not mined yet) is no answer, nor is a receipt that can't be read
     expect(await went(H(24))).toBeUndefined();
     await expect(went(H(25))).rejects.toThrow();
-    expect(await claimWentThrough(c.clients, { account: ME, hashes: {} })).toBe(false);
+    expect(await claimWentThrough(c.clients, D, { account: ME, hashes: {} })).toBe(false);
   });
 
   it("reads the USDC the swap really spent from its receipt (an exact-output swap spends at most the quote)", async () => {
@@ -990,8 +1072,6 @@ describe("v3: what happened to a payout once it was back on Base", () => {
       pref?: readonly [bigint, bigint, number];
       sale?: bigint;
       d?: Deployment;
-      /** Base's seconds a block (2, as these tests were written; 0.2 since block 53,556,128) */
-      blockS?: number;
     } = {},
   ) {
     const c = chains({
@@ -1003,9 +1083,7 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     const reads: string[] = [];
     const base = c.clients as unknown as { base: Record<string, unknown> };
     base.base.getBlock = async (q: { blockTag?: string; blockNumber?: bigint }) =>
-      q.blockTag === "latest"
-        ? { number: HEAD, timestamp: BigInt(TIP_S) }
-        : { number: q.blockNumber, timestamp: BigInt(opts.blockS === undefined ? baseTime(q.blockNumber!).getTime() / 1000 : TIP_S - Math.floor(Number(HEAD - q.blockNumber!) * opts.blockS)) };
+      q.blockTag === "latest" ? { number: HEAD, timestamp: BigInt(TIP_S) } : { number: q.blockNumber, timestamp: BigInt(baseTime(q.blockNumber!).getTime() / 1000) };
     base.base.readContract = async ({ functionName }: { functionName: string }) => {
       reads.push(functionName);
       if (functionName === "getExecutionState") return 2;
@@ -1077,16 +1155,6 @@ describe("v3: what happened to a payout once it was back on Base", () => {
     const [, mine] = encodeEventTopics({ abi: FRONT_DOOR, eventName: "Delivered", args: { user: ME } });
     expect(b.asked[0]).toEqual({ address: D.frontDoor, topics: [[sig("PayoutReceived"), sig("Delivered"), sig("Claimed")], [KEY, mine]] });
     expect(b.reads).not.toContain("deliveryOf");
-  });
-
-  it("counts the time since the payout left Bittensor in Base's blocks at its block time as measured: on its 200 ms blocks a landing 2.5 hours ago is 45,000 blocks back, found", async () => {
-    const b = backOnBase({ blockS: 0.2, logs: [landedFor(ME, HEAD - 45_000n), deliveredUsdc(2_431_337n, HEAD - 44_990n, H(62))] });
-    const f = await factsOf(b);
-    expect(f.traceFailed).toBeUndefined();
-    expect(f.credited?.taoWei).toBe(TAO_BACK);
-    expect(f.usdcDelivered?.hash).toBe(H(62));
-    // three hours of 200 ms blocks back from the head, and five minutes more (on the old 2-second count: 5,550)
-    expect(b.windows[0][0]).toBe(HEAD - 54_000n - 1_500n);
   });
 
   it("takes a claim by hand after the payout landed as its end: a later delivery belongs to another payout", async () => {
@@ -1313,7 +1381,7 @@ describe("the batch an unstake request with no receipt joined", () => {
   /** Where it stands, searched for (as live.ts does) once its hash is dead. */
   const place = async (b: ReturnType<typeof onBase>, over: Partial<WithdrawalOp> = {}, skip: ReadonlySet<string> = new Set(), searchFailedAt?: number) => {
     const op = request({ shares: SHARES, ...over });
-    const p = await requestBatch(b.clients, op, NOW);
+    const p = await requestBatch(b.clients, D, op, NOW);
     return p.dead ? requestReplacement(b.clients, D, op, { now: NOW, skip, searchFailedAt }) : p;
   };
   /** The old hash can never be mined: pending, its nonce taken by another transaction. */
@@ -1361,7 +1429,7 @@ describe("the batch an unstake request with no receipt joined", () => {
 
   it("only says the hash is dead, reading no logs, until its replacement is searched for", async () => {
     const b = onBase({ ...replaced, logs: [redeemRequested(ME, SHARES, 7n, HEAD - 50n, H(88))] });
-    expect(await requestBatch(b.clients, request({ shares: SHARES }), NOW)).toEqual({ dead: true });
+    expect(await requestBatch(b.clients, D, request({ shares: SHARES }), NOW)).toEqual({ dead: true });
     expect(b.windows).toEqual([]);
   });
 
@@ -1382,14 +1450,6 @@ describe("the batch an unstake request with no receipt joined", () => {
     expect(b.windows[0][0]).toBeGreaterThanOrEqual(HEAD - 30n - 150n);
     // the window is still open: the newest couple of blocks are read next time
     expect(b.windows.at(-1)![1]).toBe(HEAD - 2n);
-  });
-
-  it("counts the time since it was sent in Base's blocks at its block time as measured: on its 200 ms blocks a speed-up mined 2 hours 50 minutes ago (51,000 blocks back) is found", async () => {
-    const logs = [redeemRequested(ME, SHARES, 7n, HEAD - 51_000n, H(88))];
-    const b = onBase({ logs, blockS: 0.2 });
-    expect(await place(b, { sentAt: NOW - 3 * HOUR })).toEqual({ batchId: 7n, replacedBy: H(88) });
-    // three hours of 200 ms blocks back, and five minutes more (on the old 2-second count: 5,550, which missed it)
-    expect(b.windows[0][0]).toBe(HEAD - 54_000n - 1_500n);
   });
 
   it("is dropped once the whole two days after it was sent are read and hold nothing in its place: another amount, another account's, or one another record owns", async () => {
@@ -2035,5 +2095,158 @@ describe("a delivery the scan doesn't hold, while the indexer's blocks aren't al
     const c = chains();
     expect((await withdrawalFacts(c.clients, D, w3, { fd: rolled, vault, scan: newScan(D), claims: [] })).facts.sentAt).toBeUndefined();
     expect((await depositFacts(c.clients, D, dep3, { fd: rolled, vault, scan: newScan(D) })).facts.sentAt).toBeUndefined();
+  });
+});
+
+describe("v3.2's vault events, read by the deployment's own ABI", () => {
+  const D32: Deployment = {
+    ...D,
+    staker: "0x0000000000000000000000000000000000005a4E",
+    oracle: "0x000000000000000000000000000000000000041E",
+    vaultLens: "0x000000000000000000000000000000000000Ae15",
+    doorLens: "0x000000000000000000000000000000000000De15",
+  };
+  /** Task 36b's PayoutChunkSent: eight fields, `charged` and `unstakeCost` after the fee. */
+  const chunk32 = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT_V32, eventName: "PayoutChunkSent", args: { key: KEY } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256, uint256, uint256"), [0, 2, 10n ** 16n, 9n * 10n ** 15n, 10n ** 15n, 10n ** 15n, 10n ** 9n]),
+    2_000n,
+    H(31),
+  );
+  const chunk31 = log(
+    D.vault,
+    encodeEventTopics({ abi: VAULT, eventName: "PayoutChunkSent", args: { key: KEY } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint32, uint32, uint256, uint256, uint256"), [0, 2, 10n ** 16n, 9n * 10n ** 15n, 10n ** 15n]),
+    2_000n,
+    H(31),
+  );
+  const receipt = (logs: unknown[]) => ({ status: "success", logs }) as never;
+
+  it("finds the eight-field chunk on a v3.2 deployment, and v3-launch's six-field one only on v3-launch", () => {
+    expect(chunkIn(receipt([chunk32]), D32, KEY, 0, 2)).toBe(true);
+    expect(chunkIn(receipt([chunk32]), D32, KEY, 0, 3)).toBe(false);
+    expect(chunkIn(receipt([chunk31]), D32, KEY, 0, 2)).toBe(false);
+    expect(chunkIn(receipt([chunk31]), D, KEY, 0, 2)).toBe(true);
+    expect(chunkIn(receipt([chunk32]), D, KEY, 0, 2)).toBe(false);
+  });
+});
+
+// ---- v3.2 (R4): a deferred unstake's cause, read at its delivery's block (merge 7b phase 2b, the review's I2) ----
+
+describe("withdrawalFacts on v3.2: a deferral's cause from the reads at its delivery's block (exit-hold.ts)", () => {
+  const D32: Deployment = {
+    ...D,
+    staker: "0x00000000000000000000000000000000000057a4",
+    oracle: "0x0000000000000000000000000000000000000a7c",
+    vaultLens: "0x000000000000000000000000000000000000Ae15",
+    doorLens: "0x000000000000000000000000000000000000De15",
+  };
+  const PRIMARY = "0x00000000000000000000000000000000000000b7";
+  const SHARE = 10n ** 24n;
+  const BLOCK = 1_500n;
+  const T = 1_800_000_000;
+  const REQUESTED = 5n * SHARE;
+  const deliveredV32 = log(
+    D32.vault,
+    encodeEventTopics({ abi: VAULT_V32, eventName: "BatchDelivered", args: { key: KEY, sourceChain: 8453n, frontDoor: D32.frontDoor } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint64, uint256"), [3n, 0n]),
+    BLOCK,
+    H(9),
+  );
+  const deferredLog = log(
+    D32.vault,
+    encodeEventTopics({ abi: VAULT_V32, eventName: "RedeemDeferred", args: { key: KEY, user: ME } }) as Hex[],
+    encodeAbiParameters(parseAbiParameters("uint256"), [REQUESTED]),
+    BLOCK,
+    H(9),
+    1,
+  );
+  // the op asked for less than the entry the vault deferred (the door adds an account's requests in a batch into one): the
+  // cause is the entry's `requested`, 5 shares (the hold), never this op's 0.01 (it would read as the minimum)
+  const op: WithdrawalOp = { id: "w", kind: "withdrawal", account: ME, createdAt: 0, shares: SHARE / 100n, taoEstimate: 10n ** 16n, usdcEstimate: 1n, fee: 0n, batchId: 3n, state: "sent" };
+  /** The scan holds batch 3's delivery at BLOCK, its receipt with the account's RedeemDeferred. */
+  const scanOf = (d: Deployment) => {
+    const scan = newScan(d);
+    scan.delivered.set("3", { key: KEY, txHash: H(9), block: BLOCK });
+    scan.receipts.set(H(9), { status: "success", blockNumber: BLOCK, logs: [deliveredV32, deferredLog] } as never);
+    scan.blockTimes.set(BLOCK, new Date(T * 1000));
+    return scan;
+  };
+  /** Bittensor answering the lens's reads at a block (each call on its own), and the primary's canSendPayouts(). */
+  function bit(o: { fresh?: bigint; canSend?: boolean | Error; fail?: Error } = {}) {
+    const asked: { fn: string; block?: bigint; args?: readonly unknown[] }[] = [];
+    const answers: Record<string, unknown> = { primaryBridge: PRIMARY, freshShares: [BigInt(T - 60), o.fresh ?? 0n], balanceOf: 10n * SHARE, price: 10n ** 12n };
+    const bittensor = {
+      getBlock: vi.fn(async () => ({ timestamp: BigInt(T) })),
+      multicall: vi.fn(async ({ contracts, blockNumber }: { contracts: { functionName: string; args?: readonly unknown[] }[]; blockNumber: bigint }) => {
+        if (o.fail) throw o.fail;
+        return contracts.map((x) => {
+          asked.push({ fn: x.functionName, block: blockNumber, args: x.args });
+          // the primary's view, read in a multicall of its own
+          if (x.functionName === "canSendPayouts") return o.canSend instanceof Error ? { status: "failure", error: o.canSend } : { status: "success", result: o.canSend ?? true };
+          return { status: "success", result: answers[x.functionName] };
+        });
+      }),
+      readContract: vi.fn(async ({ functionName, blockNumber }: { functionName: string; blockNumber: bigint }) => {
+        asked.push({ fn: functionName, block: blockNumber });
+        if (o.canSend instanceof Error) throw o.canSend;
+        return o.canSend ?? true;
+      }),
+      getTransactionReceipt: async () => null,
+    };
+    const base = { getTransactionReceipt: async () => { throw new Error("receipt not found"); } };
+    return { clients: { base, bittensor } as never, asked, bittensor };
+  }
+  const run = async (b: ReturnType<typeof bit>, d: Deployment = D32, scan = scanOf(d)) => ({ facts: (await withdrawalFacts(b.clients, d, op, { fd, vault, scan, claims: [] })).facts, scan });
+
+  it("the one-day hold: the shares held a day are worth under the minimum, read at the delivery's block with the entry's request", async () => {
+    const b = bit({ fresh: 10n * SHARE });
+    const { facts, scan } = await run(b);
+    expect(facts.delivered).toMatchObject({ outcome: "deferred", defer: "hold", txHash: H(9) });
+    expect(b.asked.every((a) => a.block === BLOCK)).toBe(true);
+    expect(b.asked.find((a) => a.fn === "freshShares")?.args).toEqual([ME]);
+    // only what a cause needs at a delivery's block, never the allowance's inputs
+    expect(b.asked.map((a) => a.fn)).toEqual(["primaryBridge", "freshShares", "balanceOf", "price", "canSendPayouts"]);
+    expect(scan.exitsAt?.size).toBe(1);
+  });
+
+  it("the rail closed, and the day's limit (no `defer`: the trail says it as before)", async () => {
+    expect((await run(bit({ canSend: false }))).facts.delivered).toMatchObject({ outcome: "deferred", defer: "rail" });
+    const limit = (await run(bit())).facts.delivered;
+    expect(limit).toMatchObject({ outcome: "deferred" });
+    expect(limit).not.toHaveProperty("defer");
+  });
+
+  it("a read that fails is \"unread\" and kept nowhere: the next visit reads again", async () => {
+    const failing = bit({ fail: new HttpRequestError({ url: "https://archive.example", status: 429 }) });
+    const scan = scanOf(D32);
+    expect((await run(failing, D32, scan)).facts.delivered).toMatchObject({ outcome: "deferred", defer: "unread" });
+    expect(scan.exitsAt?.size ?? 0).toBe(0);
+    const healed = bit({ fresh: 10n * SHARE });
+    expect((await run(healed, D32, scan)).facts.delivered).toMatchObject({ defer: "hold" });
+    // read again: the lens's multicall and the view's own
+    expect(healed.bittensor.multicall).toHaveBeenCalledTimes(2);
+  });
+
+  it("a rail whose view the contract refuses can't be ruled out: never the day's limit, \"unread\" and not kept (the review's I1)", async () => {
+    const scan = scanOf(D32);
+    const refused = bit({ canSend: new ContractFunctionZeroDataError({ functionName: "canSendPayouts" }) });
+    expect((await run(refused, D32, scan)).facts.delivered).toMatchObject({ outcome: "deferred", defer: "unread" });
+    expect(scan.exitsAt?.size ?? 0).toBe(0);
+    // the hold is enough alone, whatever the rail: said, and kept
+    const held = bit({ fresh: 10n * SHARE, canSend: new ContractFunctionZeroDataError({ functionName: "canSendPayouts" }) });
+    expect((await run(held, D32, scan)).facts.delivered).toMatchObject({ defer: "hold" });
+    expect(scan.exitsAt?.size).toBe(1);
+  });
+
+  it("v3-launch reads nothing more and says no cause: its deferral is the day's limit", async () => {
+    const D3: Deployment = { ...D32, vaultLens: undefined, doorLens: undefined };
+    const b = bit({ fresh: 10n * SHARE });
+    const { facts } = await run(b, D3);
+    expect(facts.delivered).toMatchObject({ outcome: "deferred" });
+    expect(facts.delivered).not.toHaveProperty("defer");
+    expect(b.bittensor.multicall).not.toHaveBeenCalled();
+    expect(b.bittensor.readContract).not.toHaveBeenCalled();
   });
 });

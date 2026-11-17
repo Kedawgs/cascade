@@ -2,15 +2,47 @@ import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiPara
 import { freshTip } from "./fresh";
 import { isFull, SEND_GRACE_S } from "../batch-clock";
 import { closeEconomicsOf } from "../send-now";
-import { ADAPTER, ALPHA_VAULT_ABI, ERC20, FRONT_DOOR, MULTICALL3_ABI, QUOTER, STAKER, STAKING, STAKING_ADDRESS, TWAP_ORACLE, VAULT } from "./abi";
+import {
+  ADAPTER,
+  ALPHA_VAULT_ABI,
+  BASE_CHAIN,
+  BIT_ADAPTER_V32,
+  DOOR_LENS,
+  ERC20,
+  FRONT_DOOR_V32,
+  frontDoorAbi,
+  MULTICALL3_ABI,
+  ORACLE_V32,
+  QUOTER,
+  STAKER,
+  STAKER_V32,
+  STAKING,
+  STAKING_ADDRESS,
+  TWAP_ORACLE,
+  VAULT,
+  VAULT_LENS,
+  VAULT_V32,
+} from "./abi";
 import { APY_WINDOW_S, basketTwrKey, decodeTwr, netApyPercent, STORAGE_QUERY } from "./apy";
 import { BLOCK_SPAN, blockMsOf, blocksIn } from "./blocktime";
 import type { Clients } from "./chain";
-import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, isV3, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
-import type { NextBatch, OpenBatch } from "./types";
+import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, isV3, isV32, MULTICALL3, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, TOKENS, UNISWAP } from "./config";
+import { type DeliveryMarket, deliveryFloorPerTao, type SaleQuoteAt } from "./delivery-limit";
+import type { CancelRead, NextBatch, OpenBatch, RedeemListRead } from "./types";
+import { contractRefused } from "./wiring";
 import { RAO, toDisplay } from "./units";
 
 const ZERO: Address = "0x0000000000000000000000000000000000000000";
+
+/** v3.2's vault lens, which serves the getters that moved off the vault (spec §8.1). The share token
+ * (balanceOf, totalSupply) and `paused` stay on the vault. */
+const vaultLensOf = (d: Deployment) => ({ address: d.vaultLens as Address, abi: VAULT_LENS }) as const;
+
+/** The vault's stake hotkey: on v3.2 its lens's, else the vault's own. */
+const readStakeHotkey = (client: Pick<PublicClient, "readContract">, d: Deployment): Promise<Hex> =>
+  isV32(d)
+    ? client.readContract({ ...vaultLensOf(d), functionName: "stakeHotkey" })
+    : client.readContract({ address: d.vault, abi: VAULT, functionName: "stakeHotkey" });
 
 export interface FrontDoorState {
   depositOf: bigint;
@@ -31,29 +63,63 @@ export interface FrontDoorState {
   /** The most one batch carries, in TAO wei, and how many deposits its list holds. */
   maxBatchValue: bigint;
   maxDeposits: number;
+  /** v3.2 (R11): the first second (Base's clock, unix) the account's cancel works: five minutes after the last deposit
+   * to its entry, whoever made it (`cancelableAt`); 0 means no wait (build B: the door paused or its primary disabled).
+   * Read in the same multicall as `depositOf`. Absent on v3-launch, which has no cooldown. */
+  cancelableAt?: number;
+  /** v3.2 (R12d, M1): with `cancelableAt`, the clock it was read on: Base's (`chainTime`, the block's own timestamp,
+   * getCurrentBlockTimestamp in the same multicall) and this device's when the read landed (`readAt`, ms). The receipt
+   * counts the cancel's wait on Base's clock from them (batch-clock.ts chainNow), so a device clock minutes off neither
+   * holds the button past the cooldown nor offers it early. */
+  cancelClock?: { chainTime: number; readAt: number };
 }
 
 export async function readFrontDoor(c: Pick<Clients, "base">, d: Deployment, account: Address = ZERO): Promise<FrontDoorState> {
-  const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
-  const [depositOf, redeemOf, claimable, open, netForwarded, depositCap, minDeposit, redeemRequestFee, canClose, interval, maxBatchValue, maxDeposits] =
-    await c.base.multicall({
-      allowFailure: false,
-      contracts: [
-        { ...fd, functionName: "depositOf", args: [account] },
-        { ...fd, functionName: "redeemOf", args: [account] },
-        { ...fd, functionName: "claimable", args: [account] },
-        { ...fd, functionName: "openBatch" },
-        { ...fd, functionName: "netForwarded" },
-        { ...fd, functionName: "depositCap" },
-        { ...fd, functionName: "minDeposit" },
-        { ...fd, functionName: "redeemRequestFee" },
-        { ...fd, functionName: "canClose" },
-        { ...fd, functionName: "batchInterval" },
-        { ...fd, functionName: "maxBatchValue" },
-        { ...fd, functionName: "maxDeposits" },
-      ],
-    });
-  const [id, start, total, , nDeposits, nRedeems] = open as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+  const v32 = isV32(d);
+  const fd = { address: d.frontDoor, abi: frontDoorAbi(d) } as const;
+  const out = (await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { ...fd, functionName: "depositOf", args: [account] },
+      { ...fd, functionName: "redeemOf", args: [account] },
+      { ...fd, functionName: "claimable", args: [account] },
+      { ...fd, functionName: "openBatch" },
+      { ...fd, functionName: "netForwarded" },
+      { ...fd, functionName: "depositCap" },
+      { ...fd, functionName: "minDeposit" },
+      { ...fd, functionName: "redeemRequestFee" },
+      { ...fd, functionName: "canClose" },
+      { ...fd, functionName: "batchInterval" },
+      { ...fd, functionName: "maxBatchValue" },
+      { ...fd, functionName: "maxDeposits" },
+      // R11: the account's cancel cooldown, from the same block as its deposit; R12d (M1): and that block's time, the clock
+      // the receipt counts the wait on
+      ...(v32
+        ? ([
+            { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getCurrentBlockTimestamp" },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "cancelableAt", args: [account] },
+          ] as const)
+        : []),
+    ] as never,
+  })) as unknown[];
+  const readAt = Date.now();
+  const [depositOf, redeemOf, claimable, open, netForwarded, depositCap, minDeposit, redeemRequestFee, canClose, interval, maxBatchValue, maxDeposits, time, cancelableAt] = out as [
+    bigint,
+    bigint,
+    bigint,
+    readonly [bigint, bigint, bigint, bigint, bigint, bigint],
+    bigint,
+    bigint,
+    bigint,
+    bigint,
+    boolean,
+    bigint | number,
+    bigint,
+    number,
+    bigint | undefined,
+    bigint | undefined,
+  ];
+  const [id, start, total, , nDeposits, nRedeems] = open;
   return {
     depositOf,
     redeemOf,
@@ -71,7 +137,43 @@ export async function readFrontDoor(c: Pick<Clients, "base">, d: Deployment, acc
     batchInterval: Number(interval),
     maxBatchValue,
     maxDeposits,
+    ...(v32 && cancelableAt !== undefined ? { cancelableAt: Number(cancelableAt) } : {}),
+    ...(v32 && cancelableAt !== undefined && time !== undefined ? { cancelClock: { chainTime: Number(time), readAt } } : {}),
   };
+}
+
+/** v3.2 (R12d, M2): what a deposit's cancel checks at the click (flows.ts planCancelDeposit), and nothing more: the open
+ * batch's id, the account's deposit in it and its cooldown, and Base's clock, in one multicall (one block). The open
+ * batch's whole read (readOpenBatch) waits on fee quotes from two RPCs, prices, a log scan and Bittensor, none of which
+ * a cancel uses. Shaped as OpenBatch's own fields. */
+export async function readCancelState(c: Pick<Clients, "base">, d: Deployment, account: Address): Promise<CancelRead> {
+  const out = (await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "openBatch" },
+      { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "depositOf", args: [account] },
+      { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getCurrentBlockTimestamp" },
+      { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "cancelableAt", args: [account] },
+    ],
+  })) as unknown[];
+  const [open, depositWei, time, cancelableAt] = out as [readonly [bigint, ...unknown[]], bigint, bigint, bigint];
+  return { id: open[0], chainTime: Number(time), mine: { depositWei, cancelableAt: Number(cancelableAt) } };
+}
+
+/** v3.2 (R12d, M2): the redeem list as an unstake checks it first (flows.ts assertRedeemListOpen): its length, its limit
+ * and the account's own request, in one multicall. Only a full list with none of the account's in it needs the batch's
+ * bridge fee, the slow part of the open batch's read. */
+export async function readRedeemList(c: Pick<Clients, "base">, d: Deployment, account: Address): Promise<RedeemListRead> {
+  const out = (await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "openBatch" },
+      { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "maxRedeems" },
+      { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "redeemOf", args: [account] },
+    ],
+  })) as unknown[];
+  const [open, maxRedeems, redeemShares] = out as [readonly [bigint, bigint, bigint, bigint, bigint, bigint], number, bigint];
+  return { nRedeems: Number(open[5]), maxRedeems: Number(maxRedeems), redeemShares };
 }
 
 export interface VaultState {
@@ -88,7 +190,21 @@ export interface VaultState {
   /** v3: the most TAO one front-door unstake request can carry (the vault burns no more of it per
    * delivery; the rest stays staked). Absent on v2. */
   maxEntryValue?: bigint;
+  /** v3.2 only, from its lens: whether stake is missing (the vault refuses every delivery and direct exit until it
+   * is reconnected, spec §3.1), and the account's redeem origin (0, a chain id, or DIRECT_ORIGIN, spec §3.4). */
+  stakeMissing?: boolean;
+  redeemOrigin?: bigint;
 }
+
+/** v3.2: the account holds shares a Base door won't burn: its redeem origin isn't Base's (DIRECT_ORIGIN, another
+ * chain's, or none yet, the reward cut's), so the vault skips a request of them (RedeemSkipped, CascadeBatchLib
+ * `origin[user] != chain`). False while the origin isn't known, as on v3-launch, which has none. */
+export const originElsewhere = (v: Pick<VaultState, "shares" | "redeemOrigin">): boolean => v.redeemOrigin !== undefined && v.redeemOrigin !== BASE_CHAIN && v.shares > 0n;
+
+/** v3.2 (R6, ChatGPT R2 claim B): a Base deposit into the account leaves only on Bittensor: its redeem origin is already
+ * set, and not to Base (DIRECT_ORIGIN, or another chain's door), shares or none. An origin of 0 isn't: the deposit makes
+ * it Base's. */
+export const depositLeavesElsewhere = (v: Pick<VaultState, "redeemOrigin">): boolean => v.redeemOrigin !== undefined && v.redeemOrigin !== 0n && v.redeemOrigin !== BASE_CHAIN;
 
 /** The account's csTAO as of `block` (the vault's balanceOf then, from the archive node): what the
  * account's Deposited and Redeemed up to that block must add up to (live.ts, the seed's tripwire). */
@@ -97,9 +213,10 @@ export async function readSharesAt(c: Pick<Clients, "bittensor">, d: Deployment,
 }
 
 export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, account: Address = ZERO): Promise<VaultState> {
-  const v = { address: d.vault, abi: VAULT } as const;
   // read at a block known to be recent: a server that is behind then errors instead of answering from the past
   const blockNumber = await freshTip(c);
+  if (isV32(d)) return readVaultV32(c, d, account, blockNumber);
+  const v = { address: d.vault, abi: VAULT } as const;
   const v3 = isV3(d);
   const [shares, totalAssets, totalSupply, rootStakeRao, pendingPayouts, stakeHotkey, payoutDelay, nominatorMin, maxEntryValue] =
     await c.bittensor.multicall({
@@ -139,7 +256,61 @@ export interface PendingRewards {
   cutBps: number;
 }
 
-/** What the vault has earned but not collected yet; undefined when any read fails (unknown, not zero). */
+/** v3.2's vault: the share token on the vault, everything else on its lens, in the same multicall. The stake is
+ * priced as the vault prices it (CascadeFormulas.pricedStakeRao): the smaller of the stake the chain shows on the
+ * listed hotkeys (`visibleStakeRao`) and the stake the vault booked (`bookedStake`), both in rao. Read in the same
+ * block: whether stake is missing (the lens's `stakeMissing()`, the vault's own guard) and the account's redeem
+ * origin, which say whether an unstake request can go now (Task 59). */
+async function readVaultV32(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, blockNumber: bigint): Promise<VaultState> {
+  const v = { address: d.vault, abi: VAULT_V32 } as const;
+  const lens = { address: d.vaultLens as Address, abi: VAULT_LENS } as const;
+  const [shares, totalSupply, totalAssets, visibleRao, bookedRao, pendingPayouts, stakeHotkey, payoutDelay, maxEntryValue, stakeMissing, redeemOrigin, nominatorMin] =
+    await c.bittensor.multicall({
+      blockNumber,
+      allowFailure: false,
+      contracts: [
+        { ...v, functionName: "balanceOf", args: [account] },
+        { ...v, functionName: "totalSupply" },
+        { ...lens, functionName: "totalAssets" },
+        { ...lens, functionName: "visibleStakeRao" },
+        { ...lens, functionName: "bookedStake" },
+        { ...lens, functionName: "pendingPayouts" },
+        { ...lens, functionName: "stakeHotkey" },
+        { ...lens, functionName: "payoutDelay" },
+        { ...lens, functionName: "maxEntryValue" },
+        { ...lens, functionName: "stakeMissing" },
+        { ...lens, functionName: "redeemOrigin", args: [account] },
+        { address: STAKING_ADDRESS, abi: STAKING, functionName: "getNominatorMinRequiredStake" },
+      ],
+    });
+  return {
+    maxEntryValue,
+    shares,
+    totalAssets,
+    totalSupply,
+    rootStakeWei: (visibleRao < bookedRao ? visibleRao : bookedRao) * RAO,
+    pendingPayouts,
+    balanceWei: await c.bittensor.getBalance({ address: d.vault, blockNumber }),
+    stakeHotkey,
+    payoutDelay: Number(payoutDelay),
+    nominatorMinWei: nominatorMin * RAO,
+    stakeMissing,
+    redeemOrigin,
+  };
+}
+
+/** v3.2: the account's redeem origin as of `block` (the vault lens's `redeemOrigin`, from the archive node, as
+ * readSharesAt reads a past balance): what a delivery in that block went by. */
+export async function readRedeemOriginAt(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, block: bigint): Promise<bigint> {
+  return (await c.bittensor.readContract({ ...vaultLensOf(d), functionName: "redeemOrigin", args: [account], blockNumber: block })) as bigint;
+}
+
+/** The most hotkeys v3.2's vault lists (CascadeConstants.MAX_HOTKEYS): a count above it is no reading to stand behind. */
+const MAX_HOTKEYS = 4n;
+
+/** What the vault has earned but not collected yet; undefined when any read fails (unknown, not zero). On v3.2 the
+ * vault holds stake on every listed hotkey (the stake hotkey and a standby, MAX_HOTKEYS at most), and each earns, so
+ * what waits is their sum (Task 58's concern 3); v3-launch lists one, `stakeHotkey`. */
 export async function readPendingRewards(
   c: Pick<Clients, "bittensor">,
   d: Deployment,
@@ -147,6 +318,28 @@ export async function readPendingRewards(
 ): Promise<PendingRewards | undefined> {
   const v = { address: d.vault, abi: VAULT } as const;
   try {
+    if (isV32(d)) {
+      const lens = vaultLensOf(d);
+      const [coldkey, cut, count] = await c.bittensor.multicall({
+        allowFailure: false,
+        contracts: [
+          { ...lens, functionName: "coldkey" },
+          { ...lens, functionName: "rewardCutBps" },
+          { ...lens, functionName: "hotkeyCount" },
+        ],
+      });
+      if (count > MAX_HOTKEYS) return undefined;
+      if (count === 0n) return { wei: 0n, cutBps: Number(cut) };
+      const listed = await c.bittensor.multicall({
+        allowFailure: false,
+        contracts: Array.from({ length: Number(count) }, (_, i) => ({ ...lens, functionName: "hotkeys" as const, args: [BigInt(i)] as const })),
+      });
+      const waiting = await c.bittensor.multicall({
+        allowFailure: false,
+        contracts: listed.map((hotkey) => ({ address: STAKING_ADDRESS, abi: STAKING, functionName: "getUnclaimedRootTaoByHotkey" as const, args: [coldkey, hotkey] as const })),
+      });
+      return { wei: waiting.reduce((sum, w) => sum + w, 0n), cutBps: Number(cut) };
+    }
     const [coldkey, cut] = await c.bittensor.multicall({
       allowFailure: false,
       contracts: [
@@ -332,7 +525,7 @@ export function feesAgree(a: bigint, b: bigint, bps: bigint = FEE_CHECK_BPS): bo
  * close, whether Cascade is paused, how many deposits and unstake requests wait in it, and the time of
  * the block all of that was read at (Multicall3's own clock, so a countdown runs on Base's clock). */
 export async function readNextBatch(c: Pick<Clients, "base">, d: Deployment): Promise<NextBatch> {
-  const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
+  const fd = { address: d.frontDoor, abi: frontDoorAbi(d) } as const;
   const [open, canClose, interval, paused, time] = await c.base.multicall({
     allowFailure: false,
     contracts: [
@@ -350,10 +543,159 @@ export async function readNextBatch(c: Pick<Clients, "base">, d: Deployment): Pr
     interval: Number(interval),
     canClose,
     paused,
+    // v3.2's pause stops new deposits only: its batch still leaves (spec §3.5, I-20)
+    ...(isV32(d) ? { closesWhilePaused: true as const } : {}),
     deposits: Number(nDeposits),
     redeems: Number(nRedeems),
     chainTime: Number(time),
   };
+}
+
+/** v3.2: whether USDC delivery waits for the market (spec §3.7, I-31): the front door's `deliver` refuses
+ * `ThinPool` while either pool's 30-minute harmonic-mean in-range liquidity (the oracle's `meanLiquidity`) is under
+ * its floor (`minPoolLiquidity`, [0] TAO/WETH, [1] WETH/USDC; a floor of 0 checks nothing). One multicall on Base;
+ * rejects when it can't be read, and for a deployment without an oracle. */
+export async function readThinPool(c: Pick<Clients, "base">, d: Deployment): Promise<boolean> {
+  if (!d.oracle) throw new Error("This deployment has no price oracle, so its pools' depth can't be read");
+  const fd = { address: d.frontDoor, abi: FRONT_DOOR_V32 } as const;
+  const [[taoWeth, wethUsdc], floor0, floor1] = await c.base.multicall({
+    allowFailure: false,
+    contracts: [
+      { address: d.oracle, abi: ORACLE_V32, functionName: "meanLiquidity" },
+      { ...fd, functionName: "minPoolLiquidity", args: [0n] },
+      { ...fd, functionName: "minPoolLiquidity", args: [1n] },
+    ],
+  });
+  return taoWeth < floor0 || wethUsdc < floor1;
+}
+
+/** The staker's RouterKind.UniswapV3 (CascadeStaker.RouterKind): the only route kind Uniswap's quoter can price, as the
+ * keeper quotes it (ops/src/keeper/state.ts); on any other the keeper waits, so nothing is delivered. */
+const UNISWAP_V3_ROUTE = 0;
+
+/** v3.2: what a USDC delivery meets now, apart from its size (delivery-limit.ts), every figure from the contracts and
+ * all of it at one block (the latest when read: Task 59a review, M3): whether either pool's 30-minute mean liquidity
+ * (the oracle's `meanLiquidity`) is under its floor (the front door's `minPoolLiquidity`: deliver refuses ThinPool; one
+ * at its floor passes, a floor of 0 checks nothing), the front door's `maxDeliverySlippageBps`, the staker's
+ * `swapFeeBps`, the staker's live delivery route (`routes[deliveryRouteId]`, which sellFor sells along: M2) and, along
+ * it, what 1 TAO sells for, for the user's floor a USDC request sets now (deliveryFloorPerTao). A route that is off, or
+ * isn't Uniswap v3 (which the quoter can't price, and the keeper waits on), can't deliver: no path, and no floor read.
+ * Rejects when any of it can't be read, and for a deployment without a staker and an oracle. */
+export async function readDeliveryMarket(c: Pick<Clients, "base">, d: Deployment): Promise<DeliveryMarket> {
+  if (!d.oracle || !d.staker) throw new Error("This deployment has no oracle or staker, so it delivers no USDC");
+  const blockNumber = await c.base.getBlockNumber();
+  const fd = { address: d.frontDoor, abi: FRONT_DOOR_V32 } as const;
+  const staker = { address: d.staker, abi: STAKER_V32 } as const;
+  const [[taoWeth, wethUsdc], floor0, floor1, slippage, swapFeeBps, routeId] = await c.base.multicall({
+    allowFailure: false,
+    blockNumber,
+    contracts: [
+      { address: d.oracle, abi: ORACLE_V32, functionName: "meanLiquidity" },
+      { ...fd, functionName: "minPoolLiquidity", args: [0n] },
+      { ...fd, functionName: "minPoolLiquidity", args: [1n] },
+      { ...fd, functionName: "maxDeliverySlippageBps" },
+      { ...staker, functionName: "swapFeeBps" },
+      { ...staker, functionName: "deliveryRouteId" },
+    ],
+  });
+  const [kind, , , sellPath, active] = (await c.base.readContract({ ...staker, functionName: "routes", args: [routeId], blockNumber })) as readonly [
+    number,
+    Address,
+    Hex,
+    Hex,
+    boolean,
+  ];
+  const market = { thin: taoWeth < floor0 || wethUsdc < floor1, slippageBps: BigInt(slippage), swapFeeBps: BigInt(swapFeeBps), blockNumber };
+  if (!active || Number(kind) !== UNISWAP_V3_ROUTE) return { ...market, minUsdcPerTao: 0n, sellPath: null };
+  const [oneTao] = (await c.base.readContract({ address: UNISWAP.quoter, abi: QUOTER, functionName: "quoteExactInput", args: [sellPath, 10n ** 18n], blockNumber })) as readonly [
+    bigint,
+    ...unknown[],
+  ];
+  return { ...market, minUsdcPerTao: deliveryFloorPerTao(oneTao, BigInt(swapFeeBps)), sellPath };
+}
+
+/** v3.2's reward vesting, in seconds, as the vault lens reads it: the owner's period (`rewardVestingS`, rewardVesting:
+ * 1 to 30 days, what the next restart of either drip takes), the running claim schedule's (`vestingPeriodS`,
+ * vestingPeriod: the owner's, or what was left of the old schedule when that was longer; 0 before the first claim), and
+ * the adoption drip's (`adoptVestingPeriodS`, adoptVestingPeriod: Revision 27, an adopted gift vesting on its own drip,
+ * never restarting the claim schedule) while it still has something to add at the chain's time: its amount above 0 and
+ * its end (adoptVestingStart + adoptVestingPeriod) still ahead; 0 once it has ended, before the first adoption, or when
+ * a write-down at a supply of 0 set it with nothing in it. */
+export interface RewardVesting {
+  rewardVestingS: number;
+  vestingPeriodS: number;
+  adoptVestingPeriodS: number;
+}
+
+/** v3.2: the reward vesting periods (RewardVesting), in one multicall on the lens with the chain's time, for the FAQ's
+ * answers (Task 58 concern 5; Task 60; its review, Minor 4, and Revision 27: the leaving answer says the longest of the
+ * three). v3-launch's is a constant in its vault (7 days, faq.ts FAQ_FACTS), never read. */
+export async function readRewardVesting(c: Pick<Clients, "bittensor">, d: Deployment): Promise<RewardVesting> {
+  if (!isV32(d) || !d.vaultLens) throw new Error("Only a v3.2 vault's reward vesting is the owner's, read through its lens");
+  const lens = d.vaultLens;
+  const [reward, running, adoptAmount, adoptStart, adoptPeriod, time] = (await c.bittensor.multicall({
+    allowFailure: false,
+    contracts: [
+      { address: lens, abi: VAULT_LENS, functionName: "rewardVesting" },
+      { address: lens, abi: VAULT_LENS, functionName: "vestingPeriod" },
+      { address: lens, abi: VAULT_LENS, functionName: "adoptVestingAmount" },
+      { address: lens, abi: VAULT_LENS, functionName: "adoptVestingStart" },
+      { address: lens, abi: VAULT_LENS, functionName: "adoptVestingPeriod" },
+      { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getCurrentBlockTimestamp" },
+    ],
+  })) as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+  // CascadeFormulas.unvestedRewards: a drip has nothing left once its period has passed since its start
+  const adopting = adoptAmount > 0n && adoptStart + adoptPeriod > time;
+  return { rewardVestingS: Number(reward), vestingPeriodS: Number(running), adoptVestingPeriodS: adopting ? Number(adoptPeriod) : 0 };
+}
+
+/** v3.2: whether the front door holds a USDC delivery preference for `account` (`deliveryOf`: a floor set; receiving
+ * TAO clears it, and with it the delivery of everything of the account's still waiting: Task 59a review, I1). Rejects
+ * when it can't be read. */
+export async function readDeliveryPreference(c: Pick<Clients, "base">, d: Deployment, account: Address): Promise<boolean> {
+  const [minUsdcPerTao] = (await c.base.readContract({ address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "deliveryOf", args: [account] })) as readonly [
+    bigint,
+    bigint,
+    number,
+  ];
+  return minUsdcPerTao !== 0n;
+}
+
+/** v3.2: each of `sizes` (TAO wei) as a delivery would sell it now, in one multicall on Base at the market's block
+ * (`at.blockNumber`): what it pays along the staker's delivery route (`at.sellPath`, Uniswap's quoter, as the keeper
+ * quotes it) before the staker's fee, and the front door's oracle's 30-minute value of it (`usdcValue`, deliver's market
+ * floor before the slippage allowance). A call the contract refused (a revert: a size the pools can't take, an oracle
+ * whose history is short) leaves that figure unknown, so its sale doesn't clear; any other failure (the RPC's rate
+ * limit, a timeout) rejects, so the limit reads as unreadable, never as "no delivery" (Task 59a review, M1). Along no
+ * route, nothing is asked and every figure is unknown. */
+export async function quoteDeliveries(
+  c: Pick<Clients, "base">,
+  d: Deployment,
+  sizes: readonly bigint[],
+  at: Pick<DeliveryMarket, "sellPath" | "blockNumber">,
+): Promise<SaleQuoteAt[]> {
+  if (!d.oracle) throw new Error("This deployment has no oracle, so it delivers no USDC");
+  const oracle = d.oracle;
+  const path = at.sellPath;
+  if (path === null) return sizes.map((taoWei) => ({ taoWei, grossUsdc: undefined, twapUsdc: undefined }));
+  const results = await c.base.multicall({
+    allowFailure: true,
+    blockNumber: at.blockNumber,
+    contracts: sizes.flatMap((s) => [
+      { address: UNISWAP.quoter, abi: QUOTER, functionName: "quoteExactInput", args: [path, s] } as const,
+      { address: oracle, abi: ORACLE_V32, functionName: "usdcValue", args: [s] } as const,
+    ]),
+  });
+  const known = <T>(r: { status: "success"; result: unknown } | { status: "failure"; error: unknown }, pick: (x: unknown) => T): T | undefined => {
+    if (r.status === "success") return pick(r.result);
+    if (contractRefused(r.error)) return undefined;
+    throw r.error;
+  };
+  return sizes.map((taoWei, i) => ({
+    taoWei,
+    grossUsdc: known(results[2 * i] as never, (x) => (x as readonly [bigint, ...unknown[]])[0]),
+    twapUsdc: known(results[2 * i + 1] as never, (x) => x as bigint),
+  }));
 }
 
 /** What 1 ETH sells for in USDC units (WETH –0.05%→ USDC): the keeper's ETH price. */
@@ -364,12 +706,17 @@ export async function ethPriceUsdc(c: Pick<Clients, "base">): Promise<bigint> {
 /** Whether Bittensor's side can take a batch now, as the keeper checks before sending one: "open" when
  * the vault isn't paused and ForeverMoney's AlphaVault (which the Bittensor adapter deposits the batch's
  * TAO into) isn't paused, with no migration announced or finished; "paused" when any of that holds;
- * "unchecked" when it can't be read, never guessed open. */
-export async function readBittensorSide(c: Pick<Clients, "bittensor">, d: Deployment): Promise<"open" | "paused" | "unchecked"> {
+ * "unchecked" when it can't be read, never guessed open. On v3.2 the AlphaVault is the one of the rail now
+ * primary on each chain (R4-O round 3, as the keeper reads it): the front door's primary's Bittensor half's and
+ * the vault's primary's (each adapter's own alphaVault()), so after ForeverMoney's migration and the switch to the
+ * replacement rail it is the new vault, and before the switch the old vault's notice holds. */
+export async function readBittensorSide(c: Pick<Clients, "bittensor" | "base">, d: Deployment): Promise<"open" | "paused" | "unchecked"> {
+  if (isV32(d)) return readBittensorSideV32(c, d);
   try {
     const [vaultPaused, alphaPaused, migrationReadyAt, migrationFinished] = await c.bittensor.multicall({
       allowFailure: false,
       contracts: [
+        // the vault keeps `paused` on v3.2 too
         { address: d.vault, abi: VAULT, functionName: "paused" },
         { address: ALPHA_VAULT, abi: ALPHA_VAULT_ABI, functionName: "isPaused" },
         { address: ALPHA_VAULT, abi: ALPHA_VAULT_ABI, functionName: "migrationReadyAt" },
@@ -377,6 +724,41 @@ export async function readBittensorSide(c: Pick<Clients, "bittensor">, d: Deploy
       ],
     });
     return !vaultPaused && !alphaPaused && migrationReadyAt === 0n && !migrationFinished ? "open" : "paused";
+  } catch {
+    return "unchecked";
+  }
+}
+
+/** readBittensorSide on v3.2: the AlphaVaults of the rail now primary on each chain, each once. */
+async function readBittensorSideV32(c: Pick<Clients, "bittensor" | "base">, d: Deployment): Promise<"open" | "paused" | "unchecked"> {
+  try {
+    const [doorPrimary, [vaultPaused, vaultPrimary]] = await Promise.all([
+      c.base.readContract({ address: d.doorLens as Address, abi: DOOR_LENS, functionName: "primaryBridge" }),
+      c.bittensor.multicall({
+        allowFailure: false,
+        contracts: [
+          { address: d.vault, abi: VAULT, functionName: "paused" },
+          { address: d.vaultLens as Address, abi: VAULT_LENS, functionName: "primaryBridge" },
+        ],
+      }),
+    ]);
+    const doorHalf = await c.base.readContract({ address: doorPrimary, abi: ADAPTER, functionName: "remoteAdapter" });
+    const named = await c.bittensor.multicall({
+      allowFailure: false,
+      contracts: [doorHalf, vaultPrimary as Address].map((a) => ({ address: a, abi: BIT_ADAPTER_V32, functionName: "alphaVault" }) as const),
+    });
+    const vaults: Address[] = [];
+    for (const v of named as Address[]) if (!vaults.some((x) => x.toLowerCase() === v.toLowerCase())) vaults.push(v);
+    const reads = await c.bittensor.multicall({
+      allowFailure: false,
+      contracts: vaults.flatMap((v) => [
+        { address: v, abi: ALPHA_VAULT_ABI, functionName: "isPaused" } as const,
+        { address: v, abi: ALPHA_VAULT_ABI, functionName: "migrationReadyAt" } as const,
+        { address: v, abi: ALPHA_VAULT_ABI, functionName: "migrationFinished" } as const,
+      ]),
+    });
+    const vaultsClear = vaults.every((_, i) => reads[3 * i] === false && reads[3 * i + 1] === 0n && reads[3 * i + 2] === false);
+    return !vaultPaused && vaultsClear ? "open" : "paused";
   } catch {
     return "unchecked";
   }
@@ -396,15 +778,18 @@ export type StakerDeposits = (batchId: bigint, ageS: number) => Promise<{ count:
  * - either way the bridge fee, for this batch's exact message, asked of both Base RPCs (the second on
  *   `baseCheck`, which gives up in seconds): the larger when they agree (feesAgree), left out and marked
  *   unconfirmed when they don't (a send is never priced on one server's word), left out when either
- *   can't answer. Each figure is left out when its read fails, never guessed. */
+ *   can't answer. Each figure is left out when its read fails, never guessed.
+ * v3-launch's paused front door can't close a batch, so nothing more is read for it; v3.2's pause stops new
+ * deposits only (spec §3.5, I-20), so its batch is read on and marked `closesWhilePaused`. */
 export async function readOpenBatch(
   c: Pick<Clients, "base" | "baseCheck" | "bittensor">,
   d: Deployment,
   account: Address,
   stakerDeposits?: StakerDeposits,
 ): Promise<OpenBatch> {
-  const fd = { address: d.frontDoor, abi: FRONT_DOOR } as const;
-  const [open, deposits, redeems, canClose, interval, paused, depositOf, redeemOf, time] = await c.base.multicall({
+  const v32 = isV32(d);
+  const fd = { address: d.frontDoor, abi: frontDoorAbi(d) } as const;
+  const out = (await c.base.multicall({
     allowFailure: false,
     contracts: [
       { ...fd, functionName: "openBatch" },
@@ -416,9 +801,40 @@ export async function readOpenBatch(
       { ...fd, functionName: "depositOf", args: [account] },
       { ...fd, functionName: "redeemOf", args: [account] },
       { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getCurrentBlockTimestamp" },
-    ],
-  });
-  const [id, start, totalDeposits, feePot] = open as readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+      // v3.2: the account's cancel cooldown (R11) and the redeem list's limit (a full list's request closes it first); and
+      // (R12c) the door's limits, for the minValue of a close the site sends before a stake (units.ts closeFirstFloor)
+      ...(v32
+        ? ([
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "cancelableAt", args: [account] },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "maxRedeems" },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "maxDeposits" },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "maxBatchValue" },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "minDeposit" },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "depositCap" },
+            { address: d.frontDoor, abi: FRONT_DOOR_V32, functionName: "netForwarded" },
+          ] as const)
+        : []),
+    ] as never,
+  })) as unknown[];
+  const [open, deposits, redeems, canClose, interval, paused, depositOf, redeemOf, time, cancelableAt, maxRedeems, maxDeposits, maxBatchValue, minDeposit, depositCap, netForwarded] = out as [
+    readonly [bigint, bigint, bigint, bigint, bigint, bigint],
+    readonly { user: Address; amount: bigint }[],
+    readonly { user: Address; amount: bigint }[],
+    boolean,
+    bigint | number,
+    boolean,
+    bigint,
+    bigint,
+    bigint,
+    bigint | undefined,
+    number | undefined,
+    number | undefined,
+    bigint | undefined,
+    bigint | undefined,
+    bigint | undefined,
+    bigint | undefined,
+  ];
+  const [id, start, totalDeposits, feePot] = open;
   const batch: OpenBatch = {
     id,
     start: Number(start),
@@ -426,10 +842,16 @@ export async function readOpenBatch(
     canClose,
     paused,
     chainTime: Number(time),
-    mine: { depositWei: depositOf, redeemShares: redeemOf },
+    mine: { depositWei: depositOf, redeemShares: redeemOf, ...(v32 && cancelableAt !== undefined ? { cancelableAt: Number(cancelableAt) } : {}) },
     potWei: feePot,
+    totalWei: totalDeposits,
+    ...(v32 ? { closesWhilePaused: true as const } : {}),
+    ...(v32 && maxRedeems !== undefined ? { nRedeems: redeems.length, maxRedeems: Number(maxRedeems) } : {}),
+    ...(v32 && maxDeposits !== undefined && maxBatchValue !== undefined && minDeposit !== undefined && depositCap !== undefined && netForwarded !== undefined
+      ? { limits: { nDeposits: deposits.length, maxDeposits: Number(maxDeposits), maxBatchValue, minDeposit, depositCap, netForwarded } }
+      : {}),
   };
-  if (paused || deposits.length + redeems.length === 0) return batch;
+  if ((paused && !v32) || deposits.length + redeems.length === 0) return batch;
   const weigh = isV3(d) && !isFull(batch) && batch.chainTime < batch.start + batch.interval + SEND_GRACE_S;
   if (!canClose && !weigh) return batch;
 
@@ -496,9 +918,11 @@ export async function readCloseOutcome(c: Pick<Clients, "base">, d: Deployment, 
   try {
     const receipt = await c.base.getTransactionReceipt({ hash });
     const own = receipt.logs.filter((l) => l.address.toLowerCase() === d.frontDoor.toLowerCase());
-    const [closed] = parseEventLogs({ abi: FRONT_DOOR, eventName: "BatchClosed", logs: own });
+    // v3.2's BatchClosed has seven fields (potCarried), so another topic than v3-launch's six
+    const abi = frontDoorAbi(d);
+    const [closed] = parseEventLogs({ abi, eventName: "BatchClosed", logs: own });
     if (closed) return { kind: closed.args.id === batchId ? "sent" : "other", feeWei: closed.args.fee, potUsedWei: closed.args.potUsed };
-    return parseEventLogs({ abi: FRONT_DOOR, eventName: "BatchRolled", logs: own }).length > 0 ? { kind: "rolled" } : undefined;
+    return parseEventLogs({ abi, eventName: "BatchRolled", logs: own }).length > 0 ? { kind: "rolled" } : undefined;
   } catch {
     return undefined;
   }
@@ -507,6 +931,7 @@ export async function readCloseOutcome(c: Pick<Clients, "base">, d: Deployment, 
 /** The share of rewards Cascade keeps, in basis points; v2 has no cut, so nothing is asked. */
 export async function readRewardCutBps(c: Pick<Clients, "bittensor">, d: Deployment): Promise<number> {
   if (!isV3(d)) return 0;
+  if (isV32(d)) return Number(await c.bittensor.readContract({ ...vaultLensOf(d), functionName: "rewardCutBps" }));
   return Number(await c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "rewardCutBps" }));
 }
 
@@ -518,7 +943,7 @@ export async function readRewardCutBps(c: Pick<Clients, "bittensor">, d: Deploym
 export async function readApyPercent(c: Pick<Clients, "bittensorHistory">, d: Deployment): Promise<number | undefined> {
   const chain = c.bittensorHistory;
   const [hotkey, rewardCutBps, head] = await Promise.all([
-    chain.readContract({ address: d.vault, abi: VAULT, functionName: "stakeHotkey" }),
+    readStakeHotkey(chain, d),
     readRewardCutBps({ bittensor: chain }, d),
     chain.getBlock(),
   ]);

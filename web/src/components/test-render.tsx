@@ -9,7 +9,7 @@ import { createConfig, http, WagmiProvider } from "wagmi";
 import { CascadeDataProvider, SnapshotAtProvider } from "@/lib/cascade/context";
 import type { Clients } from "@/lib/cascade/chain";
 import { type Deployment, EXPECTED_DEPLOYMENTS } from "@/lib/cascade/config";
-import { createLiveCascadeData, notConfiguredData } from "@/lib/cascade/live";
+import { createLiveCascadeData, type LiveDeps, notConfiguredData } from "@/lib/cascade/live";
 import type { OpLog } from "@/lib/cascade/oplog";
 import type { CascadeData } from "@/lib/cascade/types";
 
@@ -52,9 +52,9 @@ export function renderWithCache(
 const LAUNCH = EXPECTED_DEPLOYMENTS["v3-launch"];
 
 /** A data source for the launch deployment as the site is built for it, with its own op log (in memory
- * unless given), and anything `over` changes (an indexer named, say). It reads nothing: a server render
- * asks no query for data. */
-export function launchData(opLog?: OpLog, over: Partial<Deployment> = {}): CascadeData {
+ * unless given), and anything `over` changes (an indexer named, say), and `given` gives it (the committed deployments
+ * its switches are read from, say). It reads nothing: a server render asks no query for data. */
+export function launchData(opLog?: OpLog, over: Partial<Deployment> = {}, given: Partial<LiveDeps> = {}): CascadeData {
   const d: Deployment = {
     frontDoor: LAUNCH.frontDoor as Address,
     baseAdapter: LAUNCH.baseAdapter as Address,
@@ -69,7 +69,7 @@ export function launchData(opLog?: OpLog, over: Partial<Deployment> = {}): Casca
     payoutDelayS: LAUNCH.payoutDelayS,
     ...over,
   };
-  return createLiveCascadeData(d, { clients: {} as Clients, ...(opLog ? { opLog } : {}) });
+  return createLiveCascadeData(d, { clients: {} as Clients, ...(opLog ? { opLog } : {}), ...given });
 }
 
 /** The text a page shows, without its markup: "5.4%APY in TAO*" for adjacent elements. */

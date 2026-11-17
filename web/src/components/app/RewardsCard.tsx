@@ -63,7 +63,8 @@ function RewardsForAccount({ account }: { account: string }) {
               </>
             ) : earned !== undefined ? (
               <>
-                {formatUsd(earned * position.data.taoPriceUsd)} <small>{formatTao(earned, 6)} TAO</small>
+                {position.data.priceMissing ? `${formatTao(earned, 6)} TAO` : formatUsd(earned * position.data.taoPriceUsd)}{" "}
+                {!position.data.priceMissing && <small>{formatTao(earned, 6)} TAO</small>}
               </>
             ) : (
               "–"
@@ -74,7 +75,8 @@ function RewardsForAccount({ account }: { account: string }) {
       </div>
       {v3 && waiting !== undefined && (
         <p className={styles.waiting}>
-          Earned, not yet collected: {formatTao(waiting, 6)} TAO ({formatUsd(waiting * position.data.taoPriceUsd)}). Cascade collects rewards for everyone when
+          Earned, not yet collected: {formatTao(waiting, 6)} TAO{position.data.priceMissing ? "" : ` (${formatUsd(waiting * position.data.taoPriceUsd)})`}. Cascade
+          collects rewards for everyone when
           enough is waiting and adds them to your balance.
         </p>
       )}

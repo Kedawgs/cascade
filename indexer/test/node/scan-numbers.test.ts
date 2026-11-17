@@ -6,7 +6,7 @@ import { pkg } from "./files.ts";
 /** A `NAME: Record<ChainName, bigint> = { base: 70n, bittensor: 400n }` constant in the keeper's scan. */
 function keeperConstant(source: string, name: string): { base: bigint; bittensor: bigint } {
   const m = new RegExp(`\\b${name}\\b[^=]*=\\s*\\{\\s*base:\\s*([\\d_]+)n,\\s*bittensor:\\s*([\\d_]+)n\\s*\\}`).exec(source);
-  if (!m) throw new Error(`no ${name} in ops/src/keeper/state.ts`);
+  if (!m) throw new Error(`no ${name} in ops/src/keeper/core/logs.ts`);
   return { base: BigInt(m[1].replaceAll("_", "")), bittensor: BigInt(m[2].replaceAll("_", "")) };
 }
 
@@ -18,10 +18,10 @@ function keeperSeconds(source: string, name: string): { base: number; bittensor:
 }
 
 describe("the scan's numbers are the keeper's", () => {
-  const state = readFileSync(pkg("../ops/src/keeper/state.ts"), "utf8");
-  const blocktime = readFileSync(pkg("../ops/src/keeper/blocktime.ts"), "utf8");
+  const state = readFileSync(pkg("../ops/src/keeper/core/logs.ts"), "utf8");
+  const blocktime = readFileSync(pkg("../ops/src/keeper/core/blocktime.ts"), "utf8");
 
-  it("the re-read and settle margins, in seconds, and the block times they are counted at while a chain's is unread", () => {
+  it("the re-read and settle margins, in seconds (the v3.2 keeper core's and the scan's, each counted at its chain's measured block time), and the block times they are counted at while a chain's is unread", () => {
     expect(REREAD_S).toEqual(keeperSeconds(state, "REREAD_S"));
     expect(SETTLE_S).toEqual(keeperSeconds(state, "SETTLE_S"));
     expect(MARGIN_FALLBACK_S).toEqual(keeperSeconds(blocktime, "MARGIN_FALLBACK_S"));

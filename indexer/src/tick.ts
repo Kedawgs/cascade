@@ -9,8 +9,10 @@ import { holdStatements } from "./hold.ts";
 import { getJson } from "./http.ts";
 import type { StoredLog, StoredRef } from "./logs.ts";
 import { arrivals, arrivalStatements, messagesFrom, messageStatements, stateStatements } from "./messages.ts";
-import { poolPriceUsd, type Reference, referencePrice } from "./prices.ts";
+import { PARK_EVENTS } from "./parks.ts";
+import { poolPriceUsd, REFERENCE_KEY, type ReferenceRead, type ReferenceReading, referencePrice, referenceReading } from "./prices.ts";
 import { ADMIN_RULES, roleWallets, watchedRoles } from "./rules/admin.ts";
+import { ITEMS_KEY, scheduledIdsOf } from "./scheduler.ts";
 import { APPROVAL_RULES } from "./rules/approvals.ts";
 import { BRIDGE_RULES } from "./rules/bridge.ts";
 import { CCIP_RULES } from "./rules/ccip.ts";
@@ -18,15 +20,33 @@ import { DEPENDENCY_RULES } from "./rules/deps.ts";
 import { logQuery, prefetch, type PrefetchNeeds, type RuleCtx } from "./rules/context.ts";
 import { type Rule, runRules } from "./rules/index.ts";
 import { MARKET_RULES } from "./rules/market.ts";
-import { lagLimitOf, monitorUnjudged, OPS_RULES } from "./rules/ops.ts";
+import { R4_RULES, WASH_LOOKBACK_S } from "./rules/r4.ts";
+import { lagLimitOf, monitorUnjudged, OPS_RULES, UNJUDGED_WARNINGS_KEY, unjudgedWarnings } from "./rules/ops.ts";
 import { PRICE_RULES } from "./rules/price.ts";
+import { RAIL_RULES } from "./rules/rails.ts";
 import { SITE_RULES } from "./rules/site.ts";
 import { SOLVENCY_RULES } from "./rules/solvency.ts";
 import { VAULT_RULES } from "./rules/vault.ts";
 import { Budget, createRpc } from "./rpc.ts";
 import { headTimeOf, type Margins, marginsAt, rereadRange, type ScanResult, type ScanStop, scanChain } from "./scan.ts";
 import { pageEvents, seedEventsOf } from "./seed.ts";
-import { type BaseState, type BitState, type ChainReading, compact, compactHour, expand, expandHour, type HourAgg, hourRollup, payoutsDone, quoteAmountOf, readSnapshot, type Snapshot } from "./snapshot.ts";
+import {
+  alphaVaultsOf,
+  type BaseState,
+  type BitState,
+  type ChainReading,
+  compact,
+  compactHour,
+  expand,
+  expandHour,
+  type HourAgg,
+  hourRollup,
+  payoutsDone,
+  quoteAmountOf,
+  railCandidatesOf,
+  readSnapshot,
+  type Snapshot,
+} from "./snapshot.ts";
 import {
   appendStatements,
   type BatchCheckRow,
@@ -73,6 +93,7 @@ export const TICK_RULES: readonly Rule[] = [
   ...SITE_RULES,
   ...APPROVAL_RULES,
   ...ADMIN_RULES,
+  ...RAIL_RULES,
   ...VAULT_RULES,
   ...PRICE_RULES,
   ...SOLVENCY_RULES,
@@ -81,6 +102,7 @@ export const TICK_RULES: readonly Rule[] = [
   ...MARKET_RULES,
   ...OPS_RULES,
   ...DEPENDENCY_RULES,
+  ...R4_RULES,
   monitorUnjudged,
 ];
 
@@ -113,11 +135,12 @@ const MAX_TX_TRIES = 10;
  * the tightest lag limit). */
 export const DEFAULT_PAYOUT_DELAY_S = 3600;
 
-/** Where the prefetch's look-back starts, from Base's settled block: 25 hours of its blocks (the redeem requests
- * unstakes.tiny_wave counts, its own 24-hour filter deciding), in blocks at its block time as measured
- * (src/blocktime.ts); from block 0 while that is unknown. */
-export function prefetchLookbacks(settled: Record<ChainName, bigint>, blockS: Partial<Record<ChainName, number>>): { requestsSince: bigint } {
-  return { requestsSince: lookbackFrom(settled.base, TINY_WAVE_LOOKBACK_S, blockS.base) };
+/** Where the prefetch's look-backs start, from each chain's settled block: 25 hours of Base's blocks (the redeem requests
+ * unstakes.tiny_wave counts, its own 24-hour filter deciding) and two holds and two hours of Bittensor's (the mints
+ * unstakes.wash looks for), in blocks at each chain's block time as measured (src/blocktime.ts); from block 0 while one
+ * is unknown. */
+export function prefetchLookbacks(settled: Record<ChainName, bigint>, blockS: Partial<Record<ChainName, number>>): { requestsSince: bigint; washSince: bigint } {
+  return { requestsSince: lookbackFrom(settled.base, TINY_WAVE_LOOKBACK_S, blockS.base), washSince: lookbackFrom(settled.bittensor, WASH_LOOKBACK_S, blockS.bittensor) };
 }
 
 export interface TickDeps {
@@ -147,6 +170,11 @@ export interface TickReport {
   subrequests?: number;
   /** logs hashed and decoded */
   decoded?: number;
+  /** the reference price reading this tick made, on the ticks that ask the sources, as commit 1 stores it (the
+   * log line keeps the readings' history; D1 keeps only the newest) */
+  reference?: ReferenceReading;
+  /** the sources' prices when they disagreed: in the log line only, never stored or served */
+  referenceAnswers?: number[];
   error?: string;
 }
 
@@ -342,8 +370,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   // each chain's re-read and settle margins this tick (scan.ts marginsAt: 140 s and 60 s of Base's blocks, 4,800 s and
   // 120 s of Bittensor's), at the block time the last tick stored (what the hourly cross-check reads too), else as the
   // stored readings measure it; at the block times they were set at while neither is known
-  const history = historyOf(state);
-  const margins = Object.fromEntries(CHAINS.map((c) => [c, marginsAt(c, storedBlockS(state.meta, c) ?? measureBlockS(history[c]))])) as Record<ChainName, Margins>;
+  const stored = historyOf(state);
+  const margins = Object.fromEntries(CHAINS.map((c) => [c, marginsAt(c, storedBlockS(state.meta, c) ?? measureBlockS(stored[c]))])) as Record<ChainName, Margins>;
 
   // 3. the stored logs of each chain's re-read range (one query; none before the first window)
   const ranges = CHAINS.flatMap((c) => {
@@ -377,6 +405,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     rpc,
     chain: "bittensor",
     roleOf,
+    version: d.version,
     addresses: addresses.bittensor,
     watch: watch.bittensor,
     startBlock: d.bittensor.startBlock,
@@ -394,6 +423,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     rpc,
     chain: "base",
     roleOf,
+    version: d.version,
     addresses: addresses.base,
     watch: watch.base,
     startBlock: d.base.startBlock,
@@ -417,6 +447,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   const removedUids = new Set(removed.map((r) => r.uid));
 
   // 6. the readings: from the last reading, the hotkeys, keepers, oracle and role holders to read
+  const history = historyOf(state);
   const previous = { base: history.base[0], bittensor: history.bittensor[0] };
   const last: Snapshot = { at: 0, base: previous.base, bittensor: previous.bittensor, nonces: { base: {}, bittensor: {} }, safeNonces: { base: {}, bittensor: {} }, messageStates: {}, deliveredReads: [] };
   const holders = watchedRoles(last);
@@ -433,10 +464,25 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       stakedHotkeys: previous.bittensor?.state.stakedHotkeys,
       stakeHotkey: previous.bittensor?.state.stakeHotkey,
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
+      // v3.2: the owners the last reading named, whose threshold and signers to read (a Safe's)
+      owners: { base: previous.base?.state.owner, bittensor: previous.bittensor?.state.owner },
+      // v3.2: scheduled(id) of this tick's new Scheduled and of every item the admin rules keep (src/scheduler.ts)
+      ...(d.version === "v3.2" ? { scheduledIds: scheduledIdsOf(state.meta[ITEMS_KEY], newLogs) } : {}),
       oracle: previous.base?.state.oracle,
       previousOracleValue: previous.base?.state.oracleValue,
       bitBridge: previous.bittensor?.state.primaryBridge,
+      // v3.2: beside BRIDGES, the rail halves the last readings named (each primary, and the other chain's primary's half)
+      ...(d.version === "v3.2"
+        ? {
+            railCandidates: railCandidatesOf({ base: previous.base?.state, bittensor: previous.bittensor?.state }),
+            // ForeverMoney's state where the rail now primary converts (R4-O round 4)
+            alphaVaults: alphaVaultsOf({ base: previous.base?.state, bittensor: previous.bittensor?.state }, cfg),
+          }
+        : {}),
       payoutQuoteAmount: quoteAmountOf(previous.bittensor?.state),
+      // R12a: a full batch's close quote, at the front door's primary bridge and worth its batch limit, as last read
+      baseBridge: previous.base?.state.primaryBridge,
+      fullBatchAmount: previous.base?.state.maxBatchValue,
       pendingMessages: [...state.pendingMessages, ...pendingFresh].map((m) => ({ messageId: m.messageId, direction: m.direction })),
       // every watched address both ways: its transaction count, and nonce() in case it is a Safe (the keys rule
       // takes a Safe's nonce() over its count). The reading keeps a nonce() only from an address with contract
@@ -453,11 +499,16 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     nowS,
   );
 
-  // the reference price, every fifth minute, when there is budget for it
-  let reference: Reference | undefined;
+  // the reference price, every fifth minute, when there is budget for it; stored with commit 1 as it came, with
+  // when the sources were asked (/v1/price serves it for the site's veto): a minute that doesn't ask leaves the
+  // stored reading and its time as they were
+  let reference: ReferenceRead | undefined;
+  let referenceRow: ReferenceReading | undefined;
   if (minute % 5 === 0 && cfg.priceSources.length > 0 && budget.left >= cfg.priceSources.length) {
+    const askedAtS = Math.floor(deps.now() / 1000);
     const timeoutMs = Math.max(1000, Math.min(10_000, rpcDeadlineMs - deps.now()));
     reference = await referencePrice({ getJson: (url) => getJson(url, { fetch: deps.fetch, budget, timeoutMs }), sources: cfg.priceSources });
+    referenceRow = referenceReading(reference, askedAtS);
   }
 
   // 7. what the rules read from D1
@@ -490,6 +541,16 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     requestsSince: prefetchLookbacks({ base: settledBase, bittensor: scans.bittensor.cursor.settledTo }, blockS).requestsSince,
     openBatch: snap.base?.state.openBatch?.id,
     messageIds: uniq([...state.pendingMessages, ...pendingFresh].map((m) => m.messageId)),
+    // v3.2: the parks of this tick's park events (src/parks.ts), and the vault's events of the payouts still queued
+    ...(d.version === "v3.2"
+      ? {
+          parkKeys: uniq(newLogs.filter((l) => l.chain === "bittensor" && l.contract === "bitAdapter" && (PARK_EVENTS as readonly string[]).includes(l.event)).map((l) => lower(l.args.key))),
+          queuedKeys: state.pendingPayoutKeys.map((p) => p.key),
+          // unstakes.wash: the mints of this tick's unstaking holders, two holds back and a margin
+          washUsers: uniq(newLogs.filter((l) => l.chain === "bittensor" && l.contract === "vault" && (l.event === "Redeemed" || l.event === "RedeemDeferred")).map((l) => lower(l.args.user))),
+          washSince: prefetchLookbacks({ base: settledBase, bittensor: scans.bittensor.cursor.settledTo }, blockS).washSince,
+        }
+      : {}),
   };
   const pre = await fromD1("the prefetch", () => prefetch(db, needs));
   for (const [k, v] of pre.blockTimes) blockTimesKnown.set(k, v);
@@ -658,7 +719,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   const findings = runRules(TICK_RULES, ctx);
   const quiet = (a: { rule: string; key: string }) =>
     JOB_OWNED.has(a.rule) || (catchingUp.length > 0 && (QUIET_WHILE_CATCHING_UP.has(a.rule) || catchingUp.some((c) => a.key === `indexer.lag:${c}` || a.key === `indexer.blind:${c}`)));
-  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at), quiet, unjudged: ctx.unjudged });
+  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t, holdActive: ctx.holdActive, lastWarningSentAt: num(state.meta.last_warning_at), quiet, unjudged: ctx.unjudged, criticalCap: t.criticalEmailsPerTick });
   const holds = holdStatements(db, r.holds, state.holdIds, nowS);
 
   // 9. commit 1, guarded by the lease
@@ -669,6 +730,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   changes("tx_backlog", txBacklog.length ? JSON.stringify(txBacklog) : "");
   if (snap.bittensor?.state.payoutDelay !== undefined) changes("payout_delay", String(snap.bittensor.state.payoutDelay));
   changes("catching_up", catchingUp.join(","));
+  // the warning rules this tick couldn't judge, for the digest (monitor.unjudged pages only critical ones)
+  changes(UNJUDGED_WARNINGS_KEY, unjudgedWarnings(ctx));
   // the first block each chain was read with the watched contracts' filter, once: the hourly cross-check doesn't judge
   // their events below it (a version that didn't ask for them stored none)
   for (const c of CHAINS) {
@@ -682,6 +745,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   }
   if (firstCaughtUp) meta.set("caught_up", String(nowS));
   meta.set("last_complete_tick", String(nowS));
+  if (referenceRow) meta.set(REFERENCE_KEY, JSON.stringify(referenceRow));
   const hourNow = Math.floor(nowS / 3600) * 3600;
   const hourPrev = hours.find((h) => h.hour === hourNow);
   const spot = snap.base ? poolPriceUsd(snap.base.state, cfg.tokens) : undefined;
@@ -715,6 +779,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     findings: findings.length,
     due: r.due.length,
     decoded: bitSpent + (baseDecode.limit - baseDecode.left),
+    ...(referenceRow ? { reference: referenceRow } : {}),
+    ...(reference && "answers" in reference && reference.answers ? { referenceAnswers: reference.answers } : {}),
   };
   let results: D1Result<unknown>[];
   try {
@@ -753,7 +819,13 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       hold: active ? { publicId: active.publicId, summary: active.summary } : raised && h ? { publicId: raised, summary: h.summary } : null,
     };
   };
+  // R4 (the email flood, D's unconfirmed item): at most criticalEmailsPerTick critical emails a tick (reconcile's cap: new
+  // alerts first, then the resolved, then the resends). The rest stay due, unmarked (a cut "resolved" email's alert left
+  // open: R4-O's fix round, Minor 6), and go on the next ticks; those sent are marked in commit 2, so a tick that dies
+  // part way through its sends can resend at most that many, never the same first ones forever, and a flood (a copied
+  // key's hundreds of Scheduled) reaches its last email in a few minutes
   const criticals = r.due.filter((x) => x.tier === "critical");
+  if (r.waiting) console.log(`tick: ${r.waiting} critical emails wait for the next ticks (at most ${t.criticalEmailsPerTick} a tick)`);
   const warnings = r.due.filter((x) => x.tier === "warning");
   const outgoing: Outgoing[] = criticals.map((x, i) => ({ id: i, ...(x.reason === "resolved" ? renderResolved(x) : renderCritical(itemOf(x))) }));
   if (warnings.length) outgoing.push({ id: criticals.length, ...renderWarnings(warnings.map(itemOf)) });

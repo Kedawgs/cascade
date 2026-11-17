@@ -13,10 +13,10 @@ const T0 = 1_800_000_000;
 const finding = (rule: RuleId, key: string, o: Partial<Finding> = {}): Finding => ({ rule, key, subject: `${rule} ${key}`, facts: { what: "it happened" }, ...o });
 
 /** One tick of the alert lifecycle against D1: reconcile, commit, then mark what was due as sent. */
-async function tick(nowS: number, findings: Finding[], o: { holdActive?: boolean; t?: typeof DEFAULTS; send?: boolean; unjudged?: Unjudged[] } = {}) {
+async function tick(nowS: number, findings: Finding[], o: { holdActive?: boolean; t?: typeof DEFAULTS; send?: boolean; unjudged?: Unjudged[]; criticalCap?: number } = {}) {
   const state = await loadTickState(db, nowS);
   const lastWarning = state.meta.last_warning_at === undefined ? undefined : Number(state.meta.last_warning_at);
-  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t: o.t ?? DEFAULTS, holdActive: o.holdActive ?? false, lastWarningSentAt: lastWarning, unjudged: o.unjudged });
+  const r = reconcile(db, { open: state.openAlerts, findings, nowS, t: o.t ?? DEFAULTS, holdActive: o.holdActive ?? false, lastWarningSentAt: lastWarning, unjudged: o.unjudged, criticalCap: o.criticalCap });
   if (r.statements.length) await db.batch(r.statements);
   const marks = o.send === false ? [] : markSent(db, r.due, nowS);
   if (marks.length) await db.batch(marks);
@@ -78,6 +78,36 @@ describe("criticals", () => {
     const r = await tick(T0 + 60, []);
     expect(r.due.map((x) => [x.key, x.reason])).toEqual([["vault.solvency", "resolved"]]);
     expect((await rows())[0].resolved_at).toBe(T0 + 60);
+  });
+
+  it("R4-O's fix round (Minor 6): under the per-tick cap new alerts go first, and a resolved email the cap cuts rolls over (its alert stays open until its email is due within the cap), never dropped", async () => {
+    const olds = ["a", "b", "c", "d"].map((k) => finding("vault.solvency", `vault.solvency:${k}`));
+    await tick(T0, olds);
+    const news = ["x", "y"].map((k) => finding("frontdoor.solvency", `frontdoor.solvency:${k}`));
+    const open = async () => (await rows()).filter((r) => r.resolved_at === null).map((r) => r.alert_key);
+    // the four clear and two new ones open: the two new first, then one resolved, within a cap of 3
+    const r1 = await tick(T0 + 60, news, { criticalCap: 3 });
+    expect(r1.due.map((x) => [x.key, x.reason])).toEqual([
+      ["frontdoor.solvency:x", "alert"],
+      ["frontdoor.solvency:y", "alert"],
+      ["vault.solvency:a", "resolved"],
+    ]);
+    expect(r1.waiting).toBe(3);
+    expect(await open()).toEqual(["vault.solvency:b", "vault.solvency:c", "vault.solvency:d", "frontdoor.solvency:x", "frontdoor.solvency:y"]);
+    // the next tick: the three resolved emails the cap cut
+    const r2 = await tick(T0 + 120, news, { criticalCap: 3 });
+    expect(r2.due.map((x) => [x.key, x.reason])).toEqual([
+      ["vault.solvency:b", "resolved"],
+      ["vault.solvency:c", "resolved"],
+      ["vault.solvency:d", "resolved"],
+    ]);
+    expect(r2.waiting).toBe(0);
+    expect(await open()).toEqual(["frontdoor.solvency:x", "frontdoor.solvency:y"]);
+    expect((await tick(T0 + 180, news, { criticalCap: 3 })).due).toEqual([]);
+    // with no cap (the hourly job's, the logs check's), every resolve at once, as before
+    const r4 = await tick(T0 + 240, []);
+    expect(r4.due.map((x) => x.reason)).toEqual(["resolved", "resolved"]);
+    expect(await open()).toEqual([]);
   });
 
   it("an event stays open when it isn't found again, with nothing due, and closes quietly after 7 days", async () => {

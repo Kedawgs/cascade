@@ -237,7 +237,8 @@ describe("gatherBudgetInputs", () => {
   });
 
   it("takes the vault's own payout delay from the contract: CascadeVault.sol's `payoutDelay = 24 hours`", () => {
-    const src = readFileSync(new URL("../../contracts/src/CascadeVault.sol", import.meta.url), "utf8");
+    // v3-launch's source, frozen in ops/builds/preaudit (contracts/ now holds v3.2)
+    const src = readFileSync(new URL("../builds/preaudit/src/CascadeVault.sol", import.meta.url), "utf8");
     const m = /uint64 public payoutDelay = (\d+) hours;/.exec(src);
     expect(m, "CascadeVault.sol declares payoutDelay in hours").not.toBeNull();
     expect(VAULT_DEFAULT_PAYOUT_DELAY).toBe(BigInt(m![1]) * 3_600n);

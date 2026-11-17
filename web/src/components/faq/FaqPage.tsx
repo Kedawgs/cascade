@@ -2,7 +2,7 @@ import { FAQ_SECTIONS, FAQ_UPDATED } from "@/lib/faq";
 import landing from "../landing/Landing.module.css";
 import { SiteFooter } from "../landing/SiteFooter";
 import { SiteNav } from "../landing/SiteNav";
-import { FaqItems } from "./FaqItems";
+import { FaqBody } from "./FaqBody";
 import styles from "./Faq.module.css";
 
 /** `/faq`: every question, grouped, with a jump list at the top. */
@@ -27,14 +27,7 @@ export function FaqPage() {
             </ul>
           </nav>
         </header>
-        {FAQ_SECTIONS.map((s) => (
-          <section key={s.id} id={s.id} className={styles.group} aria-labelledby={`${s.id}-title`}>
-            <h2 id={`${s.id}-title`} className={styles.groupTitle}>
-              {s.title}
-            </h2>
-            <FaqItems items={s.items} />
-          </section>
-        ))}
+        <FaqBody />
         <p className={styles.updated}>Last updated {FAQ_UPDATED}.</p>
       </main>
       <SiteFooter />

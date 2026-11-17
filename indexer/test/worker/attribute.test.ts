@@ -78,6 +78,8 @@ describe("senderFromArgs", () => {
     }
     expect(senderFromArgs(log("staker", "Staked", { payer: PAYER, beneficiary: USER }))).toBe(PAYER);
     expect(senderFromArgs(log("bitAdapter", "ReserveFunded", { from: PAYER, amount: "1" }))).toBe(PAYER);
+    // R4 (F-1): fundCushion's caller, as the reserve's
+    expect(senderFromArgs(log("bitAdapter", "CushionFunded", { from: PAYER, amount: "1" }))).toBe(PAYER);
     // the vault's direct entry points name msg.sender as `user`
     for (const e of ["DepositedDirect", "RedeemedDirect", "FrontDoorRedeemsAllowed"]) {
       expect(senderFromArgs(log("vault", e, { user: USER, assets: "1", shares: "1" })), e).toBe(USER);

@@ -38,6 +38,15 @@ const ERROR_STRING = parseAbi(["error Error(string)"]);
 export const revert = (reason: string, chain: ChainName = "base") =>
   new RpcError(`${chain} eth_call: execution reverted: ${reason}`, 3, encodeErrorResult({ abi: ERROR_STRING, errorName: "Error", args: [reason] }));
 
+/** The fake chains' heads: block FAKE_HEAD[chain] (or `head`) at 1,800,000,000, earlier blocks at each chain's block time (Base's
+ * 200 ms, five to a whole second; Bittensor's 12 s), each block holding 40M gas. */
+export const FAKE_HEAD: Record<ChainName, number> = { base: 60_000_000, bittensor: 7_000_000 };
+export const FAKE_BLOCK_S: Record<ChainName, number> = { base: 0.2, bittensor: 12 };
+export function fakeHeader(chain: ChainName, tag: unknown, head = FAKE_HEAD[chain]): { number: Hex; timestamp: Hex; gasLimit: Hex } {
+  const n = tag === "latest" || tag === undefined ? head : Number(BigInt(tag as Hex));
+  return { number: numberToHex(n), timestamp: numberToHex(1_800_000_000 - Math.floor((head - n) * FAKE_BLOCK_S[chain])), gasLimit: numberToHex(40_000_000) };
+}
+
 export type Answer = (args: readonly unknown[], call: { chain: ChainName; to: Hex; from?: Hex }) => unknown;
 
 /** A chain that answers eth_call by function name (from `abis`); an answer may throw to revert. Other
@@ -61,7 +70,7 @@ export function fakeChain(abis: readonly Abi[], answers: Record<string, Answer>,
       calls.push({ chain, method });
       const m = methods[method];
       if (m) return m(chain, params);
-      if (method === "eth_getBlockByNumber") return { timestamp: numberToHex(1_800_000_000) };
+      if (method === "eth_getBlockByNumber") return fakeHeader(chain, params[0]);
       throw new Error(`unexpected ${method}`);
     },
   };
@@ -76,15 +85,6 @@ export function fakeChain(abis: readonly Abi[], answers: Record<string, Answer>,
   };
   return { ctx, calls };
 }
-
-/** eth_getBlockByNumber (a fakeChain method) for a chain whose block `head` is at 1,800,000,000 and whose blocks are `blockS`
- * seconds apart, whole seconds as a header gives them: Base's 200 ms (since block 53,556,128) unless said. */
-export const headers =
-  (blockS = 0.2, head = 57_000_000) =>
-  (_c: ChainName, params: unknown[]) => {
-    const n = params[0] === "latest" ? head : Number(BigInt(params[0] as Hex));
-    return { number: numberToHex(n), timestamp: numberToHex(1_800_000_000 - Math.floor((head - n) * blockS)) };
-  };
 
 const missing = (name: string) => () => {
   throw new Error(`${name} is not stubbed`);

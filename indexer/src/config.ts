@@ -20,11 +20,30 @@ export const DEPENDENCY_ROLES: ReadonlySet<string> = new Set<DependencyRole>(["f
 export type Role = OwnRole | DependencyRole;
 export type RoleOf = (chain: ChainName, address: Hex) => Role | undefined;
 
+/** The contracts a deployment runs: v3.1 (the tag the live v3-launch and v3-test were deployed from; the default) or
+ * v3.2. It picks the events the scan decodes (abi.ts abiFor) and the readings' shape (snapshot.ts). */
+export type Version = "v3.1" | "v3.2";
+const VERSIONS: readonly Version[] = ["v3.1", "v3.2"];
+
+/** The site's stage for a deployment (web/src/lib/cascade/deployments.json): "early" is the founder level, "live"
+ * above it (admin.owner_kind warns there while the owner isn't a Safe). */
+export type Stage = "testing" | "early" | "live" | "retired";
+const STAGES: readonly Stage[] = ["testing", "early", "live", "retired"];
+
 /** One v3 deployment: its contracts (lowercase), where each chain's history starts, and the blocks up
- * to which its own setup transactions run (their events are the baseline, not alerts). */
+ * to which its own setup transactions run (their events are the baseline, not alerts). v3.2's constructors log
+ * their setters' events (the vault also HotkeyAdded and FrontDoorActivated; the staker its routes and fees), so each
+ * chain's startBlock is at or before its first contract's deploy block, and the baseline covers them. */
 export interface Deployment {
   /** "<frontDoor>:<vault>", lowercase */
   id: string;
+  version: Version;
+  /** the site's stage for it, when set (DEPLOYMENT.stage); unset judges the founder level by the caps alone */
+  stage?: Stage;
+  /** v3.2 only: CascadeVaultLens on Bittensor and CascadeDoorLens on Base, which serve the vault's and the front
+   * door's moved getters (read-only; they emit nothing, so they aren't scanned) */
+  vaultLens?: Hex;
+  doorLens?: Hex;
   base: { chainId: 8453; startBlock: bigint; baselineBlock: bigint };
   bittensor: { chainId: 964; startBlock: bigint; baselineBlock: bigint };
   frontDoor: Hex;
@@ -87,6 +106,8 @@ export interface Config {
   /** fmtao.backing_true's alpha side raises the keeper's hold (BACKING_HOLD): off as shipped, until a week of readings
    * has set backingToleranceBps (README) */
   backingHold: boolean;
+  /** the standby validator's hotkey (STANDBY_HOTKEY), read beside the stake hotkey's validator; unset: none */
+  standbyHotkey?: Hex;
 }
 
 /** The vars in wrangler.jsonc, all public. */
@@ -114,6 +135,7 @@ export const VAR_NAMES = [
   "THRESHOLDS",
   "PRICE_SOURCES",
   "BACKING_HOLD",
+  "STANDBY_HOTKEY",
 ] as const;
 
 /** The secrets (`wrangler secret put`, or a git-ignored .dev.vars locally). A secret can't share a
@@ -188,13 +210,33 @@ function chainOf<C extends number>(field: string, x: unknown, chainId: C): { cha
   return { chainId, startBlock, baselineBlock };
 }
 
-const DEPLOYMENT_KEYS = ["base", "bittensor", "frontDoor", "baseAdapter", "staker", "oracle", "vault", "bitAdapter", "vaultColdkey", "stakeHotkey", "batchMaxWaitS"] as const;
+const DEPLOYMENT_KEYS = [
+  "version",
+  "stage",
+  "base",
+  "bittensor",
+  "frontDoor",
+  "baseAdapter",
+  "staker",
+  "oracle",
+  "doorLens",
+  "vault",
+  "bitAdapter",
+  "vaultLens",
+  "vaultColdkey",
+  "stakeHotkey",
+  "batchMaxWaitS",
+] as const;
 
 function parseDeployment(raw: unknown): Deployment {
   const x = object("DEPLOYMENT", raw, DEPLOYMENT_KEYS);
   const a = (k: string) => address(`DEPLOYMENT.${k}`, x[k]);
+  if (x.version !== undefined && !(VERSIONS as readonly unknown[]).includes(x.version)) throw new ConfigError("DEPLOYMENT.version", `is not ${VERSIONS.join(" or ")}`);
+  const version = (x.version ?? "v3.1") as Version;
+  if (x.stage !== undefined && !(STAGES as readonly unknown[]).includes(x.stage)) throw new ConfigError("DEPLOYMENT.stage", `is not ${STAGES.join(", ")}`);
   const d: Deployment = {
     id: "",
+    version,
     base: chainOf("DEPLOYMENT.base", x.base, 8453 as const),
     bittensor: chainOf("DEPLOYMENT.bittensor", x.bittensor, 964 as const),
     frontDoor: a("frontDoor"),
@@ -207,11 +249,26 @@ function parseDeployment(raw: unknown): Deployment {
     stakeHotkey: bytes32("DEPLOYMENT.stakeHotkey", x.stakeHotkey),
     batchMaxWaitS: int("DEPLOYMENT.batchMaxWaitS", x.batchMaxWaitS, 0, 10 * 365 * 86400),
   };
+  if (x.stage !== undefined) d.stage = x.stage as Stage;
   d.id = `${d.frontDoor}:${d.vault}`;
   // a log is told apart by its chain and address, so no two scanned contracts on one chain may share one
   const base = [d.frontDoor, d.baseAdapter, d.staker, d.oracle];
   if (new Set(base).size !== base.length) throw new ConfigError("DEPLOYMENT", "has two Base contracts at one address");
   if (d.vault === d.bitAdapter) throw new ConfigError("DEPLOYMENT", "has the vault and the Bittensor adapter at one address");
+  // the lenses: v3.2's, and only v3.2's; each its own contract on its chain
+  for (const [k, where, others] of [
+    ["vaultLens", "Bittensor", [d.vault, d.bitAdapter]],
+    ["doorLens", "Base", base],
+  ] as const) {
+    if (version !== "v3.2") {
+      if (x[k] !== undefined) throw new ConfigError(`DEPLOYMENT.${k}`, "is v3.2's: this deployment's version is v3.1");
+      continue;
+    }
+    if (x[k] === undefined) throw new ConfigError(`DEPLOYMENT.${k}`, "is not set (a v3.2 deployment reads through it)");
+    const lens = a(k);
+    if (others.includes(lens)) throw new ConfigError(`DEPLOYMENT.${k}`, `is another of the deployment's ${where} contracts`);
+    d[k] = lens;
+  }
   return d;
 }
 
@@ -390,7 +447,15 @@ export function parseConfig(env: ConfigEnv): Config {
     thresholds: mergeThresholds(env.THRESHOLDS, env.THRESHOLDS_SECRET),
     priceSources: sources as PriceSource[],
     backingHold: flag("BACKING_HOLD", env.BACKING_HOLD),
+    ...standbyOf(env.STANDBY_HOTKEY),
   };
+}
+
+/** STANDBY_HOTKEY: a 32-byte hotkey, lowercased; absent or blank is no standby. A configuration value, never a constant:
+ * the founder lists the standby validator (Task 68) and may change it. */
+function standbyOf(x: unknown): { standbyHotkey?: Hex } {
+  if (x === undefined || x === null || (typeof x === "string" && x.trim() === "")) return {};
+  return { standbyHotkey: bytes32("STANDBY_HOTKEY", typeof x === "string" ? x.trim() : x) };
 }
 
 /** Which scanned contract `address` is on `chain`: Base holds the front door, its adapter and the

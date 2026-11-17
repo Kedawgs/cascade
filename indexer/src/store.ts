@@ -307,8 +307,7 @@ export const chunkCheckOf = (r: Row): ChunkCheckRow => ({
 
 /** How far back a PayoutReceived makes its user worth reading: seven days by its block's time; its logs are looked for in
  * eight days of Base's blocks back from the settled block, at Base's block time as the tick last measured it (meta
- * block_s:base, src/blocktime.ts: 3,456,000 of its 200 ms blocks since 2026-11-05), so a measure a little long never cuts
- * the week short; from block 0 while it is unknown. */
+ * block_s:base, src/blocktime.ts), so a measure a little long never cuts the week short; from block 0 while it is unknown. */
 const PAYOUT_USERS_S = 7 * 86_400;
 const PAYOUT_USERS_LOOKBACK_S = 8 * 86_400;
 

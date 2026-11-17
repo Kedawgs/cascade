@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 /// @notice The part of Uniswap's SwapRouter02 (Base `0x2626664c2603336E57B271c5C0b26F421741e481`) the
 /// staker calls. Unlike the original SwapRouter, the struct has no deadline field.

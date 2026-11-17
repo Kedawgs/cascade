@@ -1,6 +1,9 @@
 import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
 import type { ChainName } from "../config.ts";
+import { payoutList } from "../crosscheck/payouts.ts";
+import { ITEMS_KEY, parseItems, parseRefused, REFUSED_KEY } from "../scheduler.ts";
+import { outflowOf } from "../snapshot.ts";
 import type { Thresholds } from "../thresholds.ts";
 import { type RuleCtx, unjudged, utc } from "./context.ts";
 import { RULES } from "./ids.ts";
@@ -62,6 +65,44 @@ export const payoutOverdue: Rule = {
   },
 };
 
+/** payout.entry_above_cap (warning condition, v3.2; R2's carry): a queued payout entry not sent yet whose assets are
+ * above the most the vault's primary bridge carries in one message (its maxMessageValue, read beside the payout fee
+ * quote). CascadePayoutMath.takeChunk always takes the next entry, even above the cap, and the bridge then refuses the
+ * send (MessageTooLarge): the chunk can't be sent and the batch's payouts wait behind it until a bridge that carries it
+ * is primary. The batch's entries are rebuilt from the vault's events (payoutList: its bounces, then its redeems), less
+ * what its chunks took; after a cancel only the carried bounces are left (spec §3.10.15). Unjudged while the cap is
+ * unread, or a pending batch's events aren't loaded. */
+export const payoutEntryAboveCap: Rule = {
+  name: "payout.entry_above_cap",
+  run(ctx) {
+    if (ctx.cfg.deployment.version !== "v3.2") return [];
+    const s = ctx.snap.bittensor?.state;
+    const cap = s?.bridgeMaxMessageValue;
+    if (cap === undefined) return unjudged(ctx, "payout.entry_above_cap");
+    const logs = ctx.logs.range("bittensor", "vault", ["DepositBounced", "Redeemed", "PayoutBatchQueued", "PayoutChunkSent", "PayoutBatchCancelled"]);
+    return ctx.pendingPayoutKeys.flatMap((key) => {
+      const mine = logs.filter((l) => same(l.args.key, key));
+      if (!mine.some((l) => l.event === "PayoutBatchQueued")) return unjudged(ctx, "payout.entry_above_cap", `payout.entry_above_cap:${key}`);
+      const list = payoutList(mine, key);
+      const taken = mine.filter((l) => l.event === "PayoutChunkSent").reduce((n, l) => n + Number(l.args.taken), 0);
+      // a cancel leaves the bounces not sent yet as the batch's list (its redeems re-minted); none carried: nothing left
+      const end = mine.some((l) => l.event === "PayoutBatchCancelled") ? list.filter((p) => p.shares === 0n).length : list.length;
+      // an entry's gross against the cap, where the bridge checks the chunk's net (CascadePayoutLib.sol:160 sends plan.net;
+      // CcipAdapterBase.sol:242): an entry just above the cap whose net (its gross less the fee) fits can still send. A gap of the
+      // fee, on the cautious side, so the rule is left as it is (Task 56's review, Minor 5)
+      const above = list.slice(taken, end).filter((p) => p.assets > cap);
+      if (!above.length) return [];
+      const most = above.reduce((m, p) => (p.assets > m ? p.assets : m), 0n);
+      return one("payout.entry_above_cap", `payout.entry_above_cap:${key}`, `A queued payout of ${tao(most)} is above the ${tao(cap)} the primary bridge carries in one message`, {
+        key,
+        "entries above it": above.map((p) => `${p.user}: ${tao(p.assets)}`).join("; "),
+        "the primary bridge": s?.primaryBridge ?? "not read",
+        "it carries at most": tao(cap),
+      });
+    });
+  },
+};
+
 /** delivery.overdue: a recent payout user with claimable TAO and a live delivery preference,
  * deliveryGraceS after their PayoutReceived. */
 export const deliveryOverdue: Rule = {
@@ -81,19 +122,34 @@ export const deliveryOverdue: Rule = {
   },
 };
 
+/** keeper.low_eth: the keeper's ETH on Base below what a full batch's close needs (R12a): the floor (keeperMinEthWei,
+ * 0.015 ETH), or, when the reading quoted a full 50 + 50 batch's close (fullBatchQuote) and it asks more,
+ * keeperCloseQuotes (4) of that quote: the float the keeper sends with such a close, three quotes (core/actions.ts
+ * closeValue; a node refuses the send's estimate below it), and one more close's fee, so it warns while one more full close
+ * still goes. The floor alone while the quote is unread. */
 export const keeperLowEth: Rule = {
   name: "keeper.low_eth",
   run(ctx) {
-    const bal = ctx.snap.base?.state.keeperBalance;
+    const s = ctx.snap.base?.state;
+    const bal = s?.keeperBalance;
     if (bal === undefined) return unjudged(ctx, "keeper.low_eth", "keeper.low_eth");
-    if (bal >= ctx.t.keeperMinEthWei) return [];
-    return one("keeper.low_eth", "keeper.low_eth", `The keeper has ${eth(bal)} on Base`, { balance: eth(bal) });
+    const quote = s?.fullBatchQuote;
+    const byQuote = quote === undefined ? 0n : quote * BigInt(ctx.t.keeperCloseQuotes);
+    const need = byQuote > ctx.t.keeperMinEthWei ? byQuote : ctx.t.keeperMinEthWei;
+    if (bal >= need) return [];
+    const facts: Record<string, string> = { balance: eth(bal), needed: eth(need) };
+    if (quote !== undefined) {
+      facts["a full batch's close quote (50 + 50)"] = eth(quote);
+      facts["the float a close sends"] = `${eth(3n * quote)} (three quotes)`;
+    }
+    return one("keeper.low_eth", "keeper.low_eth", `The keeper has ${eth(bal)} on Base; a full batch's close needs ${eth(need)}`, facts);
   },
 };
 
 /** keeper.low_tao: the keeper's TAO on Bittensor below what its next claim needs: a round of its actions
- * (keeperMinTaoWei) plus the claim's gas up front, (claimGasRequired + claimGasMargin) × the base fee (Bittensor takes
- * the whole gas limit's fee before running a transaction and refunds the rest; ops sends a claim with that limit).
+ * (keeperMinTaoWei) plus the claim's gas up front, (claimGasRequired + claimGasMargin, at most claimGasCeiling: Task 65) ×
+ * the base fee (Bittensor takes the whole gas limit's fee before running a transaction and refunds the rest; ops sends a
+ * claim with that limit).
  * The round alone while the vault's claimGasRequired or the base fee is unread: below it is found, above it unjudged
  * (whether it covers a claim can't be told). */
 export const keeperLowTao: Rule = {
@@ -102,7 +158,8 @@ export const keeperLowTao: Rule = {
     const s = ctx.snap.bittensor?.state;
     const bal = s?.keeperBalance;
     if (bal === undefined) return unjudged(ctx, "keeper.low_tao", "keeper.low_tao");
-    const gas = s?.claimGasRequired === undefined ? undefined : s.claimGasRequired + BigInt(ctx.t.claimGasMargin);
+    const asked = s?.claimGasRequired === undefined ? undefined : s.claimGasRequired + BigInt(ctx.t.claimGasMargin);
+    const gas = asked === undefined ? undefined : asked > BigInt(ctx.t.claimGasCeiling) ? BigInt(ctx.t.claimGasCeiling) : asked;
     const upfront = gas === undefined || s?.baseFee === undefined ? undefined : gas * s.baseFee;
     const need = ctx.t.keeperMinTaoWei + (upfront ?? 0n);
     if (bal >= need) return upfront === undefined ? unjudged(ctx, "keeper.low_tao", "keeper.low_tao") : [];
@@ -228,10 +285,12 @@ export const unstakesTinyWave: Rule = {
 
 /** outflow.near_limit: this front door's burns in the vault's current 24-hour window plus the open batch's
  * redeems (at the current price) at outflowNearPct of max(gross × maxDailyOutflowBps / 10,000,
- * minDailyOutflow). Batches closed and not yet delivered aren't counted (their requests are not loaded). */
+ * minDailyOutflow). Batches closed and not yet delivered aren't counted (their requests are not loaded). On v3.2
+ * (outflowNearV32) the vault's own base and both of its windows. */
 export const outflowNearLimit: Rule = {
   name: "outflow.near_limit",
   run(ctx) {
+    if (ctx.cfg.deployment.version === "v3.2") return outflowNearV32(ctx);
     const v = ctx.snap.bittensor;
     const s = v?.state;
     if (!v || !s || s.rootStakeRao === undefined || s.balance === undefined || s.maxDailyOutflowBps === undefined || s.minDailyOutflow === undefined || s.price === undefined) {
@@ -250,6 +309,43 @@ export const outflowNearLimit: Rule = {
     return one("outflow.near_limit", "outflow.near_limit", "Exits are near the vault's daily outflow limit", { burned: tao(burned), waiting: tao(waiting), allowance: tao(allowance) });
   },
 };
+
+/** The open batch's redeem requests less its cancels, worth `price` each: what the next delivery may burn. */
+function waitingOf(ctx: RuleCtx, price: bigint): bigint {
+  const shares =
+    openBatchLogs(ctx, "RedeemRequested").reduce((x, l) => x + BigInt(String(l.args.shares)), 0n) -
+    openBatchLogs(ctx, "RedeemCancelled").reduce((x, l) => x + BigInt(String(l.args.shares)), 0n);
+  return ((shares > 0n ? shares : 0n) * price) / E18;
+}
+
+/** v3.2's outflow.near_limit (the T17 M5 carry; CascadeBatchLib._burnRedeems): the base is the priced stake,
+ * min(visible, booked) × 1e9, less what still ramps in (stillRamping: CascadeFormulas.unspent(ramping, lastStakeAt,
+ * STAKE_RAMP)), never the liquid balance; a delivery burns the smaller of two rests, this door's max(base ×
+ * maxDailyOutflowBps / 10,000, minDailyOutflow) in its window and every door's together max(base × globalOutflowBps /
+ * 10,000, minDailyOutflow) in the global window, each window's burns counting while it runs (24 hours from its start).
+ * Near when this front door's burns, or every door's, plus the open batch's redeems reach outflowNearPct of that
+ * window's allowance. Unjudged while the ledger, the ramp, a limit, the price or a window is unread. */
+function outflowNearV32(ctx: RuleCtx): Finding[] {
+  const v = ctx.snap.bittensor;
+  const s = v?.state;
+  const o = v ? outflowOf(v) : undefined;
+  if (!v || !s || !o || s.price === undefined) return unjudged(ctx, "outflow.near_limit", "outflow.near_limit");
+  const { base, ramp } = o;
+  const waiting = waitingOf(ctx, s.price);
+  const windows = [
+    { name: "this front door's", fact: "this front door", ...o.door },
+    { name: "every front door's together", fact: "every front door", ...o.global },
+  ];
+  const near = windows.filter((w) => (w.burned + waiting) * 100n >= w.allowance * BigInt(ctx.t.outflowNearPct));
+  // nothing found, but with a window unread its burns weren't counted
+  if (!near.length) return windows.every((w) => w.read) ? [] : unjudged(ctx, "outflow.near_limit", "outflow.near_limit");
+  return one("outflow.near_limit", "outflow.near_limit", `Exits are near the vault's daily outflow limit: ${near.map((w) => w.name).join(", and ")}`, {
+    contracts: "v3.2",
+    base: `${tao(base)} (the lower of the visible and booked stake, less ${tao(ramp)} still ramping in)`,
+    waiting: tao(waiting),
+    ...Object.fromEntries(windows.map((w) => [w.fact, `${tao(w.burned)} burned of ${tao(w.allowance)}`])),
+  });
+}
 
 /** rewards.uncollected: no claim for rewardsMaxAgeS, or rewardsDueWei waiting. */
 export const rewardsUncollected: Rule = {
@@ -298,8 +394,6 @@ export const validatorNotEarning: Rule = {
   },
 };
 
-/** rail.alpha_vault (critical): ForeverMoney's AlphaVault paused (isPaused, or a guardian's pause until a time still to
- * come), a migration announced (a ready time or a target set), executed or finished. */
 /** The AlphaVault's halt (AlphaVault.sol at e80a443, R3 FM-L2): isPaused() is block.timestamp < pausedUntil, which a
  * guardian's pause sets for at most MAX_PAUSE (2 days) a shot and the operator's adminHold(until) to any time, a finished
  * migration to the largest uint256. A time past the last a date can show (9999-12-31) is a halt with no end. */
@@ -312,6 +406,8 @@ const haltOf = (until: bigint, now: number): string =>
       ? `held by its operator until ${utc(Number(until))} (adminHold: longer than a guardian's 2-day pause)`
       : `paused until ${utc(Number(until))} (its guardian's pause, or its operator's adminHold)`;
 
+/** rail.alpha_vault (critical): ForeverMoney's AlphaVault paused (isPaused, or a guardian's pause until a time still to
+ * come), a migration announced (a ready time or a target set), executed or finished. */
 export const railAlphaVault: Rule = {
   name: "rail.alpha_vault",
   run(ctx) {
@@ -333,7 +429,7 @@ export const railAlphaVault: Rule = {
     if (why.length === 0) return unread ? unjudged(ctx, "rail.alpha_vault", "rail.alpha_vault") : [];
     const at = (x: bigint | undefined) => (x === undefined ? "unknown" : x === 0n ? "none" : x > LAST_TIME ? "no end" : utc(Number(x)));
     return one("rail.alpha_vault", "rail.alpha_vault", `ForeverMoney's AlphaVault is ${why.join(", ")}`, {
-      alphaVault: ctx.cfg.tokens.bittensor.alphaVault,
+      alphaVault: (r.state.alphaVaults ?? [ctx.cfg.tokens.bittensor.alphaVault]).join(", "),
       paused: String(a.isPaused ?? "unknown"),
       "paused until": at(a.pausedUntil),
       "pauseable after": at(a.pauseableAfter),
@@ -341,6 +437,8 @@ export const railAlphaVault: Rule = {
       "migration target": a.migrationTarget ?? "unknown",
       "migration executed": String(a.migrationExecuted ?? "unknown"),
       "migration finished": String(a.migrationFinished ?? "unknown"),
+      // v3.2: a paused front door no longer stops closes (they park instead): the runbook says what does (T30 c3)
+      ...(ctx.cfg.deployment.version === "v3.2" ? { contracts: "v3.2" } : {}),
       block: String(r.block),
     });
   },
@@ -424,6 +522,17 @@ export const indexerUnverified: Rule = {
   },
 };
 
+/** The warning rules the last tick couldn't judge, comma-separated (meta, written by the tick when the list changes):
+ * monitor.unjudged pages critical rules only, so the daily digest names these, and a warning rule blind for good (today
+ * root.pair_stamped, until Task 62 confirms the stamp's storage key) stays in sight (Task 57's review, Minor 7). */
+export const UNJUDGED_WARNINGS_KEY = "unjudged_warnings";
+/** That list for a tick's marks: each warning rule once, in the tick's order, rules switched off left out. */
+export const unjudgedWarnings = (ctx: Pick<RuleCtx, "unjudged" | "t">): string => {
+  const off = new Set(ctx.t.rules.off);
+  const warning = (rule: string) => Object.hasOwn(RULES, rule) && RULES[rule as keyof typeof RULES].tier === "warning" && !off.has(rule);
+  return [...new Set(ctx.unjudged.map((u) => u.rule as string))].filter(warning).join(",");
+};
+
 const UNJUDGED_SINCE = "unjudged_since:";
 /** The marks of one onset share a group: their since, floored to this. */
 const UNJUDGED_GROUP_S = 600;
@@ -464,18 +573,80 @@ export const monitorUnjudged: Rule = {
       groups.set(g, [...(groups.get(g) ?? []), rule]);
     }
     const minutes = (rule: string) => Math.floor((ctx.nowS - sinceOf(rule)) / 60);
-    return [...groups].map(([g, rules]): Finding => {
-      const facts: Record<string, string> = { rules: rules.join(", ") };
-      for (const rule of rules) facts[rule] = `unjudged since ${utc(sinceOf(rule))} (${minutes(rule)} minutes)`;
-      const what = rules.length === 1 ? rules[0] : `${rules.length} critical rules (${rules[0]} and ${rules.length - 1} more)`;
-      return { rule: "monitor.unjudged", key: `monitor.unjudged:${g}`, subject: `The monitor hasn't been able to judge ${what} for ${Math.max(...rules.map(minutes))} minutes`, facts };
-    });
+    return [
+      ...[...groups].map(([g, rules]): Finding => {
+        const facts: Record<string, string> = { rules: rules.join(", ") };
+        for (const rule of rules) facts[rule] = `unjudged since ${utc(sinceOf(rule))} (${minutes(rule)} minutes)`;
+        const what = rules.length === 1 ? rules[0] : `${rules.length} critical rules (${rules[0]} and ${rules.length - 1} more)`;
+        return { rule: "monitor.unjudged", key: `monitor.unjudged:${g}`, subject: `The monitor hasn't been able to judge ${what} for ${Math.max(...rules.map(minutes))} minutes`, facts };
+      }),
+      ...lensMismatches(ctx),
+      ...damagedRecords(ctx),
+    ];
   },
 };
+
+/** v3.2: the scheduler's record or refused list (meta scheduled_items, scheduled_refused; src/scheduler.ts) that
+ * doesn't read: admin.scheduled still emails every Scheduled, Executed and Cancelled, but judges and records nothing
+ * while it lasts, so it is named at once (Task 55's re-review 2, its residual), while it lasts: only this module writes
+ * them, so it won't clear by itself. */
+function damagedRecords(ctx: RuleCtx): Finding[] {
+  if (ctx.cfg.deployment.version !== "v3.2") return [];
+  const out: Finding[] = [];
+  for (const [key, parse] of [
+    [ITEMS_KEY, (v: string | undefined) => parseItems(v)],
+    [REFUSED_KEY, (v: string | undefined) => parseRefused(v)],
+  ] as const) {
+    try {
+      parse(ctx.meta[key]);
+    } catch (e) {
+      out.push({
+        rule: "monitor.unjudged",
+        key: `monitor.unjudged:record:${key}`,
+        subject: "The monitor's record of scheduled owner changes is damaged: pending ones aren't judged",
+        facts: {
+          record: `meta ${key}`,
+          error: e instanceof Error ? e.message : String(e),
+          "what still works": "every Scheduled, Executed and Cancelled is still emailed",
+          "what doesn't": "pending items aren't judged (admin.lapsed, admin.item_loosens, admin.record_full), new ones aren't recorded, and the security page doesn't show them",
+        },
+      });
+    }
+  }
+  return out;
+}
+
+/** v3.2: a lens whose target() is another contract than DEPLOYMENT's (snapshot.ts leaves every field read through it
+ * unread): named at once, while it lasts, since it is the configuration and won't clear by itself. Unjudged (an open
+ * alert left as it is) on a tick with no reading of its chain, or whose target() didn't answer. */
+function lensMismatches(ctx: RuleCtx): Finding[] {
+  if (ctx.cfg.deployment.version !== "v3.2") return [];
+  const out: Finding[] = [];
+  for (const [chain, s, lens, contract, setting] of [
+    ["bittensor", ctx.snap.bittensor?.state, "vault lens", "vault", "DEPLOYMENT.vaultLens"],
+    ["base", ctx.snap.base?.state, "door lens", "front door", "DEPLOYMENT.doorLens"],
+  ] as const) {
+    const key = `monitor.unjudged:lens:${chain}`;
+    if (!s || s.lensUnchecked) {
+      unjudged(ctx, "monitor.unjudged", key);
+      continue;
+    }
+    const m = s.lensMismatch;
+    if (!m) continue;
+    out.push({
+      rule: "monitor.unjudged",
+      key,
+      subject: `The ${lens} reads another contract: nothing is read through it`,
+      facts: { lens: m.lens, "it reads": m.target, [`the deployment's ${contract}`]: m.expected, setting, chain },
+    });
+  }
+  return out;
+}
 
 export const OPS_RULES: Rule[] = [
   batchPastMaxWait,
   payoutOverdue,
+  payoutEntryAboveCap,
   deliveryOverdue,
   keeperLowEth,
   keeperLowTao,

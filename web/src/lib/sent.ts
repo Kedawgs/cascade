@@ -1,4 +1,5 @@
-import { BRIDGE_MINUTES, type Deployment, STAKE_MINUTES } from "./cascade/config";
+import { CANCEL_COOLDOWN_S } from "./cascade/abi";
+import { BRIDGE_MINUTES, type Deployment, isV32, STAKE_MINUTES } from "./cascade/config";
 import type { DepositQuote, WithdrawalQuote } from "./cascade/types";
 import { toDisplay } from "./cascade/units";
 import { waitText } from "./faq";
@@ -17,7 +18,9 @@ export type SentNotice =
       tao: number;
       batchIntervalS?: number;
     }
-  | { kind: "unstake"; id: string; tao: number; usdc: number; batchIntervalS?: number };
+  | { kind: "unstake"; id: string; tao: number; usdc: number; keepTao?: undefined; batchIntervalS?: number }
+  /** v3.2's Receive TAO: no USDC, its TAO claimed on Base by hand. */
+  | { kind: "unstake"; id: string; tao: number; usdc?: undefined; keepTao: true; batchIntervalS?: number };
 
 /** Send it now went through. What it did, from its receipt (reads.ts, readCloseOutcome): sent the batch
  * meant ("sent"), sent the next one because that one had already left ("other"), or only rolled an empty
@@ -61,19 +64,34 @@ export const unstakeNotice = (id: string, q: Pick<WithdrawalQuote, "taoAmount" |
   ...(q.batchIntervalS !== undefined ? { batchIntervalS: q.batchIntervalS } : {}),
 });
 
+/** v3.2: an unstake asked as TAO (Receive TAO) just sent: its TAO (an estimate: the shares' value now) and no USDC. */
+export const receiveTaoNotice = (id: string, taoWei: bigint, batchIntervalS?: number): SentNotice => ({
+  kind: "unstake",
+  id,
+  tao: toDisplay(taoWei, 18),
+  keepTao: true,
+  ...(batchIntervalS !== undefined ? { batchIntervalS } : {}),
+});
+
 /** The timing the panel describes: the deployment's pinned max wait and payout delay (deployments.json),
  * and whether its unstakes pay USDC automatically (v3). */
 export interface SentTiming {
   v3: boolean;
   batchMaxWaitS?: number;
   payoutDelayS?: number;
+  /** v3.2 (R11): a deposit's cancel works this long after the last deposit to the account's entry (CANCEL_COOLDOWN). */
+  cancelCooldownS?: number;
 }
 
-export function sentTiming(d: Pick<Deployment, "batchMaxWaitS" | "payoutDelayS"> | null, v3: boolean): SentTiming {
+export function sentTiming(
+  d: (Pick<Deployment, "batchMaxWaitS" | "payoutDelayS"> & Partial<Pick<Deployment, "staker" | "oracle" | "vaultLens" | "doorLens">>) | null,
+  v3: boolean,
+): SentTiming {
   return {
     v3,
     ...(d?.batchMaxWaitS !== undefined ? { batchMaxWaitS: d.batchMaxWaitS } : {}),
     ...(d?.payoutDelayS !== undefined ? { payoutDelayS: d.payoutDelayS } : {}),
+    ...(isV32(d as Deployment | null) ? { cancelCooldownS: CANCEL_COOLDOWN_S } : {}),
   };
 }
 
@@ -116,7 +134,7 @@ export function sentRows(n: PanelNotice): [string, string][] {
   if (n.kind === "unstake") {
     return [
       ["Unstaking", `about ${formatTao(n.tao, 4)} TAO`],
-      ["You will receive", `about ${formatUsdcCents(n.usdc)} USDC`],
+      ["You will receive", n.keepTao ? "TAO on Base, to claim" : `about ${formatUsdcCents(n.usdc)} USDC`],
     ];
   }
   return n.usdc !== undefined
@@ -145,16 +163,22 @@ export function sentCopy(n: PanelNotice, t: SentTiming): SentCopy {
       title: "Your deposit is on its way",
       rows: sentRows(n),
       // the crossing and the stake as the stake form's estimate counts them (live.ts, quoteDeposit)
-      next: `Next it crosses to Bittensor in a batch${batch} It's staked about ${BRIDGE_MINUTES + STAKE_MINUTES} minutes after it leaves.`,
+      // v3.2 (R11): a cancel waits five minutes from the last deposit to the entry
+      next: `Next it crosses to Bittensor in a batch${batch} It's staked about ${BRIDGE_MINUTES + STAKE_MINUTES} minutes after it leaves.${
+        t.cancelCooldownS ? ` You can cancel it until its batch leaves, from ${waitText(t.cancelCooldownS)} after your last deposit.` : ""
+      }`,
       href: `/activity?deposit=${n.id}`,
     };
   }
   const wait =
     t.payoutDelayS === undefined ? "After a safety wait it" : t.payoutDelayS > 0 ? `After the ${waitText(t.payoutDelayS, true)} safety wait it` : "Then it";
-  // v3 sells only at the minimum price or better: below it, the TAO waits for a claim by hand
-  const payout = t.v3
-    ? "it's sold at your minimum price or better and the USDC is sent to your wallet. If TAO's price falls below your minimum, it waits for you to claim it instead"
-    : "you claim it as USDC from its receipt";
+  // v3 sells only at the minimum price or better: below it, the TAO waits for a claim by hand; v3.2's Receive TAO
+  // sells nothing
+  const payout = n.keepTao
+    ? "it waits for you to claim it"
+    : t.v3
+      ? "it's sold at your minimum price or better and the USDC is sent to your wallet. If TAO's price falls below your minimum, it waits for you to claim it instead"
+      : "you claim it as USDC from its receipt";
   return {
     title: "Your unstake is requested",
     rows: sentRows(n),

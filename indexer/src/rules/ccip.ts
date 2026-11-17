@@ -13,13 +13,16 @@ const ccipLink = (id: Hex) => `https://ccip.chain.link/msg/${id}`;
 const destination = (m: MessageRow): { chain: ChainName; adapter: Role } =>
   m.direction === "base>bittensor" ? { chain: "bittensor", adapter: "bitAdapter" } : { chain: "base", adapter: "baseAdapter" };
 
-/** The message has arrived: its destination adapter's Delivered is stored (now or before), whatever the
- * OffRamp says; or the OffRamp says SUCCESS. */
-function arrived(ctx: RuleCtx, m: MessageRow): boolean {
-  if (m.dstTx !== null) return true;
+/** Where a message stands. "parked" (v3.2): the Bittensor adapter parked it (a BatchParked of its message id is
+ * loaded): the CCIP message succeeded and ccipReceive logged Delivered after the park (R3 B-I3), but the vault never
+ * got it, so it hasn't arrived; bridge.parked judges it, not these rules. Else "arrived": its destination adapter's
+ * Delivered is stored (now or before), whatever the OffRamp says, or the OffRamp says SUCCESS. Else "pending". */
+export function messageOutcome(ctx: RuleCtx, m: MessageRow): "arrived" | "parked" | "pending" {
+  if (m.direction === "base>bittensor" && ctx.logs.range("bittensor", "bitAdapter", "BatchParked").some((l) => same(l.args.messageId, m.messageId))) return "parked";
+  if (m.dstTx !== null) return "arrived";
   const dst = destination(m);
-  if (ctx.logs.range(dst.chain, dst.adapter, "Delivered").some((l) => same(l.args.messageId, m.messageId))) return true;
-  return stateOf(ctx, m) === "SUCCESS";
+  if (ctx.logs.range(dst.chain, dst.adapter, "Delivered").some((l) => same(l.args.messageId, m.messageId))) return "arrived";
+  return stateOf(ctx, m) === "SUCCESS" ? "arrived" : "pending";
 }
 
 /** This tick's OffRamp state, else the last one stored. */
@@ -41,7 +44,7 @@ export const ccipFailure: Rule = {
   name: "ccip.failure",
   run: (ctx) =>
     ctx.messages
-      .filter((m) => !arrived(ctx, m) && stateOf(ctx, m) === "FAILURE")
+      .filter((m) => messageOutcome(ctx, m) === "pending" && stateOf(ctx, m) === "FAILURE")
       .map((m) => ({ rule: "ccip.failure", key: `ccip.failure:${m.messageId}`, subject: "A Cascade bridge message failed on its destination", facts: facts(m) })),
 };
 
@@ -51,7 +54,7 @@ export const ccipUndelivered: Rule = {
   name: "ccip.undelivered",
   run: (ctx) =>
     ctx.messages
-      .filter((m) => !arrived(ctx, m) && stateOf(ctx, m) !== "FAILURE" && ctx.settled[destination(m).chain].time - m.srcTime >= ctx.t.undeliveredS)
+      .filter((m) => messageOutcome(ctx, m) === "pending" && stateOf(ctx, m) !== "FAILURE" && ctx.settled[destination(m).chain].time - m.srcTime >= ctx.t.undeliveredS)
       .map((m) => ({
         rule: "ccip.undelivered",
         key: `ccip.undelivered:${m.messageId}`,

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { type Abi, encodeAbiParameters, encodeEventTopics, type Hex, numberToHex } from "viem";
 import { type Config, parseConfig, VAR_NAMES } from "../../src/config.ts";
 import type { RawLog } from "../../src/logs.ts";
+import deploymentV32 from "../fixtures/deployment-v3.2.json";
 
 /** The test environment's vars (wrangler.jsonc's env.test with the fixture deployment), as a plain
  * object a test can change. */
@@ -10,6 +11,9 @@ export const testVars = (): Record<string, unknown> =>
 
 /** The parsed test configuration (fake deployment, real public token addresses). */
 export const testConfig = (over: Record<string, unknown> = {}): Config => parseConfig({ ...testVars(), ...over });
+
+/** The same, for a v3.2 deployment: the fixture's contracts with DEPLOYMENT.version "v3.2" and its two lenses. */
+export const testConfigV32 = (over: Record<string, unknown> = {}): Config => testConfig({ DEPLOYMENT: JSON.stringify(deploymentV32), ...over });
 
 /** A raw log as eth_getLogs returns it, built with viem's encoders. */
 export function rawLog(o: {

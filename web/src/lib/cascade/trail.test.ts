@@ -1,7 +1,67 @@
 import { describe, expect, it } from "vitest";
+import {
+  adapterDelivered,
+  BATCH,
+  BACK_TX,
+  baseAt,
+  BIT_CLOCK,
+  BIT_HEAD,
+  bitAt,
+  bitTs,
+  CHUNK_TX,
+  chains,
+  type Crossed,
+  crossed,
+  DAY,
+  depositBounced,
+  DIRECT,
+  enc,
+  event,
+  EXEC_TX,
+  fd,
+  LAND_TX,
+  LAUNCH,
+  MSG,
+  NOW_S,
+  OTHER,
+  PARK_KEY,
+  parkedDropped,
+  parkedRefunded,
+  parkedRun,
+  payoutReceived,
+  receipt,
+  redeemed,
+  redeemSkipped,
+  scanned,
+  TAO,
+  USER,
+  V32,
+  vault,
+  vaultDelivered,
+  VKEY,
+} from "./__fixtures__/v32-chains";
+import { ADAPTER, REFUND_CHUNK, VAULT_V32 } from "./abi";
 import { RESUME_WINDOW_MS } from "./config";
+import { depositFacts, withdrawalFacts } from "./facts";
 import type { DepositOp, WithdrawalOp } from "./oplog";
-import { chainOnlyDeposit, type DepositFacts, depositRecord, isDelivering, offersClaim, STAKE_LAPSED, type WithdrawalFacts, withdrawalRecord } from "./trail";
+import {
+  chainOnlyDeposit,
+  DEFERRED_UNREAD,
+  DEPOSIT_CANCELLED,
+  depositCancelSent,
+  type DepositFacts,
+  depositRecord,
+  HOLD_DEFERRED,
+  isDelivering,
+  MINIMUM_DEFERRED,
+  offersClaim,
+  RAIL_DEFERRED,
+  STAKE_LAPSED,
+  UNSTAKE_CANCELLED,
+  withdrawalCancelSent,
+  type WithdrawalFacts,
+  withdrawalRecord,
+} from "./trail";
 
 const ME = "0x000000000000000000000000000000000000A11c" as const;
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
@@ -125,6 +185,28 @@ describe("deposit trail", () => {
     expect(r.steps[2].detail).not.toMatch(/10:10/);
   });
 
+  it("R11: a deposit waiting in the open batch carries the account's cancelableAt and the batch it waits in; one whose batch left carries neither (its depositOf is the next batch's)", () => {
+    const r = depositRecord(op, { ...base, cancelableAt: 1_800_000_300 });
+    expect(r).toMatchObject({ cancellableWei: 78_000_000_000_000_000n, cancelableAt: 1_800_000_300, cancelBatchId: 3n });
+    // 0: no wait (build B)
+    expect(depositRecord(op, { ...base, cancelableAt: 0 }).cancelableAt).toBe(0);
+    // v3-launch reads none: the batch alone
+    const launch = depositRecord(op, base);
+    expect(launch).toMatchObject({ cancelBatchId: 3n });
+    expect(launch).not.toHaveProperty("cancelableAt");
+    // its batch left: no cancel and no wait to show
+    const left = depositRecord(op, { ...base, cancelableAt: 1_800_000_300, stillOpen: false, openBatchId: 4n });
+    expect(left).not.toHaveProperty("cancellableWei");
+    expect(left).not.toHaveProperty("cancelableAt");
+    expect(left).not.toHaveProperty("cancelBatchId");
+  });
+
+  it("R12d (M1): with cancelableAt, the clock it was read on (the block's time and the device's read time); none once its batch left", () => {
+    const cancelClock = { chainTime: 1_800_000_100, readAt: 1_700_000_000_000 };
+    expect(depositRecord(op, { ...base, cancelableAt: 1_800_000_300, cancelClock })).toMatchObject({ cancelableAt: 1_800_000_300, cancelClock });
+    expect(depositRecord(op, { ...base, cancelableAt: 1_800_000_300, cancelClock, stillOpen: false, openBatchId: 4n })).not.toHaveProperty("cancelClock");
+  });
+
   it("shows a deposit taken back before the batch closed as cancelled", () => {
     const r = depositRecord({ ...op, cancelled: { hash: H(12), at: T0.getTime() } }, { ...base, cancelMined: true });
     expect(r.status).toBe("cancelled");
@@ -173,6 +255,53 @@ describe("deposit trail", () => {
     expect(statuses(r)).toEqual(["done", "done", "failed", "pending"]);
     expect(r.steps[2].detail).toMatch(/back in your wallet/i);
     expect(r.cancellableWei).toBeUndefined();
+  });
+
+  it("says a cancelled deposit's TAO came back as TAO, not USDC", () => {
+    expect(DEPOSIT_CANCELLED).toBe("Cancelled. Your TAO is back in your wallet as TAO, not USDC");
+    expect(depositRecord({ ...op, cancelled: { hash: H(12), at: T0.getTime() } }, { ...base, cancelMined: true }).steps[2].detail).toBe(DEPOSIT_CANCELLED);
+  });
+
+  it("a record that offers its cancel again names the cancel its read saw fail (cancelSeen), so a cancel sent since is known to be newer than the read", () => {
+    const sent = { ...op, cancelled: { hash: H(12), at: T0.getTime() + 4 * 60_000 } };
+    // reverted (no receipt of a cancel that took it out, nothing pending), or dropped ten minutes on: offered again
+    expect(depositRecord(sent, { ...base, cancelMined: false })).toMatchObject({ cancellableWei: 78_000_000_000_000_000n, cancelSeen: H(12) });
+    expect(depositRecord(sent, { ...base, cancelPending: "unseen", now: new Date(T0.getTime() + 15 * 60_000) }).cancelSeen).toBe(H(12));
+    // never cancelled from here: nothing seen
+    expect(depositRecord(op, base)).not.toHaveProperty("cancelSeen");
+    // cancelling, cancelled, or gone with its batch: no cancel is offered, so none is named
+    expect(depositRecord(sent, { ...base, cancelPending: "waiting" })).not.toHaveProperty("cancelSeen");
+    expect(depositRecord(sent, { ...base, cancelMined: true })).not.toHaveProperty("cancelSeen");
+    expect(depositRecord(sent, { ...base, openBatchId: 4n, stillOpen: false })).not.toHaveProperty("cancelSeen");
+  });
+
+  it("this browser's own cancel laid over a record read before it (depositCancelSent) is the record a read of the chain gives once it catches up", () => {
+    const at = T0.getTime() + 4 * 60_000;
+    const sent = { ...op, cancelled: { hash: H(12), at } };
+    // as the list last read it, before the cancel: waiting in its batch, its cancel offered, with v3.2's cooldown
+    const cooled = { ...base, cancelableAt: 1_800_000_300, cancelClock: { chainTime: 1_800_000_100, readAt: 1_700_000_000_000 } };
+    const stale = depositRecord(op, cooled);
+    expect(stale.cancellableWei).toBe(78_000_000_000_000_000n);
+    // on its way: "Cancelling…", its transaction, and nothing to cancel or to send
+    const sending = depositCancelSent(stale, { state: "sending", hash: H(12), at });
+    expect(sending).toEqual(depositRecord(sent, { ...cooled, cancelPending: "waiting" }));
+    expect(sending.steps[2]).toMatchObject({ status: "active", detail: "Cancelling…" });
+    expect(sending.steps[2].txUrl).toContain(H(12));
+    for (const gone of ["cancellableWei", "cancelBatchId", "cancelableAt", "cancelClock", "cancelSeen"]) expect(sending, gone).not.toHaveProperty(gone);
+    expect(sending.status).toBe("in_progress");
+    // confirmed: cancelled, in the chain's own words
+    const done = depositCancelSent(stale, { state: "done", hash: H(12), at });
+    expect(done).toEqual(depositRecord(sent, { ...cooled, cancelMined: true }));
+    expect(done.status).toBe("cancelled");
+    expect(done.steps[2]).toMatchObject({ status: "failed", detail: DEPOSIT_CANCELLED, at: new Date(at) });
+    expect(done.cancellableWei).toBeUndefined();
+    // a record whose read saw an earlier cancel fail: that mark goes too
+    expect(depositCancelSent(depositRecord({ ...op, cancelled: { hash: H(11), at: at - 1 } }, { ...base, cancelMined: false }), { state: "done", hash: H(12), at })).toEqual(
+      depositRecord(sent, { ...base, cancelMined: true }),
+    );
+    // the record it was laid over is left as it was
+    expect(stale.cancellableWei).toBe(78_000_000_000_000_000n);
+    expect(stale.steps[2].status).toBe("active");
   });
 
   it("is on the bridge once the batch has closed, saying for how long and where to watch it", () => {
@@ -423,6 +552,26 @@ describe("withdrawal trail", () => {
     expect(limited.unstakeAgain).toBe(true);
   });
 
+  it("v3.2: a deferred unstake says its own cause, told from the reads at its delivery's block (R4: the one-day hold and a closed rail)", () => {
+    const at = new Date();
+    const deferred = (defer?: "hold" | "rail" | "minimum" | "unread") =>
+      withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: { at, txHash: H(9), outcome: "deferred" as const, taoWei: 0n, ...(defer ? { defer } : {}) } });
+    expect(deferred("hold").steps[1].detail).toBe(HOLD_DEFERRED);
+    expect(HOLD_DEFERRED).toBe("Nothing was taken: shares less than a day old can't be unstaked through Base yet. Unstake again once they are a day old.");
+    expect(deferred("rail").steps[1].detail).toBe(RAIL_DEFERRED);
+    expect(RAIL_DEFERRED).toBe("Nothing was taken: unstakes through Base were on hold. You can unstake again once they resume.");
+    expect(deferred("minimum").steps[1].detail).toBe(MINIMUM_DEFERRED);
+    expect(MINIMUM_DEFERRED).toBe("Nothing was taken: it was worth less than the 0.03 TAO minimum when it arrived. You can unstake again.");
+    expect(deferred("unread").steps[1].detail).toBe(DEFERRED_UNREAD);
+    expect(DEFERRED_UNREAD).toBe("Nothing was taken when this request arrived. You can unstake again.");
+    // the day's limit (or the entry limit): today's sentence; every cause offers to unstake again
+    expect(deferred().steps[1].detail).toBe("The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow.");
+    for (const x of ["hold", "rail", "minimum", "unread", undefined] as const) {
+      expect(deferred(x).unstakeAgain, String(x)).toBe(true);
+      expect(deferred(x).steps[1].status).toBe("action");
+    }
+  });
+
   it("is ready to claim only once its own payout has reached Base, not whenever something is claimable", () => {
     const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const waiting = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, claimable: 5n * 10n ** 15n });
@@ -532,6 +681,45 @@ describe("withdrawal trail", () => {
 
   it("lets a request still in the open batch be cancelled", () => {
     expect(withdrawalRecord(wop, wbase).cancellableShares).toBe(10n ** 22n);
+  });
+
+  it("a request that offers its cancel again names the cancel its read saw fail (cancelSeen), and only then", () => {
+    const sent = { ...wop, cancelled: { hash: H(13), at: T0.getTime() + 4 * 60_000 } };
+    expect(withdrawalRecord(sent, { ...wbase, cancelMined: false })).toMatchObject({ cancellableShares: 10n ** 22n, cancelSeen: H(13) });
+    expect(withdrawalRecord(sent, { ...wbase, cancelPending: "unseen", now: new Date(T0.getTime() + 15 * 60_000) }).cancelSeen).toBe(H(13));
+    expect(withdrawalRecord(wop, wbase)).not.toHaveProperty("cancelSeen");
+    expect(withdrawalRecord(sent, { ...wbase, cancelPending: "waiting" })).not.toHaveProperty("cancelSeen");
+    expect(withdrawalRecord(sent, { ...wbase, cancelMined: true })).not.toHaveProperty("cancelSeen");
+  });
+
+  it("this browser's own cancel laid over a request read before it (withdrawalCancelSent) is the record a read of the chain gives once it catches up", () => {
+    const at = T0.getTime() + 4 * 60_000;
+    const sent = { ...wop, cancelled: { hash: H(13), at } };
+    const stale = withdrawalRecord(wop, wbase);
+    const sending = withdrawalCancelSent(stale, { state: "sending", hash: H(13), at });
+    expect(sending).toEqual(withdrawalRecord(sent, { ...wbase, cancelPending: "waiting" }));
+    expect(sending.steps[1]).toMatchObject({ status: "active", detail: "Cancelling…" });
+    expect(sending).not.toHaveProperty("cancellableShares");
+    const done = withdrawalCancelSent(stale, { state: "done", hash: H(13), at });
+    expect(done).toEqual(withdrawalRecord(sent, { ...wbase, cancelMined: true }));
+    expect(done.status).toBe("cancelled");
+    expect(done.steps[1]).toMatchObject({ status: "failed", detail: UNSTAKE_CANCELLED });
+    expect(UNSTAKE_CANCELLED).toBe("Cancelled before the batch closed. Your shares stay staked; the request fee isn't refunded");
+    expect(done).not.toHaveProperty("cancellableShares");
+    expect(stale.cancellableShares).toBe(10n ** 22n);
+    // a v3 request with USDC delivery asked for, and v3.2's asked as TAO: the same, and a cancelled one awaits no delivery
+    const asked: WithdrawalOp[] = [
+      { ...wop, delivery: { minUsdcPerTao: 245_000_000n, deadline: Math.floor(T0.getTime() / 1000) + 604_800 } },
+      { ...wop, keepTao: true },
+    ];
+    for (const o of asked) {
+      const before = withdrawalRecord(o, wbase);
+      const cancelled = { ...o, cancelled: { hash: H(13), at } };
+      expect(withdrawalCancelSent(before, { state: "sending", hash: H(13), at }), JSON.stringify(Object.keys(o))).toEqual(withdrawalRecord(cancelled, { ...wbase, cancelPending: "waiting" }));
+      const over = withdrawalCancelSent(before, { state: "done", hash: H(13), at });
+      expect(over, JSON.stringify(Object.keys(o))).toEqual(withdrawalRecord(cancelled, { ...wbase, cancelMined: true }));
+      expect(over).not.toHaveProperty("awaitingDelivery");
+    }
   });
 });
 
@@ -757,5 +945,305 @@ describe("v3 withdrawal trail (USDC delivered to the wallet automatically)", () 
     expect(r.usdcAmount).toBe(2.5);
     const paid = withdrawalRecord(wop, { ...back, claimable: 0n, claimed: { ...claimed, taoClaimed: 2n * CREDIT } });
     expect(paid.received).toEqual({ usdc: 2.45 });
+  });
+});
+
+
+// ---- v3.2: the trail's new states, each from fixture logs of v3.2's own events (decoded with v3.2's ABIs), the copy exact ----
+
+describe("v3.2's trail, from its own events", () => {
+  const deposit = async (c: unknown, x: Pick<Crossed, "stakeOp">, d = V32, s = scanned(d)) => {
+    const { facts } = await depositFacts(c as never, d, x.stakeOp, { fd, vault, scan: s });
+    return depositRecord(x.stakeOp, facts);
+  };
+  const withdrawal = async (c: unknown, x: Pick<Crossed, "requestOp">, v = vault, d = V32, s = scanned(d)) => {
+    const { facts } = await withdrawalFacts(c as never, d, x.requestOp, { fd, vault: v, scan: s, claims: [] });
+    return withdrawalRecord(x.requestOp, facts);
+  };
+
+  it("parkedDeposit: a batch the vault refused waits in the Bittensor adapter, said in plain words", async () => {
+    const x = crossed(3 * 3_600);
+    const c = chains({ ...x.base, ...parkedRun(x), parks: { [PARK_KEY]: [TAO, BigInt(x.parkS), true] } });
+    const r = await deposit(c, x);
+    expect(r.steps[2]).toMatchObject({
+      key: "bridge",
+      status: "active",
+      summary: "waiting to be added",
+      detail: "Your deposit reached Bittensor and is waiting to be added. Nothing is lost: it is added, or returned to you, automatically.",
+    });
+    expect(r.steps[3].status).toBe("pending");
+    expect(r.status).toBe("in_progress");
+    // a park two weeks old the keeper hasn't sent back yet: still parked, as its record shows
+    const old = crossed(15 * DAY);
+    const still = await deposit(chains({ ...old.base, ...parkedRun(old), parks: { [PARK_KEY]: [TAO, BigInt(old.parkS), true] } }), old);
+    expect(still.steps[2].detail).toBe("Your deposit reached Bittensor and is waiting to be added. Nothing is lost: it is added, or returned to you, automatically.");
+    // v3-launch's trail reads none of it: its batch is on the bridge, as before
+    const launch = await deposit(c, x, LAUNCH);
+    expect(launch.steps[2].status).toBe("active");
+    expect(launch.steps[2].detail).toMatch(/^On the bridge to Bittensor/);
+  });
+
+  it("refundedDeposit: a park sent back to Base after its 14 days is returned, not withdrawn", async () => {
+    const x = crossed(16 * DAY);
+    const refundBlock = bitAt(x.parkS + 14 * DAY + 3_600);
+    const landBlock = baseAt(bitTs(refundBlock) + 25 * 60);
+    const run = parkedRun(x);
+    const bitLogs = [...run.bitLogs, parkedRefunded(refundBlock)];
+    // the refund left Bittensor and hasn't reached Base yet
+    const going = await deposit(chains({ ...x.base, ...run, bitLogs }), x);
+    expect(going.steps[2]).toMatchObject({ status: "failed", detail: "Your deposit is on its way back to Base." });
+    // the refund payout (REFUND_CHUNK, under the park's key) credited the account on Base; the claim is on the Stake
+    // page (the controller's wording, Task 59 review Important 1: the site has no Withdraw page)
+    const landed = payoutReceived(PARK_KEY, REFUND_CHUNK, USER, TAO, landBlock, LAND_TX);
+    const back = await deposit(chains({ ...x.base, ...run, bitLogs, baseLogs: [...x.base.baseLogs, landed] }), x);
+    expect(back.steps[2]).toMatchObject({ status: "failed", detail: "Your deposit was returned to you on Base. Claim it on the Stake page." });
+    expect(back.steps[3].status).toBe("pending");
+    expect(back.status).toBe("failed");
+    // another depositor's refund from the same park isn't this account's
+    const theirs = payoutReceived(PARK_KEY, REFUND_CHUNK, OTHER, TAO, landBlock, LAND_TX);
+    const notMine = await deposit(chains({ ...x.base, ...run, bitLogs, baseLogs: [...x.base.baseLogs, theirs] }), x);
+    expect(notMine.steps[2].detail).toBe("Your deposit is on its way back to Base.");
+  });
+
+  it("refundedDeposit at Bittensor's measured block time: on 6-second blocks its run and its refund are found where their times put them", async () => {
+    BIT_CLOCK.blockS = 6;
+    try {
+      const x = crossed(16 * DAY);
+      const refundBlock = bitAt(x.parkS + 14 * DAY + 3_600);
+      const landBlock = baseAt(bitTs(refundBlock) + 25 * 60);
+      const run = parkedRun(x);
+      const landed = payoutReceived(PARK_KEY, REFUND_CHUNK, USER, TAO, landBlock, LAND_TX);
+      const c = chains({ ...x.base, ...run, bitLogs: [...run.bitLogs, parkedRefunded(refundBlock)], baseLogs: [...x.base.baseLogs, landed] });
+      const back = await deposit(c, x);
+      expect(back.steps[2]).toMatchObject({ status: "failed", detail: "Your deposit was returned to you on Base. Claim it on the Stake page." });
+      // the park's end looked for from its timeout by the head's clock at 6 s a block: a window or two, not dozens
+      const endWindows = c.asked.filter((k) => k.startsWith("bittensor.logs:") && BigInt(k.split(":")[1].split("-")[0]) > x.execBlock);
+      expect(endWindows.length).toBeLessThanOrEqual(2);
+    } finally {
+      BIT_CLOCK.blockS = 12;
+    }
+  });
+
+  it("parkEndAfterAHalt: a park whose 14 days took fewer than 80,640 blocks (a halt) is still found refunded, from the head's clock", async () => {
+    // a four-day halt after the park: its 14 days span 72,100 blocks, under 80,640 (14 days at 15 s)
+    const halt = { before: BIT_HEAD - 1_950n, seconds: 4 * DAY };
+    const parkBlock = BIT_HEAD - 74_000n;
+    const refundBlock = parkBlock + 72_100n;
+    const parkS = bitTs(parkBlock, halt);
+    expect(bitTs(refundBlock, halt) - parkS).toBeGreaterThanOrEqual(14 * DAY);
+    expect(refundBlock - parkBlock).toBeLessThan(80_640n);
+    // the stake 55 minutes before the park, its batch's close half an hour after it
+    const x = crossed(NOW_S - parkS + 55 * 60);
+    const run = parkedRun({ execBlock: parkBlock });
+    const landBlock = baseAt(bitTs(refundBlock, halt) + 25 * 60);
+    const c = chains({
+      ...x.base,
+      ...run,
+      halt,
+      bitLogs: [...run.bitLogs, parkedRefunded(refundBlock)],
+      baseLogs: [...x.base.baseLogs, payoutReceived(PARK_KEY, REFUND_CHUNK, USER, TAO, landBlock, LAND_TX)],
+    });
+    const r = await deposit(c, x);
+    expect(r.steps[2]).toMatchObject({ status: "failed", detail: "Your deposit was returned to you on Base. Claim it on the Stake page." });
+    // the search for the park's end started near the timeout by the head's clock: one window, not dozens
+    const endWindows = c.asked.filter((k) => k.startsWith("bittensor.logs:") && BigInt(k.split(":")[1].split("-")[0]) > parkBlock);
+    expect(endWindows.length).toBeLessThanOrEqual(2);
+  });
+
+  it("foreignOriginBounce: a deposit for an address that belongs to another chain's Cascade comes back, said so", async () => {
+    const x = crossed(3 * 3_600);
+    // the batch's delivery, as the vault's scan read it (each read its own scan: a scan keeps the receipts it read)
+    const s = () => {
+      const scan = scanned(V32);
+      scan.delivered.set(String(BATCH), { key: VKEY, txHash: EXEC_TX, block: x.execBlock });
+      return scan;
+    };
+    const run = (reason: number) => ({ bitReceipts: { [EXEC_TX]: receipt([vaultDelivered(x.execBlock), depositBounced(x.execBlock, reason)]) } });
+    const r = await deposit(chains({ ...x.base, ...run(1) }), x, V32, s());
+    expect(r.steps[2]).toMatchObject({ status: "failed", detail: "This address already belongs to another chain's Cascade; your deposit is on its way back." });
+    expect(r.status).toBe("failed");
+    // a bounce for any other reason keeps its words
+    const insolvent = await deposit(chains({ ...x.base, ...run(0) }), x, V32, s());
+    expect(insolvent.steps[2].detail).toBe("The vault couldn't accept this deposit safely just then, so it sent it back. It returns to Base, where you can claim it as USDC from the Stake page");
+  });
+
+  it("checking: a batch that crossed but whose outcome, delivered or parked, isn't read yet says so, never a guess", async () => {
+    const x = crossed(3 * 3_600);
+    const checking = { status: "checking", detail: "Checking where your deposit is…" };
+    // the bridge ran it on Bittensor, but nothing read yet shows where it went
+    expect((await deposit(chains({ ...x.base, executed: { [MSG]: 2 } }), x)).steps[2]).toMatchObject(checking);
+    // its run delivered it to the vault, whose scan hasn't reached that block yet
+    const delivered = chains({
+      ...x.base,
+      executed: { [MSG]: 2 },
+      bitLogs: [adapterDelivered(x.execBlock)],
+      bitReceipts: { [EXEC_TX]: receipt([vaultDelivered(x.execBlock), adapterDelivered(x.execBlock)]) },
+    });
+    expect((await deposit(delivered, x)).steps[2]).toMatchObject(checking);
+    // Bittensor can't be asked
+    expect((await deposit(chains({ ...x.base, ...parkedRun(x), bittensorDown: true }), x)).steps[2]).toMatchObject(checking);
+    // Base's logs show no close for the batch yet (a logs server that is behind)
+    expect((await deposit(chains({ ...x.base, baseLogs: [], executed: { [MSG]: 2 } }), x)).steps[2]).toMatchObject(checking);
+    // the bridge's run failed on Bittensor (CCIP FAILURE: re-executable, not lost): checking, never "any minute" (review Minor 5)
+    const failed = await deposit(chains({ ...x.base, executed: { [MSG]: 3 } }), x);
+    expect(failed.steps[2]).toMatchObject(checking);
+    expect(failed.steps[2].detail).not.toMatch(/any minute/);
+    // not run on Bittensor yet: on the bridge, timed from when it left Base
+    const bridge = await deposit(chains({ ...x.base }), x);
+    expect(bridge.steps[2].status).toBe("active");
+    expect(bridge.steps[2].detail).toMatch(
+      /^On the bridge to Bittensor \(deposited 180 minutes ago\)\. Chainlink waits for Base to finalize the batch \(about 15–25 minutes\), then delivers it on Bittensor; Chainlink's estimate was /,
+    );
+  });
+
+  it("parkedWithdrawalRequest: a request in a parked batch is pending, and once the park is dropped it can be made again", async () => {
+    // an unstake alone: its batch carries no TAO, so its park is empty
+    const x = crossed(3 * 3_600);
+    const pending = await withdrawal(chains({ ...x.base, ...parkedRun(x, 0n), parks: { [PARK_KEY]: [0n, BigInt(x.parkS), true] } }), x);
+    expect(pending.steps[1]).toMatchObject({ key: "unstake", status: "active", detail: "Still pending; do not request again until it shows dropped." });
+    expect(pending.status).toBe("in_progress");
+    expect(pending.unstakeAgain).toBeUndefined();
+    // 14 days on, the empty park is dropped
+    const old = crossed(16 * DAY);
+    const dropBlock = bitAt(old.parkS + 14 * DAY + 3_600);
+    const run = parkedRun(old, 0n);
+    const dropped = await withdrawal(chains({ ...old.base, ...run, bitLogs: [...run.bitLogs, parkedDropped(dropBlock)] }), old);
+    expect(dropped.steps[1]).toMatchObject({ status: "failed", detail: "This request was dropped and nothing was taken. You can request again." });
+    expect(dropped.status).toBe("failed");
+    expect(dropped.unstakeAgain).toBe(true);
+    expect(dropped.usdcAmount).toBeUndefined();
+    // a batch with deposits in it was refunded instead: its requests went with it
+    const withDeposits = parkedRun(old);
+    const refunded = await withdrawal(chains({ ...old.base, ...withDeposits, bitLogs: [...withDeposits.bitLogs, parkedRefunded(dropBlock)] }), old);
+    expect(refunded.steps[1].detail).toBe("This request was dropped and nothing was taken. You can request again.");
+    // v3-launch's trail reads none of it
+    expect((await withdrawal(chains({ ...x.base, ...parkedRun(x, 0n) }), x, vault, LAUNCH)).steps[1].detail).toMatch(/^On the bridge to Bittensor/);
+  });
+
+  it("originElsewhere: a request skipped because the address withdrew on Bittensor at the time says why, and what to do", async () => {
+    const x = crossed(3 * 3_600);
+    const s = () => {
+      const scan = scanned(V32);
+      scan.delivered.set(String(BATCH), { key: VKEY, txHash: EXEC_TX, block: x.execBlock });
+      return scan;
+    };
+    const skipped = (originAt: bigint | "fail") =>
+      chains({ ...x.base, originAt, bitReceipts: { [EXEC_TX]: receipt([vaultDelivered(x.execBlock), redeemSkipped(x.execBlock)]) } });
+    // the origin at the skip (read at the delivery's block) was DIRECT_ORIGIN, though the address has set Base since
+    const c = skipped(DIRECT);
+    const direct = await withdrawal(c, x, { ...vault, redeemOrigin: 8453n }, V32, s());
+    expect(direct.steps[1]).toMatchObject({
+      status: "failed",
+      detail: "Nothing was taken. This address withdraws on Bittensor, not here. Withdraw there, or set Base as its withdrawal chain from Bittensor.",
+    });
+    expect(direct.unstakeAgain).toBe(true);
+    expect(c.asked).toContain(`bittensor.redeemOrigin@${x.execBlock}`);
+    // Base's at the skip, today elsewhere: it was skipped for having no stake, whatever the origin reads now
+    const none = await withdrawal(skipped(8453n), x, { ...vault, redeemOrigin: DIRECT }, V32, s());
+    expect(none.steps[1].detail).toBe("There was no stake to take when this request arrived, so nothing was taken.");
+    // the origin at the skip can't be read: only what is true either way
+    const unread = await withdrawal(skipped("fail"), x, vault, V32, s());
+    expect(unread.steps[1]).toMatchObject({ status: "failed", detail: "This request was skipped, and nothing was taken." });
+    expect(unread.unstakeAgain).toBe(true);
+  });
+
+  it("thinPool: a payout back on Base waits for the market while a pool is thinner than its floor, and the claim is offered", async () => {
+    const x = crossed(3 * 3_600);
+    const chunkBlock = x.execBlock + 400n;
+    const landBlock = baseAt(bitTs(chunkBlock) + 25 * 60);
+    const deadline = BigInt(NOW_S + 7 * DAY);
+    const op: WithdrawalOp = { ...x.requestOp, delivery: { minUsdcPerTao: 200_000_000n, deadline: Number(deadline) } };
+    const chunk = event(
+      V32.vault,
+      VAULT_V32,
+      "PayoutChunkSent",
+      { key: VKEY },
+      enc("uint32, uint32, uint256, uint256, uint256, uint256, uint256", [0, 1, TAO, TAO - 10n ** 14n, 10n ** 14n, 10n ** 14n, 0n]),
+      chunkBlock,
+      CHUNK_TX,
+    );
+    const sent = event(V32.bitAdapter, ADAPTER, "Sent", { messageId: H(0x53), sender: V32.vault, recipient: V32.frontDoor }, enc("uint64, uint256, uint256, uint256", [8453n, TAO - 10n ** 14n, 10n ** 14n, 1n]), chunkBlock, CHUNK_TX, 1);
+    const run = (pools: { mean: readonly [bigint, bigint]; floors: readonly [bigint, bigint] }) =>
+      chains({
+        ...x.base,
+        baseLogs: [...x.base.baseLogs, payoutReceived(VKEY, 0, USER, TAO - 10n ** 14n, landBlock, BACK_TX)],
+        bitReceipts: { [EXEC_TX]: receipt([vaultDelivered(x.execBlock), redeemed(x.execBlock)]), [CHUNK_TX]: receipt([chunk, sent]) },
+        baseExecuted: { [H(0x53)]: 2 },
+        pref: [200_000_000n, deadline, 6],
+        sale: 9_900_000n,
+        pools,
+      });
+    const scan = () => {
+      const s = scanned(V32);
+      s.delivered.set(String(BATCH), { key: VKEY, txHash: EXEC_TX, block: x.execBlock });
+      s.payouts.set(VKEY, [{ txHash: CHUNK_TX, block: chunkBlock, chunk: 0, taken: 1 }]);
+      return s;
+    };
+    const record = async (c: unknown) => {
+      const { facts } = await withdrawalFacts(c as never, V32, op, { fd: { ...fd, claimable: TAO - 10n ** 14n }, vault, scan: scan(), claims: [] });
+      return withdrawalRecord(op, facts);
+    };
+    // the TAO/WETH pool's 30-minute mean liquidity is under the front door's floor
+    const thin = await record(run({ mean: [100n, 10n ** 12n], floors: [1_000n, 0n] }));
+    expect(thin.steps[3]).toMatchObject({ status: "action", detail: "USDC delivery is waiting for the market to deepen. You can claim your TAO now instead." });
+    expect(thin.status).toBe("ready");
+    expect(offersClaim(thin)).toBe(true);
+    // deep enough: delivered automatically, as before
+    const deep = await record(run({ mean: [10n ** 6n, 10n ** 12n], floors: [1_000n, 10n ** 9n] }));
+    expect(deep.steps[3]).toMatchObject({ status: "active", detail: "USDC is being delivered to your wallet automatically" });
+    expect(isDelivering(deep)).toBe(true);
+  });
+});
+
+describe("v3.2's Receive TAO: an unstake with no delivery, its TAO claimed on Base by hand (Task 59a)", () => {
+  const redeemed = { at: new Date(), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
+  const payout = { txHash: H(4), messageId: H(6), state: 2 as const, at: new Date() };
+  const tao: WithdrawalOp = { ...wop, usdcEstimate: 0n, keepTao: true };
+
+  it("names its last step as claiming the TAO, and shows no USDC it never asked for", () => {
+    const on = withdrawalRecord(tao, wbase);
+    expect(on.steps[3]).toMatchObject({ key: "claim", title: "Claim your TAO", status: "pending" });
+    expect(on.usdcAmount).toBeUndefined();
+    expect(on.keepsTao).toBe(true);
+    expect(on.awaitingDelivery).toBeUndefined();
+  });
+
+  it("is ready to claim once its own payout is back on Base", () => {
+    const ready = withdrawalRecord(tao, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 99n * 10n ** 14n });
+    expect(ready.steps[3]).toMatchObject({ title: "Claim your TAO", status: "action", detail: "Your TAO is back on Base, ready to claim" });
+    expect(ready.status).toBe("ready");
+    expect(offersClaim(ready)).toBe(true);
+    // claimed as TAO: paid, what came back in TAO
+    const claimed = { hash: H(11), at: new Date(), taoClaimed: 99n * 10n ** 14n, keptTao: true, swapFailed: false };
+    const paid = withdrawalRecord(tao, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 0n, claimed });
+    expect(paid.status).toBe("paid");
+    expect(paid.received).toEqual({ keptTao: 0.0099 });
+    expect(paid.usdcAmount).toBeUndefined();
+  });
+
+  it("sold by a later USDC unstake's delivery: shown sold, with its receipt, never in progress (C1, M7)", () => {
+    const back = { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 0n, credited: { at: new Date(), taoWei: 99n * 10n ** 14n } };
+    const sold = withdrawalRecord(tao, { ...back, usdcDelivered: { hash: H(12), at: new Date(), usdcOut: 2_450_000n } });
+    expect(sold.status).toBe("paid");
+    expect(sold.steps[3]).toMatchObject({ title: "USDC delivered", status: "done", txUrl: `https://basescan.org/tx/${H(12)}` });
+    expect(sold.received).toEqual({ usdc: 2.45 });
+    expect(sold.usdcAmount).toBe(2.45);
+  });
+
+  it("claimed from another device, or paid out with its logs unreadable: settled, never in progress (M7)", () => {
+    const back = { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout, claimable: 0n };
+    const claimed = withdrawalRecord(tao, { ...back, claimedOnChain: { hash: H(13), at: new Date(), taoClaimed: 99n * 10n ** 14n } });
+    expect(claimed.status).toBe("paid");
+    expect(claimed.steps[3]).toMatchObject({ title: "Claimed", status: "done", txUrl: `https://basescan.org/tx/${H(13)}` });
+    const unread = withdrawalRecord(tao, { ...back, traceFailed: true });
+    expect(unread.status).toBe("paid");
+    expect(unread.steps[3]).toMatchObject({ title: "Paid out", status: "done" });
+  });
+
+  it("leaves a USDC unstake's record as it was", () => {
+    const usdc = withdrawalRecord(wop, wbase);
+    expect(usdc.steps[3].title).toBe("Claim as USDC");
+    expect(usdc.keepsTao).toBeUndefined();
+    expect(usdc.usdcAmount).toBe(2.5);
   });
 });

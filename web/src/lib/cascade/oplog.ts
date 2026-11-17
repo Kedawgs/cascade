@@ -9,6 +9,17 @@ export type OpState = "running" | "needs-you" | "sent" | "failed";
 export type DepositCall = "approveUsdc" | "swap" | "approveTao" | "deposit" | "stake";
 export type ClaimCall = "claim" | "approveTao" | "swap";
 
+/** A cancel sent for a deposit or unstake, taking it back out of the open batch: its transaction, and when it was sent
+ * (ms). `confirmed` once its flow saw it through and its own receipt said it took the record out of its batch
+ * (flows.ts cancelConfirmed, op-store.ts confirmCancel): the receipt page then shows it cancelled while the reads of
+ * the chain are behind (cancel-sent.ts). This browser's word, never the chain's: a read that names this cancel as one
+ * that didn't take the record out wins over it once the cancel's ten minutes are over. */
+export interface CancelMark {
+  hash: Hex;
+  at: number;
+  confirmed?: true;
+}
+
 interface OpBase {
   id: string;
   account: Address;
@@ -37,7 +48,7 @@ export interface DepositOp extends OpBase {
   callsId?: string;
   batchId?: bigint;
   /** Taken back out of the open batch. */
-  cancelled?: { hash: Hex; at: number };
+  cancelled?: CancelMark;
 }
 
 export interface WithdrawalOp extends OpBase {
@@ -48,6 +59,8 @@ export interface WithdrawalOp extends OpBase {
   fee: bigint;
   /** v3: the USDC delivery preference sent with the request. */
   delivery?: { minUsdcPerTao: bigint; deadline: number };
+  /** v3.2: asked as TAO ("Receive TAO", flows.ts receiveTaoCall): no delivery, its payout claimed by hand. */
+  keepTao?: true;
   hash?: Hex;
   /** ms since the epoch when `hash` was recorded (a sped-up request's when its replacement was). */
   sentAt?: number;
@@ -63,7 +76,7 @@ export interface WithdrawalOp extends OpBase {
    * day after, in case Base mines it late. */
   droppedAt?: number;
   batchId?: bigint;
-  cancelled?: { hash: Hex; at: number };
+  cancelled?: CancelMark;
 }
 
 export interface ClaimOp extends OpBase {
@@ -178,8 +191,12 @@ const hashesOf = <K extends string>(keys: readonly K[]) => (x: unknown): Partial
   }
   return out;
 };
-const cancelledOf = (at: Dates) => (x: unknown): { hash: Hex; at: number } | undefined =>
-  isRecord(x) ? { hash: need(hash(x.hash)), at: need(at(x.at)) } : undefined;
+const cancelledOf = (at: Dates) => (x: unknown): CancelMark | undefined => {
+  if (!isRecord(x)) return undefined;
+  // only ever written as true, and anything else is read as not confirmed, never as a record to drop: the record is the
+  // receipt page and its cancel, and a mark odd in this one field is still its cancel, as sent
+  return { hash: need(hash(x.hash)), at: need(at(x.at)), ...(x.confirmed === true ? { confirmed: true as const } : {}) };
+};
 /** A wallet batch id (EIP-5792): the spec allows up to 8,194 characters, and wallets use that room. */
 const callsIdOf = text(8_194);
 const deliveryOf = (x: unknown): { minUsdcPerTao: bigint; deadline: number } | undefined =>
@@ -236,6 +253,7 @@ export function decodeOperation(x: unknown, account: Address, now: number, issue
         usdcEstimate: need(usdc(x.usdcEstimate)),
         fee: need(wei(x.fee)),
         delivery: maybe(x.delivery, deliveryOf),
+        keepTao: maybe(x.keepTao, (v) => (v === true ? (true as const) : undefined)),
         hash: maybe(x.hash, hash),
         sentAt: maybe(x.sentAt, at),
         nonce: maybe(x.nonce, uint32),

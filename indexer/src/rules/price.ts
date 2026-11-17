@@ -1,5 +1,6 @@
 import { formatUnits, type Hex } from "viem";
 import type { Finding } from "../alerts.ts";
+import { borneBy } from "../crosscheck/payouts.ts";
 import type { BitState, ChainReading } from "../snapshot.ts";
 import { onset, type Readings, type RuleCtx, twice } from "./context.ts";
 import type { Rule } from "./index.ts";
@@ -12,27 +13,35 @@ const big = (x: unknown) => BigInt(String(x ?? "0"));
 const pos = (x: bigint) => (x > 0n ? x : 0n);
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
-/** The wei the vault's own events in blocks (from, to] lost to honest rounding: asked minus measured. */
+/** The wei the vault's own events in blocks (from, to] lost to honest rounding: asked minus measured. On v3.2 the
+ * leaver pays (spec §3.3, Revision 23): a walk's cost, what the chain kept of the stake it took, is borne by the exit
+ * that walked (a payout chunk's entries through its unstakeCost, a direct exit's leaver through ShortfallAbsorbed), so
+ * an Unstaked in such a transaction explains no fall of the price; one elsewhere (the owner's direct removal in
+ * removeHotkey, housekeeping the holders bear) still does. A chunk's own rounding is v3.1's gross − net − fee, v3.2's
+ * gross − net − charged − unstakeCost (the caller's top-up is in the fee, not paid by the vault). */
 function roundingWei(ctx: RuleCtx, from: bigint, to: bigint): bigint {
+  const logs = ctx.logs.range("bittensor", "vault", ["Staked", "StakeMoved", "Unstaked", "PayoutChunkSent", "RedeemedDirect"], from + 1n, to);
+  const exits = ctx.cfg.deployment.version === "v3.2" ? new Set(logs.filter((l) => l.event === "PayoutChunkSent" || l.event === "RedeemedDirect").map((l) => l.txHash)) : new Set<Hex>();
   let w = 0n;
-  for (const l of ctx.logs.range("bittensor", "vault", ["Staked", "StakeMoved", "Unstaked", "PayoutChunkSent"], from + 1n, to)) {
+  for (const l of logs) {
     const a = l.args;
     if (l.event === "Staked") w += pos(big(a.rao) - big(a.measured)) * RAO;
     else if (l.event === "StakeMoved") w += pos(big(a.rao) - big(a.moved)) * RAO;
-    else if (l.event === "Unstaked") w += pos(big(a.wantRao) * RAO - big(a.receivedWei));
-    else w += pos(big(a.gross) - big(a.net) - big(a.fee));
+    else if (l.event === "Unstaked") w += exits.has(l.txHash) ? 0n : pos(big(a.wantRao) * RAO - big(a.receivedWei));
+    else if (l.event === "PayoutChunkSent") w += pos(big(a.gross) - big(a.net) - borneBy(a));
   }
   return w;
 }
 
-/** How far the price fell from `a` to `b` beyond what honest rounding in between explains (converted
- * to a price change at b's supply, plus priceDropEpsilon of the price); undefined when it didn't. */
+/** How far the price fell from `a` to `b` beyond what honest rounding in between explains, and on v3.2 a swap's fall
+ * that stake.missing explains (swapExplained: the vault mints nothing on it) (converted to a price change at b's supply,
+ * plus priceDropEpsilon of the price); undefined when it didn't. */
 function unexplainedDrop(ctx: RuleCtx, a: ChainReading<BitState>, b: ChainReading<BitState>): bigint | undefined {
   const pa = a.state.price;
   const pb = b.state.price;
   const supply = b.state.totalSupply;
   if (pa === undefined || pb === undefined || !supply || pb >= pa || a.block >= b.block) return undefined;
-  const explained = ceilDiv(roundingWei(ctx, a.block, b.block) * E18, supply) + 1n;
+  const explained = ceilDiv((roundingWei(ctx, a.block, b.block) + swapExplained(ctx, a, b).rao * RAO) * E18, supply) + 1n;
   const epsilon = BigInt(Math.ceil(Number(pa) * ctx.t.priceDropEpsilon));
   const drop = pa - pb;
   return drop > explained + epsilon ? drop : undefined;
@@ -104,9 +113,56 @@ function dropIn(ctx: RuleCtx, e: ChainReading<BitState>, p: ChainReading<BitStat
 /** The vault events that move a hotkey's stake on purpose, and the arg naming the hotkey they take from. */
 const STAKE_MOVES: Readonly<Record<string, string>> = { Unstaked: "hotkey", StakeMoved: "from", HotkeyRemoved: "hotkey" };
 
+/** A set hotkey's fall between two readings: its stake in each (rao). */
+interface Fall {
+  hotkey: Hex;
+  was: bigint;
+  now: bigint;
+}
+
+/** The set hotkeys whose stake fell by more than stakeDustRao from `a` to `b` with no vault Unstaked, StakeMoved (from
+ * it) or HotkeyRemoved of that hotkey in those blocks. */
+function fallsIn(ctx: RuleCtx, a: ChainReading<BitState>, b: ChainReading<BitState>): Fall[] {
+  const moves = ctx.logs.range("bittensor", "vault", Object.keys(STAKE_MOVES), a.block + 1n, b.block);
+  const out: Fall[] = [];
+  for (const [hk, was] of Object.entries(a.state.stakes) as [Hex, bigint][]) {
+    const now = b.state.stakes[hk];
+    if (now === undefined || (a.state.hotkeys && !a.state.hotkeys.includes(hk))) continue;
+    if (was - now <= ctx.t.stakeDustRao) continue;
+    if (moves.some((l) => String(l.args[STAKE_MOVES[l.event]]).toLowerCase() === hk.toLowerCase())) continue;
+    out.push({ hotkey: hk, was, now });
+  }
+  return out;
+}
+
+/** v3.2: the falls from `a` to `b` that stake.missing explains, a swap's (Task 56's review, Minor 2: the controller's
+ * ruling). The vault reads its stake as missing at `b` (stakeMissing(): it then mints nothing, so the swap can't sell
+ * shares cheaply, and stake.missing names the fall), and the stake reappears on the vault's own coldkey, off its set
+ * (unlistedStakeRao rose by it: the swap's new hotkey). Each fall is matched against that rise, largest first, dust
+ * aside; one it doesn't cover (stake that left the coldkey: a slash, or a move) is not explained. Nothing is explained on
+ * v3-launch, or while b's guard or either reading's unlisted total is unread. The hotkeys are lowercase. */
+function swapExplained(ctx: RuleCtx, a: ChainReading<BitState>, b: ChainReading<BitState>, falls = fallsIn(ctx, a, b)): { hotkeys: Set<string>; rao: bigint } {
+  const out = { hotkeys: new Set<string>(), rao: 0n };
+  if (ctx.cfg.deployment.version !== "v3.2" || b.state.stakeMissing !== true) return out;
+  const before = a.state.unlistedStakeRao;
+  const after = b.state.unlistedStakeRao;
+  if (before === undefined || after === undefined || after <= before) return out;
+  let left = after - before;
+  const fell = (f: Fall) => f.was - f.now;
+  for (const f of [...falls].sort((x, y) => (fell(y) > fell(x) ? 1 : fell(y) < fell(x) ? -1 : 0))) {
+    if (fell(f) > left + ctx.t.stakeDustRao) continue;
+    out.hotkeys.add(f.hotkey.toLowerCase());
+    out.rao += fell(f);
+    left = pos(left - fell(f));
+  }
+  return out;
+}
+
 /** stake.unexplained_drop: a set hotkey's stake fell by more than stakeDustRao between two readings with
  * no vault Unstaked, StakeMoved (from it) or HotkeyRemoved of that hotkey in those blocks; judged once
- * Bittensor is settled past the later reading. Holds. */
+ * Bittensor is settled past the later reading. Holds. On v3.2 a swap's fall that stake.missing explains (swapExplained)
+ * raises nothing, so it holds nothing: the vault guards itself, and the keeper stays free to deliver the parks once the
+ * swap is listed; any other fall still raises and holds, as on v3-launch. */
 export const stakeUnexplainedDrop: Rule = {
   name: "stake.unexplained_drop",
   run(ctx) {
@@ -116,12 +172,10 @@ export const stakeUnexplainedDrop: Rule = {
       const a = rs[i - 1];
       const b = rs[i];
       if (a.block >= b.block || b.block > ctx.settled.bittensor.block) continue;
-      const moves = ctx.logs.range("bittensor", "vault", Object.keys(STAKE_MOVES), a.block + 1n, b.block);
-      for (const [hk, was] of Object.entries(a.state.stakes) as [Hex, bigint][]) {
-        const now = b.state.stakes[hk];
-        if (now === undefined || (a.state.hotkeys && !a.state.hotkeys.includes(hk))) continue;
-        if (was - now <= ctx.t.stakeDustRao) continue;
-        if (moves.some((l) => String(l.args[STAKE_MOVES[l.event]]).toLowerCase() === hk.toLowerCase())) continue;
+      const falls = fallsIn(ctx, a, b);
+      const explained = swapExplained(ctx, a, b, falls).hotkeys;
+      for (const { hotkey: hk, was, now } of falls) {
+        if (explained.has(hk.toLowerCase())) continue;
         const id = `stake.unexplained_drop:${hk}:${b.block}`;
         out.push({
           rule: "stake.unexplained_drop",
@@ -285,11 +339,15 @@ function unexplainedFall(ctx: RuleCtx, a: ChainReading<BitState>, b: ChainReadin
  * settled pair of readings showing the stake. stake.unexplained_drop sees the same swap as stake leaving the
  * listed hotkey and holds at once; this rule then names where it went and raises no hold of its own while that
  * one is on. Honest operations (stake, unstake, payouts, reward claims and vesting) keep every rao on a listed
- * hotkey. One alert per hotkey while it lasts; the hold's id is the hotkey's first sight, so it is raised once. */
+ * hotkey. One alert per hotkey while it lasts; the hold's id is the hotkey's first sight, so it is raised once.
+ * On a v3.2 deployment the vault guards itself (spec §3.1: it prices min(visible, booked) and mints nothing while
+ * stake is missing), so stake.missing (src/rules/vault.ts) replaces stake.divergence there, and stake.unlisted is
+ * judged from the lens's unlistedStakeRao (unlistedV32). v3-launch's rule below is kept until it retires. */
 export const stakeDivergence: Rule = {
   name: "stake.divergence",
   raises: ["stake.unlisted"],
   run(ctx) {
+    if (ctx.cfg.deployment.version === "v3.2") return unlistedV32(ctx);
     const s = ctx.snap.bittensor;
     const p = ctx.previous.bittensor;
     if (!s || !p || p.block >= s.block) return [];
@@ -399,6 +457,47 @@ export const stakeDivergence: Rule = {
     return out;
   },
 };
+
+/** v3.2's stake.unlisted (warning event): stake sits on a hotkey under the vault's coldkey that the vault doesn't list
+ * (unlistedStakeRao(): getTotalColdkeyStakeOnSubnet less the visible stake) while nothing is missing: a stranger's
+ * transfer_stake gift, or the vault's own stake back after a write-off. It isn't in the price until listed and adopted.
+ * The T16 note rides on it: with nothing missing no stranger can list a hotkey and the last slot stays shut, so only
+ * the owner, guardian or keeper can bring it in. While stake is missing (or that is unread) stake.missing names where
+ * the stake went, so this says nothing; nor for dust (stakeDustRao). One alert per hotkey the readings asked that holds
+ * it, or one for the coldkey when none of them does. */
+function unlistedV32(ctx: RuleCtx): Finding[] {
+  const s = ctx.snap.bittensor;
+  const total = s?.state.unlistedStakeRao;
+  if (!s || total === undefined || s.state.stakeMissing !== false || total <= ctx.t.stakeDustRao) return [];
+  const now = unlistedIn(s) ?? new Set<Hex>();
+  const held = [...now].flatMap((hk) => {
+    const rao = stakeOf(s, hk);
+    return rao !== undefined && rao > ctx.t.stakeDustRao ? [{ hk, rao }] : [];
+  });
+  const common = {
+    "unlisted on the vault's coldkey": `${tao(total)} (unlistedStakeRao)`,
+    "listed by the vault": s.state.hotkeys?.join(", ") || "none",
+    note: "nothing is missing, so only the owner, guardian or keeper can list it (addHotkey), and the last of the 4 slots stays shut: no stranger can",
+    contracts: "v3.2",
+    block: String(s.block),
+  };
+  if (!held.length) {
+    return [
+      {
+        rule: "stake.unlisted",
+        key: "stake.unlisted:coldkey",
+        subject: `${tao(total)} sits on a hotkey the vault doesn't list, and nothing is missing`,
+        facts: { hotkey: "not named: no unlisted hotkey the readings asked holds it", ...common },
+      },
+    ];
+  }
+  return held.map(({ hk, rao }) => ({
+    rule: "stake.unlisted" as const,
+    key: `stake.unlisted:${hk}`,
+    subject: `${tao(rao)} sits on a hotkey the vault doesn't list, and nothing is missing`,
+    facts: { hotkey: hk, stake: `${rao} rao (${tao(rao)})`, ...common, taostats: `https://taostats.io/hotkey/${hk}` },
+  }));
+}
 
 export const PRICE_RULES: Rule[] = [priceDrop, stakeUnexplainedDrop, stakeHotkeyChanged, stakeDivergence];
 

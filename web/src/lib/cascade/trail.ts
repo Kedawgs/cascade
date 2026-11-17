@@ -5,6 +5,57 @@ import type { DepositRecord, DepositStepKey, StepStatus, TrailStep, WithdrawalRe
 import { formatDay, formatTao, formatUsdc } from "../format";
 import { toDisplay } from "./units";
 
+// ---- v3.2's states in plain words (spec §7; the plan's Task 59, each sentence exact) ----
+
+/** The vault lens reads stake missing: every delivery and direct exit waits until Cascade is reconnected (spec §3.1). */
+export const STAKE_MISSING =
+  "Staking and unstaking are paused for a short while: Cascade is reconnecting to its validator after a change on Bittensor. Nothing has been lost.";
+/** A deposit's batch the vault refused, parked in the Bittensor adapter (spec §3.2). */
+export const PARKED_DEPOSIT = "Your deposit reached Bittensor and is waiting to be added. Nothing is lost: it is added, or returned to you, automatically.";
+/** The park's refund (a payout with REFUND_CHUNK) credited the account on Base: returned, not withdrawn. The claim is
+ * the Stake page's banner (StakeCard.tsx, ClaimReady): the controller's wording (Task 59 review, Important 1), in
+ * place of the plan's "Withdraw page", which the site doesn't have. */
+export const REFUNDED_DEPOSIT = "Your deposit was returned to you on Base. Claim it on the Stake page.";
+/** The park's refund has left Bittensor and isn't on Base yet. */
+export const RETURNING_DEPOSIT = "Your deposit is on its way back to Base.";
+/** An unstake request's batch is parked: the request waits with it. */
+export const PARKED_REQUEST = "Still pending; do not request again until it shows dropped.";
+/** The park was dropped (or refunded) and its requests with it. */
+export const DROPPED_REQUEST = "This request was dropped and nothing was taken. You can request again.";
+/** A deposit for an address whose redeem origin is another chain's bounces (DepositBounced reason ForeignOrigin, §3.4). */
+export const FOREIGN_ORIGIN_BOUNCE = "This address already belongs to another chain's Cascade; your deposit is on its way back.";
+/** A request the vault skipped, when the redeem origin it had then can't be read: only what is true either way. */
+export const SKIPPED_UNREAD = "This request was skipped, and nothing was taken.";
+/** The account's redeem origin isn't Base's: a Base request is skipped (Review Focus 4), before and after. */
+export const ORIGIN_ELSEWHERE = "This address withdraws on Bittensor, not here. Withdraw there, or set Base as its withdrawal chain from Bittensor.";
+/** v3.2: why the vault deferred an unstake (RedeemDeferred names none; facts.ts tells them apart from the reads at its
+ * delivery's block, exit-hold.ts): the one-day hold on shares from a deposit less than a day old (R4, B-H1), unstakes
+ * through Base on hold while the bridge can't send payouts (R4, S-H1), or the request worth under the minimum; a cause
+ * that couldn't be read says only what is true either way. The day's limit keeps its own sentence. */
+export const HOLD_DEFERRED = "Nothing was taken: shares less than a day old can't be unstaked through Base yet. Unstake again once they are a day old.";
+export const RAIL_DEFERRED = "Nothing was taken: unstakes through Base were on hold. You can unstake again once they resume.";
+export const MINIMUM_DEFERRED = "Nothing was taken: it was worth less than the 0.03 TAO minimum when it arrived. You can unstake again.";
+export const DEFERRED_UNREAD = "Nothing was taken when this request arrived. You can unstake again.";
+const LIMIT_DEFERRED = "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow.";
+const DEFERRED: Record<"hold" | "rail" | "minimum" | "unread", string> = { hold: HOLD_DEFERRED, rail: RAIL_DEFERRED, minimum: MINIMUM_DEFERRED, unread: DEFERRED_UNREAD };
+
+/** A pool thinner than the front door's floor holds USDC delivery (ThinPool, spec §3.7): the claim by hand is offered. */
+export const THIN_POOL = "USDC delivery is waiting for the market to deepen. You can claim your TAO now instead.";
+/** v3.2: an unstake asked as TAO (Receive TAO, Task 59a): its last step, and what it says once the TAO is back. */
+export const RECEIVE_TAO_STEP = "Claim your TAO";
+export const TAO_BACK = "Your TAO is back on Base, ready to claim";
+/** A batch that crossed whose outcome, delivered or parked, isn't read yet: said, never guessed. */
+export const CHECKING_DEPOSIT = "Checking where your deposit is…";
+
+/** v3.2: what became of a batch that left Base and hasn't reached the vault, past the bridge (facts.ts, crossingOf):
+ * parked in the Bittensor adapter (when, and the run that parked it), refunded to Base after PARK_TIMEOUT (with the
+ * account's credit there once it landed), dropped (an empty park), or not read yet. */
+export type Crossing =
+  | { kind: "parked"; at: Date; txHash: Hex }
+  | { kind: "refunded"; at: Date; txHash: Hex; landed?: { at: Date; txHash: Hex; amount: bigint } }
+  | { kind: "dropped"; at: Date; txHash: Hex }
+  | { kind: "checking" };
+
 /** What the chain says about one deposit (see facts.ts). */
 export interface DepositFacts {
   swapMined: boolean;
@@ -26,10 +77,18 @@ export interface DepositFacts {
   closesBy?: boolean;
   /** The deposit's batch is still the open one. */
   stillOpen: boolean;
-  delivered?: { at: Date; txHash: Hex; messageId?: Hex; outcome: "deposited" | "bounced" | "skipped" };
+  /** v3.2 (R11): the first second (Base's clock) the account's cancel works, five minutes after the last deposit to its
+   * entry, as the front door was read (cancelableAt); 0 means no wait (build B). Absent on v3-launch. */
+  cancelableAt?: number;
+  /** v3.2 (R12d, M1): the clock cancelableAt was read on: the block's time and this device's when the read landed (ms). */
+  cancelClock?: { chainTime: number; readAt: number };
+  /** `foreignOrigin` (v3.2): bounced because the address's redeem origin is another chain's. */
+  delivered?: { at: Date; txHash: Hex; messageId?: Hex; outcome: "deposited" | "bounced" | "skipped"; foreignOrigin?: true };
   /** Whether the batch arrived can't be told yet: the history indexer's word on those blocks hasn't been
    * confirmed by the chain (facts.ts, deliveryOf). The trail says "checking", never a step. */
   deliveryUnknown?: true;
+  /** v3.2: its batch left Base and the vault holds no delivery of it: parked, refunded, or not read yet. */
+  crossing?: Crossing;
   staked?: { at: Date; txHash: Hex };
   /** Whether it was staked can't be told yet (facts.ts, confirmedStakeAfter): "checking", never a step. */
   stakeUnknown?: true;
@@ -62,9 +121,18 @@ export interface WithdrawalFacts {
   closesAt: Date;
   closesBy?: boolean;
   stillOpen: boolean;
-  delivered?: { at: Date; txHash: Hex; outcome: "redeemed" | "skipped" | "deferred"; taoWei?: bigint };
+  /** `skip` (v3.2): why the vault skipped it, from the account's redeem origin at the delivery's block: "origin", not
+   * Base's then; "unread", that read failed; absent, Base's then (no stake to take), as on v3-launch. `defer` (v3.2): why
+   * the vault deferred it, from the reads at the delivery's block (exit-hold.ts deferralCause): the one-day hold, the rail
+   * closed, the minimum, or "unread"; absent, the day's limit (or the entry limit), as on v3-launch. */
+  delivered?: { at: Date; txHash: Hex; outcome: "redeemed" | "skipped" | "deferred"; taoWei?: bigint; skip?: "origin" | "unread"; defer?: "hold" | "rail" | "minimum" | "unread" };
   /** Whether the batch arrived can't be told yet (facts.ts, deliveryOf): "checking", never a step. */
   deliveryUnknown?: true;
+  /** v3.2: its batch left Base and the vault holds no delivery of it: parked, dropped (refunded or emptied, its
+   * requests with it), or not read yet. */
+  crossing?: Exclude<Crossing, { kind: "refunded" }>;
+  /** v3.2: a pool is thinner than the front door's floor, so USDC delivery waits (reads.ts, readThinPool). */
+  thinPool?: true;
   /** The chunk that carried this account's entry. `dust` when the entry was worth less than its share of
    * the bridge fee: the vault kept it, and nothing comes back. */
   payout?: { txHash: Hex; messageId?: Hex; state: 0 | 1 | 2 | 3; at: Date; dust?: true };
@@ -189,7 +257,11 @@ const isCancelling = (op: { cancelled?: { at: number } }, f: CancelFacts): boole
   op.cancelled !== undefined &&
   f.stillOpen &&
   (f.cancelPending === "mined" || f.cancelPending === "waiting" || (f.cancelPending === "unseen" && f.now.getTime() - op.cancelled.at < STALE_MS));
-const CANCELLING = "Cancelling…";
+export const CANCELLING = "Cancelling…";
+/** A deposit taken back out of its batch: it comes back as the TAO it was, never swapped back to USDC. */
+export const DEPOSIT_CANCELLED = "Cancelled. Your TAO is back in your wallet as TAO, not USDC";
+/** An unstake request taken back out of its batch. */
+export const UNSTAKE_CANCELLED = "Cancelled before the batch closed. Your shares stay staked; the request fee isn't refunded";
 /** What "Cancelling…" says: still waiting to be mined ten minutes on, that the wallet can speed it up. */
 const cancellingDetail = (op: { cancelled?: { at: number } }, f: CancelFacts): string =>
   f.cancelPending === "waiting" && op.cancelled !== undefined && f.now.getTime() - op.cancelled.at >= STALE_MS
@@ -241,7 +313,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
   const cancelling = !cancelled && isCancelling(op, f);
   let bridge: TrailStep<DepositStepKey> = { key: "bridge", title: "Cross to Bittensor", status: "pending" };
   if (cancelled && op.cancelled) {
-    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: "Cancelled. Your TAO is back in your wallet", txUrl: explorer.baseTx(op.cancelled.hash) };
+    bridge = { ...bridge, status: "failed", at: new Date(op.cancelled.at), detail: DEPOSIT_CANCELLED, txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.delivered) {
     const d = f.delivered;
     if (d.outcome === "deposited") {
@@ -255,10 +327,14 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
         txLabel: "View on Bittensor",
         detail:
           d.outcome === "bounced"
-            ? "The vault couldn't accept this deposit safely just then, so it sent it back. It returns to Base, where you can claim it as USDC from the Stake page"
+            ? d.foreignOrigin
+              ? FOREIGN_ORIGIN_BOUNCE
+              : "The vault couldn't accept this deposit safely just then, so it sent it back. It returns to Base, where you can claim it as USDC from the Stake page"
             : "The vault skipped this deposit; the TAO stays in the vault",
       };
     }
+  } else if (f.crossing && f.depositMined) {
+    bridge = { ...bridge, ...depositCrossing(f.crossing) };
   } else if (cancelling && op.cancelled) {
     bridge = { ...bridge, status: "active", detail: cancellingDetail(op, f), txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.depositMined && f.deliveryUnknown && !f.stillOpen) {
@@ -297,7 +373,17 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     // "at $X" only for a deposit recorded with a price
     ...(price !== undefined ? { taoPriceUsd: price } : {}),
     ...(op.feesUsd !== undefined ? { feesUsd: op.feesUsd } : {}),
-    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled && !cancelling ? { cancellableWei: taoWei } : {}),
+    // a cancel takes it from the open batch, `cancelBatchId`, the one it waits in; on v3.2 not before cancelableAt (R11)
+    ...(f.stillOpen && f.depositMined && !f.delivered && !cancelled && !cancelling
+      ? {
+          cancellableWei: taoWei,
+          cancelBatchId: f.openBatchId,
+          ...(f.cancelableAt !== undefined ? { cancelableAt: f.cancelableAt } : {}),
+          ...(f.cancelableAt !== undefined && f.cancelClock ? { cancelClock: f.cancelClock } : {}),
+          // a cancel sent before this read that didn't take it out, and can't any more: this read has seen it
+          ...(op.cancelled ? { cancelSeen: op.cancelled.hash } : {}),
+        }
+      : {}),
     // the swap worked but the deposit failed: the deposit alone can be tried again (the TAO is in the wallet)
     ...(op.state === "failed" && f.swapMined && !f.depositMined && !cancelled ? { retryable: true as const } : {}),
     // the swap itself failed (reverted, or a batch that failed whole), or the stake lapsed before it was
@@ -310,6 +396,19 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
       ? { nothingSent: true as const }
       : {}),
   };
+}
+
+/** v3.2: the bridge step of a deposit whose batch crossed and hasn't reached the vault: parked (waiting to be added,
+ * still on its way, so the step is active), refunded (returned, not withdrawn: its trail ends there, as a bounce's),
+ * or still being checked. A deposit's park carries its TAO, so it is refunded, never dropped: one read so is checked. */
+function depositCrossing(x: Crossing): Pick<TrailStep, "status" | "detail" | "summary" | "at" | "txUrl" | "txLabel"> {
+  if (x.kind === "parked") return { status: "active", at: x.at, detail: PARKED_DEPOSIT, summary: "waiting to be added", txUrl: explorer.bittensorTx(x.txHash), txLabel: "View on Bittensor" };
+  if (x.kind === "refunded") {
+    return x.landed
+      ? { status: "failed", at: x.landed.at, detail: REFUNDED_DEPOSIT, txUrl: explorer.baseTx(x.landed.txHash), txLabel: "View on Base" }
+      : { status: "failed", at: x.at, detail: RETURNING_DEPOSIT, txUrl: explorer.bittensorTx(x.txHash), txLabel: "View on Bittensor" };
+  }
+  return { status: "checking", detail: CHECKING_DEPOSIT, summary: CHECKING.summary };
 }
 
 /** A deposit known only from the vault's `Deposited` event (made from another browser). */
@@ -351,7 +450,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       status: "failed",
       at: new Date(op.cancelled.at),
       txUrl: explorer.baseTx(op.cancelled.hash),
-      detail: "Cancelled before the batch closed. Your shares stay staked; the request fee isn't refunded",
+      detail: UNSTAKE_CANCELLED,
     };
   } else if (d) {
     const link = { at: d.at, txUrl: explorer.bittensorTx(d.txHash), txLabel: "View on Bittensor" };
@@ -361,11 +460,28 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
         ...unstake,
         ...link,
         status: "failed",
-        detail: "There was no stake to take when this request arrived, so nothing was taken.",
+        // v3.2 skips a request of shares whose redeem origin isn't Base's: why, and what to do (Review Focus 4), from the
+        // origin it had then; one that can't be read says only what is true either way
+        detail:
+          d.skip === "origin"
+            ? `Nothing was taken. ${ORIGIN_ELSEWHERE}`
+            : d.skip === "unread"
+              ? SKIPPED_UNREAD
+              : "There was no stake to take when this request arrived, so nothing was taken.",
       };
     } else {
-      unstake = { ...unstake, ...link, status: "action", detail: "The daily unstake limit was reached, so nothing was taken. You can unstake again tomorrow." };
+      // v3.2: the cause read at its delivery's block (none on v3-launch, whose deferral is the day's limit)
+      unstake = { ...unstake, ...link, status: "action", detail: d.defer ? DEFERRED[d.defer] : LIMIT_DEFERRED };
     }
+  } else if (f.crossing && f.requestMined) {
+    // v3.2: its batch is parked with it, or was dropped (refunded or emptied) and took it with it, or isn't read yet
+    const x = f.crossing;
+    unstake =
+      x.kind === "parked"
+        ? { ...unstake, status: "active", at: x.at, detail: PARKED_REQUEST, txUrl: explorer.bittensorTx(x.txHash), txLabel: "View on Bittensor" }
+        : x.kind === "dropped"
+          ? { ...unstake, status: "failed", at: x.at, detail: DROPPED_REQUEST, txUrl: explorer.bittensorTx(x.txHash), txLabel: "View on Bittensor" }
+          : { ...unstake, ...CHECKING };
   } else if (cancelling && op.cancelled) {
     unstake = { ...unstake, status: "active", detail: cancellingDetail(op, f), txUrl: explorer.baseTx(op.cancelled.hash) };
   } else if (f.requestMined && f.deliveryUnknown && !f.stillOpen) {
@@ -412,8 +528,12 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   const landed = ret.status === "done";
   // v3: the unstake asked for USDC sent to the wallet automatically; claiming by hand is the fallback
   const auto = op.delivery !== undefined;
-  const sold = auto ? f.usdcDelivered : undefined;
-  let claim: TrailStep<WithdrawalStepKey> = { key: "claim", title: auto ? "USDC to your wallet" : "Claim as USDC", status: "pending" };
+  // v3.2: asked as TAO (Receive TAO): nothing is sold for it, its TAO is claimed by hand; unless a later USDC request
+  // set the account's delivery preference, whose delivery sells everything credited (Task 59a review, C1): then it shows
+  // sold, from the front door's Delivered, as a USDC unstake's does
+  const keepsTao = !auto && op.keepTao === true;
+  const sold = auto || keepsTao ? f.usdcDelivered : undefined;
+  let claim: TrailStep<WithdrawalStepKey> = { key: "claim", title: auto ? "USDC to your wallet" : keepsTao ? RECEIVE_TAO_STEP : "Claim as USDC", status: "pending" };
   /** v3: paid out without a claim from this browser (delivered, or taken some other way). */
   let settled = false;
   /** v3: delivery can't happen, so the claim by hand is offered. */
@@ -463,7 +583,23 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     settled = v3.settled;
     offered = v3.offered;
     belowMinimum = v3.belowMinimum;
-  } else if (landed && f.claimable > 0n) claim = { ...claim, status: "action", detail: "Your money is back on Base. Claim it as USDC" };
+  } else if (keepsTao && landed && f.claimedOnChain) {
+    // v3.2: claimed by a claim this browser has no record of (another device): settled, never "in progress" (M7)
+    const { hash, at, taoClaimed, shared } = f.claimedOnChain;
+    claim = {
+      ...claim,
+      title: "Claimed",
+      status: "done",
+      at,
+      txUrl: explorer.baseTx(hash),
+      ...(shared ? { detail: `Claimed together with your other payout: ${formatTao(toDisplay(taoClaimed, 18), 4)} TAO in all` } : {}),
+    };
+    settled = true;
+  } else if (keepsTao && landed && f.traceFailed && f.claimable === 0n) {
+    // its logs can't be read, nothing is claimable and no claim from here: paid out, amount unknown (as deliveryStep says)
+    claim = { ...claim, title: "Paid out", status: "done", detail: "Sent to your wallet. The receipt can't be read right now, so the amount isn't shown" };
+    settled = true;
+  } else if (landed && f.claimable > 0n) claim = { ...claim, status: "action", detail: keepsTao ? TAO_BACK : "Your money is back on Base. Claim it as USDC" };
 
   const steps = [request, unstake, ret, claim];
   let status: WithdrawalRecord["status"];
@@ -474,7 +610,8 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   else if (steps.some((s) => s.status === "action")) status = "needs_you";
   else status = "in_progress";
 
-  const nothingTaken = d !== undefined && (d.outcome === "skipped" || d.outcome === "deferred");
+  // v3.2: a request dropped with its parked batch took nothing either
+  const nothingTaken = (d !== undefined && (d.outcome === "skipped" || d.outcome === "deferred")) || f.crossing?.kind === "dropped";
   // taken, but too small to send back: nothing comes back either
   const nothingBack = nothingTaken || f.payout?.dust === true;
   // only what was this unstake's alone: one sale or claim of several payouts shows its total in the step instead
@@ -487,8 +624,15 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
         ? { keptTao: toDisplay(c.taoClaimed, 18) }
         : { usdc: toDisplay(c.usdcOut ?? 0n, 6) }
       : undefined;
-  // nothing was taken, so nothing comes back; a paid v3 unstake shows what arrived (its receipt) or nothing, never the estimate
-  const usdcAmount = nothingBack ? undefined : auto && status === "paid" ? received?.usdc : toDisplay(op.usdcEstimate, 6);
+  // nothing was taken, so nothing comes back; a paid v3 unstake shows what arrived (its receipt) or nothing, never the
+  // estimate; one asked as TAO has no USDC to show, unless a later USDC request's delivery sold it
+  const usdcAmount = nothingBack
+    ? undefined
+    : (auto || keepsTao) && status === "paid"
+      ? received?.usdc
+      : keepsTao
+        ? undefined
+        : toDisplay(op.usdcEstimate, 6);
   // v3: asked for, still on its way back, its USDC to be delivered when it lands (the preference it set
   // hasn't run out); claim() clears the account's preference, so a claim by hand now would turn that off
   const awaitingDelivery =
@@ -512,8 +656,60 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
     ...(received ? { received } : {}),
     ...(belowMinimum ? { belowMinimum } : {}),
     ...(awaitingDelivery ? { awaitingDelivery: true as const } : {}),
-    ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" && !cancelling ? { cancellableShares: op.shares } : {}),
+    ...(keepsTao ? { keepsTao: true as const } : {}),
+    ...(f.stillOpen && f.requestMined && !d && status !== "cancelled" && !cancelling
+      ? // with a cancel sent before this read that didn't take it out, and can't any more: this read has seen it
+        { cancellableShares: op.shares, ...(op.cancelled ? { cancelSeen: op.cancelled.hash } : {}) }
+      : {}),
   };
+}
+
+/** A cancel this browser sent for a record, as its own records hold it: on its way ("sending"), or confirmed by the
+ * wallet's receipt ("done"); its transaction, and when it was sent (ms). */
+export interface CancelSent {
+  state: "sending" | "done";
+  hash: Hex;
+  at: number;
+}
+
+/** A deposit's record with this browser's own cancel laid over it, for a record read before that cancel was sent (the
+ * list still shows it waiting in its batch: cancel-sent.ts says when): cancelling, or cancelled, in the words and the
+ * shape a read of the chain gives it once it catches up (depositRecord), and nothing left to cancel or to send. */
+export function depositCancelSent(r: DepositRecord, c: CancelSent): DepositRecord {
+  // no longer in its batch to take back out: none of what a cancel goes by
+  const rest = { ...r };
+  delete rest.cancellableWei;
+  delete rest.cancelBatchId;
+  delete rest.cancelableAt;
+  delete rest.cancelClock;
+  delete rest.cancelSeen;
+  const txUrl = explorer.baseTx(c.hash);
+  const steps = r.steps.map((s): TrailStep<DepositStepKey> =>
+    s.key !== "bridge"
+      ? s
+      : c.state === "done"
+        ? { key: s.key, title: s.title, status: "failed", at: new Date(c.at), detail: DEPOSIT_CANCELLED, txUrl }
+        : { key: s.key, title: s.title, status: "active", detail: CANCELLING, txUrl },
+  );
+  return { ...rest, steps, ...(c.state === "done" ? { status: "cancelled" as const } : {}) };
+}
+
+/** An unstake's record with this browser's own cancel laid over it (as depositCancelSent; withdrawalRecord's words). */
+export function withdrawalCancelSent(r: WithdrawalRecord, c: CancelSent): WithdrawalRecord {
+  const rest = { ...r };
+  delete rest.cancellableShares;
+  delete rest.cancelSeen;
+  // cancelled: nothing of it is on its way back to be delivered
+  if (c.state === "done") delete rest.awaitingDelivery;
+  const txUrl = explorer.baseTx(c.hash);
+  const steps = r.steps.map((s): TrailStep<WithdrawalStepKey> =>
+    s.key !== "unstake"
+      ? s
+      : c.state === "done"
+        ? { key: s.key, title: s.title, status: "failed", at: new Date(c.at), detail: UNSTAKE_CANCELLED, txUrl }
+        : { key: s.key, title: s.title, status: "active", detail: CANCELLING, txUrl },
+  );
+  return { ...rest, steps, ...(c.state === "done" ? { status: "cancelled" as const } : {}) };
 }
 
 /** Whether the record offers the claim by hand ("Claim as USDC"): on v2 once its payout is back on
@@ -571,6 +767,9 @@ function deliveryStep(
   // the keeper sells everything claimable at once, and only at or above the minimum (rounded up, as the front door does)
   const floor = pref ? (f.claimable * pref.minUsdcPerTao + 10n ** 18n - 1n) / 10n ** 18n : 0n;
   const under = live && f.saleNowUsdc !== undefined && f.saleNowUsdc < floor;
+  // v3.2: a pool thinner than the front door's floor holds every delivery (ThinPool, checked before any price floor),
+  // so the claim by hand is offered at once
+  if (live && f.thinPool) return { step: { ...step, status: "action", detail: THIN_POOL }, settled: false, offered: true };
   if (live && !under) {
     // the keeper can skip for reasons this page can't see (the 30-minute price floor, a pause, not running):
     // after an hour back on Base the claim by hand is offered too

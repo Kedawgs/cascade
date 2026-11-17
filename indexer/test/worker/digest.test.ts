@@ -131,6 +131,22 @@ describe("buildDigest", () => {
     expect(await closed({})).toBe("closed: 2");
   });
 
+  it("lists the day's surplus sweeps of each adapter (v3.2: anyone may sweep, to the fixed treasury), and nothing of them when there were none", async () => {
+    await wipe(db);
+    const o = { db, nowS: NOW, hours: [], activeHolds: [], openAlerts: [], meta: {}, cursors: { base: cursor("base", 37_100_200n), bittensor: cursor("bittensor", 6_905_200n) } };
+    const text = async () => (await buildDigest(o)).sections.map((s) => s.lines.join("\n")).join("\n");
+    expect(await text()).not.toContain("surplus");
+    const logs = [
+      slog({ contract: "baseAdapter", event: "SurplusSwept", block: 37_100_150n, args: { native: String(10n ** 15n), tokens: String(5n * 10n ** 17n) } }),
+      slog({ contract: "baseAdapter", event: "SurplusSwept", block: 37_100_151n, args: { native: String(10n ** 15n), tokens: "0" } }),
+      slog({ contract: "bitAdapter", event: "SurplusSwept", block: 6_905_150n, args: { native: String(2n * 10n ** 15n), tokens: "0" } }),
+    ];
+    await db.batch([...upsertLogs(db, logs), ...upsertBlocks(db, logs.map((l) => ({ chain: l.chain, number: l.block, time: NOW - 3600 })))]);
+    const t = await text();
+    expect(t).toContain("Base adapter surplus swept: 0.002 ETH and 0.5 FM-TAO (2 sweeps)");
+    expect(t).toContain("Bittensor adapter surplus swept: 0.002 TAO and 0 wTAO (1 sweep)");
+  });
+
   it("shows the share price in TAO per csTAO (csTAO has 24 decimals: price() 1e12 is 1 TAO)", async () => {
     await wipe(db);
     const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [], meta: {} };
@@ -147,6 +163,16 @@ describe("buildDigest", () => {
       "catching up: bittensor (its first backfill: its lag alerts are quiet, and a cross-check waiting on it isn't reported stuck)",
     );
     expect(text(await buildDigest({ ...o, meta: { catching_up: "" } }))).not.toContain("catching up");
+  });
+
+  it("lists every warning rule the last tick couldn't judge (monitor.unjudged pages only critical ones), so a blind spot stays in sight", async () => {
+    await wipe(db);
+    const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [] };
+    const monitor = async (meta: Record<string, string>) => (await buildDigest({ ...o, meta })).sections.find((s) => s.title === "The monitor")?.lines ?? [];
+    // root.pair_stamped until Task 62 confirms the stamp's storage key
+    expect(await monitor({ unjudged_warnings: "root.pair_stamped,oracle.thin_pool" })).toContain("warning rules not judged: root.pair_stamped, oracle.thin_pool");
+    expect(await monitor({ unjudged_warnings: "" })).toContain("warning rules not judged: none");
+    expect(await monitor({})).toContain("warning rules not judged: none");
   });
 
   it("says OK, or the number of warnings, when nothing critical is open", async () => {

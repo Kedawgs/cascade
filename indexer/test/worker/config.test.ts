@@ -4,6 +4,7 @@ import { toEventSelector } from "viem";
 import { ConfigError, parseConfig, redact, rolesOf, scanAddresses, VAR_NAMES, watchFilters } from "../../src/config.ts";
 import { DEFAULTS, lagLimitS } from "../../src/thresholds.ts";
 import deployment from "../fixtures/deployment.json";
+import deploymentV32 from "../fixtures/deployment-v3.2.json";
 
 /** The test environment's vars (wrangler.jsonc's env.test, with the fixture deployment), as a plain
  * object a test can change. */
@@ -33,7 +34,7 @@ describe("parseConfig", () => {
     expect(cfg.budgets).toEqual({ subrequests: 200, decode: 5000, scanWallS: 40, leaseS: 180, siteFilesPerRun: 20, siteMaxBytes: 2_000_000 });
     expect(cfg.baseLogWindow).toBe(100n);
     expect(cfg.rpc.bittensor).toBe("https://archive.chain.opentensor.ai");
-    expect(cfg.site.pages).toEqual(["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/security/", "/stake/", "/unstake/", "/withdraw/"]);
+    expect(cfg.site.pages).toEqual(["/", "/activity/", "/deposit/", "/faq/", "/rewards/", "/security/", "/stake/", "/unstake/", "/unstake/bittensor/", "/withdraw/"]);
     expect(cfg.alerts).toEqual({ from: "monitor@cascadefi.xyz", mode: "log", to: [] });
     expect(cfg.priceSources).toEqual(["coingecko", "coinbase"]);
     expect(cfg.tokens.multicall3).toBe("0xca11bde05977b3631167028862be2a173976ca11");
@@ -89,21 +90,6 @@ describe("parseConfig", () => {
     expect(refused(withVars({ THRESHOLDS: '{"depegBps":"300"}' })).message).toContain("depegBps");
     expect(refused(withVars({ THRESHOLDS: '{"keeperMinEthWei":1.5}' })).message).toContain("keeperMinEthWei");
     expect(refused(withVars({ THRESHOLDS_SECRET: "{depegBps:" })).message).toContain("THRESHOLDS_SECRET");
-  });
-
-  it("accepts the retired logsCheckBaseBlocks and logsCheckBittensorBlocks (2-second blocks), ignoring them with a warning, so a THRESHOLDS_SECRET set before never stops the monitor", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const t = parseConfig(withVars({ THRESHOLDS_SECRET: '{"logsCheckBaseBlocks":600,"logsCheckBittensorBlocks":300,"depegBps":250}' })).thresholds;
-      expect(t.depegBps).toBe(250);
-      expect([t.logsCheckBaseS, t.logsCheckBittensorS]).toEqual([1_200, 3_600]);
-      expect(t).not.toHaveProperty("logsCheckBaseBlocks");
-      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/THRESHOLDS_SECRET names "logsCheckBaseBlocks", retired: set "logsCheckBaseS"/));
-      // the seconds are thresholds like any other
-      expect(parseConfig(withVars({ THRESHOLDS: '{"logsCheckBaseS":600}' })).thresholds.logsCheckBaseS).toBe(600);
-    } finally {
-      warn.mockRestore();
-    }
   });
 
   it("clamps nonceBehindTicks under unexplainedTxGraceS at a reading a minute, with a warning, and never refuses the config for it", () => {
@@ -354,6 +340,80 @@ describe("BACKING_HOLD", () => {
       const e = refused(withVars({ BACKING_HOLD: bad }));
       expect(e.message, JSON.stringify(bad)).toBe('BACKING_HOLD is not "true" or "false"');
     }
+  });
+});
+
+describe("the deployment's contracts version (DEPLOYMENT.version)", () => {
+  const withDeployment = (d: Record<string, unknown>) => withVars({ DEPLOYMENT: JSON.stringify(d) });
+
+  it("is v3.1, v3-launch's, when the deployment names none (the live v3-launch and v3-test): no lenses", () => {
+    const cfg = parseConfig(vars());
+    expect(cfg.deployment.version).toBe("v3.1");
+    expect(cfg.deployment.vaultLens).toBeUndefined();
+    expect(cfg.deployment.doorLens).toBeUndefined();
+    expect(parseConfig(withDeployment({ ...deployment, version: "v3.1" })).deployment.version).toBe("v3.1");
+  });
+
+  it("v3.2 takes the two lenses' addresses, lowercased: the vault lens on Bittensor, the door lens on Base", () => {
+    const cfg = parseConfig(withDeployment(deploymentV32));
+    expect(cfg.deployment.version).toBe("v3.2");
+    expect(cfg.deployment.vaultLens).toBe(deploymentV32.vaultLens.toLowerCase());
+    expect(cfg.deployment.doorLens).toBe(deploymentV32.doorLens.toLowerCase());
+    // the same deployment id: the lenses aren't part of it (a lens can be redeployed without its target)
+    expect(cfg.deployment.id).toBe(`${deploymentV32.frontDoor}:${deploymentV32.vault}`.toLowerCase());
+    // a lens emits nothing: it isn't scanned, and has no role
+    expect(scanAddresses(cfg).bittensor).not.toContain(cfg.deployment.vaultLens);
+    expect(scanAddresses(cfg).base).not.toContain(cfg.deployment.doorLens);
+  });
+
+  it("refuses v3.2 without either lens, a lens on v3.1, an unknown version and an unchecksummed lens, naming the field", () => {
+    const { vaultLens: _v, ...noVaultLens } = deploymentV32;
+    const { doorLens: _d, ...noDoorLens } = deploymentV32;
+    expect(refused(withDeployment(noVaultLens)).message).toContain("DEPLOYMENT.vaultLens");
+    expect(refused(withDeployment(noDoorLens)).message).toContain("DEPLOYMENT.doorLens");
+    expect(refused(withDeployment({ ...deployment, vaultLens: deploymentV32.vaultLens })).message).toContain("DEPLOYMENT.vaultLens");
+    expect(refused(withDeployment({ ...deployment, doorLens: deploymentV32.doorLens })).message).toContain("DEPLOYMENT.doorLens");
+    for (const version of ["v3.3", "3.2", "", 3]) expect(refused(withDeployment({ ...deploymentV32, version })).message, String(version)).toContain("DEPLOYMENT.version");
+    expect(refused(withDeployment({ ...deploymentV32, doorLens: unchecksummed(deploymentV32.doorLens) })).message).toContain("DEPLOYMENT.doorLens");
+  });
+
+  it("refuses a lens at one of the deployment's contracts on its chain", () => {
+    expect(refused(withDeployment({ ...deploymentV32, vaultLens: deploymentV32.vault })).message).toContain("DEPLOYMENT.vaultLens");
+    expect(refused(withDeployment({ ...deploymentV32, vaultLens: deploymentV32.bitAdapter })).message).toContain("DEPLOYMENT.vaultLens");
+    for (const k of ["frontDoor", "baseAdapter", "staker", "oracle"] as const) {
+      expect(refused(withDeployment({ ...deploymentV32, doorLens: deploymentV32[k] })).message, k).toContain("DEPLOYMENT.doorLens");
+    }
+  });
+});
+
+describe("the deployment's stage (DEPLOYMENT.stage)", () => {
+  const withDeployment = (d: Record<string, unknown>) => withVars({ DEPLOYMENT: JSON.stringify(d) });
+
+  it("is the site's stage for the deployment (testing, early, live or retired), and unset when the deployment names none", () => {
+    expect(parseConfig(vars()).deployment.stage).toBeUndefined();
+    for (const stage of ["testing", "early", "live", "retired"]) expect(parseConfig(withDeployment({ ...deploymentV32, stage })).deployment.stage).toBe(stage);
+    // the deployment id doesn't change with it
+    expect(parseConfig(withDeployment({ ...deploymentV32, stage: "live" })).deployment.id).toBe(parseConfig(withDeployment(deploymentV32)).deployment.id);
+  });
+
+  it("refuses any other stage, naming the field", () => {
+    for (const stage of ["Live", "open", "", 1, null]) expect(refused(withDeployment({ ...deploymentV32, stage })).message, String(stage)).toContain("DEPLOYMENT.stage");
+  });
+});
+
+describe("STANDBY_HOTKEY", () => {
+  const STANDBY = "0x40c47b6a00000000000000000000000000000000000000000000000000003209";
+
+  it("is a var, unset in the shipped environments: no standby validator", () => {
+    expect(VAR_NAMES).toContain("STANDBY_HOTKEY");
+    expect(parseConfig(vars()).standbyHotkey).toBeUndefined();
+    for (const blank of [undefined, "", "  "]) expect(parseConfig(withVars({ STANDBY_HOTKEY: blank })).standbyHotkey, JSON.stringify(blank)).toBeUndefined();
+  });
+
+  it("takes a 32-byte hotkey, lowercased, on any deployment, and refuses anything else naming the field", () => {
+    expect(parseConfig(withVars({ STANDBY_HOTKEY: STANDBY.toUpperCase().replace("0X", "0x") })).standbyHotkey).toBe(STANDBY);
+    expect(parseConfig(withVars({ STANDBY_HOTKEY: STANDBY, DEPLOYMENT: JSON.stringify(deploymentV32) })).standbyHotkey).toBe(STANDBY);
+    for (const bad of ["0x1234", STANDBY.slice(0, -1), `${STANDBY}00`, "5F...ss58", 7]) expect(refused(withVars({ STANDBY_HOTKEY: bad })).message, String(bad)).toContain("STANDBY_HOTKEY");
   });
 });
 

@@ -115,7 +115,7 @@ describe("the digest's APY", () => {
     const asked: bigint[] = [];
     const timeOf = (n: bigint) => T0 - Math.round(Number(head - n) * blockS);
     const twr = (n: bigint) => {
-      const v = T0 - timeOf(n) <= 30 * 86_400 - 60 ? (1_004n * 2n ** 64n) / 1_000n : 2n ** 64n;
+      const v = T0 - timeOf(n) <= 30 * 86_400 - 60 ? 1_004n * 2n ** 64n / 1_000n : 2n ** 64n;
       return `0x${Array.from({ length: 16 }, (_, i) => ((v >> BigInt(8 * i)) & 0xffn).toString(16).padStart(2, "0")).join("")}`;
     };
     const rpc = {

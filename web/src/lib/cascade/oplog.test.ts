@@ -224,6 +224,33 @@ describe("what the op log reads back from storage is checked before it is believ
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("reads back a v3.2 unstake that receives TAO (Task 59a), its mark kept", () => {
+    const tao: WithdrawalOp = { id: "wt1", kind: "withdrawal", account: ME, createdAt: NOW - 90_000, shares: 10n ** 22n, taoEstimate: 10n ** 16n, usdcEstimate: 0n, fee: 10n ** 14n, keepTao: true, state: "sent" };
+    expect(withStored([tao]).get(ME, "wt1")).toEqual(tao);
+  });
+
+  it("reads back a cancel marked confirmed (its flow saw it through), on a deposit and on an unstake, and one not marked without the mark", () => {
+    const confirmed = { hash: H(3), at: NOW - 30_000, confirmed: true as const };
+    expect((withStored([{ ...depositOp, cancelled: confirmed }]).get(ME, "dep1") as DepositOp).cancelled).toEqual(confirmed);
+    expect((withStored([{ ...withdrawalOp, cancelled: confirmed }]).get(ME, "wd1") as WithdrawalOp).cancelled).toEqual(confirmed);
+    expect((withStored([depositOp]).get(ME, "dep1") as DepositOp).cancelled).not.toHaveProperty("confirmed");
+  });
+
+  it("reads a cancel whose confirmed isn't true as not confirmed, and keeps its record: the record is the receipt and its Cancel", () => {
+    const mark = { hash: H(3), at: NOW - 30_000 };
+    for (const confirmed of ["yes", false, null, 1, 0, "true", {}, []]) {
+      const log = withStored([{ ...depositOp, cancelled: { ...mark, confirmed } }, { ...withdrawalOp, cancelled: { ...mark, confirmed } }, closeOp]);
+      const said = JSON.stringify(confirmed);
+      // every record is still there, the two with their cancel as sent, unconfirmed
+      expect(log.list(ME).map((o) => o.id), said).toEqual(["cls1", "dep1", "wd1"]);
+      expect(log.get(ME, "dep1"), said).toEqual({ ...depositOp, cancelled: mark });
+      expect((log.get(ME, "dep1") as DepositOp).cancelled, said).not.toHaveProperty("confirmed");
+      expect((log.get(ME, "wd1") as WithdrawalOp).cancelled, said).toEqual(mark);
+    }
+    // nothing was dropped, so nothing is warned of
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("reads back a record with only its required fields", () => {
     const bare: DepositOp = { id: "b", kind: "deposit", account: ME, createdAt: NOW - 1, usdcIn: 0n, targetTao: 10n ** 16n, hashes: {}, state: "running" };
     expect(withStored([bare]).get(ME, "b")).toEqual(bare);
@@ -269,6 +296,8 @@ describe("what the op log reads back from storage is checked before it is believ
     ["a delivery without a deadline", { ...withdrawalOp, delivery: { minUsdcPerTao: 245_000_000n } }],
     ["a delivery deadline past 2106", { ...withdrawalOp, delivery: { minUsdcPerTao: 245_000_000n, deadline: 2 ** 32 } }],
     ["shares past 128 bits", { ...withdrawalOp, shares: { $bigint: (1n << 128n).toString() } }],
+    ["a withdrawal's keepTao as text", { ...withdrawalOp, keepTao: "yes" }],
+    ["a withdrawal's keepTao false (only ever written as true)", { ...withdrawalOp, keepTao: false }],
     ["a claim's keepTao as text", { ...claimOp, keepTao: "yes" }],
     ["a claim's withdrawal ids that aren't text", { ...claimOp, withdrawalIds: [1] }],
     ["a close's hash under another step", { ...closeOp, hashes: { stake: H(8) } }],

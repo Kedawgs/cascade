@@ -2,8 +2,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Address, type Hex, parseEther } from "viem";
+import type { ClaimPolicy } from "./keeper/core/rewards.ts";
+import type { ChainName } from "./keeper/core/types.ts";
 
-export type ChainName = "base" | "bittensor";
+// The chain names and the claim policy's shape are the keeper core's (portable) types.
+export type { ChainName, ClaimPolicy };
 
 export interface ChainTarget {
   name: ChainName;
@@ -276,15 +279,6 @@ export function cadenceFromEnv(env: Env): Cadence {
   throw new Error(`OPS_CADENCE "${v}" is not a cadence: use launch, or leave it unset for test; nothing sent`);
 }
 
-/** When a reward claim is worth its cost (spec, keeper and reward policy): when what is waiting is at
- * least `claimMultiple` times the cost, or monthly while one claim costs under `monthlyClaimMaxUsd`. */
-export interface ClaimPolicy {
-  /** One claim's cost, in TAO wei. */
-  claimCostTao: bigint;
-  claimMultiple: bigint;
-  monthlyClaimMaxUsd: number;
-}
-
 /** τ0.057 is the docs' figure for a full basket, until a real claim is measured. */
 export const CLAIM_POLICY = { claimCostTao: 57n * 10n ** 15n, claimMultiple: 25n, monthlyClaimMaxUsd: 20 } as const satisfies ClaimPolicy;
 
@@ -391,8 +385,9 @@ export function gweiToWei(name: string, v: string): bigint {
 }
 
 /** The commands whose sends have no gas price cap: the emergency commands and the owner's, which a
- * person runs by hand and means, gas spike or not. A guardian's pause during a spike must go out. */
-export const UNCAPPED_COMMANDS: readonly string[] = ["pause", "unpause", "wind-down", "sweep"];
+ * person runs by hand and means, gas spike or not. A guardian's pause during a spike must go out, and so
+ * must the relayer's stamp (v3.2), a defence that waits for no fee to fall. */
+export const UNCAPPED_COMMANDS: readonly string[] = ["pause", "unpause", "wind-down", "sweep", "stamp"];
 
 /** The gas price cap a command's sends go under: none for the hand-run emergency and owner commands
  * (UNCAPPED_COMMANDS), unless `--max-gas-price <gwei>` names one for that run (`overrideGwei`, both

@@ -1,9 +1,12 @@
 import { formatUnits, parseUnits } from "viem";
-import { DELIVERY_TOLERANCE_BPS, MIN_UNSTAKE_WEI } from "./cascade/config";
-import type { DepositQuote, Limits, RoundTripCosts, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
-import { isDelivering, offersClaim } from "./cascade/trail";
-import { ENTRY_FULL_TEXT, entryFull, floorRao, MIN_UNSTAKE_TEXT, REST_LATER, toDisplay, type UnstakeCheck } from "./cascade/units";
-import { formatTao, formatUsd, formatUsdc, formatUsdShort } from "./format";
+import { DELIVERY_TOLERANCE_BPS } from "./cascade/config";
+import { type DeliveryLimit, deliverableRefusal, LIMIT_UNREAD, limitText, RECEIVE_TAO_POINTER, roomTaoWei, WAITING_UNKNOWN, waitingText } from "./cascade/delivery-limit";
+import { CLAIM_TAO_NOW, type StakeRoom } from "./cascade/flows";
+import { impactNote } from "./cascade/impact";
+import type { Available, DepositQuote, Limits, Position, RoundTripCosts, StakeProof, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
+import { isDelivering, offersClaim, ORIGIN_ELSEWHERE, STAKE_MISSING } from "./cascade/trail";
+import { ENTRY_FULL_TEXT, entryFull, floorRao, minUnstakeText, REST_LATER, toDisplay, type UnstakeCheck } from "./cascade/units";
+import { formatTao, formatUsd, formatUsdc, formatUsdcCents, formatUsdShort } from "./format";
 import type { SentNotice } from "./sent";
 
 /** What the unstake amount is typed in: TAO, or its value in USDC. */
@@ -23,6 +26,8 @@ export type StakeState = {
   usd?: number;
   /** v3: the stake button names the amount in dollars ("Stake $20"). */
   dollars?: boolean;
+  /** v3.2 (R8): the stake goes after a close of the full open batch the site sends first (closeFirstNeeded). */
+  closeFirst?: boolean;
   error: string | null;
   pending: boolean;
 };
@@ -33,7 +38,7 @@ const FULL_TEXT = {
   batch: "The current batch is full. A new one opens once it leaves, so try again soon.",
 } as const;
 
-type StakeLimits = Pick<Limits, "minUsd" | "maxUsd" | "full">;
+type StakeLimits = Pick<Limits, "minUsd" | "maxUsd" | "full"> & { afterClose?: Pick<NonNullable<Limits["afterClose"]>, "maxTao" | "maxUsd"> };
 
 export function validateStakeAmount(
   amount: number | null,
@@ -89,6 +94,27 @@ export function stakeFormReducer(s: StakeFormState, e: StakeFormEvent): StakeFor
   return { ...s, sent: null };
 }
 
+/** v3.2 (R8, the contracts review's L-1): whether a stake of `amount` dollars can't go into the open batch (it is full, or
+ * the amount is over what is left in it) but fits once it has left (limits' afterClose: the open batch can close, and the
+ * cap has the room), so the form offers to close the batch first and then stake. Never for a full cap: a close frees none
+ * of it (the cap counts the open batch already). The balance, when known, must cover it. */
+export function closeFirstNeeded(amount: number | null, limits: StakeLimits | undefined, balance: number | null = null): boolean {
+  const after = limits?.afterClose;
+  if (amount === null || !limits || !after || limits.full === "cap") return false;
+  if (amount < limits.minUsd || amount > after.maxUsd) return false;
+  if (balance !== null && amount > balance + 1e-9) return false;
+  return limits.full === "batch" || amount > limits.maxUsd;
+}
+
+/** v3.2 (R9, L-1): the room for a stake of `amount` dollars by the limits read again at the click (flows.ts closeFirst):
+ * the open batch takes it now ("now": the batch left, or a cancel made room, since the form's read: no close is sent), it
+ * fits only once the batch has left ("after-close", closeFirstNeeded), or neither ("none": the cap filled, the next
+ * batch's room shrank, or the batch can no longer close; a close paid for then would only strand the stake). */
+export function stakeRoom(amount: number, limits: StakeLimits): StakeRoom {
+  if (validateStakeAmount(amount, limits) === null) return "now";
+  return closeFirstNeeded(amount, limits) ? "after-close" : "none";
+}
+
 /** What MAX types into the USDC field: the balance floored to whole cents, never more than it holds,
  * nor more than the most a stake can be right now (`most`, when the limits are known). */
 export function maxStakeInput(balance: number, most?: number): string {
@@ -100,6 +126,8 @@ export function maxStakeInput(balance: number, most?: number): string {
  * no room at all it types the balance, and the form says why that can't be staked. */
 export function stakeMaxInput(balance: number | null, limits: StakeLimits | undefined): string | null {
   if (balance === null || !limits) return null;
+  // v3.2 (R8): a full batch the site can close first: MAX types the most the next batch takes
+  if (limits.full === "batch" && limits.afterClose) return maxStakeInput(balance, limits.afterClose.maxUsd);
   return maxStakeInput(balance, limits.full ? undefined : limits.maxUsd);
 }
 
@@ -119,8 +147,18 @@ export function walletTaoNote(tao: bigint, limits: Pick<Limits, "minTao" | "maxT
   return `Deposits take at most ${taoLabel.format(floorTo(toDisplay(limits.maxTao, 18), 6))} TAO right now.`;
 }
 
+/** R6 (ChatGPT R2 claim B): whoever controls a contract wallet's address on Bittensor can withdraw its stake there
+ * (contracts/README.md, "Who can use direct access"), and that need not be the wallet's owner on Base: said plainly. */
 export const CONTRACT_WALLET_NOTE =
-  "This wallet is a contract account, so it can only leave Cascade through Unstake here, not directly on Bittensor. If Unstake is ever paused, leaving waits until it reopens.";
+  "This wallet is a contract account: it can leave only through Unstake here, and its address on Bittensor may belong to someone else, who could withdraw its stake there. A regular wallet avoids this.";
+
+/** R6 (ChatGPT R2 claim B): a stake into an address whose redeem origin is already Bittensor (DIRECT_ORIGIN, or another
+ * chain's door) still mints, but the shares can then leave only on Bittensor, by whoever controls the address there. */
+export const ORIGIN_DEPOSIT_NOTE =
+  "This address withdraws on Bittensor, not here, so a new stake could leave only there, by whoever controls the address on Bittensor. Set Base as its withdrawal chain from Bittensor first, or use another wallet.";
+
+/** The warning before a stake into an address that already withdraws on Bittensor (live.ts getPosition), or null. */
+export const originDepositNote = (p: Pick<Position, "withdrawsOnBittensor"> | undefined): string | null => (p?.withdrawsOnBittensor ? ORIGIN_DEPOSIT_NOTE : null);
 
 /** What the stake form knows of the connected wallet: its code on Base, its wagmi connector, and
  * whether it says it runs a batch atomically there (atomicOf). */
@@ -165,7 +203,8 @@ export function stakeButtonLabel(s: StakeState): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";
   if (s.amount !== null && s.amount > 0 && s.error === null) {
-    return s.dollars ? `Stake ${formatUsdShort(s.amount)}` : `Stake ${formatUsdc(s.amount)} USDC`;
+    const stake = s.dollars ? `Stake ${formatUsdShort(s.amount)}` : `Stake ${formatUsdc(s.amount)} USDC`;
+    return s.closeFirst ? `Send the batch, then ${stake.charAt(0).toLowerCase()}${stake.slice(1)}` : stake;
   }
   return "Stake";
 }
@@ -278,6 +317,28 @@ export function claimChecking(claimable: bigint, v3: boolean, withdrawals: reado
 export const CLAIM_CHECKING =
   "One of your unstakes is still being checked against the chain, and this may already be on its way to your wallet as USDC. You can still claim it as TAO now.";
 
+/** v3.2 with USDC delivery off (the founder's switch, spec §5): the claim banner for whatever waits on Base, whether or
+ * not an unstake's USDC is being delivered (the keeper may still deliver: a claim now, kept as TAO, clears the
+ * preference first), with the prompt while the chain holds a delivery preference for the account, or that can't be
+ * told yet (unknown taken as set, as N3). Null with nothing to claim: claim() refuses NothingToClaim. */
+export function deliveryOffClaim(claimable: bigint, preference: { data?: boolean; isError: boolean }): { prompt: string | null } | null {
+  if (claimable === 0n) return null;
+  return { prompt: preference.isError || preference.data !== false ? CLAIM_TAO_NOW : null };
+}
+
+/** v3.2 with USDC delivery off (Task 60 follow-up): the button that clears the account's preference at once
+ * (use-flows.ts turnOffDelivery), the controller's words, and the line beside it while nothing is claimable yet. */
+export const TURN_OFF_DELIVERY = "Turn off USDC delivery for my account";
+export const DELIVERY_IS_OFF = "USDC delivery is off.";
+
+/** Whether to offer turning off USDC delivery for the account: only with the switch off, while the chain holds its
+ * preference or its read failed (unknown means offer it). Not while the read is loading: it would appear and vanish for
+ * every account without one. Whether anything is claimable doesn't matter: a claim can't clear a preference until a
+ * payout lands (claim() refuses NothingToClaim), this can. */
+export function turnOffDeliveryOffered(usdcDelivery: boolean, preference: { data?: boolean; isError: boolean }): boolean {
+  return !usdcDelivery && (preference.isError || preference.data === true);
+}
+
 /** v3: a claim by hand clears the account's delivery preference (CascadeFrontDoor.claim), so the claim
  * banner says so while any unstake is still on its way with automatic delivery ahead of it. */
 export function claimEndsDelivery(v3: boolean, withdrawals: readonly WithdrawalRecord[] | undefined): boolean {
@@ -347,15 +408,16 @@ export function unstakeEquivalent(taoWei: bigint, typedIn: UnstakeUnit, priceUsd
 }
 
 /** The TAO MAX asks for: the whole stake, or with a per-unstake limit (`mostWei`, units.unstakeMostWei)
- * at most that, leaving at least the minimum unstake behind so what stays can be unstaked later. Null,
- * so MAX fills nothing, when that comes to less than the minimum (the open batch's request is already at
- * the limit) or there is nothing to unstake: never zero or less. */
-export function unstakeMaxWei(availableWei: bigint, mostWei: bigint | undefined): bigint | null {
+ * at most that, leaving at least the minimum unstake (`minWei`, the deployment's: config.minUnstakeWei, always
+ * given) behind so what stays can be unstaked later. Null, so MAX fills nothing, when that
+ * comes to less than the minimum (the open batch's request is already at the limit) or there is nothing to
+ * unstake: never zero or less. */
+export function unstakeMaxWei(availableWei: bigint, mostWei: bigint | undefined, minWei: bigint): bigint | null {
   if (availableWei <= 0n) return null;
   if (mostWei === undefined || availableWei <= mostWei) return availableWei;
-  const leavingMin = availableWei - MIN_UNSTAKE_WEI;
+  const leavingMin = availableWei - minWei;
   const max = leavingMin < mostWei ? leavingMin : mostWei;
-  return max >= MIN_UNSTAKE_WEI ? max : null;
+  return max >= minWei ? max : null;
 }
 
 /** What MAX types in the unit shown: exact TAO (six decimals), or its USDC value floored to cents. */
@@ -394,7 +456,7 @@ export function unstakeLabelUsd(s: {
 /** Dollars, floored to cents: what can be unstaked never reads higher than it is. */
 const usdDown = (taoWei: bigint, priceUsd: number) => formatUsd(floorTo(toDisplay(taoWei, 18) * priceUsd, 2));
 /** The minimum in dollars, rounded up to the cent so typing the figure shown is always enough. */
-const MIN_USD = (priceUsd: number) => `about ${formatUsd(Math.ceil(toDisplay(MIN_UNSTAKE_WEI, 18) * priceUsd * 100 - 1e-7) / 100)}`;
+const MIN_USD = (priceUsd: number, minWei: bigint) => `about ${formatUsd(Math.ceil(toDisplay(minWei, 18) * priceUsd * 100 - 1e-7) / 100)}`;
 
 /** "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest a day later (…)", in the unit shown. */
 function oneUnstakeText(mostWei: bigint, unit: UnstakeUnit, priceUsd: number): string {
@@ -402,43 +464,86 @@ function oneUnstakeText(mostWei: bigint, unit: UnstakeUnit, priceUsd: number): s
   return `One unstake can carry up to ${unit === "USDC" && priceUsd > 0 ? `${usdDown(mostWei, priceUsd)} (${tao})` : tao}; ${REST_LATER}`;
 }
 
-/** The line under the unstake field: how much can go and the minimum, in the unit shown. A stake larger
- * than one unstake can carry (`mostWei`) says so instead. */
-export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number, mostWei?: bigint): string {
-  if (availableWei >= MIN_UNSTAKE_WEI && entryFull(availableWei, mostWei)) return `${ENTRY_FULL_TEXT}.`;
+/** The line under the unstake field: how much can go and the minimum (`minWei`, the deployment's, always given),
+ * in the unit shown. A stake larger than one unstake can carry (`mostWei`) says so instead. */
+export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number, mostWei: bigint | undefined, minWei: bigint): string {
+  const minTao = minUnstakeText(minWei);
+  if (availableWei >= minWei && entryFull(availableWei, mostWei, minWei)) return `${ENTRY_FULL_TEXT}.`;
   if (mostWei !== undefined && availableWei > mostWei) {
-    const min = unit === "USDC" && priceUsd > 0 ? `${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT})` : MIN_UNSTAKE_TEXT;
+    const min = unit === "USDC" && priceUsd > 0 ? `${MIN_USD(priceUsd, minWei)} (${minTao})` : minTao;
     return `${oneUnstakeText(mostWei, unit, priceUsd)}. The minimum is ${min}.`;
   }
   if (unit === "USDC" && priceUsd > 0) {
-    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
+    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd, minWei)} (${minTao}).`;
   }
-  return `You can unstake up to ${maxUnstakeInput(availableWei)} TAO. The minimum is ${MIN_UNSTAKE_TEXT}.`;
+  return `You can unstake up to ${maxUnstakeInput(availableWei)} TAO. The minimum is ${minTao}.`;
 }
 
-/** Why an amount can't be unstaked, in dollars when the user types dollars. */
+/** v3.2: why no stake can be sent right now, in plain words, or null when one can (the stake form then holds its
+ * button): stake is missing (the vault lens reads it; StakeProof only says so on v3.2), so a stake sent now would only
+ * park until Cascade is reconnected, beside the site's own notice that staking is paused (Task 59 review, Minor 2).
+ * Not read yet, or not missing: the form as before. */
+export const stakeHold = (proof: Pick<StakeProof, "stakeMissing"> | undefined): string | null => (proof?.stakeMissing ? STAKE_MISSING : null);
+
+/** v3.2: why no unstake can be requested right now, in plain words, or null when one can (the form then holds its
+ * button): the account's shares withdraw elsewhere (their redeem origin isn't Base's, so the vault would skip the
+ * request and its fee would be spent for nothing: Review Focus 4), said first since setting Base from Bittensor is
+ * the user's to do; or stake is missing (the vault refuses every delivery until Cascade is reconnected). */
+export function requestHold(a: Pick<Available, "originElsewhere" | "stakeMissing"> | null): string | null {
+  if (a?.originElsewhere) return ORIGIN_ELSEWHERE;
+  if (a?.stakeMissing) return STAKE_MISSING;
+  return null;
+}
+
+/** v3.2's unstake form on the window (spec §3.5, §7): one daily allowance is shared by every unstake, first come;
+ * the part of a request over what is left of it stays staked, to be asked for again. */
+export const UNSTAKE_WINDOW_NOTE = "Unstakes share a daily limit; any part over it stays staked, and you unstake it again a day later.";
+
+/** What the unstake form says it pays. On v3.2 the leaver pays every cost of its exit (spec Revision 23,
+ * design-leaver-pays.md): the payout's entries also bear the cost of the walk that unstakes them, a fee the chain
+ * charges on a removal, unknowable at request time and none today, so the quote says it is less that share. */
+export const unstakeReceiveText = (usdcAmount: number, v32: boolean): string =>
+  `about ${formatUsdcCents(usdcAmount)} USDC${v32 ? ", less its share of any unstake fee the chain charges (none today)" : ""}`;
+
+/** Why an amount can't be unstaked, in dollars when the user types dollars (`minWei`, the deployment's minimum,
+ * always given). */
 export function unstakeErrorText(
   check: Extract<UnstakeCheck, { ok: false }>,
   availableWei: bigint,
   unit: UnstakeUnit,
   priceUsd: number,
-  mostWei?: bigint,
+  mostWei: bigint | undefined,
+  minWei: bigint,
 ): string {
   if (unit !== "USDC" || !(priceUsd > 0)) return check.reason;
+  const minTao = minUnstakeText(minWei);
   switch (check.code) {
     case "overEntry":
       return mostWei !== undefined ? `${oneUnstakeText(mostWei, unit, priceUsd)}.` : check.reason;
     case "tooMuch":
       return `That's more than you can unstake (up to ${usdDown(availableWei, priceUsd)}).`;
     case "belowMin":
-      return `The minimum unstake is ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
+      return `The minimum unstake is ${MIN_USD(priceUsd, minWei)} (${minTao}).`;
     case "leavesDust":
-      return `That would leave less than ${MIN_USD(priceUsd)} staked, too little to unstake later.`;
+      return `That would leave less than ${MIN_USD(priceUsd, minWei)} staked, too little to unstake later.`;
     case "stakeBelowMin":
-      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd)} (${MIN_UNSTAKE_TEXT}).`;
+      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd, minWei)} (${minTao}).`;
     default:
       return check.reason;
   }
+}
+
+/** The unstake form's red line when its quote can't be read: the USDC sale's quote, so it says the amount can't go. */
+export const QUOTE_FAILED = "This amount can't be sent back right now";
+
+/** The unstake form's red line under the amount: the amount check's own refusal (`checkError`, unstakeErrorText), else
+ * a quote that couldn't be read (QUOTE_FAILED). In the TAO-only form (v3.2 with USDC delivery off, `taoOnly`) the
+ * check's alone: the quote is the USDC sale's (the pools, the fees, the prices), which Receive TAO doesn't need, and it
+ * can fail exactly when the pools can't be trusted, so it says nothing above the one way out (Task 60 review,
+ * Important 2). Null when nothing is wrong. */
+export function unstakeFormError(x: { checkError: string | null; quoteFailed: boolean; taoOnly: boolean }): string | null {
+  if (x.checkError !== null) return x.checkError;
+  return x.quoteFailed && !x.taoOnly ? QUOTE_FAILED : null;
 }
 
 const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
@@ -455,4 +560,148 @@ export function etaText(minutes: number): string {
 export function unstakeEtaText(minutes: number): string {
   const h = Math.max(1, Math.round(minutes / 60));
   return h <= 36 ? `about ${plural(h, "hour")}` : `about ${plural(Math.round(h / 24), "day")}`;
+}
+
+// ---- v3.2's unstake form (Task 59a): USDC within the live delivery limit and the impact cap; Receive TAO always open ----
+
+/** The way out that sells nothing: v3.2's unstake as TAO, claimed on Base by hand (use-flows.ts receiveTao). The front
+ * door keeps one delivery preference per account and deliver sells everything credited to it, so a later USDC request
+ * would sell this TAO too (Task 59a review, C1; the controller's words). */
+export const RECEIVE_TAO_LABEL = "Receive TAO instead";
+export const RECEIVE_TAO_NOTE = "Nothing is sold: your TAO comes back to Base for you to claim. A later USDC unstake would sell it too.";
+/** The same with USDC delivery off (Task 60): no USDC unstake is offered, so nothing later would sell it. */
+export const RECEIVE_TAO_NOTE_OFF = "Nothing is sold: your TAO comes back to Base for you to claim.";
+/** Receiving TAO clears the account's USDC delivery preference (flows.ts receiveTaoCall), as a claim does. */
+export const RECEIVE_ENDS_DELIVERY = "This also turns off automatic USDC delivery for your other unstakes: you'll claim those by hand.";
+
+/** The Unstake page's heading. v3-launch's says USDC, its one way out; v3.2's fits both, USDC and Receive TAO (Task 59a
+ * review, M9), and with USDC delivery off (Task 60) only TAO. */
+export function unstakeHeading(x: { v32: boolean; usdcDelivery: boolean }): { title: string; sub: string } {
+  if (!x.v32) return { title: "Unstake to USDC", sub: "We sell your staked TAO and send the USDC back to the same wallet." };
+  return {
+    title: "Unstake",
+    sub: x.usdcDelivery ? "Your staked TAO comes back to the same wallet on Base, as USDC or as TAO." : "Your staked TAO comes back to the same wallet on Base, as TAO to claim.",
+  };
+}
+
+/** v3.2: when a USDC unstake's TAO is sold, and what happens if it can't be (the founder's C-L2 decision and the
+ * queued-deliveries question of 2026-11-05), marked as the USDC path's (Task 59a review, M9): back on Base after the
+ * batch, the bridges and the safety wait (the quote's ETA, when known), sold one sale at a time by the keeper, and if
+ * the market doesn't allow it, left on Base to claim whenever the user likes. */
+export function deliveryLaterText(etaMinutes: number | undefined): string {
+  const when = etaMinutes !== undefined ? `With USDC, your TAO is back on Base in ${unstakeEtaText(etaMinutes)} and sold then` : "With USDC, your TAO is sold once it is back on Base";
+  return `${when}, one sale at a time, so a busy day can take longer. If the market doesn't allow a sale, your TAO stays on Base for you to claim any time.`;
+}
+
+/** The unit the unstake amount is typed in: on v3.2 while TAO's price can't be read, TAO (no dollar figure can be
+ * converted, and Receive TAO needs none: Task 59a review, M6), and with USDC delivery off (nothing is sold, so no dollar
+ * figure is asked for: Task 60); otherwise the one chosen. */
+export const shownUnstakeUnit = (unit: UnstakeUnit, x: { v32: boolean; priceMissing: boolean; usdcDelivery?: boolean }): UnstakeUnit =>
+  x.v32 && (x.priceMissing || x.usdcDelivery === false) ? "TAO" : unit;
+
+/** What v3.2's unstake form offers right now: the USDC unstake's button; before it, what else of the account's a USDC
+ * unstake sells (`warning`); its lines (the quote's price impact and the live delivery limit, each a note or the reason
+ * it is refused); and Receive TAO, with whether it also ends an automatic USDC delivery (`endsDelivery`). */
+export interface UnstakeActions {
+  usdc: boolean;
+  warning: string | null;
+  notes: { text: string; refused: boolean }[];
+  tao: { offered: boolean; enabled: boolean; endsDelivery: boolean };
+}
+
+/** The unstake form's ways out. On v3.2 a USDC unstake goes only once its quote is in, its price impact is within the
+ * cap (impact.ts), and the live limit is read and its sale under it (delivery-limit.ts): over it, with no USDC delivery
+ * to be had, or the limit unreadable (fail closed, a failed refetch's stale figures included: M4), it is refused, saying
+ * why. Whenever the account has TAO waiting (its request in the open batch, its payouts on their way from requests made
+ * anywhere, its TAO on Base: the chains' figures), the form says, before the button, that a USDC unstake sells that too
+ * (the latest request decides for all: C1); while not all of that is read (the scan of the account's events not
+ * complete, the limit loading or unreadable), it says so without a figure (fix round 2). Receive TAO is offered beside it
+ * with any wallet, and is on whenever a request can be made at all (an amount that checks out, no flow running, nothing
+ * holding requests, the contracts as built, ETH for the request fee when the quote has read it): never held by the
+ * impact cap, the limit, a quote or the outside-price veto (asked only at the click, of USDC alone: usdcUnstakeChecks),
+ * none of which is an input here. It says it also ends the account's USDC delivery whenever the chain holds a
+ * preference, or that isn't read yet or can't be (unknown taken as set: I1, re-review N3). With USDC delivery off
+ * (`usdcDelivery` false, v3.2's switch: Task 60, spec §5) no USDC unstake and no USDC line at all, and Receive TAO, its
+ * one way out, as above, saying it ends the delivery the chain holds (`preference`, unknown taken as set). Every other
+ * deployment's form is as it was: the USDC button by the quote, and nothing else. */
+export function unstakeActions(x: {
+  v32: boolean;
+  account: string | null;
+  /** The request's shares, once its amount checks out. */
+  shares: bigint | null;
+  quote: WithdrawalQuote | undefined;
+  limit: { data?: DeliveryLimit; isError: boolean };
+  pending: boolean;
+  lowEth: boolean;
+  hold: string | null;
+  blocked: string | null;
+  /** v3.2: whether the site offers USDC delivery (config.usdcDeliveryOn); on unless given. */
+  usdcDelivery?: boolean;
+  /** v3.2 with USDC delivery off: whether the chain holds a delivery preference for the account (its own read). */
+  preference?: { data?: boolean; isError: boolean };
+}): UnstakeActions {
+  const canRequest = x.account !== null && !x.pending && x.hold === null && x.blocked === null;
+  const usdcBase = canRequest && x.quote !== undefined && !x.lowEth;
+  if (!x.v32) return { usdc: usdcBase, warning: null, notes: [], tao: { offered: false, enabled: false, endsDelivery: false } };
+  if (x.usdcDelivery === false) {
+    const pref = x.preference ?? { isError: false };
+    return {
+      usdc: false,
+      warning: null,
+      notes: [],
+      tao: {
+        offered: x.account !== null,
+        enabled: canRequest && x.shares !== null && !x.lowEth,
+        endsDelivery: x.account !== null && (pref.isError || pref.data !== false),
+      },
+    };
+  }
+  const notes: UnstakeActions["notes"] = [];
+  const impact = impactNote(x.quote);
+  if (impact) notes.push(impact.refused ? { text: `${impact.text} ${RECEIVE_TAO_POINTER}`, refused: true } : impact);
+  const l = x.limit.data;
+  let limitRefused = true;
+  // a failed read first: the last good reading, kept beside it, is no answer now (M4)
+  if (x.limit.isError) notes.push({ text: LIMIT_UNREAD, refused: true });
+  else if (l && l.clearsAll) limitRefused = false;
+  else if (l) {
+    limitRefused = roomTaoWei(l) === 0n || (x.quote !== undefined && deliverableRefusal(x.quote, l) !== null);
+    notes.push({ text: limitText(l), refused: limitRefused });
+  }
+  // what else a USDC unstake sells: the figure once every payout of the account's on its way is read, else no figure
+  const known = !x.limit.isError && x.limit.data?.waitingComplete === true;
+  const waiting = x.limit.data?.waitingTaoWei ?? 0n;
+  return {
+    usdc: usdcBase && !impact?.refused && !limitRefused,
+    warning: x.account === null ? null : !known ? WAITING_UNKNOWN : waiting > 0n ? waitingText(waiting) : null,
+    notes,
+    tao: {
+      offered: x.account !== null,
+      enabled: canRequest && x.shares !== null && !x.lowEth,
+      endsDelivery: x.account !== null && (x.limit.isError || x.limit.data === undefined || x.limit.data.preferenceSet),
+    },
+  };
+}
+
+/** One claim button's label: "Confirm in your wallet…" on the one pressed (`pressed`, its `keepTao`) while its claim
+ * runs, never on another (Task 59a re-review, N2); its own label otherwise. */
+export const claimButtonLabel = (choice: { label: string; keepTao: boolean }, x: { busy: string | null; pressed: boolean | null }): string =>
+  x.busy === "claim" && x.pressed === choice.keepTao ? "Confirm in your wallet…" : choice.label;
+
+/** The claim buttons for what is back on Base, the first one leading: Claim as USDC, and after a sale the price check
+ * held (`saleHeld`) or a claim whose swap failed (`claimFailed`, the receipt's) the TAO; but for an unstake asked as TAO
+ * (`keepsTao`), Claim as TAO first and Claim as USDC beside it (Task 59a review, M12). With USDC delivery off
+ * (`usdcDelivery` false, Task 60) Claim as TAO alone, whatever was asked for: no USDC option is offered. */
+export function claimChoices(x: { keepsTao: boolean; saleHeld: boolean; claimFailed?: boolean; usdcDelivery?: boolean }): { label: string; keepTao: boolean }[] {
+  if (x.usdcDelivery === false) return [{ label: "Claim as TAO", keepTao: true }];
+  if (x.keepsTao) {
+    return [
+      { label: "Claim as TAO", keepTao: true },
+      { label: "Claim as USDC", keepTao: false },
+    ];
+  }
+  const usdc = { label: "Claim as USDC", keepTao: false };
+  if (x.saleHeld) return [usdc, { label: "Claim as TAO instead", keepTao: true }];
+  if (x.claimFailed) return [usdc, { label: "Claim now and swap to USDC separately", keepTao: true }];
+  return [usdc];
 }

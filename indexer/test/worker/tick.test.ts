@@ -8,8 +8,6 @@ import { catchingUpChains, prefetchLookbacks } from "../../src/tick.ts";
 import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog } from "./fixtures.ts";
-import { slog } from "./rule-ctx.ts";
-import { upsertBlocks, upsertLogs } from "../../src/store.ts";
 import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, type TickWorld, tickWorld } from "./tick-world.ts";
 
 const db = env.DB;
@@ -51,7 +49,7 @@ describe("a first tick", () => {
 
 describe("each chain's block time, measured from the readings (Base went from 2 s to 200 ms blocks on 2026-11-05)", () => {
   it("is kept in meta once the readings span 100 s, and written again only when it moves 5%", async () => {
-    const w = tickWorld();
+    const w = tickWorld({ unmeasured: true });
     const blockS = async () => Object.fromEntries((await rows<{ k: string; v: string }>("SELECT k, v FROM meta WHERE k LIKE 'block_s:%'")).map((m) => [m.k, m.v]));
     await w.tick();
     // one reading: nothing to measure yet
@@ -73,7 +71,7 @@ describe("each chain's block time, measured from the readings (Base went from 2 
   });
 
   it("keeps up with Base's 200 ms blocks on the production settings, re-reading 140 s and settling 60 s of them: 10 windows of 100 a tick, and an hour's backlog in two ticks' budgets", async () => {
-    const w = tickWorld({ over: { BASE_LOG_WINDOW: "100", SUBREQUEST_BUDGET: "200" } });
+    const w = tickWorld({ over: { BASE_LOG_WINDOW: "100", SUBREQUEST_BUDGET: "200" }, unmeasured: true });
     // Base at 300 blocks a minute (200 ms, five to a whole second)
     w.specs.base.blockTime = (n) => T0 + Math.floor(Number(n - START_HEADS.base) / 5);
     const cursor = async () => (await rows<{ scanned_to: number; settled_to: number }>("SELECT scanned_to, settled_to FROM cursors WHERE chain = 'base'"))[0];
@@ -88,7 +86,10 @@ describe("each chain's block time, measured from the readings (Base went from 2 
       return baseWindows(before).length;
     };
     await w.tick();
-    // until three readings span 100 s the margins are counted at 2 s (70 and 30 blocks)
+    // a fresh store's first tick, its block time unknown: settled 300 blocks (60 s at the fallback's 0.2 s) short of the head
+    const firstCursor = await cursor();
+    expect(firstCursor.settled_to).toBe(firstCursor.scanned_to - 300);
+    // until three readings span 100 s the margins are counted at the fallback, Base's 0.2 s (700 and 300 blocks)
     for (let i = 0; i < 3; i++) await minute();
     expect((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'block_s:base'"))[0].v).toBe("0.2");
     for (let i = 0; i < 10; i++) {
@@ -119,33 +120,12 @@ describe("each chain's block time, measured from the readings (Base went from 2 
     expect(measureBlockS(at([[0, 0], [30, 60]]))).toBeUndefined();
   });
 
-  it("loads the redeem requests unstakes.tiny_wave counts from 25 hours of Base's blocks by time (the rule keeps the last 24): 450,000 at 200 ms, 45,000 at 2 s; from block 0 while unmeasured", () => {
-    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 0.2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 450_000n });
-    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, { base: 2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 45_000n });
-    // a block time unknown (a first tick on an empty store): from block 0, the rule's own 24-hour filter deciding
-    expect(prefetchLookbacks({ base: 60_000_000n, bittensor: 7_000_000n }, {})).toEqual({ requestsSince: 0n });
-  });
-
-  it("unstakes.tiny_wave counts the tiny redeem requests of the last 24 hours of Base's 200 ms blocks, not of the last 2.4", async () => {
-    const w = tickWorld();
-    // Base at 300 blocks a minute (200 ms, five to a whole second) since the first reading, so every reading measures 0.2 s
-    w.specs.base.blockTime = (n) => T0 + Math.floor(Number(n - START_HEADS.base) / 5);
-    const minute = async () => {
-      w.advance();
-      w.specs.base.head += 270n;
-      await w.tick();
-    };
-    await w.tick();
-    for (let i = 0; i < 7; i++) await minute();
-    expect((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'block_s:base'"))[0].v).toBe("0.2");
-    // 20 tiny redeem requests stored, an hour apart (18,000 blocks), the oldest 20 hours (360,000 blocks) back
-    const [c] = await rows<{ settled_to: number; settled_time: number }>("SELECT settled_to, settled_time FROM cursors WHERE chain = 'base'");
-    const requests = Array.from({ length: 20 }, (_, i) =>
-      slog({ contract: "frontDoor", event: "RedeemRequested", address: w.cfg.deployment.frontDoor, block: BigInt(c.settled_to) - BigInt(i + 1) * 18_000n, args: { batchId: "1", user: KEEPER, shares: "1000" } }),
-    );
-    await env.DB.batch([...upsertLogs(env.DB, requests), ...upsertBlocks(env.DB, requests.map((l, i) => ({ chain: "base" as const, number: l.block, time: c.settled_time - (i + 1) * 3_600 })))]);
-    await minute();
-    expect(await alertKeys()).toContain("unstakes.tiny_wave");
+  it("sets the prefetch's look-backs by time: 25 hours of Base's blocks for the tiny-unstake wave (the rule keeps the last 24: 450,000 at 200 ms), two holds and two hours of Bittensor's", () => {
+    const settled = { base: 60_000_000n, bittensor: 7_000_000n };
+    expect(prefetchLookbacks(settled, { base: 0.2, bittensor: 12 })).toEqual({ requestsSince: 60_000_000n - 450_000n, washSince: 7_000_000n - 15_000n });
+    expect(prefetchLookbacks(settled, { base: 2, bittensor: 6 })).toEqual({ requestsSince: 60_000_000n - 45_000n, washSince: 7_000_000n - 30_000n });
+    // a block time unknown (a first tick): from block 0, the rules' own time filters deciding
+    expect(prefetchLookbacks(settled, {})).toEqual({ requestsSince: 0n, washSince: 0n });
   });
 });
 
@@ -713,7 +693,9 @@ describe("catchingUpChains", () => {
   });
 });
 
-describe("catching up", () => {
+// many ticks each: alone 0.03 to 3 s, past vitest's 5 s default under the full suite's load (two timed out once each, in
+// R4's final run and in R4-O round 2's); the file's precedent is api-status's 30 s
+describe("catching up", { timeout: 30_000 }, () => {
   it("a clean first backfill, slower than an hour, never pages: catching up lasts until the lag is under its limit (probe P3)", async () => {
     // Base starts 8,000 s back and gains about 140 s a tick (one 100-block window); v3-test's limits: lag 15 min, blind 30
     const w = tickWorld({ heads: { base: 37_004_000n, bittensor: 6_900_700n }, over: { ALERT_MODE: "send", ALERT_TO: "owner@example.com" } });
@@ -994,6 +976,8 @@ describe("what Cascade depends on, through the tick", () => {
     expect(new Set(steady.map((f) => kind(f.methods)))).toEqual(new Set(["window", "multicall", "counts", "times"]));
     // the fee quote's chunk carries the most the vault sends, as the last reading named it (15 TAO in the fake, as live)
     expect(w.state.asked.quotes.at(-1)).toMatchObject({ entries: 100, amount: 15n * 10n ** 18n });
+    // R12a: a full batch's close quote carries the front door's batch limit as the last reading named it (10 TAO)
+    expect(w.state.asked.closeQuotes.at(-1)).toMatchObject({ deposits: 50, redeems: 50, amount: 10n * 10n ** 18n });
   });
 
   it("raises fmtao.backing_true and, with BACKING_HOLD on, its hold when the AlphaVault's backing falls below wTAO's supply, and a MINTER_ROLE grant on FM-TAO as a critical", async () => {

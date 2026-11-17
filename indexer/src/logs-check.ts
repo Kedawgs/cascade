@@ -246,7 +246,7 @@ export async function runLogsCheck(deps: LogsCheckDeps): Promise<LogsCheckResult
     const storedUids = new Set(stored.map((r) => r.uid as Hex));
     // the second's logs, by the uid the scan would give them (its own identity scheme), those at watched addresses
     const secondLogs = identify(chain, second).flatMap((x) => {
-      const log = decode(chain, x, roleOf);
+      const log = decode(chain, x, roleOf, cfg.deployment.version);
       return log && judged(log.contract, log.block) ? [log] : [];
     });
     const secondUids = new Set(secondLogs.map((l) => l.uid));

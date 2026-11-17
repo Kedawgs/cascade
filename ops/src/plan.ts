@@ -42,9 +42,11 @@ export interface PlanV3 extends Omit<Plan, "addresses"> {
 
 export const isPlanV3 = (plan: Plan | PlanV3): plan is PlanV3 => "version" in plan && plan.version === 3;
 
-/** The contracts build in contracts/out, which new v3 plans record and are deployed from: the pre-audit
- * changes (the adapters take a per-message cap, the vault's allowance base and setter bounds). The build
- * before it, "launch-cadence", was never deployed, and its plans are refused like any unknown build. */
+/** The contracts build new v3 plans record and are deployed from, v3-launch's: the pre-audit changes (the
+ * adapters take a per-message cap, the vault's allowance base and setter bounds). Frozen in
+ * ops/builds/preaudit since contracts/ holds v3.2; a plan of it is read from there (builds.ts), and its
+ * creates go only from a checkout of it. The build before it, "launch-cadence", was never deployed, and
+ * its plans are refused like any unknown build. */
 export const CONTRACTS_BUILD = "preaudit";
 /** The build v3 was first deployed from: a v3 plan without a `build` was made by it. */
 export const A2B4412_BUILD = "a2b4412";

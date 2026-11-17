@@ -1,4 +1,4 @@
-import { cached, handleFlow, handleHealth, handleScan, handleStatus } from "./api.ts";
+import { cached, handleFlow, handleHealth, handlePrice, handleScan, handleStatus } from "./api.ts";
 import { type Config, parseConfig } from "./config.ts";
 import { CRONS } from "./crons.ts";
 import { runDaily } from "./daily.ts";
@@ -32,7 +32,7 @@ async function fetch(request: Request, env: Env, ctx: ExecutionContext): Promise
     }
     return handleScan(request, env, cfg);
   }
-  // the status and the health go through the Workers Cache (a burst reaches D1 once per TTL per location) and,
+  // the status, the flow, the price and the health go through the Workers Cache (a burst reaches D1 once per TTL per location) and,
   // when they do reach the Worker, through the rate limiter, each route under its own key. A HEAD (an uptime
   // checker's default) is answered as its GET, without the body.
   const nowS = Math.floor(Date.now() / 1000);
@@ -45,7 +45,7 @@ async function fetch(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (!cfg) return headless(new Response("not available", { status: 503, headers: { "Cache-Control": "no-store" } }));
     return headless(await cached(asGet, ctx, () => handleStatus(asGet, env, cfg, nowS)));
   }
-  if (path === "/v1/flow") {
+  if (path === "/v1/flow" || path === "/v1/price") {
     const cfg = configOf(env);
     // unconfigured: the site gets a readable 503 (and its can't-check state) when its origin is set
     if (!cfg) {
@@ -53,7 +53,9 @@ async function fetch(request: Request, env: Env, ctx: ExecutionContext): Promise
       if (typeof env.SITE_ORIGIN === "string" && /^https:\/\/[^/]+$/.test(env.SITE_ORIGIN)) headers["Access-Control-Allow-Origin"] = env.SITE_ORIGIN;
       return headless(new Response("not available", { status: 503, headers }));
     }
-    return headless(await cached(asGet, ctx, () => handleFlow(asGet, env, cfg, nowS)));
+    // the price is for the site's outside-price check, a veto only (handlePrice)
+    const handle = path === "/v1/flow" ? () => handleFlow(asGet, env, cfg, nowS) : () => handlePrice(asGet, env, cfg);
+    return headless(await cached(asGet, ctx, handle));
   }
   if (path === "/v1/health") {
     // the configured thresholds' lag limit (the defaults' when the config can't be read: no tick runs then, and

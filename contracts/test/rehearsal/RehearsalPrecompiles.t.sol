@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {CascadeVault} from "../../src/CascadeVault.sol";
+import {CascadeVaultLens} from "../../src/lens/CascadeVaultLens.sol";
 import {ADDRESS_MAPPING_ADDRESS, IAddressMapping} from "../../src/interfaces/IAddressMapping.sol";
 import {ISTAKING_ADDRESS, IStaking} from "../../src/interfaces/IStaking.sol";
 import {StubBridge} from "../mocks/StubBridge.sol";
+import {defaultVaultParams} from "../utils/DefaultParams.sol";
 import {
     BALANCE_TRANSFER_ADDRESS,
     RehearsalAddressMapping,
@@ -18,6 +20,10 @@ import {
 contract RehearsalPrecompilesTest is Test {
     address constant WALLET = 0x770932787DD3bcE64f14E31f4746bCe22E214fFF;
     bytes32 constant HK = bytes32(uint256(0x58));
+    /// The guardian: never the owner's account (CascadeBase's constructor refuses one account for both).
+    address guardian = makeAddr("guardian");
+    /// The read-only lens (spec §8.1) on the vault newVault() last deployed, built on the stand-ins too.
+    CascadeVaultLens vaultLens;
 
     function setUp() public {
         vm.etch(ADDRESS_MAPPING_ADDRESS, address(new RehearsalAddressMapping()).code);
@@ -25,11 +31,15 @@ contract RehearsalPrecompilesTest is Test {
         vm.etch(BALANCE_TRANSFER_ADDRESS, address(new RehearsalBalanceTransfer()).code);
     }
 
-    function newVault() internal returns (CascadeVault) {
+    function newVault() internal returns (CascadeVault vault) {
         StubBridge bridge = new StubBridge(IERC20(address(0)));
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
         bytes32 coldkey = IAddressMapping(ADDRESS_MAPPING_ADDRESS).addressMapping(predicted);
-        return new CascadeVault(coldkey, HK, bridge, WALLET, WALLET, 1e16, 8453, makeAddr("frontDoor"));
+        CascadeVault.Params memory p =
+            defaultVaultParams(coldkey, HK, bridge, WALLET, guardian, WALLET, 8453, makeAddr("frontDoor"));
+        p.minDirectDeposit = 1e16;
+        vault = new CascadeVault(p);
+        vaultLens = new CascadeVaultLens(address(vault));
     }
 
     function test_mappingPadsTheAddress() public view {
@@ -38,7 +48,7 @@ contract RehearsalPrecompilesTest is Test {
 
     function test_vaultDeploysOnTheStandIns() public {
         CascadeVault vault = newVault();
-        assertEq(vault.coldkey(), bytes32(uint256(uint160(address(vault)))));
+        assertEq(vaultLens.coldkey(), bytes32(uint256(uint160(address(vault)))));
     }
 
     function test_transferForcesBalanceIntoAVaultThatRefusesPlainTransfers() public {
@@ -47,9 +57,9 @@ contract RehearsalPrecompilesTest is Test {
         (bool ok,) = address(vault).call{value: 1}("");
         assertFalse(ok);
 
-        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1.5e12}(vault.coldkey());
+        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1.5e12}(vaultLens.coldkey());
         assertEq(address(vault).balance, 1e12, "an empty account reads 500 rao below what was sent");
-        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1e12}(vault.coldkey());
+        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1e12}(vaultLens.coldkey());
         assertEq(address(vault).balance, 2e12, "later transfers are credited in full");
         vm.expectRevert(bytes("rehearsal: below the existential deposit"));
         RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 500e9}(bytes32(uint256(0xE0A)));
@@ -60,9 +70,9 @@ contract RehearsalPrecompilesTest is Test {
     function test_aReservedVaultMintsTheFirstDepositAtTheLaunchPrice() public {
         CascadeVault vault = newVault();
         vm.deal(address(this), 1 ether);
-        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1.5e12}(vault.coldkey());
-        assertEq(vault.totalAssets(), 0);
-        assertEq(vault.price(), 1e12, "1 wei per 1e6 shares, scaled by 1e18");
+        RehearsalBalanceTransfer(BALANCE_TRANSFER_ADDRESS).transfer{value: 1.5e12}(vaultLens.coldkey());
+        assertEq(vaultLens.totalAssets(), 0);
+        assertEq(vaultLens.price(), 1e12, "1 wei per 1e6 shares, scaled by 1e18");
     }
 
     function test_stakingReads() public {
@@ -78,15 +88,13 @@ contract RehearsalPrecompilesTest is Test {
     /// rehearsal to settle, here with vm.deal as the rehearsal does with anvil_setBalance.
     function test_vaultStakesAndTheDebitIsLeftToSettle() public {
         CascadeVault vault = newVault();
-        vm.prank(WALLET);
-        vault.setKeeper(WALLET);
         vm.deal(address(vault), 1e12 + 1e17);
 
         vm.expectEmit(true, false, false, true, ISTAKING_ADDRESS);
         emit RehearsalStaking.Debit(address(vault), 1e17);
         vm.prank(WALLET);
         vault.stakeIdle();
-        assertEq(vault.rootStakeRao(), 1e8, "stake recorded on the vault's coldkey");
+        assertEq(vaultLens.visibleStakeRao(), 1e8, "stake recorded on the vault's coldkey");
         assertEq(address(vault).balance, 1e12 + 1e17, "balance untouched until the rehearsal settles");
     }
 
@@ -103,8 +111,6 @@ contract RehearsalPrecompilesTest is Test {
 
     function test_unstakePaysFromItsOwnBalanceByForcedSend() public {
         CascadeVault vault = newVault();
-        vm.prank(WALLET);
-        vault.setKeeper(WALLET);
         vm.deal(address(vault), 1e12 + 1e17);
         vm.prank(WALLET);
         vault.stakeIdle();
@@ -116,7 +122,7 @@ contract RehearsalPrecompilesTest is Test {
         IStaking(ISTAKING_ADDRESS).removeStakeFull(HK, 0);
         assertEq(address(vault).balance, 1e12 + 1e17, "paid into a vault that refuses plain transfers");
         assertEq(ISTAKING_ADDRESS.balance, 1 ether - 1e17);
-        assertEq(vault.rootStakeRao(), 0);
+        assertEq(vaultLens.visibleStakeRao(), 0);
     }
 
     function test_removeStakeTakesThePositionWhenLessThanTheNominatorMinimumWouldRemain() public {

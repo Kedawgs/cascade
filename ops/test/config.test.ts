@@ -4,9 +4,10 @@ import { describe, expect, it } from "vitest";
 import { BASE_V3, deploymentName, isV3Deployment, LIVE, paths, recordPath, SETTINGS, SETTINGS_V3, SETTINGS_V3_LAUNCH, targets, WALLET } from "../src/config.ts";
 import { decodeSs58, encodeSs58 } from "../src/ss58.ts";
 
-const forkBase = readFileSync(new URL("../../contracts/test/fork/ForkBase.sol", import.meta.url), "utf8");
+/** v3-launch's contract tests, frozen in ops/builds/preaudit (contracts/ now holds v3.2). */
+const forkBase = readFileSync(new URL("../builds/preaudit/test/fork/ForkBase.sol", import.meta.url), "utf8");
 const constant = (name: string) => forkBase.match(new RegExp(`${name} = (\\w+);`))?.[1];
-const forkV3 = readFileSync(new URL("../../contracts/test/fork/BaseForkV3.t.sol", import.meta.url), "utf8");
+const forkV3 = readFileSync(new URL("../builds/preaudit/test/fork/BaseForkV3.t.sol", import.meta.url), "utf8");
 const constantV3 = (name: string) => forkV3.match(new RegExp(`${name} = (\\w+);`))?.[1];
 
 describe("v3 config", () => {
@@ -52,8 +53,8 @@ describe("v3 config", () => {
     expect([SETTINGS_V3.adapterReserve, SETTINGS_V3.vaultReserve]).toEqual([SETTINGS.adapterReserve, SETTINGS.vaultReserve]);
   });
 
-  it("asks for the delivery gas toward Bittensor that contracts/test/adapters/AdapterGas.t.sol calibrates, and at least its gas toward Base", () => {
-    const gasTest = readFileSync(new URL("../../contracts/test/adapters/AdapterGas.t.sol", import.meta.url), "utf8");
+  it("asks for the delivery gas toward Bittensor that v3-launch's AdapterGas.t.sol calibrates, and at least its gas toward Base", () => {
+    const gasTest = readFileSync(new URL("../builds/preaudit/test/adapters/AdapterGas.t.sol", import.meta.url), "utf8");
     const calibrated = (name: string) => {
       const m = gasTest.match(new RegExp(`constant ${name} = ([\\d_]+);`));
       if (!m) throw new Error(name);

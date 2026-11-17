@@ -1,0 +1,520 @@
+// cascade-keeper: the v3.2 keeper as its own Worker (design-keeper-worker.md). Run wrangler only from this folder.
+// Nothing here is a secret. The secrets are set at deploy (Task 67), never here:
+//   KEEPER_PRIVATE_KEY      pnpm keeper:new-key -- --env <test|production> --put-secret
+//   CONTROL_TOKEN_SHA256    pnpm keeper:new-token -- --env <test|production> --put-secret
+//   BASE_RPC_URL_SECRET, BASE_LOGS_RPC_URL_SECRET, BITTENSOR_RPC_URL_SECRET   keyed RPC URLs (they override the vars below)
+// Deploy at 100%, never as a gradual deployment, so two versions never run side by side (design §4).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cascade-keeper",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-14",
+  // Wrangler sends no usage telemetry for this project: building and testing stay local.
+  "send_metrics": false,
+  // Workers Logs: every line the keeper logs (scrubbed of URL secrets and of the key), kept 7 days.
+  "observability": { "enabled": true },
+  // The control routes answer on the keeper's own hostname only (a custom domain chosen at Task 67), never on workers.dev.
+  "workers_dev": false,
+  "preview_urls": false,
+  // One copy of viem and of noble's hashes in the bundle: the core's imports (../ops/src/keeper/core, which would find
+  // ops' own copies) and the Worker's resolve to this package's, at the ES module entry each package's exports map names
+  // (test/node/bundle.test.ts holds them to the maps, bundles, and counts the copies).
+  "alias": {
+    "viem": "./node_modules/viem/_esm/index.js",
+    "viem/accounts": "./node_modules/viem/_esm/accounts/index.js",
+    "@noble/hashes/blake2": "./node_modules/@noble/hashes/esm/blake2.js"
+  },
+  // The lease, the kill switch, the memory and the journal (src/coordinator.ts). Never rename or delete this class: a
+  // delete migration erases its data.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KeeperCoordinator"] }],
+  // Budgets (Workers Paid; design §5): 30 s of CPU an invocation by default (a full round took 55 to 179 ms in local
+  // workerd over a fake RPC, Task 50b), 15 min of wall time for a cron, 1,000+ subrequests (a round made 17 to 157). A run makes at most
+  // KEEPER_SUBREQUEST_BUDGET RPC requests (a send's own get 100 more), starts no send after 45 s and waits at most 40 s
+  // for a receipt; the lease lasts 120 s.
+  "env": {
+    // The testnet deployment (Tasks 62 to 64).
+    "test": {
+      // One round a minute (in each environment only, so a deploy without --env makes no cron). From a phone:
+      // Cloudflare dashboard, cascade-keeper-<env>, Triggers, delete the cron to stop it.
+      "triggers": { "crons": ["* * * * *"] },
+      "durable_objects": { "bindings": [{ "name": "COORDINATOR", "class_name": "KeeperCoordinator" }] },
+      // 30 control requests a minute per client and route; the namespace id is any integer unique in the account
+      "ratelimits": [{ "name": "KEEPER_LIMITER", "namespace_id": "8453101", "simple": { "limit": 30, "period": 60 } }],
+      // the monitor's /v1/status for the hold (Task 50a), one way: the monitor gets nothing from the keeper
+      "services": [{ "binding": "MONITOR", "service": "cascade-indexer-test" }],
+      "vars": {
+        // the v3.2 deployment, as `pnpm config:from-record -- <record>` prints it (Task 62 for test, Task 67 for production);
+        // empty: the keeper runs nothing
+        "DEPLOYMENT": "",
+        "BASE_RPC_URL": "https://base-rpc.publicnode.com",
+        "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
+        // the archive node: the lite node keeps only minutes of logs
+        "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
+        "BASE_LOG_WINDOW": "10000",
+        "RPC_SPACING_MS": { "base": 100, "bittensor": 600 },
+        "KEEPER_SUBREQUEST_BUDGET": "300",
+        // ops' OPS_MAX_GAS_PRICE_BASE and OPS_MAX_GAS_PRICE_BITTENSOR defaults
+        "MAX_GAS_PRICE_BASE_GWEI": "5",
+        "MAX_GAS_PRICE_BITTENSOR_GWEI": "100",
+        // Task 52: the keeper re-executes no CCIP FAILURE by itself (the founder's ruling: by hand, pnpm ops reexec); it
+        // reports each one with the hand command. "on" only after Task 61's rehearsals
+        "OPS_REEXEC_AUTO": "off"
+      }
+    },
+    // The v3.2 launch deployment (Task 67).
+    "production": {
+      "triggers": { "crons": ["* * * * *"] },
+      "durable_objects": { "bindings": [{ "name": "COORDINATOR", "class_name": "KeeperCoordinator" }] },
+      "ratelimits": [{ "name": "KEEPER_LIMITER", "namespace_id": "8453102", "simple": { "limit": 30, "period": 60 } }],
+      "services": [{ "binding": "MONITOR", "service": "cascade-indexer-production" }],
+      // the keeper's own hostname (Task 67, runbook 2.3 step 4): the only one its control routes answer on; ops/.env's OPS_KEEPER_URL
+      "routes": [{ "pattern": "keeper.cascadefi.xyz", "custom_domain": true }],
+      "vars": {
+        // the v3.2-launch deployment, as `pnpm config:from-record -- ../ops/deployments/v3.2-launch.json` printed it on deploy day
+        // (2026-11-16, Task 67). A var holds 5 kB and the record is 10, so its for-life list is in the numbered parts below,
+        // which the Worker joins and holds to the digest forLifeParts names (src/deployment-vars.ts): a part missing, out
+        // of place, edited or of another printout, and the keeper is not ready
+        "DEPLOYMENT": {
+          "version": "v3.2",
+          "name": "v3.2-launch",
+          "chainIds": {
+            "base": 8453,
+            "bittensor": 964
+          },
+          "launchChain": {
+            "$bigint": "8453"
+          },
+          "addresses": {
+            "vault": "0x56544AfF15fccea33b4db189cB5B3726DBac724e",
+            "vaultLens": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+            "frontDoor": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+            "doorLens": "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f",
+            "bitAdapter": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+            "baseAdapter": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+            "staker": "0x371C5CFa5F5F6B3356fBC360EaD26066A2958B87",
+            "oracle": "0xDddd746237b923A0081630F4DcE7857De568696D"
+          },
+          "keeper": "0x7070F6A27be2Fe8521146450B5EB65190f5C7c9d",
+          "vaultColdkey": "0xb090e81b3abb52702aa03fea68518c773a62bc65d54fa7061640b0c6fb07facc",
+          "vaultCreatedAt": 1794851568,
+          "startBlocks": {
+            "bittensor": {
+              "$bigint": "9520646"
+            },
+            "base": {
+              "$bigint": "58306060"
+            }
+          },
+          "batchMaxWaitS": 86400,
+          "usdcDelivery": true,
+          "payoutTopUpMax": {
+            "$bigint": "0"
+          },
+          "spendCap": {
+            "base": {
+              "$bigint": "10000000000000000"
+            },
+            "bittensor": {
+              "$bigint": "400000000000000000"
+            }
+          },
+          "alphaVault": "0x11837459896D96F821a8D88eC93a3C8D152033D4",
+          "quoterV2": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+          "ethUsdcPath": "0x42000000000000000000000000000000000000060001f4833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "offRamps": {
+            "base": "0x16E577f1724AE2598F9b43a52C19E6f67eE13808",
+            "bittensor": "0xF9410A08FD57e629c66E1f37a5Ae8f0a757d9AD9"
+          },
+          "onRamps": {
+            "base": "0xF75bf16b03aaE98677926F0987F195A2153996B9",
+            "bittensor": "0x5aA05e14ac7FaF23F1757d46429E6CA7e3FC1274"
+          },
+          "selectors": {
+            "base": {
+              "$bigint": "15971525489660198786"
+            },
+            "bittensor": {
+              "$bigint": "2135107236357186872"
+            }
+          },
+          "stakingPrecompile": "0x0000000000000000000000000000000000000805",
+          "forLifeParts": {
+            "of": 2,
+            "id": "0x29acfbecad21e2e85632c7560ebfaebee587acb7846c766dd94dfb177862ffa8"
+          }
+        },
+        "DEPLOYMENT_FOR_LIFE_1": {
+          "part": 1,
+          "of": 2,
+          "id": "0x29acfbecad21e2e85632c7560ebfaebee587acb7846c766dd94dfb177862ffa8",
+          "values": [
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVault",
+              "address": "0x56544AfF15fccea33b4db189cB5B3726DBac724e",
+              "fn": "launchChain",
+              "returns": "uint64",
+              "want": "8453"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVault",
+              "address": "0x56544AfF15fccea33b4db189cB5B3726DBac724e",
+              "fn": "MS_PER_BLOCK",
+              "returns": "uint64",
+              "want": "7200"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVaultLens",
+              "address": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+              "fn": "DOMAIN_SEPARATOR",
+              "returns": "bytes32",
+              "want": "0x202dacf31ad4c78618ea0b30a325ab90cbe97333c59c563505e05aadc3b1c9eb"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVaultLens",
+              "address": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+              "fn": "STAMP_TYPEHASH",
+              "returns": "bytes32",
+              "want": "0x4a2ff47f9ebab098e58b19433a88d005ec2123b12ee173beccfe13a7b0a94ebf"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVaultLens",
+              "address": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+              "fn": "EXIT_GAS_RESERVE",
+              "returns": "uint256",
+              "want": "2000000"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVaultLens",
+              "address": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+              "fn": "target",
+              "returns": "address",
+              "want": "0x56544AfF15fccea33b4db189cB5B3726DBac724e"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeDoorLens",
+              "address": "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f",
+              "fn": "target",
+              "returns": "address",
+              "want": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeDoorLens",
+              "address": "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f",
+              "fn": "DOMAIN_SEPARATOR",
+              "returns": "bytes32",
+              "want": "0xdf78d472b0e782d31b376210a611bc69ebd97d9d9ff811a37e871d4b07262dca"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeDoorLens",
+              "address": "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f",
+              "fn": "STAMP_TYPEHASH",
+              "returns": "bytes32",
+              "want": "0x4a2ff47f9ebab098e58b19433a88d005ec2123b12ee173beccfe13a7b0a94ebf"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "fn": "vault",
+              "returns": "address",
+              "want": "0x56544AfF15fccea33b4db189cB5B3726DBac724e"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "fn": "vaultChain",
+              "returns": "uint64",
+              "want": "964"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "fn": "treasury",
+              "returns": "address",
+              "want": "0x34D1f7DC8Cb62280d0bc617b784Bd2c4668809f6"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "fn": "asset",
+              "returns": "address",
+              "want": "0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "fn": "usdc",
+              "returns": "address",
+              "want": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "fn": "MS_PER_BLOCK",
+              "returns": "uint64",
+              "want": "120"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeStaker",
+              "address": "0x371C5CFa5F5F6B3356fBC360EaD26066A2958B87",
+              "fn": "frontDoor",
+              "returns": "address",
+              "want": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeStaker",
+              "address": "0x371C5CFa5F5F6B3356fBC360EaD26066A2958B87",
+              "fn": "tao",
+              "returns": "address",
+              "want": "0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeStaker",
+              "address": "0x371C5CFa5F5F6B3356fBC360EaD26066A2958B87",
+              "fn": "usdc",
+              "returns": "address",
+              "want": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeTwapOracle",
+              "address": "0xDddd746237b923A0081630F4DcE7857De568696D",
+              "fn": "tao",
+              "returns": "address",
+              "want": "0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeTwapOracle",
+              "address": "0xDddd746237b923A0081630F4DcE7857De568696D",
+              "fn": "usdc",
+              "returns": "address",
+              "want": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeTwapOracle",
+              "address": "0xDddd746237b923A0081630F4DcE7857De568696D",
+              "fn": "weth",
+              "returns": "address",
+              "want": "0x4200000000000000000000000000000000000006"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeTwapOracle",
+              "address": "0xDddd746237b923A0081630F4DcE7857De568696D",
+              "fn": "taoWethPool",
+              "returns": "address",
+              "want": "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeTwapOracle",
+              "address": "0xDddd746237b923A0081630F4DcE7857De568696D",
+              "fn": "wethUsdcPool",
+              "returns": "address",
+              "want": "0xd0b53D9277642d899DF5C87A3966A349A798F224"
+            }
+          ]
+        },
+        "DEPLOYMENT_FOR_LIFE_2": {
+          "part": 2,
+          "of": 2,
+          "id": "0x29acfbecad21e2e85632c7560ebfaebee587acb7846c766dd94dfb177862ffa8",
+          "values": [
+            {
+              "chain": "bittensor",
+              "contract": "CcipBittensorAdapter",
+              "address": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+              "fn": "treasury",
+              "returns": "address",
+              "want": "0x34D1f7DC8Cb62280d0bc617b784Bd2c4668809f6"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CcipBittensorAdapter",
+              "address": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+              "fn": "maxMessageValue",
+              "returns": "uint256",
+              "want": "50000000000000000000"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CcipBittensorAdapter",
+              "address": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+              "fn": "inboundGasBase",
+              "returns": "uint256",
+              "want": "1300000"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CcipBittensorAdapter",
+              "address": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+              "fn": "inboundGasPerEntry",
+              "returns": "uint256",
+              "want": "57000"
+            },
+            {
+              "chain": "base",
+              "contract": "CcipBaseAdapter",
+              "address": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+              "fn": "treasury",
+              "returns": "address",
+              "want": "0x34D1f7DC8Cb62280d0bc617b784Bd2c4668809f6"
+            },
+            {
+              "chain": "base",
+              "contract": "CcipBaseAdapter",
+              "address": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+              "fn": "maxMessageValue",
+              "returns": "uint256",
+              "want": "50000000000000000000"
+            },
+            {
+              "chain": "base",
+              "contract": "CcipBaseAdapter",
+              "address": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+              "fn": "minSendAmount",
+              "returns": "uint256",
+              "want": "10000000000000000"
+            },
+            {
+              "chain": "base",
+              "contract": "CcipBaseAdapter",
+              "address": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+              "fn": "gasBase",
+              "returns": "uint256",
+              "want": "1300000"
+            },
+            {
+              "chain": "base",
+              "contract": "CcipBaseAdapter",
+              "address": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+              "fn": "gasPerEntry",
+              "returns": "uint256",
+              "want": "57000"
+            }
+          ],
+          "code": [
+            {
+              "chain": "bittensor",
+              "contract": "CcipBittensorAdapter",
+              "address": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+              "codeHash": "0xfd63e090f772d3450b490386968d62e36ad9f4f622cca2a1c1c4342f53f4e438"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadePayoutMath",
+              "address": "0xEa16630ba8376bE307CEa231540E5A72295aa3B9",
+              "codeHash": "0x34558145ce224380c2f7f696833776c0880ca4ac111510217f9018e62bec7621"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeStakeLib",
+              "address": "0xE52a9c0ea3DE0D4FF7249a65c8cFbeE78f68E01C",
+              "codeHash": "0xc060ed312c35a6c52287664f49dece450e5b9e88a95ad0a3b47cb0535e35e0f2"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadePayoutLib",
+              "address": "0xA141426E5DFf1F7C9Cc2019A0bD2AC0BD0809328",
+              "codeHash": "0x0a76f626deae51f24eba6d0098f4821bfa3f8d526343f9b548ddf52e9e09c978"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeBatchLib",
+              "address": "0xf8A59A42e8A67C5609714d6bC3fAeDC7F8a799CD",
+              "codeHash": "0x33a4845da390cfede20c263c66900de4a789eb89be7cff4218aba8530d35a1ab"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeHotkeyLib",
+              "address": "0xa499190631AeBFa8A2987764fFA4cb3A6B5dd0aa",
+              "codeHash": "0xc78163a98f338b9bdea14f779d28441f6fc69aef21e74f3d680f9eb50e948e9e"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVault",
+              "address": "0x56544AfF15fccea33b4db189cB5B3726DBac724e",
+              "codeHash": "0xa1d0a2eb8317083f0bff6588e2dc6f0fc3c43c4d99a3b036e3a49012b7ad5356"
+            },
+            {
+              "chain": "bittensor",
+              "contract": "CascadeVaultLens",
+              "address": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+              "codeHash": "0x7ede3b97510bd522f47adb6761e8cf2a7d34a6d2e14953a4bb649e75fa34a6a4"
+            },
+            {
+              "chain": "base",
+              "contract": "CcipBaseAdapter",
+              "address": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+              "codeHash": "0xf060f2bb0fe1b55025d693711784749c8ba41b45e51f117aa2547b0598526642"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeTwapOracle",
+              "address": "0xDddd746237b923A0081630F4DcE7857De568696D",
+              "codeHash": "0x0b47b59b6954dac09dde9787c158ed7390cdf856405b3d1781ac809c2e4c07a4"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeFrontDoor",
+              "address": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+              "codeHash": "0x9450869fd9d03df31ccb495dc5dcce64864a4173abbb6be129a2aeb7b98bcd2d"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeStaker",
+              "address": "0x371C5CFa5F5F6B3356fBC360EaD26066A2958B87",
+              "codeHash": "0x0abba7353785bd12ebfc34b3631f6e660065cc1e2f36fe5fd72cbcb75d4c2c71"
+            },
+            {
+              "chain": "base",
+              "contract": "CascadeDoorLens",
+              "address": "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f",
+              "codeHash": "0x64349317c3555356c32f0410cd2d4ebe9473c14b5d5c427732d2a010771afc59"
+            }
+          ],
+          "pools": [
+            {
+              "pair": "WETH/USDC",
+              "address": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+              "fee": 500
+            },
+            {
+              "pair": "TAO/WETH",
+              "address": "0x82dD34C6631C286cDD1dB16f2c232f60E402Dd5A",
+              "fee": 3000
+            }
+          ]
+        },
+        "BASE_RPC_URL": "https://base-rpc.publicnode.com",
+        "BASE_LOGS_RPC_URL": "https://base-rpc.publicnode.com",
+        "BITTENSOR_RPC_URL": "https://archive.chain.opentensor.ai",
+        "BASE_LOG_WINDOW": "10000",
+        "RPC_SPACING_MS": { "base": 100, "bittensor": 600 },
+        "KEEPER_SUBREQUEST_BUDGET": "300",
+        "MAX_GAS_PRICE_BASE_GWEI": "5",
+        "MAX_GAS_PRICE_BITTENSOR_GWEI": "100",
+        "OPS_REEXEC_AUTO": "off"
+      }
+    }
+  }
+}

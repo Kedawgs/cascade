@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -9,7 +9,8 @@ import {CcipAdapterBase} from "./CcipAdapterBase.sol";
 /// @notice The Base side of the CCIP bridge: the bridged TAO is an ERC-20 here, so sending pulls
 /// tokens from the caller and delivery transfers them to the recipient.
 /// @dev No `receive` or `fallback`: the whole msg.value of a send is the fee budget, and the router
-/// is paid exactly the quoted fee; any excess stays in the adapter.
+/// is paid exactly the quoted fee; any excess stays in the adapter until `sweepSurplus` sends it to
+/// the treasury. Between calls the adapter owes nothing, so it can sweep everything it holds.
 contract CcipBaseAdapter is CcipAdapterBase {
     using SafeERC20 for IERC20;
 
@@ -20,6 +21,14 @@ contract CcipBaseAdapter is CcipAdapterBase {
     constructor(Config memory c, uint256 minSendAmount_) CcipAdapterBase(c) {
         if (minSendAmount_ > c.maxMessageValue) revert MessageCapOutOfRange();
         minSendAmount = minSendAmount_;
+    }
+
+    /// @notice Sends the adapter's whole native and token balance (a send's kept fee excess, tokens
+    /// sent to it by mistake) to the immutable `treasury`; anyone may call it.
+    /// @dev The stated exception to a lock on every function that pays out (ruling B12): the payee is
+    /// the immutable treasury, nothing is written before the transfers, and a re-entry sweeps 0.
+    function sweepSurplus() external {
+        _sweep(address(this).balance, token.balanceOf(address(this)));
     }
 
     function _checkAmount(uint256 amount) internal view override {
@@ -36,7 +45,10 @@ contract CcipBaseAdapter is CcipAdapterBase {
     }
 
     /// @dev Tokens first: the recipient checks its token balance inside `onBridgeMessage`.
-    function _deliver(address recipient, address sender, bytes memory message, uint256 amount) internal override {
+    function _deliver(bytes32, address recipient, address sender, bytes memory message, uint256 amount)
+        internal
+        override
+    {
         if (amount > 0) token.safeTransfer(recipient, amount);
         ICascadeReceiver(recipient).onBridgeMessage(remoteChainId, sender, message, amount);
     }

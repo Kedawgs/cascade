@@ -18,9 +18,15 @@ export interface Deployment {
   batchMaxWaitS?: number;
   /** v3: the vault's payout delay, in seconds (written by `pnpm ops web-config`). Absent = not known here. */
   payoutDelayS?: number;
+  /** v3.2 only: the read-only lenses that serve the getters v3.2 moved off the vault (CascadeVaultLens, on
+   * Bittensor) and off the front door (CascadeDoorLens, on Base). Both or neither (readDeployment refuses
+   * one alone), and only on a v3 deployment: with them the site uses v3.2's ABIs (isV32). */
+  vaultLens?: Address;
+  doorLens?: Address;
   /** The history indexer's origin (`https://…`, no path), from NEXT_PUBLIC_CASCADE_INDEXER_URL: a first
    * visit starts its scan of the vault's history from the indexer's seed, verified against the chain
-   * (live.ts, seed.ts). Absent = the site reads the whole history from the chains itself, as before. */
+   * (live.ts, seed.ts). Absent = the site reads the whole history from the chains itself, as before.
+   * Required on v3.2 (readDeployment refuses a v3.2 env without it): its outside-price veto reads it. */
   indexerUrl?: string;
 }
 
@@ -56,6 +62,11 @@ export const batchCloseAt = (openStart: number, batchInterval: number, batchMaxW
  * other mix), and only then does the site keep the v2 flows. */
 export const isV3 = (d: Deployment): boolean => Boolean(d.staker && d.oracle);
 
+/** A v3.2 deployment is a v3 one with both lenses (readDeployment refuses any other mix): the site then calls
+ * and decodes with v3.2's ABIs (abi.ts) and reads the moved getters through the lenses. Every other
+ * deployment, v3-launch above all, keeps its own ABIs and flows exactly as they are. */
+export const isV32 = (d: Deployment | null | undefined): boolean => !!d && isV3(d) && Boolean(d.vaultLens && d.doorLens);
+
 type Env = Record<string, string | undefined>;
 
 const address = (v: string | undefined): Address | null => (v && isAddress(v, { strict: true }) && v !== v.toLowerCase() ? v : null);
@@ -84,12 +95,32 @@ export function readDeployment(env: Env): Deployment | null {
         "(NEXT_PUBLIC_CASCADE_STAKER, NEXT_PUBLIC_CASCADE_ORACLE). Refusing to fall back to the v2 flows: run `pnpm ops web-config` again.",
     );
   }
+  const vaultLens = address(env.NEXT_PUBLIC_CASCADE_VAULT_LENS);
+  const doorLens = address(env.NEXT_PUBLIC_CASCADE_DOOR_LENS);
+  const namesV32 = [env.NEXT_PUBLIC_CASCADE_VAULT_LENS, env.NEXT_PUBLIC_CASCADE_DOOR_LENS].some((v) => !!v);
+  if (namesV32 && (!vaultLens || !doorLens || !staker || !oracle)) {
+    throw new Error(
+      "The env names a v3.2 deployment but not both its lenses as checksummed addresses (NEXT_PUBLIC_CASCADE_VAULT_LENS, " +
+        "NEXT_PUBLIC_CASCADE_DOOR_LENS) on a v3 deployment with a staker and an oracle. Refusing to read v3.2's contracts " +
+        "through v3-launch's getters: run `pnpm ops web-config` again.",
+    );
+  }
   const maxWait = env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S;
   const batchMaxWaitS = maxWait && /^[1-9]\d*$/.test(maxWait) ? Number(maxWait) : undefined;
   // 0 is a real setting (no delay), so it is kept; anything but plain digits is left out
   const delay = env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S;
   const payoutDelayS = delay && /^(0|[1-9]\d*)$/.test(delay) ? Number(delay) : undefined;
   const indexerUrl = indexerOrigin(env.NEXT_PUBLIC_CASCADE_INDEXER_URL);
+  // v3.2's outside-price veto reads the indexer before every stake and USDC unstake, and fails closed without it
+  // (price-veto.ts): a v3.2 site with no indexer would refuse them all, so none is built
+  if (vaultLens && doorLens && !indexerUrl) {
+    throw new Error(
+      "The env names a v3.2 deployment but no indexer: NEXT_PUBLIC_CASCADE_INDEXER_URL must be the indexer's https origin " +
+        "(no path). v3.2 checks the price on Base against the indexer's outside price before every stake and USDC unstake, " +
+        "and refuses them without it. Refusing to build a site that would refuse them all: set it (`pnpm ops web-config` " +
+        "writes it from OPS_INDEXER_URL).",
+    );
+  }
   return {
     frontDoor,
     baseAdapter,
@@ -100,6 +131,7 @@ export function readDeployment(env: Env): Deployment | null {
     hotkeySs58,
     ...(staker ? { staker } : {}),
     ...(oracle ? { oracle } : {}),
+    ...(vaultLens && doorLens ? { vaultLens, doorLens } : {}),
     ...(batchMaxWaitS ? { batchMaxWaitS } : {}),
     ...(payoutDelayS !== undefined ? { payoutDelayS } : {}),
     ...(indexerUrl ? { indexerUrl } : {}),
@@ -108,22 +140,38 @@ export function readDeployment(env: Env): Deployment | null {
 
 /** How the site describes a deployment (the FAQ's answers): "testing" (a test deployment: one key holds
  * every role, and depositing isn't recommended), "early" (the launch: real deposits under a cap, the owner
- * one hardware wallet, a separate guardian, no multisig or timelock yet), or "live" (a multisig owner
- * behind a timelock). */
-export type Stage = "testing" | "early" | "live";
-const STAGES: readonly string[] = ["testing", "early", "live"] satisfies Stage[];
+ * one hardware wallet, a separate guardian, no multisig or timelock yet), "live" (a multisig owner
+ * behind a timelock), or "retired" (a version of Cascade that is retired: the site shows only the ways out,
+ * never a stake or a deposit; Task 60, spec §7 "Retiring v3-launch"). */
+export type Stage = "testing" | "early" | "live" | "retired";
+const STAGES: readonly string[] = ["testing", "early", "live", "retired"] satisfies Stage[];
 
 /** A deployment the site may be built for, as committed in deployments.json (reviewed in git). */
 export interface ExpectedDeployment {
   version: 2 | 3;
   stage: Stage;
+  /** A retired deployment only: the stage it was retired from (v3-launch's, at Task 69, "early"), which words its FAQ and
+   * audit card: its owner and guardian are still what that stage's answers say (wordingStage). */
+  retiredFrom?: Exclude<Stage, "retired">;
+  /** v3.2 only: whether the site offers USDC delivery. `false` is the founder's switch for when ForeverMoney or the
+   * pools can't be trusted, the stalemate's answer (spec §5): every USDC option is hidden, Receive TAO and the claim
+   * stay open, and an account with a delivery preference is prompted to claim, which clears it. Absent = on; every
+   * v3.2 entry names it (deployments.test.ts). A deployment without Receive TAO can't turn it off (checkedDeployment). */
+  usdcDelivery?: boolean;
   frontDoor: string;
   baseAdapter: string;
   vault: string;
   bitAdapter: string;
+  /** Whether the deployment's contract source is published (the public repository, the explorers' verified source).
+   * Absent = published. `false` while a new deployment's code waits to be published (v3.2-launch's did, until Task 70):
+   * the site then never says "open source" of its contracts, and says when the code comes instead (sourcePublished). */
+  sourcePublished?: boolean;
   /** v3 only. */
   staker?: string;
   oracle?: string;
+  /** v3.2 only: its two lenses, both or neither (a v3 entry with them is a v3.2 deployment). */
+  vaultLens?: string;
+  doorLens?: string;
   bitBlock: string;
   vaultSs58: string;
   hotkeySs58: string;
@@ -152,6 +200,8 @@ export function knownDeployment(d: Deployment, list: Readonly<Record<string, Exp
       (e.version === 3) === isV3(d) &&
       sameAddress(e.staker, d.staker) &&
       sameAddress(e.oracle, d.oracle) &&
+      sameAddress(e.vaultLens, d.vaultLens) &&
+      sameAddress(e.doorLens, d.doorLens) &&
       e.bitBlock === String(d.bitBlock) &&
       e.vaultSs58 === d.vaultSs58 &&
       e.hotkeySs58 === d.hotkeySs58,
@@ -165,10 +215,37 @@ export function deploymentEntry(d: Deployment | null, list: Readonly<Record<stri
 }
 
 /** The stage deployments.json gives `d`. It fails closed: "testing", the most careful wording, for no
- * deployment, one not listed, or a stage that isn't exactly one of the three. */
+ * deployment, one not listed, or a stage that isn't exactly one of the four. */
 export function deploymentStage(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): Stage {
   const stage: unknown = deploymentEntry(d, list)?.stage;
   return typeof stage === "string" && STAGES.includes(stage) ? (stage as Stage) : "testing";
+}
+
+/** The stage the site's words describe `d` as (the FAQ, the audit card): its stage, but for a retired one the stage it
+ * was retired from (its entry's `retiredFrom`), whose owner and guardian it still has. It fails closed: "testing" for a
+ * retired entry that doesn't name exactly one of the other three, as for any stage deploymentStage doesn't know. */
+export function wordingStage(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): Exclude<Stage, "retired"> {
+  const stage = deploymentStage(d, list);
+  return stage === "retired" ? retiredWording(deploymentEntry(d, list)?.retiredFrom) : stage;
+}
+
+/** Whether the site may say `d`'s contracts are open source (deployments.json `sourcePublished`): yes unless its entry
+ * says false. No deployment, or an entry that doesn't say, keeps the words the site always had. */
+export function sourcePublished(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): boolean {
+  return deploymentEntry(d, list)?.sourcePublished !== false;
+}
+
+/** A retired deployment's `retiredFrom`, exactly testing, early or live; "testing" for anything else (fail closed). */
+export const retiredWording = (v: unknown): Exclude<Stage, "retired"> => (v === "early" || v === "live" || v === "testing" ? v : "testing");
+
+/** Whether the site offers USDC delivery for `d` (deployments.json `usdcDelivery`, v3.2's switch: spec §5). Only a v3.2
+ * deployment can turn it off, since only v3.2 has Receive TAO (an unstake with no delivery) for its unstakes to take
+ * instead; every other deployment keeps its USDC unstake, whatever its entry says (checkedDeployment refuses that
+ * entry). On v3.2 it is off for `false`, and fails closed for any value that isn't a boolean; absent, it is on. */
+export function usdcDeliveryOn(d: Deployment | null, list: Readonly<Record<string, ExpectedDeployment>> = EXPECTED_DEPLOYMENTS): boolean {
+  if (!isV32(d)) return true;
+  const v: unknown = deploymentEntry(d, list)?.usdcDelivery;
+  return v === undefined || v === true;
 }
 
 const PINNED = [
@@ -198,6 +275,12 @@ export function checkedDeployment(d: Deployment | null, list: Readonly<Record<st
       );
     }
   }
+  if (!isV32(d) && list[name].usdcDelivery === false) {
+    throw new Error(
+      `deployments.json turns off ${name}'s USDC delivery (usdcDelivery: false), but only a v3.2 deployment can: it has Receive TAO ` +
+        "for its unstakes instead. Refusing to build a site whose unstakes would have nowhere to go.",
+    );
+  }
   return d;
 }
 
@@ -212,6 +295,8 @@ export const DEPLOYMENT = checkedDeployment(readDeployment({
   NEXT_PUBLIC_CASCADE_HOTKEY_SS58: process.env.NEXT_PUBLIC_CASCADE_HOTKEY_SS58,
   NEXT_PUBLIC_CASCADE_STAKER: process.env.NEXT_PUBLIC_CASCADE_STAKER,
   NEXT_PUBLIC_CASCADE_ORACLE: process.env.NEXT_PUBLIC_CASCADE_ORACLE,
+  NEXT_PUBLIC_CASCADE_VAULT_LENS: process.env.NEXT_PUBLIC_CASCADE_VAULT_LENS,
+  NEXT_PUBLIC_CASCADE_DOOR_LENS: process.env.NEXT_PUBLIC_CASCADE_DOOR_LENS,
   NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S: process.env.NEXT_PUBLIC_CASCADE_BATCH_MAX_WAIT_S,
   NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S: process.env.NEXT_PUBLIC_CASCADE_PAYOUT_DELAY_S,
   NEXT_PUBLIC_CASCADE_INDEXER_URL: process.env.NEXT_PUBLIC_CASCADE_INDEXER_URL,
@@ -222,6 +307,14 @@ export const TOKENS = {
   weth: "0x4200000000000000000000000000000000000006",
   tao: "0xf3081494B87e8D5fb7960f066E931D1D0e6E3d67",
 } as const satisfies Record<string, Address>;
+
+/** ForeverMoney's TAO on Base, as a wallet adds it (EIP-747; add-to-wallet.ts): what a claim or a cancel pays out,
+ * on v3-launch and v3.2 alike. Its address is TOKENS.tao, the one place it is typed: ops deploys every Base contract
+ * with the same token (ops/src/config.ts LIVE.base.TOKEN, read back by ops verify), and wiring.ts holds the front
+ * door's asset() and the adapter's token() to TOKENS.tao before anything is sent. Every front door refuses an asset
+ * without 18 decimals (CascadeFrontDoor's UnsupportedDecimals); "TAO" is the token's own symbol() (a wallet checks
+ * it against the token before adding it). add-to-wallet.test.ts holds all three to those sources. */
+export const FM_TAO = { address: TOKENS.tao, symbol: "TAO", decimals: 18 } as const;
 
 export const UNISWAP = {
   router: "0x2626664c2603336E57B271c5C0b26F421741e481",
@@ -285,11 +378,15 @@ export const PRICE_CHECK_BPS = 500n;
  * apart, in basis points, are trusted from neither (reads.ts, readOpenBatch). 10%: the two reads are
  * seconds apart, and the fee moves only when the bridge's price feeds update, a step of a few percent. */
 export const FEE_CHECK_BPS = 1_000n;
-/** The smallest unstake (and remainder) the form allows (see units.checkUnstake): 0.011 TAO. The vault
- * defers, without burning, a front-door redeem worth less than 0.01 TAO at the batch's price
- * (MIN_REDEEM_VALUE), and the user would have paid the request fee for nothing; 10% more covers the
- * rounding between the form's price and the vault's. */
-export const MIN_UNSTAKE_WEI = 11n * 10n ** 15n;
+/** The smallest unstake (and remainder) the form allows on v3.2 (see units.checkUnstake): 0.033 TAO. v3.2's
+ * vault defers, without burning, a front-door redeem worth less than 0.03 TAO at the batch's price
+ * (MIN_REDEEM_VALUE, contracts/src/CascadeConstants.sol), and the user would have paid the request fee for
+ * nothing; 10% more covers the rounding between the form's price and the vault's. */
+export const MIN_UNSTAKE_WEI = 33n * 10n ** 15n;
+/** The same for v3-launch and every deployment before v3.2: 0.011 TAO, over their vault's 0.01 TAO. */
+export const MIN_UNSTAKE_WEI_V3 = 11n * 10n ** 15n;
+/** The unstake minimum of deployment `d`: v3.2's for a v3.2 deployment, else v3-launch's. */
+export const minUnstakeWei = (d: Deployment | null | undefined): bigint => (isV32(d) ? MIN_UNSTAKE_WEI : MIN_UNSTAKE_WEI_V3);
 
 /** USDC –0.05%→ WETH –0.3%→ TAO, Uniswap v3 (the cheapest, deepest route on Base). */
 export const PATH_USDC_TO_TAO = encodePacked(

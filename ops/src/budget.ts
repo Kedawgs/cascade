@@ -1,9 +1,9 @@
 import { type Address, encodeDeployData, formatEther, getContractAddress, type Hex, hexToBigInt } from "viem";
-import { loadArtifact } from "./artifacts.ts";
+import { artifactFor } from "./builds.ts";
 import { CLAIM_POLICY, type ClaimPolicy, SETTINGS, WALLET, WALLET_SS58 } from "./config.ts";
 import { readColdkey } from "./deploy.ts";
 import { claimGasLimit, VAULT_CLAIM_GAS_REQUIRED } from "./keeper/rewards.ts";
-import { buildPlan, buildPlanV3, isPlanV3 } from "./plan.ts";
+import { buildPlan, buildPlanV3, isPlanV3, type Plan, type PlanV3 } from "./plan.ts";
 import type { DeploymentRecord } from "./record.ts";
 import { ROUND_TRIP } from "./roundtrip.ts";
 import { balanceOf, gasPriceOf, nonceOf } from "./rpc.ts";
@@ -204,8 +204,9 @@ const sumGas = (rec: DeploymentRecord, ids: StepId[]) =>
     return s + (d && "gasUsed" in d ? d.gasUsed : 0n);
   }, 0n);
 
-const estimateCreate = async (ctx: Ctx, name: string, args: unknown[]) => {
-  const a = loadArtifact(ctx.paths.contractsDir, name);
+/** A create's gas on the live node, with the creation code of the build `plan` deploys (builds.ts). */
+const estimateCreate = async (ctx: Ctx, plan: Plan | PlanV3, name: string, args: unknown[]) => {
+  const a = artifactFor(plan, name);
   const data = encodeDeployData({ abi: a.abi, bytecode: a.bytecode, args } as never);
   return hexToBigInt((await ctx.rpc.request("bittensor", "eth_estimateGas", [{ from: WALLET, data }])) as Hex);
 };
@@ -233,8 +234,8 @@ export async function gatherBudgetInputs(ctx: Ctx, rehearsal: DeploymentRecord, 
   const delivery = rehearsal.roundTrip?.find((s) => s.step === deliverStep);
   return {
     bitCreateGas: {
-      bitAdapter: await estimateCreate(ctx, "CcipBittensorAdapter", args("bitAdapter")),
-      vault: await estimateCreate(ctx, "CascadeVault", args("vault")),
+      bitAdapter: await estimateCreate(ctx, live, "CcipBittensorAdapter", args("bitAdapter")),
+      vault: await estimateCreate(ctx, live, "CascadeVault", args("vault")),
     },
     bitConfigGas: sumGas(rehearsal, bitCalls),
     baseDeployGas: sumGas(rehearsal, baseSteps),

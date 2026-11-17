@@ -1,4 +1,23 @@
 {
+  "v3.2-launch": {
+    "version": 3,
+    "stage": "early",
+    "usdcDelivery": true,
+    "frontDoor": "0xd1Ae29169146Ff62c9E9D4dC17c653B62fA3754e",
+    "baseAdapter": "0x0BEbdEbD94Ff1eD14a06E8fC055Afabd1465637E",
+    "staker": "0x371C5CFa5F5F6B3356fBC360EaD26066A2958B87",
+    "oracle": "0xDddd746237b923A0081630F4DcE7857De568696D",
+    "vault": "0x56544AfF15fccea33b4db189cB5B3726DBac724e",
+    "bitAdapter": "0x24B1b5eC0bB46c4F9850Ce9D75f7957eCB3B0027",
+    "vaultLens": "0xc8b3b74261489ff544cF18335778498cd6f32010",
+    "doorLens": "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f",
+    "bitBlock": "9520646",
+    "vaultSs58": "5G4DLACwJDTUhHtu62rCDqA7afCgd3m6f6TphYBShS1q6fTv",
+    "hotkeySs58": "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u",
+    "payoutDelayS": 86400,
+    "batchMaxWaitS": 86400,
+    "unstakeLimits": { "maxEntryTao": 10, "dailyOutflowPct": 20, "dailyFloorTao": 10 }
+  },
   "v3-launch": {
     "version": 3,
     "stage": "early",

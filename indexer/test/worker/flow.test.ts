@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { flowOf, type AdminLog, type FlowInput, type FlowV1, STALE_AFTER_S } from "../../src/flow.ts";
-import type { BaseState, BitState, Bucket, ChainReading } from "../../src/snapshot.ts";
-import { testConfig, tx } from "./fixtures.ts";
+import type { Hex } from "viem";
+import { doorParksOf, flowOf, type AdminLog, type FlowInput, type FlowV1, STALE_AFTER_S } from "../../src/flow.ts";
+import { PARK_TIMEOUT_S } from "../../src/parks.ts";
+import { slog } from "./rule-ctx.ts";
+import type { TrackedItem } from "../../src/scheduler.ts";
+import type { BaseState, BitState, Bucket, ChainReading, Exits, ScheduledItem } from "../../src/snapshot.ts";
+import { testConfig, testConfigV32, tx } from "./fixtures.ts";
 
 const cfg = testConfig();
 const d = cfg.deployment;
@@ -386,5 +390,175 @@ describe("flowOf", () => {
     const got = keys(f);
     expect(got.sort()).toEqual(expected.sort());
     expect(got.filter((k) => /alert|threshold|hold|rule/i.test(k.split(".").pop()!))).toEqual([]);
+  });
+
+  describe("v3.2's states and money-out figures, for the security page (the web copy audit's N1 to N5 and S9)", () => {
+    const cfg32 = testConfigV32();
+    const d32 = cfg32.deployment;
+    const PRIMARY = d32.bitAdapter.toLowerCase() as Hex;
+    const open: Exits = { open: true, ownerHold: false, guardianHold: false, pausedBy: 0, primaryDisabledBy: 0, launchDoorRemovedBy: 0, lastOwnerClose: 0, lastGuardianClose: 0, pendingSince: 0 };
+    /** a healthy v3.2 vault: 1,000 TAO priced, nothing ramping; 20% a day through this door, 30% through all; 30 TAO burned */
+    const bit32 = (o: Partial<BitState> = {}) =>
+      bitState({
+        stakeMissing: false,
+        primaryBridge: PRIMARY,
+        rails: { [PRIMARY]: { canSendPayouts: true } },
+        exits: open,
+        payoutDelay: 86_400,
+        rootStakeRao: 1000n * 10n ** 9n,
+        bookedStake: 1000n * 10n ** 9n,
+        rampingStake: 0n,
+        lastStakeAt: 0,
+        maxDailyOutflowBps: 2000n,
+        globalOutflowBps: 3000n,
+        minDailyOutflow: 10n * E18,
+        burnWindow: { start: NOW - 3600, burned: 30n * E18 },
+        globalWindow: { start: NOW - 3600, burned: 30n * E18 },
+        ...o,
+      });
+    const flow32 = (o: Partial<FlowInput> = {}, bit: Partial<BitState> = {}, base: Partial<BaseState> = {}) =>
+      flowOf(input({ cfg: cfg32, base: rd(baseState({ exits: open, ...base })), bittensor: rd(bit32(bit)), parks: [], ...o }));
+
+    it("all well: none of v3.2's notices, and the exits part: the wait before payouts, today's limit and what it has burned, nothing parked", () => {
+      const f = flow32();
+      expect(f.notices).toEqual([]);
+      expect(f.exits).toEqual({ payoutDelayS: 86_400, dailyLimit: String(200n * E18), usedToday: String(30n * E18), parked: "0", parkedRefundFrom: "none" });
+    });
+
+    it("the day's limit is the binding window's: every door's together when its rest is the smaller", () => {
+      const f = flow32({}, { globalWindow: { start: NOW - 3600, burned: 290n * E18 } });
+      expect(f.exits).toMatchObject({ dailyLimit: String(300n * E18), usedToday: String(290n * E18) });
+      // a window that ended counts nothing: today's burned is 0
+      expect(flow32({}, { burnWindow: { start: NOW - 86_500, burned: 30n * E18 }, globalWindow: { start: NOW - 86_500, burned: 30n * E18 } }).exits).toMatchObject({ usedToday: "0" });
+    });
+
+    it("unknown, never 0, while a limit or a window is unread, the delay is unread, or the Bittensor reading is stale", () => {
+      expect(flow32({}, { globalOutflowBps: undefined }).exits).toMatchObject({ dailyLimit: null, usedToday: null });
+      expect(flow32({}, { burnWindow: undefined }).exits).toMatchObject({ dailyLimit: null, usedToday: null });
+      expect(flow32({}, { payoutDelay: undefined }).exits?.payoutDelayS).toBeNull();
+      const stale = flowOf(input({ cfg: cfg32, bittensor: rd(bit32({ stakeMissing: true }), STALE_AFTER_S + 1), parks: [{ amount: E18, parkedAt: NOW - 60 }] }));
+      expect(stale.exits).toEqual({ payoutDelayS: null, dailyLimit: null, usedToday: null, parked: null, parkedRefundFrom: null });
+      expect(stale.notices).toEqual([]);
+    });
+
+    it("stake missing (N1), the vault's primary unable to send payouts (N3: its canSendPayouts()), and a route switched off (N4: a primary disabled on either chain, or the launch door removed), once", () => {
+      expect(flow32({}, { stakeMissing: true }).notices).toEqual([{ kind: "stakeMissing", chain: "bittensor", contract: d32.vault }]);
+      expect(flow32({}, { rails: { [PRIMARY]: { canSendPayouts: false } } }).notices).toEqual([{ kind: "payoutsClosed", chain: "bittensor", contract: PRIMARY }]);
+      // unread: no notice (unknown is never said as closed)
+      expect(flow32({}, { rails: { [PRIMARY]: {} } }).notices).toEqual([]);
+      expect(flow32({}, {}, { exits: { ...open, primaryDisabledBy: 1 } }).notices).toEqual([{ kind: "routeDisabled", chain: "base", contract: d32.frontDoor }]);
+      expect(flow32({}, { exits: { ...open, launchDoorRemovedBy: 2 } }).notices).toEqual([{ kind: "routeDisabled", chain: "bittensor", contract: d32.vault }]);
+      expect(flow32({}, { exits: { ...open, primaryDisabledBy: 1 } }, { exits: { ...open, primaryDisabledBy: 2 } }).notices.filter((n) => n.kind === "routeDisabled")).toHaveLength(1);
+    });
+
+    it("deposits waiting on Bittensor (N2): the front door's open parks with TAO, their sum, and when the oldest can be sent back to Base", () => {
+      const f = flow32({ parks: [{ amount: 2n * E18, parkedAt: NOW - 3600 }, { amount: E18, parkedAt: NOW - 7200 }] });
+      expect(f.exits).toMatchObject({ parked: String(3n * E18), parkedRefundFrom: NOW - 7200 + PARK_TIMEOUT_S });
+      expect(f.notices).toEqual([{ kind: "parked", chain: "bittensor", contract: d32.bitAdapter, earliest: NOW - 7200 + PARK_TIMEOUT_S }]);
+      // a park whose time isn't known: the sum, the date unknown
+      expect(flow32({ parks: [{ amount: E18 }] }).exits).toMatchObject({ parked: String(E18), parkedRefundFrom: null });
+      // the parks unread: unknown
+      expect(flow32({ parks: undefined }).exits).toMatchObject({ parked: null, parkedRefundFrom: null });
+    });
+
+    it("doorParksOf: from the park events, the front door's open parks with TAO, each with its BatchParked's time (or told by its block from the reading)", () => {
+      const AD = d32.bitAdapter;
+      const parked = (key: Hex, block: bigint, o: Record<string, string> = {}) =>
+        slog({ contract: "bitAdapter", event: "BatchParked", address: AD, block, args: { key, messageId: tx(70), recipient: d32.vault, sender: d32.frontDoor, amount: String(E18), converted: "false", reason: "0x00000000", ...o } });
+      const ended = (key: Hex, block: bigint) => slog({ contract: "bitAdapter", event: "ParkedDelivered", address: AD, block, args: { key } });
+      const K = (n: number) => tx(80 + n);
+      const logs = [
+        parked(K(1), 6_900_000n),
+        parked(K(2), 6_900_100n),
+        ended(K(2), 6_900_200n),
+        parked(K(3), 6_900_300n, { sender: "0x00000000000000000000000000000000000000e9" }),
+        parked(K(4), 6_900_400n, { amount: "0" }),
+        parked(K(5), 6_900_500n),
+      ];
+      const times = new Map([[6_900_000n, NOW - 10_000]]);
+      expect(doorParksOf(logs, d32, (b) => times.get(b), { block: 6_901_000n, time: NOW })).toEqual([
+        { amount: E18, parkedAt: NOW - 10_000 },
+        { amount: E18, parkedAt: NOW - 500 * 12 },
+      ]);
+      expect(doorParksOf(logs, d32, () => undefined, undefined)).toEqual([{ amount: E18 }, { amount: E18 }]);
+      // told by its block at Bittensor's block time as measured (6 s a block here)
+      expect(doorParksOf(logs, d32, (b) => times.get(b), { block: 6_901_000n, time: NOW }, 6)[1]).toEqual({ amount: E18, parkedAt: NOW - 500 * 6 });
+    });
+
+    it("v3.2's document is the allow-listed shape with the exits part; v3-launch's has none", () => {
+      const keys = (v: unknown, path = ""): string[] =>
+        v && typeof v === "object" && !Array.isArray(v) ? Object.entries(v).flatMap(([k, x]) => [`${path}${k}`, ...keys(x, `${path}${k}.`)]) : [];
+      expect(keys(flow32()).filter((k) => k.startsWith("exits"))).toEqual(["exits", ...["payoutDelayS", "dailyLimit", "usedToday", "parked", "parkedRefundFrom"].map((k) => `exits.${k}`)]);
+      expect(flowOf(input())).not.toHaveProperty("exits");
+    });
+  });
+
+  describe("v3.2's pending scheduled items, from the record the admin rules keep and the lens's reads", () => {
+    const cfg32 = testConfigV32();
+    const d32 = cfg32.deployment;
+    const DAY = 86_400;
+    const G = "0x00000000000000000000000000000000000000b2" as Hex;
+    const open: Exits = { open: true, ownerHold: false, guardianHold: false, pausedBy: 0, primaryDisabledBy: 0, launchDoorRemovedBy: 0, lastOwnerClose: 0, lastGuardianClose: 0, pendingSince: 0 };
+    const item = (o: Partial<TrackedItem> = {}): TrackedItem => ({
+      chain: "bittensor",
+      role: "vault",
+      id: tx(51),
+      kind: 1,
+      selector: "0xa7016023",
+      readyAt: NOW + 2 * DAY,
+      data: "0xa701602300000000000000000000000000000000000000000000000000000000000000b2",
+      setter: "setGuardian",
+      args: { newGuardian: G },
+      canonical: true,
+      uid: tx(52),
+      block: "6900200",
+      tx: tx(53),
+      ...o,
+    });
+    const lensItem = (i: TrackedItem, o: Partial<ScheduledItem> = {}): ScheduledItem => ({ scheduledAt: i.readyAt - 8 * DAY, readyAt: i.readyAt, class: 2, kind: i.kind, selector: i.selector, readyBlock: 1n, ...o });
+    const at = (i: TrackedItem, read?: ScheduledItem, exits: Exits = open) => rd(bitState({ exits, msPerBlock: 7_200, scheduled: read ? { [i.id]: read } : {} }));
+
+    it("shows each pending item with its kind, setter, arguments, readyAt and the transaction that scheduled it", () => {
+      const i = item();
+      const f = flowOf(input({ cfg: cfg32, bittensor: at(i, lensItem(i)), items: [i] }));
+      expect(f.notices).toEqual([
+        { kind: "itemScheduled", chain: "bittensor", contract: d32.vault, target: G, earliest: i.readyAt, tx: i.tx, item: { id: i.id, kind: "GuardianSwap", setter: "setGuardian", args: { newGuardian: G } } },
+      ]);
+      // a front door item without an address argument names no target
+      const fd = item({ chain: "base", role: "frontDoor", id: tx(61), setter: "setBatchInterval", args: { interval: "300" }, kind: 0 });
+      const g = flowOf(input({ cfg: cfg32, base: rd(baseState({ exits: open, scheduled: { [fd.id]: lensItem(fd) } })), items: [fd] }));
+      expect(g.notices).toEqual([{ kind: "itemScheduled", chain: "base", contract: d32.frontDoor, earliest: fd.readyAt, tx: fd.tx, item: { id: fd.id, kind: "Ordinary", setter: "setBatchInterval", args: { interval: "300" } } }]);
+    });
+
+    it("an item the lens hasn't read, or a stale chain's, is still shown: unread is never 'nothing pending'", () => {
+      const i = item();
+      expect(flowOf(input({ cfg: cfg32, bittensor: at(i), items: [i] })).notices).toHaveLength(1);
+      expect(flowOf(input({ cfg: cfg32, bittensor: rd(bitState({}), STALE_AFTER_S + 1), items: [i] })).notices).toHaveLength(1);
+      expect(flowOf(input({ cfg: cfg32, bittensor: null, items: [i] })).notices).toHaveLength(1);
+      // an item whose calldata didn't decode: shown, setter and arguments unknown
+      const odd = item({ setter: undefined, args: undefined, canonical: undefined });
+      expect(flowOf(input({ cfg: cfg32, bittensor: at(odd), items: [odd] })).notices[0]).toMatchObject({ item: { setter: null, args: null } });
+    });
+
+    it("leaves out an item the lens reads gone, one a closure or stamp killed, and one past its window", () => {
+      const i = item();
+      expect(flowOf(input({ cfg: cfg32, bittensor: at(i, { ...lensItem(i), readyAt: 0, scheduledAt: 0 }), items: [i] })).notices).toEqual([]);
+      expect(flowOf(input({ cfg: cfg32, bittensor: at(i, lensItem(i), { ...open, lastOwnerClose: i.readyAt - 8 * DAY }), items: [i] })).notices).toEqual([]);
+      // past both its windows: in time, and its readyBlock (1) plus 42,000 calibrated blocks (7,200 ms) before the reading's
+      const old = item({ readyAt: NOW - 7 * DAY - 100 });
+      expect(flowOf(input({ cfg: cfg32, bittensor: { ...at(old, lensItem(old)), block: 100_000n }, items: [old] })).notices).toEqual([]);
+      // past its window in time only, its blocks still to come (Revision 28): it can still run, so it is shown; and with
+      // MS_PER_BLOCK unread, unknown, shown too
+      expect(flowOf(input({ cfg: cfg32, bittensor: { ...at(old, lensItem(old)), block: 42_001n }, items: [old] })).notices).toHaveLength(1);
+      const unread = at(old, lensItem(old));
+      expect(flowOf(input({ cfg: cfg32, bittensor: { ...unread, block: 100_000n, state: { ...unread.state, msPerBlock: undefined } }, items: [old] })).notices).toHaveLength(1);
+    });
+
+    it("leaves out a finished item (the record marks it: past its window, killed, or reverting at execute), even while the lens hasn't read it", () => {
+      const done = item({ lapsed: true });
+      expect(flowOf(input({ cfg: cfg32, bittensor: at(done), items: [done] })).notices).toEqual([]);
+      expect(flowOf(input({ cfg: cfg32, bittensor: null, items: [done] })).notices).toEqual([]);
+      expect(flowOf(input({ cfg: cfg32, bittensor: at(done, lensItem(done)), items: [done] })).notices).toEqual([]);
+    });
   });
 });

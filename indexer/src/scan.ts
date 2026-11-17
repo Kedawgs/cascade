@@ -1,6 +1,6 @@
 import { type Hex, hexToBigInt, hexToNumber } from "viem";
 import { blocksIn } from "./blocktime.ts";
-import type { ChainName, RoleOf } from "./config.ts";
+import type { ChainName, RoleOf, Version } from "./config.ts";
 import { decode, identityOf, type RawLog, type StoredLog, type StoredRef, sortByPosition, storedIdentity, uidFor } from "./logs.ts";
 import { type Budget, BudgetExhausted, type Rpc, RpcError } from "./rpc.ts";
 
@@ -17,9 +17,9 @@ export const REREAD_S: Record<ChainName, number> = { base: 140, bittensor: 4_800
  * (300), 120 s of Bittensor's (10). */
 export const SETTLE_S: Record<ChainName, number> = { base: 60, bittensor: 120 };
 /** The block time the margins are counted at while a chain's own is unknown (a new store's first ticks, before three
- * readings span 100 s): the block times they were set at, Base's 2 s and Bittensor's 12 s, so the counts they always
- * had (70 and 30, 400 and 10); the first tick that knows it re-reads its full depth. */
-export const MARGIN_FALLBACK_S: Record<ChainName, number> = { base: 2, bittensor: 12 };
+ * readings span 100 s): the chains' block times today, Base's 0.2 s (since block 53,556,128) and Bittensor's 12 s, so the
+ * full depths (700 and 300, 400 and 10), erring high on blocks (the keeper's are the same: a test holds them equal). */
+export const MARGIN_FALLBACK_S: Record<ChainName, number> = { base: 0.2, bittensor: 12 };
 
 /** A chain's re-read and settle margins for one tick, in blocks. */
 export interface Margins {
@@ -109,6 +109,8 @@ export async function scanChain(o: {
   rpc: Rpc;
   chain: ChainName;
   roleOf: RoleOf;
+  /** the deployment's contracts version, whose events the logs are decoded with (v3.1 unless given) */
+  version?: Version;
   addresses: Hex[];
   /** other addresses read in the same requests, for these topics only (ForeverMoney's admin events: watchFilters) */
   watch?: { address: Hex[]; topics: readonly Hex[] };
@@ -148,7 +150,7 @@ export async function scanChain(o: {
    * transaction, index and block with the same content is the stored one, recognised without a hash. */
   const byPlace = new Map<string, { uid: Hex; what: string }>();
   for (const [uid, s] of o.stored) {
-    const what = storedIdentity(s);
+    const what = storedIdentity(s, o.version);
     if (what !== undefined) byPlace.set(`${s.txHash}:${s.logIndex}:${s.block}`, { uid, what });
   }
 
@@ -182,7 +184,7 @@ export async function scanChain(o: {
         if (o.decodeBudget.left > 0) o.decodeBudget.spend();
         const uid = uidFor(chain, i.what, i.n);
         // the same log at another index of the same block: nothing to write
-        const log = o.stored.get(uid)?.block === block ? undefined : decode(chain, { uid, raw: i.raw }, o.roleOf);
+        const log = o.stored.get(uid)?.block === block ? undefined : decode(chain, { uid, raw: i.raw }, o.roleOf, o.version);
         read.push({ log, uid, block });
       }
     }

@@ -118,7 +118,7 @@ export async function pauseCommand(
       try {
         gas = hexToBigInt((await ctx.rpc.request(chain, "eth_estimateGas", [{ from: who, to: address, data }])) as Hex);
       } catch (e) {
-        problem(`${where}: ${call} from the ${role} ${who} would fail (${describeRevert(ctx, e)}); nothing sent`);
+        problem(`${where}: ${call} from the ${role} ${who} would fail (${describeRevert(e)}); nothing sent`);
         continue;
       }
       // the node takes a transaction only when the key can pay its whole gas limit (the send's 1.25×

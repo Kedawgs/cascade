@@ -1,10 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useNow } from "@/lib/client-state";
 import { useFlow } from "@/lib/cascade/hooks";
-import { DEPLOYMENT } from "@/lib/cascade/config";
-import { contractsOf } from "@/lib/security-content";
+import { DEPLOYMENT, type Deployment, isV32, sourcePublished } from "@/lib/cascade/config";
+import { contractsLabel, contractsOf } from "@/lib/security-content";
 import { flowView, heroNumbers, type HeroStat, type PageView, type StepId, type StepView } from "@/lib/security-view";
 import { SITE_LINKS } from "@/lib/site";
 import landing from "../landing/Landing.module.css";
@@ -39,8 +40,8 @@ function Hero({ view }: { view: PageView }) {
   const contracts = contractsOf(DEPLOYMENT).length;
   const facts: HeroStat[] = [
     ...row,
-    { value: "7 days", label: "Public notice before any contract change" },
-    ...(contracts > 0 ? [{ value: String(contracts), label: "Contracts, all open source" }] : []),
+    { value: "7 days", label: "Public notice before a new bridge or front door" },
+    ...(contracts > 0 ? [{ value: String(contracts), label: contractsLabel(sourcePublished(DEPLOYMENT)) }] : []),
   ];
   return (
     <header className={`${landing.hero} ${styles.heroBand}`}>
@@ -50,7 +51,7 @@ function Hero({ view }: { view: PageView }) {
           <strong>Security</strong>
         </h1>
         <div>
-          <p className={styles.heroLede}>Every number on this page is read from the chain every minute, with a link to check it yourself.</p>
+          <p className={styles.heroLede}>The live numbers on this page are read from the chain every minute, each with a link to check it yourself.</p>
           <dl className={styles.leadStats}>
             {lead.map((s) => (
               <div key={s.label} className={styles.leadStat}>
@@ -107,6 +108,17 @@ function Details({ step, className }: { step: StepView; className: string }) {
         </dl>
       )}
     </div>
+  );
+}
+
+/** Under the money-out map, v3.2 only: the way out that skips Base and the bridge. `deployment`: the site's (config). */
+export function DirectExit({ deployment = DEPLOYMENT }: { deployment?: Deployment | null }) {
+  if (!isV32(deployment)) return null;
+  return (
+    <p className={styles.statusDetail}>
+      There is a second way out that skips Base and the bridge: a regular wallet can{" "}
+      <Link href="/unstake/bittensor/">withdraw straight from the vault on Bittensor</Link>.
+    </p>
   );
 }
 
@@ -242,6 +254,7 @@ export function SecurityPage() {
         </ol>
 
         <Details step={selected} className={styles.detail} />
+        {dir === "out" && <DirectExit />}
 
         <ProtectedSection />
         <ContractsSection />

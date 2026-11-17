@@ -25,7 +25,10 @@ export function pendingEntry(op: Operation): PendingEntry | null {
   const createdAt = new Date(op.createdAt);
   if (op.kind === "withdrawal") {
     return {
-      notice: { kind: "unstake", id: op.id, tao: toDisplay(op.taoEstimate, 18), usdc: toDisplay(op.usdcEstimate, 6) },
+      // v3.2: one asked as TAO has no USDC estimate to show
+      notice: op.keepTao
+        ? { kind: "unstake", id: op.id, tao: toDisplay(op.taoEstimate, 18), keepTao: true }
+        : { kind: "unstake", id: op.id, tao: toDisplay(op.taoEstimate, 18), usdc: toDisplay(op.usdcEstimate, 6) },
       createdAt,
       ...(op.hash ? { txUrl: explorer.baseTx(op.hash) } : {}),
     };

@@ -5,17 +5,23 @@ import { type FormEvent, type RefObject, useId, useReducer, useRef, useState } f
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
-import { useBalances, useDepositQuote, useIsV3, useLimits, useProtocolStats, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
+import { useBalances, useDepositQuote, useIsV3, useIsV32, useLimits, useOpenBatch, usePosition, useProof, useProtocolStats, useRetired, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
+import { impactNote, impactRowText } from "@/lib/cascade/impact";
+import { CLOSABLE_GAP_MS } from "@/lib/cascade/live";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { useWalletKind } from "@/lib/cascade/use-wallet-kind";
+import { useNow } from "@/lib/client-state";
 import { formatUsd, parseAmount } from "@/lib/format";
+import { CLOSE_FIRST_RECHECKING, closeFirstView } from "@/lib/send-now";
 import { depositNotice } from "@/lib/sent";
 import {
   breakEvenDays,
   breakEvenText,
   cascadeFeesText,
+  closeFirstNeeded,
   contractWalletNote,
   etaText,
+  originDepositNote,
   stakeMaxInput,
   POOL_FEES_TEXT,
   stakeAmountText,
@@ -23,15 +29,23 @@ import {
   stakeFootText,
   stakeFormNote,
   stakeFormReducer,
+  stakeHold,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
 import { Dash } from "../Dash";
 import { AmountField } from "./AmountField";
+import { RetiredNotice } from "./RetiredNotice";
 import { SentDialog } from "./SentDialog";
 import styles from "./StakeForm.module.css";
 
 /** Less than this much ETH on Base can't pay for the swap and deposit. */
 const LOW_ETH_WEI = 5n * 10n ** 13n;
+
+/** R10 (M-1): whether the limits' reading can time the paid close (send-now.ts closeFirstView): React Query goes on
+ * showing the last reading through a failed refresh ("unread") and a hidden tab's stopped ones ("old": older than
+ * CLOSABLE_GAP_MS, two refreshes), so neither counts until a fresh one comes. */
+const limitsFreshness = (l: { isError: boolean; dataUpdatedAt: number }, now: number): "fresh" | "old" | "unread" =>
+  l.isError ? "unread" : now - l.dataUpdatedAt > CLOSABLE_GAP_MS ? "old" : "fresh";
 
 function usdcUnits(raw: string): bigint | null {
   try {
@@ -55,16 +69,7 @@ export function PriceStrip() {
   );
 }
 
-/**
- * The stake form used on the stake page and the landing page. With no account it
- * still quotes, but the button becomes the wallet chooser.
- */
-export function StakeForm({
-  account,
-  initialAmount = "",
-  maxUsdc = null,
-  amountRef,
-}: {
+interface StakeFormProps {
   account: string | null;
   /** Pre-filled amount, as typed text. */
   initialAmount?: string;
@@ -72,16 +77,34 @@ export function StakeForm({
   maxUsdc?: number | null;
   /** The amount input, when the owner wants focus there too (after its own panel closes). */
   amountRef?: RefObject<HTMLInputElement | null>;
-}) {
+}
+
+/**
+ * The stake form used on the stake page and the landing page. With no account it
+ * still quotes, but the button becomes the wallet chooser. On a retired deployment (Task 60) there is no stake: the
+ * plan's sentence takes its place, on both pages.
+ */
+export function StakeForm(props: StakeFormProps) {
+  const retired = useRetired();
+  return retired ? <RetiredNotice /> : <StakeFormBody {...props} />;
+}
+
+function StakeFormBody({ account, initialAmount = "", maxUsdc = null, amountRef }: StakeFormProps) {
   const ownRef = useRef<HTMLInputElement>(null);
   const amountInput = amountRef ?? ownRef;
   const v3 = useIsV3();
+  const v32 = useIsV32();
+  // v3.2: while the vault lens reads stake missing, a stake would only park: held, with the reason (stake-form.ts)
+  const proof = useProof(false, v32);
+  const hold = v32 ? stakeHold(proof.data) : null;
   const limits = useLimits();
   const balances = useBalances(account);
   const flows = useFlows(account);
   const [{ raw, sent }, dispatch] = useReducer(stakeFormReducer, { raw: initialAmount, sent: null });
   const setRaw = (v: string) => dispatch({ type: "edit", raw: v });
   const [opId, setOpId] = useState<string | null>(null);
+  // R12d: a click on an aged reading is reading the limits again (onSubmit), and says so
+  const [rechecking, setRechecking] = useState(false);
   const inputId = useId();
   const noteId = useId();
   // a contract account (not a plain or EIP-7702 one) is told how it can leave once it starts to stake:
@@ -94,10 +117,26 @@ export function StakeForm({
     if (kind.data !== undefined) setStarted(true);
   };
   const walletNote = started && kind.data ? contractWalletNote(kind.data) : null;
+  // v3.2 (R6, claim B): a stake into an address that already withdraws on Bittensor could leave only there, so the form
+  // warns before it, with the first input (as the note above) or once an amount is typed
+  const position = usePosition(account ?? "", false, v32 && account !== null);
+  const originNote = v32 && account && (started || raw !== "") ? originDepositNote(position.data) : null;
 
   const amount = parseAmount(raw);
   const lim = limits.data;
-  const { error, note } = stakeFormNote(amount, limits, account ? maxUsdc : null);
+  const formNote = stakeFormNote(amount, limits, account ? maxUsdc : null);
+  // v3.2 (R8): the full open batch is all that stops this stake, and it can be sent first: the form offers to send it,
+  // then stake (flows.closeThenStake), saying what the close costs (send-now.ts closeFirstView, from the open batch read).
+  // R9 (M-2): only once reads a refresh apart still find the same batch closable (the keeper's free close comes first),
+  // and as due, not full, when it can close by time alone; R9 (L-1): the click closes only the batch the note priced;
+  // R10 (M-1): held while the limits' reading isn't fresh (the click reads them again and holds the clock to that read)
+  const after = lim?.afterClose;
+  const closeFirst = v32 && account !== null && after !== undefined && closeFirstNeeded(amount, lim, maxUsdc);
+  const openBatch = useOpenBatch(account ?? "", closeFirst);
+  const now = useNow(15_000);
+  const closeView = closeFirst && after ? closeFirstView({ batch: openBatch.data, unread: openBatch.isError, after, limits: limitsFreshness(limits, now) }) : null;
+  const error = closeFirst ? null : formNote.error;
+  const note = closeView ? closeView.note : formNote.note;
   // MAX waits for the limits as well as the balance
   const maxInput = stakeMaxInput(maxUsdc, lim);
   const units = lim && amount !== null && amount > 0 && error === null ? usdcUnits(raw) : null;
@@ -105,8 +144,10 @@ export function StakeForm({
   // ignore the previous amount's quote while the new one loads
   const quote = units !== null && quoteQuery.data?.usdcIn === units ? quoteQuery.data : undefined;
   const pending = flows.busy === "stake";
+  // v3.2: the swap's own price impact, warned from 1% and refused above 3% (impact.ts); none on other deployments
+  const impact = v32 ? impactNote(quote) : null;
   const lowEth = account !== null && balances.data !== undefined && balances.data.eth < LOW_ETH_WEI;
-  const label = stakeButtonLabel({ account, amount, error, pending, dollars: v3 });
+  const label = stakeButtonLabel({ account, amount, error, pending, dollars: v3, closeFirst });
   // v3: what leaving costs, read apart from the quote so it never holds up the button; to the 0.001
   // TAO, so the quote's refreshes don't each ask Bittensor again (the bridge fee barely moves with size)
   const roundTrip = useRoundTrip(v3 && quote ? (quote.targetTao / 10n ** 15n) * 10n ** 15n : null);
@@ -118,10 +159,19 @@ export function StakeForm({
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!account || !quote || pending) return;
+    if (!account || !quote || pending || hold !== null || impact?.refused || closeView?.disabled) return;
+    const priced = closeView?.batchId;
+    if (closeView && priced === undefined) return;
+    // R10 (M-1): the view may be from a render before the reading aged (a tab just shown again): read the limits again;
+    // R12d: saying so while it does, never a click that seems to do nothing
+    if (closeView && limitsFreshness(limits, Date.now()) !== "fresh") {
+      setRechecking(true);
+      void limits.refetch().finally(() => setRechecking(false));
+      return;
+    }
     start();
     setOpId(null);
-    flows.stake(quote, setOpId).then(
+    (closeView && priced !== undefined ? flows.closeThenStake(quote, priced, setOpId) : flows.stake(quote, setOpId)).then(
       // cleared before the refreshed balance arrives, which counts this stake, and confirmed in a panel
       // (stakeFormReducer)
       (id) => dispatch({ type: "sent", notice: depositNotice(id, quote) }),
@@ -165,13 +215,42 @@ export function StakeForm({
       </p>
 
       {account ? (
-        <button type="submit" className={`pill pill-block ${styles.submit}`} disabled={!quote || pending || lowEth || flows.blocked !== null}>
+        <button
+          type="submit"
+          className={`pill pill-block ${styles.submit}`}
+          disabled={!quote || pending || lowEth || hold !== null || flows.blocked !== null || impact?.refused === true || closeView?.disabled === true}
+        >
           {label}
         </button>
       ) : (
         <div className={styles.submit}>
           <ConnectWallet variant="pill-block" />
         </div>
+      )}
+      {rechecking && (
+        <p role="status" className={styles.note}>
+          {CLOSE_FIRST_RECHECKING}
+        </p>
+      )}
+      {closeView?.warning && (
+        <p role="status" className={styles.error}>
+          {closeView.warning}
+        </p>
+      )}
+      {hold && (
+        <p role="status" className={styles.error}>
+          {hold}
+        </p>
+      )}
+      {impact && (
+        <p role={impact.refused ? "status" : undefined} className={impact.refused ? styles.error : styles.note}>
+          {impact.text}
+        </p>
+      )}
+      {originNote && (
+        <p role="status" className={styles.error}>
+          {originNote}
+        </p>
       )}
       {account && walletNote && <p className={styles.under}>{walletNote}</p>}
       {lowEth && (
@@ -207,6 +286,12 @@ export function StakeForm({
               <dt>Pool fees</dt>
               <dd>{quote ? POOL_FEES_TEXT : "–"}</dd>
             </div>
+            {v32 && (
+              <div>
+                <dt>Price impact</dt>
+                <dd>{quote?.impact ? impactRowText(quote.impact) : "–"}</dd>
+              </div>
+            )}
           </>
         ) : (
           <>

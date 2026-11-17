@@ -8,7 +8,8 @@ import type { Entry } from "./replay.ts";
 
 // The payout cross-check (spec 6.2, "Payouts, Bittensor → Base"): one landing of a payout chunk on Base
 // against the chunk the vault sent, rebuilt from the vault's events (CascadeVault.sol v3.1:
-// processPayouts, _takeChunk, _deductFee).
+// processPayouts, _takeChunk, _deductFee; v3.2: CascadePayoutLib's prepare and finish, CascadePayoutMath.deductFee,
+// and cancel's carry-forward).
 
 /** One entry of a payout batch as the vault queued it (CascadeMessages.Payout). */
 export interface Payout {
@@ -32,7 +33,10 @@ const same = (a: unknown, b: Hex) => typeof a === "string" && a.toLowerCase() ==
 const byPosition = (a: StoredLog, b: StoredLog) => (a.block !== b.block ? (a.block < b.block ? -1 : 1) : a.logIndex - b.logIndex);
 
 /** A payout batch's list: its DepositBounced entries (0 shares) first, then its Redeemed entries, each in
- * log order, as ops/src/keeper/payouts.ts rebuildPayouts builds it. */
+ * log order, as ops/src/keeper/payouts.ts rebuildPayouts builds it. A v3.2 cancel that carries bounced entries
+ * forward (PayoutBatchCancelled's bouncesCarried, spec §3.10.15) keeps the unsent ones, the tail of the bounces from
+ * the cursor on, as the batch's new list with the cursor at 0 and the chunk numbers going on: the same entries this
+ * list holds from the old cursor, so the chunks after it are placed by every earlier chunk's `taken` as before. */
 export function payoutList(vaultLogs: readonly StoredLog[], key: Hex): Payout[] {
   const mine = vaultLogs.filter((l) => l.contract === "vault" && same(l.args.key, key)).sort(byPosition);
   return [
@@ -41,8 +45,13 @@ export function payoutList(vaultLogs: readonly StoredLog[], key: Hex): Payout[] 
   ];
 }
 
-/** A chunk's entries as _deductFee sends them: the list's [cursor, cursor + taken), each paid
- * assets − ceil(assets × fee / gross) (at least 0), floored to rao, zeros dropped. */
+/** What a chunk's entries bore of its PayoutChunkSent, split over them: v3.2's charged + unstakeCost (the fee the
+ * bridge was paid may be more: the caller's top-up), v3.1's fee. */
+export const borneBy = (args: StoredLog["args"]): bigint => (args.charged !== undefined ? big(args.charged) + big(args.unstakeCost) : big(args.fee));
+
+/** A chunk's entries as _deductFee (v3.1) and CascadePayoutMath.deductFee (v3.2) send them: the list's [cursor,
+ * cursor + taken), each paid assets − ceil(assets × borne / gross) (at least 0), floored to rao, zeros dropped;
+ * `borne` is borneBy's. */
 export function chunkEntries(list: readonly Payout[], cursor: number, taken: number, gross: bigint, fee: bigint): Entry[] {
   return list.slice(cursor, cursor + taken).flatMap((p) => {
     const cut = gross === 0n ? 0n : (p.assets * fee + gross - 1n) / gross;
@@ -127,7 +136,7 @@ export function checkPayout(i: {
   const list = payoutList(i.vaultLogs, key);
   const taken = Number(sent.args.taken);
   if (cursor + taken > list.length) return fail(PAYOUT_STEPS.entries, `entries ${cursor}–${cursor + taken - 1} of a list of ${list.length}`, { sentTx, messageId });
-  const entries = chunkEntries(list, cursor, taken, big(sent.args.gross), big(sent.args.fee));
+  const entries = chunkEntries(list, cursor, taken, big(sent.args.gross), borneBy(sent.args));
   const sum = entries.reduce((s, e) => s + e.amount, 0n);
   if (sum !== net) return fail(PAYOUT_STEPS.entries, `the rebuilt entries pay ${sum}, the chunk's net ${net}`, { sentTx, messageId });
   const received = group.events.filter((e) => e.event === "PayoutReceived" && same(e.args.batchKey, key) && Number(e.args.chunk) === chunk);

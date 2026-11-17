@@ -4,7 +4,7 @@ import { RPC } from "./cascade/config";
 import { wagmiConfig } from "./wagmi";
 
 describe("the wallet config", () => {
-  it("knows Base only: nothing the site sends goes to any other chain", () => {
+  it("knows Base only: every flow sends on Base (the emergency page on Bittensor asks the wallet itself, use-direct-exit.ts)", () => {
     expect(wagmiConfig.chains.map((c) => c.id)).toEqual([base.id]);
     expect(Object.keys(wagmiConfig._internal.transports).map(Number)).toEqual([base.id]);
   });

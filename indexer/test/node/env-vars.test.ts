@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DB_BINDING } from "../../scripts/d1.ts";
 import { pkg, readJsonc } from "./files.ts";
 
 interface Wrangler {
@@ -20,6 +21,26 @@ describe("the environments' vars in wrangler.jsonc", () => {
       const vars = env[name]?.vars ?? {};
       expect(Object.fromEntries(BUDGETS.map((b) => [b, vars[b]])), name).toEqual(paid);
     }
+  });
+
+  it("name STANDBY_HOTKEY in both: blank for test (v3-test has no standby), the plan's standby validator (Yuma) for production's v3.2-launch", () => {
+    expect(env.test?.vars?.STANDBY_HOTKEY).toBe("");
+    expect(env.production?.vars?.STANDBY_HOTKEY).toBe("0x40c47b6a294686fe9612b5d78dd369f4c77fa3bbf96a4286ede97410ba2e3209");
+  });
+
+  it("production is the v3.2 deployment (Task 67, 2026-11-16: DEPLOYMENT.version v3.2, stage early, so v3.2's events and the lenses' readings); test stays on v3-test's contracts, with no version", () => {
+    const deployment = (name: string) => env[name]?.vars?.DEPLOYMENT as Record<string, unknown> | undefined;
+    expect(deployment("test")?.version).toBeUndefined();
+    expect([deployment("production")?.version, deployment("production")?.stage]).toEqual(["v3.2", "early"]);
+  });
+
+  it("give the database the binding the owner's scripts name (DB) in both; production's is v3.2-launch's own database, never v3-launch's", () => {
+    const dbs = (name: string) => (env[name] as { d1_databases?: { binding: string; database_name: string; database_id: string }[] } | undefined)?.d1_databases ?? [];
+    for (const name of ["test", "production"]) expect(dbs(name).map((d) => d.binding), name).toEqual([DB_BINDING]);
+    expect(DB_BINDING).toBe("DB");
+    expect(dbs("production")[0]).toMatchObject({ database_name: "cascade-indexer-production-v32", database_id: "6c5a5b11-a36b-4352-beba-b61e7d2b142f" });
+    // v3-launch's database: a tick refuses a DEPLOYMENT changed under it, so v3.2 is never pointed back at it
+    expect(dbs("production")[0]?.database_id).not.toBe("1bfa3258-3d46-4beb-b0c4-6a9e26fa9fc7");
   });
 
   it("ship fmtao.backing_true without its hold in both (BACKING_HOLD false until a week of readings has set its tolerance)", () => {

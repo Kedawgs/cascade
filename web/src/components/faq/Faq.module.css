@@ -71,6 +71,8 @@
   font-size: 17px;
   line-height: 1.6;
   color: var(--ink-2);
+  /* a token's address (See your TAO in your wallet) breaks rather than running past a phone's edge */
+  overflow-wrap: anywhere;
 }
 
 .a p {
@@ -84,6 +86,20 @@
 .a a {
   color: var(--water-deep);
   text-underline-offset: 3px;
+}
+
+/* a button under an answer (Add to wallet), and what it says came of it */
+.action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 14px;
+}
+
+.action p {
+  margin: 0;
+  font-size: 14px;
 }
 
 /* the app's narrower column */

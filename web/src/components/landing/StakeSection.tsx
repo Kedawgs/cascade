@@ -1,6 +1,7 @@
 "use client";
 
 import { useCascadeAccount } from "@/lib/account";
+import { useRetired } from "@/lib/cascade/hooks";
 import { STAKE_POINTS as POINTS } from "@/lib/landing";
 import { useUsdcBalance } from "@/lib/use-usdc-balance";
 import { availableToStake } from "@/lib/usdc-balance";
@@ -17,10 +18,13 @@ function Tick() {
   );
 }
 
+/** The landing page's stake section; none on a retired deployment (Task 60 follow-up), whose hero says it is retired. */
 export function StakeSection() {
   const { state } = useCascadeAccount();
   const account = state.status === "wallet" ? state.account : null;
   const balance = useUsdcBalance();
+  const retired = useRetired();
+  if (retired) return null;
 
   return (
     <section id="stake" className={styles.stakeWrap} aria-labelledby="stake-heading">

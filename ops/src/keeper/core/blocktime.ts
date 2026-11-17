@@ -1,13 +1,13 @@
 import { type Hex, hexToNumber, numberToHex } from "viem";
-import type { ChainName } from "../config.ts";
-import type { Rpc } from "../rpc.ts";
+import type { Rpc } from "./rpc.ts";
+import type { ChainName } from "./types.ts";
 
-// A chain's block time, measured from its block headers, never assumed: Base went from 2-second blocks to 200 ms ones at
-// block 53,556,128 (2026-11-05 18:00 UTC), so a count of blocks that meant half an hour before means three minutes
-// after. Every figure that turns a time into blocks (a look-back, a block at a time, the oracle pools' history) reads it
-// here, so a later change of either chain's block time needs no change of code.
+// A chain's block time, measured from two of its block headers, never assumed: Base went from 2-second blocks to 200 ms
+// ones at block 53,556,128 (2026-11-05 18:00 UTC), so a count of blocks that meant an hour before means six minutes after.
+// Every figure that turns a time into blocks (a look-back, a block near a time, how long blocks last) reads it here, so a
+// later change of either chain's block time needs no change of code.
 
-/** How far apart the headers are, in blocks: about 200 s of Base's and an hour of Bittensor's today, so whole-second
+/** How far apart the two headers are, in blocks: about 200 s of Base's and an hour of Bittensor's today, so whole-second
  * timestamps give the block time to within one percent. */
 export const BLOCK_TIME_SPAN: Record<ChainName, bigint> = { base: 1_000n, bittensor: 300n };
 
@@ -79,14 +79,9 @@ export function blockTimeOf(rpc: Rpc, chain: ChainName, head?: BlockAt): Promise
 /** The blocks `chain` makes in `seconds` at `blockS` seconds a block, rounded up. */
 export const blocksIn = (seconds: number, blockS: number): bigint => BigInt(Math.ceil(seconds / blockS));
 
-/** The block time a margin (keeper/state.ts REREAD_S and SETTLE_S, registry.ts's; the indexer's the same) is counted at
- * while a chain's own can't be read: the block times the margins were set at, Base's 2 s (until block 53,556,128) and
- * Bittensor's 12 s, so they count the blocks they always did then; the next read that measures it re-reads the full
- * depth. */
-export const MARGIN_FALLBACK_S: Record<ChainName, number> = { base: 2, bittensor: 12 };
-
-/** `seconds` of `chain`'s blocks at its block time measured from `rpc`'s headers (blockTimeOf), or at MARGIN_FALLBACK_S
- * while that can't be read. Never throws. */
-export async function marginBlocks(rpc: Rpc, chain: ChainName, seconds: number): Promise<bigint> {
-  return blocksIn(seconds, await blockTimeOf(rpc, chain).catch(() => MARGIN_FALLBACK_S[chain]));
-}
+/** The block time a margin (logs.ts REREAD_S and SETTLE_S; the indexer's the same) is counted at while a chain's own was
+ * never measured (logs.ts marginsOf keeps the last one measured in the keeper's memory): Base's 0.2 s (since block
+ * 53,556,128) and Bittensor's 12 s, the chains' block times today. Erring high on blocks, the safe side everywhere a margin
+ * is used: a fallback of Base's old 2 s would re-read and settle a tenth of the time, and let a first run raise its scans'
+ * seenFrom past blocks the next run should re-read (review Minor 1). */
+export const MARGIN_FALLBACK_S: Record<ChainName, number> = { base: 0.2, bittensor: 12 };

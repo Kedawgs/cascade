@@ -17,7 +17,7 @@ import type { BaseState, BitState, Bucket, HourAgg } from "../../src/snapshot.ts
 import { loadTickState } from "../../src/store.ts";
 import { DEFAULTS } from "../../src/thresholds.ts";
 import { wipe } from "./d1-count.ts";
-import { testConfig } from "./fixtures.ts";
+import { testConfig, testConfigV32 } from "./fixtures.ts";
 import { baseState, bitState, reading, ruleCtx } from "./rule-ctx.ts";
 
 // A condition resolves only on a reading that shows it cleared. A rule that can't judge it (this tick's reading
@@ -226,9 +226,9 @@ describe("the dependency conditions, unread", () => {
     expect(judged(deps.ccipRateLimited, ctx({ base: { lane }, bit: { lane } }))).toEqual(CLEAR);
   });
 
-  it("root.unlock_interval, oracle.cardinality, oracle.reverted and payout.fee_ceiling: the field unread is unjudged, read and fine is clear", () => {
-    expect(judged(deps.rootUnlockInterval, ctx({ bit: {} }))).toEqual(blind([{ rule: "root.unlock_interval", key: "root.unlock_interval" }]));
-    expect(judged(deps.rootUnlockInterval, ctx({ bit: { rootUnlockInterval: 0n } }))).toEqual(CLEAR);
+  it("root.hold_interval, oracle.cardinality, oracle.reverted and payout.fee_ceiling: the field unread is unjudged, read and fine is clear", () => {
+    expect(judged(deps.rootHoldInterval, ctx({ bit: {} }))).toEqual(blind([{ rule: "root.hold_interval", key: "root.hold_interval" }]));
+    expect(judged(deps.rootHoldInterval, ctx({ bit: { rootUnlockInterval: 0n } }))).toEqual(CLEAR);
     // the flap seen live: a reading whose slot0 didn't answer resolved the warning, the next one reopened it
     expect(judged(deps.oracleCardinality, ctx({ base: {}, baseBefore: { taoWethPool: { cardinality: 600 } } }))).toEqual(
       blind([
@@ -335,6 +335,42 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     expect(RUNBOOK["monitor.unjudged"]({ rules: "validator.take_high" })).toContain("validator.take_high");
   });
 
+  it("names a lens that reads another contract than the deployment's at once, on either chain, while it lasts", () => {
+    const LENS = "0x1e5a000000000000000000000000000000000a11" as Hex;
+    const OTHER = "0x00000000000000000000000000000000000000e7" as Hex;
+    const V = cfg.deployment.vault;
+    const F = cfg.deployment.frontDoor;
+    const at32 = (o: Parameters<typeof ctx>[0]) => ({ ...at(NOW, o), cfg: testConfigV32() });
+    const c = at32({ bit: { lensMismatch: { lens: LENS, target: OTHER, expected: V } }, base: { lensMismatch: { lens: LENS, target: OTHER, expected: F } } });
+    const found = runRules([ops.monitorUnjudged], c);
+    expect(found.map((f) => f.key)).toEqual(["monitor.unjudged:lens:bittensor", "monitor.unjudged:lens:base"]);
+    expect(found[0]).toMatchObject({
+      rule: "monitor.unjudged",
+      subject: "The vault lens reads another contract: nothing is read through it",
+      facts: { lens: LENS, "it reads": OTHER, "the deployment's vault": V, setting: "DEPLOYMENT.vaultLens" },
+    });
+    expect(found[1]).toMatchObject({ subject: "The door lens reads another contract: nothing is read through it", facts: { "the deployment's front door": F, setting: "DEPLOYMENT.doorLens" } });
+    const steps = RUNBOOK["monitor.unjudged"](found[0].facts);
+    expect(steps).toContain("DEPLOYMENT.vaultLens");
+    expect(steps).not.toContain("half an hour");
+    // no mismatch: nothing (and no mark written for it)
+    const fine = at32({ bit: {}, base: {} });
+    expect(runRules([ops.monitorUnjudged], fine)).toEqual([]);
+    expect(fine.writes.meta).toEqual([]);
+    expect(fine.unjudged).toEqual([]);
+    // no reading of a chain, or a target() that didn't answer: unknown, the open alert left as it is (no flapping)
+    const blindLens = at32({ bit: { lensUnchecked: true } });
+    expect(runRules([ops.monitorUnjudged], blindLens)).toEqual([]);
+    expect(blindLens.unjudged).toEqual([
+      { rule: "monitor.unjudged", key: "monitor.unjudged:lens:bittensor" },
+      { rule: "monitor.unjudged", key: "monitor.unjudged:lens:base" },
+    ]);
+    // v3-launch has no lens: nothing, ever
+    const v31 = at(NOW, { bit: { lensMismatch: { lens: LENS, target: OTHER, expected: V } } });
+    expect(runRules([ops.monitorUnjudged], v31)).toEqual([]);
+    expect(v31.unjudged).toEqual([]);
+  });
+
   it("is quiet in a steady state, and writes nothing", () => {
     const c = at(NOW, { bit: { validator: { hotkey: HK, take: 0, rootStake: 100n, rootUid: 1 } } });
     expect(runRules([deps.validatorTake, ops.monitorUnjudged], c)).toEqual([]);
@@ -401,7 +437,7 @@ describe("monitor.unjudged: a critical condition left unjudged for 30 minutes pa
     expect(Object.keys(marks).length).toBeGreaterThan(3);
     const found = run(at(NOW + 1800, { base: { oracleValue: 400_000_000n }, meta: marks })).filter((f) => f.rule === "monitor.unjudged");
     expect(found).toHaveLength(1);
-    expect(found[0].facts.rules.split(", ")).toEqual(expect.arrayContaining(["vault.solvency", "validator.take_high", "validator.root_uid_lost", "root.unlock_interval", "fmtao.backing_true"]));
+    expect(found[0].facts.rules.split(", ")).toEqual(expect.arrayContaining(["vault.solvency", "validator.take_high", "validator.root_uid_lost", "root.hold_interval", "fmtao.backing_true"]));
   });
 
   it("a rule going blind later is a new alert of its own, though the first one was acknowledged; each group resolves on its own", async () => {
@@ -488,7 +524,7 @@ describe("no flapping, end to end", () => {
     // read again, still too few: the same alert, no second email
     expect(await tick(deps.oracleCardinality, at(NOW + 180, few, few))).toEqual([]);
     expect(await alerts()).toEqual([{ alert_key: "oracle.cardinality:taoWeth", resolved_at: null }]);
-    // grown past 901: resolved (a warning resolves quietly)
+    // grown past 1,801: resolved (a warning resolves quietly)
     expect(await tick(deps.oracleCardinality, at(NOW + 240, { ...few, taoWethPool: { cardinality: 2000 } }, few))).toEqual([]);
     expect(await alerts()).toEqual([{ alert_key: "oracle.cardinality:taoWeth", resolved_at: NOW + 240 }]);
   });

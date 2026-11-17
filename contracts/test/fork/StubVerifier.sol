@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
 import {MessageV1Codec} from "../vendor/ccip/MessageV1Codec.sol";
 

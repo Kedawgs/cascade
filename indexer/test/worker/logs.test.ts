@@ -1,9 +1,9 @@
 import { type Hex, keccak256, pad, toBytes } from "viem";
 import { describe, expect, it } from "vitest";
-import { ADAPTER, BIT_ADAPTER, FRONT_DOOR, STAKER, VAULT } from "../../src/abi.ts";
+import { ADAPTER, BIT_ADAPTER, BIT_ADAPTER_V32, FRONT_DOOR, FRONT_DOOR_V32, LIMIT_SETTERS, limitSetterOf, STAKER, VAULT, VAULT_V32 } from "../../src/abi.ts";
 import { rolesOf } from "../../src/config.ts";
-import { decode, identify, is } from "../../src/logs.ts";
-import { rawLog, testConfig, tx } from "./fixtures.ts";
+import { decode, identify, identityOf, is, storedIdentity, storedRefOf, topic0Of } from "../../src/logs.ts";
+import { rawLog, testConfig, testConfigV32, tx } from "./fixtures.ts";
 
 const cfg = testConfig();
 const d = cfg.deployment;
@@ -112,6 +112,83 @@ describe("decode", () => {
   it("leaves out a log from an address that isn't one of ours on that chain", () => {
     const raw = rawLog({ address: d.vault, abi: VAULT, eventName: "HotkeyAdded", args: { hotkey: d.stakeHotkey }, block: 2n, logIndex: 0, txHash: tx(9) });
     expect(decode("base", one(identify("base", [raw])), roleOf)).toBeUndefined();
+  });
+});
+
+describe("decode by the deployment's contracts version", () => {
+  const cfg32 = testConfigV32();
+  const d32 = cfg32.deployment;
+  const roles32 = rolesOf(d32);
+  const chunk31 = { key: KEY, chunk: 0, taken: 2, gross: 3n * 10n ** 18n, net: 2_990_000_000_000_000_000n, fee: 10n ** 16n };
+  const chunk32 = { ...chunk31, charged: 9n * 10n ** 15n, unstakeCost: 10n ** 15n };
+  const at = (abi: Parameters<typeof rawLog>[0]["abi"], eventName: string, args: Record<string, unknown>, n: number, address = d.vault) =>
+    rawLog({ address, abi, eventName, args, block: 6_900_200n, logIndex: n, txHash: tx(50 + n) });
+
+  it("decodes v3.2's eight-field PayoutChunkSent only on a v3.2 deployment, and v3.1's six-field one only on v3.1 (v3-launch)", () => {
+    const raw32 = at(VAULT_V32, "PayoutChunkSent", chunk32, 0);
+    const raw31 = at(VAULT, "PayoutChunkSent", chunk31, 1);
+    // their topics differ: one name, two signatures
+    expect(raw32.topics[0]).not.toBe(raw31.topics[0]);
+    const v32 = decode("bittensor", one(identify("bittensor", [raw32])), roles32, d32.version)!;
+    expect([v32.event, v32.args]).toEqual(["PayoutChunkSent", { key: KEY, chunk: 0, taken: 2, gross: "3000000000000000000", net: "2990000000000000000", fee: "10000000000000000", charged: "9000000000000000", unstakeCost: "1000000000000000" }]);
+    expect(decode("bittensor", one(identify("bittensor", [raw31])), roles32, d32.version)?.event).toBe("unknown");
+    // v3-launch's deployment (no version: v3.1) decodes exactly as it did
+    expect(decode("bittensor", one(identify("bittensor", [raw31])), roleOf)?.args).toEqual({ key: KEY, chunk: 0, taken: 2, gross: "3000000000000000000", net: "2990000000000000000", fee: "10000000000000000" });
+    expect(decode("bittensor", one(identify("bittensor", [raw31])), roleOf, "v3.1")?.event).toBe("PayoutChunkSent");
+    expect(decode("bittensor", one(identify("bittensor", [raw32])), roleOf)?.event).toBe("unknown");
+  });
+
+  it("decodes the events the v3.2 libraries log at the vault's address, and the new front door, adapter and scheduler events", () => {
+    const logs = [
+      at(VAULT_V32, "DepositBounced", { key: KEY, user: USER, assets: 5n, reason: 1 }, 0),
+      at(VAULT_V32, "ShortfallAbsorbed", { amount: 7n }, 1),
+      at(VAULT_V32, "RedeemedDirect", { user: USER, shares: 2n, assets: 3n, acceptedMissing: true }, 2),
+      at(VAULT_V32, "UnstakeSkipped", { hotkey: d.stakeHotkey }, 3),
+      at(VAULT_V32, "PayoutBatchCancelled", { key: KEY, reminted: 9n, bouncesCarried: 2 }, 4),
+      at(VAULT_V32, "Scheduled", { id: KEY, kind: 0, selector: "0x12345678", readyAt: 1_800_172_800n, data: "0x12345678" }, 5),
+      at(BIT_ADAPTER_V32, "BatchParked", { key: KEY, messageId: KEY, recipient: d.vault, sender: d.frontDoor, amount: 5n, converted: false, reason: "0xdeadbeef" }, 6, d.bitAdapter),
+    ];
+    const got = identify("bittensor", logs).map((x) => decode("bittensor", x, roles32, "v3.2")!);
+    expect(got.map((l) => [l.contract, l.event])).toEqual([
+      ["vault", "DepositBounced"],
+      ["vault", "ShortfallAbsorbed"],
+      ["vault", "RedeemedDirect"],
+      ["vault", "UnstakeSkipped"],
+      ["vault", "PayoutBatchCancelled"],
+      ["vault", "Scheduled"],
+      ["bitAdapter", "BatchParked"],
+    ]);
+    expect(got[0].args).toEqual({ key: KEY, user: USER, assets: "5", reason: 1 });
+    expect(got[2].args.acceptedMissing).toBe(true);
+    expect(got[4].args).toEqual({ key: KEY, reminted: "9", bouncesCarried: 2 });
+    expect(got[5].args).toMatchObject({ id: KEY, kind: 0, selector: "0x12345678", readyAt: "1800172800", data: "0x12345678" });
+    const closed = at(FRONT_DOOR_V32, "BatchClosed", { id: 4n, totalDeposits: 1n, nDeposits: 1n, nRedeems: 0n, fee: 2n, potUsed: 2n, potCarried: 3n }, 0, d.frontDoor);
+    expect(decode("base", one(identify("base", [closed])), roles32, "v3.2")?.args).toMatchObject({ id: "4", potUsed: "2", potCarried: "3" });
+  });
+
+  it("decodes the constructor's deploy-block events (every setter's LimitSet by selector, HotkeyAdded, FrontDoorActivated), the setter named by its selector", () => {
+    const [selector, setter] = [...LIMIT_SETTERS][0];
+    const logs = [
+      at(VAULT_V32, "LimitSet", { selector, a: 5n, b: 0n }, 0),
+      at(VAULT_V32, "HotkeyAdded", { hotkey: d.stakeHotkey }, 1),
+      at(VAULT_V32, "FrontDoorActivated", { chain: 8453n, addr: d.frontDoor }, 2),
+    ];
+    const [limit, added, door] = identify("bittensor", logs).map((x) => decode("bittensor", x, roles32, "v3.2")!);
+    expect([limit.event, limitSetterOf(String(limit.args.selector)), limitSetterOf(limit.topic1 as Hex)]).toEqual(["LimitSet", setter, setter]);
+    expect([added.event, door.event]).toEqual(["HotkeyAdded", "FrontDoorActivated"]);
+    // v3-launch's LimitSet(bytes32 name, ...) is another topic: a v3.2 LimitSet would be unknown there
+    expect(decode("bittensor", one(identify("bittensor", [logs[0]])), roleOf)?.event).toBe("unknown");
+  });
+
+  it("rebuilds a stored v3.2 log's identity from its columns with v3.2's topics", () => {
+    const raw = at(VAULT_V32, "PayoutChunkSent", chunk32, 0);
+    const log = decode("bittensor", one(identify("bittensor", [raw])), roles32, "v3.2")!;
+    const ref = storedRefOf(log);
+    expect(storedIdentity(ref, "v3.2")).toBe(identityOf(raw));
+    expect(topic0Of("vault", "PayoutChunkSent", "v3.2")).toBe(raw.topics[0]);
+    // v3.1's topic for the same name is the six-field event's
+    expect(topic0Of("vault", "PayoutChunkSent")).toBe(at(VAULT, "PayoutChunkSent", chunk31, 1).topics[0]);
+    expect(storedIdentity(ref)).not.toBe(identityOf(raw));
   });
 });
 

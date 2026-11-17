@@ -95,6 +95,13 @@
   color: var(--ink-2);
 }
 
+/* v3.2: a vault-wide state the lane can't show (stake missing while Cascade reconnects) */
+.notice {
+  margin-top: 14px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
 .link {
   color: var(--water-deep);
   font-weight: 700;

@@ -1,7 +1,10 @@
-import type { Abi, Address } from "viem";
+import type { Address } from "viem";
 import type { ChainName } from "./config.ts";
+import type { CallRequest } from "./keeper/core/types.ts";
+import type { BuildV32 } from "./v32/build.ts";
 
-/** A contract creation, sent with `forge create`. */
+/** A contract creation of a v3-launch plan, sent with `forge create` (send.ts sendCreate). It names no build: such a
+ * request is v3-launch's, whose frozen build (ops/builds/preaudit) gives its constructor. */
 export interface CreateRequest {
   chain: ChainName;
   nonce: number;
@@ -11,19 +14,18 @@ export interface CreateRequest {
   args: unknown[];
 }
 
-/** A contract call, sent with `cast send`. */
-export interface CallRequest {
-  chain: ChainName;
-  nonce: number;
-  label: string;
-  to: Address;
-  abi: Abi;
-  functionName: string;
-  args: unknown[];
-  value?: bigint;
-  /** Send with exactly this gas limit (refused if the estimate is above it), instead of 1.25× the estimate. */
-  gasLimit?: bigint;
+/** A v3.2 create (Task 44): tied to v3.2's frozen build, which gives its creation code, linked with `libraries` (path:Name
+ * -> the planned address), and its constructor; sent as exactly those bytes, signed by the deployer's keystore. Its
+ * gas may not exceed `gasCeiling`, the most the plan's funding counts for it (v32/deploy.ts). */
+export interface CreateRequestV32 extends CreateRequest {
+  version: 32;
+  build: BuildV32;
+  libraries?: Record<string, Address>;
+  gasCeiling: bigint;
 }
+
+/** A contract call: the keeper core's type (keeper/core/types.ts). */
+export type { CallRequest };
 
 export type StepId =
   | "baseAdapter"

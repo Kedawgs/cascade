@@ -3,12 +3,13 @@ import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import type { StoredLog } from "../../src/logs.ts";
 import { arrivals, arrivalStatements, messageStatements, messagesFrom, stateStatements } from "../../src/messages.ts";
-import { ccipFailure, ccipForeignSend, ccipUndelivered } from "../../src/rules/ccip.ts";
+import { ccipFailure, ccipForeignSend, ccipUndelivered, messageOutcome } from "../../src/rules/ccip.ts";
 import { logQuery, type RuleCtx } from "../../src/rules/context.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import { loadTickState, type MessageRow } from "../../src/store.ts";
-import { D, h } from "./bridge-fixtures.ts";
+import { D, h, parkLog } from "./bridge-fixtures.ts";
 import { wipe } from "./d1-count.ts";
+import { testConfigV32 } from "./fixtures.ts";
 import { ruleCtx, slog } from "./rule-ctx.ts";
 
 const db = env.DB;
@@ -136,3 +137,68 @@ describe("ccip.foreign_send", () => {
   });
 });
 
+
+// ---- v3.2 (Task 56): Delivered is logged after a park too (R3 B-I3): a parked message hasn't arrived ----
+
+describe("v3.2: a parked message is not an arrived one", () => {
+  const parkOf = (messageId: Hex, txHash = h(`dst ${messageId}`)) => parkLog("BatchParked", { key: h(`park of ${messageId}`), block: 6_900_200n, txHash, logIndex: 0, messageId, amount: 5n });
+  it("arrivals skip a Bittensor Delivered whose own transaction parked that message; another message's park doesn't", () => {
+    const d = delivered(h("m1"));
+    expect(arrivals([parkOf(h("m1")), d])).toEqual([]);
+    expect(arrivals([parkOf(h("another")), d])).toEqual([{ messageId: h("m1"), dstTx: d.txHash, dstBlock: d.block }]);
+    expect(arrivals([parkOf(h("m1"), h("another tx")), d])).toEqual([{ messageId: h("m1"), dstTx: d.txHash, dstBlock: d.block }]);
+  });
+
+  it("the ccip rules read a parked message as parked: neither arrived, undelivered nor failed (bridge.parked has it)", () => {
+    const m = message();
+    expect(messageOutcome(tick({ messages: [m], logs: [delivered(h("m1"))] }), m)).toBe("arrived");
+    expect(messageOutcome(tick({ messages: [m], states: { [h("m1")]: "SUCCESS" } }), m)).toBe("arrived");
+    expect(messageOutcome(tick({ messages: [m] }), m)).toBe("pending");
+    const parked = tick({ messages: [m], logs: [parkOf(h("m1")), delivered(h("m1"))], states: { [h("m1")]: "SUCCESS" }, after: 7200 });
+    expect(messageOutcome(parked, m)).toBe("parked");
+    expect(ccipUndelivered.run(parked)).toEqual([]);
+    expect(ccipFailure.run(parked)).toEqual([]);
+  });
+});
+
+// ---- Task 56 fix round 1: a stranger's park refund (R3 A-L2) is not Cascade's message (review Important 1) ----
+
+describe("v3.2: a Bittensor Sent is the vault's message only when it names the front door", () => {
+  const D32 = testConfigV32().deployment;
+  /** refundParked's Sent names the park's recipient (the vault) as its sender and the park's sender as its recipient
+   * (CcipBittensorAdapter.sol:209): a stranger's park refunds to the stranger, the door's to the front door */
+  const payout = sent({ sender: D32.vault, recipient: D32.frontDoor, messageId: h("vault payout"), chain: "bittensor", block: 6_900_100n });
+  const doorRefund = sent({ sender: D32.vault, recipient: D32.frontDoor, messageId: h("door park refund"), chain: "bittensor", block: 6_900_110n });
+  const strangerRefund = sent({ sender: D32.vault, recipient: STRANGER, messageId: h("stranger park refund"), chain: "bittensor", block: 6_900_120n });
+  const failed = (rows: MessageRow[]) => ccipFailure.run(tick({ messages: rows, states: Object.fromEntries(rows.map((m) => [m.messageId, "FAILURE"])), after: 7200 }));
+
+  it("a stranger's refunded park, whose delivery to the stranger fails for good, raises no ccip.failure and no ccip.undelivered", () => {
+    const rows = messagesFrom([strangerRefund], D32, () => SENT_AT, SENT_AT + 99);
+    expect(rows).toEqual([]);
+    expect(failed(rows)).toEqual([]);
+    expect(ccipUndelivered.run(tick({ messages: rows, after: 7200 }))).toEqual([]);
+  });
+
+  it("the vault's own payout, and a door park's refund, still raise ccip.failure when they fail", () => {
+    const rows = messagesFrom([payout, doorRefund, strangerRefund], D32, () => SENT_AT, SENT_AT + 99);
+    expect(rows.map((m) => [m.messageId, m.direction, m.recipient])).toEqual([
+      [h("vault payout"), "bittensor>base", D32.frontDoor.toLowerCase()],
+      [h("door park refund"), "bittensor>base", D32.frontDoor.toLowerCase()],
+    ]);
+    expect(failed(rows).map((f) => f.key)).toEqual([`ccip.failure:${h("vault payout")}`, `ccip.failure:${h("door park refund")}`]);
+  });
+
+  it("v3-launch is unchanged: every vault Sent is its message (it has no parks to refund)", () => {
+    expect(messagesFrom([payout, strangerRefund], D, () => SENT_AT, SENT_AT + 99).map((m) => m.messageId)).toEqual([h("vault payout"), h("stranger park refund")]);
+  });
+});
+
+describe("ccip.failure's runbook names R3's two causes that need no fix (review Minor 8)", () => {
+  it("a stranger's early execution (re-execute at once, no committee results needed) and the inbound bucket (wait for it to refill)", () => {
+    const line = RUNBOOK["ccip.failure"]({});
+    expect(line).toContain("a stranger can move an untouched message to FAILURE");
+    expect(line).toContain("re-execute it at once; no committee results are needed");
+    expect(line).toContain("before ccipReceive");
+    expect(line).toContain("ccip.rate_limited");
+  });
+});

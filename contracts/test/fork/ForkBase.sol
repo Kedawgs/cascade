@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.38;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
+import {IUniswapV3PoolOracle} from "../../src/CascadeTwapOracle.sol";
 import {MessageV1Codec} from "../vendor/ccip/MessageV1Codec.sol";
 import {StubVerifier} from "./StubVerifier.sol";
 
@@ -69,6 +70,10 @@ abstract contract ForkBase is Test {
     address constant BIT_POOL = 0xB66b9c085ab711ECC373aaF6dc959a4A6B42BE2e;
     address constant ALPHA_VAULT = 0x11837459896D96F821a8D88eC93a3C8D152033D4;
 
+    /// A copy of `CascadeTwapOracle.MIN_CARDINALITY`: Solidity 0.8.38 refuses to read a contract's constant through
+    /// its type name (error 9582), so each suite that builds the oracle asserts this equals its `MIN_CARDINALITY()`.
+    uint16 constant ORACLE_MIN_CARDINALITY = 1_801;
+
     uint8 constant UNTOUCHED = 0;
     uint8 constant IN_PROGRESS = 1;
     uint8 constant SUCCESS = 2;
@@ -95,6 +100,26 @@ abstract contract ForkBase is Test {
         uint256 pinned = vm.envOr("FORK_BLOCK", uint256(0));
         if (pinned == 0) vm.createSelectFork(url);
         else vm.createSelectFork(url, pinned);
+    }
+
+    /// For a `setUp` that builds the TWAP oracle on the live Base pools: skips the whole suite, with the reason on
+    /// the console and in the skip, when `pool` has fewer observation slots in use than the oracle's constructor
+    /// requires (`MIN_CARDINALITY`, 1,801 since Revision 28), as at a `FORK_BLOCK` pinned before the TAO/WETH pool grew
+    /// from 600 to 2,000. Without it every test would fail in `setUp` on `TooFewObservations`.
+    function skipBelowMinCardinality(address pool) internal {
+        (,,, uint16 cardinality,,,) = IUniswapV3PoolOracle(pool).slot0();
+        if (cardinality >= ORACLE_MIN_CARDINALITY) return;
+        string memory reason = string.concat(
+            "pool ",
+            vm.toString(pool),
+            " has ",
+            vm.toString(uint256(cardinality)),
+            " observation slots in use at this block, below the TWAP oracle's MIN_CARDINALITY (",
+            vm.toString(uint256(ORACLE_MIN_CARDINALITY)),
+            "): fork a later block"
+        );
+        console.log(reason);
+        vm.skip(true, reason);
     }
 
     /// The `OffRamp 2.0.0` that `router` accepts for messages from `sourceSelector`, found by version

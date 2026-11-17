@@ -108,4 +108,10 @@ describe("the public Next batch line", () => {
   it("names no time while Cascade is paused: nothing leaves until it's lifted", () => {
     expect(line({ paused: true })).toBe("Next batch: on hold while Cascade is paused");
   });
+
+  it("on a paused v3.2 front door says only that new stakes are paused: its batch still leaves, and Send it now works", () => {
+    expect(line({ paused: true, closesWhilePaused: true })).toBe("New stakes and automatic USDC delivery are paused; withdrawals and claims still work.");
+    // not paused, the countdown as before
+    expect(line({ closesWhilePaused: true })).toMatch(/^Next batch leaves /);
+  });
 });

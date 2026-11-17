@@ -12,13 +12,24 @@ import {
   type Hex,
   hexToBigInt,
   hexToNumber,
+  keccak256,
   numberToHex,
+  parseSignature,
+  parseTransaction,
+  recoverAddress,
+  recoverTransactionAddress,
+  type Signature,
+  serializeTransaction,
+  type TransactionSerializable,
   toFunctionSignature,
 } from "viem";
-import { loadArtifact } from "./artifacts.ts";
+import { PREAUDIT_CONTRACTS, preauditArtifact } from "./builds.ts";
 import { type ChainName, type ChainTarget, gweiOf, type Paths, WALLET } from "./config.ts";
+import { chainLabel, ReceiptTimeout, RevertedOnChain, SendRefused, unit } from "./keeper/core/errors.ts";
+import type { Replacement, Sent } from "./keeper/core/types.ts";
 import { chainIdOf, codeAt, gasPriceOf, isRevert, nonceOf, priorityFeeOf, type Rpc, RpcError } from "./rpc.ts";
-import type { CallRequest, CreateRequest } from "./types.ts";
+import type { CallRequest, CreateRequest, CreateRequestV32 } from "./types.ts";
+import { buildErrorsV32, deployDataV32 } from "./v32/build.ts";
 
 export interface Runner {
   run(file: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }): Promise<{ code: number; stdout: string; stderr: string }>;
@@ -56,58 +67,23 @@ export interface Ctx {
   pollMs?: number;
 }
 
-export interface Sent {
-  hash: Hex;
-  block: number;
-  gasUsed: bigint;
-  costWei: bigint;
-  address?: Address;
-  logs?: { address: Address; topics: Hex[]; data: Hex }[];
-}
+// The keeper core's send errors, labels and types (one class each, so `instanceof` holds whichever module threw it).
+export { chainLabel, type RefusalReason, ReceiptTimeout, RevertedOnChain, SendRefused, scrubSecrets, unit } from "./keeper/core/errors.ts";
+export { logsOf } from "./keeper/core/logs.ts";
+export type { Replacement, Sent } from "./keeper/core/types.ts";
 
-/** Why a send was refused before anything was signed; "fee": the chain's gas price is over the cap. */
-export type RefusalReason = "not-live" | "chain-id" | "nonce" | "waiting" | "estimate" | "signer" | "fee";
+/** A v3.2 create was mined but did not leave what the plan predicts: its receipt names no contract or another address.
+ * The plan's addresses no longer hold. */
+export class UnexpectedReceipt extends Error {}
 
-export class SendRefused extends Error {
-  readonly reason: RefusalReason;
+/** A v3.2 create's receipt is good (status 1, the planned address) but the RPC shows no code there yet: most likely a
+ * node a few blocks behind. `sent` is the receipt's record; the next run compares the code with the build. */
+export class CodeNotYetSeen extends Error {
+  readonly sent: Sent;
 
-  constructor(reason: RefusalReason, message: string) {
+  constructor(message: string, sent: Sent) {
     super(message);
-    this.reason = reason;
-  }
-}
-
-/** The transaction was mined and reverted: its receipt's status is not 1. `reason` is why, when the
- * call, replayed at the block it reverted in (revertReason), reverts too: a Cascade contract's error by
- * name (BelowMinimum()), Error(string) with its text ("Too little received"); unset when the replay goes
- * through (the state moved within the block) or the node didn't answer it. */
-export class RevertedOnChain extends Error {
-  readonly chain: ChainName;
-  readonly hash: Hex;
-  readonly reason?: string;
-
-  constructor(chain: ChainName, label: string, hash: Hex, reason?: string) {
-    super(`${chainLabel(chain)}: ${label} reverted on chain (transaction ${hash}${reason ? `, ${reason}` : ""})`);
-    this.chain = chain;
-    this.hash = hash;
-    this.reason = reason;
-  }
-}
-
-/** The transaction was sent but no receipt came within the wait. `hash` is unknown when forge timed out.
- * `request` is the call it carries (sendCall's), for a replacement at the same nonce (replaceCall). */
-export class ReceiptTimeout extends Error {
-  readonly hash?: Hex;
-  readonly chain: ChainName;
-  readonly nonce: number;
-  readonly request?: CallRequest;
-
-  constructor(chain: ChainName, nonce: number, hash?: Hex, request?: CallRequest) {
-    super(`${chainLabel(chain)}: no receipt yet for nonce ${nonce}${hash ? ` (transaction ${hash})` : ""}; nothing more will be sent until it is mined or dropped`);
-    this.hash = hash;
-    this.chain = chain;
-    this.nonce = nonce;
-    this.request = request;
+    this.sent = sent;
   }
 }
 
@@ -123,12 +99,6 @@ export interface Signer {
 /** The context's signer, else the test wallet with the default keystore. */
 export const signerOf = (ctx: Pick<Ctx, "signer" | "paths">): Signer =>
   ctx.signer ?? { address: WALLET, keystore: ctx.paths.keystore, passwordFile: ctx.paths.passwordFile, name: "the test wallet" };
-
-/** The RPC for log scans and their heads: the context's logs server, else its main RPC. */
-export const logsOf = (ctx: Pick<Ctx, "rpc" | "logs">): Rpc => ctx.logs ?? ctx.rpc;
-
-export const chainLabel = (chain: ChainName) => (chain === "base" ? "Base" : "Bittensor");
-export const unit = (chain: ChainName) => (chain === "base" ? "ETH" : "TAO");
 
 /** One argument as cast and forge parse it: tuples (a,b), arrays [a,b], integers in decimal. */
 export function castArg(value: unknown, param: AbiParameter): string {
@@ -161,27 +131,6 @@ export function redact(targets: Ctx["targets"], text: string): string {
   return out.replace(/((?:d|api_?)?key|token|secret)=[^&\s)"']+/gi, "$1=…");
 }
 
-/** A URL: its scheme, its authority (user info, host, port), and the rest (path, query, fragment). */
-const URL_IN_TEXT = /\b([a-z][a-z0-9+.-]*):\/\/([^\s/?#"'<>()[\]]+)([^\s"'<>()[\]]*)/gi;
-
-/** `text` with every URL cut down to its scheme, its host's last two labels and its port (no user info,
- * subdomain, path or query, where a provider's key can sit; a bare "/" carries none and stays, so the
- * sign page's http://127.0.0.1:<port>/ still opens), and every key-like `name=value` value dropped.
- * Unlike redact it needs no list of RPCs: every line the CLI prints goes through it (output.ts). */
-export function scrubSecrets(text: string): string {
-  return text
-    .replace(URL_IN_TEXT, (_m, scheme: string, authority: string, rest: string) => {
-      const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
-      const colon = hostPort.lastIndexOf(":");
-      const host = colon > 0 && !hostPort.endsWith("]") ? hostPort.slice(0, colon) : hostPort;
-      const port = host === hostPort ? "" : hostPort.slice(colon);
-      const labels = host.split(".");
-      const shown = /^[\d.]+$/.test(host) || host.startsWith("[") || labels.length <= 2 ? host : `…${labels.slice(-2).join(".")}`;
-      return `${scheme}://${shown}${port}${rest === "" || rest === "/" ? rest : "/…"}`;
-    })
-    .replace(/\b((?:d|api_?)?key|token|secret|password|passwd)=[^&\s)"']+/gi, "$1=…");
-}
-
 /** A URL's registrable domain, the last two labels of its host (drpc.org, publicnode.com): never a
  * subdomain, path or query, where a provider's key can sit. An IP address or a one-label host as it is.
  * (No public-suffix list: a host under e.g. co.uk shows as co.uk, which says less but leaks nothing.) */
@@ -202,10 +151,12 @@ export const baseLogsLine = (target: ChainTarget) => `Reading Base's logs from $
 
 const isLocal = (url: string) => ["127.0.0.1", "localhost"].includes(new URL(url).hostname);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const bin = (ctx: Ctx, name: string) => join(ctx.paths.foundryBin, process.platform === "win32" ? `${name}.exe` : name);
+/** A Foundry tool's path (forge, cast) in the configured Foundry bin. */
+export const bin = (ctx: Pick<Ctx, "paths">, name: string) => join(ctx.paths.foundryBin, process.platform === "win32" ? `${name}.exe` : name);
 
-/** The live gate and the chain id: before anything is estimated or signed. */
-async function gate(ctx: Ctx, chain: ChainName): Promise<void> {
+/** The live gate and the chain id: before anything is estimated or signed (and, for a v3.2 deployment, before anything
+ * is read: v32/deploy.ts). */
+export async function gate(ctx: Ctx, chain: ChainName): Promise<void> {
   const local = Object.values(ctx.targets).every((t) => isLocal(t.rpcUrl));
   const remote = Object.values(ctx.targets).every((t) => !isLocal(t.rpcUrl));
   if (!ctx.live && !local) throw new SendRefused("not-live", "this command would reach the live networks: add --live to mean it");
@@ -258,29 +209,21 @@ async function checkSigner(ctx: Ctx): Promise<void> {
 
 let errorAbi: Abi | undefined;
 
-/** The contracts' custom errors, so a failed estimate can say which one. */
-function contractErrors(ctx: Pick<Ctx, "paths">): Abi {
-  if (!errorAbi) {
-    const names = ["CascadeVault", "CascadeFrontDoor", "CcipBaseAdapter", "CcipBittensorAdapter", "CascadeStaker", "CascadeTwapOracle"];
-    errorAbi = names.flatMap((n) => {
-      try {
-        return loadArtifact(ctx.paths.contractsDir, n).abi.filter((i) => i.type === "error");
-      } catch {
-        return [];
-      }
-    });
-  }
+/** The contracts' custom errors, so a failed estimate can say which one: v3-launch's frozen build's
+ * (builds.ts), the build of every v3-launch plan this tool sends for; a v3.2 send names its own build's. */
+function contractErrors(): Abi {
+  errorAbi ??= PREAUDIT_CONTRACTS.flatMap((n) => preauditArtifact(n).abi.filter((i) => i.type === "error"));
   return errorAbi;
 }
 
-/** A failed call's reason: a Cascade contract's error by name, Error(string) with its text (e.g. the
- * router's "Too little received"), else the node's message. */
-export function describeRevert(ctx: Pick<Ctx, "paths">, e: unknown): string {
+/** A failed call's reason: a Cascade contract's error by name (from `errors`, else v3-launch's), Error(string) with its
+ * text (e.g. the router's "Too little received"), else the node's message. */
+export function describeRevert(e: unknown, errors?: Abi): string {
   const raw = e instanceof RpcError ? e.data : undefined;
   const data = typeof raw === "string" ? raw : (raw as { data?: unknown } | undefined)?.data;
   if (typeof data === "string" && data.startsWith("0x") && data.length >= 10) {
     try {
-      const d = decodeErrorResult({ abi: contractErrors(ctx), data: data as Hex });
+      const d = decodeErrorResult({ abi: errors ?? contractErrors(), data: data as Hex });
       return `${d.errorName}(${(d.args ?? []).map(String).join(", ")})`;
     } catch {
       return `${(e as Error).message}, revert data ${data}`;
@@ -290,11 +233,11 @@ export function describeRevert(ctx: Pick<Ctx, "paths">, e: unknown): string {
 }
 
 /** eth_estimateGas on the node with no gas price (with one, the node checks the balance and refuses). */
-async function estimate(ctx: Ctx, chain: ChainName, tx: { from: Address; to?: Address; data: Hex; value?: Hex }, label: string) {
+async function estimate(ctx: Ctx, chain: ChainName, tx: { from: Address; to?: Address; data: Hex; value?: Hex }, label: string, errors?: Abi) {
   try {
     return hexToBigInt((await ctx.rpc.request(chain, "eth_estimateGas", [tx])) as Hex);
   } catch (e) {
-    throw new SendRefused("estimate", `${chainLabel(chain)}: ${label} would fail, nothing sent (${describeRevert(ctx, e)})`);
+    throw new SendRefused("estimate", `${chainLabel(chain)}: ${label} would fail, nothing sent (${describeRevert(e, errors)})`);
   }
 }
 
@@ -330,7 +273,7 @@ async function prepare(ctx: Ctx, chain: ChainName, label: string, gas: bigint, g
   ];
 }
 
-type Receipt = {
+export type Receipt = {
   status: Hex;
   blockNumber: Hex;
   gasUsed: Hex;
@@ -340,7 +283,7 @@ type Receipt = {
 };
 
 /** Polls for the receipt; an RPC error is retried until the deadline, since the transaction is out. */
-async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex, request?: CallRequest): Promise<Receipt> {
+export async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex, request?: CallRequest): Promise<Receipt> {
   const deadline = Date.now() + ctx.receiptTimeoutMs;
   for (;;) {
     try {
@@ -359,14 +302,20 @@ async function waitReceipt(ctx: Ctx, chain: ChainName, nonce: number, hash: Hex,
  * before. The first replay that reverts gives the reason (describeRevert: a Cascade contract's error by
  * name, Error(string) with its text); neither reverting, or the node not answering, gives undefined. Reads
  * only: nothing is sent. */
-export async function revertReason(ctx: Pick<Ctx, "rpc" | "paths">, chain: ChainName, tx: { from: Address; to: Address; data: Hex; value: Hex }, block: Hex): Promise<string | undefined> {
+export async function revertReason(
+  ctx: Pick<Ctx, "rpc">,
+  chain: ChainName,
+  tx: { from: Address; to?: Address; data: Hex; value: Hex },
+  block: Hex,
+  errors?: Abi,
+): Promise<string | undefined> {
   const mined = hexToBigInt(block);
   for (const at of [mined, mined - 1n]) {
     if (at < 0n) break;
     try {
       await ctx.rpc.request(chain, "eth_call", [tx, numberToHex(at)]);
     } catch (e) {
-      return isRevert(e) ? describeRevert(ctx, e) : undefined;
+      return isRevert(e) ? describeRevert(e, errors) : undefined;
     }
   }
   return undefined;
@@ -381,7 +330,7 @@ async function noHash(ctx: Ctx, chain: ChainName, nonce: number, label: string, 
   return new Error(`${chainLabel(chain)}: ${label} failed: ${redact(ctx.targets, out.stderr.trim() || out.stdout.trim())}`);
 }
 
-function settle(chain: ChainName, label: string, hash: Hex, r: Receipt, reason?: string): Sent {
+export function settle(chain: ChainName, label: string, hash: Hex, r: Receipt, reason?: string): Sent {
   if (r.status !== "0x1") throw new RevertedOnChain(chain, label, hash, reason);
   const gasUsed = hexToBigInt(r.gasUsed);
   return { hash, block: hexToNumber(r.blockNumber), gasUsed, costWei: gasUsed * hexToBigInt(r.effectiveGasPrice), logs: r.logs ?? [] };
@@ -389,11 +338,43 @@ function settle(chain: ChainName, label: string, hash: Hex, r: Receipt, reason?:
 
 const hashIn = (out: string) => out.match(/0x[0-9a-fA-F]{64}/)?.[0] as Hex | undefined;
 
-/** Deploys with `forge create`, which reads the build output (no creation code on the command line). */
-export async function sendCreate(ctx: Ctx, req: CreateRequest, predicted: Address): Promise<Sent> {
+/** What a v3.2 create tells its caller as it goes: `signed` once the transaction is signed and before it is broadcast
+ * (its hash, which the deployment record keeps for good, so a run stopped anywhere after this, or a broadcast whose
+ * answer was lost while the node took it, is settled by its hash). */
+export interface CreateHooks {
+  signed?(hash: Hex): void;
+}
+
+/** Which build a create is tied to: v3.2's for a version-32 request (routed first, before any v3-launch path), else
+ * v3-launch's. Refused, before anything is read or sent, when it cannot be tied to one: a version other than 32, a
+ * version-32 request without its build, or a request that names no version but carries libraries or a build
+ * (v3-launch's creates link nothing). */
+export function createRoute(req: CreateRequest | CreateRequestV32): "v3.2" | "v3-launch" {
+  const r = req as Partial<CreateRequestV32>;
+  if (r.version === 32) {
+    if (!r.build) throw new SendRefused("build", `${chainLabel(req.chain)}: ${req.label} is a v3.2 create without v3.2's frozen build; nothing sent`);
+    return "v3.2";
+  }
+  if (r.version !== undefined || r.libraries !== undefined || r.build !== undefined) {
+    const what = r.version !== undefined ? `version ${String(r.version)}` : "libraries or a build, but not version 32";
+    throw new SendRefused(
+      "build",
+      `${chainLabel(req.chain)}: ${req.label} cannot be tied to one build (${what}): v3-launch's creates link nothing, and v3.2's carry version 32 and their build; nothing sent`,
+    );
+  }
+  return "v3-launch";
+}
+
+/** Sends a create. A v3.2 one (createRoute) takes v3.2's path, sendCreateV32. Every other is a v3-launch plan's, sent
+ * with `forge create`, which builds this checkout's contracts/ (no creation code on the command line): deploy sends a
+ * v3-launch plan's creates only from a checkout of its build (builds.ts, assertCheckoutIs), so its constructor's
+ * inputs and the creation code its gas is estimated with come from v3-launch's frozen build (builds.ts,
+ * preauditArtifact), never contracts/out, which holds v3.2. */
+export async function sendCreate(ctx: Ctx, req: CreateRequest | CreateRequestV32, predicted: Address, hooks: CreateHooks = {}): Promise<Sent> {
+  if (createRoute(req) === "v3.2") return sendCreateV32(ctx, req as CreateRequestV32, predicted, hooks);
   await guard(ctx, req.chain, req.nonce);
   const name = req.contract.split(":")[1];
-  const artifact = loadArtifact(ctx.paths.contractsDir, name);
+  const artifact = preauditArtifact(name);
   const data = encodeDeployData({ abi: artifact.abi, bytecode: artifact.bytecode, args: req.args } as never);
   const gas = await estimate(ctx, req.chain, { from: signerOf(ctx).address, data }, req.label);
   const common = await prepare(ctx, req.chain, req.label, gas);
@@ -424,6 +405,149 @@ export async function sendCreate(ctx: Ctx, req: CreateRequest, predicted: Addres
   // a load-balanced RPC can answer from a node a block behind the receipt: give it a moment
   for (let i = 0; (await codeAt(ctx.rpc, req.chain, predicted)) === "0x"; i++) {
     if (i >= 10) throw new Error(`${chainLabel(req.chain)}: no code at ${predicted} after the receipt (transaction ${hash})`);
+    await sleep(ctx.pollMs ?? 3_000);
+  }
+  return { ...sent, address: predicted };
+}
+
+/** secp256k1's order over 2: a signature whose s is above it is the malleable twin, which nodes refuse. */
+const HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+
+/** Why the signed transaction `raw` is not `tx` signed by `from`, or null. Decoded back, every field must be the planned
+ * one (the type, the chain id, the nonce, no `to` for a create and the planned one for a call (v3.2's relayed stamp,
+ * v32/stamp.ts), the planned value (0 unless given), the data byte for byte, the gas, the fee fields, no access list),
+ * its signature's s must be low, and it must recover to `from`. */
+export async function signedTransactionProblem(tx: TransactionSerializable, raw: Hex, from: Address): Promise<string | null> {
+  let got: ReturnType<typeof parseTransaction>;
+  try {
+    got = parseTransaction(raw);
+  } catch (e) {
+    return `it does not decode (${(e as Error).message.split("\n")[0]})`;
+  }
+  const fees = tx.type === "legacy" ? ["gasPrice"] : ["maxFeePerGas", "maxPriorityFeePerGas"];
+  const field = (o: unknown, k: string) => (o as Record<string, unknown>)[k];
+  const pairs: [string, unknown, unknown][] = [
+    ["type", got.type, tx.type],
+    ["chainId", got.chainId, tx.chainId],
+    ["nonce", got.nonce, tx.nonce],
+    ["to", got.to ? got.to.toLowerCase() : null, tx.to ? tx.to.toLowerCase() : null],
+    ["value", got.value ?? 0n, tx.value ?? 0n],
+    ["data", (got.data ?? "0x").toLowerCase(), (tx.data ?? "0x").toLowerCase()],
+    ["gas", got.gas, tx.gas],
+    ...fees.map((f): [string, unknown, unknown] => [f, field(got, f), field(tx, f)]),
+    ["access list's length", ((field(got, "accessList") as unknown[] | undefined) ?? []).length, 0],
+  ];
+  for (const [name, g, w] of pairs) {
+    if (g !== w) return name === "data" ? `its data is not the planned ${tx.to ? "calldata" : "creation code and arguments"}` : `its ${name} is ${String(g)}, not the planned ${String(w)}`;
+  }
+  // the malleable twin recovers to the same signer, but nodes refuse a high s (EIP-2; Task 44's re-review, N1)
+  if (!got.s || !got.r) return "it carries no signature";
+  if (hexToBigInt(got.s) > HALF_N) return "its signature's s is high (the malleable twin), which nodes refuse";
+  const by = await recoverTransactionAddress({ serializedTransaction: raw as never });
+  return by.toLowerCase() === from.toLowerCase() ? null : `it recovers to ${by}, not ${from}`;
+}
+
+/** `tx` signed by the context's signer. Foundry's `cast wallet sign --no-hash` signs the transaction's hash with the
+ * keystore (by path: the key never leaves Foundry); the signature must recover to the signer's address, with a low s;
+ * the signed transaction is put together (`assemble`, viem's serializeTransaction) and decoded back, and must be `tx`
+ * from the signer (signedTransactionProblem; Task 44's review, I-1). Refused ("signer"), nothing sent, otherwise. */
+export async function signTransaction(
+  ctx: Ctx,
+  tx: TransactionSerializable,
+  assemble: (tx: TransactionSerializable, sig: Signature) => Hex = (t, sig) => serializeTransaction(t, sig),
+): Promise<Hex> {
+  const s = signerOf(ctx);
+  const digest = keccak256(serializeTransaction(tx));
+  const out = await ctx.runner.run(bin(ctx, "cast"), ["wallet", "sign", "--no-hash", digest, "--keystore", s.keystore, "--password-file", s.passwordFile], {
+    cwd: ctx.paths.contractsDir,
+  });
+  const sig = out.code === 0 ? (out.stdout.match(/0x[0-9a-fA-F]{130}(?![0-9a-fA-F])/)?.[0] as Hex | undefined) : undefined;
+  if (!sig) {
+    const why = redact(ctx.targets, out.stderr.trim() || out.stdout.trim()) || `exit ${out.code}`;
+    throw new SendRefused("signer", `${s.name}'s keystore did not sign (${why}); nothing sent`);
+  }
+  const { r, s: sv, yParity } = parseSignature(sig);
+  if (hexToBigInt(sv) > HALF_N) throw new SendRefused("signer", `${s.name}'s keystore gave a high-s signature, which nodes refuse; nothing sent`);
+  const by = await recoverAddress({ hash: digest, signature: sig });
+  if (by.toLowerCase() !== s.address.toLowerCase()) throw new SendRefused("signer", `the keystore signed as ${by}, not ${s.name} ${s.address}; nothing sent`);
+  const raw = assemble(tx, { r, s: sv, yParity, v: 27n + BigInt(yParity) });
+  const problem = await signedTransactionProblem(tx, raw, s.address);
+  if (problem) throw new SendRefused("signer", `the signed transaction, decoded back, is not the planned one: ${problem}; nothing sent`);
+  return raw;
+}
+
+/** A v3.2 create: exactly the linked creation code of its frozen build (build.ts deployDataV32, the one link path,
+ * ruling DB4), estimated with those bytes, signed by the deployer's keystore and broadcast as those bytes, so what is
+ * sent is what the build (and Task 45's verify) says; never `forge create`, which would build the checkout's sources.
+ * The same gate, chain id and nonce checks as every send come first (the deployer's mined and pending nonces must both
+ * be the planned one); the gas may not exceed the request's ceiling, nor the fees the cap. The signed transaction is
+ * decoded back before it goes (signTransaction), and its hash goes to `hooks.signed` before the broadcast. A mined
+ * revert throws RevertedOnChain; a receipt that names no contract or another address than `predicted`,
+ * UnexpectedReceipt; a good receipt with no code seen there yet, CodeNotYetSeen; no receipt in time, ReceiptTimeout. */
+async function sendCreateV32(ctx: Ctx, req: CreateRequestV32, predicted: Address, hooks: CreateHooks): Promise<Sent> {
+  const chain = req.chain;
+  await guard(ctx, chain, req.nonce);
+  const errors = buildErrorsV32(req.build);
+  const data = deployDataV32(req.build, req);
+  const from = signerOf(ctx).address;
+  const gas = await estimate(ctx, chain, { from, data }, req.label, errors);
+  if (gas > req.gasCeiling) {
+    throw new SendRefused(
+      "estimate",
+      `${chainLabel(chain)}: ${req.label} needs ${gas.toLocaleString("en-US")} gas, more than the ${req.gasCeiling.toLocaleString("en-US")} the plan's funding counts for it; nothing sent`,
+    );
+  }
+  const padded = (gas * 125n + 99n) / 100n;
+  const limit = padded < req.gasCeiling ? padded : req.gasCeiling;
+  const price = await gasPriceOf(ctx.rpc, chain);
+  const over = overCap(ctx, chain, price);
+  if (over) throw new SendRefused("fee", `${over}; ${req.label} waits for it to fall; nothing sent`);
+  ctx.log(`${chainLabel(chain)}: ${req.label} — est. ${gas.toLocaleString("en-US")} gas ≈ ${formatEther(gas * price)} ${unit(chain)}`);
+  const t = ctx.targets[chain];
+  const tip = t.legacy ? 0n : await priorityFeeOf(ctx.rpc, chain);
+  // the node's gas price is its base fee and its suggested tip together, so a tip above it is no honest answer, and it
+  // would lift the fee cap past OPS_MAX_GAS_PRICE_* (Task 44's review, M1)
+  if (tip > price) {
+    throw new SendRefused("fee", `${chainLabel(chain)}: the node suggests a priority fee of ${gweiOf(tip)}, above its gas price of ${gweiOf(price)}; ${req.label} not sent`);
+  }
+  const maxFee = 2n * price;
+  const cap = ctx.maxGasPrice?.[chain];
+  if (!t.legacy && cap !== undefined && maxFee > 2n * cap) {
+    throw new SendRefused("fee", `${chainLabel(chain)}: a fee cap of ${gweiOf(maxFee)} is over twice the ${gweiOf(cap)} cap; ${req.label} not sent`);
+  }
+  const tx: TransactionSerializable = t.legacy
+    ? { type: "legacy", chainId: t.chainId, nonce: req.nonce, gas: limit, gasPrice: price, data, value: 0n }
+    : { type: "eip1559", chainId: t.chainId, nonce: req.nonce, gas: limit, maxFeePerGas: maxFee, maxPriorityFeePerGas: tip, data, value: 0n };
+  await checkSigner(ctx);
+  const raw = await signTransaction(ctx, tx);
+  const hash = keccak256(raw);
+  hooks.signed?.(hash);
+  try {
+    await ctx.rpc.request(chain, "eth_sendRawTransaction", [raw]);
+  } catch (e) {
+    // the node may have taken it all the same (its answer lost on the way back): its pool, or the nonce, says so
+    // (its hash stays in the record either way: one the node took while its pool and nonce lag is settled next run)
+    const known = await ctx.rpc.request(chain, "eth_getTransactionByHash", [hash]).catch(() => null);
+    if (!known && (await nonceOf(ctx.rpc, chain, from)) <= req.nonce) {
+      throw new Error(`${chainLabel(chain)}: ${req.label} was not sent, as far as the node says (${redact(ctx.targets, (e as Error).message)}); its hash is kept, and the next run settles it first`);
+    }
+  }
+  const r = await waitReceipt(ctx, chain, req.nonce, hash);
+  const reason = r.status === "0x1" ? undefined : await revertReason(ctx, chain, { from, data, value: "0x0" }, r.blockNumber, errors);
+  const sent = settle(chain, req.label, hash, r, reason);
+  const got = r.contractAddress;
+  if (!got || got.toLowerCase() !== predicted.toLowerCase()) {
+    throw new UnexpectedReceipt(`${chainLabel(chain)}: ${req.label} (transaction ${hash}) was planned at ${predicted}, but its receipt names ${got ?? "no contract"}`);
+  }
+  // a load-balanced RPC can answer from a node a block behind the receipt: give it a moment, then leave the code to the
+  // next run's check (the controller's ruling on the review's M3: RPC lag after a good receipt voids nothing)
+  for (let i = 0; (await codeAt(ctx.rpc, chain, predicted)) === "0x"; i++) {
+    if (i >= 10) {
+      throw new CodeNotYetSeen(`${chainLabel(chain)}: ${req.label}'s receipt (transaction ${hash}) is good, at ${predicted}, but the RPC shows no code there yet`, {
+        ...sent,
+        address: predicted,
+      });
+    }
     await sleep(ctx.pollMs ?? 3_000);
   }
   return { ...sent, address: predicted };
@@ -462,10 +586,6 @@ export async function sendCall(ctx: Ctx, req: CallRequest): Promise<Sent> {
   const r = await waitReceipt(ctx, req.chain, req.nonce, hash, req);
   return settle(req.chain, req.label, hash, r, r.status === "0x1" ? undefined : await revertReason(ctx, req.chain, tx, r.blockNumber));
 }
-
-/** What replaceCall did: the pending transaction replaced (the same call again, or a cancel in its place)
- * with the replacement's receipt, or nothing (why). */
-export type Replacement = { replaced: false; reason: string } | ({ replaced: true; cancelled: boolean } & Sent);
 
 /** A replacement's fee over the pending transaction's: 12.5% (nodes take a replacement from 10% more). */
 const bumped = (fee: bigint) => (fee * 1125n + 999n) / 1000n;
@@ -548,7 +668,7 @@ export async function replaceCall(ctx: Ctx, req: CallRequest, pending: readonly 
     if (!isRevert(e)) {
       return { replaced: false, reason: `${chainLabel(chain)}: the node didn't answer the estimate of ${req.label} (${redact(ctx.targets, (e as Error).message)}); nothing cancelled` };
     }
-    ctx.log(`${chainLabel(chain)}: ${req.label} would fail now (${describeRevert(ctx, e)}): nonce ${req.nonce} is cancelled instead`);
+    ctx.log(`${chainLabel(chain)}: ${req.label} would fail now (${describeRevert(e)}): nonce ${req.nonce} is cancelled instead`);
     cancelled = true;
     call = [from.address, "--value", "0"];
     limit = CANCEL_GAS;

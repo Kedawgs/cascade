@@ -30,6 +30,12 @@ const RAIL_POOL_V32 = RAIL_V32("ask ForeverMoney what changed");
 const OPEN_BATCH_CLOSED = (when: string, again: string) =>
   `The open batch's redeem requests are deferred ${when}: the requesters keep their shares and their request fees are spent; tell them to ask again ${again}, or to leave directly on Bittensor with a regular wallet (/unstake/bittensor/). There is no need to hold the close: the vault takes nothing from them, and holding it would hold the batch's deposits too (runbook 7.7).`;
 
+/** guardian.low_eth and guardian.low_tao: the offline pause needs the same gas, and a balance that fell with nothing
+ * signed is a sweeper's (a copied seed drains the owner's and the guardian's accounts and front-runs every refill:
+ * runbook 7.2, "never refill a swept account"). */
+const GUARDIAN_GAS =
+  "The offline pause kept ready (runbook 3.6: pnpm ops pause both --for-wallet --offline) fixes no gas or fee, so it needs this balance too. First make sure you spent it yourself (a pause, a drill): the guardian pays gas only for what you sign with it. If its balance fell and you signed nothing, someone else has its key. Never refill a swept account: follow runbook 7.2 (a copied seed) or 7.3 (a stolen guardian).";
+
 export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
   "price.drop": () =>
     "Find the cause before anything else moves (the stake hotkey and the vault's stake on taostats). If stake left the hotkey set or the drop is unexplained, guardian: pause() the vault so no batch is priced low; re-add a swapped hotkey with addHotkey.",
@@ -207,6 +213,10 @@ export const RUNBOOK: Record<RuleId, (f: Facts) => string> = {
     `Top up the keeper wallet's ETH on Base${f.needed ? ` to well above ${f.needed}` : ""} (about 0.03 ETH: pnpm ops budget prints it, runbook 2.2). A close sends a float of three times its bridge fee quote${f["the float a close sends"] ? ` (${f["the float a close sends"]} for a full batch now)` : ""} and the front door sends back what the fee leaves, but a node refuses the send unless the wallet holds the whole float and the gas: below it, a full batch can't be closed by the keeper, and the batch waits on Base until someone else closes it.`,
   "keeper.low_tao": (f) =>
     `Top up the keeper wallet's TAO on Bittensor${f.needed ? ` to more than ${f.needed}` : ""}. Bittensor takes a claim's whole gas limit up front${f["a claim's gas up front"] ? ` (${f["a claim's gas up front"]})` : ""}, so a keeper below this can't claim the vault's rewards at all, even though each claim costs far less once the unused gas is refunded.`,
+  "guardian.low_eth": (f) =>
+    `Send ETH on Base to the guardian ${or(f.guardian, "(the address the front door's guardian() names)")}${f["kept for two pauses"] ? `, to well above ${f["kept for two pauses"]}` : ""} (about 0.001 ETH was its launch funding; pnpm ops budget prints its share of the gas); any account can send it. The guardian signs the emergency pause() and disableBridge on the front door (runbook 7.1), and a wallet won't send a call its account can't pay for: with no ETH it can't pause. ${GUARDIAN_GAS}`,
+  "guardian.low_tao": (f) =>
+    `Send TAO on Bittensor's EVM to the guardian ${or(f.guardian, "(the address the vault's guardian() names)")}${f["kept for two pauses"] ? `, to well above ${f["kept for two pauses"]}` : ""} (about 0.01 TAO was its launch funding); any account can send it, to its 0x address on chain 964. The guardian signs the emergency pause() of the vault, its disableBridge and its cancel of a scheduled change (runbook 7.1), and Bittensor takes a transaction's whole gas limit up front: with too little it can't pause the vault at all. ${GUARDIAN_GAS}`,
   "keeper.idle_unstaked": () => "The keeper isn't staking (or isn't running): check it.",
   "adapter.low_reserve": () => "Top up the Bittensor adapter's reserve with fundReserve().",
   "twap.divergence": () => "Deliveries may stall (or the pool is being pushed). Watch the pool; users can claim by hand.",

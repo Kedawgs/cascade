@@ -166,6 +166,66 @@ describe("keeper and vault housekeeping", () => {
     expect(RUNBOOK["keeper.low_eth"](f.facts)).toContain("0.0172 ETH");
   });
 
+  it("guardian.low_eth below 0.0005 ETH on Base and guardian.low_tao below 0.005 TAO on Bittensor: half its launch funding, two emergency pauses at a cautious gas price", () => {
+    expect(DEFAULTS.guardianMinEthWei).toBe(5n * 10n ** 14n);
+    expect(DEFAULTS.guardianMinTaoWei).toBe(5n * 10n ** 15n);
+    // the launch funding (0.001 ETH and 0.01 TAO, 2026-11-16) is no warning
+    expect(rules(ops.guardianLowEth, ctx({ base: { guardianBalance: 10n ** 15n } }))).toEqual([]);
+    expect(rules(ops.guardianLowTao, ctx({ bit: { guardianBalance: 10n ** 16n } }))).toEqual([]);
+    // at the floor is fine, one wei under it warns
+    expect(rules(ops.guardianLowEth, ctx({ base: { guardianBalance: 5n * 10n ** 14n } }))).toEqual([]);
+    expect(rules(ops.guardianLowEth, ctx({ base: { guardianBalance: 5n * 10n ** 14n - 1n } }))).toEqual(["guardian.low_eth"]);
+    expect(rules(ops.guardianLowTao, ctx({ bit: { guardianBalance: 5n * 10n ** 15n } }))).toEqual([]);
+    expect(rules(ops.guardianLowTao, ctx({ bit: { guardianBalance: 5n * 10n ** 15n - 1n } }))).toEqual(["guardian.low_tao"]);
+    // each judges its own chain's balance, never the other's or the keeper's
+    expect(rules(ops.guardianLowEth, ctx({ base: { guardianBalance: 10n ** 15n, keeperBalance: 0n }, bit: { guardianBalance: 0n } }))).toEqual([]);
+    expect(rules(ops.guardianLowTao, ctx({ bit: { guardianBalance: 10n ** 16n, keeperBalance: 0n }, base: { guardianBalance: 0n } }))).toEqual([]);
+    for (const id of ["guardian.low_eth", "guardian.low_tao"] as const) expect(RULES[id]).toEqual({ tier: "warning", kind: "condition", canHold: false, mutedByHold: false });
+  });
+
+  it("the guardian's alerts say what it holds, the floor and where to send gas, and the runbook names the chain, the address and the pause it is for", () => {
+    const G = "0x00000000000000000000000000000000000000a2" as Hex;
+    const [e] = ops.guardianLowEth.run(ctx({ base: { guardianBalance: 4n * 10n ** 14n, guardian: G } }));
+    expect(e).toEqual({
+      rule: "guardian.low_eth",
+      key: "guardian.low_eth",
+      subject: "The guardian has 0.0004 ETH on Base, under the 0.0005 ETH kept for two emergency pauses",
+      facts: { balance: "0.0004 ETH", "kept for two pauses": "0.0005 ETH", guardian: G },
+    });
+    const [t] = ops.guardianLowTao.run(ctx({ bit: { guardianBalance: 0n, guardian: G } }));
+    expect(t).toEqual({
+      rule: "guardian.low_tao",
+      key: "guardian.low_tao",
+      subject: "The guardian has 0 TAO on Bittensor, under the 0.005 TAO kept for two emergency pauses",
+      facts: { balance: "0 TAO", "kept for two pauses": "0.005 TAO", guardian: G },
+    });
+    // the guardian unread on this reading: the balance is still judged, the address left out
+    expect(ops.guardianLowEth.run(ctx({ base: { guardianBalance: 0n } }))[0].facts).toEqual({ balance: "0 ETH", "kept for two pauses": "0.0005 ETH" });
+    // a floor set in THRESHOLDS is the one judged and named
+    const raised = ctx({ base: { guardianBalance: 10n ** 15n } });
+    raised.t = { ...DEFAULTS, guardianMinEthWei: 2n * 10n ** 15n };
+    expect(ops.guardianLowEth.run(raised)[0].subject).toBe("The guardian has 0.001 ETH on Base, under the 0.002 ETH kept for two emergency pauses");
+
+    const eth = RUNBOOK["guardian.low_eth"](e.facts);
+    expect(eth).toContain(`Send ETH on Base to the guardian ${G}`);
+    expect(eth).toContain("above 0.0005 ETH");
+    expect(eth).toContain("pause()");
+    expect(eth).toContain("pnpm ops pause both --for-wallet --offline");
+    const tao = RUNBOOK["guardian.low_tao"](t.facts);
+    expect(tao).toContain(`Send TAO on Bittensor's EVM to the guardian ${G}`);
+    expect(tao).toContain("above 0.005 TAO");
+    expect(tao).toContain("whole gas limit up front");
+    // with no facts (the digest, a hand-rendered email) each still reads whole
+    expect(RUNBOOK["guardian.low_eth"]({})).toContain("Send ETH on Base to the guardian (the address the front door's guardian() names)");
+    expect(RUNBOOK["guardian.low_tao"]({})).toContain("Send TAO on Bittensor's EVM to the guardian (the address the vault's guardian() names)");
+    for (const text of [eth, tao, RUNBOOK["guardian.low_eth"]({}), RUNBOOK["guardian.low_tao"]({})]) {
+      expect(text).not.toMatch(/undefined/);
+      // a balance that fell with nothing signed is a sweeper's work, and a swept account is never refilled (runbook 7.2)
+      expect(text).toContain("Never refill a swept account");
+      expect(text).toContain("runbook 7.2");
+    }
+  });
+
   it("keeper.idle_unstaked: stakeable idle at least the minimum stake for more than 2 hours", () => {
     const bit = { balance: 3n * E18 + 10n ** 12n, pendingPayouts: E18, minStakeRao: 2n * 10n ** 9n };
     const first = ctx({ bit });

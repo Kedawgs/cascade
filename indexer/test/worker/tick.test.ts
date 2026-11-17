@@ -5,7 +5,8 @@ import { countingDb, wipe } from "./d1-count.ts";
 import { BIT_ADAPTER, DEPENDENCY_EVENTS, FRONT_DOOR, MINTER_ROLE } from "../../src/abi.ts";
 import { measureBlockS } from "../../src/blocktime.ts";
 import { catchingUpChains, prefetchLookbacks } from "../../src/tick.ts";
-import { KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
+import { expand } from "../../src/snapshot.ts";
+import { GUARDIAN, KEEPER, TREASURY_WALLET } from "./fake-deployment.ts";
 import { TEST_URLS } from "./fake-rpc.ts";
 import { rawLog } from "./fixtures.ts";
 import { failingBatches, failingCommits, h, roundTrip, rows, type SentEmail, START_HEADS, stakedLog, T0, type TickWorld, tickWorld } from "./tick-world.ts";
@@ -951,6 +952,65 @@ describe("backfill and budgets", () => {
     expect((await w.tick({ db: c.db })).outcome).toBe("done");
     expect(c.stats.queries).toBeLessThanOrEqual(6);
     expect(c.stats.rowsRead).toBeLessThan(2000);
+  });
+});
+
+describe("the guardian's gas, through the tick", () => {
+  const reading = async () => expand((await rows<{ json: string }>("SELECT json FROM readings ORDER BY at DESC LIMIT 1"))[0].json);
+  const unjudgedWarnings = async () => ((await rows<{ v: string }>("SELECT v FROM meta WHERE k = 'unjudged_warnings'"))[0]?.v ?? "").split(",");
+
+  it("reads the guardian's balance on each chain once a reading has named it, in the multicalls already made, and warns under two pauses' worth; quiet at its launch funding", async () => {
+    const w = tickWorld();
+    await w.tick();
+    // the first reading names the guardian: no balance of it yet, and the two rules say they couldn't judge (never clear)
+    expect((await reading()).base?.state).not.toHaveProperty("guardianBalance");
+    expect(await unjudgedWarnings()).toEqual(expect.arrayContaining(["guardian.low_eth", "guardian.low_tao"]));
+    w.advance();
+    await w.tick();
+    const second = await reading();
+    expect(second.base?.state.guardianBalance).toBe(10n ** 15n);
+    expect(second.bittensor?.state.guardianBalance).toBe(10n ** 16n);
+    expect(await unjudgedWarnings()).not.toEqual(expect.arrayContaining(["guardian.low_eth"]));
+    expect(await unjudgedWarnings()).not.toEqual(expect.arrayContaining(["guardian.low_tao"]));
+    // 0.001 ETH and 0.01 TAO, as funded at launch: nothing
+    expect((await alertKeys()).filter((k) => k.startsWith("guardian."))).toEqual([]);
+    // the same requests as a tick made before it was read: one multicall a chain
+    const before = w.net.fetches.length;
+    w.state.base.guardianBalance = 5n * 10n ** 14n - 1n;
+    w.advance();
+    await w.tick();
+    expect(w.net.fetches.slice(before).filter((f) => f.methods.includes("eth_call"))).toHaveLength(2);
+    expect(w.net.fetches.slice(before).some((f) => f.methods.includes("eth_getBalance"))).toBe(false);
+    expect((await alertKeys()).filter((k) => k.startsWith("guardian."))).toEqual(["guardian.low_eth"]);
+    w.state.bit.guardianBalance = 5n * 10n ** 15n - 1n;
+    w.advance();
+    await w.tick();
+    expect((await alertKeys()).filter((k) => k.startsWith("guardian."))).toEqual(["guardian.low_eth", "guardian.low_tao"]);
+    const [alert] = await rows<{ tier: string; kind: string; subject: string; runbook: string }>("SELECT tier, kind, subject, runbook FROM alerts WHERE rule = 'guardian.low_tao'");
+    expect(alert).toMatchObject({ tier: "warning", kind: "condition", subject: "The guardian has 0.004999999999999999 TAO on Bittensor, under the 0.005 TAO kept for two emergency pauses" });
+    expect(alert.runbook).toContain(`Send TAO on Bittensor's EVM to the guardian ${GUARDIAN}`);
+    // a warning never holds the keeper
+    expect((await w.status()).hold.active).toBe(false);
+    // funded again: both resolve
+    w.state.base.guardianBalance = 10n ** 15n;
+    w.state.bit.guardianBalance = 10n ** 16n;
+    w.advance();
+    await w.tick();
+    expect((await alertKeys()).filter((k) => k.startsWith("guardian."))).toEqual([]);
+  });
+
+  it("a tick with no reading of a chain leaves that chain's guardian alert open (unjudged), never resolved", async () => {
+    const w = tickWorld({ setup: (s) => void (s.bit.guardianBalance = 0n) });
+    await w.tick();
+    w.advance();
+    await w.tick();
+    expect((await alertKeys()).filter((k) => k.startsWith("guardian."))).toEqual(["guardian.low_tao"]);
+    // Bittensor's multicall fails: no reading of it this tick
+    w.fail((url) => (url === TEST_URLS.bittensor ? new Error("down") : undefined));
+    w.advance();
+    await w.tick();
+    expect((await alertKeys()).filter((k) => k.startsWith("guardian."))).toEqual(["guardian.low_tao"]);
+    expect(await unjudgedWarnings()).toEqual(expect.arrayContaining(["guardian.low_tao"]));
   });
 });
 

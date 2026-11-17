@@ -71,6 +71,23 @@ export const DEFAULTS = {
    * fee (0.285 TAO at launch): Bittensor takes a transaction's whole gas limit up front, so a keeper below it can't claim
    * at all. */
   keeperMinTaoWei: 10n ** 16n,
+  /** guardian.low_eth: 0.0005 ETH on Base, half the guardian's launch funding (0.001 ETH, 2026-11-16): what two
+   * emergency pauses need at a gas price far above Base's usual one. The front door's pause() used 49,794 gas in the
+   * rehearsal (ops v32/budget.ts FOUNDER_STEPS_V32), 62,243 as a wallet's limit (a quarter more), so two are 124,486 gas
+   * and 0.00008 ETH of Base's L1 fee (ops BASE_L1_PER_CALL, 0.00004 a call). Base's price sits well under 0.1 gwei and
+   * spikes to about 1 (ops config.ts maxGasPrices): at 1 gwei two pauses need 0.0002 ETH, or 0.00043 sized as pnpm ops
+   * budget sizes a founder account (the limits at twice the price, its 30% margin). The floor covers them up to about
+   * 3.4 gwei. At the keeper's own 5 gwei cap they would need 0.0007 ETH (0.0017 as the budget sizes it), more than the
+   * guardian holds: fund it higher, and raise this, if Base's price ever lives there. */
+  guardianMinEthWei: 5n * 10n ** 14n,
+  /** guardian.low_tao: 0.005 TAO on Bittensor, half the guardian's launch funding (0.01 TAO): two pauses of the vault
+   * at a gas price far above Bittensor's usual one. No rehearsal measured the vault's pause(); the guardian's
+   * disableBridge on the vault, which writes the same (a flag, the actor, the guardian's clock, two events), used 54,105
+   * gas (FOUNDER_STEPS_V32), 67,632 as a wallet's limit, so two are 135,264 gas, which Bittensor takes whole up front.
+   * Its gas price sits about 10 gwei (ops config.ts; about 5 in November 2026): at 10 gwei two need 0.00135 TAO, or
+   * 0.0035 as the budget sizes it. The floor covers them up to about 37 gwei; the keeper's cap there is 100 gwei, where
+   * they would need 0.0135 TAO, more than the guardian holds. */
+  guardianMinTaoWei: 5n * 10n ** 15n,
   /** the gas the keeper sends a claim with above the vault's claimGasRequired (ops CLAIM_GAS_MARGIN) */
   claimGasMargin: 2_000_000,
   /** the most gas the keeper sends a claim with: Bittensor's per-transaction ceiling (ops BITTENSOR_TX_GAS_CEILING, Task

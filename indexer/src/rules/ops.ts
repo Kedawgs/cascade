@@ -169,6 +169,29 @@ export const keeperLowTao: Rule = {
   },
 };
 
+/** guardian.low_eth and guardian.low_tao: the guardian's gas on a chain below what two emergency pauses need at a
+ * cautious gas price (guardianMinEthWei on Base, guardianMinTaoWei on Bittensor: thresholds.ts says where each comes
+ * from). The guardian sends the pause on both chains, and an account that can't pay a call's gas can't send it. Its
+ * balance is the reading's (the guardian the last reading named, read in the chain's multicall); unread, the rule is
+ * unjudged: no reading of the chain, no guardian named yet, or a guardian changed since the last reading. */
+const guardianLow = (rule: "guardian.low_eth" | "guardian.low_tao", chain: ChainName): Rule => ({
+  name: rule,
+  run(ctx) {
+    const s = ctx.snap[chain]?.state;
+    const bal = s?.guardianBalance;
+    if (bal === undefined) return unjudged(ctx, rule, rule);
+    const [floor, amount, where] = chain === "base" ? ([ctx.t.guardianMinEthWei, eth, "Base"] as const) : ([ctx.t.guardianMinTaoWei, tao, "Bittensor"] as const);
+    if (bal >= floor) return [];
+    return one(rule, rule, `The guardian has ${amount(bal)} on ${where}, under the ${amount(floor)} kept for two emergency pauses`, {
+      balance: amount(bal),
+      "kept for two pauses": amount(floor),
+      ...(s?.guardian ? { guardian: s.guardian } : {}),
+    });
+  },
+});
+export const guardianLowEth = guardianLow("guardian.low_eth", "base");
+export const guardianLowTao = guardianLow("guardian.low_tao", "bittensor");
+
 /** keeper.idle_unstaked: the vault's stakeable idle balance (balance − 1e12 − pendingPayouts) at least the
  * chain's minimum stake for more than idleUnstakedS (since when: meta idle_since). */
 export const keeperIdleUnstaked: Rule = {
@@ -650,6 +673,8 @@ export const OPS_RULES: Rule[] = [
   deliveryOverdue,
   keeperLowEth,
   keeperLowTao,
+  guardianLowEth,
+  guardianLowTao,
   keeperIdleUnstaked,
   adapterLowReserve,
   capNearlyFull,

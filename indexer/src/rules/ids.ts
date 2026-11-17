@@ -193,6 +193,9 @@ export const RULES = {
   "delivery.overdue": warning("condition"),
   "keeper.low_eth": warning("condition"),
   "keeper.low_tao": warning("condition"),
+  // the guardian's gas for the emergency pause, on each chain: below it the key that stops things may not be able to
+  "guardian.low_eth": warning("condition"),
+  "guardian.low_tao": warning("condition"),
   "keeper.idle_unstaked": warning("condition"),
   "adapter.low_reserve": warning("condition"),
   "twap.divergence": warning("condition"),

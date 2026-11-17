@@ -110,6 +110,14 @@ describe("the operational conditions, unread", () => {
     expect(judged(ops.keeperLowTao, ctx({ bit: { keeperBalance: E18, claimGasRequired: 1_000_000n, baseFee: 10n ** 9n } }))).toEqual(CLEAR);
     expect(judged(ops.adapterLowReserve, ctx({ bit: {} }))).toEqual(blind([{ rule: "adapter.low_reserve", key: "adapter.low_reserve" }]));
     expect(judged(ops.adapterLowReserve, ctx({ bit: { adapterBalance: E18 } }))).toEqual(CLEAR);
+    // the guardian's gas: no reading of its chain, or a reading without its balance (the guardian not named yet, or just
+    // changed), is unjudged, never clear and never a finding; the other chain's balance doesn't stand in
+    expect(judged(ops.guardianLowEth, ctx({}))).toEqual(blind([{ rule: "guardian.low_eth", key: "guardian.low_eth" }]));
+    expect(judged(ops.guardianLowEth, ctx({ base: {}, bit: { guardianBalance: E18 } }))).toEqual(blind([{ rule: "guardian.low_eth", key: "guardian.low_eth" }]));
+    expect(judged(ops.guardianLowEth, ctx({ base: { guardianBalance: E18 } }))).toEqual(CLEAR);
+    expect(judged(ops.guardianLowTao, ctx({}))).toEqual(blind([{ rule: "guardian.low_tao", key: "guardian.low_tao" }]));
+    expect(judged(ops.guardianLowTao, ctx({ bit: {}, base: { guardianBalance: E18 } }))).toEqual(blind([{ rule: "guardian.low_tao", key: "guardian.low_tao" }]));
+    expect(judged(ops.guardianLowTao, ctx({ bit: { guardianBalance: E18 } }))).toEqual(CLEAR);
     const idle = ctx({ bit: { balance: 10n ** 12n, pendingPayouts: 0n }, meta: { idle_since: String(NOW - 86_400) } });
     expect(judged(ops.keeperIdleUnstaked, idle)).toEqual(blind([{ rule: "keeper.idle_unstaked", key: "keeper.idle_unstaked" }]));
     // its mark is left as it is

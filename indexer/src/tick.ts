@@ -464,6 +464,8 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
       stakedHotkeys: previous.bittensor?.state.stakedHotkeys,
       stakeHotkey: previous.bittensor?.state.stakeHotkey,
       keepers: { base: previous.base?.state.keeper, bittensor: previous.bittensor?.state.keeper },
+      // the guardian each chain's last reading named: its gas for the emergency pause (guardian.low_eth, guardian.low_tao)
+      guardians: { base: previous.base?.state.guardian, bittensor: previous.bittensor?.state.guardian },
       // v3.2: the owners the last reading named, whose threshold and signers to read (a Safe's)
       owners: { base: previous.base?.state.owner, bittensor: previous.bittensor?.state.owner },
       // v3.2: scheduled(id) of this tick's new Scheduled and of every item the admin rules keep (src/scheduler.ts)

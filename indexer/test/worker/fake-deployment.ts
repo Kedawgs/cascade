@@ -99,6 +99,8 @@ export function deploymentState(cfg: Config) {
       lockPoolFmTao: 100n * 10n ** 18n,
       adapterBalance: 10n ** 13n,
       keeperBalance: 10n ** 18n,
+      /** the guardian's TAO: its launch funding, 0.01 */
+      guardianBalance: 10n ** 16n,
       alpha: {
         isPaused: false,
         migrationReadyAt: 0n,
@@ -237,6 +239,8 @@ export function deploymentState(cfg: Config) {
       /** USDC.balanceOf(wethUsdcPool) */
       wethUsdcPoolUsdc: 12_000_000n * 10n ** 6n,
       keeperBalance: 10n ** 17n,
+      /** the guardian's ETH on Base: its launch funding, 0.001 */
+      guardianBalance: 10n ** 15n,
       /** R12a: the front door's redeemRequestFee: v3-launch's 0.0001 ETH, or v3.2's launch 0.0002 ETH (the founder,
        * 2026-11-16) */
       redeemRequestFee: d.version === "v3.2" ? 2n * 10n ** 14n : 10n ** 14n,
@@ -372,8 +376,8 @@ export function fakeDeployment(cfg: Config, state: DeploymentState, o: { heads?:
   const x = state.bit;
   const balances = (chain: "base" | "bittensor") => (a: Hex) => {
     const k = lc(a);
-    if (chain === "base") return k === d.frontDoor ? b.frontDoorEth : k === lc(b.keeper) ? b.keeperBalance : (b.ethOf[k] ?? 0n);
-    return k === d.vault ? x.balance : k === d.bitAdapter ? x.adapterBalance : k === lc(x.keeper) ? x.keeperBalance : 0n;
+    if (chain === "base") return k === d.frontDoor ? b.frontDoorEth : k === lc(b.keeper) ? b.keeperBalance : k === lc(b.guardian) ? b.guardianBalance : (b.ethOf[k] ?? 0n);
+    return k === d.vault ? x.balance : k === d.bitAdapter ? x.adapterBalance : k === lc(x.keeper) ? x.keeperBalance : k === lc(x.guardian) ? x.guardianBalance : 0n;
   };
   const counts = (chain: "base" | "bittensor") => ([a]: readonly unknown[]) => `0x${(state.nonces[chain][lc(a)] ?? 0n).toString(16)}`;
   /** a Safe answers nonce() and, when listed in safeOwners, getThreshold() and getOwners() */

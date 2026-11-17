@@ -261,6 +261,47 @@ describe("readSnapshot", () => {
     expect(s.bittensor).toBeDefined();
   });
 
+  it("reads the guardian's gas on each chain in that chain's multicall (no request more), for the guardian the last reading named; unread when none was named, or when this reading names another", async () => {
+    for (const c of [cfg, testConfigV32()]) {
+      const state = deploymentState(c);
+      state.base.guardianBalance = 7n * 10n ** 14n;
+      state.bit.guardianBalance = 9n * 10n ** 15n;
+      const { rpc, net } = fakeDeployment(c, state);
+      // the first reading names the guardian, and has no balance of it yet: nothing asked for it
+      const first = await readSnapshot(rpc, c, inputs(), 1);
+      expect(first.base?.state.guardian).toBe(GUARDIAN);
+      expect(first.bittensor?.state.guardian).toBe(GUARDIAN);
+      expect(first.base?.state).not.toHaveProperty("guardianBalance");
+      expect(first.bittensor?.state).not.toHaveProperty("guardianBalance");
+      const before = net.count();
+      // the next asks its balance on each chain, each chain's own (never the keeper's 1 TAO and 0.1 ETH)
+      const s = await readSnapshot(rpc, c, inputs({ guardians: { base: GUARDIAN, bittensor: GUARDIAN }, keepers: { base: KEEPER, bittensor: KEEPER } }), 2);
+      expect(s.base?.state.guardianBalance).toBe(7n * 10n ** 14n);
+      expect(s.bittensor?.state.guardianBalance).toBe(9n * 10n ** 15n);
+      expect(s.base?.state.keeperBalance).toBe(10n ** 17n);
+      expect(s.bittensor?.state.keeperBalance).toBe(10n ** 18n);
+      // as many requests as the reading without it: a multicall a chain (and v3.2's one gas estimate)
+      expect(net.count() - before).toBe(before);
+      expect(net.fetches.slice(before).map((f) => f.methods).flat().sort()).toEqual(net.fetches.slice(0, before).map((f) => f.methods).flat().sort());
+      // one chain's guardian alone is asked there alone
+      const one = await readSnapshot(rpc, c, inputs({ guardians: { bittensor: GUARDIAN } }), 3);
+      expect(one.bittensor?.state.guardianBalance).toBe(9n * 10n ** 15n);
+      expect(one.base?.state).not.toHaveProperty("guardianBalance");
+      // a guardian replaced since the last reading: the balance read is the old one's, so it is left unread on this
+      // reading (the rule is unjudged), and the next reads the new guardian's
+      const NEW = "0x00000000000000000000000000000000000000b7" as Hex;
+      state.base.guardian = NEW;
+      state.bit.guardian = NEW;
+      const swapped = await readSnapshot(rpc, c, inputs({ guardians: { base: GUARDIAN, bittensor: GUARDIAN } }), 4);
+      expect(swapped.base?.state.guardian).toBe(NEW);
+      expect(swapped.base?.state).not.toHaveProperty("guardianBalance");
+      expect(swapped.bittensor?.state).not.toHaveProperty("guardianBalance");
+      const next = await readSnapshot(rpc, c, inputs({ guardians: { base: NEW, bittensor: NEW } }), 5);
+      expect(next.base?.state.guardianBalance).toBe(7n * 10n ** 14n);
+      expect(next.bittensor?.state.guardianBalance).toBe(9n * 10n ** 15n);
+    }
+  });
+
   it("reads watched addresses' transaction counts in one batch per chain, and a Safe's nonce in the multicall", async () => {
     const state = deploymentState(cfg);
     state.nonces.base[OWNER] = 12n;

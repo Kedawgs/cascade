@@ -30,6 +30,7 @@ import {
 } from "./abi.ts";
 import { type ChainName, type Config, PATH_TAO_TO_USDC, PATH_USDC_TO_TAO, UNISWAP_QUOTER as QUOTER } from "./config.ts";
 import { encodePayoutsMessage } from "./crosscheck/payouts.ts";
+import { hourSpend, type TickSpend } from "./gas.ts";
 import { encodeBatchMessage } from "./crosscheck/replay.ts";
 import { multicall, newerThan, type Read } from "./multicall.ts";
 import type { Rpc } from "./rpc.ts";
@@ -270,6 +271,9 @@ export interface BitState {
   lockPoolFmTao?: bigint;
   adapterBalance?: bigint;
   keeperBalance?: bigint;
+  /** the guardian's TAO (guardian.low_tao): the balance of the guardian the last reading named (SnapshotInputs.guardians),
+   * left unread on a reading that names another guardian (a setGuardian since: the next reading reads the new one's) */
+  guardianBalance?: bigint;
   alpha: {
     isPaused?: boolean;
     migrationReadyAt?: bigint;
@@ -448,6 +452,8 @@ export interface BaseState {
   oracleValue?: bigint;
   oracleReverted?: boolean;
   keeperBalance?: bigint;
+  /** the guardian's ETH (guardian.low_eth): the balance of the guardian the last reading named, as BitState's */
+  guardianBalance?: bigint;
   /** R12a: the front door's redeemRequestFee, the ETH the first redeem request a user makes in a batch pays its pot */
   redeemRequestFee?: bigint;
   /** R12a: the front door's primary bridge's fee to close a full batch (50 deposits and 50 redeem requests: the costliest
@@ -512,6 +518,9 @@ export interface SnapshotInputs {
   stakedHotkeys?: Hex[];
   stakeHotkey?: Hex;
   keepers?: { base?: Hex; bittensor?: Hex };
+  /** the guardian the last reading named on each chain, whose native balance to read there (its gas for the emergency
+   * pause), in that chain's multicall as the keeper's is */
+  guardians?: { base?: Hex; bittensor?: Hex };
   oracle?: Hex;
   /** the previous Base reading's oracleValue: a $1,000 sell quote is sized by it (no quote without one) */
   previousOracleValue?: bigint;
@@ -774,6 +783,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   vp.add({ ethBalance: d.vault }, (v) => (bit.balance = v));
   vp.add({ ethBalance: d.bitAdapter }, (v) => (bit.adapterBalance = v));
   if (i.keepers?.bittensor) vp.add({ ethBalance: i.keepers.bittensor }, (v) => (bit.keeperBalance = v));
+  if (i.guardians?.bittensor) vp.add({ ethBalance: i.guardians.bittensor }, (v) => (bit.guardianBalance = v));
   vp.add({ address: t.bittensor.fmTao, abi: ERC20, functionName: "balanceOf", args: [t.bittensor.lockPool] }, (v) => (bit.lockPoolFmTao = v));
   // ForeverMoney's state, read at the AlphaVaults of the rail now primary on each chain (v3.2, R4-O round 4: the deploy's
   // until a switch, the replacement pair's after one), TOKENS' until the readings name them; v3-launch at TOKENS'
@@ -1007,6 +1017,7 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
   bp.add({ address: t.base.fmTao, abi: ERC20, functionName: "balanceOf", args: [t.base.taoWethPool] }, (v) => (base.taoWethPool.tao = v));
   bp.add({ ethBalance: d.frontDoor }, (v) => (base.frontDoorEth = v));
   if (i.keepers?.base) bp.add({ ethBalance: i.keepers.base }, (v) => (base.keeperBalance = v));
+  if (i.guardians?.base) bp.add({ ethBalance: i.guardians.base }, (v) => (base.guardianBalance = v));
   for (const [pool, into] of [
     [t.base.taoWethPool, base.taoWethPool],
     [t.base.wethUsdcPool, base.wethUsdcPool],
@@ -1114,6 +1125,9 @@ export async function readSnapshot(rpc: Rpc, cfg: Config, i: SnapshotInputs, now
     deliveredReads: [],
     codes: { base: baseCounts.codes, bittensor: bitCounts.codes },
   };
+  // a balance read for a guardian this reading no longer names is not the guardian's: left unread, never judged
+  if (bit.guardian !== undefined && i.guardians?.bittensor && lc(i.guardians.bittensor) !== bit.guardian) delete bit.guardianBalance;
+  if (base.guardian !== undefined && i.guardians?.base && lc(i.guardians.base) !== base.guardian) delete base.guardianBalance;
   if (bitReading) {
     // ForeverMoney's state as one, from the vaults read (R4-O round 4)
     bit.alpha = combinedAlpha(alphaVaults.map((v) => alphaOf[v]));
@@ -1328,6 +1342,13 @@ export interface HourAgg {
    * them sets backingToleranceBps before BACKING_HOLD is switched on: README) */
   backingPpmLow?: number;
   backingPpmHigh?: number;
+  /** the keeper's spend in the hour, per chain (src/gas.ts): what its balance fell by between consecutive readings,
+   * summed (0 once a balance was counted in the hour; absent on a row from before it was kept), and what it rose by, a
+   * top-up (absent while it never rose). The daily digest sums a day and a week of them */
+  keeperEthSpent?: bigint;
+  keeperEthAdded?: bigint;
+  keeperTaoSpent?: bigint;
+  keeperTaoAdded?: bigint;
   /** the pool's TAO price in USD, summed over the readings that had one */
   spotSum: number;
   spotCount: number;
@@ -1336,8 +1357,9 @@ export interface HourAgg {
 const hi = (a: bigint | undefined, b: bigint | undefined) => (a === undefined ? b : b === undefined ? a : a > b ? a : b);
 const lo = (a: bigint | undefined, b: bigint | undefined) => (a === undefined ? b : b === undefined ? a : a < b ? a : b);
 
-/** The hour's aggregates with this tick's reading: a new hour starts afresh. */
-export function hourRollup(prev: HourAgg | undefined, s: Snapshot, spotUsd?: number): HourAgg {
+/** The hour's aggregates with this tick's reading, and what the tick counted of the keeper's spend (src/gas.ts): a new
+ * hour starts afresh. */
+export function hourRollup(prev: HourAgg | undefined, s: Snapshot, spotUsd?: number, spend?: TickSpend): HourAgg {
   const hour = Math.floor(s.at / 3600) * 3600;
   const p: HourAgg = prev && prev.hour === hour ? prev : { hour, ticks: 0, spotSum: 0, spotCount: 0 };
   const bit = s.bittensor?.state;
@@ -1362,6 +1384,7 @@ export function hourRollup(prev: HourAgg | undefined, s: Snapshot, spotUsd?: num
     standbyStakeHigh: hi(p.standbyStakeHigh, bit?.standby?.rootStake),
     backingPpmLow: ppm === undefined ? p.backingPpmLow : Math.min(p.backingPpmLow ?? ppm, ppm),
     backingPpmHigh: ppm === undefined ? p.backingPpmHigh : Math.max(p.backingPpmHigh ?? ppm, ppm),
+    ...hourSpend(p, spend),
     spotSum: p.spotSum + (spotUsd ?? 0),
     spotCount: p.spotCount + (spotUsd === undefined ? 0 : 1),
   };

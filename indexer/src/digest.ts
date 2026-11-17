@@ -2,6 +2,7 @@ import { formatUnits } from "viem";
 import { lookbackFrom, storedBlockS } from "./blocktime.ts";
 import type { ChainName } from "./config.ts";
 import type { DigestContent } from "./email.ts";
+import { amountTo, parseSpend, spendKey, spentIn } from "./gas.ts";
 import { UNJUDGED_WARNINGS_KEY } from "./rules/ops.ts";
 import type { BaseState, BitState, ChainReading, HourAgg } from "./snapshot.ts";
 import type { AlertRow, CursorRow, HoldRow } from "./store.ts";
@@ -45,6 +46,51 @@ const pct = (now: bigint, then: bigint | undefined) => {
   const bp = Number(((now - then) * 1_000_000n) / then) / 10_000;
   return `${bp >= 0 ? "+" : ""}${bp.toFixed(2)}%`;
 };
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** A time's UTC day, as "16 Nov 2026". */
+const dayMonthYear = (s: number) => {
+  const d = new Date(s * 1000);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+};
+
+/** Each chain's gas coin as the Gas section prints it: ETH to 8 places, TAO to 6 (gas.ts amountTo). */
+const GAS = [
+  { chain: "base", name: "Base", coin: "ETH", places: 8 },
+  { chain: "bittensor", name: "Bittensor", coin: "TAO", places: 6 },
+] as const;
+const WINDOWS = [
+  { label: "last 24 hours", seconds: DAY },
+  { label: "last 7 days", seconds: 7 * DAY },
+] as const;
+
+/** The Gas section (src/gas.ts): the keeper's and the guardian's balance on each chain, from the latest reading, then
+ * the keeper's spend on each chain: in the last 24 hours and the last 7 days, from the hour rows (spentIn: "not enough
+ * history yet" until the count reaches back over the window; a top-up in it is said, since it is no longer hidden),
+ * and in all from the running total (meta keeper_spend:<chain>), named by the day its count starts on, never as "all
+ * time". A balance not read, or a chain with no total, says so in a line of its own: never a zero that might be false.
+ * In the coins themselves: the digest converts nothing to dollars. */
+function gasLines(i: Pick<DigestInput, "base" | "bit" | "hours" | "meta" | "nowS">): string[] {
+  const state = { base: i.base?.state, bittensor: i.bit?.state };
+  const held = (who: string, field: "keeperBalance" | "guardianBalance") =>
+    GAS.map((g) => {
+      const wei = state[g.chain]?.[field];
+      return `${who} on ${g.name}: ${wei === undefined ? "not read" : `${amountTo(wei, g.places)} ${g.coin}`}`;
+    });
+  const spent = GAS.flatMap((g) => {
+    const total = parseSpend(i.meta[spendKey(g.chain)]);
+    if (!total) return [`keeper spent on ${g.name}: not counted yet`];
+    const coins = (wei: bigint) => `${amountTo(wei, g.places)} ${g.coin}`;
+    return [
+      ...WINDOWS.map((w) => {
+        const s = spentIn(i.hours, g.chain, total, i.nowS, w.seconds);
+        return `keeper spent on ${g.name}, ${w.label}: ${s === undefined ? "not enough history yet" : `${coins(s.spent)}${s.toppedUp ? " (topped up in this window)" : ""}`}`;
+      }),
+      `keeper spent on ${g.name}, since ${dayMonthYear(total.since)}: ${coins(total.spent)}`,
+    ];
+  });
+  return [...held("keeper", "keeperBalance"), ...held("guardian", "guardianBalance"), ...spent];
+}
 
 export interface DigestInput {
   db: D1Database;
@@ -106,10 +152,7 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
     ...sweeps(baseSweeps, "Base adapter", "ETH", "FM-TAO"),
     ...sweeps(bitSweeps, "Bittensor adapter", "TAO", "wTAO"),
   ];
-  const keeper = [
-    `Base: ${base?.keeperBalance === undefined ? "unknown" : amount(base.keeperBalance, "ETH")}`,
-    `Bittensor: ${bit?.keeperBalance === undefined ? "unknown" : amount(bit.keeperBalance, "TAO")}`,
-  ];
+  const gas = gasLines(i);
   const alerts = i.openAlerts.length ? [...critical, ...warnings].map((a) => `[${a.tier}] ${a.subject} (${age(i.nowS - a.openedAt)})`) : ["none open"];
   const hold = i.activeHolds.length ? i.activeHolds.map((h) => `on: ${h.publicId} (${h.summary}), raised ${age(i.nowS - h.raisedAt)} ago`) : ["off"];
   const lag = (["base", "bittensor"] as ChainName[]).map((c) => {
@@ -128,7 +171,7 @@ export async function buildDigest(i: DigestInput): Promise<DigestContent> {
       { title: "Staking", lines: staking },
       { title: "Batches in 24 hours", lines: batches },
       { title: "Fees in 24 hours", lines: fees },
-      { title: "Keeper balances", lines: keeper },
+      { title: "Gas", lines: gas },
       { title: "Open alerts", lines: alerts },
       { title: "The hold", lines: hold },
       {

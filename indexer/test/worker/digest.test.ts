@@ -3,6 +3,8 @@ import type { Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import { BASKET_TWR_PREFIX, basketTwrKey, decodeTwr, netApyPercent } from "../../src/apy.ts";
 import { buildDigest, digestDue } from "../../src/digest.ts";
+import { renderDigest } from "../../src/email.ts";
+import { formatSpend } from "../../src/gas.ts";
 import type { StoredLog } from "../../src/logs.ts";
 import type { HourAgg } from "../../src/snapshot.ts";
 import { type AlertRow, type CursorRow, upsertBlocks, upsertLogs } from "../../src/store.ts";
@@ -180,5 +182,153 @@ describe("buildDigest", () => {
     const o = { db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], meta: {} };
     expect((await buildDigest({ ...o, openAlerts: [] })).status).toBe("OK");
     expect((await buildDigest({ ...o, openAlerts: [alert({}), alert({ id: 3 })] })).status).toBe("2 warnings");
+  });
+});
+
+describe("the digest's Gas section: the keeper's and the guardian's balances, and the keeper's spend (src/gas.ts)", () => {
+  const KEEPER = "0x00000000000000000000000000000000000000a3" as Hex;
+  /** an hour row `back` hours before the digest's hour */
+  const row = (back: number, o: Partial<HourAgg> = {}): HourAgg => ({ hour: Math.floor(NOW / 3600) * 3600 - back * 3600, ticks: 60, spotSum: 0, spotCount: 0, ...o });
+  const total = (since: number, spent: bigint, last = 0n) => formatSpend({ since, spent, last, keeper: KEEPER });
+  type Input = Parameters<typeof buildDigest>[0];
+  const digest = async (o: Partial<Input>) => {
+    await wipe(db);
+    return buildDigest({ db, nowS: NOW, hours: [], cursors: {}, activeHolds: [], openAlerts: [], meta: {}, ...o });
+  };
+  const gas = async (o: Partial<Input>) => (await digest(o)).sections.find((s) => s.title === "Gas")?.lines ?? [];
+  // the launch keeper after its two stakes, and the guardian as funded
+  const base = reading(37_100_200n, NOW, baseState({ keeperBalance: 29_999_550_000_000_000n, guardianBalance: 10n ** 15n }));
+  const bit = reading(6_905_200n, NOW, bitState({ keeperBalance: 498_432_220_000_000_000n, guardianBalance: 10n ** 16n }));
+  /** NOW is 15 Jan 2027, 08:00 UTC */
+  const JAN_6 = NOW - 9 * DAY;
+
+  it("spent: each balance from the latest reading (ETH to 8 places, TAO to 6), and the keeper's spend on each chain in 24 hours, 7 days, and since the date its count starts", async () => {
+    const d = await digest({
+      base,
+      bit,
+      meta: { "keeper_spend:base": total(JAN_6, 450_000_000_000n), "keeper_spend:bittensor": total(JAN_6, 1_567_280_000_000_000n) },
+      // the second stake two hours ago, the first on the day before; rows back to the count's start, and one a day older
+      hours: [
+        row(2, { keeperEthSpent: 250_000_000_000n, keeperTaoSpent: 698_170_000_000_000n }),
+        row(30, { keeperEthSpent: 200_000_000_000n, keeperTaoSpent: 869_110_000_000_000n }),
+        row(168, { keeperEthSpent: 0n, keeperTaoSpent: 0n }),
+        row(192, { keeperEthSpent: 7n * E18, keeperTaoSpent: 7n * E18 }),
+      ],
+    });
+    expect(d.sections.find((s) => s.title === "Gas")?.lines).toEqual([
+      "keeper on Base: 0.02999955 ETH",
+      "keeper on Bittensor: 0.498432 TAO",
+      "guardian on Base: 0.001 ETH",
+      "guardian on Bittensor: 0.01 TAO",
+      "keeper spent on Base, last 24 hours: 0.00000025 ETH",
+      "keeper spent on Base, last 7 days: 0.00000045 ETH",
+      "keeper spent on Base, since 6 Jan 2027: 0.00000045 ETH",
+      "keeper spent on Bittensor, last 24 hours: 0.000698 TAO",
+      "keeper spent on Bittensor, last 7 days: 0.001567 TAO",
+      "keeper spent on Bittensor, since 6 Jan 2027: 0.001567 TAO",
+    ]);
+    // it takes the place of the old "Keeper balances" section, where that one stood, and no line of it is in dollars
+    expect(d.sections.map((s) => s.title)).toEqual(["Staking", "Batches in 24 hours", "Fees in 24 hours", "Gas", "Open alerts", "The hold", "The monitor"]);
+    const text = renderDigest(d).text;
+    expect(text).toContain("Gas\nkeeper on Base: 0.02999955 ETH\n");
+    expect(text).not.toMatch(/all time/i);
+    expect((d.sections.find((s) => s.title === "Gas")?.lines ?? []).join("\n")).not.toMatch(/\$|USD/);
+  });
+
+  it("topped up: the spend of a window a top-up fell in, and that it did; never of a window it didn't fall in, or of the other chain", async () => {
+    const lines = await gas({
+      base,
+      bit,
+      meta: { "keeper_spend:base": total(JAN_6, 9n * 10n ** 11n), "keeper_spend:bittensor": total(JAN_6, 3n * 10n ** 15n) },
+      hours: [
+        row(1, { keeperEthSpent: 10n ** 11n, keeperTaoSpent: 10n ** 15n }),
+        // 0.02 ETH sent to the keeper three days ago, between two spends
+        row(72, { keeperEthSpent: 3n * 10n ** 11n, keeperEthAdded: 2n * 10n ** 16n, keeperTaoSpent: 2n * 10n ** 15n }),
+        row(170, { keeperEthSpent: 5n * 10n ** 11n, keeperTaoSpent: 0n }),
+      ],
+    });
+    expect(lines.slice(4)).toEqual([
+      "keeper spent on Base, last 24 hours: 0.0000001 ETH",
+      "keeper spent on Base, last 7 days: 0.0000004 ETH (topped up in this window)",
+      "keeper spent on Base, since 6 Jan 2027: 0.0000009 ETH",
+      "keeper spent on Bittensor, last 24 hours: 0.001 TAO",
+      "keeper spent on Bittensor, last 7 days: 0.003 TAO",
+      "keeper spent on Bittensor, since 6 Jan 2027: 0.003 TAO",
+    ]);
+  });
+
+  it("not enough history: a window the count doesn't reach back over says so, never a figure from less; the total still prints, from its own date", async () => {
+    // the first day after the deploy: counted from 20:00 UTC the evening before, twelve hours ago, nothing spent since
+    const since = NOW - 12 * 3600;
+    const lines = await gas({
+      base,
+      bit,
+      meta: { "keeper_spend:base": total(since, 0n), "keeper_spend:bittensor": total(since, 0n) },
+      hours: Array.from({ length: 13 }, (_, i) => row(i, { keeperEthSpent: 0n, keeperTaoSpent: 0n })),
+    });
+    expect(lines.slice(4)).toEqual([
+      "keeper spent on Base, last 24 hours: not enough history yet",
+      "keeper spent on Base, last 7 days: not enough history yet",
+      "keeper spent on Base, since 14 Jan 2027: 0 ETH",
+      "keeper spent on Bittensor, last 24 hours: not enough history yet",
+      "keeper spent on Bittensor, last 7 days: not enough history yet",
+      "keeper spent on Bittensor, since 14 Jan 2027: 0 TAO",
+    ]);
+    // three days on: the day is covered, the week isn't yet; a spend under the last place shown is never "0"
+    const later = await gas({
+      base,
+      bit,
+      meta: { "keeper_spend:base": total(NOW - 3 * DAY, 4_000_000_000n), "keeper_spend:bittensor": total(NOW - 3 * DAY, 10n ** 15n) },
+      hours: [row(3, { keeperEthSpent: 4_000_000_000n, keeperTaoSpent: 0n }), row(40, { keeperEthSpent: 0n, keeperTaoSpent: 10n ** 15n })],
+    });
+    expect(later.slice(4)).toEqual([
+      "keeper spent on Base, last 24 hours: under 0.00000001 ETH",
+      "keeper spent on Base, last 7 days: not enough history yet",
+      "keeper spent on Base, since 12 Jan 2027: under 0.00000001 ETH",
+      "keeper spent on Bittensor, last 24 hours: 0 TAO",
+      "keeper spent on Bittensor, last 7 days: not enough history yet",
+      "keeper spent on Bittensor, since 12 Jan 2027: 0.001 TAO",
+    ]);
+  });
+
+  it("not read, not counted yet: a chain with no reading, a balance unread, or no total says so in a plain line, never a zero", async () => {
+    // no reading of Base at all; Bittensor's names no guardian balance; Base has no total, Bittensor's doesn't read
+    const lines = await gas({
+      bit: reading(6_905_200n, NOW, bitState({ keeperBalance: 498_432_220_000_000_000n })),
+      meta: { "keeper_spend:bittensor": '{"since":1,"spent":"x"}' },
+      hours: [row(1, { keeperEthSpent: 5n, keeperTaoSpent: 5n }), row(200, { keeperEthSpent: 5n, keeperTaoSpent: 5n })],
+    });
+    expect(lines).toEqual([
+      "keeper on Base: not read",
+      "keeper on Bittensor: 0.498432 TAO",
+      "guardian on Base: not read",
+      "guardian on Bittensor: not read",
+      "keeper spent on Base: not counted yet",
+      "keeper spent on Bittensor: not counted yet",
+    ]);
+    // nothing at all in hand: the section still stands, every line saying what is missing
+    expect(await gas({})).toEqual([
+      "keeper on Base: not read",
+      "keeper on Bittensor: not read",
+      "guardian on Base: not read",
+      "guardian on Bittensor: not read",
+      "keeper spent on Base: not counted yet",
+      "keeper spent on Bittensor: not counted yet",
+    ]);
+    // a balance read as nothing is a reading: 0, as read
+    expect((await gas({ base: reading(1n, NOW, baseState({ keeperBalance: 0n, guardianBalance: 0n })) })).slice(0, 4)).toEqual([
+      "keeper on Base: 0 ETH",
+      "keeper on Bittensor: not read",
+      "guardian on Base: 0 ETH",
+      "guardian on Bittensor: not read",
+    ]);
+  });
+
+  it("the total's date is the UTC day its count starts on, as \"16 Nov 2026\"", async () => {
+    const since = async (s: number) => (await gas({ meta: { "keeper_spend:base": total(s, 0n) } })).find((l) => l.includes("since"));
+    expect(await since(Date.UTC(2026, 10, 16, 0, 0, 0) / 1000)).toBe("keeper spent on Base, since 16 Nov 2026: 0 ETH");
+    expect(await since(Date.UTC(2026, 10, 16, 23, 59, 59) / 1000)).toBe("keeper spent on Base, since 16 Nov 2026: 0 ETH");
+    expect(await since(Date.UTC(2026, 10, 17, 0, 0, 0) / 1000)).toBe("keeper spent on Base, since 17 Nov 2026: 0 ETH");
+    expect(await since(Date.UTC(2027, 4, 3, 12, 0, 0) / 1000)).toBe("keeper spent on Base, since 3 May 2027: 0 ETH");
   });
 });

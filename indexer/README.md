@@ -44,6 +44,19 @@ about 75 minutes after the last complete tick. A tick that can't read or write i
 `monitor.db_failing` email, at minute 0 only. Neither can speak when the Worker refuses its config: that is
 what the outside uptime check on `/v1/health` is for (deploy step 10).
 
+The digest's **Gas** section gives the keeper's and the guardian's balance on each chain (the latest reading's)
+and what the keeper spent on each: in the last 24 hours, the last 7 days, and since the day its count began. The
+spend is the sum of the falls of its balance between consecutive readings (`src/gas.ts`: its gas, and the fees its
+sends carry); a rise is a top-up and counts as no spend, so a top-up doesn't hide the spend around it (that
+window's line says "topped up in this window"). It costs no request and no D1 query of its own: each chain's
+running total is meta `keeper_spend:<chain>` (`{ since, spent, last, keeper }`, read with the tick's state and
+written in its commit only when the balance moved), and each hour row carries the hour's falls and rises
+(`keeperEthSpent`, `keeperTaoSpent`, `keeperEthAdded`, `keeperTaoAdded`), which the two windows sum. The total
+counts from the first tick of the version that keeps it (seeded from the six stored readings a tick loads), so its
+line is "since" that day, never "all time", and a window says "not enough history yet" until the count reaches
+back over it. The readings are the head's, not settled ones: a keeper transaction a reorg removes and re-mines
+would be counted twice.
+
 ### Six routes
 
 | Route | For |

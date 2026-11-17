@@ -5,6 +5,7 @@ import { blockSKey, blockSToStore, lookbackFrom, measureBlockS, storedBlockS } f
 import { type ChainName, type Config, rolesOf, scanAddresses, watchFilters } from "./config.ts";
 import { deliveredChecks } from "./crosscheck/payouts.ts";
 import { type AlertItem, type Outgoing, renderCritical, renderDbFailing, renderResolved, renderWarnings, sendAll } from "./email.ts";
+import { formatSpend, parseSpend, type SpendTotal, spendKey, spendStep, storedBalances, type TickSpend } from "./gas.ts";
 import { holdStatements } from "./hold.ts";
 import { getJson } from "./http.ts";
 import type { StoredLog, StoredRef } from "./logs.ts";
@@ -235,6 +236,33 @@ export function historyOf(state: Pick<TickState, "lastReadings">): { base: Chain
 export function payoutDelayOf(snap: Snapshot, history: readonly ChainReading<BitState>[], meta: Readonly<Record<string, string>>): number {
   const ok = (x: number | undefined) => (x !== undefined && Number.isFinite(x) && x > 0 ? x : undefined);
   return ok(snap.bittensor?.state.payoutDelay) ?? ok(history.find((r) => ok(r.state.payoutDelay))?.state.payoutDelay) ?? ok(num(meta.payout_delay)) ?? DEFAULT_PAYOUT_DELAY_S;
+}
+
+/** The keeper's spend this tick (src/gas.ts), from what the tick holds already (no request, no query): each chain's
+ * running total as stored (meta keeper_spend:<chain>) stepped with this tick's reading of the keeper's balance, and what
+ * that counted, for the hour row. The balance is the keeper's the last stored reading named (the one it was read of: a
+ * setKeeper since is spendStep's to handle). A chain with no reading this tick, or a reading whose keeper balance is
+ * unread, is stepped by nothing: its total and its hour's count stay, and the next balance read is compared with the last
+ * one counted, so nothing spent meanwhile is lost. With no total stored (the first run, or one that doesn't read), the
+ * count starts from the stored readings in hand (storedBalances: the last six, less the oldest), then this tick's. */
+export function keeperSpend(
+  meta: Readonly<Record<string, string>>,
+  history: { base: readonly ChainReading<BaseState>[]; bittensor: readonly ChainReading<BitState>[] },
+  snap: Pick<Snapshot, "base" | "bittensor">,
+): { totals: Partial<Record<ChainName, SpendTotal>>; tick: TickSpend } {
+  const totals: Partial<Record<ChainName, SpendTotal>> = {};
+  const tick: TickSpend = {};
+  for (const c of CHAINS) {
+    const reading = snap[c];
+    const balance = reading?.state.keeperBalance;
+    const keeper = history[c][0]?.state.keeper?.toLowerCase() as Hex | undefined;
+    if (!reading || balance === undefined || !keeper) continue;
+    const stored = parseSpend(meta[spendKey(c)]);
+    const stepped = spendStep(stored, keeper, [...(stored ? [] : storedBalances(history[c], keeper)), { time: reading.time, balance }]);
+    if (stepped.total) totals[c] = stepped.total;
+    if (stepped.tick) tick[c] = stepped.tick;
+  }
+  return { totals, tick };
 }
 
 /** Which blocks' times to fetch on a chain, at most PER_TICK: the new settled block first (its time is the
@@ -748,6 +776,13 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
   if (firstCaughtUp) meta.set("caught_up", String(nowS));
   meta.set("last_complete_tick", String(nowS));
   if (referenceRow) meta.set(REFERENCE_KEY, JSON.stringify(referenceRow));
+  // the keeper's spend (src/gas.ts): each chain's running total, loaded with the rest of meta, stepped with this tick's
+  // reading of the keeper's balance and written when that moved; what the tick counted goes into the hour row
+  const spend = keeperSpend(state.meta, history, snap);
+  for (const c of CHAINS) {
+    const total = spend.totals[c];
+    if (total) changes(spendKey(c), formatSpend(total));
+  }
   const hourNow = Math.floor(nowS / 3600) * 3600;
   const hourPrev = hours.find((h) => h.hour === hourNow);
   const spot = snap.base ? poolPriceUsd(snap.base.state, cfg.tokens) : undefined;
@@ -761,7 +796,7 @@ async function work(deps: TickDeps, run: TickRun): Promise<TickReport> {
     ...upsertBlocks(db, fetchedTimes),
     ...insertTxs(db, [...txRows.values()]),
     ...(snap.base || snap.bittensor ? [insertReading(db, { at: nowS, baseBlock: snap.base?.block ?? null, bitBlock: snap.bittensor?.block ?? null, json: compact(snap) })] : []),
-    upsertHour(db, hourNow, compactHour(hourRollup(hourPrev, snap, spot) as HourAgg)),
+    upsertHour(db, hourNow, compactHour(hourRollup(hourPrev, snap, spot, spend.tick) as HourAgg)),
     ...messageStatements(db, newMessages),
     ...arrivalStatements(db, [...firstArrival.values()]),
     ...stateStatements(db, snap.messageStates, nowS),

@@ -206,17 +206,12 @@ const DELIVERY_PATIENCE_MS = 60 * 60_000;
 /** Chainlink's usual Base → Bittensor delivery time. */
 const BRIDGE_MS = 20 * 60_000;
 
-/** On the bridge: how long so far, what it is waiting for, and when it should arrive. */
-function onTheBridge(f: { now: Date; sentAt?: Date }, since?: { verb: string; at: Date }): string {
-  const mins = since ? Math.max(0, Math.round((f.now.getTime() - since.at.getTime()) / 60_000)) : undefined;
-  const so_far = since && mins !== undefined ? ` (${since.verb} ${mins} minute${mins === 1 ? "" : "s"} ago)` : "";
+/** On the bridge: where it is and when it should arrive, and nothing else (the founder, 2026-11-16: "way too wordy
+ * people really just want to see where and eta"). How the bridge works is the FAQ's; its own page is the step's link. */
+function onTheBridge(f: { now: Date; sentAt?: Date }): string {
   const eta = f.sentAt ? new Date(f.sentAt.getTime() + BRIDGE_MS) : undefined;
-  const when = !eta
-    ? ""
-    : eta.getTime() > f.now.getTime()
-      ? `, expected around ${hhmm(eta)}`
-      : `; Chainlink's estimate was ${hhmm(eta)}, so it should land any minute`;
-  return `On the bridge to Bittensor${so_far}. Chainlink waits for Base to finalize the batch (about 15–25 minutes), then delivers it on Bittensor${when}`;
+  const when = !eta ? "Usually takes about 20 minutes." : eta.getTime() > f.now.getTime() ? `Arrives around ${hhmm(eta)}.` : "Due any minute.";
+  return `On the bridge to Bittensor. ${when}`;
 }
 
 /** Before the batch closes: its time, or that it can close now once that time has passed. */
@@ -347,7 +342,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
       status: "active",
       detail: f.stillOpen
         ? `${waitForClose(f)}, then the bridge (${BRIDGE_TIME})`
-        : onTheBridge(f, f.depositedAt ? { verb: "deposited", at: f.depositedAt } : undefined),
+        : onTheBridge(f),
       ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
   }
@@ -494,7 +489,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       status: "active",
       detail: f.stillOpen
         ? `${waitForClose(f)}, then the bridge`
-        : onTheBridge(f, f.requestedAt ? { verb: "requested", at: f.requestedAt } : undefined),
+        : onTheBridge(f),
       ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
   }

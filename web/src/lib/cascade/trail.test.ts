@@ -142,7 +142,7 @@ describe("deposit trail", () => {
 
   it("gives the bridge an expected arrival when it knows when the batch was sent", () => {
     const r = depositRecord(op, { ...base, openBatchId: 4n, stillOpen: false, sentAt: new Date("2026-10-25T10:12:00Z") });
-    expect(r.steps[2].detail).toMatch(/expected around 10:32 AM/);
+    expect(r.steps[2].detail).toBe("On the bridge to Bittensor. Arrives around 10:32 AM.");
   });
 
   it("shows what the swap really spent once it is known, not the most it could spend", () => {
@@ -304,7 +304,7 @@ describe("deposit trail", () => {
     expect(stale.steps[2].status).toBe("active");
   });
 
-  it("is on the bridge once the batch has closed, saying for how long and where to watch it", () => {
+  it("is on the bridge once the batch has closed: where it is, how long that usually takes, and where to watch it", () => {
     const r = depositRecord(op, {
       ...base,
       openBatchId: 4n,
@@ -313,8 +313,8 @@ describe("deposit trail", () => {
       watchUrl: "https://ccip.chain.link/address/0x221C",
     });
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
-    expect(r.steps[2].detail).toMatch(/deposited 12 minutes ago/);
-    expect(r.steps[2].detail).toMatch(/finalize/);
+    // no send time known: the usual time, in a few words (nothing about how the bridge works)
+    expect(r.steps[2].detail).toBe("On the bridge to Bittensor. Usually takes about 20 minutes.");
     expect(r.steps[2].txUrl).toBe("https://ccip.chain.link/address/0x221C");
     expect(r.cancellableWei).toBeUndefined();
   });
@@ -536,8 +536,8 @@ describe("withdrawal trail", () => {
       sentAt: new Date("2026-10-25T10:12:00Z"),
       watchUrl: "https://ccip.chain.link/address/0x221C",
     });
-    expect(r.steps[1].detail).toMatch(/requested 15 minutes ago/);
-    expect(r.steps[1].detail).toMatch(/expected around 10:32 AM/);
+    // where it is and when it arrives, nothing else
+    expect(r.steps[1].detail).toBe("On the bridge to Bittensor. Arrives around 10:32 AM.");
     expect(r.steps[1].txUrl).toBe("https://ccip.chain.link/address/0x221C");
   });
 
@@ -1092,7 +1092,7 @@ describe("v3.2's trail, from its own events", () => {
     const bridge = await deposit(chains({ ...x.base }), x);
     expect(bridge.steps[2].status).toBe("active");
     expect(bridge.steps[2].detail).toMatch(
-      /^On the bridge to Bittensor \(deposited 180 minutes ago\)\. Chainlink waits for Base to finalize the batch \(about 15–25 minutes\), then delivers it on Bittensor; Chainlink's estimate was /,
+      /^On the bridge to Bittensor\. Due any minute\.$/,
     );
   });
 

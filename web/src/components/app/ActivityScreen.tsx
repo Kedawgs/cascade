@@ -214,6 +214,14 @@ export function DepositDetail({ account, id }: { account: string; id: string }) 
                 : `${formatTao(deposit.taoAmount, 4)} TAO`}
             </dd>
           </div>
+          {/* the price this deposit's TAO was bought at (known for a deposit made from this browser): the list's row
+              leaves it out on a phone, so the receipt carries it */}
+          {deposit.taoPriceUsd !== undefined && (
+            <div>
+              <dt>Bought at</dt>
+              <dd>{formatUsd(deposit.taoPriceUsd)} per TAO</dd>
+            </div>
+          )}
           {deposit.feesUsd !== undefined && (
             <div>
               {/* v3's figure is Cascade's fees and the pools' together */}

@@ -1,5 +1,55 @@
+/* Under the summary: what waits to be collected (a label and its amount, as a row), then one sentence on how rewards
+   reach a balance, then the list of what was added. One left edge for all of it (the first two were two paragraphs,
+   one of them centred). */
+.waiting {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  margin: 0;
+  padding: 18px 24px 0;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}
+
+.waitingValue {
+  font-weight: 700;
+  color: var(--ink);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.waitingValue small {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.note {
+  margin: 0;
+  padding: 16px 24px 22px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+.waiting + .note {
+  padding-top: 12px;
+}
+
+.note a {
+  color: var(--water-deep);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .list {
   padding: 6px 24px 10px;
+}
+
+.note + .list {
+  border-top: 1px solid var(--line-soft);
 }
 
 .row {
@@ -33,27 +83,17 @@
   color: var(--ink-3);
 }
 
-.empty {
-  padding: 20px 24px;
-  font-size: 14.5px;
-  color: var(--ink-2);
-  text-align: center;
-}
-
 .connect {
   padding: 0 24px 24px;
 }
 
+/* after every rule whose sides it narrows */
 @media (max-width: 480px) {
   .list,
+  .waiting,
+  .note,
   .connect {
     padding-left: 18px;
     padding-right: 18px;
   }
-}
-
-.waiting {
-  padding: 16px 24px 0;
-  font-size: 14.5px;
-  color: var(--ink-2);
 }

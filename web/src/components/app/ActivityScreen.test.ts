@@ -712,3 +712,11 @@ describe("after a cancel is sent from this browser, the receipt stops offering C
     expect(allButtons(unstakePage(stale, withOps(unstakeOp(), depositOp({ cancelled: sent(true) }))))).toEqual(["Send it now: about $1.74", "Cancel unstake"]);
   });
 });
+
+describe("the receipt's figures", () => {
+  it("says the price the deposit's TAO was bought at when this browser knows it (the list's row leaves it out on a phone), and no row when it doesn't", () => {
+    const known = plainText(depositPage([], launchData(), inBatch({ taoPriceUsd: 191.52 })));
+    expect(known).toContain("TAO in this deposit0.1000 TAOBought at$191.52 per TAO");
+    expect(plainText(depositPage([], launchData(), inBatch()))).not.toContain("Bought at");
+  });
+});

@@ -16,7 +16,7 @@ const MAX_WINDOW_S = 33 * 86_400;
 /** The keeper claims and restakes rewards about once a month. */
 const CLAIMS_PER_YEAR = 12;
 /** Above this the figure is more likely a bad read than a real yield, so it is hidden. */
-const APY_MAX_PERCENT = 20;
+export const APY_MAX_PERCENT = 20;
 const YEAR_S = 365 * 86_400;
 
 /** The BasketTwr key for a hotkey (Blake2_128Concat). */

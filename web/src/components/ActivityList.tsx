@@ -3,7 +3,7 @@ import { chainInfo } from "@/lib/cascade/chains";
 import { NO_DEPOSITS_HERE } from "@/lib/cascade/flows";
 import type { PendingEntry } from "@/lib/cascade/pending";
 import type { DepositRecord, WithdrawalRecord } from "@/lib/cascade/types";
-import { formatDateTime, formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
+import { formatDay, formatTao, formatTime, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
 import { TRANSIT_PHRASE } from "@/lib/lane";
 import styles from "./ActivityList.module.css";
 
@@ -17,9 +17,10 @@ function Bars({ done }: { done: number }) {
   );
 }
 
-function when(d: Date, now = Date.now()): string {
+/** "Today, 9:14 AM", or the day ("Oct 1") for an earlier one. */
+export function when(d: Date, now = Date.now()): string {
   const sameDay = new Date(now).toDateString() === d.toDateString();
-  return sameDay ? `Today, ${formatDateTime(d).split(", ")[1] ?? ""}`.trim() : formatDay(d);
+  return sameDay ? `Today, ${formatTime(d)}` : formatDay(d);
 }
 
 function Chip({ status }: { status: DepositRecord["status"] | WithdrawalRecord["status"] }) {
@@ -39,7 +40,7 @@ function PendingRow({ entry }: { entry: PendingEntry }) {
   return (
     <li>
       <Link href={n.kind === "deposit" ? `/activity?deposit=${n.id}` : `/activity?withdrawal=${n.id}`} className={styles.row}>
-        <span>
+        <span className={styles.m}>
           <span className={styles.t}>
             {n.kind === "unstake"
               ? "Unstake"
@@ -58,9 +59,11 @@ function PendingRow({ entry }: { entry: PendingEntry }) {
             `${n.usdc !== undefined ? "about " : ""}${formatTao(n.tao, 4)} TAO`
           )}
         </span>
-        <span>
+        <span className={styles.s}>
           <span className={`${styles.chip} ${styles.busy}`}>Confirming</span>
-          <span className={styles.sub}>sent, not confirmed yet</span>
+          <span className={styles.prog}>
+            <span className={styles.sub}>sent, not confirmed yet</span>
+          </span>
         </span>
         <span className={styles.chev} aria-hidden="true">
           ›
@@ -87,7 +90,7 @@ export function DepositList({ deposits, pending = [], retired = false }: { depos
         return (
           <li key={d.id}>
             <Link href={`/activity?deposit=${d.id}`} className={styles.row}>
-              <span>
+              <span className={styles.m}>
                 <span className={styles.t}>
                   {d.amountUsd !== undefined ? formatUsdShort(d.amountUsd) : `${formatTao(d.taoAmount, 4)} TAO`} from{" "}
                   {chainInfo(d.sourceChain).label}
@@ -96,15 +99,16 @@ export function DepositList({ deposits, pending = [], retired = false }: { depos
               </span>
               <span className={styles.c}>
                 {formatTao(d.taoAmount, 4)} TAO
+                {/* the small line under an amount (here the price it was bought at) shows on a wide row only */}
                 {d.taoPriceUsd !== undefined && <small>at {formatUsd(d.taoPriceUsd)}</small>}
               </span>
-              <span>
+              <span className={styles.s}>
                 <Chip status={d.status} />
                 {d.status !== "staked" && d.status !== "cancelled" && (
-                  <>
+                  <span className={styles.prog}>
                     <Bars done={done} />
                     <span className={styles.sub}>{current ? (current.summary ?? TRANSIT_PHRASE[current.key]) : "starting"}</span>
-                  </>
+                  </span>
                 )}
               </span>
               <span className={styles.chev} aria-hidden="true">
@@ -137,7 +141,7 @@ export function WithdrawalList({ withdrawals, pending = [] }: { withdrawals: Wit
         return (
           <li key={w.id}>
             <Link href={`/activity?withdrawal=${w.id}`} className={styles.row}>
-              <span>
+              <span className={styles.m}>
                 <span className={styles.t}>Unstake</span>
                 <span className={styles.d}>{when(w.createdAt)}</span>
               </span>
@@ -152,9 +156,13 @@ export function WithdrawalList({ withdrawals, pending = [] }: { withdrawals: Wit
                   "–"
                 )}
               </span>
-              <span>
+              <span className={styles.s}>
                 <Chip status={w.status} />
-                {w.status !== "paid" && w.status !== "cancelled" && <Bars done={done} />}
+                {w.status !== "paid" && w.status !== "cancelled" && (
+                  <span className={styles.prog}>
+                    <Bars done={done} />
+                  </span>
+                )}
               </span>
               <span className={styles.chev} aria-hidden="true">
                 ›

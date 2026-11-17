@@ -1069,7 +1069,7 @@ describe("v3.2's trail, from its own events", () => {
 
   it("checking: a batch that crossed but whose outcome, delivered or parked, isn't read yet says so, never a guess", async () => {
     const x = crossed(3 * 3_600);
-    const checking = { status: "checking", detail: "Checking where your deposit is…" };
+    const checking = { status: "checking", detail: "Your deposit has left Base. Loading its latest status on the way to Bittensor…" };
     // the bridge ran it on Bittensor, but nothing read yet shows where it went
     expect((await deposit(chains({ ...x.base, executed: { [MSG]: 2 } }), x)).steps[2]).toMatchObject(checking);
     // its run delivered it to the vault, whose scan hasn't reached that block yet

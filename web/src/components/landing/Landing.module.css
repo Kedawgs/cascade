@@ -217,13 +217,16 @@ html:has(.navBar) {
 }
 
 /* room for the widest ordinary value ("12.3%", "$10.1K"; every digit is one width, by body's tabular-nums),
-   so a new figure never moves the Stake button */
+   so a new figure never moves the Stake button; the figure's skeleton, while it loads, fills that room
+   (Figure.module.css) */
 .statApy {
   min-width: 2.9em;
+  --figure-width: 2.9em;
 }
 
 .statTotal {
   min-width: 3.2em;
+  --figure-width: 3.2em;
 }
 
 .statAccent {

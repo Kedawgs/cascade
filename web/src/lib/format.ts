@@ -22,6 +22,7 @@ const dateTimeFmt = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
+const timeFmt = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" });
 
 /** Rounds half away from zero to `decimals` places, without float drift like 1.005 -> 1.00. */
 export function round(n: number, decimals: number): number {
@@ -91,6 +92,12 @@ export function formatDay(d: Date): string {
 /** "Oct 1, 9:14 AM" */
 export function formatDateTime(d: Date): string {
   return valid(d) ? normalizeSpaces(dateTimeFmt.format(d)) : "–";
+}
+
+/** "9:14 AM": the time by itself. Never cut out of formatDateTime's text: a browser may join the date and the time
+ * with ", " or with " at " (an iPhone showed "Today," with no time, 2026-11-16). */
+export function formatTime(d: Date): string {
+  return valid(d) ? normalizeSpaces(timeFmt.format(d)) : "–";
 }
 
 function plural(n: number, unit: string): string {

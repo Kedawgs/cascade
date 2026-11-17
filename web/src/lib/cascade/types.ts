@@ -11,6 +11,7 @@ import type { Clients } from "./chain";
 import type { Deployment, Stage } from "./config";
 import type { DeliveryLimit } from "./delivery-limit";
 import type { PriceImpact } from "./impact";
+import type { FigureStore } from "../remembered";
 import type { OpLog } from "./oplog";
 import type { DepositRecord, WithdrawalRecord } from "./records";
 
@@ -27,8 +28,6 @@ export interface Position {
   taoBalance: number;
   usdValue: number;
   taoPriceUsd: number;
-  /** Rewards earned but not yet collected, this account's share after Cascade's cut; undefined when unknown. */
-  pendingRewardsTao?: number;
   /** v3.2: TAO's price couldn't be read: `taoPriceUsd` and `usdValue` are 0 and not to be shown (live.ts getPosition). */
   priceMissing?: true;
   /** v3.2 (R6, ChatGPT R2 claim B): the account's redeem origin is already another than Base's (DIRECT_ORIGIN, or another
@@ -90,10 +89,11 @@ export interface StakeProof {
   stakeMissing?: true;
 }
 
-/** Protocol-wide figures. A missing value shows as "–". (No count of stakers: there is no indexer.) */
+/** Protocol-wide figures read on Bittensor. A missing value shows as "–". (No count of stakers: there is no indexer.)
+ * The TAO price is not one of them: it is read on Base, on its own (getTaoPrice), so it neither waits for Bittensor's
+ * node nor fails with it. */
 export interface ProtocolStats {
   totalStakedTao?: number;
-  taoPriceUsd?: number;
 }
 
 export interface RewardRecord {
@@ -289,6 +289,10 @@ export interface CascadeData {
   readonly deployment: Deployment;
   readonly clients: Clients;
   readonly opLog: OpLog;
+  /** What this browser remembers of the public display figures between visits (remembered.ts): the yield, the total
+   * staked and the TAO price shown as information, each a reading an earlier visit took from the chain. Never a balance,
+   * a limit, a quote, nor anything a transaction or a button's state is decided from. */
+  readonly figures: FigureStore;
   /** The founder's switches for this deployment, from its entry in deployments.json (config.ts; Task 60): its stage
    * ("retired" shows only the ways out), and whether the site offers USDC delivery (v3.2's switch, spec §5). */
   readonly stage: Stage;
@@ -297,10 +301,16 @@ export interface CascadeData {
    * prompt to claim while USDC delivery is off. Rejects on any other deployment, and when it can't be read. */
   getDeliveryPreference(account: string): Promise<boolean>;
   getProtocolStats(): Promise<ProtocolStats>;
+  /** What one TAO sells for, in dollars (reads.ts taoPriceUsd): one read on Base, nothing from Bittensor. */
+  getTaoPrice(): Promise<number>;
   /** The yield in TAO of root staking with the vault's validator over the last 30 days, after its take
    * and Cascade's cut, as a percent. Rejects when there is no figure that can be stood behind. */
   getApy(): Promise<number>;
   getPosition(account: string): Promise<Position>;
+  /** v3: the account's share, after Cascade's cut, of the rewards the vault has earned and not yet collected, in TAO.
+   * Its own read, for the Rewards page alone: the stake itself (getPosition) never waits on it. Null when it can't be
+   * told (unknown, never zero), and on v2, where nothing is read. */
+  getPendingRewards(account: string): Promise<number | null>;
   getAvailable(account: string): Promise<Available>;
   getPositionHistory(account: string): Promise<PositionHistory>;
   getProof(): Promise<StakeProof>;

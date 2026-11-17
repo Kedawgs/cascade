@@ -6,24 +6,37 @@ import { describe, expect, it } from "vitest";
 import type { Deployment } from "@/lib/cascade/config";
 import { cascadeKeys } from "@/lib/cascade/hooks";
 import { CLOSE_FIRST_RECHECKING } from "@/lib/send-now";
-import { type Cached, launchData, plainText, renderWithCache } from "../test-render";
+import { type Cached, launchData, plainText, renderWithCache, shownText, spokenText } from "../test-render";
 import { PriceStrip, StakeForm } from "./StakeForm";
 
 const SEEDED = Date.now() - 60_000;
-const strip = (cached: Cached[], seededAt?: number) => plainText(renderWithCache(createElement(PriceStrip), cached, { seededAt }));
-const stats = (over: Partial<Cached>): Cached => ({ key: cascadeKeys.stats(), data: { totalStakedTao: 1, taoPriceUsd: 254.49 }, ...over });
+const stripHtml = (cached: Cached[], seededAt?: number) => renderWithCache(createElement(PriceStrip), cached, { seededAt });
+const strip = (cached: Cached[], seededAt?: number) => plainText(stripHtml(cached, seededAt));
+/** The TAO price's own read (Base). */
+const priced = (over: Partial<Cached>): Cached => ({ key: cascadeKeys.taoPrice(), data: 254.49, ...over });
 
 describe("PriceStrip", () => {
-  it("doesn't show the snapshot's TAO price as today's", () => {
-    expect(strip([stats({ at: SEEDED })], SEEDED)).toContain("TAO –Loading");
+  it("doesn't show the snapshot's TAO price as today's: a skeleton in its place while this visit's is read", () => {
+    const h = stripHtml([priced({ at: SEEDED })], SEEDED);
+    expect(spokenText(h)).toContain("TAO Loading");
+    expect(shownText(h)).not.toMatch(/\$|–/);
   });
 
-  it("shows the price from a live read", () => {
-    expect(strip([stats({ at: SEEDED + 20_000 })], SEEDED)).toContain("TAO $254.49");
+  it("shows the price from a live read, once on screen and read out once", () => {
+    const h = stripHtml([priced({ at: SEEDED + 20_000 })], SEEDED);
+    expect(shownText(h)).toContain("TAO $254.49Your balance is TAO");
+    expect(spokenText(h)).toContain("TAO $254.49Your balance is TAO");
+  });
+
+  it("shows it without the total staked: the price is Base's own read, which doesn't wait for Bittensor's nor fail with it", () => {
+    expect(strip([priced({}), { key: cascadeKeys.stats(), data: { totalStakedTao: 1 }, at: Date.now() - 2 * 60 * 60_000, failed: true }])).toContain("TAO $254.49");
+    expect(spokenText(stripHtml([priced({})]))).toContain("TAO $254.49");
+    // and the total staked alone is no price
+    expect(spokenText(stripHtml([{ key: cascadeKeys.stats(), data: { totalStakedTao: 1 } }]))).toContain("TAO Loading");
   });
 
   it("says the price isn't available when the live read fails with only the snapshot's", () => {
-    expect(strip([stats({ at: SEEDED, failed: true })], SEEDED)).toContain("TAO –Not available");
+    expect(strip([priced({ at: SEEDED, failed: true })], SEEDED)).toContain("TAO –Not available");
   });
 });
 

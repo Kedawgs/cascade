@@ -1,0 +1,59 @@
+/* A figure's place while it is being read and there is none to show yet: a soft rounded bar where the figure will be,
+   with a slow shimmer. It is as wide as the room kept for the figure (`--figure-width`, set beside the figure's own
+   min-width where there is one) and as tall as a line of its text, so nothing moves when the figure arrives. */
+.skeleton {
+  position: relative;
+  display: inline-block;
+  width: var(--figure-width, 4.2em);
+  max-width: 100%;
+  vertical-align: baseline;
+}
+
+/* one line of the figure's own text: the place keeps the height the figure will have, in a line or as a flex item */
+.skeleton::before {
+  content: "\00a0";
+}
+
+/* the bar itself, about as tall as the digits */
+.skeleton::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 0.62em;
+  min-height: 8px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background-color: var(--line);
+  background-image: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.75) 50%, transparent 70%);
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
+  background-position: 180% 0;
+  animation: figure-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes figure-shimmer {
+  from {
+    background-position: 180% 0;
+  }
+
+  to {
+    background-position: -80% 0;
+  }
+}
+
+/* a figure's words for screen readers alone (beside globals.css's sr-only): not part of a selection, so text copied
+   from the page has the figure once, not twice */
+.spoken {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* reduced motion: the bar alone, still, with no shimmer on it */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+    background-image: none;
+  }
+}

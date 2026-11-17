@@ -5,7 +5,7 @@ import { type FormEvent, type RefObject, useId, useReducer, useRef, useState } f
 import { parseUnits } from "viem";
 import { liveChains } from "@/lib/cascade/chains";
 import { ROOT_YIELD_PCT } from "@/lib/cascade/config";
-import { useBalances, useDepositQuote, useIsV3, useIsV32, useLimits, useOpenBatch, usePosition, useProof, useProtocolStats, useRetired, useRoundTrip, useTaoPrice } from "@/lib/cascade/hooks";
+import { useBalances, useDepositQuote, useIsV3, useIsV32, useLimits, useOpenBatch, usePosition, useProof, useRetired, useRoundTrip, useShownTaoPrice } from "@/lib/cascade/hooks";
 import { impactNote, impactRowText } from "@/lib/cascade/impact";
 import { CLOSABLE_GAP_MS } from "@/lib/cascade/live";
 import { useFlows } from "@/lib/cascade/use-flows";
@@ -32,7 +32,7 @@ import {
   stakeHold,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
-import { Dash } from "../Dash";
+import { Figure } from "../Figure";
 import { AmountField } from "./AmountField";
 import { RetiredNotice } from "./RetiredNotice";
 import { SentDialog } from "./SentDialog";
@@ -55,14 +55,18 @@ function usdcUnits(raw: string): bigint | null {
   }
 }
 
-/** v3: the TAO price (a live read's only), and what it means for a balance held in TAO. */
+/** v3: the TAO price as information (this visit's read; until it arrives, the one this browser remembers when that is
+ * under an hour old; never the server's snapshot's: hooks.ts useShownTaoPrice), and what it means for a balance held in
+ * TAO. The stake itself is priced by its own quote, read when an amount is typed. */
 export function PriceStrip() {
-  const stats = useProtocolStats();
-  const price = useTaoPrice();
+  const price = useShownTaoPrice();
   return (
     <div className={styles.priceStrip}>
       <p className={styles.price}>
-        TAO <b>{price !== undefined ? formatUsd(price) : <Dash loading={!stats.isError} />}</b>
+        TAO{" "}
+        <b>
+          <Figure value={price.value} format={formatUsd} loading={price.loading} />
+        </b>
       </p>
       <p className={styles.priceNote}>Your balance is TAO: its dollar value moves with TAO&apos;s price.</p>
     </div>

@@ -262,7 +262,8 @@ export function StakeCard({ account, initialAmount = "" }: { account: string | n
             Your USDC
             {account && <span className={styles.liveDot} aria-hidden="true" />}
           </p>
-          <p className={styles.v}>{account ? avail.text : "–"}</p>
+          {/* a skeleton while the wallet's balance is read, a dash when it can't be; never a remembered balance */}
+          <p className={styles.v}>{!account ? "–" : balance.status === "success" ? avail.text : <Dash loading={balance.status === "pending"} />}</p>
         </div>
         {account ? (
           <StakedSummary account={account} />

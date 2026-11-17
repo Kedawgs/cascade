@@ -1,9 +1,10 @@
 "use client";
 
-import { useIsV3, usePosition, usePositionHistory, useProtocolStats, useRewards, useTaoPrice } from "@/lib/cascade/hooks";
+import { useIsV3, usePendingRewards, usePosition, usePositionHistory, useRewards, useShownTaoPrice } from "@/lib/cascade/hooks";
 import { formatDay, formatSignedTao, formatTao, formatUsd } from "@/lib/format";
 import { ConnectWallet } from "../ConnectWallet";
 import { Dash } from "../Dash";
+import { Figure } from "../Figure";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
 import app from "./App.module.css";
@@ -13,14 +14,15 @@ import styles from "./RewardsCard.module.css";
 const EMPTY = "Your rewards show here once the first ones are collected. Cascade collects them for everyone and adds them to your balance.";
 const SHOW_DAYS = 14;
 
-/** The TAO price, live (a live read's only). */
+/** The TAO price as information (hooks.ts useShownTaoPrice: never the server's snapshot's). */
 function Price() {
-  const stats = useProtocolStats();
-  const price = useTaoPrice();
+  const price = useShownTaoPrice();
   return (
     <div>
       <p className={card.k}>TAO price</p>
-      <p className={card.v}>{price !== undefined ? formatUsd(price) : <Dash loading={!stats.isError} />}</p>
+      <p className={card.v}>
+        <Figure value={price.value} format={formatUsd} loading={price.loading} />
+      </p>
     </div>
   );
 }
@@ -28,9 +30,11 @@ function Price() {
 function RewardsForAccount({ account }: { account: string }) {
   const v3 = useIsV3();
   const position = usePosition(account);
-  // what has been earned needs the vault's history: it follows the balance, with "–" in its place meanwhile
+  // what has been earned needs the vault's history: it follows the balance, with a skeleton in its place meanwhile
   const history = usePositionHistory(account);
   const rewards = useRewards(account);
+  // v3: what is earned and not collected yet, its own read beside the balance's: the line shows once it is known
+  const pending = usePendingRewards(account);
   if (position.isError || rewards.isError) {
     return (
       <LoadError
@@ -45,7 +49,7 @@ function RewardsForAccount({ account }: { account: string }) {
   if (!position.data || !rewards.data) return <Loading />;
 
   const earned = history.data?.rewardsEarnedTao;
-  const waiting = position.data.pendingRewardsTao;
+  const waiting = pending.data ?? undefined;
   const recent = [...rewards.data].reverse().slice(0, SHOW_DAYS);
 
   return (

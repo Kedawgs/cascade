@@ -4,6 +4,7 @@ import { ALPHA_VAULT, type Deployment, FEE_CHECK_BPS, MULTICALL3 } from "./confi
 import { FRONT_DOOR, FRONT_DOOR_V32 } from "./abi";
 import { basketTwrKey, STORAGE_QUERY } from "./apy";
 import { nextBatchLine } from "../batch-clock";
+import { StaleChainError } from "./fresh";
 import { requestHold } from "../stake-form";
 import {
   CLOSE_GAS,
@@ -38,10 +39,12 @@ const D: Deployment = {
 const ME = "0x000000000000000000000000000000000000a11c" as const;
 const H32 = `0x${"ab".repeat(32)}` as Hex;
 
-/** A client that answers multicalls by function name and records what was asked. */
+/** A client that answers multicalls by function name and records what was asked. Multicall3's own two (the block a
+ * multicall is answered at, and an address's balance) answer the fake's block and `balance` unless given. */
 function fake(answers: Record<string, unknown>, balance = 0n) {
   const asked: string[] = [];
   const pinned: (bigint | undefined)[] = [];
+  const own: Record<string, unknown> = { getBlockNumber: 9_400_000n, getEthBalance: balance };
   const client = {
     async getBlock() {
       return { number: 9_400_000n, timestamp: BigInt(Math.floor(Date.now() / 1000)) };
@@ -50,8 +53,9 @@ function fake(answers: Record<string, unknown>, balance = 0n) {
       pinned.push(blockNumber);
       return contracts.map((c) => {
         asked.push(c.functionName);
-        if (!(c.functionName in answers)) throw new Error(`unexpected ${c.functionName}`);
-        return answers[c.functionName];
+        if (c.functionName in answers) return answers[c.functionName];
+        if (c.functionName in own) return own[c.functionName];
+        throw new Error(`unexpected ${c.functionName}`);
       });
     },
     async readContract({ functionName, args }: { functionName: string; args: unknown[] }) {
@@ -197,8 +201,10 @@ describe("reads", () => {
     );
     const v = await readVault({ bittensor: bit.client }, D, ME);
     expect(v).toMatchObject({ shares: 10n ** 22n, rootStakeWei: 15n * 10n ** 15n, nominatorMinWei: 2n * 10n ** 16n, payoutDelay: 3600, balanceWei: 2n * 10n ** 16n });
-    // read at a block known to be recent, so a lagging server errors instead of answering from the past
-    expect(bit.pinned).toEqual([9_400_000n, 9_400_000n]);
+    // one multicall at the newest block, its balance in it (Multicall3's getEthBalance), no read of its own after
+    expect(bit.pinned).toEqual([undefined]);
+    expect(bit.asked).toContain("getEthBalance");
+    expect(bit.asked).toContain("getBlockNumber");
     // v2: no per-unstake limit is asked for, nor given
     expect(bit.asked).not.toContain("maxEntryValue");
     expect(v.maxEntryValue).toBeUndefined();
@@ -285,45 +291,68 @@ describe("readApyPercent", () => {
   const ONE = 2n ** 64n;
   const le = (bits: bigint) => `0x${Array.from({ length: 16 }, (_, k) => ((bits >> BigInt(8 * k)) & 0xffn).toString(16).padStart(2, "0")).join("")}`;
 
-  /** An archive node: `blockS`-second blocks (12), a BasketTwr value per block number. */
+  /** An archive node: `blockS`-second blocks (12), a BasketTwr value per block number; reached on the yield's two
+   * connections (chain.ts), each request recorded with the connection it came on. */
   function archive(twr: Record<string, string>, head = 9_400_000n, blockS = 12n) {
     const calls: { to: string; data: string; blockNumber: bigint }[] = [];
-    const client = {
+    const sent: string[] = [];
+    const on = (connection: "yield" | "deep") => ({
       async readContract({ functionName }: { functionName: string }) {
+        sent.push(`${connection}: ${functionName}`);
         return functionName === "stakeHotkey" ? HOTKEY : 1000;
       },
       async getBlock(args: { blockNumber?: bigint } = {}) {
         const number = args.blockNumber ?? head;
+        sent.push(`${connection}: header ${args.blockNumber ?? "latest"}`);
         return { number, timestamp: 1_800_000_000n - (head - number) * blockS };
       },
       async call(a: { to: string; data: string; blockNumber: bigint }) {
         calls.push(a);
+        sent.push(`${connection}: series at ${a.blockNumber}`);
         return { data: twr[a.blockNumber.toString()] };
       },
-    };
-    return { client: client as never, calls };
+    });
+    return { clients: { bittensorYield: on("yield") as never, bittensorDeep: on("deep") as never }, calls, sent };
   }
 
   it("reads the vault validator's series now and 216,000 blocks back, timed by the blocks' clocks", async () => {
-    const { client, calls } = archive({ "9400000": le((ONE * 1004n) / 1000n), "9184000": le(ONE) });
-    const apy = await readApyPercent({ bittensorHistory: client }, D3);
+    const { clients, calls } = archive({ "9400000": le((ONE * 1004n) / 1000n), "9184000": le(ONE) });
+    const apy = await readApyPercent(clients, D3);
     expect(calls.map((c) => c.blockNumber)).toEqual([9_400_000n, 9_184_000n]);
     expect(calls.every((c) => c.to === STORAGE_QUERY && c.data === basketTwrKey(HOTKEY))).toBe(true);
     expect(apy).toBeCloseTo(4.469, 3);
   });
 
   it("reads 30 days back by time, at Bittensor's block time as measured from two spans of its headers: at 6 s a block, 432,000 blocks", async () => {
-    const { client, calls } = archive({ "9400000": le((ONE * 1004n) / 1000n), "8968000": le(ONE) }, 9_400_000n, 6n);
-    expect(await readApyPercent({ bittensorHistory: client }, D3)).toBeCloseTo(4.469, 3);
+    const { clients, calls } = archive({ "9400000": le((ONE * 1004n) / 1000n), "8968000": le(ONE) }, 9_400_000n, 6n);
+    expect(await readApyPercent(clients, D3)).toBeCloseTo(4.469, 3);
     expect(calls.map((c) => c.blockNumber)).toEqual([9_400_000n, 8_968_000n]);
   });
 
   it("has nothing to show before there are 30 days of chain, or without a series", async () => {
     const young = archive({}, 100_000n);
-    expect(await readApyPercent({ bittensorHistory: young.client }, D3)).toBeUndefined();
+    expect(await readApyPercent(young.clients, D3)).toBeUndefined();
     expect(young.calls).toEqual([]);
     const none = archive({ "9400000": le(ONE) });
-    expect(await readApyPercent({ bittensorHistory: none.client }, D3)).toBeUndefined();
+    expect(await readApyPercent(none.clients, D3)).toBeUndefined();
+  });
+
+  it("sends the two reads of the block 30 days back on their own connection, which never batches: the slow read travels alone, and today's reads never wait in a batch with it", async () => {
+    const { clients, sent } = archive({ "9400000": le((ONE * 1004n) / 1000n), "9184000": le(ONE) });
+    await readApyPercent(clients, D3);
+    // 30 days back: the series' value then and that block's header (its time), and nothing else, on the deep connection
+    expect(sent.filter((x) => x.startsWith("deep: ")).sort()).toEqual(["deep: header 9184000", "deep: series at 9184000"]);
+    // today's reads, and the block time's two spans of recent headers, on the yield's batching connection
+    expect(sent.filter((x) => x.startsWith("yield: ")).sort()).toEqual(
+      ["yield: header 9399400", "yield: header 9399700", "yield: header latest", "yield: rewardCutBps", "yield: series at 9400000", "yield: stakeHotkey"].sort(),
+    );
+  });
+
+  it("fails as a whole when the read 30 days back does (the query then tries again in a few minutes), never with half a figure", async () => {
+    const { clients } = archive({ "9400000": le((ONE * 1004n) / 1000n), "9184000": le(ONE) });
+    const deep = clients.bittensorDeep as unknown as { call: () => Promise<never> };
+    deep.call = () => Promise.reject(new Error("The request took too long to respond."));
+    await expect(readApyPercent(clients, D3)).rejects.toThrow(/too long/);
   });
 });
 
@@ -802,8 +831,11 @@ describe("v3.2: the vault's moved getters, read through its lens", () => {
   /** Bittensor answering by `address.functionName`, every read recorded so: the vault, its lens and the precompile. */
   function bittensor(answers: Record<string, unknown>, balance = 0n) {
     const asked: string[] = [];
+    /** Multicall3's own two in the vault's multicall: the block it is answered at, and the vault's balance. */
+    const own: Record<string, unknown> = { [`${MULTICALL3.toLowerCase()}.getBlockNumber`]: 9_400_000n, [`${MULTICALL3.toLowerCase()}.getEthBalance`]: balance };
     const answer = (address: string, functionName: string, args?: readonly unknown[]) => {
       const key = `${address.toLowerCase()}.${functionName}`;
+      if (key in own) return own[key];
       asked.push(key);
       if (!(key in answers)) throw new Error(`unexpected ${key}`);
       const a = answers[key];
@@ -992,7 +1024,7 @@ describe("v3.2: the vault's moved getters, read through its lens", () => {
       },
     };
     // too young a chain for a 30-day figure: only the hotkey and the cut are read, both on the lens
-    expect(await readApyPercent({ bittensorHistory: history as never }, D32)).toBeUndefined();
+    expect(await readApyPercent({ bittensorYield: history as never, bittensorDeep: history as never }, D32)).toBeUndefined();
     expect(bit.asked).toEqual([`${lens}.rewardCutBps`, `${lens}.stakeHotkey`, `${lens}.rewardCutBps`]);
   });
 
@@ -1028,5 +1060,121 @@ describe("v3.2: the vault's moved getters, read through its lens", () => {
     expect(await drip({ amount: 0n, start: NOW - DAY, period: 14n * DAY })).toBe(0);
     // v3-launch's vesting is a constant in its vault, never read
     await expect(readRewardVesting({ bittensor: bit.client }, D)).rejects.toThrow(/v3\.2/);
+  });
+});
+
+describe("readVault: the vault's figures in one round trip, and never an old picture of the chain", () => {
+  const NOW_S = Math.floor(Date.now() / 1000);
+  const HOTKEY = `0x${"58".repeat(32)}`;
+  const TIP = 9_400_000n;
+
+  /** Bittensor's public endpoint: the newest header it gives each time it is asked (`tips`), and the block a multicall
+   * with none pinned is answered at (`latest`, each time; a pinned one is answered at its block). The vault's total
+   * staked is the block it was read at, so a figure says where it came from. Every request is recorded in order; with
+   * `together`, neither the header nor the figures are answered until both were asked; with `split`, a multicall with
+   * no block pinned is answered as two calls would be, its last part a block later. */
+  function node(o: { tips: { number: bigint; ageS: number }[]; latest: bigint[]; together?: boolean; split?: boolean }) {
+    const log: string[] = [];
+    const sizes: (number | undefined)[] = [];
+    let tipsAsked = 0;
+    let latestAsked = 0;
+    let bothAsked!: () => void;
+    const both = o.together ? new Promise<void>((resolve) => (bothAsked = resolve)) : Promise.resolve();
+    const seen = new Set<string>();
+    const ask = (what: "header" | "figures") => {
+      seen.add(what);
+      if (o.together && seen.size === 2) bothAsked();
+    };
+    const client = {
+      async getBlock() {
+        const t = o.tips[Math.min(tipsAsked++, o.tips.length - 1)];
+        log.push("header latest");
+        ask("header");
+        await both;
+        return { number: t.number, timestamp: BigInt(NOW_S - t.ageS) };
+      },
+      async multicall({ contracts, blockNumber, batchSize }: { contracts: { functionName: string; args?: readonly unknown[] }[]; blockNumber?: bigint; batchSize?: number }) {
+        const at = blockNumber ?? o.latest[Math.min(latestAsked++, o.latest.length - 1)];
+        log.push(blockNumber === undefined ? "figures latest" : `figures at ${blockNumber}`);
+        sizes.push(batchSize);
+        ask("figures");
+        await both;
+        const answers: Record<string, unknown> = {
+          getBlockNumber: at,
+          getEthBalance: 10n ** 12n,
+          balanceOf: 10n ** 22n,
+          totalAssets: at,
+          totalSupply: 2n * 10n ** 22n,
+          rootStakeRao: 15_000_000n,
+          pendingPayouts: 0n,
+          stakeHotkey: HOTKEY,
+          payoutDelay: 3600n,
+          getNominatorMinRequiredStake: 20_000_000n,
+        };
+        return contracts.map((c, i) => {
+          if (!(c.functionName in answers)) throw new Error(`unexpected ${c.functionName}`);
+          // the block the calls are answered at is asked first and last: a multicall sent as two calls names two blocks
+          if (c.functionName === "getBlockNumber" && i > 0 && o.split && blockNumber === undefined) return at + 1n;
+          return answers[c.functionName];
+        });
+      },
+      async getBalance() {
+        log.push("balance");
+        return 0n;
+      },
+    };
+    return { client: client as never, log, sizes };
+  }
+
+  it("asks the newest header and the figures together, and stands on the figures when they are from that block: one round trip, where there were three in a row", async () => {
+    const n = node({ tips: [{ number: TIP, ageS: 12 }], latest: [TIP], together: true });
+    const v = await readVault({ bittensor: n.client }, D, ME);
+    expect(v.totalAssets).toBe(TIP);
+    expect(n.log.sort()).toEqual(["figures latest", "header latest"]);
+  });
+
+  it("reads the vault's liquid TAO in the same multicall (Multicall3's getEthBalance), with no balance read of its own", async () => {
+    const n = node({ tips: [{ number: TIP, ageS: 12 }], latest: [TIP] });
+    expect((await readVault({ bittensor: n.client }, D, ME)).balanceWei).toBe(10n ** 12n);
+    expect(n.log).not.toContain("balance");
+  });
+
+  it("asks the figures as one call, never split by size, and the block they are answered at first and last: figures answered across two blocks don't stand, and are read again pinned to one", async () => {
+    const whole = node({ tips: [{ number: TIP, ageS: 12 }], latest: [TIP] });
+    await readVault({ bittensor: whole.client }, D, ME);
+    expect(whole.sizes).toEqual([0]);
+    const split = node({ tips: [{ number: TIP, ageS: 12 }], latest: [TIP], split: true });
+    const v = await readVault({ bittensor: split.client }, D, ME);
+    expect(split.log.slice(2)).toEqual(["header latest", `figures at ${TIP}`]);
+    expect(v.totalAssets).toBe(TIP);
+    expect(split.sizes).toEqual([0, 0]);
+  });
+
+  it("stands on figures from a block after that header, too: they are newer than a block known to be recent", async () => {
+    const n = node({ tips: [{ number: TIP, ageS: 12 }], latest: [TIP + 1n] });
+    expect((await readVault({ bittensor: n.client }, D, ME)).totalAssets).toBe(TIP + 1n);
+    expect(n.log).toHaveLength(2);
+  });
+
+  it("reads again, pinned to a tip known to be recent, when the figures came from a block before the header's (a server that is behind answered them)", async () => {
+    const n = node({ tips: [{ number: TIP, ageS: 12 }], latest: [TIP - 1_000n] });
+    const v = await readVault({ bittensor: n.client }, D, ME);
+    // the pinned read's figures, not the old ones
+    expect(v.totalAssets).toBe(TIP);
+    expect(n.log.slice(2)).toEqual(["header latest", `figures at ${TIP}`]);
+  });
+
+  it("when the newest header is hours old, asks again as before and reads at the recent tip it then finds", async () => {
+    const n = node({ tips: [{ number: 9_358_543n, ageS: 3 * 3600 }, { number: TIP, ageS: 6 }], latest: [9_358_543n] });
+    const v = await readVault({ bittensor: n.client }, D, ME);
+    expect(v.totalAssets).toBe(TIP);
+    expect(n.log.slice(2)).toEqual(["header latest", `figures at ${TIP}`]);
+  });
+
+  it("says Bittensor is behind when every answer is old, rather than give figures from the past", async () => {
+    // the figures are from the header's own block, but that block is three hours old
+    const n = node({ tips: [{ number: 9_358_543n, ageS: 3 * 3600 }], latest: [9_358_543n] });
+    await expect(readVault({ bittensor: n.client }, D, ME)).rejects.toBeInstanceOf(StaleChainError);
+    expect(n.log.filter((x) => x.startsWith("figures at"))).toEqual([]);
   });
 });

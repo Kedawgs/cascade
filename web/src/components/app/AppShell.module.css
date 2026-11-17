@@ -10,6 +10,45 @@ html:has(.app) {
   background: var(--mist);
 }
 
+/* The header stays on screen while the page scrolls, as the home page's navbar does (Landing.module.css .navBar): the
+   whole of it at every width, so on narrow screens both rows, the logo and wallet and the tabs under them. The wrapper
+   reaches out over the page's 20px sides to the window's edges, with the page's own background, so nothing of the page
+   shows beside the bar or through it; it sits above the page (the wallet's menu is a popover, above everything). A
+   hairline under it fades in once the page has moved, where the browser can tie an animation to scrolling. Sticky, so
+   it keeps its place in the page and nothing moves when it catches. */
+.barWrap {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: 0 -20px;
+  padding: 0 20px;
+  background: var(--mist);
+}
+
+@supports (animation-timeline: scroll()) {
+  .barWrap {
+    animation: barEdge linear both;
+    animation-timeline: scroll();
+    animation-range: 0 64px;
+  }
+}
+
+@keyframes barEdge {
+  from {
+    box-shadow: 0 1px 0 transparent;
+  }
+
+  to {
+    box-shadow: 0 1px 0 var(--line);
+  }
+}
+
+/* a place on the page that is scrolled to (a focused field, a link's target) lands below the bar, not under it: the
+   bar is 100px tall here */
+html:has(.barWrap) {
+  scroll-padding-top: 108px;
+}
+
 /* The home navbar's sizes (SiteNav's .nav) on wide screens: as tall, with its content edges on the same
    lines as the home page's .wrap (at most 1280px with 40px sides; the app's own 20px sides count
    towards them). */
@@ -114,10 +153,13 @@ html:has(.app) {
 
 /* room for "9,999.99 USDC" (every digit is one width, by body's tabular-nums), so the balance arriving
    in place of "–" doesn't push the Base chip; a bigger balance may still grow the pill */
+/* As wide as its text, with a small floor so the pill barely moves when the balance arrives: a wide reserved box left
+   a blank band at the pill's left for a small balance ("0 USDC"). */
 .walletBalance {
-  min-width: 7.5em;
+  min-width: 3.4em;
   text-align: right;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .walletAddr {
@@ -137,6 +179,15 @@ html:has(.app) {
   height: 30px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--water), var(--proof));
+}
+
+/* The connected wallet's own icon, in the avatar's place. */
+.avatarIcon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  object-fit: contain;
+  background: #fff;
 }
 
 /* Native popover: light dismiss and Escape come for free. */
@@ -214,6 +265,11 @@ html:has(.app) {
     flex-wrap: wrap;
     min-height: 84px;
     padding: 12px 20px;
+  }
+
+  /* the two rows are 134px together (12 + 44 + 16 + 50 + 12) */
+  html:has(.barWrap) {
+    scroll-padding-top: 142px;
   }
 
   .left {

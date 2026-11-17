@@ -77,6 +77,31 @@
   color: var(--water-deep) !important;
 }
 
+/* the statistics card's figures: room for an ordinary value of each ("12.3%", "12,480 TAO", "$255.44"; every digit is
+   one width, by body's tabular-nums), kept from the first render, so a figure arriving never moves its label; its
+   skeleton, while it loads, fills that room (Figure.module.css) */
+.figApy,
+.figStaked,
+.figPrice {
+  flex: none;
+  white-space: nowrap;
+}
+
+.figApy {
+  min-width: 5ch;
+  --figure-width: 5ch;
+}
+
+.figStaked {
+  min-width: 9.5ch;
+  --figure-width: 9.5ch;
+}
+
+.figPrice {
+  min-width: 6.5ch;
+  --figure-width: 6.5ch;
+}
+
 .footnote {
   margin-top: 14px;
   font-size: 12.5px;

@@ -39,37 +39,41 @@ const TABS: { key: AppTab; href: string; label: string }[] = [
 ];
 
 /** The signed-in app frame: logo, four tabs, network and wallet pills, one centred column. The bar has
- * the home navbar's sizes, with the app's own content. */
+ * the home navbar's sizes, with the app's own content, and like it stays on screen as the page scrolls: the whole
+ * header (on narrow screens both its rows, the logo and wallet and the tabs under them), in a wrapper as wide as the
+ * window (AppShell.module.css .barWrap). */
 export function AppShell({ active, children }: { active: AppTab; children: ReactNode }) {
   return (
     <div className={styles.app}>
-      <header className={styles.bar}>
-        <div className={styles.left}>
-          <Link href="/" className={styles.home} aria-label="Cascade home">
-            <Logo size="lg" />
-          </Link>
-          <nav className={styles.tabs} aria-label="App sections">
-            {TABS.map((t) => (
-              <Link
-                key={t.key}
-                href={t.href}
-                className={`${styles.tab} ${t.key === active ? styles.on : ""}`}
-                aria-current={t.key === active ? "page" : undefined}
-              >
-                {ICON[t.key]}
-                {t.label}
-              </Link>
-            ))}
-          </nav>
-        </div>
-        <div className={styles.right}>
-          <span className={styles.net}>
-            <span className={styles.netDot} aria-hidden="true" />
-            Base
-          </span>
-          <WalletPill />
-        </div>
-      </header>
+      <div className={styles.barWrap}>
+        <header className={styles.bar}>
+          <div className={styles.left}>
+            <Link href="/" className={styles.home} aria-label="Cascade home">
+              <Logo size="lg" />
+            </Link>
+            <nav className={styles.tabs} aria-label="App sections">
+              {TABS.map((t) => (
+                <Link
+                  key={t.key}
+                  href={t.href}
+                  className={`${styles.tab} ${t.key === active ? styles.on : ""}`}
+                  aria-current={t.key === active ? "page" : undefined}
+                >
+                  {ICON[t.key]}
+                  {t.label}
+                </Link>
+              ))}
+            </nav>
+          </div>
+          <div className={styles.right}>
+            <span className={styles.net}>
+              <span className={styles.netDot} aria-hidden="true" />
+              Base
+            </span>
+            <WalletPill />
+          </div>
+        </header>
+      </div>
       <div className={`col ${styles.col}`}>{children}</div>
     </div>
   );

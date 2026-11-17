@@ -105,19 +105,75 @@
   font-weight: 600;
 }
 
+/* A wide row is one line of four cells: what and when (.m), how much (.c), its state (.s), the arrow. The state's
+   progress (.prog: the bars and the step's words) is laid out as part of its cell there. */
+.prog {
+  display: contents;
+}
+
+/* A phone's row, kept short (the founder, 2026-11-16: "too vertical on mobile"): two lines, a third only while the
+   deposit or unstake is on its way.
+     what             how much   >
+     when              [state]   >
+     bars  the step's words            (on its way only)
+   The small line under the amount (the price a deposit was bought at, an unstake's "on Base") is left out there. */
 @media (max-width: 560px) {
   .row {
-    grid-template-columns: 1fr auto;
-    row-gap: 6px;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    column-gap: 12px;
+    row-gap: 4px;
+    padding: 14px 0;
+  }
+
+  .m {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    min-width: 0;
   }
 
   .c {
-    grid-column: 1;
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    text-align: right;
+  }
+
+  .c small {
+    display: none;
+  }
+
+  .s {
+    display: contents;
+  }
+
+  .s > .chip {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+  }
+
+  .prog {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 10px;
+    margin-top: 2px;
+  }
+
+  .prog .bars {
+    margin-left: 0;
+  }
+
+  .prog .sub {
+    margin-top: 0;
   }
 
   .chev {
-    grid-row: 1 / span 3;
-    grid-column: 2;
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    align-self: center;
   }
 }
 

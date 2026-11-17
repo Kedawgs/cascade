@@ -48,6 +48,7 @@ import { freshTip } from "./fresh";
 import { DISTRUST_MS, distrustIndexer, fetchSeed, indexerDistrusted, type SeedHalves } from "./indexer";
 import { type ClaimOp, createOpLog, type DepositOp, effectiveState, entryPriceUsd, type OpLog, type StringStorage, type WithdrawalOp } from "./oplog";
 import { SALE_PROBE_TAO, STAKE_PROBE_USDC } from "./price-veto";
+import { createFigureStore, NO_FIGURES } from "../remembered";
 import * as reads from "./reads";
 import { createScanStore, dropSavedScans, type ScanStore, seedHalves } from "./scan-store";
 import { type CheckMemo, checkSeededHistory, SEED_MIN_BLOCKS, type SeedVerdict, seededRanges, verifySeed } from "./seed";
@@ -674,20 +675,15 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       .map(({ id, batchId, shares, unsure }) => ({ id, batchId, shares, ...(unsure ? { unsure } : {}) }));
   }
 
-  /** The stake itself, from contract reads alone: it never waits on the vault's history. On v3.2 a price that can't be
-   * read (its quote reverting, as in a pool pushed off its price) leaves the position there with its dollars missing
-   * (`priceMissing`), so Unstake still opens, in TAO, and Receive TAO with it (Task 59a review, M6); v3-launch's fails as
-   * before. */
+  /** The stake itself, from contract reads alone: the vault's figures and the TAO price, asked together. It never waits
+   * on the vault's history, nor on the rewards waiting to be collected (getPendingRewards, the Rewards page's own read).
+   * On v3.2 a price that can't be read (its quote reverting, as in a pool pushed off its price) leaves the position there
+   * with its dollars missing (`priceMissing`), so Unstake still opens, in TAO, and Receive TAO with it (Task 59a review,
+   * M6); v3-launch's fails as before. */
   async function getPosition(account: string): Promise<Position> {
     const a = account as Address;
     const [v, read] = await Promise.all([deps.readVault(c, d, a), isV32(d) ? deps.taoPriceUsd(c).catch(() => undefined) : deps.taoPriceUsd(c)]);
     const price = read ?? 0;
-    // v3 only (v2's Rewards page stays as it was); a failed read leaves it unknown, never zero
-    const waiting = isV3(d) ? await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined) : undefined;
-    const pendingRewardsTao =
-      waiting && v.totalSupply > 0n
-        ? toDisplay((waiting.wei * v.shares * BigInt(10_000 - waiting.cutBps)) / (v.totalSupply * 10_000n), 18)
-        : undefined;
     const taoWei = taoFor(v.shares, v.totalAssets, v.totalSupply);
     return {
       shares: v.shares,
@@ -695,10 +691,20 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
       taoBalance: toDisplay(taoWei, 18),
       usdValue: toDisplay(taoWei, 18) * price,
       taoPriceUsd: price,
-      ...(pendingRewardsTao !== undefined ? { pendingRewardsTao } : {}),
       ...(read === undefined ? { priceMissing: true as const } : {}),
       ...(isV32(d) && reads.depositLeavesElsewhere(v) ? { withdrawsOnBittensor: true as const } : {}),
     };
+  }
+
+  /** v3: the account's share, after Cascade's cut, of what the vault has earned and not collected yet, in TAO: read on
+   * its own for the Rewards page (three more Bittensor round trips on v3.2), so "Your stake" never waits on it. Null
+   * when the rewards waiting can't be read, or no shares exist to share them (unknown, never zero), and on v2, whose
+   * Rewards page stays as it was and where nothing is read. */
+  async function getPendingRewards(account: string): Promise<number | null> {
+    if (!isV3(d)) return null;
+    const v = await deps.readVault(c, d, account as Address);
+    const waiting = await deps.readPendingRewards(c, d, v.stakeHotkey).catch(() => undefined);
+    return waiting && v.totalSupply > 0n ? toDisplay((waiting.wei * v.shares * BigInt(10_000 - waiting.cutBps)) / (v.totalSupply * 10_000n), 18) : null;
   }
 
   /** v3.2: what a USDC delivery of a new unstake would also sell of the account's (the latest request decides for all
@@ -1031,17 +1037,22 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     deployment: d,
     clients: c,
     opLog: deps.opLog,
+    // the public display figures this browser keeps between visits, a deployment's own (its vault's): never a balance
+    figures: createFigureStore(storage, d.vault.toLowerCase(), now),
     // the founder's switches, from the deployment's committed entry (fail closed: config.ts)
     stage: deploymentStage(d, deps.deployments),
     usdcDelivery: usdcDeliveryOn(d, deps.deployments),
     checkWiring: () => wiring(),
     forgetWiring: () => wiring.forget(),
 
+    // Bittensor alone: the TAO price is Base's, read on its own (getTaoPrice), so neither waits for the other nor fails
+    // with it. The number of stakers is hidden: no indexer.
     async getProtocolStats() {
-      const [v, price] = await Promise.all([deps.readVault(c, d), deps.taoPriceUsd(c)]);
-      // The number of stakers is hidden: no indexer.
-      return { totalStakedTao: toDisplay(v.totalAssets, 18), taoPriceUsd: price };
+      const v = await deps.readVault(c, d);
+      return { totalStakedTao: toDisplay(v.totalAssets, 18) };
     },
+
+    getTaoPrice: () => deps.taoPriceUsd(c),
 
     async getApy() {
       const apy = await deps.readApyPercent(c, d);
@@ -1050,6 +1061,7 @@ export function createLiveCascadeData(d: Deployment, given: Partial<LiveDeps> = 
     },
 
     getPosition,
+    getPendingRewards,
     getAvailable,
     getPositionHistory,
 
@@ -1214,13 +1226,16 @@ export function notConfiguredData(): CascadeData {
     get opLog() {
       return missing();
     },
+    figures: NO_FIGURES,
     // no deployment: the careful stage, and nothing switched off (every read fails anyway)
     stage: "testing",
     usdcDelivery: true,
     getDeliveryPreference: fail,
     getProtocolStats: fail,
+    getTaoPrice: fail,
     getApy: fail,
     getPosition: fail,
+    getPendingRewards: fail,
     getAvailable: fail,
     getPositionHistory: fail,
     getProof: fail,

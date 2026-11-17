@@ -4,10 +4,17 @@ import { useId, useState } from "react";
 import { useConnect, useConnectors, type Connector } from "wagmi";
 import styles from "./ConnectWallet.module.css";
 
-function connectorLabel(c: Connector): string {
+/** What a wallet is called on the site: its own name, as it announced it (EIP-6963), or ours for the two built in. */
+export function connectorLabel(c: Pick<Connector, "id" | "name">): string {
   if (c.id === "baseAccount") return "Base Account";
   if (c.id === "injected") return "Browser wallet";
   return c.name;
+}
+
+/** A wallet's own icon, only when it is an image inlined as a data: URI (what EIP-6963 wallets announce, and all the
+ * site's Content-Security-Policy lets an <img> load besides its own files): never a remote address. */
+export function walletIcon(icon: unknown): string | undefined {
+  return typeof icon === "string" && /^data:image\/(png|svg\+xml|webp|jpeg|gif);/i.test(icon) && icon.length <= 200_000 ? icon : undefined;
 }
 
 /**

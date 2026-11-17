@@ -2,9 +2,9 @@ import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { cascadeKeys } from "@/lib/cascade/hooks";
 import type { Available, Position, PositionHistory } from "@/lib/cascade/types";
-import { type Cached, plainText, renderWithCache } from "../test-render";
+import { type Cached, launchData, plainText, renderWithCache, shownText, spokenText } from "../test-render";
 import { RewardsCard } from "./RewardsCard";
-import { StakedSummary } from "./StakeCard";
+import { StakeCard, StakedSummary } from "./StakeCard";
 import { UnstakeForm } from "./UnstakeForm";
 import { UnstakeSummary } from "./UnstakeScreen";
 
@@ -21,17 +21,57 @@ describe("the balance, before the vault's history is read", () => {
     expect(text(createElement(StakedSummary, { account: ME }), [POSITION])).toContain("Your stake0.08 TAO $20.00");
   });
 
-  it("keeps a dash in the balance's place while it loads, and says when it can't be shown", () => {
-    expect(text(createElement(StakedSummary, { account: ME }), [])).toContain("Your stake–Loading");
+  it("keeps a skeleton in the balance's place while it loads (no dash, no number), and a dash when it can't be shown", () => {
+    const loading = renderWithCache(createElement(StakedSummary, { account: ME }), []);
+    expect(spokenText(loading)).toContain("Your stakeLoading");
+    expect(shownText(loading)).toBe("Your stake");
+    expect(loading).toContain('data-figure="loading"');
     expect(text(createElement(StakedSummary, { account: ME }), [{ ...POSITION, failed: true }])).toContain("Your stake–Not available");
+  });
+
+  it("never fills it from what the browser remembers: with a store full of figures from an earlier visit, the stake is still read from the chain", () => {
+    const m = new Map<string, string>();
+    const read: string[] = [];
+    const storage = { getItem: (k: string) => (read.push(k), m.get(k) ?? null), setItem: (k: string, v: string) => void m.set(k, v) };
+    const data = launchData(undefined, {}, { storage });
+    data.figures.remember("apy", 9.9);
+    data.figures.remember("staked", 99.5);
+    data.figures.remember("price", 999.99);
+    const stake = renderWithCache(createElement(StakedSummary, { account: ME }), [], { data });
+    expect(shownText(stake)).toBe("Your stake");
+    const summary = renderWithCache(createElement(UnstakeSummary, { account: ME }), [], { data });
+    expect(shownText(summary)).toBe("Your stakeAvailable to unstake");
+    // with the stake read: its own dollars (the position's price), nothing of the remembered price
+    const known = shownText(renderWithCache(createElement(StakedSummary, { account: ME }), [POSITION], { data }));
+    expect(known).toBe("Your stake0.08 TAO $20.00");
+    // the store holds nothing but the three public figures, and none of these renders read it
+    expect([...m.keys()].map((k) => k.split(".").pop()).sort()).toEqual(["apy", "price", "staked"]);
+    expect(read).toEqual([]);
+  });
+});
+
+describe("Your USDC, on the stake card", () => {
+  const card = (account: string | null) => renderWithCache(createElement(StakeCard, { account }), [], { data: launchData() });
+
+  it("keeps a skeleton in the balance's place while the wallet's balance is read, never a remembered balance", () => {
+    const h = card(ME);
+    expect(spokenText(h)).toContain("Your USDCLoadingYour stakeLoading");
+    expect(shownText(h)).toContain("Your USDCYour stake");
+  });
+
+  it("shows the plain dash with no wallet connected: nothing is being read", () => {
+    const h = card(null);
+    expect(shownText(h)).toContain("Your USDC–Your stake–");
+    expect(spokenText(h)).not.toContain("Your USDCLoading");
   });
 });
 
 describe("Unstake summary", () => {
   it("shows the balance while what can be unstaked is still being worked out", () => {
-    const t = text(createElement(UnstakeSummary, { account: ME }), [POSITION]);
-    expect(t).toContain("Your stake0.0800 TAO$20.00");
-    expect(t).toContain("Available to unstake–Loading");
+    const h = renderWithCache(createElement(UnstakeSummary, { account: ME }), [POSITION]);
+    expect(plainText(h)).toContain("Your stake0.0800 TAO$20.00");
+    expect(spokenText(h)).toContain("Available to unstakeLoading");
+    expect(shownText(h)).toBe("Your stake0.0800 TAO$20.00Available to unstake");
   });
 
   it("shows what can be unstaked once it is known, keeping it through a failed read", () => {
@@ -47,9 +87,11 @@ describe("Rewards card", () => {
   const ready: Cached[] = [POSITION, { key: cascadeKeys.rewards(ME), data: [] }];
 
   it("shows the card with a dash for what was earned until the vault's history has been read", () => {
-    const t = text(createElement(RewardsCard, { account: ME }), ready);
-    expect(t).toContain("Earned so far–Loading");
-    expect(t).toContain("TAO price");
+    const h = renderWithCache(createElement(RewardsCard, { account: ME }), ready);
+    // a skeleton for what was earned and for the TAO price, each read out as Loading; no dash while they load
+    expect(spokenText(h)).toContain("Earned so farLoadingTAO priceLoading");
+    expect(shownText(h)).toContain("Earned so farTAO price");
+    expect(h.match(/data-figure="loading"/g)).toHaveLength(2);
   });
 
   it("shows what was earned once the history is in, keeping it through a failed read", () => {

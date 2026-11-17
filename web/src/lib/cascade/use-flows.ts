@@ -62,7 +62,7 @@ import {
   whenWired,
   wiringNotice,
 } from "./flows";
-import { cascadeKeys, useWiring } from "./hooks";
+import { changedByFlow, useWiring } from "./hooks";
 import { impactRefusal } from "./impact";
 import { cancelStore, opStore, scratchStore, settleCancel } from "./op-store";
 import { type ClaimOp, type CloseOp, type DepositOp, newOpId, type Operation, type WithdrawalOp } from "./oplog";
@@ -192,7 +192,8 @@ export function useFlows(account: string | null) {
       if (e instanceof SaleRefusedError) setSaleHeld(true);
       throw e;
     } finally {
-      void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
+      // everything a flow may have changed is read again; not the 30-day yield, which none changes (hooks.ts)
+      void queryClient.invalidateQueries(changedByFlow());
       void queryClient.invalidateQueries({ queryKey: ["quote"] });
       // the contracts are read again after each flow, so the next one goes by a fresh answer
       data.forgetWiring();
@@ -558,7 +559,7 @@ export function useFlows(account: string | null) {
     remove(id: string): boolean {
       const removed = data.opLog.removeUnsent(a, id);
       if (!removed) setError("This one has started sending, so it stays in your activity");
-      void queryClient.invalidateQueries({ queryKey: cascadeKeys.all() });
+      void queryClient.invalidateQueries(changedByFlow());
       return removed;
     },
 

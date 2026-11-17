@@ -20,7 +20,7 @@ const clockOffsets = new WeakMap<object, { offsetMs: number; at: number }>();
 /** Now, by Base's clock (its newest block's time: a block every 200 ms) rather than the device's: a device clock that is
  * minutes off must not make a healthy node look stale, or a stale one healthy. The device clock is the
  * fallback when Base can't be read. */
-async function chainNowMs(c: Partial<Pick<Clients, "base">>): Promise<number> {
+export async function chainNowMs(c: Partial<Pick<Clients, "base">>): Promise<number> {
   if (!c.base) return Date.now();
   const cached = clockOffsets.get(c.base);
   if (cached && Date.now() - cached.at < CLOCK_TTL_MS) return Date.now() + cached.offsetMs;
@@ -34,13 +34,16 @@ async function chainNowMs(c: Partial<Pick<Clients, "base">>): Promise<number> {
   }
 }
 
+/** Whether a block of that time is the chain's present at `nowMs`: no older than MAX_AGE_S. */
+export const isRecent = (b: { timestamp: bigint }, nowMs: number): boolean => nowMs / 1000 - Number(b.timestamp) <= MAX_AGE_S;
+
 /** The newest block of an up-to-date server. A public endpoint can answer from a server that has
  * fallen behind, so an old answer is asked again (it may land on another) before giving up. */
 export async function freshTip(c: Pick<Clients, "bittensor"> & Partial<Pick<Clients, "base">>, nowMs?: number): Promise<bigint> {
   const now = nowMs ?? (await chainNowMs(c));
   for (let i = 0; i < FRESH_TRIES; i++) {
     const b = await c.bittensor.getBlock({ blockTag: "latest" });
-    if (now / 1000 - Number(b.timestamp) <= MAX_AGE_S) return b.number as bigint;
+    if (isRecent(b, now)) return b.number as bigint;
   }
   throw new StaleChainError();
 }

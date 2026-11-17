@@ -44,8 +44,10 @@ export const THIN_POOL = "USDC delivery is waiting for the market to deepen. You
 /** v3.2: an unstake asked as TAO (Receive TAO, Task 59a): its last step, and what it says once the TAO is back. */
 export const RECEIVE_TAO_STEP = "Claim your TAO";
 export const TAO_BACK = "Your TAO is back on Base, ready to claim";
-/** A batch that crossed whose outcome, delivered or parked, isn't read yet: said, never guessed. */
-export const CHECKING_DEPOSIT = "Checking where your deposit is…";
+/** A batch that left Base whose outcome, delivered or parked, isn't read yet: said, never guessed, and in words that
+ * don't alarm (the founder, 2026-11-16: "Checking where your deposit is" read as if it were lost): what is known
+ * (it has left Base) first, then that the rest is loading. */
+export const CHECKING_DEPOSIT = "Your deposit has left Base. Loading its latest status on the way to Bittensor…";
 
 /** v3.2: what became of a batch that left Base and hasn't reached the vault, past the bridge (facts.ts, crossingOf):
  * parked in the Bittensor adapter (when, and the run that parked it), refunded to Base after PARK_TIMEOUT (with the

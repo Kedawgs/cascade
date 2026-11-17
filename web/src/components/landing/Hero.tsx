@@ -2,24 +2,22 @@
 
 import Link from "next/link";
 import { SOURCE_CHAINS, availabilityText } from "@/lib/cascade/chains";
-import { useApy, useProtocolStats, useRetired } from "@/lib/cascade/hooks";
+import { useHeroTotal, useRetired, useShownApy } from "@/lib/cascade/hooks";
 import { formatUsdCompact } from "@/lib/format";
-import { APY_KEEP_MS, APY_NOTE_SHORT, formatApy, shownFigure, STATS_KEEP_MS, totalStakedUsd } from "@/lib/stats";
+import { APY_NOTE_SHORT, formatApy } from "@/lib/stats";
 import { RetiredNotice } from "../app/RetiredNotice";
-import { Dash } from "../Dash";
+import { Figure } from "../Figure";
 import { Mark } from "../Logo";
 import { HeroMark } from "./HeroMark";
 import styles from "./Landing.module.css";
 
 export function Hero() {
   const retired = useRetired();
-  const stats = useProtocolStats();
-  const apy = useApy();
-  const apyShown = shownFigure(apy, APY_KEEP_MS);
-  // the total has a place from a dollar up, decided by the first figures there are (the snapshot's, so
-  // at first paint) and kept through failed reads; its value is the one there is to show
-  const total = totalStakedUsd(stats.data);
-  const totalShown = totalStakedUsd(shownFigure(stats, STATS_KEEP_MS));
+  // each figure is the newest real reading there is: the first HTML's snapshot, one this browser remembers from an
+  // earlier visit, then this visit's own, which it counts to when it differs (Figure.tsx)
+  const apy = useShownApy();
+  // the total has a place from a dollar up, and while it isn't known yet; its value is the one there is to show
+  const total = useHeroTotal();
 
   return (
     <header className={styles.hero}>
@@ -39,18 +37,19 @@ export function Hero() {
           </h1>
           <p className={styles.lead}>Deposit USDC from the wallet you already have.</p>
           <div className={styles.stats}>
-            {/* every figure keeps its place (a dash until it is known), so the Stake button never moves */}
+            {/* every figure keeps its place (a skeleton while it loads, a dash when there is none), so the Stake
+                button never moves */}
             <div>
               <p className={`${styles.statV} ${styles.statAccent} ${styles.statApy}`}>
-                {apyShown !== undefined ? formatApy(apyShown) : <Dash loading={apy.isPending} />}
+                <Figure value={apy.value} format={formatApy} loading={apy.loading} />
               </p>
               <p className={styles.statK}>APY in TAO*</p>
             </div>
             <span className={styles.vr} aria-hidden="true" />
-            {total !== undefined && total >= 1 && (
+            {total.place && (
               <div>
                 <p className={`${styles.statV} ${styles.statTotal}`}>
-                  {totalShown !== undefined ? formatUsdCompact(totalShown) : <Dash loading={false} />}
+                  <Figure value={total.usd} format={formatUsdCompact} loading={total.loading} />
                 </p>
                 <p className={styles.statK}>Total staked</p>
               </div>

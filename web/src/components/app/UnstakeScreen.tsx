@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCascadeAccount } from "@/lib/account";
 import { OTHER_WAYS_OUT } from "@/lib/cascade/direct-exit";
-import { useAvailable, useIsV32, usePosition, useUsdcDelivery } from "@/lib/cascade/hooks";
+import { useAvailable, useIsV32, usePosition, useUnstakeReads, useUsdcDelivery } from "@/lib/cascade/hooks";
 import { toDisplay } from "@/lib/cascade/units";
 import { formatTao, formatUsd } from "@/lib/format";
 import { unstakeHeading } from "@/lib/stake-form";
@@ -19,7 +19,8 @@ import { StatsCardForAccount } from "./StatsCard";
 import { UnstakeForm } from "./UnstakeForm";
 
 /** The balance and what can be unstaked. The balance is a contract read; what can be unstaked may wait
- * for the vault's history, so it keeps "–" in its place meanwhile. */
+ * for the vault's history, so it keeps a skeleton in its place meanwhile (Dash: "–" only once a read has failed). Both
+ * are read from the chain on every visit: nothing here is ever a remembered value. */
 export function UnstakeSummary({ account }: { account: string }) {
   const position = usePosition(account);
   const available = useAvailable(account);
@@ -95,6 +96,8 @@ export function UnstakeScreen() {
   const v32 = useIsV32();
   const usdcDelivery = useUsdcDelivery();
   const heading = unstakeHeading({ v32, usdcDelivery });
+  // the form's own reads start now, beside the balance, not once the balance has loaded and the form mounts
+  useUnstakeReads(account);
 
   return (
     <AppShell active="unstake">

@@ -26,13 +26,13 @@ export interface Cached {
 const testWagmi = createConfig({ chains: [base], transports: { [base.id]: http() }, multiInjectedProviderDiscovery: false, ssr: true });
 
 /** `seededAt`: when the server's snapshot was read, as `Providers` passes it on (none by default).
- * `data`: the data source (its deployment, its op log); no deployment by default. */
+ * `data`: the data source (its deployment, its op log); no deployment by default.
+ * `client`: the query cache to render with, for a test that looks at what the render set up in it (a new one by default). */
 export function renderWithCache(
   element: ReactElement,
   cached: Cached[] = [],
-  { seededAt = 0, data = notConfiguredData() }: { seededAt?: number; data?: CascadeData } = {},
+  { seededAt = 0, data = notConfiguredData(), client = new QueryClient() }: { seededAt?: number; data?: CascadeData; client?: QueryClient } = {},
 ): string {
-  const client = new QueryClient();
   for (const c of cached) {
     const query = client.getQueryCache().build(client, { queryKey: c.key });
     if (c.data !== undefined) client.setQueryData(c.key, c.data, { updatedAt: c.at ?? Date.now() });
@@ -78,3 +78,11 @@ export const plainText = (html: string): string =>
     .replace(/<[^>]*>/g, "")
     .replace(/&#x27;/g, "'")
     .replace(/&amp;/g, "&");
+
+/** What a screen reader is given of a page: its text without what is hidden from it (a figure's node on screen, whose
+ * twin it reads instead; a dash; a skeleton): "5.4%APY in TAO*", "LoadingAPY in TAO*", "Not availableAPY in TAO*". */
+export const spokenText = (html: string): string => plainText(html.replace(/<span[^>]*aria-hidden="true"[^>]*>[^<]*<\/span>/g, ""));
+
+/** What is on screen: a page's text without the screen readers' own: "5.4%APY in TAO*", "APY in TAO*" (a skeleton has
+ * no text), "–APY in TAO*". */
+export const shownText = (html: string): string => plainText(html.replace(/<span class="sr-only[^"]*">[^<]*<\/span>/g, ""));

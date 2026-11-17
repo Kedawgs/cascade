@@ -1,5 +1,5 @@
 import { type Address, encodeAbiParameters, encodePacked, type Hex, parseAbiParameters, parseEventLogs, type PublicClient } from "viem";
-import { freshTip } from "./fresh";
+import { chainNowMs, freshTip, isRecent } from "./fresh";
 import { isFull, SEND_GRACE_S } from "../batch-clock";
 import { closeEconomicsOf } from "../send-now";
 import {
@@ -182,7 +182,8 @@ export interface VaultState {
   totalSupply: bigint;
   rootStakeWei: bigint;
   pendingPayouts: bigint;
-  /** The vault's liquid TAO (Bittensor reads it 500 rao below what it holds). */
+  /** The vault's liquid TAO (Bittensor reads it 500 rao below what it holds), as Multicall3's getEthBalance gives it in
+   * the same call as the figures above. */
   balanceWei: bigint;
   stakeHotkey: Hex;
   payoutDelay: number;
@@ -212,17 +213,51 @@ export async function readSharesAt(c: Pick<Clients, "bittensor">, d: Deployment,
   return (await c.bittensor.readContract({ address: d.vault, abi: VAULT, functionName: "balanceOf", args: [account], blockNumber: block })) as bigint;
 }
 
-export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, account: Address = ZERO): Promise<VaultState> {
-  // read at a block known to be recent: a server that is behind then errors instead of answering from the past
-  const blockNumber = await freshTip(c);
-  if (isV32(d)) return readVaultV32(c, d, account, blockNumber);
+/** The vault's figures as one multicall read them, and the block it read them all at: Multicall3's own getBlockNumber,
+ * asked first and last in the same multicall; null if the two differ (the calls didn't all run in one block, so no one
+ * block can be claimed for them). */
+interface VaultRead {
+  state: VaultState;
+  block: bigint | null;
+}
+
+/** What every vault multicall asks of Multicall3 itself, beside the vault's own figures: the block it is answered at
+ * (`blockOf`, put first and last in the list), and the vault's liquid TAO. The balance is Multicall3's getEthBalance,
+ * the read the site made before in a call of its own: on a client that batches through Multicall3, as the site's
+ * Bittensor client does (chain.ts), viem's getBalance asks exactly this function, never eth_getBalance (chain.test.ts
+ * pins it). In the same call, it costs no round trip. */
+const blockOf = { address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getBlockNumber" } as const;
+const liquidOf = (d: Deployment) => ({ address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getEthBalance", args: [d.vault] }) as const;
+
+/** How a vault multicall is sent: as one call, whatever its size (viem otherwise splits a batch over 1,024 bytes into
+ * several calls, which, read at the newest block, could be answered at different blocks), and failing as a whole. */
+const AS_ONE = { allowFailure: false, batchSize: 0 } as const;
+
+/** The vault's state for `account`, in one round trip's wait when it can be: the newest block's header and the vault's
+ * figures are asked at the same time, the figures naming the one block they were all read at. They stand when that
+ * header is recent (fresh.ts: no older than five minutes by Base's clock) and the figures are from its block or a later
+ * one: at least as new as a block known to be recent. Otherwise as before, in two more round trips: a tip known to be
+ * recent (freshTip asks again: another server may answer), then the figures pinned to it, so a server that is behind
+ * errors instead of answering from the past. Either way an old picture of the chain is never returned as the present. */
+export async function readVault(c: Pick<Clients, "bittensor"> & Partial<Pick<Clients, "base">>, d: Deployment, account: Address = ZERO): Promise<VaultState> {
+  const read = (blockNumber?: bigint) => (isV32(d) ? readVaultV32(c, d, account, blockNumber) : readVaultV3(c, d, account, blockNumber));
+  const [first, tip, nowMs] = await Promise.all([read(), c.bittensor.getBlock({ blockTag: "latest" }), chainNowMs(c)]);
+  if (first.block !== null && first.block >= tip.number && isRecent(tip, nowMs)) return first.state;
+  return (await read(await freshTip(c, nowMs))).state;
+}
+
+/** v3-launch's vault (and v2's): every getter on the vault itself, with its balance, in one multicall, at `blockNumber`
+ * when given, else the newest block. */
+async function readVaultV3(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, blockNumber?: bigint): Promise<VaultRead> {
   const v = { address: d.vault, abi: VAULT } as const;
   const v3 = isV3(d);
-  const [shares, totalAssets, totalSupply, rootStakeRao, pendingPayouts, stakeHotkey, payoutDelay, nominatorMin, maxEntryValue] =
+  const [block, balanceWei, shares, totalAssets, totalSupply, rootStakeRao, pendingPayouts, stakeHotkey, payoutDelay, nominatorMin, maxEntryValue, blockAfter] =
     await c.bittensor.multicall({
-      blockNumber,
-      allowFailure: false,
+      ...(blockNumber !== undefined ? { blockNumber } : {}),
+      ...AS_ONE,
       contracts: [
+        blockOf,
+        liquidOf(d),
         { ...v, functionName: "balanceOf", args: [account] },
         { ...v, functionName: "totalAssets" },
         { ...v, functionName: "totalSupply" },
@@ -233,19 +268,23 @@ export async function readVault(c: Pick<Clients, "bittensor">, d: Deployment, ac
         { address: STAKING_ADDRESS, abi: STAKING, functionName: "getNominatorMinRequiredStake" },
         // v2's vault has no per-unstake limit to ask about
         v3 ? { ...v, functionName: "maxEntryValue" } : { ...v, functionName: "totalSupply" },
+        blockOf,
       ],
     });
   return {
-    ...(v3 ? { maxEntryValue } : {}),
-    shares,
-    totalAssets,
-    totalSupply,
-    rootStakeWei: rootStakeRao * RAO,
-    pendingPayouts,
-    balanceWei: await c.bittensor.getBalance({ address: d.vault, blockNumber }),
-    stakeHotkey,
-    payoutDelay: Number(payoutDelay),
-    nominatorMinWei: nominatorMin * RAO,
+    block: block === blockAfter ? block : null,
+    state: {
+      ...(v3 ? { maxEntryValue } : {}),
+      shares,
+      totalAssets,
+      totalSupply,
+      rootStakeWei: rootStakeRao * RAO,
+      pendingPayouts,
+      balanceWei,
+      stakeHotkey,
+      payoutDelay: Number(payoutDelay),
+      nominatorMinWei: nominatorMin * RAO,
+    },
   };
 }
 
@@ -256,19 +295,22 @@ export interface PendingRewards {
   cutBps: number;
 }
 
-/** v3.2's vault: the share token on the vault, everything else on its lens, in the same multicall. The stake is
+/** v3.2's vault: the share token on the vault, everything else on its lens, in the same multicall, with the vault's
+ * balance (at `blockNumber` when given, else the newest block). The stake is
  * priced as the vault prices it (CascadeFormulas.pricedStakeRao): the smaller of the stake the chain shows on the
  * listed hotkeys (`visibleStakeRao`) and the stake the vault booked (`bookedStake`), both in rao. Read in the same
  * block: whether stake is missing (the lens's `stakeMissing()`, the vault's own guard) and the account's redeem
  * origin, which say whether an unstake request can go now (Task 59). */
-async function readVaultV32(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, blockNumber: bigint): Promise<VaultState> {
+async function readVaultV32(c: Pick<Clients, "bittensor">, d: Deployment, account: Address, blockNumber?: bigint): Promise<VaultRead> {
   const v = { address: d.vault, abi: VAULT_V32 } as const;
   const lens = { address: d.vaultLens as Address, abi: VAULT_LENS } as const;
-  const [shares, totalSupply, totalAssets, visibleRao, bookedRao, pendingPayouts, stakeHotkey, payoutDelay, maxEntryValue, stakeMissing, redeemOrigin, nominatorMin] =
+  const [block, balanceWei, shares, totalSupply, totalAssets, visibleRao, bookedRao, pendingPayouts, stakeHotkey, payoutDelay, maxEntryValue, stakeMissing, redeemOrigin, nominatorMin, blockAfter] =
     await c.bittensor.multicall({
-      blockNumber,
-      allowFailure: false,
+      ...(blockNumber !== undefined ? { blockNumber } : {}),
+      ...AS_ONE,
       contracts: [
+        blockOf,
+        liquidOf(d),
         { ...v, functionName: "balanceOf", args: [account] },
         { ...v, functionName: "totalSupply" },
         { ...lens, functionName: "totalAssets" },
@@ -281,21 +323,25 @@ async function readVaultV32(c: Pick<Clients, "bittensor">, d: Deployment, accoun
         { ...lens, functionName: "stakeMissing" },
         { ...lens, functionName: "redeemOrigin", args: [account] },
         { address: STAKING_ADDRESS, abi: STAKING, functionName: "getNominatorMinRequiredStake" },
+        blockOf,
       ],
     });
   return {
-    maxEntryValue,
-    shares,
-    totalAssets,
-    totalSupply,
-    rootStakeWei: (visibleRao < bookedRao ? visibleRao : bookedRao) * RAO,
-    pendingPayouts,
-    balanceWei: await c.bittensor.getBalance({ address: d.vault, blockNumber }),
-    stakeHotkey,
-    payoutDelay: Number(payoutDelay),
-    nominatorMinWei: nominatorMin * RAO,
-    stakeMissing,
-    redeemOrigin,
+    block: block === blockAfter ? block : null,
+    state: {
+      maxEntryValue,
+      shares,
+      totalAssets,
+      totalSupply,
+      rootStakeWei: (visibleRao < bookedRao ? visibleRao : bookedRao) * RAO,
+      pendingPayouts,
+      balanceWei,
+      stakeHotkey,
+      payoutDelay: Number(payoutDelay),
+      nominatorMinWei: nominatorMin * RAO,
+      stakeMissing,
+      redeemOrigin,
+    },
   };
 }
 
@@ -939,9 +985,15 @@ export async function readRewardCutBps(c: Pick<Clients, "bittensor">, d: Deploym
  * The APY of root staking with the vault's validator over the last 30 days: its on-chain return
  * series (BasketTwr) read through the storage-query precompile now and 30 days back, less Cascade's
  * cut. Needs an archive node (the site's Bittensor RPC is one). Undefined when there's no figure to show.
+ *
+ * On the yield's own two connections (chain.ts), which wait long enough for the public archive node (a read of today's
+ * state can take 18 s, one of 30-day-old state 10 to 40 s): today's reads on `bittensorYield`, which batches them among
+ * themselves; the two of the block 30 days back (its series value and its header) on `bittensorDeep`, each a request of
+ * its own, never in a batch, since a batch answers only when its slowest call has. Nothing else uses either connection,
+ * so the yield holds no other read back, and none holds it.
  */
-export async function readApyPercent(c: Pick<Clients, "bittensorHistory">, d: Deployment): Promise<number | undefined> {
-  const chain = c.bittensorHistory;
+export async function readApyPercent(c: Pick<Clients, "bittensorYield" | "bittensorDeep">, d: Deployment): Promise<number | undefined> {
+  const chain = c.bittensorYield;
   const [hotkey, rewardCutBps, head] = await Promise.all([
     readStakeHotkey(chain, d),
     readRewardCutBps({ bittensor: chain }, d),
@@ -956,8 +1008,8 @@ export async function readApyPercent(c: Pick<Clients, "bittensorHistory">, d: De
   const thenNumber = head.number - back;
   const [now, then, thenBlock] = await Promise.all([
     chain.call({ to: STORAGE_QUERY, data: key, blockNumber: head.number }),
-    chain.call({ to: STORAGE_QUERY, data: key, blockNumber: thenNumber }),
-    chain.getBlock({ blockNumber: thenNumber }),
+    c.bittensorDeep.call({ to: STORAGE_QUERY, data: key, blockNumber: thenNumber }),
+    c.bittensorDeep.getBlock({ blockNumber: thenNumber }),
   ]);
   return netApyPercent({
     twrNow: decodeTwr(now.data),

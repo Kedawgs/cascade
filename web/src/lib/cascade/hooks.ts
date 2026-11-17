@@ -1,11 +1,13 @@
 "use client";
 
-import { keepPreviousData, type Query, type QueryClient, useQuery } from "@tanstack/react-query";
+import { hashKey, keepPreviousData, type Query, type QueryClient, type QueryFilters, useQuery } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
 import type { Address } from "viem";
 import { type CancelRecord, cancelSentFromHere } from "../cancel-sent";
 import { useNow } from "../client-state";
-import { shownFigure, STATS_KEEP_MS } from "../stats";
-import { DEPLOYMENT, isV3, isV32, minUnstakeWei, type Stage } from "./config";
+import type { FigureKey, Reading } from "../remembered";
+import { APY_KEEP_MS, heroTotal, type LiveFigure, liveOnly, shownFigure, STATS_KEEP_MS, withRemembered } from "../stats";
+import { DEPLOYMENT, explorer, isV3, isV32, minUnstakeWei, type Stage } from "./config";
 import { readExitHold } from "./exit-hold";
 import { readRewardVesting } from "./reads";
 import { fetchFlow } from "./flow";
@@ -26,7 +28,10 @@ const IDLE_MS = 30_000;
 /** Query keys hold bigints as strings (react-query hashes keys with JSON). */
 export const cascadeKeys = {
   all: () => ["cascade"] as const,
+  /** The protocol figures read on Bittensor: the total staked. */
   stats: () => ["cascade", "stats"] as const,
+  /** The TAO price, read on Base alone. */
+  taoPrice: () => ["cascade", "tao-price"] as const,
   apy: () => ["cascade", "apy"] as const,
   limits: () => ["cascade", "limits"] as const,
   proof: () => ["cascade", "proof"] as const,
@@ -35,6 +40,8 @@ export const cascadeKeys = {
   code: (account: string) => ["cascade", account, "code"] as const,
   rewards: (account: string) => ["cascade", account, "rewards"] as const,
   position: (account: string) => ["cascade", account, "position"] as const,
+  /** v3: the account's share of the rewards earned and not yet collected, the Rewards page's own read. */
+  pendingRewards: (account: string) => ["cascade", account, "pending-rewards"] as const,
   available: (account: string) => ["cascade", account, "available"] as const,
   history: (account: string) => ["cascade", account, "history"] as const,
   deposits: (account: string) => ["cascade", account, "deposits"] as const,
@@ -56,12 +63,30 @@ export const cascadeKeys = {
   roundTrip: (taoWei: bigint) => ["quote", "round-trip", taoWei.toString()] as const,
 };
 
+/** What a flow may have changed, to be read again once it ends (use-flows.ts): every "cascade" query but the yield. A
+ * stake, an unstake or a claim doesn't move a 30-day figure, and each restart of the yield's query sets its running
+ * read aside and starts another, leaving a slow read of Bittensor's archive node in flight for nothing. */
+export const changedByFlow = (): QueryFilters => ({ queryKey: cascadeKeys.all(), predicate: (q) => q.queryHash !== hashKey(cascadeKeys.apy()) });
+
 /** Puts the server's snapshot into a new cache, dated when it was read, so the first render (on the
  * server, and in the browser while it hydrates) shows the same figures. The live reads refresh them in
  * place as they come due. */
 export function seedSnapshot(client: QueryClient, s: Snapshot): void {
   if (s.apyPercent !== undefined) client.setQueryData(cascadeKeys.apy(), s.apyPercent, { updatedAt: s.at });
   if (s.stats !== undefined) client.setQueryData(cascadeKeys.stats(), s.stats, { updatedAt: s.at });
+  if (s.taoPriceUsd !== undefined) client.setQueryData(cascadeKeys.taoPrice(), s.taoPriceUsd, { updatedAt: s.at });
+}
+
+/** The deployment's vault on Bittensor's explorer, for "View on Bittensor": from the build's own deployment (the address
+ * the stake proof links to, live.ts getProof), so the link is in the first HTML and waits on no read. None when the site
+ * has no deployment. */
+export function useVaultExplorerUrl(): string | undefined {
+  const data = useCascadeData();
+  try {
+    return explorer.account(data.deployment.vaultSs58);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Whether the site talks to a v3 deployment; false when none is configured (its reads all fail). */
@@ -193,37 +218,171 @@ export function useOpenBatch(account: string, enabled: boolean) {
   return useQuery({ queryKey: cascadeKeys.openBatch(account), queryFn: () => data.getOpenBatch(account), enabled, refetchInterval: IDLE_MS });
 }
 
-export function useProtocolStats() {
-  const data = useCascadeData();
-  return useQuery({ queryKey: cascadeKeys.stats(), queryFn: () => data.getProtocolStats(), refetchInterval: IDLE_MS });
+/** A fetch of a public figure, as its query function is given it. */
+type FigureFetch = { readonly signal: AbortSignal };
+
+/** Whether a fetch that has just answered is still the one its query waits for. A query read again before its last
+ * read answered (a flow's refresh, say) sets that read aside, and the answer that comes last is then not the one the
+ * query keeps; it isn't remembered either (remembered.ts), so what a visit leaves for the next is what it showed.
+ * Asked only once the read has answered: react-query stops an unobserved fetch whose function took its signal, and
+ * these reads are let run to their end (the yield's is too slow to throw away). */
+const stillWanted = (fetch: FigureFetch): boolean => !fetch.signal.aborted;
+
+/** The total staked (Bittensor), every 30 s. Each reading that arrives is remembered for this browser's next visit
+ * (remembered.ts), as the yield's and the TAO price's are below: these three public display figures, and no other
+ * query's data. */
+export function statsQuery(data: CascadeData) {
+  return {
+    queryKey: cascadeKeys.stats(),
+    queryFn: async (fetch: FigureFetch) => {
+      const stats = await data.getProtocolStats();
+      if (stats.totalStakedTao !== undefined && stillWanted(fetch)) data.figures.remember("staked", stats.totalStakedTao);
+      return stats;
+    },
+    refetchInterval: IDLE_MS,
+  };
 }
 
-/** The TAO price to show, wherever one is shown: a live read's, kept through failed reads for an hour
- * (see shownFigure), and none while the figures are still the server's snapshot. That one is as old as
- * the last deploy, and mustn't pass for today's price on a page where people decide to deposit, so the
- * first paint has "–" in its place. (Totals may show the snapshot's.) A figure is the snapshot's when it
- * is dated exactly when the snapshot was read: "no later than" would also catch the browser's own reads
- * when its clock is behind the build machine's. */
+export function useProtocolStats() {
+  const data = useCascadeData();
+  return useQuery(statsQuery(data));
+}
+
+/** The TAO price, every 30 s: one read on Base, its own query, so it neither waits for the vault's read on Bittensor
+ * nor fails with it. */
+export function taoPriceQuery(data: CascadeData) {
+  return {
+    queryKey: cascadeKeys.taoPrice(),
+    queryFn: async (fetch: FigureFetch) => {
+      const price = await data.getTaoPrice();
+      if (stillWanted(fetch)) data.figures.remember("price", price);
+      return price;
+    },
+    refetchInterval: IDLE_MS,
+  };
+}
+
+/** The TAO price's query as it is: its data may still be the server's snapshot (see useTaoPrice, useShownTaoPrice). */
+export function useTaoPriceQuery() {
+  const data = useCascadeData();
+  return useQuery(taoPriceQuery(data));
+}
+
+/** The TAO price that values the user's own money (TAO in the wallet, what waits to be claimed): this visit's own read
+ * and nothing else, kept through failed reads for an hour (see shownFigure). Never one remembered from an earlier
+ * visit, and none while the query still holds the server's snapshot: that one is as old as the last deploy, and mustn't
+ * pass for today's price. (The price shown as a figure is useShownTaoPrice.) */
 export function useTaoPrice(): number | undefined {
-  const stats = useProtocolStats();
+  const price = useTaoPriceQuery();
   const snapshotAt = useSnapshotAt();
-  if (snapshotAt !== 0 && stats.dataUpdatedAt === snapshotAt) return undefined;
-  return shownFigure(stats, STATS_KEEP_MS)?.taoPriceUsd;
+  return shownFigure(liveOnly(price, snapshotAt), STATS_KEEP_MS);
 }
 
 /** A 30-day figure moves slowly: read it every half hour, and keep the last good one through a failed read. */
-const APY_MS = 30 * 60_000;
+export const APY_MS = 30 * 60_000;
+/** A yield read that failed is tried again after three minutes, not thirty: Bittensor's archive node was slow or
+ * turned it away, and the next try may well get through. */
+export const APY_RETRY_MS = 3 * 60_000;
+/** The most one attempt at the yield may take in the browser, all its reads together: three minutes. Each request waits
+ * 90 s and is asked once more (chain.ts), and there are several in a row, so against a node that hangs an attempt could
+ * otherwise run for many minutes with no new one started. Past this it counts as failed, and the next comes in
+ * APY_RETRY_MS. */
+export const APY_ATTEMPT_MS = 3 * 60_000;
+
+/** `read`, or a failure once `ms` have passed without its answer (which is then left unused). */
+function within<T>(read: Promise<T>, ms: number, late: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(late)), ms);
+    read.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
+/** The yield's query: its own, so nothing else waits on its slow read. Once every half hour after a reading, every
+ * three minutes after a failure, and each attempt asks Bittensor once: the connection it reads on retries a failed
+ * request once itself (chain.ts YIELD_RETRIES), so the query asks no second time on top of that. An attempt is given
+ * APY_ATTEMPT_MS in all. */
+export function apyQuery(data: CascadeData) {
+  return {
+    queryKey: cascadeKeys.apy(),
+    queryFn: async (fetch: FigureFetch) => {
+      const apy = await within(data.getApy(), APY_ATTEMPT_MS, "The yield took too long to read");
+      if (stillWanted(fetch)) data.figures.remember("apy", apy);
+      return apy;
+    },
+    staleTime: APY_MS,
+    refetchInterval: (q: Query<number>) => (q.state.status === "error" ? APY_RETRY_MS : APY_MS),
+    refetchOnWindowFocus: false,
+    retry: false,
+  };
+}
 
 export function useApy() {
   const data = useCascadeData();
-  return useQuery({
-    queryKey: cascadeKeys.apy(),
-    queryFn: () => data.getApy(),
-    staleTime: APY_MS,
-    refetchInterval: APY_MS,
-    refetchOnWindowFocus: false,
-    retry: 1,
-  });
+  return useQuery(apyQuery(data));
+}
+
+const noSubscribe = () => () => {};
+
+/** What this browser remembers of a public display figure from an earlier visit (remembered.ts), from the first render
+ * after hydration on: never in the server's markup, nor in the render that hydrates it, which must match. Only the
+ * four hooks below read it, for the yield, the total staked and the TAO price shown as a figure: a balance, a limit or
+ * a quote is never remembered. */
+function useRecalled(key: FigureKey): Reading | undefined {
+  const { figures } = useCascadeData();
+  return useSyncExternalStore(
+    noSubscribe,
+    () => figures.recall(key),
+    () => undefined,
+  );
+}
+
+/** A public figure as a page shows it: the value (undefined: none to show) and, with none, whether a read may still
+ * bring one (`loading`: a skeleton in its place) or not (a dash). */
+export interface ShownNumber {
+  value: number | undefined;
+  loading: boolean;
+}
+
+/** The total staked of a stats query, as a figure of its own. */
+const stakedOf = (stats: LiveFigure<{ totalStakedTao?: number }>): LiveFigure<number> => ({ data: stats.data?.totalStakedTao, isError: stats.isError, dataUpdatedAt: stats.dataUpdatedAt });
+
+/** The yield to show: this visit's reading; until it arrives, the newer of the first HTML's snapshot and the one this
+ * browser remembers; kept through failed reads for 14 days from when it was read, then none. */
+export function useShownApy(): ShownNumber {
+  const apy = useApy();
+  const snapshotAt = useSnapshotAt();
+  const recalled = useRecalled("apy");
+  return { value: shownFigure(withRemembered(apy, recalled, snapshotAt), APY_KEEP_MS), loading: apy.isPending };
+}
+
+/** The total staked to show, in TAO: as the yield, kept for an hour. */
+export function useShownStaked(): ShownNumber {
+  const stats = useProtocolStats();
+  const snapshotAt = useSnapshotAt();
+  const recalled = useRecalled("staked");
+  return { value: shownFigure(withRemembered(stakedOf(stats), recalled, snapshotAt), STATS_KEEP_MS), loading: stats.isPending };
+}
+
+/** The TAO price shown as a figure (the price strip, the statistics card, the Rewards page): this visit's reading;
+ * until it arrives, the one this browser remembers when that is under an hour old. Never the server's snapshot's, which
+ * is as old as the last deploy; kept through failed reads for an hour, then none. */
+export function useShownTaoPrice(): ShownNumber {
+  const price = useTaoPriceQuery();
+  const snapshotAt = useSnapshotAt();
+  const recalled = useRecalled("price");
+  // with the snapshot's price left out, whatever the query holds is this visit's own reading: it stands
+  return { value: shownFigure(withRemembered(liveOnly(price, snapshotAt), recalled, 0), STATS_KEEP_MS), loading: !price.isError };
+}
+
+/** The home page's total staked, in dollars (stats.ts heroTotal): the TAO staked at the TAO price, each the newest
+ * reading there is. Here the snapshot's price counts too: a total, not a price anyone acts on. */
+export function useHeroTotal(): ReturnType<typeof heroTotal> {
+  const stats = useProtocolStats();
+  const price = useTaoPriceQuery();
+  const snapshotAt = useSnapshotAt();
+  const staked = useRecalled("staked");
+  const priced = useRecalled("price");
+  return heroTotal(withRemembered(stakedOf(stats), staked, snapshotAt), withRemembered(price, priced, snapshotAt));
 }
 
 export function useLimits() {
@@ -257,14 +416,30 @@ export function usePosition(account: string, live = false, enabled = true) {
   });
 }
 
+/** v3: the account's share of the rewards earned and not yet collected (getPendingRewards), every 30 s: the Rewards
+ * page's own read, apart from the stake's (usePosition), which no longer waits on it. Null while it can't be told;
+ * nothing is read on v2. */
+export function usePendingRewards(account: string) {
+  const data = useCascadeData();
+  const v3 = useIsV3();
+  return useQuery({
+    queryKey: cascadeKeys.pendingRewards(account),
+    queryFn: () => data.getPendingRewards(account),
+    enabled: v3,
+    refetchInterval: IDLE_MS,
+  });
+}
+
 /** What can be unstaked. Usually as quick as the balance: it waits on the vault's history only while an
- * unstake from this browser is on its way and its arrival isn't known yet. */
-export function useAvailable(account: string, live = false) {
+ * unstake from this browser is on its way and its arrival isn't known yet. `enabled` false asks nothing of its own
+ * (the unstake screen with no wallet yet) and reads whatever the cache holds. */
+export function useAvailable(account: string, live = false, enabled = true) {
   const data = useCascadeData();
   return useQuery({
     queryKey: cascadeKeys.available(account),
     queryFn: () => data.getAvailable(account),
     refetchInterval: live ? LIVE_MS : IDLE_MS,
+    enabled,
   });
 }
 
@@ -433,6 +608,49 @@ export function useDeliveryLimit(account: string | null, enabled: boolean) {
     enabled: enabled && account !== null,
     refetchInterval: 30_000,
   });
+}
+
+/** Reads of the unstake form's, started with the screen so they load beside the balance and not after it: the form
+ * mounts only once the balance and what can be unstaked are known (UnstakeForm.tsx), and each of its reads would start
+ * only then. They are the form's own queries (one read each: the form finds them in the cache), started in two steps:
+ * - with the wallet, unless it is known to have nothing staked: its balances, the contracts' wiring check (which holds
+ *   every button until it answers), and on v3.2 with USDC delivery off the delivery preference (one read on Base);
+ * - only once the stake is known and above nothing, and not while its history is being checked against the chain (the
+ *   form doesn't show then): on v3.2 the live delivery limit, which scans the vault's history, and what holds an
+ *   unstake, each read again every 30 seconds. A visitor with nothing staked never starts them.
+ * So they start earlier than the form would ask them, never for a form that can't show. Nothing here decides anything:
+ * what gates the form and its buttons is unchanged. */
+export function useUnstakeReads(account: string | null): void {
+  const v32 = useIsV32();
+  const usdcDelivery = useUsdcDelivery();
+  const position = usePosition(account ?? "", false, account !== null);
+  const available = useAvailable(account ?? "", false, account !== null);
+  const reads = unstakeReads({ account, shares: position.data?.shares, checking: available.data?.checking === true, v32, usdcDelivery });
+  useBalances(reads.account);
+  useWiring(reads.wiring);
+  useDeliveryPreference(reads.account, reads.deliveryPreference);
+  useDeliveryLimit(reads.staked, reads.deliveryLimit);
+  useExitHold(reads.exitHold);
+}
+
+/** Which reads the unstake screen starts (useUnstakeReads), and for whom.
+ * - `account`: whose balances, wiring check (`wiring`) and, on v3.2 with USDC delivery off, delivery preference
+ *   (`deliveryPreference`) are read from the start: the wallet's, unless it is known to have nothing staked (`shares`
+ *   0; unknown, undefined, while the balance loads).
+ * - `staked`: whose delivery limit (`deliveryLimit`: v3.2 with USDC delivery on) and unstake hold (`exitHold`: v3.2) are
+ *   read: the wallet's only once its stake is known and above nothing, and its history isn't being checked against the
+ *   chain (`checking`); no one's before that. */
+export function unstakeReads(o: { account: string | null; shares: bigint | undefined; checking: boolean; v32: boolean; usdcDelivery: boolean }) {
+  const account = o.account !== null && o.shares !== 0n ? o.account : null;
+  const staked = account !== null && o.shares !== undefined && o.shares > 0n && !o.checking ? account : null;
+  return {
+    account,
+    wiring: account !== null,
+    deliveryPreference: account !== null && o.v32 && !o.usdcDelivery,
+    staked,
+    deliveryLimit: staked !== null && o.v32 && o.usdcDelivery,
+    exitHold: o.v32 ? staked : null,
+  };
 }
 
 /** v3: what a later unstake of `taoWei` costs, for the break-even line. Kept apart from the deposit

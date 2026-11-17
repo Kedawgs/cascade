@@ -162,7 +162,7 @@ describe("the open batch", () => {
   });
 });
 
-describe("rewards waiting (v3)", () => {
+describe("rewards waiting (v3): the Rewards page's own read", () => {
   const D3: Deployment = { ...D, staker: "0x00000000000000000000000000000000000000b1", oracle: "0x00000000000000000000000000000000000000b2" };
 
   it("is the account's share of the vault's uncollected rewards, less the 10% cut", async () => {
@@ -172,28 +172,41 @@ describe("rewards waiting (v3)", () => {
       deps({ readVault: async () => half, readPendingRewards: async () => ({ wei: 4n * 10n ** 15n, cutBps: 1000 }) }),
     );
     // 0.004 TAO x 1/2 x 0.9
-    expect((await data.getPosition(ME)).pendingRewardsTao).toBeCloseTo(0.0018, 12);
+    expect(await data.getPendingRewards(ME)).toBeCloseTo(0.0018, 12);
   });
 
-  it("stays undefined when the read fails, and the rest of the position is intact", async () => {
+  it("is unknown (null), never zero, when the read fails, and the position is intact", async () => {
     const data = createLiveCascadeData(D3, deps({ readPendingRewards: async () => undefined }));
-    const p = await data.getPosition(ME);
-    expect(p.pendingRewardsTao).toBeUndefined();
-    expect(p.taoBalance).toBeCloseTo(0.08, 12);
+    expect(await data.getPendingRewards(ME)).toBeNull();
+    const thrown = createLiveCascadeData(D3, deps({ readPendingRewards: async () => Promise.reject(new Error("rate limited")) }));
+    expect(await thrown.getPendingRewards(ME)).toBeNull();
+    expect((await thrown.getPosition(ME)).taoBalance).toBeCloseTo(0.08, 12);
   });
 
   it("is zero, not unknown, when the chain says nothing is waiting", async () => {
     const data = createLiveCascadeData(D3, deps({ readPendingRewards: async () => ({ wei: 0n, cutBps: 1000 }) }));
-    expect((await data.getPosition(ME)).pendingRewardsTao).toBe(0);
+    expect(await data.getPendingRewards(ME)).toBe(0);
   });
 
-  it("isn't read or shown on v2, whose Rewards page stays as it was", async () => {
+  it("isn't read on v2, whose Rewards page stays as it was", async () => {
     let asked = 0;
-    const data = createLiveCascadeData(D, deps({ readPendingRewards: async () => (asked++, { wei: 4n * 10n ** 15n, cutBps: 1000 }) }));
-    const p = await data.getPosition(ME);
+    const data = createLiveCascadeData(
+      D,
+      deps({ readVault: async () => (asked++, vault), readPendingRewards: async () => (asked++, { wei: 4n * 10n ** 15n, cutBps: 1000 }) }),
+    );
+    expect(await data.getPendingRewards(ME)).toBeNull();
     expect(asked).toBe(0);
-    expect(p).not.toHaveProperty("pendingRewardsTao");
-    expect(p.taoBalance).toBeCloseTo(0.08, 12);
+  });
+
+  it("the stake never waits on it: getPosition doesn't read the rewards waiting, on any deployment, and answers while that read would still hang", async () => {
+    let asked = 0;
+    const hangs = async () => (asked++, new Promise<never>(() => {}));
+    for (const d of [D, D3]) {
+      const p = await createLiveCascadeData(d, deps({ readPendingRewards: hangs })).getPosition(ME);
+      expect(p.taoBalance).toBeCloseTo(0.08, 12);
+      expect(p).not.toHaveProperty("pendingRewardsTao");
+    }
+    expect(asked).toBe(0);
   });
 });
 
@@ -546,7 +559,7 @@ describe("v3.2: a request or a deposit whose batch was parked, as Unstake and th
     const run = parkedRun(x);
     const a = account(x, { ...run, bitLogs: [...run.bitLogs, parkedDropped(bitAt(x.parkS + 14 * DAY + 3_600))] }, "stake");
     const [r] = await a.data.listDeposits(USER);
-    expect(r.steps[2]).toMatchObject({ status: "checking", detail: "Checking where your deposit is…" });
+    expect(r.steps[2]).toMatchObject({ status: "checking", detail: "Your deposit has left Base. Loading its latest status on the way to Bittensor…" });
   });
 
   it("stops counting a refunded deposit as on its way once the trail has read it so", async () => {
@@ -1438,15 +1451,48 @@ describe("live data", () => {
     expect(l.minUsd - free.minUsd).toBeGreaterThanOrEqual(0.05 - 1e-9);
   });
 
-  it("shows total staked and the price, and hides stakers, without waiting on the APY", async () => {
+  it("shows total staked, and hides stakers, without waiting on the APY or the TAO price", async () => {
     let asked = false;
-    const readApyPercent = async () => {
+    const other = async () => {
       asked = true;
       return 5.36;
     };
-    const s = await createLiveCascadeData(D, deps({ readApyPercent })).getProtocolStats();
-    expect(s).toEqual({ totalStakedTao: 0.08, taoPriceUsd: 250 });
+    const s = await createLiveCascadeData(D, deps({ readApyPercent: other, taoPriceUsd: other })).getProtocolStats();
+    expect(s).toEqual({ totalStakedTao: 0.08 });
     expect(asked).toBe(false);
+  });
+
+  it("reads the TAO price on Base alone: it still answers when the vault's read on Bittensor fails, or never answers", async () => {
+    let vaultAsked = 0;
+    const down = createLiveCascadeData(D, deps({ readVault: async () => (vaultAsked++, Promise.reject(new Error("Bittensor's node is down"))) }));
+    expect(await down.getTaoPrice()).toBe(250);
+    // the price asked nothing of Bittensor
+    expect(vaultAsked).toBe(0);
+    await expect(down.getProtocolStats()).rejects.toThrow("Bittensor's node is down");
+    const hung = createLiveCascadeData(D, deps({ readVault: () => new Promise<never>(() => {}) }));
+    expect(await hung.getTaoPrice()).toBe(250);
+    // and the total staked still answers when Base's price read fails
+    const noPrice = createLiveCascadeData(D, deps({ taoPriceUsd: async () => Promise.reject(new Error("quoter reverted")) }));
+    expect(await noPrice.getProtocolStats()).toEqual({ totalStakedTao: 0.08 });
+    await expect(noPrice.getTaoPrice()).rejects.toThrow("quoter reverted");
+  });
+
+  it("keeps this browser's remembered figures under the deployment's vault, in its storage: three public figures, no balance", async () => {
+    const storage = memory();
+    const data = createLiveCascadeData(D, deps({ storage, now: () => T0 }));
+    data.figures.remember("apy", 5.36);
+    expect(storage.getItem(`cascade.figure.${D.vault.toLowerCase()}.apy`)).toBe(`{"v":1,"value":5.36,"at":${T0}}`);
+    // reading the account's own figures remembers nothing
+    await data.getPosition(ME);
+    await data.getBalances(ME);
+    await data.getLimits();
+    await data.getAvailable(ME);
+    expect(data.figures.recall("staked")).toBeUndefined();
+    expect(data.figures.recall("price")).toBeUndefined();
+    // and the site with no deployment remembers nothing at all
+    expect(notConfiguredData().figures.recall("apy")).toBeUndefined();
+    await expect(notConfiguredData().getTaoPrice()).rejects.toBeInstanceOf(NotConfiguredError);
+    await expect(notConfiguredData().getPendingRewards(ME)).rejects.toBeInstanceOf(NotConfiguredError);
   });
 
   it("reads the APY on its own, and refuses rather than inventing one", async () => {

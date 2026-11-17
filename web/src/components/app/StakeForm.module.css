@@ -187,10 +187,12 @@
   white-space: nowrap;
 }
 
-/* room for "$999.99", so the note beside it stays put when the price arrives */
+/* room for "$999.99", so the note beside it stays put when the price arrives; its skeleton, while it loads, fills
+   that room (Figure.module.css) */
 .price b {
   display: inline-block;
   min-width: 4.2em;
+  --figure-width: 4.2em;
   margin-left: 2px;
   font-size: 15px;
   font-weight: 700;

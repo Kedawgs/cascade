@@ -132,7 +132,11 @@ export const ADAPTER = parseAbi([
 ]);
 
 /** Multicall3's own clock: asked in a batch read, it gives the timestamp of the block the read came from. */
-export const MULTICALL3_ABI = parseAbi(["function getCurrentBlockTimestamp() view returns (uint256 timestamp)"]);
+export const MULTICALL3_ABI = parseAbi([
+  "function getCurrentBlockTimestamp() view returns (uint256 timestamp)",
+  "function getBlockNumber() view returns (uint256 blockNumber)",
+  "function getEthBalance(address addr) view returns (uint256 balance)",
+]);
 
 /** ForeverMoney's AlphaVault on Bittensor, which the Bittensor adapter deposits a batch's TAO into: the
  * reads the keeper takes for "can a batch be sent" (ops/src/keeper/state.ts, ops/src/preflight.ts). */

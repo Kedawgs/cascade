@@ -15,8 +15,16 @@
 # chain-proxy.wallet.coinbase.com), falling back to viem's default for Base, mainnet.base.org. Its
 # popup at keys.coinbase.com is a window, not a connection, and its own check of the page's headers
 # fetches the page itself ('self'). Browser wallets talk to the page through the extension, not the
-# network. The site has no WalletConnect connector. When a build names the history indexer
-# (NEXT_PUBLIC_CASCADE_INDEXER_URL), scripts/csp-headers.mjs adds exactly that origin here too.
+# network. When a build names the history indexer (NEXT_PUBLIC_CASCADE_INDEXER_URL),
+# scripts/csp-headers.mjs adds exactly that origin here too.
+#
+# WalletConnect is not in this committed line. A build that offers it (the default; see
+# src/lib/walletconnect.ts) gets exactly one more source from scripts/csp-headers.mjs, in connect-src:
+# wss://relay.walletconnect.org, the relay a pairing and its session run over. Nothing else of
+# WalletConnect's is allowed or needed: its telemetry is off, its Verify frame is off (frame-src stays
+# 'none'), its provider reads the chains through the RPCs above, and the site draws its own dialog (no
+# Reown AppKit, so none of its fonts, images or wallet-list API). A build with WalletConnect off gets
+# nothing added.
 /*
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://mainnet.base.org https://base-rpc.publicnode.com https://archive.chain.opentensor.ai https://*.wallet.coinbase.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
   Strict-Transport-Security: max-age=31536000

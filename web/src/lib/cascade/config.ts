@@ -410,6 +410,10 @@ export const explorer = {
   baseAddress: (addr: string) => `https://basescan.org/address/${addr}`,
   /** A contract on Bittensor's EVM, on the same explorer as bittensorTx. */
   bittensorAddress: (addr: string) => `https://evm.taostats.io/address/${addr}`,
+  /** A contract's verified source, on Sourcify's viewer, by chain id. Every v3.2 contract is an exact match there on
+   * both chains; the block explorers need not carry the source (Basescan has none for them), and Bittensor's EVM
+   * explorer was down when the founder tried it (2026-11-16). */
+  code: (chainId: number, addr: string) => `https://repo.sourcify.dev/${chainId}/${addr}`,
   /** A validator's page on taostats, by its SS58 hotkey (the FAQ links the same pages). */
   validator: (hotkeySs58: string) => `https://taostats.io/validators/${hotkeySs58}`,
   /** The bridge lane on Chainlink's CCIP explorer. It has no page per lane, so this is the page of the

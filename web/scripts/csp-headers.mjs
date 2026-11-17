@@ -86,9 +86,25 @@ export function indexerOrigin(v) {
   return url.protocol === "https:" && url.origin === v && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(url.hostname) ? v : null;
 }
 
+/** WalletConnect's relay: the one host a pairing and its session need (src/lib/walletconnect.ts
+ * WALLETCONNECT_RELAY; tests hold the two together, and to the installed packages' own constant). A
+ * WebSocket, so it is named with its scheme: 'self' and the https hosts don't cover it. Nothing else of
+ * WalletConnect's is allowed: its telemetry is off, its Verify frame is off (frame-src stays 'none'), and
+ * its provider reads the chains through the site's own RPCs. */
+export const WALLETCONNECT_RELAY = "wss://relay.walletconnect.org";
+
+/** Whether a build whose NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is `v` offers WalletConnect, by the site's own
+ * rule (src/lib/walletconnect.ts, walletConnectProjectId; a test holds the two together): unset, the site
+ * uses its tracked project id, so it is on; set, it is on only when the value is shaped like a project id
+ * (32 lower-case hex characters), and off when it is empty or anything else.
+ * @param {string | undefined | null} v */
+export function walletConnectOn(v) {
+  return v === undefined || v === null ? true : /^[0-9a-f]{32}$/.test(v);
+}
+
 /** `headers` with the fallback allowing every page's inline scripts and those of `others` (the 404 page),
  * and one rule per page after it allowing that page's alone; both with `connect` (the indexer's origin,
- * when the build names one) added to connect-src. A previous run's hashes and rules are replaced. The
+ * when the build names one, and WalletConnect's relay, when the build offers it) added to connect-src. A previous run's hashes and rules are replaced. The
  * committed fallback's script-src must be 'self' alone. */
 export function withPageRules(headers, pages, others = [], connect = []) {
   const base = headers.includes(MARKER) ? headers.slice(0, headers.indexOf(MARKER)) : headers;
@@ -113,20 +129,33 @@ function htmlFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? htmlFiles(join(dir, e.name)) : e.name.endsWith(".html") ? [join(dir, e.name)] : []));
 }
 
-/** The value of NEXT_PUBLIC_CASCADE_INDEXER_URL `next build` inlined into the exported scripts under
- * `out` (config.ts passes it by name, and the minified bundle keeps that name as the property), or null
- * when the bundle names none. Throws when the scripts name two different values. */
-export function inlinedIndexerUrl(out) {
+/** The value of the variable `name` that `next build` inlined into the exported scripts under `out` (the
+ * site passes each by name, and the minified bundle keeps that name as the property), or null when the
+ * bundle names none (the variable was unset). Throws when the scripts name two different values.
+ * @param {string} out
+ * @param {string} name */
+function inlined(out, name) {
   const files = jsFiles(out);
   const values = new Set();
+  const named = new RegExp(String.raw`${name}:(?:"((?:[^"\\]|\\.)*)"|(void 0|undefined|null))`, "g");
   for (const file of files) {
-    for (const m of readFileSync(file, "utf8").matchAll(/NEXT_PUBLIC_CASCADE_INDEXER_URL:(?:"((?:[^"\\]|\\.)*)"|(void 0|undefined|null))/g)) {
+    for (const m of readFileSync(file, "utf8").matchAll(named)) {
       values.add(m[1] === undefined ? null : m[1]);
     }
   }
-  if (values.size > 1) throw new Error(`the exported scripts name more than one NEXT_PUBLIC_CASCADE_INDEXER_URL: ${[...values].join(", ")}`);
+  if (values.size > 1) throw new Error(`the exported scripts name more than one ${name}: ${[...values].join(", ")}`);
   return values.size === 1 ? [...values][0] : null;
 }
+
+/** The value of NEXT_PUBLIC_CASCADE_INDEXER_URL `next build` inlined (config.ts passes it by name), or
+ * null when the bundle names none.
+ * @param {string} out */
+export const inlinedIndexerUrl = (out) => inlined(out, "NEXT_PUBLIC_CASCADE_INDEXER_URL");
+
+/** The value of NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID `next build` inlined (walletconnect.ts passes it by
+ * name), or null when it was unset. An empty value, which turns WalletConnect off, is inlined as "".
+ * @param {string} out */
+export const inlinedWalletConnectId = (out) => inlined(out, "NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID");
 
 function jsFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? jsFiles(join(dir, e.name)) : e.name.endsWith(".js") ? [join(dir, e.name)] : []));
@@ -142,8 +171,10 @@ export function buildEnv(dir) {
 
 /** Writes `out`'s _headers from the pages exported there, with the indexer's origin in connect-src when
  * the build's environment names one (NEXT_PUBLIC_CASCADE_INDEXER_URL: `env`, or the process's environment
- * with `dir`'s .env files loaded as `next build` loads them). Fails rather than write a policy that
- * disagrees with what the exported scripts inlined: the page may connect exactly where its code asks.
+ * with `dir`'s .env files loaded as `next build` loads them), and WalletConnect's relay when the build
+ * offers WalletConnect (NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID unset or an id; off, nothing is added for it).
+ * Fails rather than write a policy that disagrees with what the exported scripts inlined: the page may
+ * connect exactly where its code asks.
  * @param {string} out
  * @param {Record<string, string | undefined>} [env]
  * @param {string} [dir] */
@@ -165,14 +196,27 @@ export function build(out, env, dir = fileURLToPath(new URL("..", import.meta.ur
       `the exported scripts inlined NEXT_PUBLIC_CASCADE_INDEXER_URL=${inlined === null ? "(none)" : JSON.stringify(inlined)} but the policy would be built from ${value === undefined ? "(none)" : JSON.stringify(value)}: build and this step must see the same environment`,
     );
   }
-  writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages, others, indexer ? [indexer] : []));
-  return { pages: pages.map((p) => p.route), indexer };
+  // WalletConnect: on or off by the site's own rule, from the same value the scripts inlined
+  const projectId = environment.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
+  const inlinedId = inlinedWalletConnectId(out);
+  if (inlinedId !== (projectId ?? null)) {
+    throw new Error(
+      `the exported scripts inlined NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=${inlinedId === null ? "(none)" : JSON.stringify(inlinedId)} but the policy would be built from ${projectId === undefined ? "(none)" : JSON.stringify(projectId)}: build and this step must see the same environment`,
+    );
+  }
+  const walletConnect = walletConnectOn(projectId);
+  if (projectId && !walletConnect) {
+    console.warn("csp-headers: NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID isn't a project id (32 lower-case hex characters); the site offers no WalletConnect, and the policy doesn't allow its relay");
+  }
+  const connect = [...(indexer ? [indexer] : []), ...(walletConnect ? [WALLETCONNECT_RELAY] : [])];
+  writeFileSync(headersPath, withPageRules(readFileSync(headersPath, "utf8"), pages, others, connect));
+  return { pages: pages.map((p) => p.route), indexer, walletConnect };
 }
 
 function main() {
-  const { pages, indexer } = build(fileURLToPath(new URL("../out", import.meta.url)));
+  const { pages, indexer, walletConnect } = build(fileURLToPath(new URL("../out", import.meta.url)));
   console.log(
-    `csp-headers: a Content-Security-Policy for each of ${pages.length} pages in out/_headers (${pages.join(" ")}), and the fallback with all their inline scripts and the 404 page's${indexer ? `; connect-src also allows the indexer at ${indexer}` : ""}`,
+    `csp-headers: a Content-Security-Policy for each of ${pages.length} pages in out/_headers (${pages.join(" ")}), and the fallback with all their inline scripts and the 404 page's${indexer ? `; connect-src also allows the indexer at ${indexer}` : ""}${walletConnect ? `; connect-src also allows WalletConnect's relay at ${WALLETCONNECT_RELAY}` : "; WalletConnect is off in this build, and nothing is allowed for it"}`,
   );
 }
 

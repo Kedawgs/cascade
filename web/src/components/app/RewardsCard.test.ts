@@ -20,7 +20,7 @@ describe("how rewards reach a balance, in one sentence", () => {
   it("v3.2: how often they are collected (the keeper's round) and how long they take to be added (the vault's period)", () => {
     expect(FAQ_FACTS.v32.claimRoundDays).toBe(28);
     expect(rewardsSchedule({ v32: true, vestingS: 30 * 86_400 })).toBe(
-      "Cascade collects rewards for everyone at least every 28 days, then adds them to balances gradually over 30 days.",
+      "Cascade collects rewards for everyone at least once a month, then adds them to balances gradually over 30 days.",
     );
     expect(rewardsSchedule({ v32: true, vestingS: 7 * 86_400 })).toContain("gradually over 7 days.");
   });
@@ -28,7 +28,7 @@ describe("how rewards reach a balance, in one sentence", () => {
   it("v3.2, the period not read yet (or unreadable): its limit, never a guess of the figure", () => {
     for (const vestingS of [undefined, 0, Number.NaN]) {
       expect(rewardsSchedule({ v32: true, vestingS })).toBe(
-        "Cascade collects rewards for everyone at least every 28 days, then adds them to balances gradually over up to 30 days.",
+        "Cascade collects rewards for everyone at least once a month, then adds them to balances gradually over up to 30 days.",
       );
     }
   });

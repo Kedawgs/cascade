@@ -66,7 +66,8 @@ is the proper fix for both). Re-check with `pnpm audit --prod` after any bump.
 
 The site is hosted as static files on Cloudflare Pages, which reads `out/_headers`. `public/_headers`
 sets, on every path, a Content-Security-Policy (only this site's scripts; connections only to the
-RPCs above and Base Account's wallet hosts, `*.wallet.coinbase.com`; no framing, plugins, other
+RPCs above and Base Account's wallet hosts, `*.wallet.coinbase.com`, and WalletConnect's relay when
+the build offers it, see "WalletConnect"; no framing, plugins, other
 `<base>` or form targets), HSTS, `nosniff`, a referrer policy and a minimal permissions policy. As
 committed, the policy allows no inline script. After `next build`, `scripts/csp-headers.mjs` adds the
 sha256 of every exported page's inline scripts (the 404 page's too) to it, and gives each page a
@@ -93,6 +94,33 @@ names, which its own constants give as `chain-proxy.wallet.coinbase.com`: both a
 `*.wallet.coinbase.com`. That can't be checked without signing in to a Base Account. **Before
 launch, test one real Base Account stake on a Pages preview**, with the browser console open for CSP
 errors.
+
+## WalletConnect
+
+Phone and hardware wallets connect by QR code or link: wagmi's `walletConnect` connector, wrapped
+(`src/lib/walletconnect-connector.ts`) so that none of its code loads until someone picks it or a
+session of theirs may be alive, and so that a session without an account on Base is ended at once
+(WalletConnect sends every chain as optional now; Bittensor EVM is asked for too, for
+`/unstake/bittensor`). The dialog is the site's own (`src/components/WalletConnectDialog.tsx`): the QR
+code is drawn in the page by the `qr` package, and Reown AppKit, which the provider lists as a
+dependency for its own QR window, is not installed (`pnpm-workspace.yaml` removes it, and
+`next.config.ts` points the provider's one import of it at `src/lib/walletconnect-no-appkit.ts`, which
+throws).
+
+- **Project id:** the site's Reown project id is tracked in `src/lib/walletconnect.ts` (a public
+  identifier). `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` overrides it for a build: another id (32
+  lower-case hex characters) is used in its place; set and empty, or anything else, turns WalletConnect
+  off for that build (no option, no connector, no relay in the policy).
+- **Policy:** a build that offers WalletConnect gets exactly one more source from
+  `scripts/csp-headers.mjs`, `wss://relay.walletconnect.org` in `connect-src`. Its telemetry is off
+  (`telemetryEnabled: false`), its Verify frame is off (`walletconnect-inner.ts`, `withoutVerifyFrame`:
+  the provider has no option for it, and with `frame-src 'none'` every wallet prompt would otherwise
+  wait five seconds for a frame the browser refuses), and its provider reads the chains through the
+  site's own RPCs. A test (`src/lib/walletconnect.test.ts`) lists every host the installed packages
+  name, so a bump that adds one is seen.
+- **Allowed origins:** the Reown project lists the origins that may use the id. The relay refuses any
+  other (close code 3000, "origin not allowed"); the dialog then says it can't reach WalletConnect.
+  `localhost` is allowed; a Pages preview address is not unless it is added there.
 
 ## Routes
 

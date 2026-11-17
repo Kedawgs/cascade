@@ -24,7 +24,11 @@ export function rewardsSchedule(o: { v32: boolean; vestingS?: number }): string 
   if (!o.v32) return `Cascade collects rewards for everyone when enough is waiting, then adds them to balances gradually over ${FAQ_FACTS.vestingDays} days.`;
   const known = o.vestingS !== undefined && Number.isFinite(o.vestingS) && o.vestingS > 0;
   const over = known ? `over ${waitText(o.vestingS as number)}` : "over up to 30 days";
-  return `Cascade collects rewards for everyone at least every ${FAQ_FACTS.v32.claimRoundDays} days, then adds them to balances gradually ${over}.`;
+  // a round of 28 to 31 days is said as a month (the founder, 2026-11-16: "every 28 days?" beside the 30-day drip read
+  // as a mismatch); the FAQ keeps the exact figure
+  const days = FAQ_FACTS.v32.claimRoundDays;
+  const often = days >= 28 && days <= 31 ? "at least once a month" : `at least every ${days} days`;
+  return `Cascade collects rewards for everyone ${often}, then adds them to balances gradually ${over}.`;
 }
 
 /** The schedule's sentence, with where an account's rewards will show while it has none yet, and the FAQ's answer. */

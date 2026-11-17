@@ -5,3 +5,11 @@ allowBuilds:
 # every lockfile entry against it on each install too, so a poisoned release caught within a week of
 # publishing never reaches a build; a dependency bump simply waits out the week.
 minimumReleaseAge: 10080
+# WalletConnect's provider lists Reown AppKit (its own QR window, and the wallet SDKs, fonts and remote
+# wallet list that come with it) as a dependency, and loads it only when asked for that window. The site
+# draws its own (src/components/WalletConnectDialog.tsx, showQrModal: false), so AppKit and the few
+# hundred packages under it are never installed; next.config.ts points the provider's one import of it
+# at a file of the site's own that throws (src/lib/walletconnect-no-appkit.ts). A test holds all three
+# (src/lib/walletconnect-connector.test.ts).
+overrides:
+  "@walletconnect/ethereum-provider>@reown/appkit": "-"

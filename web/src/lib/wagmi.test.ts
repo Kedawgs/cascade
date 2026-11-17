@@ -14,7 +14,11 @@ describe("the wallet config", () => {
     expect(transport.value?.url).toBe(RPC.base);
   });
 
-  it("offers Base Account and the browser's own wallets, nothing else", () => {
-    expect(wagmiConfig.connectors.map((c) => c.id)).toEqual(["baseAccount", "injected"]);
+  it("offers Base Account, the browser's own wallets and WalletConnect (the build's default: its tracked project id), nothing else", () => {
+    expect(wagmiConfig.connectors.map((c) => c.id)).toEqual(["baseAccount", "injected", "walletConnect"]);
+  });
+
+  it("stays Base only with WalletConnect in it: the session's second chain, Bittensor EVM, is the connector's own (walletconnect-inner.ts)", () => {
+    expect(wagmiConfig.chains.map((c) => c.id)).toEqual([base.id]);
   });
 });

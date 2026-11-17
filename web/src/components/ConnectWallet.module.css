@@ -45,7 +45,8 @@
   position: absolute;
   right: 0;
   z-index: 10;
-  width: 260px;
+  /* room for WalletConnect's second line, and for Cancel beside a wallet being connected to */
+  width: min(300px, calc(100vw - 40px));
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-input);
@@ -58,12 +59,56 @@
   gap: 8px;
 }
 
+/* a wallet's row: its button, and Cancel beside it while it is being connected to */
+.row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+/* the wallet being connected to: its button stays (focus stays on it) but reads as waiting, and does nothing */
+.pending,
+.pending:hover:not(:disabled) {
+  background: var(--mist);
+  color: var(--ink-2);
+  cursor: default;
+}
+
+.cancel {
+  flex: none;
+  min-height: 46px;
+  padding: 0 14px;
+}
+
+/* WalletConnect's option: its name, and under it who it is for */
+.twoLine {
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.optionNote {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--ink-2);
+  text-wrap: balance;
+}
+
 .hint {
   margin-top: 8px;
   font-size: 13.5px;
   color: var(--ink-2);
 }
 
+/* Inside the panel, under the options: in the nav the panel hangs under the button (position: absolute, above), so
+   this sentence arriving moves nothing in the bar; in a card the list is under the button, which stays where it is. */
 .error {
   margin-top: 10px;
   color: var(--danger);

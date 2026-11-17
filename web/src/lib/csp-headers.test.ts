@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { build, fallbackPolicy, indexerOrigin, inlineScriptHashes, routeOf, withPageRules } from "../../scripts/csp-headers.mjs";
+import { build, fallbackPolicy, indexerOrigin, inlinedWalletConnectId, inlineScriptHashes, routeOf, WALLETCONNECT_RELAY, withPageRules } from "../../scripts/csp-headers.mjs";
 import { indexerOrigin as siteIndexerOrigin, RPC } from "./cascade/config";
+import { WALLETCONNECT_PROJECT_ID } from "./walletconnect";
 
 const HEADERS = readFileSync(fileURLToPath(new URL("../../public/_headers", import.meta.url)), "utf8");
 const sha = (s: string) => `'sha256-${createHash("sha256").update(s, "utf8").digest("base64")}'`;
@@ -164,9 +165,15 @@ describe("each page's own policy", () => {
     }
   });
 
+  /** A build with WalletConnect off (its variable set, and empty), so the tests of the indexer's origin see that alone;
+   * WalletConnect's relay has its own tests below. */
+  const OFF = { NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: "" };
+
   /** A fake export: the committed headers, three pages and a script chunk that inlined `inlined` as
-   * NEXT_PUBLIC_CASCADE_INDEXER_URL (the way next build writes config.ts's object), in a fresh folder. */
-  const exported = (inlined?: string) => {
+   * NEXT_PUBLIC_CASCADE_INDEXER_URL (the way next build writes config.ts's object) and `walletConnect` as
+   * NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID (walletconnect.ts's; null for unset: the script then keeps the variable's own name, which
+   * the browser reads as nothing), in a fresh folder. */
+  const exported = (inlined?: string, walletConnect: string | null = "") => {
     const out = mkdtempSync(join(tmpdir(), "cascade-csp-"));
     writeFileSync(join(out, "_headers"), HEADERS);
     writeFileSync(join(out, "index.html"), "<html><script>home()</script></html>");
@@ -176,13 +183,15 @@ describe("each page's own policy", () => {
     mkdirSync(join(out, "_next", "static", "chunks"), { recursive: true });
     const literal = inlined === undefined ? "void 0" : JSON.stringify(inlined);
     writeFileSync(join(out, "_next", "static", "chunks", "app.js"), `let e={NEXT_PUBLIC_CASCADE_VAULT:"0x1",NEXT_PUBLIC_CASCADE_INDEXER_URL:${literal}};`);
+    const id = walletConnect === null ? "process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID" : JSON.stringify(walletConnect);
+    writeFileSync(join(out, "_next", "static", "chunks", "wallet.js"), `let w=f({NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID:${id}});`);
     return out;
   };
 
   it("builds out/_headers with exactly the indexer's origin in every connect-src when the env names one, and none when it doesn't", () => {
     const committed = directives(fallbackPolicy(HEADERS)).get("connect-src")!;
     const named = exported("https://api.cascadefi.xyz");
-    build(named, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" });
+    build(named, { ...OFF, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" });
     const withIt = readFileSync(join(named, "_headers"), "utf8");
     expect(directives(fallbackPolicy(withIt)).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
     expect(directives(policyOf(withIt, "/")).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz"]);
@@ -197,7 +206,7 @@ describe("each page's own policy", () => {
       [{ NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz/v1" }, "https://api.cascadefi.xyz/v1"],
     ] as const) {
       const unnamed = exported(inlined);
-      build(unnamed, env);
+      build(unnamed, { ...OFF, ...env });
       const without = readFileSync(join(unnamed, "_headers"), "utf8");
       expect(without, JSON.stringify(env)).not.toContain("cascadefi.xyz");
       expect(directives(fallbackPolicy(without)).get("connect-src")).toEqual(committed);
@@ -208,7 +217,8 @@ describe("each page's own policy", () => {
   it("reads the value next build inlined from web/.env.local the way next build does, so a value set only there still reaches the policy", () => {
     const committed = directives(fallbackPolicy(HEADERS)).get("connect-src")!;
     const dir = mkdtempSync(join(tmpdir(), "cascade-web-"));
-    writeFileSync(join(dir, ".env.local"), "NEXT_PUBLIC_CASCADE_INDEXER_URL=https://api.cascadefi.xyz\n");
+    // WalletConnect off for that build, as its line in the file says it: set, and empty
+    writeFileSync(join(dir, ".env.local"), "NEXT_PUBLIC_CASCADE_INDEXER_URL=https://api.cascadefi.xyz\nNEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=\n");
     const env = process.env as Record<string, string | undefined>;
     const had = env.NEXT_PUBLIC_CASCADE_INDEXER_URL;
     const nodeEnv = env.NODE_ENV;
@@ -229,10 +239,80 @@ describe("each page's own policy", () => {
   });
 
   it("fails the build when the exported scripts inlined another indexer URL than the policy would allow, or none", () => {
-    expect(() => build(exported("https://other.example"), { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toThrow(/inlined/);
-    expect(() => build(exported(), { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toThrow(/inlined/);
-    expect(() => build(exported("https://api.cascadefi.xyz"), {})).toThrow(/inlined/);
+    expect(() => build(exported("https://other.example"), { ...OFF, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toThrow(/inlined NEXT_PUBLIC_CASCADE_INDEXER_URL/);
+    expect(() => build(exported(), { ...OFF, NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toThrow(/inlined NEXT_PUBLIC_CASCADE_INDEXER_URL/);
+    expect(() => build(exported("https://api.cascadefi.xyz"), { ...OFF })).toThrow(/inlined NEXT_PUBLIC_CASCADE_INDEXER_URL/);
     expect(indexerOrigin("https://other.example")).toBe("https://other.example");
+  });
+
+  describe("WalletConnect's relay", () => {
+    /** An id nobody has: for the override's tests. */
+    const MADE_UP = "0123456789abcdef0123456789abcdef";
+    const committedPolicy = fallbackPolicy(HEADERS);
+    const committed = directives(committedPolicy).get("connect-src")!;
+    const policies = (out: string) => {
+      const text = readFileSync(join(out, "_headers"), "utf8");
+      return [fallbackPolicy(text), policyOf(text, "/"), policyOf(text, "/activity/")];
+    };
+    /** A policy without its script hashes: what the build adds besides them. */
+    const withoutHashes = (policy: string) => policy.replace(/script-src [^;]*;/, "script-src 'self';");
+
+    it("is the one thing added, to connect-src alone, on the fallback and every page, when the build offers WalletConnect: by default, or under another project id", () => {
+      for (const [env, inlined] of [
+        [{}, null],
+        [{ NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: MADE_UP }, MADE_UP],
+        [{ NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: WALLETCONNECT_PROJECT_ID }, WALLETCONNECT_PROJECT_ID],
+      ] as const) {
+        const out = exported(undefined, inlined);
+        expect(build(out, env).walletConnect, JSON.stringify(env)).toBe(true);
+        for (const policy of policies(out)) {
+          expect(directives(policy).get("connect-src")).toEqual([...committed, "wss://relay.walletconnect.org"]);
+          // everything else is the committed policy, word for word: no frame, no image, script, style or font source
+          expect(withoutHashes(policy).replace(" wss://relay.walletconnect.org", "")).toBe(committedPolicy);
+          expect(directives(policy).get("frame-src")).toEqual(["'none'"]);
+        }
+        const text = readFileSync(join(out, "_headers"), "utf8");
+        // the relay once in each of the three policies, and no other host of WalletConnect's or Reown's, nor a wildcard
+        const lines = text.split("\n").filter((l) => l.trim().startsWith("Content-Security-Policy:")).join("\n");
+        expect(lines.match(/walletconnect|reown|web3modal/gi)).toHaveLength(3);
+        expect(lines.match(/wss:\/\/relay\.walletconnect\.org/g)).toHaveLength(3);
+        expect(lines).not.toMatch(/\*\.walletconnect|wss:\/\/\*|wss: /);
+      }
+      expect(WALLETCONNECT_RELAY).toBe("wss://relay.walletconnect.org");
+    });
+
+    it("is added beside the indexer's origin, each once", () => {
+      const out = exported("https://api.cascadefi.xyz", null);
+      expect(build(out, { NEXT_PUBLIC_CASCADE_INDEXER_URL: "https://api.cascadefi.xyz" })).toMatchObject({ indexer: "https://api.cascadefi.xyz", walletConnect: true });
+      for (const policy of policies(out)) expect(directives(policy).get("connect-src")).toEqual([...committed, "https://api.cascadefi.xyz", "wss://relay.walletconnect.org"]);
+    });
+
+    it("is not added, and nothing else is, when the build turns WalletConnect off: the variable empty, or not an id", () => {
+      for (const value of ["", "off", MADE_UP.toUpperCase(), MADE_UP.slice(1)]) {
+        const out = exported(undefined, value);
+        expect(build(out, { NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: value }).walletConnect, JSON.stringify(value)).toBe(false);
+        for (const policy of policies(out)) {
+          expect(directives(policy).get("connect-src")).toEqual(committed);
+          expect(withoutHashes(policy)).toBe(committedPolicy);
+        }
+        const lines = readFileSync(join(out, "_headers"), "utf8").split("\n").filter((l) => l.trim().startsWith("Content-Security-Policy:")).join("\n");
+        expect(lines).not.toMatch(/walletconnect|wss:/i);
+      }
+    });
+
+    it("reads what the scripts inlined: the id, an empty value, or nothing when the variable was unset", () => {
+      expect(inlinedWalletConnectId(exported(undefined, MADE_UP))).toBe(MADE_UP);
+      expect(inlinedWalletConnectId(exported(undefined, ""))).toBe("");
+      expect(inlinedWalletConnectId(exported(undefined, null))).toBeNull();
+    });
+
+    it("fails the build when the scripts were built with another setting than the policy would be: never a relay allowed for an option that is off, nor an option the policy would block", () => {
+      // built on (the default), policy asked for off; and the reverse
+      expect(() => build(exported(undefined, null), { NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: "" })).toThrow(/inlined NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID/);
+      expect(() => build(exported(undefined, ""), {})).toThrow(/inlined NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID/);
+      // built under one id, policy asked for another
+      expect(() => build(exported(undefined, MADE_UP), { NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: WALLETCONNECT_PROJECT_ID })).toThrow(/inlined NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID/);
+    });
   });
 
   it("fails the build when the committed fallback's script-src is anything but 'self'", () => {

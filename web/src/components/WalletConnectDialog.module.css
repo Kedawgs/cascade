@@ -1,0 +1,167 @@
+/* WalletConnect's dialog: the pairing link as a QR code, over a dimmed page (the card of SentDialog). */
+
+.dialog {
+  width: min(400px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  /* the global reset zeroes margins; a modal dialog is centred by its auto margins */
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.dialog::backdrop {
+  background: rgba(16, 33, 43, 0.45);
+}
+
+.body {
+  padding: 22px 24px 24px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+}
+
+.close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-right: -8px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--mist);
+  color: var(--ink);
+}
+
+.note {
+  margin-top: 8px;
+  font-size: 14.5px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+/* which sentence is read: scanning where a mouse points, opening the wallet where a finger does */
+.byLink {
+  display: none;
+}
+
+.failed {
+  margin-top: 12px;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+
+/* the code's own square, held before the code is drawn so nothing below it moves */
+.qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, 300px);
+  aspect-ratio: 1;
+  margin: 16px auto 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-input);
+  background: #fff;
+  overflow: hidden;
+}
+
+.code {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.drawing {
+  width: 100%;
+  height: 100%;
+  background: var(--line-soft);
+}
+
+.actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/* "Open in wallet": only where a finger points (a phone or a tablet) */
+.open {
+  display: none;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .open {
+    display: flex;
+  }
+
+  .byScan {
+    display: none;
+  }
+
+  .byLink {
+    display: inline;
+  }
+}
+
+/* the line that says "Link copied": its height is kept while it is empty, so nothing moves when it speaks */
+.copied {
+  min-height: 20px;
+  margin-top: 8px;
+  font-size: 13.5px;
+  line-height: 20px;
+  text-align: center;
+  color: var(--proof-text);
+}
+
+.link {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-input);
+  background: var(--mist);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.fine {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+@media (max-width: 480px) {
+  .body {
+    padding: 18px 18px 20px;
+  }
+}

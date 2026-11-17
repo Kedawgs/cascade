@@ -104,14 +104,17 @@ describe("SecurityPage", () => {
     expect(t).not.toMatch(/largest DeFi|auditable/);
   });
 
-  it("lists the deployment's contracts on both chains, each with a copy button and its explorer", () => {
+  it("lists the deployment's contracts on both chains, each with a copy button and a link to its verified source", () => {
     const live = Object.values(deployments).find((x) => x.stage === "early")!;
     const h = renderWithCache(createElement(ContractsSection, { deployment: live as unknown as Deployment }), []);
     const t = plainText(h);
     expect(t).toContain("The contracts");
     for (const name of ["Swap contract", "Price check", "Front door", "Bridge adapter", "Vault"]) expect(t).toContain(name);
-    expect(h).toMatch(/https:\/\/basescan\.org\/address\/0x[0-9a-fA-F]{40}/);
-    expect(h).toMatch(/https:\/\/evm\.taostats\.io\/address\/0x[0-9a-fA-F]{40}/);
+    // the live (v3.2) deployment: each contract's code on Sourcify, by chain (Base 8453, Bittensor 964), and the link says so
+    expect(h.match(/https:\/\/repo\.sourcify\.dev\/8453\/0x[0-9a-fA-F]{40}/g)).toHaveLength(4);
+    expect(h.match(/https:\/\/repo\.sourcify\.dev\/964\/0x[0-9a-fA-F]{40}/g)).toHaveLength(2);
+    expect(t.match(/Read its code on Sourcify ↗/g)).toHaveLength(6);
+    expect(h).not.toMatch(/evm\.taostats\.io\/address|basescan\.org\/address/);
     expect(h).toContain("Copy the Bittensor Vault address");
   });
 

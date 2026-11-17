@@ -1,4 +1,4 @@
-import { type Deployment, explorer } from "./cascade/config";
+import { type Deployment, explorer, isV32 } from "./cascade/config";
 import type { StepId } from "./security-view";
 
 /** One contract the money passes through, as /security lists it. */
@@ -9,17 +9,24 @@ export interface ContractRow {
   does: string;
   address: string;
   href: string;
+  /** The link's words: where it leads. */
+  linkLabel: string;
 }
 
 /** The deployment's contracts, Base first (where the money starts), in the order the money meets them. The
  * staker and the oracle exist only on a v3 deployment, so a row appears only for an address the deployment has. */
 export function contractsOf(d: Deployment | null): ContractRow[] {
   if (!d) return [];
+  // v3.2's contracts are verified on Sourcify (exact matches, both chains): the link is to the code itself. Any other
+  // deployment's link stays its chain's explorer page.
+  const sourcify = isV32(d);
+  const link = (chain: ContractRow["chain"], address: string) =>
+    sourcify
+      ? { href: explorer.code(chain === "Base" ? 8453 : 964, address), linkLabel: "Read its code on Sourcify" }
+      : { href: chain === "Base" ? explorer.baseAddress(address) : explorer.bittensorAddress(address), linkLabel: "Read it on the explorer" };
   const base = (name: string, does: string, address: string | undefined): ContractRow[] =>
-    address ? [{ chain: "Base", name, does, address, href: explorer.baseAddress(address) }] : [];
-  const bit = (name: string, does: string, address: string): ContractRow[] => [
-    { chain: "Bittensor", name, does, address, href: explorer.bittensorAddress(address) },
-  ];
+    address ? [{ chain: "Base", name, does, address, ...link("Base", address) }] : [];
+  const bit = (name: string, does: string, address: string): ContractRow[] => [{ chain: "Bittensor", name, does, address, ...link("Bittensor", address) }];
   return [
     ...base("Swap contract", "Swaps your USDC for TAO, and TAO back to USDC, against the price check.", d.staker),
     ...base("Price check", "The 30-minute average price every swap is checked against.", d.oracle),

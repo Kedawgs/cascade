@@ -71,7 +71,7 @@ function ContractList({ chain, rows }: { chain: ContractRow["chain"]; rows: Cont
             <div className={styles.contractActions}>
               <CopyButton value={r.address} label={`${r.chain} ${r.name}`} />
               <a className={styles.src} href={r.href} target="_blank" rel="noopener noreferrer">
-                Read it on the explorer ↗
+                {r.linkLabel} ↗
               </a>
             </div>
           </li>

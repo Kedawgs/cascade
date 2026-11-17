@@ -24,7 +24,18 @@ describe("contractsOf", () => {
     ]);
     for (const r of rows) {
       expect(r.href).toBe(r.chain === "Base" ? `https://basescan.org/address/${r.address}` : `https://evm.taostats.io/address/${r.address}`);
+      expect(r.linkLabel).toBe("Read it on the explorer");
       expect(r.does.length).toBeGreaterThan(20);
+    }
+  });
+
+  it("a v3.2 deployment's contracts link to their verified source on Sourcify, by chain id, and say so", () => {
+    const v32 = { ...d, vaultLens: "0xc8b3b74261489ff544cF18335778498cd6f32010", doorLens: "0x9Da3e48fF7ab29AA277f37B0bC5B14c8Bbf96e7f" } as unknown as Deployment;
+    const rows = contractsOf(v32);
+    expect(rows).toHaveLength(6);
+    for (const r of rows) {
+      expect(r.href).toBe(`https://repo.sourcify.dev/${r.chain === "Base" ? 8453 : 964}/${r.address}`);
+      expect(r.linkLabel).toBe("Read its code on Sourcify");
     }
   });
 

@@ -60,7 +60,9 @@ export function heroNumbers(view: PageView): { lead: HeroStat[]; row: HeroStat[]
   };
 }
 
-const DASH = "–";
+/** What a live figure reads when there is none to show. The page puts a figure's place there (SecurityPage.tsx: the
+ * shimmer while the first reading is on its way, the dash once there is none). */
+export const DASH = "–";
 
 /** A reading older than this on the visitor's clock is stale, whatever the document said when it was built (the
  * monitor's own limit, indexer/src/flow.ts STALE_AFTER_S): a cached or long-open document never reads as live. */
@@ -98,7 +100,7 @@ export const ROUTE_POOL_FEES = (3000 + 500) / 1_000_000;
 /** What a $1,000 swap costs, as a share: the quote measured against the 30-minute average, but never below the
  * pools' own fees, plus Cascade's own fee. The measure against the average alone reads "nothing" whenever the price
  * has moved the swap's way (a buy while the price falls, a sale while it rises): the founder saw "0.0%" for a
- * deposit on 2026-11-18, with the price about 1% under its average. `cascade` is Cascade's fee on $1,000 (a deposit:
+ * deposit on 2026-11-18, with the price a little under its average. `cascade` is Cascade's fee on $1,000 (a deposit:
  * the percentage and the flat fee; a payout: the percentage). */
 export const swapCost = (vsAverage: number | null, cascade: number): number | null =>
   vsAverage === null || !Number.isFinite(vsAverage) ? null : Math.max(vsAverage, ROUTE_POOL_FEES) + cascade;

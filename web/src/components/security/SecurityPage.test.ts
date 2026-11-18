@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query";
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { cascadeKeys } from "@/lib/cascade/hooks";
@@ -52,6 +53,28 @@ describe("SecurityPage", () => {
     expect(t).not.toContain("All checks passing");
     expect(t).not.toContain("100.00%");
     expect(t).toContain("–");
+  });
+
+  it("shows a figure's place, never a number, while the first reading is on its way; a dash once there is none", () => {
+    // the first HTML and a visit before the monitor answers: nothing cached, the read running
+    const client = new QueryClient();
+    client.getQueryCache().build(client, { queryKey: cascadeKeys.flow() }).setState({ fetchStatus: "fetching" });
+    const loading = renderWithCache(createElement(SecurityPage), [], { client });
+    expect(plainText(loading)).toContain("Checking the chain…");
+    // the top's five live figures (backing, last check, pool depth, deposit cost, bridge room) and the map's: places
+    expect((loading.match(/data-figure="loading"/g) ?? []).length).toBeGreaterThanOrEqual(5);
+    expect(loading).not.toContain('data-figure="none"');
+    for (const made of ["0.0%", "$0", "0 TAO"]) expect(plainText(loading), made).not.toContain(made);
+    // what is not read from the chain is there from the start
+    expect(plainText(loading)).toContain("7 days");
+    // the read came back with nothing (the monitor unreachable): dashes, and no shimmer left running
+    const none = html(null);
+    expect(none).toContain('data-figure="none"');
+    expect(none).not.toContain('data-figure="loading"');
+    // a reading: the figures themselves
+    const live = html(healthy());
+    expect(live).not.toContain('data-figure="loading"');
+    expect(plainText(live)).toContain("100.00%");
   });
 
   it("cantCheckState", () => {

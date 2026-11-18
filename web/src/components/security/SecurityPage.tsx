@@ -6,8 +6,9 @@ import { useNow } from "@/lib/client-state";
 import { useFlow } from "@/lib/cascade/hooks";
 import { DEPLOYMENT, type Deployment, isV32, sourcePublished } from "@/lib/cascade/config";
 import { contractsLabel, contractsOf } from "@/lib/security-content";
-import { flowView, heroNumbers, type HeroStat, type PageView, type StepId, type StepView } from "@/lib/security-view";
+import { DASH, flowView, heroNumbers, type HeroStat, type PageView, type StepId, type StepView } from "@/lib/security-view";
 import { SITE_LINKS } from "@/lib/site";
+import { FigurePlace } from "../Figure";
 import landing from "../landing/Landing.module.css";
 import { SiteFooter } from "../landing/SiteFooter";
 import { SiteNav } from "../landing/SiteNav";
@@ -34,8 +35,15 @@ export function tabAfterKey(from: Dir, key: string): Dir | null {
 const TONE_CLASS = { ok: styles.toneOk, amber: styles.toneAmber, stale: styles.toneStale } as const;
 const FIGURE_TONE = { ok: styles.figOk, amber: styles.figAmber, stale: styles.figStale } as const;
 
+/** A live figure's words, or its place when it has none (security-view's dash): the shimmer the rest of the site
+ * shows while the first reading is on its way (`loading`), the dash once a reading came and has no figure. Never a
+ * number that was not read. */
+function Live({ value, loading }: { value: string; loading: boolean }) {
+  return value === DASH ? <FigurePlace loading={loading} /> : <>{value}</>;
+}
+
 /** The top of /security: what the page is, the two figures it leads with, and a row of the live ones. */
-function Hero({ view }: { view: PageView }) {
+function Hero({ view, loading }: { view: PageView; loading: boolean }) {
   const { lead, row } = heroNumbers(view);
   const contracts = contractsOf(DEPLOYMENT).length;
   const facts: HeroStat[] = [
@@ -56,7 +64,9 @@ function Hero({ view }: { view: PageView }) {
             {lead.map((s) => (
               <div key={s.label} className={styles.leadStat}>
                 <dt className={styles.leadK}>{s.label}</dt>
-                <dd className={`${styles.leadV} ${s.tone ? FIGURE_TONE[s.tone] : ""}`}>{s.value}</dd>
+                <dd className={`${styles.leadV} ${s.tone ? FIGURE_TONE[s.tone] : ""}`}>
+                  <Live value={s.value} loading={loading} />
+                </dd>
               </div>
             ))}
           </dl>
@@ -73,7 +83,9 @@ function Hero({ view }: { view: PageView }) {
           {facts.map((s) => (
             <div key={s.label} className={styles.rowStat}>
               <dt className={styles.rowK}>{s.label}</dt>
-              <dd className={styles.rowV}>{s.value}</dd>
+              <dd className={styles.rowV}>
+                <Live value={s.value} loading={loading} />
+              </dd>
             </div>
           ))}
         </dl>
@@ -83,7 +95,7 @@ function Hero({ view }: { view: PageView }) {
 }
 const STATUS_CLASS = { passing: styles.passing, notOptimal: styles.notOptimal, cantCheck: styles.quiet, waiting: styles.quiet } as const;
 
-function Details({ step, className }: { step: StepView; className: string }) {
+function Details({ step, className, loading }: { step: StepView; className: string; loading: boolean }) {
   return (
     <div className={className} aria-live="polite">
       <div className={styles.detailTop}>
@@ -102,7 +114,9 @@ function Details({ step, className }: { step: StepView; className: string }) {
           {step.figures.map((f) => (
             <div key={f.label}>
               <dt className={styles.k}>{f.label}</dt>
-              <dd className={styles.v}>{f.value}</dd>
+              <dd className={styles.v}>
+                <Live value={f.value} loading={loading} />
+              </dd>
             </div>
           ))}
         </dl>
@@ -160,7 +174,7 @@ export function SecurityPage() {
   return (
     <div className={landing.page}>
       <SiteNav />
-      <Hero view={view} />
+      <Hero view={view} loading={checking} />
       <main className={`wrap ${styles.pageEnd}`}>
         <header id="flow" className={styles.flowHead}>
           <h2 className={styles.h2}>Where your money goes</h2>
@@ -244,16 +258,18 @@ export function SecurityPage() {
                       <span className={`${styles.dot} ${TONE_CLASS[s.tone]}`} aria-hidden="true" />
                       {s.name}
                     </span>
-                    <span className={styles.headline}>{s.headline}</span>
+                    <span className={styles.headline}>
+                      <Live value={s.headline} loading={checking} />
+                    </span>
                   </button>
-                  {open && <Details step={s} className={styles.inline} />}
+                  {open && <Details step={s} className={styles.inline} loading={checking} />}
                 </div>
               </li>
             );
           })}
         </ol>
 
-        <Details step={selected} className={styles.detail} />
+        <Details step={selected} className={styles.detail} loading={checking} />
         {dir === "out" && <DirectExit />}
 
         <ProtectedSection />

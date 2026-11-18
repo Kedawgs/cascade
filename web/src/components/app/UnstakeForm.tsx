@@ -45,11 +45,12 @@ import {
   unstakeNote,
   unstakeReceiveText,
   UNSTAKE_FORM_CLEARED,
+  UNSTAKE_MORE_LABEL,
   UNSTAKE_WINDOW_NOTE,
   type UnstakeUnit,
   RECEIVE_ENDS_DELIVERY,
   RECEIVE_TAO_LABEL,
-  RECEIVE_TAO_NOTE,
+  RECEIVE_TAO_LATER,
   RECEIVE_TAO_NOTE_OFF,
   shownUnstakeUnit,
   unstakeActions,
@@ -384,7 +385,6 @@ function UnstakeFormBody({
         </p>
       ))}
       {v32 && !taoOnly && <p className={styles.under}>{deliveryNote(quote ? deliveryFloorUsd(quote) : null)}</p>}
-      {v32 && !taoOnly && <p className={styles.under}>{deliveryLaterText(quote?.etaMinutes)}</p>}
       {v32 && alert}
       {actions.tao.offered && !taoOnly && (
         <>
@@ -392,13 +392,24 @@ function UnstakeFormBody({
             {pending && receiving ? "Confirm in your wallet…" : RECEIVE_TAO_LABEL}
           </button>
           <p className={styles.under}>
-            {RECEIVE_TAO_NOTE}
+            {RECEIVE_TAO_NOTE_OFF}
             {actions.tao.endsDelivery ? ` ${RECEIVE_ENDS_DELIVERY}` : ""}
           </p>
         </>
       )}
       {v3 && !v32 && <p className={styles.under}>{deliveryNote(quote ? deliveryFloorUsd(quote) : null)}</p>}
-      {v32 && <p className={styles.under}>{UNSTAKE_WINDOW_NOTE}</p>}
+      {/* v3.2: the explanations nobody needs to press a button, folded away (closed until asked for): how the USDC
+          sale goes, what a later USDC unstake does to TAO received now, the daily limit */}
+      {v32 && (
+        <details className={styles.more}>
+          <summary>{UNSTAKE_MORE_LABEL}</summary>
+          <ul>
+            {!taoOnly && <li>{deliveryLaterText(quote?.etaMinutes)}</li>}
+            {!taoOnly && <li>{RECEIVE_TAO_LATER}</li>}
+            <li>{UNSTAKE_WINDOW_NOTE}</li>
+          </ul>
+        </details>
+      )}
       {lowEth && quote && (
         <p className={styles.error}>
           This unstake needs about {formatEther(quote.fee + GAS_WEI)} ETH on Base for the request fee and network fees, and this

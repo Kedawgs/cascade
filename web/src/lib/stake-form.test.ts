@@ -952,6 +952,20 @@ describe("v3.2's unstake form: what each way out offers right now", () => {
     expect(unstakeActions({ ...ready, account: null }).tao).toEqual({ offered: false, enabled: false, endsDelivery: false });
   });
 
+  it("says what else a USDC unstake sells only when that changes something: not when the earlier unstakes were USDC ones already", () => {
+    const waiting = { ...LIMIT, waitingTaoWei: 399n * 10n ** 14n };
+    // earlier TAO waits and the account's USDC delivery is known to be on: it is sold anyway, the line says nothing new
+    expect(unstakeActions({ ...ready, limit: { data: { ...waiting, preferenceSet: true }, isError: false } }).warning).toBeNull();
+    // the same TAO, asked as TAO (the preference off): this request would sell it, and the line says so
+    expect(unstakeActions({ ...ready, limit: { data: { ...waiting, preferenceSet: false }, isError: false } }).warning).toBe("Your 0.0399 TAO from earlier unstakes will be sold for USDC too.");
+    // not everything read, the preference off or unread: the standing line stays (it fails towards saying it)
+    expect(unstakeActions({ ...ready, limit: { data: { ...waiting, waitingComplete: false, preferenceSet: false }, isError: false } }).warning).toBe(WAITING_UNKNOWN);
+    expect(unstakeActions({ ...ready, limit: { data: undefined, isError: false } }).warning).toBe(WAITING_UNKNOWN);
+    expect(unstakeActions({ ...ready, limit: { data: { ...waiting, preferenceSet: true }, isError: true } }).warning).toBe(WAITING_UNKNOWN);
+    // the preference on and the figure not complete yet: still nothing new to say
+    expect(unstakeActions({ ...ready, limit: { data: { ...waiting, waitingComplete: false, preferenceSet: true }, isError: false } }).warning).toBeNull();
+  });
+
   it("says Receive TAO also ends USDC delivery whenever the chain says a preference is set, or that can't be read (I1)", () => {
     expect(unstakeActions({ ...ready, limit: { data: { ...LIMIT, preferenceSet: true }, isError: false } }).tao.endsDelivery).toBe(true);
     expect(unstakeActions({ ...ready, limit: { data: { ...LIMIT, preferenceSet: true, clearsAll: true }, isError: false } }).tao.endsDelivery).toBe(true);

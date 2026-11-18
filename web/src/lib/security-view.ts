@@ -1,6 +1,7 @@
 import { explorer } from "./cascade/config";
 import type { Amount, Bucket, FlowChain, FlowV1, Notice, Scheduled } from "./cascade/flow";
 import { validatorName, validatorSs58 } from "./cascade/validators";
+import { FAQ_FACTS } from "./faq";
 import { formatDateTime, formatDuration, formatPercent, formatRelative, formatTao, formatUsdCompact, shortAddress } from "./format";
 
 // The security page's view models: a pure function from the monitor's flow document (and the visitor's clock)
@@ -89,6 +90,18 @@ const taoText = (n: number | null) => (n === null ? DASH : `${tao2(n)} TAO`);
 function costText(shortfall: number | null): string {
   return shortfall === null || !Number.isFinite(shortfall) ? DASH : `about ${formatPercent(Math.max(0, shortfall))}`;
 }
+
+/** The pools' own fees along Cascade's route (TAO / WETH at 0.3%, WETH / USDC at 0.05%: config.ts's paths). A swap
+ * never costs less than this, whatever the price is doing. */
+export const ROUTE_POOL_FEES = (3000 + 500) / 1_000_000;
+
+/** What a $1,000 swap costs, as a share: the quote measured against the 30-minute average, but never below the
+ * pools' own fees, plus Cascade's own fee. The measure against the average alone reads "nothing" whenever the price
+ * has moved the swap's way (a buy while the price falls, a sale while it rises): the founder saw "0.0%" for a
+ * deposit on 2026-11-18, with the price about 1% under its average. `cascade` is Cascade's fee on $1,000 (a deposit:
+ * the percentage and the flat fee; a payout: the percentage). */
+export const swapCost = (vsAverage: number | null, cascade: number): number | null =>
+  vsAverage === null || !Number.isFinite(vsAverage) ? null : Math.max(vsAverage, ROUTE_POOL_FEES) + cascade;
 
 const SAY = {
   wallet: "You start with USDC in your own wallet. Cascade never holds your keys.",
@@ -196,13 +209,13 @@ export function flowView(data: { flow: FlowV1; receivedAt: number } | null, nowM
   // the thinner pool sets the headline: never a better number than the weaker one
   const depthHeadline = depths.length === 2 ? usd(Math.min(...depths)) : DASH;
   const buyTao = baseOk ? units(sw!.buyQuote1000Tao, 18) : null;
-  const depositCost = priced && buyTao !== null ? 1 - (buyTao * twap!) / 1000 : null;
+  const depositCost = swapCost(priced && buyTao !== null ? 1 - (buyTao * twap!) / 1000 : null, FAQ_FACTS.swapFeePct / 100 + FAQ_FACTS.depositFeeUsd / 1000);
   const sellQ = baseOk ? sw?.sellQuote : null;
   const sellCost = (() => {
     if (!priced || !sellQ) return null;
     const tIn = units(sellQ.taoIn, 18);
     const out = units(sellQ.usdcOut, 6);
-    return tIn === null || out === null || tIn <= 0 ? null : 1 - out / (tIn * twap!);
+    return tIn === null || out === null || tIn <= 0 ? null : swapCost(1 - out / (tIn * twap!), FAQ_FACTS.swapFeePct / 100);
   })();
   const spot = baseOk ? units(sw!.spotUsdcPerTao, 6) : null;
   const apart = priced && spot !== null ? `${formatPercent(Math.abs(spot - twap!) / twap!)} apart` : DASH;

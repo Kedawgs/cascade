@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { FlowV1, Notice } from "./cascade/flow";
 import { GENERATED_AT, goodFlow, goodFlowV32 } from "./cascade/__fixtures__/flow-v1";
 import { formatDateTime } from "./format";
-import { AMBER, flowView, heroNumbers, type PageView, type StepView } from "./security-view";
+import { AMBER, flowView, heroNumbers, type PageView, type StepView, ROUTE_POOL_FEES, swapCost } from "./security-view";
 
 // the visitor's clock at the moment the document arrived
 const RECEIVED = 1_800_000_001_000;
@@ -178,7 +178,7 @@ describe("flowView", () => {
     const v = view(f);
     expect(figure(step(v, "swapOut"), "A $1,000 payout costs")).toBe("–");
     expect(step(v, "swapOut").tone).toBe("stale");
-    expect(figure(step(v, "swap"), "A $1,000 deposit costs")).toBe("about 0.7%");
+    expect(figure(step(v, "swap"), "A $1,000 deposit costs")).toBe("about 0.9%");
     expect(step(v, "swap").tone).toBe("ok");
     expect(v.status.kind).toBe("waiting");
   });
@@ -524,8 +524,8 @@ describe("flowView", () => {
 
   it("costFigureFromTheQuote", () => {
     const v = view(goodFlow());
-    expect(figure(step(v, "swap"), "A $1,000 deposit costs")).toBe("about 0.7%");
-    expect(figure(step(v, "swapOut"), "A $1,000 payout costs")).toBe("about 0.7%");
+    expect(figure(step(v, "swap"), "A $1,000 deposit costs")).toBe("about 0.9%");
+    expect(figure(step(v, "swapOut"), "A $1,000 payout costs")).toBe("about 0.9%");
     expect(figure(step(v, "swap"), "Price vs 30-minute average")).toBe("0.3% apart");
     expect(figure(step(v, "swap"), "TAO / WETH pool depth")).toBe("$800K");
     expect(figure(step(v, "swap"), "WETH / USDC pool depth")).toBe("$6M");
@@ -701,5 +701,21 @@ describe("heroNumbers", () => {
     const v = view(f);
     expect(heroNumbers(v).lead[0]!.value).toBe("–");
     expect(heroNumbers(v).lead[1]!.value).toMatch(/hour/);
+  });
+});
+
+describe("what a $1,000 swap costs", () => {
+  const DEPOSIT_FEE = 0.0015 + 0.05 / 1000; // Cascade's 0.15% and $0.05, on $1,000
+  it("is the quote against the 30-minute average plus Cascade's fee, and never under the pools' own fees", () => {
+    expect(ROUTE_POOL_FEES).toBe(0.0035); // TAO / WETH at 0.3%, WETH / USDC at 0.05%
+    // an ordinary reading: 0.7% against the average, 0.855% with Cascade's fee
+    expect(swapCost(0.007, DEPOSIT_FEE)).toBeCloseTo(0.00855, 10);
+    // the price has moved the swap's way (the buy is "cheaper than the average"): the old figure read 0.0%; now the
+    // pools' fees and Cascade's, about 0.5%
+    for (const vsAverage of [0, -0.0001, -0.01, -0.2]) expect(swapCost(vsAverage, DEPOSIT_FEE)).toBeCloseTo(0.00505, 10);
+    // a payout pays Cascade's percentage only
+    expect(swapCost(-0.01, 0.0015)).toBeCloseTo(0.005, 10);
+    // nothing to measure: nothing said (a dash on the page), never a number
+    for (const none of [null, Number.NaN, Number.POSITIVE_INFINITY]) expect(swapCost(none, DEPOSIT_FEE)).toBeNull();
   });
 });

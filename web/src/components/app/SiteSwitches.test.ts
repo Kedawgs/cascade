@@ -373,3 +373,18 @@ describe("usdcDeliveryOffHidesTheOptionAndPromptsAClaim (Task 60)", () => {
     expect(buttons(render(createElement(UnstakeForm, { account: ME }), unstakeForm, launch))).toEqual(["Unstake"]);
   });
 });
+
+describe("the unstake form keeps what decides a click in the open and folds the explanations away", () => {
+  it("v3.2 with USDC delivery: one short line under each button, and 'How unstaking works' closed, holding the rest", () => {
+    const h = render(createElement(UnstakeForm, { account: ME }), unstakeForm, site({ stage: "early", usdcDelivery: true }, true));
+    const [open, folded] = [h.slice(0, h.indexOf("<details")), /<details[^>]*>([\s\S]*?)<\/details>/.exec(h)?.[1] ?? ""];
+    // closed until asked for (no `open` attribute), under its heading
+    expect(h).toMatch(/<details class="[^"]*_more_[^"]*"><summary>How unstaking works<\/summary>/);
+    // folded: how the sale goes, what a later USDC unstake does to TAO received now, the daily limit
+    for (const part of ["one sale at a time", "If you receive TAO, a later USDC unstake would sell that TAO too.", "Unstakes share a daily limit"]) expect(plainText(folded), part).toContain(part);
+    // in the open: the two buttons, and under Receive TAO only what it does
+    expect(buttons(h)).toEqual(expect.arrayContaining(["Receive TAO instead"]));
+    expect(plainText(open)).toContain(RECEIVE_TAO_NOTE_OFF);
+    for (const moved of ["one sale at a time", "A later USDC unstake would sell it too", "Unstakes share a daily limit"]) expect(plainText(open), moved).not.toContain(moved);
+  });
+});

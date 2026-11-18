@@ -223,6 +223,33 @@
   text-align: center;
 }
 
+/* The form's folded explanations: a quiet line to open, a short list inside (left-aligned: it is read, not glanced at) */
+.more {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.more summary {
+  width: fit-content;
+  margin: 0 auto;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--water-deep);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.more ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.more li + li {
+  margin-top: 6px;
+}
+
 .foot {
   margin: 12px 0 0;
   font-size: 13px;

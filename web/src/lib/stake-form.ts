@@ -573,6 +573,11 @@ export const RECEIVE_TAO_NOTE = "Nothing is sold: your TAO comes back to Base fo
 export const RECEIVE_TAO_NOTE_OFF = "Nothing is sold: your TAO comes back to Base for you to claim.";
 /** Receiving TAO clears the account's USDC delivery preference (flows.ts receiveTaoCall), as a claim does. */
 export const RECEIVE_ENDS_DELIVERY = "This also turns off automatic USDC delivery for your other unstakes: you'll claim those by hand.";
+/** The folded part of the form (the founder, 2026-11-18: "this unstake page text is really too much going on"): how a
+ * USDC unstake's sale goes, what a later USDC unstake does to TAO received now, and the daily limit sit under one
+ * heading, closed until asked for. What decides or refuses a click stays in the open. */
+export const UNSTAKE_MORE_LABEL = "How unstaking works";
+export const RECEIVE_TAO_LATER = "If you receive TAO, a later USDC unstake would sell that TAO too.";
 
 /** The Unstake page's heading. v3-launch's says USDC, its one way out; v3.2's fits both, USDC and Receive TAO (Task 59a
  * review, M9), and with USDC delivery off (Task 60) only TAO. */
@@ -671,9 +676,14 @@ export function unstakeActions(x: {
   // what else a USDC unstake sells: the figure once every payout of the account's on its way is read, else no figure
   const known = !x.limit.isError && x.limit.data?.waitingComplete === true;
   const waiting = x.limit.data?.waitingTaoWei ?? 0n;
+  // ...but not when the account's waiting TAO is already set to be sold: its USDC delivery preference is known to be
+  // on (its earlier unstakes were USDC ones), so this one changes nothing for them and the line only puzzled (the
+  // founder, 2026-11-18, twice). Unknown or off, the line stays: it is what tells someone who asked for TAO that this
+  // request would sell it.
+  const alreadyUsdc = !x.limit.isError && x.limit.data?.preferenceSet === true;
   return {
     usdc: usdcBase && !impact?.refused && !limitRefused,
-    warning: x.account === null ? null : !known ? WAITING_UNKNOWN : waiting > 0n ? waitingText(waiting) : null,
+    warning: x.account === null || alreadyUsdc ? null : !known ? WAITING_UNKNOWN : waiting > 0n ? waitingText(waiting) : null,
     notes,
     tao: {
       offered: x.account !== null,

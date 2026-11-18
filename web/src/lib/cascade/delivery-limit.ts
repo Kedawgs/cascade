@@ -202,8 +202,13 @@ export const RECEIVE_TAO_POINTER = "You can receive TAO instead.";
 
 /** A USDC unstake's refusal (a FlowError: the veto's, the impact cap's, the limit's) with RECEIVE_TAO_POINTER, its
  * state kept; anything else as it is (userMessage words a wallet's or a network's error). */
+/** Whether a refusal's words already point to receiving TAO: RECEIVE_TAO_POINTER's, or a limit refusal's own
+ * (LIMIT_UNREAD, NO_DELIVERY, "Right now up to ..."). pointToTao adds the pointer only where this is false, and the
+ * form offers its switch to TAO where it is true: one test for both, so they can't disagree. */
+export const saysReceiveTao = (message: string | null | undefined): boolean => message != null && /receive TAO/i.test(message);
+
 export function pointToTao(e: unknown): unknown {
-  if (!(e instanceof FlowError) || /receive TAO/i.test(e.message)) return e;
+  if (!(e instanceof FlowError) || saysReceiveTao(e.message)) return e;
   return new FlowError(`${e.message} ${RECEIVE_TAO_POINTER}`, e.state);
 }
 

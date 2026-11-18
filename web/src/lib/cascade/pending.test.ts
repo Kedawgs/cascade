@@ -1,7 +1,7 @@
 import type { Address, Hex } from "viem";
 import { describe, expect, it } from "vitest";
 import type { ClaimOp, DepositOp, Operation, WithdrawalOp } from "./oplog";
-import { PENDING_SHOWN_MS, pendingEntries, pendingEntry, receiptShows } from "./pending";
+import { CONFIRMING, PENDING_SHOWN_MS, pendingEntries, pendingEntry, pendingRows, pendingTrail, receiptShows } from "./pending";
 
 const ME: Address = "0x1234567890abcdef1234567890abcdef12345678";
 const NOW = Date.UTC(2026, 9, 30, 12);
@@ -122,5 +122,47 @@ describe("receiptShows", () => {
     expect(receiptShows({ ...q, isError: true, record: undefined, entry: null })).toBe("error");
     expect(receiptShows({ ...q, isError: true, record: { id: "d1" }, entry: null })).toBe("error");
     expect(receiptShows({ ...q, isError: true, record: undefined, entry })).toBe("pending-error");
+  });
+});
+
+describe("pendingTrail: a receipt's own steps before anything is read from the chain", () => {
+  const steps = (op: Operation, x?: { payoutDelayS?: number }) => {
+    const entry = pendingEntry(op);
+    if (!entry) throw new Error("no entry");
+    return pendingTrail(entry, x);
+  };
+
+  it("an unstake: its request confirming, then what is ahead, the safety wait named", () => {
+    const s = steps(unstake(), { payoutDelayS: 86_400 });
+    expect(s.map((x) => [x.key, x.status])).toEqual([["request", "active"], ["unstake", "pending"], ["return", "pending"], ["claim", "pending"]]);
+    expect(s[0]).toMatchObject({ title: "Request your unstake", detail: CONFIRMING, txUrl: `https://basescan.org/tx/${H(2)}` });
+    expect(s[1].detail).toBe("Leaves Base with the next batch, then the bridge (usually 20–30 minutes)");
+    expect(s[2].detail).toBe("Starts after a 24-hour safety wait on Bittensor");
+    expect(s[3]).toMatchObject({ title: "USDC to your wallet", detail: "Sold for USDC on Base and sent to your wallet automatically" });
+    // the wait's length not known to the site: still said to be there; a deployment without one: nothing promised
+    expect(steps(unstake())[2].detail).toBe("Starts after a safety wait on Bittensor");
+    expect(steps(unstake(), { payoutDelayS: 0 })[2].detail).toBeUndefined();
+    // nothing but the step it sent claims anything: no step is done, none has a time
+    expect(s.some((x) => x.status === "done" || x.at !== undefined)).toBe(false);
+  });
+
+  it("an unstake asked as TAO ends in a claim of TAO, not a sale", () => {
+    const s = steps(unstake({ keepTao: true } as Partial<WithdrawalOp>), { payoutDelayS: 86_400 });
+    expect(s[3]).toMatchObject({ title: "Claim your TAO", detail: "Arrives on Base as TAO, for you to claim" });
+    expect(pendingRows(pendingEntry(unstake({ keepTao: true } as Partial<WithdrawalOp>))!.notice)).toEqual([["You will receive", "TAO on Base, to claim"]]);
+  });
+
+  it("a deposit: the transaction it sent confirming (the swap; for TAO already in the wallet, the deposit)", () => {
+    const usdc = steps(deposit());
+    expect(usdc.map((x) => [x.key, x.status])).toEqual([["swap", "active"], ["deposit", "pending"], ["bridge", "pending"], ["stake", "pending"]]);
+    expect(usdc[0].detail).toBe(CONFIRMING);
+    expect(usdc[2].detail).toBe("Leaves Base with the next batch, then the bridge (usually 20–30 minutes)");
+    const tao = steps(deposit({ usdcIn: 0n }));
+    expect(tao.map((x) => [x.key, x.status])).toEqual([["swap", "done"], ["deposit", "active"], ["bridge", "pending"], ["stake", "pending"]]);
+    expect(tao[1].detail).toBe(CONFIRMING);
+    // the rows are the confirmed receipt's, an estimate said to be one and wallet TAO's exact
+    expect(pendingRows(pendingEntry(deposit())!.notice)[0][0]).toBe("TAO in this deposit");
+    expect(pendingRows(pendingEntry(deposit())!.notice)[0][1]).toMatch(/^about [0-9.]+ TAO$/);
+    expect(pendingRows(pendingEntry(deposit({ usdcIn: 0n }))!.notice)[0][1]).toMatch(/^[0-9.]+ TAO$/);
   });
 });

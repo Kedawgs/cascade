@@ -1,12 +1,14 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { useCascadeAccount } from "@/lib/account";
-import { OTHER_WAYS_OUT } from "@/lib/cascade/direct-exit";
+import { OTHER_WAYS_OUT, OTHER_WAYS_STEPS } from "@/lib/cascade/direct-exit";
 import { useAvailable, useIsV32, usePosition, useUnstakeReads, useUsdcDelivery } from "@/lib/cascade/hooks";
+import { appGuard, useFlows } from "@/lib/cascade/use-flows";
 import { toDisplay } from "@/lib/cascade/units";
 import { formatTao, formatUsd } from "@/lib/format";
-import { unstakeHeading } from "@/lib/stake-form";
+import { AS_TAO_LINK, AS_TAO_NOTE, AS_USDC_LINK, AS_USDC_NOTE, taoChoice, unstakeHeading } from "@/lib/stake-form";
 import { Dash } from "../Dash";
 import { Loading } from "../Loading";
 import app from "./App.module.css";
@@ -67,22 +69,37 @@ export function UnstakeSummary({ account }: { account: string }) {
   );
 }
 
-/** v3.2: the way out that needs neither Base nor ForeverMoney, the emergency page on Bittensor (Task 59b). Nothing on
- * any other deployment. */
-export function OtherWaysOut() {
+/** v3.2's other ways out. First, where there is the choice (`onAsTao`: USDC delivery on), the unstake as TAO with
+ * nothing sold: a switch of the form above, and the way back once switched (`asTao`). Then the way out that needs
+ * neither Base nor ForeverMoney, the emergency page on Bittensor (Task 59b). Nothing on any other deployment. */
+export function OtherWaysOut({ asTao = false, onAsTao, busy = false }: { asTao?: boolean; onAsTao?: (asTao: boolean) => void; busy?: boolean }) {
   const v32 = useIsV32();
   if (!v32) return null;
   return (
-    <section aria-labelledby="other-ways-heading" className={app.section}>
+    <section aria-labelledby="other-ways-heading" className={`${app.section} ${app.ways}`}>
       <div className={app.secHead}>
         <h2 id="other-ways-heading">Other ways out</h2>
       </div>
+      {onAsTao && (
+        <p className="small">
+          {/* held while any request runs (`busy`): no switch under a wallet's prompt */}
+          <button type="button" className="link" disabled={busy} onClick={() => onAsTao(!asTao)}>
+            {asTao ? AS_USDC_LINK : AS_TAO_LINK}
+          </button>
+          : {asTao ? AS_USDC_NOTE : AS_TAO_NOTE}
+        </p>
+      )}
       <p className="small">
         <Link href="/unstake/bittensor/" className="link">
           Withdraw on Bittensor
         </Link>
         : {OTHER_WAYS_OUT}
       </p>
+      <ol className={app.steps}>
+        {OTHER_WAYS_STEPS.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -95,7 +112,19 @@ export function UnstakeScreen() {
   const account = state.status === "wallet" ? state.account : null;
   const v32 = useIsV32();
   const usdcDelivery = useUsdcDelivery();
-  const heading = unstakeHeading({ v32, usdcDelivery });
+  // the person's own choice of TAO, made under "Other ways out" or where a USDC unstake is refused: the form then
+  // asks for TAO and sells nothing. Only where there is a choice (v3.2 with USDC delivery on)
+  const [chosenTao, setChosenTao] = useState(false);
+  const { offered, asTao } = taoChoice({ v32, usdcDelivery, asTao: chosenTao });
+  // never while a request runs (one is waiting on the wallet, say): the form under the wallet's prompt must stay the
+  // one that asked for it (review of f9c59861, finding 1). Asked of the shared guard at the click, not of a render
+  const flows = useFlows(account);
+  const choose = offered
+    ? (tao: boolean) => {
+        if (appGuard.active === null) setChosenTao(tao);
+      }
+    : undefined;
+  const heading = unstakeHeading({ v32, usdcDelivery: usdcDelivery && !asTao });
   // the form's own reads start now, beside the balance, not once the balance has loaded and the form mounts
   useUnstakeReads(account);
 
@@ -130,10 +159,11 @@ export function UnstakeScreen() {
               )}
             </div>
             <div className={card.form}>
-              <UnstakeForm account={account} />
+              {/* each choice its own form: an amount typed in dollars is never read as TAO */}
+              <UnstakeForm account={account} asTao={asTao} onAsTao={choose} />
             </div>
           </div>
-          <OtherWaysOut />
+          <OtherWaysOut asTao={asTao} onAsTao={choose} busy={flows.busy !== null} />
           <StatsCardForAccount />
           <Faq />
         </>

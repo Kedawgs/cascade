@@ -139,6 +139,21 @@ ul {
   text-decoration: underline;
 }
 
+/* a link that switches something on the page rather than going somewhere: a button, looking the same */
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button.link:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
 .section-title {
   font-size: 15px;
   font-weight: 600;

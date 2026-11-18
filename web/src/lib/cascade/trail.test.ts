@@ -97,11 +97,11 @@ const statuses = (r: { steps: { status: string }[] }) => r.steps.map((s) => s.st
 describe("deposit trail with a max wait", () => {
   it("words the close time as an upper bound, with the day when it is not today", () => {
     const same = depositRecord(op, { ...base, closesBy: true });
-    expect(same.steps[2].detail).toMatch(/^Waits for the batch to close, by about 10:10 AM, then the bridge/);
+    expect(same.steps[2].detail).toMatch(/^On Base, waiting for the next batch\. Leaves by about 10:10 AM, then the bridge/);
     expect(same.steps[2].detail).not.toMatch(/tomorrow/);
     const next = depositRecord(op, { ...base, closesBy: true, now: new Date(2026, 9, 25, 10, 5), closesAt: new Date(2026, 9, 26, 14, 5) });
-    expect(next.steps[2].detail).toMatch(/close, by about 2:05 PM tomorrow, then/);
-    expect(depositRecord(op, base).steps[2].detail).toMatch(/^Waits for the batch to close at /);
+    expect(next.steps[2].detail).toMatch(/Leaves by about 2:05 PM tomorrow, then/);
+    expect(depositRecord(op, base).steps[2].detail).toMatch(/^On Base, waiting for the next batch\. Leaves at /);
   });
 });
 
@@ -181,7 +181,7 @@ describe("deposit trail", () => {
 
   it("says the batch can close now once its time has passed", () => {
     const r = depositRecord(op, { ...base, now: new Date("2026-10-25T10:20:00Z") });
-    expect(r.steps[2].detail).toMatch(/can close now/i);
+    expect(r.steps[2].detail).toMatch(/^On Base, waiting for its batch to be sent\. It can leave now, then the bridge/);
     expect(r.steps[2].detail).not.toMatch(/10:10/);
   });
 
@@ -493,23 +493,45 @@ const wbase: WithdrawalFacts = {
 describe("withdrawal trail with a max wait", () => {
   it("words the close time as an upper bound, with the day when it is not today", () => {
     const same = withdrawalRecord(wop, { ...wbase, closesBy: true });
-    expect(same.steps[1].detail).toBe("Waits for the batch to close, by about 10:10 AM, then the bridge");
+    expect(same.steps[1].detail).toBe("On Base, waiting for the next batch. Leaves by about 10:10 AM, then the bridge (usually 20–30 minutes).");
     const next = withdrawalRecord(wop, { ...wbase, closesBy: true, now: new Date(2026, 9, 25, 10, 5), closesAt: new Date(2026, 9, 26, 14, 5) });
-    expect(next.steps[1].detail).toBe("Waits for the batch to close, by about 2:05 PM tomorrow, then the bridge");
+    expect(next.steps[1].detail).toBe("On Base, waiting for the next batch. Leaves by about 2:05 PM tomorrow, then the bridge (usually 20–30 minutes).");
     // without a max wait: the close time itself, as before
-    expect(withdrawalRecord(wop, wbase).steps[1].detail).toBe("Waits for the batch to close at 10:10 AM, then the bridge");
+    expect(withdrawalRecord(wop, wbase).steps[1].detail).toBe("On Base, waiting for the next batch. Leaves at 10:10 AM, then the bridge (usually 20–30 minutes).");
     // past the time: it can close now, either way
-    expect(withdrawalRecord(wop, { ...wbase, closesBy: true, now: new Date("2026-10-25T10:20:00Z") }).steps[1].detail).toMatch(/^The batch can close now/);
+    expect(withdrawalRecord(wop, { ...wbase, closesBy: true, now: new Date("2026-10-25T10:20:00Z") }).steps[1].detail).toMatch(/^On Base, waiting for its batch to be sent\. It can leave now/);
   });
 
   it("gives the day the launch's 24-hour safety wait ends on when it is not today", () => {
     const redeemed = { at: new Date(2026, 9, 25, 10, 35), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const facts = { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payoutDelay: 86_400, now: new Date(2026, 9, 25, 10, 40) };
-    expect(withdrawalRecord(wop, facts).steps[2].detail).toBe("The 24-hour safety wait ends around 10:35 AM tomorrow, then it crosses back to Base (usually 20–30 minutes)");
+    expect(withdrawalRecord(wop, facts).steps[2].detail).toBe("On Bittensor, in the 24-hour safety wait. Leaves for Base around 10:35 AM tomorrow, then the bridge (usually 20–30 minutes).");
     // the next morning it ends today: no day
     expect(withdrawalRecord(wop, { ...facts, now: new Date(2026, 9, 26, 8, 0) }).steps[2].detail).toBe(
-      "The 24-hour safety wait ends around 10:35 AM, then it crosses back to Base (usually 20–30 minutes)",
+      "On Bittensor, in the 24-hour safety wait. Leaves for Base around 10:35 AM, then the bridge (usually 20–30 minutes).",
     );
+    // the wait over and the payout not sent yet: no time already past is given as when it leaves
+    expect(withdrawalRecord(wop, { ...facts, now: new Date(2026, 9, 26, 10, 50) }).steps[2].detail).toBe(
+      "On Bittensor. The 24-hour safety wait is over: it leaves for Base shortly, then the bridge (usually 20–30 minutes).",
+    );
+  });
+});
+
+describe("an unstake's steps still ahead say what to expect", () => {
+  it("the safety wait and how it ends, while the unstake is simply on its way; nothing once it isn't", () => {
+    // sent early or not, waiting in its batch: the 24-hour wait is on the receipt from the start
+    const waiting = withdrawalRecord(wop, { ...wbase, payoutDelay: 86_400 });
+    expect(waiting.status).toBe("in_progress");
+    expect(waiting.steps.map((s) => s.status)).toEqual(["done", "active", "pending", "pending"]);
+    expect(waiting.steps[2].detail).toBe("Starts after a 24-hour safety wait on Bittensor");
+    // a deployment with no safety wait promises none
+    expect(withdrawalRecord(wop, { ...wbase, payoutDelay: 0 }).steps[2].detail).toBeUndefined();
+    // a cancel sent from this browser, laid over the record: nothing is expected of the steps after it any more
+    for (const state of ["sending", "done"] as const) {
+      const c = withdrawalCancelSent(waiting, { state, hash: H(7), at: Date.UTC(2026, 9, 25, 10, 6) });
+      expect(c.steps[2].detail, state).toBeUndefined();
+      expect(c.steps[3].detail, state).toBeUndefined();
+    }
   });
 });
 
@@ -519,7 +541,7 @@ describe("withdrawal trail", () => {
     const redeemed = { at: new Date("2026-10-25T10:35:00Z"), txHash: H(9), outcome: "redeemed" as const, taoWei: 99n * 10n ** 14n };
     const r = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed });
     expect(statuses(r)).toEqual(["done", "done", "active", "pending"]);
-    expect(r.steps[2].detail).toMatch(/safety wait ends around 11:35 AM/);
+    expect(r.steps[2].detail).toMatch(/safety wait\. Leaves for Base around 11:35 AM/);
     expect(r.steps[0].title).toBe("Request your unstake");
     expect(r.steps[0].detail).toBeUndefined();
     const flying = withdrawalRecord(wop, { ...wbase, openBatchId: 6n, stillOpen: false, delivered: redeemed, payout: { txHash: H(4), messageId: H(6), state: 1, at: new Date() } });

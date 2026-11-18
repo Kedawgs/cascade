@@ -54,7 +54,14 @@ import {
   deliveryLaterText,
   RECEIVE_ENDS_DELIVERY,
   RECEIVE_TAO_LABEL,
-  RECEIVE_TAO_NOTE,
+  RECEIVE_TAO_LATER,
+  AS_TAO_LINK,
+  AS_TAO_NOTE,
+  AS_USDC_LINK,
+  AS_USDC_NOTE,
+  BACK_TO_USDC_LABEL,
+  offersTao,
+  unstakeSubmit,
   shownUnstakeUnit,
   unstakeActions,
   deliveryOffClaim,
@@ -64,8 +71,8 @@ import {
   QUOTE_FAILED,
   unstakeFormError,
 } from "./stake-form";
-import { CLAIM_TAO_NOW } from "./cascade/flows";
-import { type DeliveryLimit, LIMIT_UNREAD, limitText, NO_DELIVERY, RECEIVE_TAO_POINTER, WAITING_UNKNOWN } from "./cascade/delivery-limit";
+import { CLAIM_TAO_NOW, FlowError } from "./cascade/flows";
+import { type DeliveryLimit, LIMIT_UNREAD, limitText, NO_DELIVERY, RECEIVE_TAO_POINTER, usdcUnstakeChecks, WAITING_UNKNOWN } from "./cascade/delivery-limit";
 import { IMPACT_REFUSED } from "./cascade/impact";
 import { MIN_UNSTAKE_WEI, MIN_UNSTAKE_WEI_V3 } from "./cascade/config";
 import { checkUnstake } from "./cascade/units";
@@ -311,7 +318,7 @@ describe("unstake helpers", () => {
 
   it("states what can be unstaked and the minimum in the unit shown", () => {
     const available = 70_219_000_000_000_000n;
-    expect(unstakeNote(available, "USDC", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe("You can unstake up to $17.69. The minimum is about $2.78 (0.011 TAO).");
+    expect(unstakeNote(available, "USDC", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe("You can unstake up to $17.69. The minimum is about $2.78.");
     expect(unstakeNote(available, "TAO", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.011 TAO.");
   });
 
@@ -349,7 +356,7 @@ describe("unstake helpers", () => {
     const most = (99n * TAO) / 10n;
     expect(unstakeNote(25n * TAO, "TAO", 250, most, MIN_UNSTAKE_WEI_V3)).toBe("One unstake can carry up to 9.9 TAO; unstake the rest a day later (unstakes are limited per day). The minimum is 0.011 TAO.");
     expect(unstakeNote(25n * TAO, "USDC", 250, most, MIN_UNSTAKE_WEI_V3)).toBe(
-      "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest a day later (unstakes are limited per day). The minimum is about $2.75 (0.011 TAO).",
+      "One unstake can carry up to $2,475.00 (9.9 TAO); unstake the rest a day later (unstakes are limited per day). The minimum is about $2.75.",
     );
     // a stake within the most reads as before
     expect(unstakeNote(70_219_000_000_000_000n, "TAO", 252, most, MIN_UNSTAKE_WEI_V3)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.011 TAO.");
@@ -363,10 +370,10 @@ describe("unstake helpers", () => {
     const min = MIN_UNSTAKE_WEI;
     const available = 70_219_000_000_000_000n;
     // 0.033 TAO at $252 is $8.316, rounded up to the cent
-    expect(unstakeNote(available, "USDC", 252, undefined, min)).toBe("You can unstake up to $17.69. The minimum is about $8.32 (0.033 TAO).");
+    expect(unstakeNote(available, "USDC", 252, undefined, min)).toBe("You can unstake up to $17.69. The minimum is about $8.32.");
     expect(unstakeNote(available, "TAO", 252, undefined, min)).toBe("You can unstake up to 0.070219 TAO. The minimum is 0.033 TAO.");
     expect(unstakeErrorText({ ok: false, code: "belowMin", reason: "Unstake at least 0.033 TAO", offerAll: false }, available, "USDC", 252, undefined, min)).toBe(
-      "The minimum unstake is about $8.32 (0.033 TAO).",
+      "The minimum unstake is about $8.32.",
     );
     expect(unstakeErrorText({ ok: false, code: "leavesDust", reason: "x", offerAll: true }, available, "USDC", 252, undefined, min)).toBe(
       "That would leave less than about $8.32 staked, too little to unstake later.",
@@ -386,13 +393,13 @@ describe("unstake helpers", () => {
 
   it("rounds the dollar minimum up, so typing the minimum shown is always accepted", () => {
     // 0.011 TAO at $252.40 is $2.7764
-    expect(unstakeNote(70_219_000_000_000_000n, "USDC", 252.4, undefined, MIN_UNSTAKE_WEI_V3)).toMatch(/minimum is about \$2\.78 /);
+    expect(unstakeNote(70_219_000_000_000_000n, "USDC", 252.4, undefined, MIN_UNSTAKE_WEI_V3)).toMatch(/minimum is about \$2\.78\.$/);
   });
 
   it("explains a refused amount in dollars when typing dollars", () => {
     const available = 70_219_000_000_000_000n;
     expect(unstakeErrorText({ ok: false, code: "belowMin", reason: "Unstake at least 0.011 TAO", offerAll: false }, available, "USDC", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe(
-      "The minimum unstake is about $2.78 (0.011 TAO).",
+      "The minimum unstake is about $2.78.",
     );
     expect(unstakeErrorText({ ok: false, code: "tooMuch", reason: "x", offerAll: true }, available, "USDC", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe(
       "That's more than you can unstake (up to $17.69).",
@@ -401,7 +408,7 @@ describe("unstake helpers", () => {
       "That would leave less than about $2.78 staked, too little to unstake later.",
     );
     expect(unstakeErrorText({ ok: false, code: "stakeBelowMin", reason: "x", offerAll: false }, available, "USDC", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe(
-      "Your stake is below the minimum unstake of about $2.78 (0.011 TAO).",
+      "Your stake is below the minimum unstake of about $2.78.",
     );
     expect(unstakeErrorText({ ok: false, code: "belowMin", reason: "Unstake at least 0.011 TAO", offerAll: false }, available, "TAO", 252, undefined, MIN_UNSTAKE_WEI_V3)).toBe(
       "Unstake at least 0.011 TAO",
@@ -988,9 +995,92 @@ describe("v3.2's unstake form: what each way out offers right now", () => {
     expect(unstakeActions({ ...launch, hold: "held" }).usdc).toBe(false);
   });
 
+  it("offers the switch to TAO under the USDC form only where the USDC unstake can't go while the TAO one could", async () => {
+    const tao = { offered: true, enabled: true, endsDelivery: false };
+    const can = { taoOnly: false, canSwitch: true, flowError: null, quoteFailed: false, limitUnread: false };
+    const fine = { notes: [], tao, usdc: true };
+    // a form that can send: its one button, nothing else
+    expect(offersTao(fine, can)).toBe(false);
+    expect(offersTao({ ...fine, notes: [{ text: "Up to $40 can be delivered right now.", refused: false }] }, can)).toBe(false);
+    // a line refuses the USDC unstake (the limit, the price impact, the limit unread): the switch, right there
+    expect(offersTao({ notes: [{ text: NO_DELIVERY, refused: true }], tao, usdc: false }, can)).toBe(true);
+
+    // refused at the click: the checks' own words, every one of them. The limit's refusals say "receive TAO" themselves
+    // and so get no pointer added (pointToTao): the switch must show for those too (review of f9c59861, finding 2)
+    const refusals: string[] = [];
+    const refuse = (x: Parameters<typeof usdcUnstakeChecks>[0]) => usdcUnstakeChecks(x).then(() => undefined, (e: unknown) => void refusals.push((e as Error).message));
+    await refuse({ v32: true, q: {} as never, deliverable: () => Promise.reject(new Error("rpc")) });
+    await refuse({ v32: true, q: {} as never, deliverable: () => Promise.resolve(NO_DELIVERY) });
+    await refuse({ v32: true, q: {} as never, deliverable: () => Promise.resolve(limitText(LIMIT)) });
+    await refuse({ v32: true, q: {} as never, deliverable: () => Promise.resolve(null), veto: () => Promise.reject(new FlowError("The price can't be checked.", "needs-you")) });
+    expect(refusals).toHaveLength(4);
+    expect(refusals.filter((m) => m.includes(RECEIVE_TAO_POINTER))).toHaveLength(1);
+    for (const m of refusals) expect(offersTao(fine, { ...can, flowError: m }), m).toBe(true);
+    // any other failure at the click (the wallet said no, the network): no switch pushed at the person
+    expect(offersTao(fine, { ...can, flowError: "You rejected the request in your wallet." })).toBe(false);
+    expect(offersTao(fine, { ...can, flowError: undefined })).toBe(false);
+
+    // the USDC button off with nothing to say why not TAO: its quote failed, or its limit isn't read yet (finding 3),
+    // from the form's own view model
+    const quoteFailed = unstakeActions({ ...ready, quote: undefined, limit: { data: { ...LIMIT, clearsAll: true }, isError: false } });
+    expect([quoteFailed.usdc, quoteFailed.tao.enabled, quoteFailed.notes.some((n) => n.refused)]).toEqual([false, true, false]);
+    expect(offersTao(quoteFailed, { ...can, quoteFailed: true })).toBe(true);
+    const limitLoading = unstakeActions({ ...ready, limit: { data: undefined, isError: false } });
+    expect([limitLoading.usdc, limitLoading.tao.enabled, limitLoading.notes.some((n) => n.refused)]).toEqual([false, true, false]);
+    expect(offersTao(limitLoading, { ...can, limitUnread: true })).toBe(true);
+    // a quote only still loading says nothing yet: no link flickering in and out while an amount is typed
+    expect(offersTao(quoteFailed, can)).toBe(false);
+    // and never while the TAO unstake couldn't go either (a request pending, a hold)
+    expect(offersTao(unstakeActions({ ...ready, quote: undefined, pending: true }), { ...can, quoteFailed: true })).toBe(false);
+
+    // already the TAO form, no switch to offer (USDC delivery off, another deployment), or no wallet: never
+    const refused = { notes: [{ text: "x", refused: true }], tao, usdc: false };
+    expect(offersTao(refused, { ...can, taoOnly: true })).toBe(false);
+    expect(offersTao(refused, { ...can, canSwitch: false })).toBe(false);
+    expect(offersTao({ ...refused, tao: { ...tao, offered: false } }, can)).toBe(false);
+  });
+
+  it("the form's one submit sends its own view's request, never the other's, and nothing while a request is pending", () => {
+    const usdcView = (x: Partial<Parameters<typeof unstakeActions>[0]> = {}) => unstakeActions({ ...ready, limit: { data: { ...LIMIT, clearsAll: true }, isError: false }, ...x });
+    const taoView = (x: Partial<Parameters<typeof unstakeActions>[0]> = {}) => unstakeActions({ ...ready, usdcDelivery: false, preference: { data: false, isError: false }, ...x });
+    const has = { hasAccount: true, hasQuote: true, hasRequest: true };
+    expect(unstakeSubmit({ ...has, taoOnly: false, actions: usdcView() })).toBe("unstake");
+    expect(unstakeSubmit({ ...has, taoOnly: true, actions: taoView() })).toBe("receiveTao");
+    // the USDC view never asks for TAO: refused, it sends nothing, even with the TAO request open
+    const refused = usdcView({ limit: { data: { ...LIMIT, saleTaoWei: 0n, saleUsdc: 0n }, isError: false } });
+    expect([refused.usdc, refused.tao.enabled]).toEqual([false, true]);
+    expect(unstakeSubmit({ ...has, taoOnly: false, actions: refused })).toBeNull();
+    expect(unstakeSubmit({ ...has, taoOnly: false, hasQuote: false, actions: usdcView() })).toBeNull();
+    // the TAO view never sells: whatever the USDC side would allow, it is Receive TAO or nothing
+    expect(unstakeSubmit({ ...has, taoOnly: true, actions: usdcView() })).toBe("receiveTao");
+    expect(unstakeSubmit({ ...has, taoOnly: true, hasRequest: false, actions: taoView() })).toBeNull();
+    // a request pending (waiting on the wallet): nothing from either view
+    expect(unstakeSubmit({ ...has, taoOnly: false, actions: usdcView({ pending: true }) })).toBeNull();
+    expect(unstakeSubmit({ ...has, taoOnly: true, actions: taoView({ pending: true }) })).toBeNull();
+    // no wallet: nothing
+    expect(unstakeSubmit({ ...has, hasAccount: false, taoOnly: false, actions: usdcView() })).toBeNull();
+    expect(unstakeSubmit({ ...has, hasAccount: false, taoOnly: true, actions: taoView() })).toBeNull();
+  });
+
+  it("names the TAO view's button for what it asks, never the USDC view's word", () => {
+    const s = { account: "0xa", amount: 0.5, error: null, pending: false };
+    expect(unstakeButtonLabel(s, { asTao: true })).toBe("Receive 0.50 TAO");
+    expect(unstakeButtonLabel({ ...s, amount: null }, { asTao: true })).toBe("Receive TAO");
+    expect(unstakeButtonLabel({ ...s, error: "too much" }, { asTao: true })).toBe("Receive TAO");
+    expect(unstakeButtonLabel({ ...s, pending: true }, { asTao: true })).toBe("Confirm in your wallet…");
+    expect(unstakeButtonLabel({ ...s, account: null }, { asTao: true })).toBe("Connect wallet");
+    // the USDC view, as before
+    expect(unstakeButtonLabel(s)).toBe("Unstake 0.50 TAO");
+    expect(unstakeButtonLabel({ ...s, usd: 96.2 })).toBe("Unstake $96.20");
+  });
+
   it("says Receive TAO, and the USDC sale's timing, in short plain words", () => {
     expect(RECEIVE_TAO_LABEL).toBe("Receive TAO instead");
-    expect(RECEIVE_TAO_NOTE).toBe("Nothing is sold: your TAO comes back to Base for you to claim. A later USDC unstake would sell it too.");
+    // the switch to TAO: a link under "Other ways out" and its way back, never a second button under the form
+    expect(`${AS_TAO_LINK}: ${AS_TAO_NOTE}`).toBe("Receive TAO instead of USDC: nothing is sold; your TAO comes back to Base for you to claim.");
+    expect(`${AS_USDC_LINK}: ${AS_USDC_NOTE}`).toBe("Unstake to USDC: your TAO is sold on Base and the USDC is sent to your wallet.");
+    expect(BACK_TO_USDC_LABEL).toBe("Unstake to USDC instead");
+    expect(RECEIVE_TAO_LATER).toBe("If this TAO is still waiting to be claimed when you next unstake to USDC, it is sold too.");
     expect(RECEIVE_ENDS_DELIVERY).toBe("This also turns off automatic USDC delivery for your other unstakes: you'll claim those by hand.");
     expect(deliveryLaterText(26 * 60)).toBe(
       "With USDC, your TAO is back on Base in about 26 hours and sold then, one sale at a time, so a busy day can take longer. If the market doesn't allow a sale, your TAO stays on Base for you to claim any time.",

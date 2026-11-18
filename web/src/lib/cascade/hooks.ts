@@ -133,6 +133,8 @@ export function useDeliveryPreference(account: string | null, enabled: boolean) 
     queryFn: () => data.getDeliveryPreference(account as string),
     enabled: enabled && account !== null,
     refetchInterval: IDLE_MS,
+    // read again whenever a screen opens on it: an answer cached before the account's last USDC unstake is not today's
+    refetchOnMount: "always",
   });
 }
 

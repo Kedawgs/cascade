@@ -227,10 +227,27 @@ export const timeAt = (at: Date, now: Date): string => `${hhmm(at)}${dayLabel(at
 
 const waitForClose = (f: { closesAt: Date; now: Date; closesBy?: boolean }) =>
   f.closesAt.getTime() <= f.now.getTime()
-    ? "The batch can close now; it crosses as soon as it is sent"
+    ? "On Base, waiting for its batch to be sent. It can leave now"
     : f.closesBy
-      ? `Waits for the batch to close, by about ${timeAt(f.closesAt, f.now)}`
-      : `Waits for the batch to close at ${hhmm(f.closesAt)}`;
+      ? `On Base, waiting for the next batch. Leaves by about ${timeAt(f.closesAt, f.now)}`
+      : `On Base, waiting for the next batch. Leaves at ${hhmm(f.closesAt)}`;
+
+/** A receipt's steps in progress each say where the money is and when it moves on, in that order and in a line (the
+ * founder, 2026-11-18: "clear ETAs and locations of where the money is at"); the steps still ahead say what to expect
+ * before they start, above all an unstake's safety wait, which sending its batch early does not shorten. */
+const thenTheBridge = `then the bridge (${BRIDGE_TIME}).`;
+/** An unstake's Return to Base, still ahead: the safety wait it starts with (none on a deployment without one). */
+export const safetyWaitAhead = (payoutDelayS: number): string | undefined =>
+  payoutDelayS > 0 ? `Starts after a ${Math.round(payoutDelayS / 3600)}-hour safety wait on Bittensor` : undefined;
+/** The same where the wait's length isn't known (a receipt not read from the chain yet, on a site with no deployment's timing). */
+export const SAFETY_WAIT_AHEAD = "Starts after a safety wait on Bittensor";
+/** An unstake's last step, still ahead: sold and sent without a claim, or (asked as TAO) the TAO itself to claim. */
+export const USDC_AHEAD = "Sold for USDC on Base and sent to your wallet automatically";
+export const TAO_AHEAD = "Arrives on Base as TAO, for you to claim";
+/** A step ahead of a deposit or unstake that hasn't left Base: how it gets to Bittensor. */
+export const CROSSING_AHEAD = `Leaves Base with the next batch, then the bridge (${BRIDGE_TIME})`;
+/** A step still ahead keeps no expectation once the record is no longer simply on its way (a cancel laid over it). */
+const noHint = <K extends string>(s: TrailStep<K>): TrailStep<K> => (s.status === "pending" && s.detail !== undefined ? { key: s.key, title: s.title, status: s.status } : s);
 
 function overall<K extends string>(steps: TrailStep<K>[], doneStatus: string): "failed" | "needs_you" | "done" | "in_progress" {
   if (steps.some((s) => s.status === "failed")) return "failed";
@@ -341,7 +358,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
       ...bridge,
       status: "active",
       detail: f.stillOpen
-        ? `${waitForClose(f)}, then the bridge (${BRIDGE_TIME})`
+        ? `${waitForClose(f)}, ${thenTheBridge}`
         : onTheBridge(f),
       ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
@@ -352,7 +369,7 @@ export function depositRecord(op: DepositOp, f: DepositFacts): DepositRecord {
     if (f.staked) stake = { ...stake, status: "done", at: f.staked.at, txUrl: explorer.bittensorTx(f.staked.txHash), txLabel: "View on Bittensor" };
     else if (f.stakeUnknown) stake = { ...stake, ...CHECKING };
     else if (f.waitingForMinimum) stake = { ...stake, ...waitingForMinimum(f) };
-    else stake = { ...stake, status: "active", detail: "Staking shortly" };
+    else stake = { ...stake, status: "active", detail: "Arrived on Bittensor. Staking shortly." };
   }
 
   const steps = [swap, deposit, bridge, stake];
@@ -488,7 +505,7 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
       ...unstake,
       status: "active",
       detail: f.stillOpen
-        ? `${waitForClose(f)}, then the bridge`
+        ? `${waitForClose(f)}, ${thenTheBridge}`
         : onTheBridge(f),
       ...(!f.stillOpen && f.watchUrl ? { txUrl: f.watchUrl, txLabel: "Watch it on Chainlink's explorer" } : {}),
     };
@@ -510,13 +527,17 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
         ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}),
       };
     } else if (p) {
-      ret = { ...ret, status: "active", detail: `On the bridge back to Base, ${BRIDGE_TIME}`, ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
+      ret = { ...ret, status: "active", detail: "On the bridge back to Base. Usually takes 20–30 minutes.", ...(p.messageId ? { txUrl: explorer.ccip(p.messageId), txLabel: "View on the bridge" } : {}) };
     } else {
       const from = new Date(d.at.getTime() + f.payoutDelay * 1000);
+      const hours = `${Math.round(f.payoutDelay / 3600)}-hour`;
       ret = {
         ...ret,
         status: "active",
-        detail: `The ${Math.round(f.payoutDelay / 3600)}-hour safety wait ends around ${hhmm(from)}${dayLabel(from, f.now)}, then it crosses back to Base (${BRIDGE_TIME})`,
+        detail:
+          from.getTime() > f.now.getTime()
+            ? `On Bittensor, in the ${hours} safety wait. Leaves for Base around ${hhmm(from)}${dayLabel(from, f.now)}, ${thenTheBridge}`
+            : `On Bittensor. The ${hours} safety wait is over: it leaves for Base shortly, ${thenTheBridge}`,
       };
     }
   }
@@ -607,6 +628,15 @@ export function withdrawalRecord(op: WithdrawalOp, f: WithdrawalFacts): Withdraw
   else if (steps.some((s) => s.status === "action")) status = "needs_you";
   else status = "in_progress";
 
+  // simply on its way: the steps still ahead say what to expect, the safety wait first (no cancel, nothing failed)
+  if (status === "in_progress" && !cancelling) {
+    if (ret.status === "pending") {
+      const wait = safetyWaitAhead(f.payoutDelay);
+      if (wait) steps[2] = { ...ret, detail: wait };
+    }
+    if (claim.status === "pending" && (auto || keepsTao)) steps[3] = { ...claim, detail: auto ? USDC_AHEAD : TAO_AHEAD };
+  }
+
   // v3.2: a request dropped with its parked batch took nothing either
   const nothingTaken = (d !== undefined && (d.outcome === "skipped" || d.outcome === "deferred")) || f.crossing?.kind === "dropped";
   // taken, but too small to send back: nothing comes back either
@@ -683,7 +713,7 @@ export function depositCancelSent(r: DepositRecord, c: CancelSent): DepositRecor
   const txUrl = explorer.baseTx(c.hash);
   const steps = r.steps.map((s): TrailStep<DepositStepKey> =>
     s.key !== "bridge"
-      ? s
+      ? noHint(s)
       : c.state === "done"
         ? { key: s.key, title: s.title, status: "failed", at: new Date(c.at), detail: DEPOSIT_CANCELLED, txUrl }
         : { key: s.key, title: s.title, status: "active", detail: CANCELLING, txUrl },
@@ -701,7 +731,7 @@ export function withdrawalCancelSent(r: WithdrawalRecord, c: CancelSent): Withdr
   const txUrl = explorer.baseTx(c.hash);
   const steps = r.steps.map((s): TrailStep<WithdrawalStepKey> =>
     s.key !== "unstake"
-      ? s
+      ? noHint(s)
       : c.state === "done"
         ? { key: s.key, title: s.title, status: "failed", at: new Date(c.at), detail: UNSTAKE_CANCELLED, txUrl }
         : { key: s.key, title: s.title, status: "active", detail: CANCELLING, txUrl },

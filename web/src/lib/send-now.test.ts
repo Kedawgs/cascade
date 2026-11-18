@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { STALE_MS } from "./batch-clock";
 import type { CloseOp, Operation } from "./cascade/oplog";
 import type { OpenBatch } from "./cascade/types";
-import { CLOSE_FIRST_SEEN_MS, closeEconomicsOf, closeFirstView, closeSentFromHere, feeToPay, SEND_GRACE_S, sendGate, sendNowValue, sendNowView } from "./send-now";
+import { CLOSE_FIRST_SEEN_MS, closeEconomicsOf, closeFirstView, closeSentFromHere, feeToPay, SEND_GRACE_S, sendGate, sendNowKeepsWait, sendNowValue, sendNowView } from "./send-now";
 
 const H = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
 const ME = "0x000000000000000000000000000000000000a11c" as const;
@@ -474,5 +474,13 @@ describe("R8 (the contracts review's L-1), R9 (M-2): the stake form's offer to s
     expect(v(full({ paused: true }))).toEqual({ note: "Staking is paused right now. Try again later.", disabled: true });
     // 0.000969 sent + 0.00001 for the close's gas = 0.000979 ETH at $2,330
     expect(v(full({ ethWei: 5n * 10n ** 14n }))).toMatchObject({ warning: "You need about $2.29 of ETH on Base for this.", disabled: true });
+  });
+});
+
+describe("sendNowKeepsWait: what sending an unstake's batch early does not shorten", () => {
+  it("names the deployment's safety wait, says there is one when its length isn't known, and nothing where there is none", () => {
+    expect(sendNowKeepsWait(86_400)).toBe("Sending it now skips only the wait for the batch. The 24-hour safety wait on Bittensor still applies.");
+    expect(sendNowKeepsWait(undefined)).toBe("Sending it now skips only the wait for the batch. The safety wait on Bittensor still applies.");
+    expect(sendNowKeepsWait(0)).toBeNull();
   });
 });

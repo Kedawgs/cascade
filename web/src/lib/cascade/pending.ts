@@ -1,6 +1,9 @@
+import { formatTao, formatUsdc } from "../format";
 import type { SentNotice } from "../sent";
 import { explorer } from "./config";
 import type { Operation } from "./oplog";
+import type { TrailStep } from "./records";
+import { CROSSING_AHEAD, RECEIVE_TAO_STEP, SAFETY_WAIT_AHEAD, safetyWaitAhead, TAO_AHEAD, USDC_AHEAD } from "./trail";
 import { toDisplay } from "./units";
 
 /** How long after it was sent a deposit or unstake of this browser's shows in Activity's list before
@@ -52,6 +55,42 @@ export function pendingEntries(ops: readonly Operation[], kind: "deposit" | "wit
     .map(pendingEntry)
     .filter((e): e is PendingEntry => e !== null)
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+}
+
+/** A step this browser sent and the chain's history hasn't shown yet. */
+export const CONFIRMING = "Sent from this browser. Confirming on Base…";
+
+/** The steps of a deposit or unstake this browser sent, before its record is read from the chain: the trail its
+ * receipt will have, the step it sent confirming and the rest ahead, so a receipt is one layout from the moment it is
+ * sent (the founder, 2026-11-18: "it should only show this layout no matter where it is in the process"). Nothing
+ * here is read from the chain, and nothing claims to be: the one step that is not ahead says it is confirming.
+ * `payoutDelayS` is the deployment's safety wait, when the site knows it. */
+export function pendingTrail(entry: PendingEntry, x: { payoutDelayS?: number } = {}): TrailStep[] {
+  const n = entry.notice;
+  const sent = { status: "active" as const, detail: CONFIRMING, summary: "confirming…", ...(entry.txUrl ? { txUrl: entry.txUrl } : {}) };
+  if (n.kind === "unstake") {
+    const wait = x.payoutDelayS === undefined ? SAFETY_WAIT_AHEAD : safetyWaitAhead(x.payoutDelayS);
+    return [
+      { key: "request", title: "Request your unstake", ...sent },
+      { key: "unstake", title: "Unstake on Bittensor", status: "pending", detail: CROSSING_AHEAD },
+      { key: "return", title: "Return to Base", status: "pending", ...(wait ? { detail: wait } : {}) },
+      { key: "claim", title: n.keepTao ? RECEIVE_TAO_STEP : "USDC to your wallet", status: "pending", detail: n.keepTao ? TAO_AHEAD : USDC_AHEAD },
+    ];
+  }
+  // a deposit of TAO already in the wallet has no swap to wait for: the transaction it sent is the deposit
+  const swapped = n.usdc !== undefined;
+  return [
+    swapped ? { key: "swap", title: "Swap USDC for TAO", ...sent } : { key: "swap", title: "Swap USDC for TAO", status: "done" },
+    swapped ? { key: "deposit", title: "Deposit into Cascade", status: "pending" } : { key: "deposit", title: "Deposit into Cascade", ...sent },
+    { key: "bridge", title: "Cross to Bittensor", status: "pending", detail: CROSSING_AHEAD },
+    { key: "stake", title: "Stake on Bittensor", status: "pending" },
+  ];
+}
+
+/** The figures under that trail, in the confirmed receipt's own rows and words: estimates are "about". */
+export function pendingRows(n: SentNotice): [string, string][] {
+  if (n.kind === "unstake") return [["You will receive", n.keepTao ? "TAO on Base, to claim" : `about ${formatUsdc(n.usdc)} USDC on Base`]];
+  return [["TAO in this deposit", n.usdc !== undefined ? `about ${formatTao(n.tao, 4)} TAO` : `${formatTao(n.tao, 4)} TAO`]];
 }
 
 /** What a receipt page shows: its record once read; before that this browser's own entry for it

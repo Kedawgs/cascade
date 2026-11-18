@@ -28,24 +28,23 @@ import {
 } from "@/lib/cascade/hooks";
 import { type ActivityTab, parseActivityParams } from "@/lib/activity-params";
 import { requestFeeEth } from "@/lib/faq";
-import { type PendingEntry, receiptShows } from "@/lib/cascade/pending";
+import { type PendingEntry, pendingRows, pendingTrail, receiptShows } from "@/lib/cascade/pending";
 import type { DepositRecord } from "@/lib/cascade/records";
 import { depositCancelSent, isDelivering, offersClaim, withdrawalCancelSent } from "@/lib/cascade/trail";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { formatDay, formatTao, formatUsd, formatUsdc, formatUsdShort } from "@/lib/format";
-import { sentRows } from "@/lib/sent";
 import { claimButtonLabel, claimChoices, deliveryOffClaim, stakeAgainHref, TURN_OFF_DELIVERY, turnOffDeliveryOffered } from "@/lib/stake-form";
 import { DepositList, WithdrawalList } from "../ActivityList";
 import { AddToWallet } from "../AddToWallet";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
 import { Loading } from "../Loading";
-import { ReceiptLink } from "../ReceiptLink";
 import { Trail } from "../Trail";
 import app from "./App.module.css";
 import { AppShell } from "./AppShell";
 import { RetiredNotice } from "./RetiredNotice";
 import { BlockNotice, SendItNow } from "./SendItNow";
+import { useSentTiming } from "./SentDialog";
 import styles from "./ActivityScreen.module.css";
 
 function BackLink({ href = "/activity" }: { href?: string }) {
@@ -70,11 +69,13 @@ function Actions({ children }: { children: ReactNode }) {
   return <div className={styles.actions}>{children}</div>;
 }
 
-/** A receipt Activity hasn't read from the chain yet: this browser's own entry for it, said plainly to be
- * unconfirmed, with the figures it was sent with and its transaction, until the list read from the chain
- * holds its record (pending.ts). `onRetry` when that read failed. */
+/** A receipt Activity hasn't read from the chain yet: this browser's own entry for it, in the layout its record
+ * will have (the same steps: pending.ts pendingTrail), the step it sent said plainly to be confirming, with the
+ * figures it was sent with and its transaction, until the list read from the chain holds its record. `onRetry` when
+ * that read failed. */
 export function PendingReceipt({ entry, onRetry }: { entry: PendingEntry; onRetry?: () => void }) {
   const n = entry.notice;
+  const timing = useSentTiming();
   const deposit = n.kind === "deposit";
   const title = deposit
     ? `Where your ${n.usdc !== undefined ? formatUsdShort(n.usdc) : `${formatTao(n.tao, 4)} TAO`} is going`
@@ -89,27 +90,16 @@ export function PendingReceipt({ entry, onRetry }: { entry: PendingEntry; onRetr
           {formatDay(entry.createdAt)} {deposit ? "deposit" : "unstake"}
         </p>
         <h2 className={styles.panelTitle}>{title}</h2>
-        <p className={styles.confirming} role="status">
-          <span className="loading-spinner" aria-hidden="true" />
-          Submitted, confirming…
-        </p>
-        <p className={styles.panelText}>
-          Sent from this browser, and not confirmed here yet: its steps show as soon as Base and Bittensor have been read. Until
-          then, these are the figures it was sent with.
-        </p>
+        {/* the receipt's own layout from the moment it is sent: its steps, the one it sent confirming, the rest ahead */}
+        <Trail steps={pendingTrail(entry, timing.payoutDelayS !== undefined ? { payoutDelayS: timing.payoutDelayS } : {})} label={deposit ? "Deposit steps" : "Unstake steps"} />
         <dl className={styles.rows}>
-          {sentRows(n).map(([label, value]) => (
+          {pendingRows(n).map(([label, value]) => (
             <div key={label}>
               <dt>{label}</dt>
               <dd>{value}</dd>
             </div>
           ))}
         </dl>
-        {entry.txUrl && (
-          <ReceiptLink href={entry.txUrl} className={styles.tx}>
-            View the transaction on Base
-          </ReceiptLink>
-        )}
       </div>
       {onRetry && <LoadError what={deposit ? "this deposit" : "this unstake"} onRetry={onRetry} />}
     </>

@@ -8,7 +8,7 @@ import { cascadeKeys } from "@/lib/cascade/hooks";
 import type { DepositRecord, WithdrawalRecord } from "@/lib/cascade/records";
 import type { Available, Position } from "@/lib/cascade/types";
 import { SEND_HELD_BY_DEPOSIT, sendNowHeldByDeposit, sendNowOffered } from "@/lib/send-now";
-import { DELIVERY_IS_OFF, RECEIVE_ENDS_DELIVERY, RECEIVE_TAO_LABEL, RECEIVE_TAO_NOTE_OFF, TURN_OFF_DELIVERY, unstakeHeading } from "@/lib/stake-form";
+import { AS_TAO_LINK, BACK_TO_USDC_LABEL, DELIVERY_IS_OFF, RECEIVE_ENDS_DELIVERY, RECEIVE_TAO_LABEL, RECEIVE_TAO_NOTE_OFF, TURN_OFF_DELIVERY, taoChoice, unstakeHeading } from "@/lib/stake-form";
 import { Hero } from "../landing/Hero";
 import { SiteNav } from "../landing/SiteNav";
 import { StakeSection } from "../landing/StakeSection";
@@ -21,7 +21,8 @@ import { ClaimReady, StakeCard } from "./StakeCard";
 import { StakeForm } from "./StakeForm";
 import { StakeScreen } from "./StakeScreen";
 import { UnstakeForm } from "./UnstakeForm";
-import { UnstakeScreen } from "./UnstakeScreen";
+import { appGuard } from "@/lib/cascade/use-flows";
+import { OtherWaysOut, UnstakeScreen } from "./UnstakeScreen";
 
 // Task 60: the founder's two switches, each a line of a deployment's entry in deployments.json: the stage "retired" (the
 // site shows only the ways out), and v3.2's `usdcDelivery: false` (no USDC option; preference holders prompted to claim).
@@ -130,7 +131,12 @@ describe("retiredStageShowsOnlyExits (Task 60)", () => {
       }
       const form = buttons(render(createElement(UnstakeForm, { account: ME }), unstakeForm, retired()));
       expect(form[0]).toBe("Unstake");
-      if (v32) expect(form).toContain(RECEIVE_TAO_LABEL);
+      // v3.2's unstake as TAO stays too: the form itself, switched to it (its one button then asks for TAO)
+      if (v32) {
+        const tao = render(createElement(UnstakeForm, { account: ME, asTao: true, onAsTao: () => undefined }), unstakeForm, retired());
+        expect(buttons(tao)).toEqual(["Receive TAO", BACK_TO_USDC_LABEL]);
+        expect(plainText(tao)).toContain(RECEIVE_TAO_NOTE_OFF);
+      }
     });
 
     it(`${name}: where nothing is there yet, no invitation to stake: the unstake form, the deposits, a page not found (review, Minor 1)`, () => {
@@ -244,7 +250,8 @@ describe("usdcDeliveryOffHidesTheOptionAndPromptsAClaim (Task 60)", () => {
     const pref = (set: boolean): Cached => ({ key: cascadeKeys.deliveryPreference(ME), data: set });
     const h = render(createElement(UnstakeForm, { account: ME }), [...unstakeForm, pref(true)], off());
     const t = plainText(h);
-    expect(buttons(h)).toEqual(["Unstake"]);
+    // the TAO view's button says what it asks for, never the USDC view's word
+    expect(buttons(h)).toEqual(["Receive TAO"]);
     expect(t).toContain(RECEIVE_TAO_NOTE_OFF);
     expect(RECEIVE_TAO_NOTE_OFF).toBe("Nothing is sold: your TAO comes back to Base for you to claim.");
     // it clears the preference the chain holds, and says so
@@ -252,8 +259,8 @@ describe("usdcDeliveryOffHidesTheOptionAndPromptsAClaim (Task 60)", () => {
     expect(plainText(render(createElement(UnstakeForm, { account: ME }), [...unstakeForm, pref(false)], off()))).not.toContain(RECEIVE_ENDS_DELIVERY);
     for (const usdc of ["USDC arrives", "With USDC", "Price impact", "TAO price", "can be delivered", "USDC unstake", "Type a USDC amount"]) expect(h, usdc).not.toContain(usdc);
     expect(t).toContain("TAO on Base, to claim");
-    // USDC delivery on: the USDC button and Receive TAO beside it, as before
-    expect(buttons(render(createElement(UnstakeForm, { account: ME }), unstakeForm, on()))).toEqual(["Unstake", RECEIVE_TAO_LABEL]);
+    // USDC delivery on: the USDC button alone (Receive TAO is the form's switch, under "Other ways out")
+    expect(buttons(render(createElement(UnstakeForm, { account: ME, onAsTao: () => undefined }), unstakeForm, on()))).toEqual(["Unstake"]);
   });
 
   it("the claim banner prompts the claim in the plan's words while the chain holds a delivery preference, whatever is being delivered", () => {
@@ -375,16 +382,88 @@ describe("usdcDeliveryOffHidesTheOptionAndPromptsAClaim (Task 60)", () => {
 });
 
 describe("the unstake form keeps what decides a click in the open and folds the explanations away", () => {
-  it("v3.2 with USDC delivery: one short line under each button, and 'How unstaking works' closed, holding the rest", () => {
-    const h = render(createElement(UnstakeForm, { account: ME }), unstakeForm, site({ stage: "early", usdcDelivery: true }, true));
+  const on = () => site({ stage: "early", usdcDelivery: true }, true);
+  const noop = () => undefined;
+
+  it("v3.2 with USDC delivery: one button and one short line; 'How unstaking works' closed, holding the rest", () => {
+    const h = render(createElement(UnstakeForm, { account: ME, onAsTao: noop }), unstakeForm, on());
     const [open, folded] = [h.slice(0, h.indexOf("<details")), /<details[^>]*>([\s\S]*?)<\/details>/.exec(h)?.[1] ?? ""];
     // closed until asked for (no `open` attribute), under its heading
     expect(h).toMatch(/<details class="[^"]*_more_[^"]*"><summary>How unstaking works<\/summary>/);
-    // folded: how the sale goes, what a later USDC unstake does to TAO received now, the daily limit
-    for (const part of ["one sale at a time", "If you receive TAO, a later USDC unstake would sell that TAO too.", "Unstakes share a daily limit"]) expect(plainText(folded), part).toContain(part);
-    // in the open: the two buttons, and under Receive TAO only what it does
-    expect(buttons(h)).toEqual(expect.arrayContaining(["Receive TAO instead"]));
-    expect(plainText(open)).toContain(RECEIVE_TAO_NOTE_OFF);
-    for (const moved of ["one sale at a time", "A later USDC unstake would sell it too", "Unstakes share a daily limit"]) expect(plainText(open), moved).not.toContain(moved);
+    // folded: how the sale goes, and the daily limit
+    for (const part of ["one sale at a time", "Unstakes share a daily limit"]) expect(plainText(folded), part).toContain(part);
+    // in the open: the one button; no second button, and none of Receive TAO's words (it is the form's switch, elsewhere)
+    expect(buttons(h)).toEqual(["Unstake"]);
+    for (const gone of [RECEIVE_TAO_LABEL, RECEIVE_TAO_NOTE_OFF, RECEIVE_ENDS_DELIVERY, "one sale at a time", "Unstakes share a daily limit"]) expect(plainText(open), gone).not.toContain(gone);
+    // dollars typed, dollars said: the minimum's TAO figure is the TAO view's
+    expect(plainText(open)).toMatch(/The minimum is about \$[0-9.]+\.(?! \()/);
+    expect(plainText(open)).not.toContain("(0.033 TAO)");
+  });
+
+  it("switched to TAO by the person: the form USDC delivery off shows, with the way back, and nothing of the USDC sale", () => {
+    const pref = (set: boolean): Cached => ({ key: cascadeKeys.deliveryPreference(ME), data: set });
+    const h = render(createElement(UnstakeForm, { account: ME, asTao: true, onAsTao: noop }), [...unstakeForm, pref(true)], on());
+    const t = plainText(h);
+    expect(buttons(h)).toEqual(["Receive TAO", BACK_TO_USDC_LABEL]);
+    expect(t).toContain(RECEIVE_TAO_NOTE_OFF);
+    // it clears the delivery preference the chain holds, and says so where the choice is made
+    expect(t).toContain(RECEIVE_ENDS_DELIVERY);
+    expect(plainText(render(createElement(UnstakeForm, { account: ME, asTao: true, onAsTao: noop }), [...unstakeForm, pref(false)], on()))).not.toContain(RECEIVE_ENDS_DELIVERY);
+    for (const usdc of ["USDC arrives", "With USDC", "Price impact", "can be delivered", "Type a USDC amount", "one sale at a time"]) expect(t, usdc).not.toContain(usdc);
+    expect(t).toContain("TAO on Base, to claim");
+    expect(t).toContain("The minimum is 0.033 TAO.");
+    // folded: what a later USDC unstake does to TAO taken by choice, and the daily limit
+    const folded = plainText(/<details[^>]*>([\s\S]*?)<\/details>/.exec(h)?.[1] ?? "");
+    expect(folded).toContain("If this TAO is still waiting to be claimed when you next unstake to USDC, it is sold too.");
+    expect(folded).toContain("Unstakes share a daily limit");
+    // with USDC delivery off there is no way back to offer, whatever was chosen
+    const off = site({ stage: "early", usdcDelivery: false }, true);
+    expect(buttons(render(createElement(UnstakeForm, { account: ME, asTao: true }), [...unstakeForm, pref(false)], off))).toEqual(["Receive TAO"]);
+  });
+
+  it("the form's own way back is held while any request runs (the shared guard), and free again after", async () => {
+    const tao = () => render(createElement(UnstakeForm, { account: ME, asTao: true, onAsTao: noop }), unstakeForm, on());
+    const back = (h: string) => /<button type="button" class="link"( disabled="")?>Unstake to USDC instead<\/button>/.exec(h);
+    expect(back(tao())?.[1]).toBeUndefined();
+    let release = () => undefined as void;
+    const running = appGuard.run("unstake", () => new Promise<void>((done) => (release = done)));
+    try {
+      expect(back(tao())?.[1]).toBe(' disabled=""');
+    } finally {
+      release();
+      await running;
+    }
+    expect(back(tao())?.[1]).toBeUndefined();
+  });
+
+  it("'Other ways out' holds the switch to TAO and its way back, and only where the page offers the choice", () => {
+    const section = (props: { asTao?: boolean; onAsTao?: (t: boolean) => void; busy?: boolean }, data = on()) => render(createElement(OtherWaysOut, props), [], data);
+    // the choice offered: the switch first, then the emergency page
+    const offered = section({ onAsTao: noop });
+    expect(buttons(offered)).toEqual([AS_TAO_LINK]);
+    expect(plainText(offered)).toContain(`${AS_TAO_LINK}: nothing is sold; your TAO comes back to Base for you to claim.`);
+    expect(plainText(offered).indexOf(AS_TAO_LINK)).toBeLessThan(plainText(offered).indexOf("Withdraw on Bittensor"));
+    // taken: the same place is the way back
+    const taken = section({ asTao: true, onAsTao: noop });
+    expect(buttons(taken)).toEqual(["Unstake to USDC"]);
+    expect(plainText(taken)).toContain("Unstake to USDC: your TAO is sold on Base and the USDC is sent to your wallet.");
+    // while any request runs the switch is held: no other form may come up under a wallet's prompt
+    expect(section({ onAsTao: noop, busy: true })).toMatch(/<button type="button" class="link" disabled="">Receive TAO instead of USDC<\/button>/);
+    expect(offered).not.toContain('disabled=""');
+    // the emergency way out, in plain steps: the fee's TAO first, where the TAO ends up last
+    expect(plainText(offered)).toContain("your TAO arrives at this same wallet address on the Bittensor network, not on Base.");
+    expect([...offered.matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1])).toEqual([
+      "Have about 0.02 TAO at this address on Bittensor for the network fee.",
+      "Open the page: your wallet switches to the Bittensor network.",
+      "Withdraw. Your TAO lands in your wallet on Bittensor.",
+    ]);
+    // no choice to offer (the page gives no switch): the emergency page alone, as before
+    expect(buttons(section({}))).toEqual([]);
+    expect(plainText(section({}))).toContain("Withdraw on Bittensor");
+    // and the page offers it only on v3.2 with USDC delivery on; a choice made before never outlives that
+    expect(taoChoice({ v32: true, usdcDelivery: true, asTao: false })).toEqual({ offered: true, asTao: false });
+    expect(taoChoice({ v32: true, usdcDelivery: true, asTao: true })).toEqual({ offered: true, asTao: true });
+    expect(taoChoice({ v32: true, usdcDelivery: false, asTao: true })).toEqual({ offered: false, asTao: false });
+    expect(taoChoice({ v32: false, usdcDelivery: true, asTao: true })).toEqual({ offered: false, asTao: false });
   });
 });

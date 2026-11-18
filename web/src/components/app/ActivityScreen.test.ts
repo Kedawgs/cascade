@@ -215,8 +215,8 @@ describe("a receipt page before its list is read", () => {
       }),
     );
 
-  it("shows a deposit sent in the last day as submitted and confirming", () => {
-    expect(page(sentDeposit())).toContain("Submitted, confirming…");
+  it("shows a deposit sent in the last day as sent and confirming, in the receipt's own steps", () => {
+    expect(page(sentDeposit())).toContain("Sent from this browser. Confirming on Base…");
   });
 
   it("waits for the list for one sent more than a day ago: it may well be staked, so it isn't called unconfirmed", () => {
@@ -266,14 +266,19 @@ describe("a receipt opened before Activity has read it", () => {
     return renderWithCache(createElement(PendingReceipt, { entry }), [], { data: withOps(op) });
   };
 
-  it("a deposit: where it's going, said plainly to be unconfirmed, with its transaction on Base", () => {
+  it("a deposit: the receipt's own four steps from the moment it is sent, the first said plainly to be confirming, with its transaction on Base", () => {
     const h = card(sentDeposit());
     const text = plainText(h);
     expect(text).toContain("Where your $50 is going");
-    expect(text).toContain("Submitted, confirming…");
-    expect(text).toContain("not confirmed here yet");
-    expect(text).toContain("Amount50 USDC");
-    expect(text).toContain("TAO (estimate)about 0.1946 TAO");
+    // one layout at every stage: the trail, never a box of its own
+    expect(h).toMatch(/<ol[^>]*aria-label="Deposit steps"/);
+    expect([...h.matchAll(/<li\b/g)]).toHaveLength(4);
+    for (const step of ["Swap USDC for TAO", "Deposit into Cascade", "Cross to Bittensor", "Stake on Bittensor"]) expect(text, step).toContain(step);
+    expect(text).toContain("Sent from this browser. Confirming on Base…");
+    expect(text).toContain("Leaves Base with the next batch, then the bridge (usually 20–30 minutes)");
+    for (const gone of ["Submitted, confirming…", "not confirmed here yet", "these are the figures it was sent with"]) expect(text, gone).not.toContain(gone);
+    // the confirmed receipt's own row and words, an estimate said to be one
+    expect(text).toContain("TAO in this depositabout 0.1946 TAO");
     expect(h).toContain(`href="https://basescan.org/tx/${H(1)}"`);
     expect(h).toContain('href="/activity"');
   });
@@ -282,8 +287,14 @@ describe("a receipt opened before Activity has read it", () => {
     const h = card(sentUnstake());
     const text = plainText(h);
     expect(text).toContain("Your unstake of about $17.41");
-    expect(text).toContain("Submitted, confirming…");
-    expect(text).toContain("You will receiveabout 17.41 USDC");
+    expect(h).toMatch(/<ol[^>]*aria-label="Unstake steps"/);
+    for (const step of ["Request your unstake", "Unstake on Bittensor", "Return to Base", "USDC to your wallet"]) expect(text, step).toContain(step);
+    expect(text).toContain("Sent from this browser. Confirming on Base…");
+    // what is ahead, the safety wait first: on the receipt before anything is read from the chain
+    expect(text).toMatch(/Starts after a (24-hour )?safety wait on Bittensor/);
+    expect(text).toContain("Sold for USDC on Base and sent to your wallet automatically");
+    expect(text).not.toContain("Submitted, confirming…");
+    expect(text).toContain("You will receiveabout 17.41 USDC on Base");
     expect(h).toContain(`href="https://basescan.org/tx/${H(2)}"`);
     expect(h).toContain('href="/activity?tab=unstakes"');
   });
@@ -401,7 +412,7 @@ const inBatch = (over: Partial<DepositRecord> = {}): DepositRecord => ({
   steps: [
     { key: "swap", title: "Swap USDC for TAO", status: "done" },
     { key: "deposit", title: "Deposit into Cascade", status: "done" },
-    { key: "bridge", title: "Cross to Bittensor", status: "active", detail: "Waits for the batch to close, by about 8:00 AM tomorrow, then the bridge (usually 20–30 minutes)" },
+    { key: "bridge", title: "Cross to Bittensor", status: "active", detail: "On Base, waiting for the next batch. Leaves by about 8:00 AM tomorrow, then the bridge (usually 20–30 minutes)." },
     { key: "stake", title: "Stake on Bittensor", status: "pending" },
   ],
   cancellableWei: 10n ** 17n,
@@ -413,7 +424,7 @@ const unstakeInBatch = (over: Partial<WithdrawalRecord> = {}): WithdrawalRecord 
   unstake({
     steps: [
       { key: "request", title: "Request your unstake", status: "done" },
-      { key: "unstake", title: "Unstake on Bittensor", status: "active", detail: "Waits for the batch to close, by about 8:00 AM tomorrow, then the bridge" },
+      { key: "unstake", title: "Unstake on Bittensor", status: "active", detail: "On Base, waiting for the next batch. Leaves by about 8:00 AM tomorrow, then the bridge (usually 20–30 minutes)." },
       { key: "return", title: "Return to Base", status: "pending" },
       { key: "claim", title: "USDC to your wallet", status: "pending" },
     ],
@@ -469,11 +480,12 @@ describe("the receipt's two buttons while it waits in its open batch: Send it no
     // the batch not read yet (or its read failing): no block at all, and the cancel still there
     const unread = depositPage([]);
     alone(unread, "unread");
-    expect(plainText(unread)).not.toContain("Leaves");
+    // the box's own line ("Leaves in ..."); the step above it says when the batch leaves too
+    expect(plainText(unread)).not.toMatch(/Leaves (in |any moment|within )/);
     // the contracts don't match (the wiring check): Send it now shows nothing, the way out stays
     const blocked = depositPage([openBatch(), { key: ["wiring"], data: "mismatch" }]);
     alone(blocked, "blocked");
-    expect(plainText(blocked)).not.toContain("Leaves");
+    expect(plainText(blocked)).not.toMatch(/Leaves (in |any moment|within )/);
     expect(plainText(blocked)).not.toContain("Send it now");
     // v3-launch's front door paused: nothing to send, the cancel stays
     alone(depositPage([openBatch({ paused: true })]), "paused");
@@ -583,7 +595,7 @@ describe("after a cancel is sent from this browser, the receipt stops offering C
     expect(h).toMatch(new RegExp(`<div class="[^"]*_box_[^"]*" role="status"><p[^>]*>Cancelling your deposit…</p><p[^>]*><a href="${TX}"[^>]*>View the transaction`));
     // the trail's step, as a read of the chain will show it
     expect(text).toContain("Cross to BittensorCancelling…");
-    expect(text).not.toContain("Waits for the batch to close");
+    expect(text).not.toContain("waiting for the next batch");
   });
 
   it("confirmed before the scan catches up: shown as cancelled, its TAO back as TAO, not USDC, and neither button", () => {
@@ -594,7 +606,7 @@ describe("after a cancel is sent from this browser, the receipt stops offering C
     expect(text).toContain("Deposit cancelled.Your TAO is back in your wallet as TAO, not USDC. View the transaction");
     expect(h).toContain(`href="${TX}"`);
     expect(text).toContain("Cross to BittensorCancelled. Your TAO is back in your wallet as TAO, not USDC");
-    for (const gone of ["Send it now", "Leaves in", "Cancel deposit", "Cancelling", "Waits for the batch to close"]) expect(text, gone).not.toContain(gone);
+    for (const gone of ["Send it now", "Leaves in", "Cancel deposit", "Cancelling", "waiting for the next batch"]) expect(text, gone).not.toContain(gone);
     // a read from a node behind the cancel's block, which says that same cancel failed and offers it again: within the
     // cancel's ten minutes the read is taken to be behind, and it is still cancelled
     const lagging = depositPage(stale, data(), inBatch({ cancelSeen: CANCEL }));
@@ -616,7 +628,7 @@ describe("after a cancel is sent from this browser, the receipt stops offering C
     expect(allButtons(refused)).toEqual(["Send it now: about $1.74", "Cancel deposit"]);
     const text = plainText(refused);
     for (const gone of ["Deposit cancelled", "Cancelled.", "Cancelling"]) expect(text, gone).not.toContain(gone);
-    expect(text).toContain("Waits for the batch to close");
+    expect(text).toContain("waiting for the next batch");
     // the same mark on a read that knows of no cancel (made before it), or only of another: still cancelled, however old
     for (const read of [inBatch(), inBatch({ cancelSeen: H(0xee) })]) {
       const stillStale = depositPage(stale, withOps(depositOp({ cancelled: old })), read);

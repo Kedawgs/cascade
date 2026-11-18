@@ -19,6 +19,26 @@
   margin-top: 30px;
 }
 
+/* a short numbered list under a section's line (Unstake's emergency way out): the line's own size and colour */
+.steps {
+  margin: 8px 0 0;
+  padding-left: 22px;
+  /* the site's reset takes a list's numbers away: these are steps, in order */
+  list-style: decimal;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.steps li + li {
+  margin-top: 2px;
+}
+
+/* a section of several ways, one to a paragraph: room between them */
+.ways > p + p {
+  margin-top: 12px;
+}
+
 .secHead {
   display: flex;
   justify-content: space-between;

@@ -36,8 +36,16 @@ export const BITTENSOR_WALLET_CHAIN = {
 
 export const DIRECT_EXIT_TITLE = "Withdraw on Bittensor";
 export const DIRECT_EXIT_SUB = "An emergency way out: your stake as TAO, straight from the vault to this address on Bittensor.";
-/** Unstake's other ways out: after the page's link, "Withdraw on Bittensor". */
-export const OTHER_WAYS_OUT = "for emergencies, your stake as TAO straight from the vault, without Base.";
+/** Unstake's other ways out: after the page's link, "Withdraw on Bittensor"; and its steps under that. Reworded
+ * 2026-11-18 (the founder: "worded better and have more clear steps"): what it is for, where the TAO ends up (this
+ * same address, on Bittensor, not Base), and what the person does, the fee's TAO first since nothing works without it. */
+export const OTHER_WAYS_OUT =
+  "for emergencies, when Base or the bridge can't be used. You unstake straight from the vault, and your TAO arrives at this same wallet address on the Bittensor network, not on Base.";
+export const OTHER_WAYS_STEPS = [
+  "Have about 0.02 TAO at this address on Bittensor for the network fee.",
+  "Open the page: your wallet switches to the Bittensor network.",
+  "Withdraw. Your TAO lands in your wallet on Bittensor.",
+] as const;
 /** The order of magnitude of the withdrawal's least gas limit at today's price (exitGasFloor: about 0.015 TAO with the
  * launch's two hotkeys at 6 gwei, about 0.02 with four); the page's hold gives the exact figure (review of d33c4b5, M3). */
 export const GAS_NOTE = "Network fees on Bittensor are paid in TAO, so this address needs about 0.02 TAO there, most of it not spent.";

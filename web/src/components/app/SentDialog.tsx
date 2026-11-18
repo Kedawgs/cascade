@@ -8,7 +8,7 @@ import { type PanelNotice, sentCopy, sentTiming, type SentTiming } from "@/lib/s
 import styles from "./SentDialog.module.css";
 
 /** The deployment's timing, or none when the site isn't connected to one. */
-function useSentTiming(): SentTiming {
+export function useSentTiming(): SentTiming {
   const data = useCascadeData();
   const v3 = useIsV3();
   try {

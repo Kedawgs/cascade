@@ -7,10 +7,10 @@ import { useBatchMaxWait, useOpenBatch, useRetired } from "@/lib/cascade/hooks";
 import type { Operation } from "@/lib/cascade/oplog";
 import { useFlows } from "@/lib/cascade/use-flows";
 import { useNow } from "@/lib/client-state";
-import { closeSentFromHere, sendNowHeldByDeposit, sendNowOffered, type SendNowView, sendNowView } from "@/lib/send-now";
+import { closeSentFromHere, sendNowHeldByDeposit, sendNowKeepsWait, sendNowOffered, type SendNowView, sendNowView } from "@/lib/send-now";
 import { batchNotice, type PanelNotice } from "@/lib/sent";
 import { ReceiptLink } from "../ReceiptLink";
-import { SentDialog } from "./SentDialog";
+import { SentDialog, useSentTiming } from "./SentDialog";
 import styles from "./SendItNow.module.css";
 
 /** This browser's records, or none where there is no deployment. */
@@ -56,6 +56,7 @@ export function SendItNow({
   // a countdown in minutes: a re-render of this small box every half minute is plenty
   const now = useNow(30_000);
   const [sent, setSent] = useState<PanelNotice | null>(null);
+  const keepsWait = sendNowKeepsWait(useSentTiming().payoutDelayS);
 
   const b = batch.data;
   const sending = b ? closeSentFromHere(opsOf(data, account), b.id, now) : undefined;
@@ -106,6 +107,8 @@ export function SendItNow({
             </div>
           )}
           {button && <p className={styles.note}>{button.note}</p>}
+          {/* an unstake sent early still waits out the safety wait on Bittensor: said where the button is */}
+          {button && what === "unstake" && keepsWait && <p className={styles.note}>{keepsWait}</p>}
           {button?.warning && <p className={styles.warning}>{button.warning}</p>}
           {view && flows.error && (
             <p role="alert" className={styles.error}>

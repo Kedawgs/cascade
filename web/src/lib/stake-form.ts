@@ -1,6 +1,6 @@
 import { formatUnits, parseUnits } from "viem";
 import { DELIVERY_TOLERANCE_BPS } from "./cascade/config";
-import { type DeliveryLimit, deliverableRefusal, LIMIT_UNREAD, limitText, RECEIVE_TAO_POINTER, roomTaoWei, WAITING_UNKNOWN, waitingText } from "./cascade/delivery-limit";
+import { type DeliveryLimit, deliverableRefusal, LIMIT_UNREAD, limitText, RECEIVE_TAO_POINTER, roomTaoWei, saysReceiveTao, WAITING_UNKNOWN, waitingText } from "./cascade/delivery-limit";
 import { CLAIM_TAO_NOW, type StakeRoom } from "./cascade/flows";
 import { impactNote } from "./cascade/impact";
 import type { Available, DepositQuote, Limits, Position, RoundTripCosts, StakeProof, WithdrawalQuote, WithdrawalRecord } from "./cascade/types";
@@ -354,11 +354,16 @@ export function maxUnstakeInput(taoWei: bigint): string {
   return formatUnits(floored, 18);
 }
 
-export function unstakeButtonLabel(s: StakeState): string {
+/** The unstake form's button. In the TAO view (`asTao`: the person's choice, or USDC delivery off) it says what the
+ * request is, "Receive ... TAO", never the USDC view's "Unstake ...": the two views' buttons can't be taken for each
+ * other (review of f9c59861, finding 6). */
+export function unstakeButtonLabel(s: StakeState, x: { asTao?: boolean } = {}): string {
   if (!s.account) return "Connect wallet";
   if (s.pending) return "Confirm in your wallet…";
-  if (s.amount !== null && s.amount > 0 && s.error === null) {
-    return s.usd !== undefined ? `Unstake ${formatUsd(s.usd)}` : `Unstake ${taoLabel.format(floorTo(s.amount, 6))} TAO`;
+  const ok = s.amount !== null && s.amount > 0 && s.error === null;
+  if (x.asTao) return ok ? `Receive ${taoLabel.format(floorTo(s.amount as number, 6))} TAO` : "Receive TAO";
+  if (ok) {
+    return s.usd !== undefined ? `Unstake ${formatUsd(s.usd)}` : `Unstake ${taoLabel.format(floorTo(s.amount as number, 6))} TAO`;
   }
   return "Unstake";
 }
@@ -465,16 +470,18 @@ function oneUnstakeText(mostWei: bigint, unit: UnstakeUnit, priceUsd: number): s
 }
 
 /** The line under the unstake field: how much can go and the minimum (`minWei`, the deployment's, always given),
- * in the unit shown. A stake larger than one unstake can carry (`mostWei`) says so instead. */
+ * in the unit shown and in that unit alone: typing dollars, the minimum is in dollars; its TAO figure shows once the
+ * field is switched to TAO (the founder, 2026-11-18: beside a dollar field, "(0.033 TAO)" read as the amount to
+ * type). A stake larger than one unstake can carry (`mostWei`) says so instead. */
 export function unstakeNote(availableWei: bigint, unit: UnstakeUnit, priceUsd: number, mostWei: bigint | undefined, minWei: bigint): string {
   const minTao = minUnstakeText(minWei);
   if (availableWei >= minWei && entryFull(availableWei, mostWei, minWei)) return `${ENTRY_FULL_TEXT}.`;
   if (mostWei !== undefined && availableWei > mostWei) {
-    const min = unit === "USDC" && priceUsd > 0 ? `${MIN_USD(priceUsd, minWei)} (${minTao})` : minTao;
+    const min = unit === "USDC" && priceUsd > 0 ? MIN_USD(priceUsd, minWei) : minTao;
     return `${oneUnstakeText(mostWei, unit, priceUsd)}. The minimum is ${min}.`;
   }
   if (unit === "USDC" && priceUsd > 0) {
-    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd, minWei)} (${minTao}).`;
+    return `You can unstake up to ${usdDown(availableWei, priceUsd)}. The minimum is ${MIN_USD(priceUsd, minWei)}.`;
   }
   return `You can unstake up to ${maxUnstakeInput(availableWei)} TAO. The minimum is ${minTao}.`;
 }
@@ -516,18 +523,17 @@ export function unstakeErrorText(
   minWei: bigint,
 ): string {
   if (unit !== "USDC" || !(priceUsd > 0)) return check.reason;
-  const minTao = minUnstakeText(minWei);
   switch (check.code) {
     case "overEntry":
       return mostWei !== undefined ? `${oneUnstakeText(mostWei, unit, priceUsd)}.` : check.reason;
     case "tooMuch":
       return `That's more than you can unstake (up to ${usdDown(availableWei, priceUsd)}).`;
     case "belowMin":
-      return `The minimum unstake is ${MIN_USD(priceUsd, minWei)} (${minTao}).`;
+      return `The minimum unstake is ${MIN_USD(priceUsd, minWei)}.`;
     case "leavesDust":
       return `That would leave less than ${MIN_USD(priceUsd, minWei)} staked, too little to unstake later.`;
     case "stakeBelowMin":
-      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd, minWei)} (${minTao}).`;
+      return `Your stake is below the minimum unstake of ${MIN_USD(priceUsd, minWei)}.`;
     default:
       return check.reason;
   }
@@ -566,9 +572,21 @@ export function unstakeEtaText(minutes: number): string {
 
 /** The way out that sells nothing: v3.2's unstake as TAO, claimed on Base by hand (use-flows.ts receiveTao). The front
  * door keeps one delivery preference per account and deliver sells everything credited to it, so a later USDC request
- * would sell this TAO too (Task 59a review, C1; the controller's words). */
+ * would sell this TAO too (Task 59a review, C1).
+ * It is no longer a second button under the form (the founder, 2026-11-18: "I dont think we need all this ... it maybe
+ * should just be a link in other ways out"): it is the form itself, switched to TAO from a link under "Other ways
+ * out" (AS_TAO_LINK), and from RECEIVE_TAO_LABEL right where a USDC unstake is refused, so the way out that needs no
+ * sale is one step away whenever the sale can't go. Switched, the form is the one USDC delivery off shows: one
+ * button, Receive TAO's. */
 export const RECEIVE_TAO_LABEL = "Receive TAO instead";
-export const RECEIVE_TAO_NOTE = "Nothing is sold: your TAO comes back to Base for you to claim. A later USDC unstake would sell it too.";
+/** Unstake's other ways out: the link that switches the form to TAO, and what follows it. */
+export const AS_TAO_LINK = "Receive TAO instead of USDC";
+export const AS_TAO_NOTE = "nothing is sold; your TAO comes back to Base for you to claim.";
+/** The same place once the form is switched to TAO: the way back. */
+export const AS_USDC_LINK = "Unstake to USDC";
+export const AS_USDC_NOTE = "your TAO is sold on Base and the USDC is sent to your wallet.";
+/** Under the switched form's button: the way back, beside it. */
+export const BACK_TO_USDC_LABEL = "Unstake to USDC instead";
 /** The same with USDC delivery off (Task 60): no USDC unstake is offered, so nothing later would sell it. */
 export const RECEIVE_TAO_NOTE_OFF = "Nothing is sold: your TAO comes back to Base for you to claim.";
 /** Receiving TAO clears the account's USDC delivery preference (flows.ts receiveTaoCall), as a claim does. */
@@ -577,7 +595,7 @@ export const RECEIVE_ENDS_DELIVERY = "This also turns off automatic USDC deliver
  * USDC unstake's sale goes, what a later USDC unstake does to TAO received now, and the daily limit sit under one
  * heading, closed until asked for. What decides or refuses a click stays in the open. */
 export const UNSTAKE_MORE_LABEL = "How unstaking works";
-export const RECEIVE_TAO_LATER = "If you receive TAO, a later USDC unstake would sell that TAO too.";
+export const RECEIVE_TAO_LATER = "If this TAO is still waiting to be claimed when you next unstake to USDC, it is sold too.";
 
 /** The Unstake page's heading. v3-launch's says USDC, its one way out; v3.2's fits both, USDC and Receive TAO (Task 59a
  * review, M9), and with USDC delivery off (Task 60) only TAO. */
@@ -692,6 +710,46 @@ export function unstakeActions(x: {
     },
   };
 }
+
+/** The Unstake page's choice of TAO: offered only where there are two ways (v3.2 with USDC delivery on), and taken
+ * only where offered, so a choice made earlier can never leave a form on TAO that has no way back. */
+export const taoChoice = (x: { v32: boolean; usdcDelivery: boolean; asTao: boolean }): { offered: boolean; asTao: boolean } => {
+  const offered = x.v32 && x.usdcDelivery;
+  return { offered, asTao: offered && x.asTao };
+};
+
+/** Whether the USDC form shows the switch to TAO: a USDC unstake is what the form offers (`taoOnly` false), there is a
+ * switch (`canSwitch`), and the USDC unstake can't go while the TAO one could:
+ * - one of its lines refuses it (the limit, the price impact, the limit unread);
+ * - it was refused at the click in words that point to TAO (the pointer flows.ts adds, or a limit refusal's own:
+ *   saysReceiveTao, the one test both use);
+ * - its quote failed (`quoteFailed`: the price can't be read, say), or its limit isn't read yet (`limitUnread`), with
+ *   an amount the TAO unstake would take: the USDC button is off and nothing else says why not TAO.
+ * Never otherwise: a form that can send shows its one button (review of f9c59861, findings 2 and 3). */
+export const offersTao = (
+  a: Pick<UnstakeActions, "notes" | "tao" | "usdc">,
+  x: { taoOnly: boolean; canSwitch: boolean; flowError: string | null | undefined; quoteFailed: boolean; limitUnread: boolean },
+): boolean =>
+  !x.taoOnly &&
+  x.canSwitch &&
+  a.tao.offered &&
+  (a.notes.some((n) => n.refused) || saysReceiveTao(x.flowError) || (a.tao.enabled && !a.usdc && (x.quoteFailed || x.limitUnread)));
+
+/** What the form's one submit sends, decided in one place: in the TAO view (the person's choice, or USDC delivery
+ * off) the TAO unstake, nothing sold; in the USDC view the USDC unstake; or nothing, when that view's own request
+ * can't go. Never the other view's (review of f9c59861, G). Both are off while any request is pending: `usdc` and
+ * `tao.enabled` are (unstakeActions). */
+export const unstakeSubmit = (x: {
+  taoOnly: boolean;
+  hasAccount: boolean;
+  hasQuote: boolean;
+  hasRequest: boolean;
+  actions: Pick<UnstakeActions, "usdc" | "tao">;
+}): "receiveTao" | "unstake" | null => {
+  if (!x.hasAccount) return null;
+  if (x.taoOnly) return x.hasRequest && x.actions.tao.enabled ? "receiveTao" : null;
+  return x.hasQuote && x.actions.usdc ? "unstake" : null;
+};
 
 /** One claim button's label: "Confirm in your wallet…" on the one pressed (`pressed`, its `keepTao`) while its claim
  * runs, never on another (Task 59a re-review, N2); its own label otherwise. */

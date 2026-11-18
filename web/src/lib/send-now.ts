@@ -93,6 +93,15 @@ const usdUp = (n: number) => formatUsd(Math.ceil(Math.round(n * 1e6) / 1e4) / 10
 /** Dollars to the nearest cent, "under $0.01" below half a cent: never "$0.00" for an amount that isn't nothing. */
 const usdNear = (n: number) => (n > 0 && n < 0.005 ? "under $0.01" : formatUsd(n));
 
+/** Under an unstake's Send it now: what sending the batch early does not shorten (the founder, 2026-11-18: "it should
+ * be clear that they still need to wait the 24h protection"). The deployment's safety wait when the site knows it;
+ * nothing on a deployment without one. */
+export function sendNowKeepsWait(payoutDelayS: number | undefined): string | null {
+  if (payoutDelayS === 0) return null;
+  const wait = payoutDelayS === undefined ? "The safety wait" : `The ${Math.round(payoutDelayS / 3600)}-hour safety wait`;
+  return `Sending it now skips only the wait for the batch. ${wait} on Bittensor still applies.`;
+}
+
 /** An ETH amount in words: "$1.74 in ETH" at the price read ("under $0.01 in ETH" for a tiny one), or
  * "0.000745 ETH" without a price. */
 export function inEth(wei: bigint, ethPriceUsd?: number): string {

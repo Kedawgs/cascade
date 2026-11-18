@@ -1,13 +1,15 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { type FormEvent, type RefObject, useId, useRef, useState } from "react";
+import { type FormEvent, type RefObject, useEffect, useId, useRef, useState } from "react";
 import { formatEther } from "viem";
 import { useNow } from "@/lib/client-state";
 import { liveChains } from "@/lib/cascade/chains";
 import { shownExitHold, unstakeHoldLines } from "@/lib/cascade/exit-hold";
 import { NOTHING_STAKED_HERE } from "@/lib/cascade/flows";
 import {
+  cascadeKeys,
   useAvailable,
   useBalances,
   useDeliveryLimit,
@@ -49,11 +51,14 @@ import {
   UNSTAKE_WINDOW_NOTE,
   type UnstakeUnit,
   RECEIVE_ENDS_DELIVERY,
+  BACK_TO_USDC_LABEL,
   RECEIVE_TAO_LABEL,
   RECEIVE_TAO_LATER,
   RECEIVE_TAO_NOTE_OFF,
+  offersTao,
   shownUnstakeUnit,
   unstakeActions,
+  unstakeSubmit,
 } from "@/lib/stake-form";
 import { ConnectWallet } from "../ConnectWallet";
 import { LoadError } from "../LoadError";
@@ -66,15 +71,34 @@ const GAS_WEI = 3n * 10n ** 13n;
 
 /** The unstake form: the amount typed in TAO or as its USDC value, a USDC estimate out. An unstake that
  * goes through is confirmed in a panel, held here so the refresh after it (which may change what the form
- * shows) can't take the panel away. */
-export function UnstakeForm({ account }: { account: string | null }) {
+ * shows) can't take the panel away.
+ * `asTao` is the person's own choice of TAO (Unstake's other ways out): the form USDC delivery off shows, one button,
+ * Receive TAO's, nothing sold. `onAsTao` switches it (absent where there is no choice: not v3.2, or USDC delivery off).
+ * Each choice is its own form body (a `key` on it), so an amount typed in dollars is never read as TAO; the panel
+ * that confirms a request, and where it is recorded, stay here above that key, so a switch can never lose them. The
+ * switch itself is refused while any request runs (the page's `onAsTao`, and each link-button here). After a switch
+ * the caret goes to the new body's amount, once. */
+export function UnstakeForm({ account, asTao = false, onAsTao }: { account: string | null; asTao?: boolean; onAsTao?: (asTao: boolean) => void }) {
   const [sent, setSent] = useState<SentNotice | null>(null);
   // the amount input: where focus goes when the panel closes
   const amountRef = useRef<HTMLInputElement>(null);
-  const sending: Sending = { onSent: setSent, amountRef };
+  const sending: Sending = { onSent: setSent, amountRef, asTao, onAsTao };
+  // switched: the caret to the new body's amount (which also brings it into view); once per switch, never on a later
+  // remount of the body (a reload after an error, a wallet connecting)
+  const shown = useRef(asTao);
+  useEffect(() => {
+    if (shown.current === asTao) return;
+    shown.current = asTao;
+    amountRef.current?.focus();
+  }, [asTao]);
+  const body = asTao ? "tao" : "usdc";
   return (
     <>
-      {account ? <UnstakeWithBalance account={account} {...sending} /> : <UnstakeFormBody account={null} position={null} {...sending} />}
+      {account ? (
+        <UnstakeWithBalance key={body} account={account} {...sending} />
+      ) : (
+        <UnstakeFormBody key={body} account={null} position={null} {...sending} />
+      )}
       <SentDialog notice={sent} onClose={() => setSent(null)} returnFocus={amountRef} />
     </>
   );
@@ -84,6 +108,9 @@ export function UnstakeForm({ account }: { account: string | null }) {
 interface Sending {
   onSent: (n: SentNotice) => void;
   amountRef: RefObject<HTMLInputElement | null>;
+  /** The person chose TAO; how to switch (absent: no choice to offer). */
+  asTao: boolean;
+  onAsTao: ((asTao: boolean) => void) | undefined;
 }
 
 function UnstakeWithBalance({ account, ...sending }: { account: string } & Sending) {
@@ -132,6 +159,8 @@ function UnstakeFormBody({
   position,
   onSent,
   amountRef,
+  asTao,
+  onAsTao,
 }: {
   account: string | null;
   position: (Position & Available) | null;
@@ -140,7 +169,9 @@ function UnstakeFormBody({
   const v32 = useIsV32();
   // v3.2's switch (Task 60, spec §5): with USDC delivery off no USDC unstake is offered, and Receive TAO is the one way
   // out, as the form's own button (it is never off on any other deployment: config.usdcDeliveryOn)
-  const usdcDelivery = useUsdcDelivery();
+  const deliveryOn = useUsdcDelivery();
+  // the person's own choice of TAO is that same form: everything below reads one answer, "is a USDC unstake offered"
+  const usdcDelivery = deliveryOn && !asTao;
   const taoOnly = v32 && !usdcDelivery;
   // the deployment's own minimum: v3.2's 0.033 TAO, v3-launch's 0.011 TAO
   const minWei = useMinUnstakeWei();
@@ -164,6 +195,7 @@ function UnstakeFormBody({
   // v3.2 (R4): what holds a Base unstake now: the bridge unable to send payouts, shares less than a day old, today's limit
   const exitHold = useExitHold(v32 ? account : null);
   const now = useNow(60_000);
+  const queryClient = useQueryClient();
   const inputId = useId();
   const noteId = useId();
 
@@ -224,7 +256,7 @@ function UnstakeFormBody({
     error,
     // with USDC delivery off the one button is Receive TAO's
     pending: pending && (taoOnly ? receiving : !receiving),
-  });
+  }, { asTao: taoOnly });
 
   /** MAX: the whole stake, or as much as one unstake can carry (pinned exactly, so a unit switch or the
    * price can't move it past the limit). */
@@ -258,12 +290,17 @@ function UnstakeFormBody({
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    // USDC delivery off: the form's one button asks for TAO, nothing sold
-    if (taoOnly) return onReceiveTao();
-    if (!account || !quote || !actions.usdc) return;
+    // one decision for what this view's button sends (stake-form.ts unstakeSubmit): the TAO view asks for TAO, nothing
+    // sold; the USDC view the USDC unstake; never the other's
+    const send = unstakeSubmit({ taoOnly, hasAccount: account !== null, hasQuote: quote !== undefined, hasRequest: shares !== null && request !== null, actions });
+    if (send === "receiveTao") return onReceiveTao();
+    if (send !== "unstake" || !account || !quote) return;
     setOpId(null);
     flows.unstake(quote, setOpId).then(
       (id) => {
+        // a USDC unstake sets the account's delivery preference: an answer read before it (the TAO view's "none set")
+        // is no longer true, and must not hide what Receive TAO would end (review of f9c59861, finding 5)
+        queryClient.setQueryData(cascadeKeys.deliveryPreference(account), true);
         cleared();
         onSent(unstakeNotice(id, quote));
       },
@@ -377,8 +414,16 @@ function UnstakeFormBody({
           {actions.tao.endsDelivery ? ` ${RECEIVE_ENDS_DELIVERY}` : ""}
         </p>
       )}
-      {/* v3.2: the USDC unstake's price impact and the live delivery limit, each a note or why it is refused, and how its
-          sale goes; then any refusal at the click, and Receive TAO right there, open whatever held the USDC one */}
+      {/* TAO by the person's own choice: the way back, beside the button */}
+      {taoOnly && deliveryOn && onAsTao && (
+        <p className={styles.under}>
+          <button type="button" className="link" disabled={flows.busy !== null} onClick={() => onAsTao(false)}>
+            {BACK_TO_USDC_LABEL}
+          </button>
+        </p>
+      )}
+      {/* v3.2: the USDC unstake's price impact and the live delivery limit, each a note or why it is refused; then any
+          refusal at the click; and where the USDC unstake is refused, the switch to TAO right there */}
       {actions.notes.map((n) => (
         <p key={n.text} role={n.refused ? "status" : undefined} className={n.refused ? styles.error : styles.note}>
           {n.text}
@@ -386,26 +431,28 @@ function UnstakeFormBody({
       ))}
       {v32 && !taoOnly && <p className={styles.under}>{deliveryNote(quote ? deliveryFloorUsd(quote) : null)}</p>}
       {v32 && alert}
-      {actions.tao.offered && !taoOnly && (
-        <>
-          <button type="button" className="pill pill-ghost pill-block" disabled={!actions.tao.enabled} onClick={onReceiveTao}>
-            {pending && receiving ? "Confirm in your wallet…" : RECEIVE_TAO_LABEL}
+      {offersTao(actions, {
+        taoOnly,
+        canSwitch: onAsTao !== undefined,
+        flowError: flows.error,
+        quoteFailed: quoteQuery.isError && shares !== null,
+        limitUnread: limit.data === undefined && !limit.isError,
+      }) && (
+        <p className={styles.under}>
+          <button type="button" className="link" disabled={flows.busy !== null} onClick={() => onAsTao?.(true)}>
+            {RECEIVE_TAO_LABEL}
           </button>
-          <p className={styles.under}>
-            {RECEIVE_TAO_NOTE_OFF}
-            {actions.tao.endsDelivery ? ` ${RECEIVE_ENDS_DELIVERY}` : ""}
-          </p>
-        </>
+        </p>
       )}
       {v3 && !v32 && <p className={styles.under}>{deliveryNote(quote ? deliveryFloorUsd(quote) : null)}</p>}
       {/* v3.2: the explanations nobody needs to press a button, folded away (closed until asked for): how the USDC
-          sale goes, what a later USDC unstake does to TAO received now, the daily limit */}
+          sale goes, or for TAO taken by choice what a later USDC unstake does to it; the daily limit */}
       {v32 && (
         <details className={styles.more}>
           <summary>{UNSTAKE_MORE_LABEL}</summary>
           <ul>
             {!taoOnly && <li>{deliveryLaterText(quote?.etaMinutes)}</li>}
-            {!taoOnly && <li>{RECEIVE_TAO_LATER}</li>}
+            {taoOnly && deliveryOn && <li>{RECEIVE_TAO_LATER}</li>}
             <li>{UNSTAKE_WINDOW_NOTE}</li>
           </ul>
         </details>

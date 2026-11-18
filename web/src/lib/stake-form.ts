@@ -699,9 +699,14 @@ export function unstakeActions(x: {
   // founder, 2026-11-18, twice). Unknown or off, the line stays: it is what tells someone who asked for TAO that this
   // request would sell it.
   const alreadyUsdc = !x.limit.isError && x.limit.data?.preferenceSet === true;
+  // ...and not while the read is still on its way: "not read yet" is not "unknown". Said then, the line flashed up and
+  // went again for everyone whose earlier unstakes were USDC ones (the founder, 2026-11-18). Nothing is lost by
+  // waiting: the USDC button is off until the read arrives (limitRefused above), so no USDC unstake can be sent
+  // before the line, where it applies, is on screen. A read that failed still says it.
+  const limitLoading = !x.limit.isError && x.limit.data === undefined;
   return {
     usdc: usdcBase && !impact?.refused && !limitRefused,
-    warning: x.account === null || alreadyUsdc ? null : !known ? WAITING_UNKNOWN : waiting > 0n ? waitingText(waiting) : null,
+    warning: x.account === null || alreadyUsdc || limitLoading ? null : !known ? WAITING_UNKNOWN : waiting > 0n ? waitingText(waiting) : null,
     notes,
     tao: {
       offered: x.account !== null,

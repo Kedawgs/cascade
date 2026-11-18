@@ -881,8 +881,12 @@ describe("v3.2's unstake form: what each way out offers right now", () => {
       expect(a.warning).toBe(WAITING_UNKNOWN);
       expect(a.usdc).toBe(true);
     }
-    // not read yet, or the read failed (USDC then refused as unreadable, Receive TAO on): the same line
-    expect(unstakeActions({ ...ready, limit: { isError: false } }).warning).toBe(WAITING_UNKNOWN);
+    // not read yet: nothing said yet (the line no longer flashes up while the page loads), and what protects the TAO
+    // meanwhile is the USDC button itself, off until the read arrives
+    const notRead = unstakeActions({ ...ready, limit: { isError: false } });
+    expect(notRead.warning).toBeNull();
+    expect(notRead.usdc).toBe(false);
+    // the read failed (USDC then refused as unreadable, Receive TAO on): the standing line
     const unread = unstakeActions({ ...ready, limit: { data: { ...LIMIT, waitingTaoWei: 7n * 10n ** 17n }, isError: true } });
     expect(unread).toMatchObject({ usdc: false, warning: WAITING_UNKNOWN, notes: [{ text: LIMIT_UNREAD, refused: true }] });
     expect(unread.tao.enabled).toBe(true);
@@ -967,7 +971,13 @@ describe("v3.2's unstake form: what each way out offers right now", () => {
     expect(unstakeActions({ ...ready, limit: { data: { ...waiting, preferenceSet: false }, isError: false } }).warning).toBe("Your 0.0399 TAO from earlier unstakes will be sold for USDC too.");
     // not everything read, the preference off or unread: the standing line stays (it fails towards saying it)
     expect(unstakeActions({ ...ready, limit: { data: { ...waiting, waitingComplete: false, preferenceSet: false }, isError: false } }).warning).toBe(WAITING_UNKNOWN);
-    expect(unstakeActions({ ...ready, limit: { data: undefined, isError: false } }).warning).toBe(WAITING_UNKNOWN);
+    // the read still on its way: nothing yet (no line flashing up and going again), and no USDC unstake can be sent
+    // meanwhile, so nothing is sold before the line, where it applies, is on screen
+    const loading = unstakeActions({ ...ready, limit: { data: undefined, isError: false } });
+    expect(loading.warning).toBeNull();
+    expect(loading.usdc).toBe(false);
+    // the read failed: the standing line, as before
+    expect(unstakeActions({ ...ready, limit: { data: undefined, isError: true } }).warning).toBe(WAITING_UNKNOWN);
     expect(unstakeActions({ ...ready, limit: { data: { ...waiting, preferenceSet: true }, isError: true } }).warning).toBe(WAITING_UNKNOWN);
     // the preference on and the figure not complete yet: still nothing new to say
     expect(unstakeActions({ ...ready, limit: { data: { ...waiting, waitingComplete: false, preferenceSet: true }, isError: false } }).warning).toBeNull();

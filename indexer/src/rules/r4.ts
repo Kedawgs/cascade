@@ -216,7 +216,15 @@ export const batchCancelChurn: Rule = {
  * them: Cascade's bridge messages still crossing (a batch closed and not arrived, a payout sent and not landed) and the
  * Bittensor adapters' parks (R4-O's fix round, Minor 7: a batch over 1 TAO in flight or parked fired it). Direct exits on
  * Bittensor (redeemDirect) take TAO out without lowering it, so the cap fills with TAO that has left. An adapter's parks
- * unread: unjudged. */
+ * unread: unjudged.
+ * A batch just closed is between the chains too, before its message is: a close raises netForwarded in the very reading
+ * it lands in, while its bridge message reaches ctx.messages only once the scan has settled the close's block (its
+ * re-read and settle margins, minutes behind the head). For those readings the batch was in neither the vault, nor the
+ * crossing messages, nor a park, and read as "left" (the launch's second batch, 01:34 UTC on 2026-11-17: one false
+ * warning). So what netForwarded rose by over the last CLOSE_LAG_READINGS readings, less what of it the messages
+ * already show crossing to Bittensor from that time on, counts as between the chains. A real gap is found at most
+ * that many readings later. */
+export const CLOSE_LAG_READINGS = 5;
 export const capExitsConsumed: Rule = {
   name: "cap.exits_consumed",
   run(ctx) {
@@ -233,7 +241,17 @@ export const capExitsConsumed: Rule = {
     }
     // a parked batch's message is counted in its adapter's parks, not here (messageOutcome "parked")
     const crossing = ctx.messages.filter((m) => messageOutcome(ctx, m) === "pending").reduce((x, m) => x + BigInt(m.amount), 0n);
-    const between = assets + crossing + parked;
+    // what the closes of the last few readings added and the messages don't show yet (the comment above)
+    const past = ctx.history.base[Math.min(CLOSE_LAG_READINGS, ctx.history.base.length) - 1];
+    let closing = 0n;
+    if (past?.state.netForwarded !== undefined && s.netForwarded > past.state.netForwarded) {
+      const added = s.netForwarded - past.state.netForwarded;
+      const seen = ctx.messages
+        .filter((m) => m.direction === "base>bittensor" && m.srcTime >= past.time && messageOutcome(ctx, m) === "pending")
+        .reduce((x, m) => x + BigInt(m.amount), 0n);
+      if (added > seen) closing = added - seen;
+    }
+    const between = assets + crossing + parked + closing;
     const gap = s.netForwarded > between ? s.netForwarded - between : 0n;
     if (gap < ctx.t.capExitsGapWei) return [];
     return one("cap.exits_consumed", "cap.exits_consumed", `The deposit cap counts ${tao(gap)} that has left the vault`, {
@@ -241,6 +259,7 @@ export const capExitsConsumed: Rule = {
       "the vault's assets": tao(assets),
       "crossing between the chains": tao(crossing),
       "parked on the Bittensor adapters": tao(parked),
+      ...(closing > 0n ? { "closed in the last few readings, its message not read yet": tao(closing) } : {}),
       "deposit cap": s.depositCap === undefined ? "not read" : tao(s.depositCap),
     });
   },

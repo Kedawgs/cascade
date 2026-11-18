@@ -97,7 +97,7 @@ describe("SecurityPage", () => {
   it("shows how the money is protected, with the home page's points", () => {
     const t = text(healthy());
     expect(t).toContain("How your money is protected");
-    expect(t).toContain("Your TAO sits in an open-source contract anyone can read. Sending it anywhere new takes 7 days' public notice.");
+    expect(t).toContain("Your TAO sits in an open-source contract anyone can read. Sensitive changes are timelocked: 48 hours for settings, 7 days for a new bridge or front door.");
     for (const point of ["Verifiable on-chain", "Open source", "Independent audit", "Built on Chainlink CCIP"]) expect(t).toContain(point);
     // the bridge's live figures are in the map above the grid
     expect(t).toContain("Your TAO crosses chains over Chainlink's CCIP bridge. Its limits and anything in transit are shown above.");

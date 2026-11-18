@@ -1,14 +1,19 @@
 import Link from "next/link";
 import { DEPLOYMENT, sourcePublished, type Stage, wordingStage } from "@/lib/cascade/config";
+import { FAQ_FACTS } from "@/lib/faq";
 import { auditCard } from "@/lib/landing";
 import { AUDIT_STATUS, SITE_LINKS } from "@/lib/site";
 import styles from "./Landing.module.css";
 
+/** How long a sensitive change waits in public, from the contracts' own delays (FAQ_FACTS: the owner's timelock for a
+ * setting that loosens a protection, the registry's delay for a new bridge or front door). The founder's words for it
+ * (2026-11-18): the old sentence, "Sending it anywhere new takes 7 days' public notice", read as a threat. */
+export const TIMELOCK_NOTE = `Sensitive changes are timelocked: ${FAQ_FACTS.timelockH} hours for settings, ${FAQ_FACTS.registryDelayDays} days for a new bridge or front door.`;
 /** The promise both the home page and /security lead their protection points with. */
-export const PROTECTION_LEDE = "Your TAO sits in an open-source contract anyone can read. Sending it anywhere new takes 7 days' public notice.";
+export const PROTECTION_LEDE = `Your TAO sits in an open-source contract anyone can read. ${TIMELOCK_NOTE}`;
 /** The same promise while the deployment's contract source isn't published yet (deployments.json `sourcePublished`:
  * false): nothing is called open source before the code is there to read. */
-export const PROTECTION_LEDE_UNPUBLISHED = "Your TAO sits in a contract with hard limits written into its code. Sending it anywhere new takes 7 days' public notice.";
+export const PROTECTION_LEDE_UNPUBLISHED = `Your TAO sits in a contract with hard limits written into its code. ${TIMELOCK_NOTE}`;
 /** The lede for the deployment the site is built for, by whether its source is published. */
 export const protectionLede = (published: boolean = sourcePublished(DEPLOYMENT)): string => (published ? PROTECTION_LEDE : PROTECTION_LEDE_UNPUBLISHED);
 

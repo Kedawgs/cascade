@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { reconcile } from "../../src/alerts.ts";
 import { RULES } from "../../src/rules/ids.ts";
 import { logQuery } from "../../src/rules/context.ts";
-import { adminStampQuiet, batchCancelChurn, batchDepositsBlocked, batchDepositsFull, capExitsConsumed, FULL_UNCLOSED_READINGS, holdBlocks, MIN_REDEEM_VALUE_RAO, payoutBouncesStranded, payoutNoRail, R4_RULES, RAIL_CLOSED_SINCE, railPayoutsClosed, SMALL_LIST_CLOSES, stakeAddFee, stakeMinNearFloor, unstakesWash, WASH_LOOKBACK_S, washBlocks } from "../../src/rules/r4.ts";
+import { adminStampQuiet, batchCancelChurn, batchDepositsBlocked, batchDepositsFull, capExitsConsumed, CLOSE_LAG_READINGS, FULL_UNCLOSED_READINGS, holdBlocks, MIN_REDEEM_VALUE_RAO, payoutBouncesStranded, payoutNoRail, R4_RULES, RAIL_CLOSED_SINCE, railPayoutsClosed, SMALL_LIST_CLOSES, stakeAddFee, stakeMinNearFloor, unstakesWash, WASH_LOOKBACK_S, washBlocks } from "../../src/rules/r4.ts";
 import { RUNBOOK } from "../../src/runbook.ts";
 import { DEFAULTS, mergeThresholds } from "../../src/thresholds.ts";
 import { TICK_RULES } from "../../src/tick.ts";
@@ -318,6 +318,40 @@ describe("A-L2: cap.exits_consumed, the door's netForwarded against the vault's 
     const u = ctxOf({ base, bit: bitState({ totalAssets: 2n * E18, adapters: {} }) });
     expect(capExitsConsumed.run(u)).toEqual([]);
     expect(u.unjudged).toContainEqual({ rule: "cap.exits_consumed", key: "cap.exits_consumed" });
+  });
+
+  it("a batch just closed is not TAO that left: netForwarded rises at the close, the message is read only once the scan settles its block", () => {
+    // the launch's second batch: 0.2111 TAO staked, a 1.0495 TAO batch closed this minute, no message indexed yet
+    const before = baseState({ netForwarded: 211063801n * 10n ** 9n, depositCap: 40n * E18 });
+    const after = baseState({ netForwarded: 1260583455n * 10n ** 9n, depositCap: 40n * E18 });
+    const bit = bitState({ totalAssets: 211063801n * 10n ** 9n, adapters: noParks() });
+    /** this tick's reading `now`, with `earlier` readings a minute apart before it (newest first) */
+    const at = (now: ReturnType<typeof baseState>, earlier: ReturnType<typeof baseState>[], messages: MessageRow[] = []) => {
+      const history = earlier.map((st, i) => reading(37_000_000n - 300n * BigInt(i + 1), NOW - 60 * (i + 1), st));
+      return { ...ctxOf({ base: now, bit, messages }), previous: { base: history[0] }, history: { base: history, bittensor: [] } };
+    };
+    // with no history the old reading stands (nothing shows a close): it warns, as it did live
+    expect(capExitsConsumed.run(ctxOf({ base: after, bit })).map((x) => x.subject)).toEqual(["The deposit cap counts 1.049519654 TAO that has left the vault"]);
+    // the reading the close lands in, and each of the next ones while the close is inside the window: quiet
+    for (let n = 1; n <= CLOSE_LAG_READINGS; n++) {
+      const earlier = [...Array.from({ length: n - 1 }, () => after), ...Array.from({ length: CLOSE_LAG_READINGS - n + 1 }, () => before)];
+      expect(capExitsConsumed.run(at(after, earlier)), `the close ${n} reading(s) ago`).toEqual([]);
+    }
+    // once the message is read it is the crossing that covers it, counted once (not the rise and the message both)
+    const sent = { ...message(5, "base>bittensor", 1049519654n * 10n ** 9n), srcTime: NOW - 90 };
+    expect(capExitsConsumed.run(at(after, [after, before, before, before, before], [sent]))).toEqual([]);
+    const half = { ...message(6, "base>bittensor", 5n * 10n ** 17n), srcTime: NOW - 90 };
+    expect(capExitsConsumed.run(at(after, [after, before, before, before, before], [half]))).toEqual([]);
+    // the window passed and nothing is crossing or in the vault: it really left, and the warning is back
+    const stale = capExitsConsumed.run(at(after, Array.from({ length: CLOSE_LAG_READINGS }, () => after)));
+    expect(stale.map((x) => x.subject)).toEqual(["The deposit cap counts 1.049519654 TAO that has left the vault"]);
+    // a fall of netForwarded (a payout landed) allows nothing
+    const fell = capExitsConsumed.run(at(baseState({ netForwarded: 40n * E18, depositCap: 40n * E18 }), Array.from({ length: CLOSE_LAG_READINGS }, () => baseState({ netForwarded: 45n * E18 }))));
+    expect(fell.map((x) => x.subject)).toEqual(["The deposit cap counts 39.788936199 TAO that has left the vault"]);
+    // an old message (sent before the window) is not what the rise was: the rise still counts, the message is plain crossing
+    const old = { ...message(7, "base>bittensor", 3n * E18), srcTime: NOW - 3_600 };
+    const f = capExitsConsumed.run(at(baseState({ netForwarded: 10n * E18, depositCap: 40n * E18 }), [baseState({ netForwarded: 4n * E18 })], [old]));
+    expect(f).toEqual([]); // 0.2111 in the vault + 3 crossing + 6 just closed = 9.2111 of 10: under the 1 TAO gap
   });
 });
 

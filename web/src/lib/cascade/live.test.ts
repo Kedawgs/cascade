@@ -2426,7 +2426,7 @@ describe("v3.2: the live USDC delivery limit, and what else a USDC unstake sells
     /** What the form says before the USDC button with this limit read. */
     const lineOf = (l: DeliveryLimit) =>
       unstakeActions({ v32: true, account: USER, shares: null, quote: undefined, limit: { data: l, isError: false }, pending: false, lowEth: false, hold: null, blocked: null }).warning;
-    const FIGURE = "This also sells the 0.0100 TAO of yours on its way back to Base or waiting there.";
+    const FIGURE = "Your 0.0100 TAO from earlier unstakes will be sold for USDC too.";
 
     it("gives the generic line while a batch below the newest delivered one has a run that failed on Bittensor, until it is delivered", async () => {
       const x = crossed(16 * DAY);
@@ -2496,7 +2496,7 @@ describe("v3.2: the live USDC delivery limit, and what else a USDC unstake sells
       const l = await between.data.getDeliveryLimit(USER);
       // settled by the check, and its credit read after it: in the figure, never missed
       expect(l).toMatchObject({ waitingTaoWei: TAO32, waitingComplete: true });
-      expect(lineOf(l)).toBe("This also sells the 0.0400 TAO of yours on its way back to Base or waiting there.");
+      expect(lineOf(l)).toBe("Your 0.0400 TAO from earlier unstakes will be sold for USDC too.");
     });
 
     it("gives no figure while a refund is on its way to Base that can't be told whose, until its message has run on Base", async () => {

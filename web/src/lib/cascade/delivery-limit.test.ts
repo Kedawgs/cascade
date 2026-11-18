@@ -402,10 +402,10 @@ describe("a USDC unstake against the live limit", () => {
   });
 
   it("says, in its own sentence, what else of the account's a USDC unstake sells (the latest request decides for all)", () => {
-    expect(waitingText(TAO)).toBe("This also sells the 1.0000 TAO of yours on its way back to Base or waiting there.");
-    expect(waitingText(123_456_789_000_000_000n)).toBe("This also sells the 0.1234 TAO of yours on its way back to Base or waiting there.");
+    expect(waitingText(TAO)).toBe("Your 1.0000 TAO from earlier unstakes will be sold for USDC too.");
+    expect(waitingText(123_456_789_000_000_000n)).toBe("Your 0.1234 TAO from earlier unstakes will be sold for USDC too.");
     // while not every payout of the account's on its way is read: no figure
-    expect(WAITING_UNKNOWN).toBe("A USDC unstake also sells any of your TAO on its way back to Base or waiting there.");
+    expect(WAITING_UNKNOWN).toBe("Any TAO from your earlier unstakes will be sold for USDC too.");
   });
 
   it("says no USDC delivery can be made when none clears, or the account's own waiting TAO fills the limit", () => {

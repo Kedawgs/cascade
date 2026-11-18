@@ -857,7 +857,7 @@ describe("v3.2's unstake form: what each way out offers right now", () => {
     const waiting = { ...LIMIT, waitingTaoWei: 7n * 10n ** 17n };
     for (const l of [waiting, { ...waiting, saleTaoWei: 40n * TAO, clearsAll: true }]) {
       const a = unstakeActions({ ...ready, limit: { data: l, isError: false } });
-      expect(a.warning).toBe("This also sells the 0.7000 TAO of yours on its way back to Base or waiting there.");
+      expect(a.warning).toBe("Your 0.7000 TAO from earlier unstakes will be sold for USDC too.");
       expect(a.usdc).toBe(true);
     }
     // every payout of the account's read, and nothing waiting: nothing said
@@ -867,7 +867,7 @@ describe("v3.2's unstake form: what each way out offers right now", () => {
   });
 
   it("while the account's events aren't all read, says a USDC unstake sells any of its TAO on its way, without a figure (fix round 2)", () => {
-    expect(WAITING_UNKNOWN).toBe("A USDC unstake also sells any of your TAO on its way back to Base or waiting there.");
+    expect(WAITING_UNKNOWN).toBe("Any TAO from your earlier unstakes will be sold for USDC too.");
     // the scan of its events not complete, a figure found so far or none: the standing line, the USDC button as the limit says
     for (const waitingTaoWei of [0n, 7n * 10n ** 17n]) {
       const a = unstakeActions({ ...ready, limit: { data: { ...LIMIT, waitingTaoWei, waitingComplete: false }, isError: false } });

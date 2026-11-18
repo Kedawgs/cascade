@@ -151,12 +151,13 @@ export const LIMIT_UNREAD = "Can't check how much USDC can be delivered right no
 
 /** What else of the account's a USDC unstake sells (the latest request decides for all its waiting TAO), rounded down to
  * the 0.0001 TAO shown: said before the button whenever there is any and every payout of the account's on its way was
- * read (Task 59a fix round 2, the controller's words). */
+ * read (Task 59a fix round 2). Reworded 2026-11-18 (the founder, on the live form: "that weird message"): the same
+ * fact, in the words of what the person did before ("your earlier unstakes") rather than where the TAO is. */
 export const waitingText = (taoWei: bigint): string =>
-  `This also sells the ${formatTao(Number(taoWei / 10n ** 14n) / 1e4, 4)} TAO of yours on its way back to Base or waiting there.`;
+  `Your ${formatTao(Number(taoWei / 10n ** 14n) / 1e4, 4)} TAO from earlier unstakes will be sold for USDC too.`;
 /** Said before the button instead while not every payout of the account's on its way was read (the scan of its events
  * not complete, the read loading or failed): no figure (fix round 2, the controller's words). */
-export const WAITING_UNKNOWN = "A USDC unstake also sells any of your TAO on its way back to Base or waiting there.";
+export const WAITING_UNKNOWN = "Any TAO from your earlier unstakes will be sold for USDC too.";
 
 /** The live figure, in the controller's words: the USDC a new unstake's delivery can be at most right now (the room
  * left after what of the account's already waits, at the largest clearing sale's price, rounded down to the cent), or

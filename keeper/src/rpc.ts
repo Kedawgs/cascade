@@ -237,7 +237,10 @@ export function batched(inner: Rpc, o: { learned: Learned; now: () => number; lo
 
 /** The run's two RPCs over `fetch`: `rpc` for reads and sends (metered, batched) and `logs` for log scans (Base's on
  * its own logs server, Bittensor's on the main, archive, node), and the meter. Spacing between requests is per chain
- * (RPC_SPACING_MS); a 429 is retried once after 2 s, since a run has 45 s to send. */
+ * (RPC_SPACING_MS); a 429 is asked again up to three times, 2 s apart: a node that turns away one request in ten (the
+ * live keeper's Bittensor node did, all day, 2026-11-19) failed almost every long round on one retry, and held the first
+ * mainnet payout for an hour. The run's deadline and lease still end a run that is too slow (the guard, before every
+ * request), and each asking counts in the subrequest budget. */
 export function runRpc(
   cfg: KeeperConfig,
   o: {
@@ -254,7 +257,7 @@ export function runRpc(
   const chainOf = (url: string): ChainName => (url === cfg.urls.bittensor ? "bittensor" : "base");
   // the global fetch is looked up per request (so a test's spy is seen), each one counted and given up if it hangs
   const f = countingFetch((input, init) => (o.fetch ?? fetch)(input, init), m, chainOf, o.requestTimeoutMs);
-  const opts = { minIntervalMs: cfg.spacingMs, retries: 1, backoffMs: 2_000, fetch: f };
+  const opts = { minIntervalMs: cfg.spacingMs, retries: 3, backoffMs: 2_000, fetch: f };
   const main = metered(createRpc({ base: { rpcUrl: cfg.urls.base }, bittensor: { rpcUrl: cfg.urls.bittensor } }, opts), m, o.guard);
   const baseLogs = metered(createRpc({ base: { rpcUrl: cfg.urls.baseLogs }, bittensor: { rpcUrl: cfg.urls.bittensor } }, opts), m, o.guard);
   const b = batched(main, { learned: o.learned, now: o.now, log: o.log, multicall3: o.multicall3 });
